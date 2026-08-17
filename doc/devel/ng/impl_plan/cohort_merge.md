@@ -99,7 +99,7 @@ reaching 14 and a SNP at 12 are one; a late widening pulls in a following observ
 second pass.
 *Depends:* A2. *Source:* [spec](../spec/cohort_merge.md) §4.1; [arch](../arch/cohort_merge.md) §3.
 
-☐ **A4 — the two verdicts, width first.** `Verdict::Failed` / `TooQuiet` / `Build`, decided in that
+✅ **A4 — the two verdicts, width first.** `Verdict::Failed` / `TooQuiet` / `Build`, decided in that
 order. **Own commit, do not bundle.** The order is the silent part: a reference-only chain wider
 than `max_cohort_locus_span` must count as failed, not vanish as too quiet, or the count stops
 meaning "ground the caller refused". Assert both verdicts on a locus that qualifies for both.

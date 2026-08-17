@@ -16,6 +16,7 @@
 //! [`super::MinAltObs`] sets out — a maximum never exceeds a sum, so at one threshold
 //! the two rules keep different loci.
 
+use super::{MaxCohortLocusSpan, MinAltObs};
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
@@ -37,7 +38,77 @@ pub struct SampleMembers<'a> {
     pub observations: &'a [SampleLocusObservations],
 }
 
-/// A cohort locus as it comes off the walk, before anything is judged or assembled.
+/// What the caller undertakes to do with a closed locus — decided **width first**
+/// (spec §4.3).
+///
+/// **The order is the whole of this type.** A locus can qualify for both verdicts at
+/// once: a reference-only chain, wider than the bound, is both too wide to build and too
+/// quiet to be worth building. Judging width first makes it [`Failed`](Self::Failed),
+/// which is ground the caller *refused*; judging variability first would make it
+/// [`TooQuiet`](Self::TooQuiet), which is ground the caller *examined and found empty* —
+/// and the failed count would then stop meaning what spec §3.3 says it means, silently.
+///
+/// **Which loci the order actually moves is worth being exact about**, because it is not
+/// the case §3.3 leads with. A long deletion carries far more than `min_alt_obs`
+/// non-reference reads, so it is `Failed` under either order and the count is right
+/// either way. The loci that move are the ones qualifying for *both* tests — wide and
+/// below the keep threshold — which is a chain of overlapping observations at a few
+/// reads a position. So the wrong order under-counts at low coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Wider than `max_cohort_locus_span`: not assembled, and **counted** — by the
+    /// builder that consumes this walk, which returns its region's failed-locus count
+    /// beside its observations (spec §3.3, §6.3). Nothing here counts; the walk's part is
+    /// to yield the locus rather than swallow it, so that the count has something to
+    /// count and the organiser has a span to displace overlapping loci with (§3.2, §6.1).
+    Failed,
+    /// Fewer non-reference reads across it than `min_alt_obs`: not assembled and **not
+    /// counted**. A failure is ground the caller refused; this is ground it judged empty,
+    /// and conflating the two would make the failed count unreadable (spec §4.3 for the
+    /// threshold; §1.3 and §3.3 for why only a failure is counted).
+    TooQuiet,
+    /// Assemble it (spec §4.2).
+    Build,
+}
+
+/// Judge one closed locus — a pure function of its span, its non-reference total and the
+/// two parameters, so the order the two tests are applied in can be checked on its own.
+///
+/// A locus exactly `max_cohort_locus_span` bases wide is built: the bound is the widest
+/// the caller undertakes to build, not the first width it refuses (spec §4.1). A total
+/// exactly `min_alt_obs` is likewise built — the locus is kept when the reads *reach* the
+/// threshold (spec §4.3).
+///
+/// **⛦ OPEN, and this rule is wider than the spec's: the width test is applied to every
+/// locus, where spec §3.1 says `max_cohort_locus_span` "governs **generic** loci only".**
+/// An STR locus's span is its reference tract — a fact about the reference rather than a
+/// claim about the reads — and §3.1 expects the true ceiling on an emitted observation to
+/// be "the larger of `max_cohort_locus_span` and the widest STR tract the segmentation
+/// admits", 100 rather than 50 at the two defaults. As written, a 60-base tract would be
+/// failed and counted, inflating the one number §3.3 says an operator reads.
+///
+/// It is not gated here because the design does not say how a *cohort* locus takes a
+/// kind: §4.1's grouping chains observations of any kind into one locus, and neither the
+/// spec nor the architecture rules on a locus whose members are an STR tract in one
+/// sample and a SNP in another. Inventing that rule is not this step's to do. Nothing
+/// feeds this walk yet, so the divergence is inert until milestone C; it is raised at
+/// Checkpoint A and must be settled before then.
+fn judge(
+    span: u64,
+    non_reference_reads: u32,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_obs: MinAltObs,
+) -> Verdict {
+    if span > u64::from(max_cohort_locus_span.get()) {
+        Verdict::Failed
+    } else if non_reference_reads < min_alt_obs.get() {
+        Verdict::TooQuiet
+    } else {
+        Verdict::Build
+    }
+}
+
+/// A cohort locus as it comes off the walk, closed and judged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClosedLocus<'a> {
     /// First position to furthest reach. Uncapped here — how wide a locus may be is a
@@ -63,6 +134,13 @@ pub struct ClosedLocus<'a> {
     /// `min_alt_obs`, so a total pinned at `u32::MAX` gives the same verdict as the true
     /// one — and reaching the cap needs four billion non-reference reads in one locus.
     pub non_reference_reads: u32,
+    /// What the caller undertakes to do with it, decided width first (see [`Verdict`]).
+    ///
+    /// **Every closed locus comes out, whatever its verdict.** A failed one is not
+    /// silence: it owns its ground and displaces the loci that overlap it, so the
+    /// organiser has to be told its span (spec §3.2, §6.1). A too-quiet one is dropped
+    /// by whoever consumes this, not hidden by the walk.
+    pub verdict: Verdict,
 }
 
 impl ClosedLocus<'_> {
@@ -75,12 +153,24 @@ impl ClosedLocus<'_> {
     /// against, so the widest locus expressible would be judged narrow enough to build.
     /// Subtracting first and adding after cannot do that.
     pub fn span(&self) -> u64 {
-        self.region
-            .end
-            .get()
-            .saturating_sub(self.region.start.get())
-            .saturating_add(1)
+        span_of(self.region)
     }
+}
+
+/// How many reference bases `region` covers — the spelling this module judges on, so the
+/// width a locus is judged on and the width it reports can never be two different
+/// numbers.
+///
+/// **Not `GenomeRegion::len()`**, which answers 0 at the coordinate ceiling in the
+/// release profile (see [`ClosedLocus::span`]). That other spelling is still the one to
+/// reach for on a region no locus produced — an observation's own span, say, where the
+/// ceiling is unreachable.
+fn span_of(region: GenomeRegion) -> u64 {
+    region
+        .end
+        .get()
+        .saturating_sub(region.start.get())
+        .saturating_add(1)
 }
 
 /// Walks the samples' observations merged by position and closes each locus as its
@@ -132,6 +222,11 @@ pub struct LocusCloser<'a> {
     /// Where each cursor stood when the open locus opened — scratch, refilled per locus
     /// and never reallocated, since its length is the sample count for the whole walk.
     cursors_at_open: Vec<usize>,
+    /// The widest locus the caller undertakes to build. Read only to judge; closing is
+    /// uncapped (spec §4.1).
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    /// The keep threshold, in non-reference reads summed across a locus.
+    min_alt_obs: MinAltObs,
 }
 
 impl<'a> LocusCloser<'a> {
@@ -148,10 +243,20 @@ impl<'a> LocusCloser<'a> {
     /// Whatever it is handed, the walk terminates and consumes every observation exactly
     /// once.
     ///
+    /// **`max_cohort_locus_span` and `min_alt_obs` are read only to judge each closed
+    /// locus** (see [`Verdict`]); neither changes which observations group together, so
+    /// this walk closes the same loci at any values of them. The first is the widest
+    /// locus the caller undertakes to build; the second is how many non-reference reads a
+    /// locus needs, summed across it, to be worth building.
+    ///
     /// Zero samples yields nothing rather than failing: refusing a zero-sample *run* is
     /// the caller's job and happens at construction (spec §7.2), and a walk over an
     /// empty cohort is not the place to discover it.
-    pub fn over(observations_per_sample: &[&'a [SampleLocusObservations]]) -> Self {
+    pub fn over(
+        observations_per_sample: &[&'a [SampleLocusObservations]],
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_obs: MinAltObs,
+    ) -> Self {
         let keys = observations_per_sample
             .iter()
             .map(|observations| observations.first().map(key_of))
@@ -161,6 +266,8 @@ impl<'a> LocusCloser<'a> {
             cursors_at_open: vec![0; observations_per_sample.len()],
             observations_per_sample: observations_per_sample.to_vec(),
             keys,
+            max_cohort_locus_span,
+            min_alt_obs,
         }
     }
 
@@ -304,14 +411,21 @@ impl<'a> Iterator for LocusCloser<'a> {
                 }),
         );
 
+        let region = GenomeRegion {
+            contig,
+            start,
+            end: reach,
+        };
         Some(ClosedLocus {
-            region: GenomeRegion {
-                contig,
-                start,
-                end: reach,
-            },
+            region,
             members,
             non_reference_reads,
+            verdict: judge(
+                span_of(region),
+                non_reference_reads,
+                self.max_cohort_locus_span,
+                self.min_alt_obs,
+            ),
         })
     }
 }
@@ -321,6 +435,15 @@ mod tests {
     use super::*;
     use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
     use crate::ng::types::{ContigId, Position, ReadGroupId};
+    use std::num::NonZeroU32;
+
+    fn max_span(bases: u32) -> MaxCohortLocusSpan {
+        MaxCohortLocusSpan(NonZeroU32::new(bases).expect("not zero"))
+    }
+
+    fn keep_at(reads: u32) -> MinAltObs {
+        MinAltObs(NonZeroU32::new(reads).expect("not zero"))
+    }
 
     fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
         GenomeRegion {
@@ -390,11 +513,24 @@ mod tests {
         }
     }
 
+    /// A bound no fixture here can exceed, so a test about *closing* is not also a test
+    /// about the width verdict.
+    fn unbounded() -> MaxCohortLocusSpan {
+        MaxCohortLocusSpan(NonZeroU32::new(u32::MAX).expect("not zero"))
+    }
+
+    /// The walk under parameters chosen not to interfere: nothing can be too wide, and
+    /// the keep threshold is production's default. The tests that are *about* the
+    /// verdicts call [`LocusCloser::over`] with their own.
+    fn walk<'a>(observations_per_sample: &[&'a [SampleLocusObservations]]) -> LocusCloser<'a> {
+        LocusCloser::over(observations_per_sample, unbounded(), MinAltObs::DEFAULT)
+    }
+
     /// The spans of every locus the walk closes, in order — what most of these tests
     /// assert on. **The contig is dropped**, so a test about contig boundaries must not
     /// use this.
     fn closed_spans(observations_per_sample: &[&[SampleLocusObservations]]) -> Vec<(u64, u64)> {
-        LocusCloser::over(observations_per_sample)
+        walk(observations_per_sample)
             .map(|closed| (closed.region.start.get(), closed.region.end.get()))
             .collect()
     }
@@ -456,7 +592,7 @@ mod tests {
         let inside = [observation(region(12, 12), 2)];
         let elsewhere = [observation(region(50, 50), 5)];
 
-        let mut closer = LocusCloser::over(&[&covering, &inside, &elsewhere]);
+        let mut closer = walk(&[&covering, &inside, &elsewhere]);
         let first = closer.next().expect("a locus at 10");
 
         assert_eq!(first.region, region(10, 14));
@@ -487,7 +623,7 @@ mod tests {
             observation(region(14, 14), 1),
         ];
 
-        let mut closer = LocusCloser::over(&[&wide, &two_inside]);
+        let mut closer = walk(&[&wide, &two_inside]);
         let closed = closer.next().expect("one locus");
 
         assert_eq!(closed.region, region(10, 20));
@@ -507,7 +643,7 @@ mod tests {
             observation(region_on(0, 10, 14), 3),
             observation(region_on(1, 10, 10), 2),
         ];
-        let closed: Vec<_> = LocusCloser::over(&[&sample]).collect();
+        let closed: Vec<_> = walk(&[&sample]).collect();
 
         assert_eq!(closed.len(), 2);
         assert_eq!(closed[0].region, region_on(0, 10, 14));
@@ -528,7 +664,7 @@ mod tests {
         let first = [observation(region(20, 20), 1)];
         let second = [observation(region(20, 20), 1)];
 
-        let closed: Vec<_> = LocusCloser::over(&[&first, &second]).collect();
+        let closed: Vec<_> = walk(&[&first, &second]).collect();
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0].non_reference_reads, 2,
@@ -552,8 +688,7 @@ mod tests {
         let also_inside = [observation(region(14, 14), 4)];
         let all_reference = [all_reference_observation(region(16, 16), 9)];
 
-        let closed: Vec<_> =
-            LocusCloser::over(&[&wide, &inside, &also_inside, &all_reference]).collect();
+        let closed: Vec<_> = walk(&[&wide, &inside, &also_inside, &all_reference]).collect();
 
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].non_reference_reads, 9);
@@ -586,6 +721,235 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------
+    // The two verdicts, decided width first (spec §4.3).
+    // ---------------------------------------------------------------
+
+    /// **The width verdict comes before the variability one, and this is the fixture that
+    /// says so** (spec §15's fourth new test).
+    ///
+    /// The locus qualifies for both at once: 21 bases wide against a bound of 10, and not
+    /// one non-reference read in it. Judged width first it is `Failed` — ground the caller
+    /// *refused*, and counted. Judged variability first it would be `TooQuiet` — ground
+    /// the caller *examined and found empty*, and not counted. Both orders drop the locus,
+    /// so nothing downstream can tell them apart; what changes is the failed count, which
+    /// is the only signal an operator has that the bound is charging more than they
+    /// expected. Getting this backwards is invisible except in the number that exists to
+    /// be read.
+    #[test]
+    fn a_reference_only_chain_wider_than_the_bound_is_failed_not_too_quiet() {
+        let chain = [
+            all_reference_observation(region(10, 20), 4),
+            all_reference_observation(region(20, 30), 4),
+        ];
+
+        let closed: Vec<_> = LocusCloser::over(&[&chain], max_span(10), keep_at(2)).collect();
+
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].span(), 21, "10 to 30 inclusive");
+        assert_eq!(
+            closed[0].non_reference_reads, 0,
+            "and it qualifies for the quiet verdict too"
+        );
+        assert_eq!(closed[0].verdict, Verdict::Failed);
+    }
+
+    /// The bound is the widest the caller undertakes to build, not the first width it
+    /// refuses: a locus exactly that wide is built, and one base more fails.
+    #[test]
+    fn a_locus_exactly_at_the_bound_is_built() {
+        let exactly = [observation(region(10, 19), 5)];
+        let one_wider = [observation(region(10, 20), 5)];
+
+        let at_bound: Vec<_> = LocusCloser::over(&[&exactly], max_span(10), keep_at(2)).collect();
+        assert_eq!(at_bound[0].span(), 10);
+        assert_eq!(at_bound[0].verdict, Verdict::Build);
+
+        let over_bound: Vec<_> =
+            LocusCloser::over(&[&one_wider], max_span(10), keep_at(2)).collect();
+        assert_eq!(over_bound[0].span(), 11);
+        assert_eq!(over_bound[0].verdict, Verdict::Failed);
+
+        // **The parameter is read, not assumed.** The same 11-base locus builds under a
+        // wider bound, so a rule comparing against a number of its own — the default, or
+        // whatever the other fixtures happen to pass — would answer the same twice and
+        // fail here.
+        let under_a_wider_bound: Vec<_> =
+            LocusCloser::over(&[&one_wider], max_span(11), keep_at(2)).collect();
+        assert_eq!(under_a_wider_bound[0].verdict, Verdict::Build);
+    }
+
+    /// The locus is kept when its non-reference reads *reach* the threshold — so exactly
+    /// `min_alt_obs` builds, and one read short is too quiet.
+    #[test]
+    fn a_locus_exactly_at_the_keep_threshold_is_built() {
+        let two_reads = [observation(region(10, 10), 2)];
+        let one_read = [observation(region(10, 10), 1)];
+
+        let at_threshold: Vec<_> =
+            LocusCloser::over(&[&two_reads], max_span(50), keep_at(2)).collect();
+        assert_eq!(at_threshold[0].verdict, Verdict::Build);
+
+        let below: Vec<_> = LocusCloser::over(&[&one_read], max_span(50), keep_at(2)).collect();
+        assert_eq!(below[0].verdict, Verdict::TooQuiet);
+    }
+
+    /// **At a threshold of one the rule changes character, not degree**: any
+    /// non-reference read at all builds the locus, and only ground nobody varied at is too
+    /// quiet — spec §15's `keep_threshold_one_is_variant_filter` row. One is the smallest
+    /// value an operator can set, and the single low-coverage sample is where they would
+    /// reach for it.
+    #[test]
+    fn at_a_threshold_of_one_any_non_reference_read_builds() {
+        let one_read = [observation(region(10, 10), 1)];
+        let none = [all_reference_observation(region(10, 10), 4)];
+
+        let built: Vec<_> = LocusCloser::over(&[&one_read], max_span(50), keep_at(1)).collect();
+        assert_eq!(built[0].verdict, Verdict::Build);
+
+        let quiet: Vec<_> = LocusCloser::over(&[&none], max_span(50), keep_at(1)).collect();
+        assert_eq!(quiet[0].verdict, Verdict::TooQuiet);
+    }
+
+    /// **A failed locus still comes out of the walk, with its span.** It is not silence:
+    /// it owns its ground and the organiser has to displace the loci that overlap it
+    /// (spec §3.2, §6.1), which it cannot do for a locus it was never told about. The
+    /// loci on either side are judged on their own terms.
+    #[test]
+    fn a_failed_locus_is_emitted_with_its_ground_and_its_neighbours_are_untouched() {
+        let sample = [
+            observation(region(10, 10), 5),
+            observation(region(20, 40), 5),
+            observation(region(60, 60), 5),
+        ];
+
+        let closed: Vec<_> = LocusCloser::over(&[&sample], max_span(10), keep_at(2)).collect();
+
+        assert_eq!(closed.len(), 3);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+        assert_eq!(closed[1].region, region(20, 40));
+        assert_eq!(closed[1].verdict, Verdict::Failed);
+        assert_eq!(closed[2].verdict, Verdict::Build);
+    }
+
+    /// **The bystander is what a failed locus costs, and spec §3.2 says so plainly**: one
+    /// sample's over-wide deletion suppresses another sample's ordinary SNP, because the
+    /// shared bases chain them into one locus. Nothing is emitted over that ground for
+    /// either sample.
+    ///
+    /// This is spec §15's first new-test fixture. The *count* half of that row belongs to
+    /// C1, which is where a builder returns its region's failed spans.
+    #[test]
+    fn a_failed_locus_suppresses_the_bystander_variants_chained_into_it() {
+        let over_wide_deletion = [observation(region(10, 40), 6)];
+        let ordinary_snp = [observation(region(20, 20), 8)];
+
+        let closed: Vec<_> = LocusCloser::over(
+            &[&over_wide_deletion, &ordinary_snp],
+            max_span(10),
+            keep_at(2),
+        )
+        .collect();
+
+        assert_eq!(
+            closed.len(),
+            1,
+            "the shared bases chain them into one locus"
+        );
+        assert_eq!(closed[0].verdict, Verdict::Failed);
+        assert_eq!(
+            closed[0]
+                .members
+                .iter()
+                .map(|m| m.sample)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "the SNP is a member of the failed locus, so it goes down with it"
+        );
+    }
+
+    /// **The verdict is wired to the span this module computes, not to
+    /// `GenomeRegion::len()`.** A locus at the top of the coordinate space is four bases
+    /// wide and well inside the bound; through `len()` the same locus panics in a debug
+    /// build and measures 0 in release, which would pass any bound at all.
+    ///
+    /// The fixture is built by hand rather than through `observation`, because that
+    /// helper sizes its reference bases with `region.len()` — the very call this test
+    /// exists to keep out of the verdict, and it panics here.
+    #[test]
+    fn a_locus_at_the_coordinate_ceiling_is_judged_on_its_true_width() {
+        let at_the_ceiling = [SampleLocusObservations {
+            region: region(u64::MAX - 3, u64::MAX),
+            reference_bases: Box::from(&b"AAAA"[..]),
+            observations: vec![sequence(b"CCCC", 5)],
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }];
+
+        let closed: Vec<_> =
+            LocusCloser::over(&[&at_the_ceiling], max_span(10), keep_at(2)).collect();
+
+        assert_eq!(closed[0].span(), 4);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+    }
+
+    /// **A chain no member of which is over-wide fails just the same** — spec §3.2's
+    /// "what matters is how wide the locus ended up, not how it got there".
+    ///
+    /// Three observations in three samples, spans 10, 10 and 7, against a bound of 10: no
+    /// member exceeds it, and the closure is 21 bases. **The member widths are what make
+    /// this test discriminating**, and they are asserted rather than described, because an
+    /// earlier version of this fixture had a member of 11 — over the bound — which a
+    /// member-wise rule would have failed for the wrong reason. Judging the widest member
+    /// instead of the closure passed the whole suite against that fixture.
+    #[test]
+    fn a_chain_of_narrow_observations_fails_on_its_closed_width() {
+        let first = [observation(region(10, 19), 2)];
+        let second = [observation(region(15, 24), 2)];
+        let third = [observation(region(24, 30), 2)];
+
+        let closed: Vec<_> =
+            LocusCloser::over(&[&first, &second, &third], max_span(10), keep_at(2)).collect();
+
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].span(), 21);
+        assert_eq!(closed[0].verdict, Verdict::Failed);
+        assert!(
+            closed[0]
+                .members
+                .iter()
+                .flat_map(|members| members.observations)
+                .all(|observation| span_of(observation.region) <= 10),
+            "no single member reaches the bound; the closure is what does"
+        );
+    }
+
+    /// The verdict order, on the ordering rule alone rather than through a fixture — the
+    /// four cases the two tests cross, with the both-qualify cell asserted explicitly.
+    #[test]
+    fn the_verdict_is_decided_width_first() {
+        let wide = 11;
+        let narrow = 5;
+        let loud = 4;
+        let quiet = 0;
+
+        assert_eq!(
+            judge(narrow, loud, max_span(10), keep_at(2)),
+            Verdict::Build
+        );
+        assert_eq!(
+            judge(narrow, quiet, max_span(10), keep_at(2)),
+            Verdict::TooQuiet
+        );
+        assert_eq!(judge(wide, loud, max_span(10), keep_at(2)), Verdict::Failed);
+        assert_eq!(
+            judge(wide, quiet, max_span(10), keep_at(2)),
+            Verdict::Failed,
+            "qualifies for both: the width verdict is the one that stands"
+        );
+    }
+
     /// **A locus at the top of the coordinate space reports its true width**, where
     /// `region.len()` would panic in debug and answer 0 in release — and 0 is the answer
     /// that matters, since A4 compares this against `max_cohort_locus_span` and would
@@ -596,6 +960,7 @@ mod tests {
             region: region(u64::MAX - 3, u64::MAX),
             members: Vec::new(),
             non_reference_reads: 0,
+            verdict: Verdict::TooQuiet,
         };
         assert_eq!(at_the_ceiling.span(), 4);
     }
@@ -610,7 +975,7 @@ mod tests {
         let joins_later = [observation(region(12, 12), 2)];
         let opens_the_locus = [observation(region(10, 14), 3)];
 
-        let closed: Vec<_> = LocusCloser::over(&[&joins_later, &opens_the_locus]).collect();
+        let closed: Vec<_> = walk(&[&joins_later, &opens_the_locus]).collect();
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0]
@@ -631,7 +996,7 @@ mod tests {
         let first = [observation(region(10, 10), u32::MAX)];
         let second = [observation(region(10, 10), u32::MAX)];
 
-        let closed: Vec<_> = LocusCloser::over(&[&first, &second]).collect();
+        let closed: Vec<_> = walk(&[&first, &second]).collect();
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].non_reference_reads, u32::MAX);
     }
@@ -645,7 +1010,7 @@ mod tests {
         let covered = [observation(region(10, 14), 3)];
         let after: [SampleLocusObservations; 0] = [];
 
-        let closed: Vec<_> = LocusCloser::over(&[&before, &covered, &after]).collect();
+        let closed: Vec<_> = walk(&[&before, &covered, &after]).collect();
 
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].region, region(10, 14));
@@ -668,7 +1033,7 @@ mod tests {
         let on_contig_zero = [observation(region_on(0, 10, 14), 3)];
         let on_contig_one = [observation(region_on(1, 5, 5), 2)];
 
-        let closed: Vec<_> = LocusCloser::over(&[&on_contig_zero, &on_contig_one]).collect();
+        let closed: Vec<_> = walk(&[&on_contig_zero, &on_contig_one]).collect();
 
         assert_eq!(closed.len(), 2);
         assert_eq!(closed[0].region, region_on(0, 10, 14));
@@ -688,7 +1053,7 @@ mod tests {
             observation(region(50, 50), 1),
             observation(region(10, 10), 1),
         ];
-        let _ = LocusCloser::over(&[&unsorted]).count();
+        let _ = walk(&[&unsorted]).count();
     }
 
     /// **The argmin scans every sample, not the first two.** The observation at 50 is
@@ -713,7 +1078,7 @@ mod tests {
     #[test]
     fn an_all_reference_locus_still_closes() {
         let sample = [all_reference_observation(region(10, 10), 4)];
-        let closed: Vec<_> = LocusCloser::over(&[&sample]).collect();
+        let closed: Vec<_> = walk(&[&sample]).collect();
 
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].non_reference_reads, 0);
@@ -724,10 +1089,10 @@ mod tests {
     /// construction (spec §7.2), not here.
     #[test]
     fn nothing_to_walk_yields_nothing() {
-        assert_eq!(LocusCloser::over(&[]).count(), 0);
+        assert_eq!(walk(&[]).count(), 0);
 
         let empty: [SampleLocusObservations; 0] = [];
-        assert_eq!(LocusCloser::over(&[&empty, &empty]).count(), 0);
+        assert_eq!(walk(&[&empty, &empty]).count(), 0);
     }
 
     /// **Where the samples' observations were split between slices changes nothing** —
@@ -772,7 +1137,7 @@ mod tests {
         let first = [observation(region(10, 10), 2)];
         let second = [observation(region(10, 10), 3)];
 
-        let closed: Vec<_> = LocusCloser::over(&[&first, &second]).collect();
+        let closed: Vec<_> = walk(&[&first, &second]).collect();
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].region, region(10, 10));
         assert_eq!(
@@ -806,7 +1171,7 @@ mod tests {
         let chained: Vec<_> = (0..40)
             .map(|step| observation(region(10 + step * 2, 12 + step * 2), 1))
             .collect();
-        let closed: Vec<_> = LocusCloser::over(&[&chained]).collect();
+        let closed: Vec<_> = walk(&[&chained]).collect();
 
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].region, region(10, 90));
@@ -828,7 +1193,7 @@ mod tests {
             observation(region(14, 20), 1),
         ];
 
-        let closed: Vec<_> = LocusCloser::over(&[&a, &b]).collect();
+        let closed: Vec<_> = walk(&[&a, &b]).collect();
         for pair in closed.windows(2) {
             assert!(
                 pair[0].region.end < pair[1].region.start,
