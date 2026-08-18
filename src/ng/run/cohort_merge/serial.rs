@@ -209,6 +209,7 @@ fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{SourceFailed, region, region_on};
+    use super::super::organise::{Organiser, RegionIndex};
     use super::*;
     use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
     use crate::ng::types::{ContigId, Position, ReadGroupId};
@@ -919,6 +920,20 @@ mod tests {
         };
         let (from_oracle, from_cache) = (rendered(&oracle), rendered(&through_cache));
         let bases = building_region_width.get();
+        // **Before the comparison, not after.** Once the two drivers are known equal, the
+        // cached output *is* the oracle's, whose loci one walk per analysed region makes
+        // disjoint by construction — so a guard placed below could only fire on an input the
+        // oracle itself had overlapped, which is to say never. Measured by E2's review: with
+        // the cached driver deliberately broken, eight tests failed and none of the eight was
+        // this guard; moved here, the same break trips it by name.
+        refuse_overlapping_ground(&through_cache, bases);
+        refuse_displaced_loci(
+            analysed,
+            per_sample,
+            building_region_width,
+            max_cohort_locus_span,
+            min_alt_obs,
+        );
         if let Some(first) = from_oracle
             .iter()
             .zip(&from_cache)
@@ -937,6 +952,203 @@ mod tests {
         );
 
         oracle
+    }
+
+    /// **A real merge never displaces a locus** — the same claim as
+    /// [`refuse_overlapping_ground`], made where it counts: through the builders and into a
+    /// real [`Organiser`], rather than on the merged output afterwards.
+    ///
+    /// This is `merge_cohort_through_cache`'s own loop with the organiser wired in — evict at
+    /// the building region's first base, cover it, build it, submit it — which is as close to
+    /// the parallel arrangement as one thread gets. Without it nothing in the suite ever hands
+    /// the organiser an outcome a builder produced, and the counter that is meant to be the
+    /// alarm would first be read on real data.
+    ///
+    /// **It re-runs the driver's loop rather than calling the driver**, because
+    /// `merge_cohort_through_cache` returns one merged outcome and the organiser needs them
+    /// region by region. So a defect in the *driver's* own loop is caught by the byte-identity
+    /// comparison above and not here; what this catches is a builder producing overlapping loci
+    /// from a window drawn as the design says to draw it.
+    ///
+    /// **The eviction point is the discipline it pins**, and E2's review is why that matters:
+    /// the safety-net argument reads as though it rests on the cache, and it rests on where
+    /// whoever draws the cache forward chooses to evict. Measured here: move this loop's
+    /// eviction from the building region's first base to its last — one line — and the suite
+    /// reports `at building regions of 29 bases a builder produced a locus on ground an earlier
+    /// locus already owned`. The reviewer measured the same change on a harness of its own at
+    /// 1,170 displacements over 4,000 random layouts. E3 hands eviction to the organiser with
+    /// several builders in flight, where the safe point is the earliest live region's first
+    /// base rather than the latest.
+    fn refuse_displaced_loci(
+        analysed: &[GenomeRegion],
+        per_sample: &[&[SampleLocusObservations]],
+        building_region_width: CohortLocusBuilderRegionsLen,
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_obs: MinAltObs,
+    ) {
+        let mut cache =
+            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let mut organiser = Organiser::new();
+        let mut next_index = 0u64;
+
+        for analysed_region in analysed {
+            for building_region in building_regions_of(*analysed_region, building_region_width) {
+                cache.evict_before(GenomePosition {
+                    contig: building_region.contig,
+                    position: building_region.start,
+                });
+                cache
+                    .cover(building_region)
+                    .expect("the fixture sources hold");
+                let outcome = cache.with_observations(building_region, |observations_per_sample| {
+                    build_region(
+                        building_region,
+                        observations_per_sample,
+                        max_cohort_locus_span,
+                        min_alt_obs,
+                    )
+                });
+                organiser.submit(RegionIndex(next_index), outcome);
+                next_index += 1;
+                assert!(organiser.drain_ready().count() < usize::MAX);
+            }
+        }
+
+        assert_eq!(
+            organiser.displaced_locus_count(),
+            0,
+            "at building regions of {} bases a builder produced a locus on ground an earlier \
+             locus already owned",
+            building_region_width.get(),
+        );
+    }
+
+    /// **No two loci a merge produces may overlap** — the claim the organiser's displacement
+    /// rule is the safety net for (`super::organise::Organiser`, and spec §6.1).
+    ///
+    /// Asserted inside [`the_outcome_both_drivers_agree_on`] rather than in a test of its own,
+    /// so that it holds over every fixture routed through that helper rather than over one case
+    /// written to demonstrate it — **six of this file's twenty-eight tests**, among them the two
+    /// hundred random layouts and the 305–330 deletion that a building region's boundary falls
+    /// inside at four of its five widths. **A test that calls a driver directly is not checked**,
+    /// and `a_locus_reaching_across_a_building_region_boundary_is_built_once_and_whole` is one
+    /// such. The organiser's own tests say what the rule *does*; this says it is not needed on
+    /// the fixtures it sees.
+    ///
+    /// It is checked on the **cached** driver's output, because that is the one that divides
+    /// the ground into short regions: the oracle hands a whole analysed region to one builder,
+    /// where the loci are disjoint by construction and the claim is vacuous.
+    ///
+    /// A failed span counts as ground exactly as an emitted locus does (spec §3.2), so the two
+    /// are sorted together and checked as one sequence. **Disjointness is the whole of what it
+    /// asserts**: the sort is how the two vectors are merged, and it also throws away the order
+    /// the driver produced them in — which the byte-identity comparison above is what checks.
+    fn refuse_overlapping_ground(outcome: &RegionOutcome, bases: u32) {
+        let mut ground: Vec<GenomeRegion> = outcome
+            .cohort_observations
+            .iter()
+            .map(|observed| observed.region)
+            .chain(outcome.failed_locus_spans.iter().copied())
+            .collect();
+        ground.sort_by_key(|span| (span.contig, span.start));
+
+        for pair in ground.windows(2) {
+            let [earlier, later] = pair else { continue };
+            let (earlier, later) = (*earlier, *later);
+            assert!(
+                earlier.contig != later.contig || earlier.end < later.start,
+                "at building regions of {bases} bases the merge produced {earlier} and \
+                 {later}, which share ground — the second was built by a builder that never \
+                 saw what opened in the first",
+            );
+        }
+    }
+
+    /// The disjointness guard above asserts a property every fixture in this file has, so
+    /// nothing here can tell a working guard from a vacuous one. These two feed it output no
+    /// merge produces, which is the only way to know it would fire.
+    #[test]
+    #[should_panic(expected = "which share ground")]
+    fn the_disjointness_guard_refuses_two_overlapping_loci() {
+        refuse_overlapping_ground(
+            &RegionOutcome {
+                cohort_observations: Vec::new(),
+                failed_locus_spans: vec![region(10, 40), region(25, 60)],
+            },
+            20,
+        );
+    }
+
+    /// And a failed span counts as ground, so an emitted locus opening inside one is refused
+    /// exactly as two emitted loci would be — which is why the two vectors are sorted together
+    /// rather than checked apart.
+    #[test]
+    #[should_panic(expected = "which share ground")]
+    fn the_disjointness_guard_weighs_a_failed_span_as_ground() {
+        refuse_overlapping_ground(
+            &RegionOutcome {
+                cohort_observations: vec![locus_over(region(40, 44))],
+                failed_locus_spans: vec![region(10, 200)],
+            },
+            20,
+        );
+    }
+
+    /// **The boundary is one shared base.** `GenomeRegion` is inclusive at both ends, so
+    /// 10-40 and 40-60 share base 40 — the case an `earlier.end <= later.start` slip would
+    /// call disjoint.
+    #[test]
+    #[should_panic(expected = "which share ground")]
+    fn the_disjointness_guard_refuses_two_loci_sharing_one_base() {
+        refuse_overlapping_ground(
+            &RegionOutcome {
+                cohort_observations: Vec::new(),
+                failed_locus_spans: vec![region(10, 40), region(40, 60)],
+            },
+            20,
+        );
+    }
+
+    /// And the other side of that boundary: adjacent is not overlapping, so 10-39 beside
+    /// 40-60 passes.
+    #[test]
+    fn the_disjointness_guard_allows_two_adjacent_loci() {
+        refuse_overlapping_ground(
+            &RegionOutcome {
+                cohort_observations: Vec::new(),
+                failed_locus_spans: vec![region(10, 39), region(40, 60)],
+            },
+            20,
+        );
+    }
+
+    /// **The sort is by contig first, and that carries weight.** Ordered on position alone
+    /// these three interleave, every adjacent pair straddles a contig, and the overlap on
+    /// contig 1 is never compared.
+    #[test]
+    #[should_panic(expected = "which share ground")]
+    fn the_disjointness_guard_finds_an_overlap_interleaved_across_contigs() {
+        refuse_overlapping_ground(
+            &RegionOutcome {
+                cohort_observations: Vec::new(),
+                failed_locus_spans: vec![
+                    region_on(1, 10, 80),
+                    region_on(0, 20, 25),
+                    region_on(1, 30, 40),
+                ],
+            },
+            20,
+        );
+    }
+
+    /// A cohort observation over `span`, for the guard's own tests — what it reads is the
+    /// ground, and nothing else.
+    fn locus_over(span: GenomeRegion) -> crate::ng::run::cohort_merge::build::CohortObservation {
+        crate::ng::run::cohort_merge::build::CohortObservation {
+            region: span,
+            alleles: Vec::new(),
+            per_sample: Vec::new(),
+        }
     }
 
     /// **The cache changes nothing, at every building-region width** — the milestone's claim.
@@ -1017,6 +1229,19 @@ mod tests {
             merged.cohort_observations[0].per_sample.len(),
             2,
             "and both samples' evidence is in it, though they sit either side of base 320",
+        );
+
+        // **The shape the plan's E2 names**, taken all the way into a real organiser: a wide
+        // deletion beginning before a building region and reaching into it is exactly where a
+        // later builder would work from a partial picture. Nothing is displaced, because the
+        // builder that owns base 305 follows the locus to 330 and every later builder skips
+        // the chain it opened.
+        refuse_displaced_loci(
+            &[region(1, 600)],
+            &[&deleting, &inside],
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
         );
     }
 

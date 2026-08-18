@@ -204,7 +204,7 @@ keyed by region index, drained on next-expected; exactly one outcome per region 
 ones; a gap is an error rather than a truncation.
 *Depends:* D2. *Source:* [spec](../spec/cohort_merge.md) §6.3; [arch](../arch/cohort_merge.md) §4.
 
-☐ **E2 — overlap resolution.** Of two overlapping loci the earlier start stands; a failed locus's
+✅ **E2 — overlap resolution.** Of two overlapping loci the earlier start stands; a failed locus's
 span displaces the same way an emitted locus does. **Own commit, do not bundle.** The silent
 failure is a locus built from a partial picture surviving into the output because nothing displaced
 it — which needs a wide deletion beginning before a building region and reaching into it, so the

@@ -32,9 +32,9 @@
 //! only way in.
 //!
 //! **The organiser is the other half of this file** — [`Organiser`], which takes the builders'
-//! outcomes and releases their loci in genome order. Ordered release has landed; resolving the
-//! overlaps between neighbouring regions, and drawing the cache forward for the builders, are
-//! the next two steps (`doc/devel/ng/impl_plan/cohort_merge.md`, E2 and E3).
+//! outcomes, resolves the overlaps between neighbouring regions, and releases the survivors in
+//! genome order. What is still to come is drawing the cache forward for the builders and the
+//! parallel arrangement around it (`doc/devel/ng/impl_plan/cohort_merge.md`, E3).
 //!
 //! **Whether the two belong in one file is open, and the argument for it is weaker than it
 //! first looked.** The case was that the organiser would become the cache's only writer, at
@@ -520,6 +520,21 @@ pub enum RunEndedShort {
     },
 }
 
+/// What a finished run has to say about the loci it did not emit.
+///
+/// **Both counts leave with the organiser**, because `finish` consumes it: a caller that read
+/// them afterwards could not, and one that had to read them first would lose them by taking the
+/// obvious order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeTally {
+    /// Loci refused by the width bound — spec §3.3's number, the only signal that the bound is
+    /// charging more than expected.
+    pub failed_loci: u64,
+    /// Loci dropped because an earlier locus already owned their first base (spec §6.1).
+    /// **Expected to be zero**; [`Organiser`] says why.
+    pub displaced_loci: u64,
+}
+
 /// Holds the builders' outcomes and releases their loci in genome order (spec §6.1, §6.3).
 ///
 /// **Builders finish out of order and the consumer must see genome order**, so the outcomes
@@ -535,16 +550,60 @@ pub enum RunEndedShort {
 ///
 /// **Waiting for the predecessor is not merely about order.** A region's loci can only be
 /// confirmed once the region before it has been resolved, because that is what says whether a
-/// locus owned earlier already covers this region's ground (spec §6.3). That resolution is the
-/// next step's — this one releases what it is given, in order, and drops nothing — and
-/// [`release_regions_in_turn`](Self::release_regions_in_turn) is where it will go (the plan's
-/// E2).
+/// locus owned earlier already covers this region's ground (spec §6.3). So the release point
+/// is also the resolution point: each region's loci and failed spans are taken in genome
+/// order, and one whose first base falls on ground an earlier locus already owns is dropped —
+/// the earlier owner stands, whether it was emitted or failed
+/// ([`resolve_and_release`](Self::resolve_and_release)).
+///
+/// **That rule is a safety net, not a live one, and saying which matters.** Under
+/// [`build_region`](super::build::build_region)'s input contract two loci owned by different
+/// regions cannot overlap at all, so nothing in a healthy run reaches it. Three terms carry
+/// the argument and are worth naming first: a locus's **members** are the per-sample
+/// observations it was closed over; a builder's **window** is the observations it is handed
+/// for its own region; and its members are **chained** when each begins at or before the
+/// furthest reach of those already open, which is what keeps one locus open across them
+/// (spec §4.1, [`super::close::LocusCloser`]). The argument in full, because the code is
+/// otherwise a branch nobody can explain:
+///
+/// - a builder is handed every observation overlapping its own ground, including those that
+///   opened earlier. **This is a discipline of whoever draws the cache forward, not a property
+///   of the cache**: [`ObservationCache::evict_before`] drops what ends before whatever
+///   position it is handed, and the driver chooses that position to be the building region's
+///   own first base (`super::serial::merge_cohort_through_cache`), so everything reaching into
+///   the region survives. Hand it the region's *last* base instead and the argument fails at
+///   once — measured, and the regression test is
+///   `super::serial::tests::refuse_displaced_loci`. E3 gives the choice to the organiser with
+///   several builders in flight, where the safe point is the earliest live region's first base;
+/// - so if a locus L owned by an earlier region reaches into this one, every member of L that
+///   reaches this region's first base is in this builder's window. Take any member of L
+///   starting inside this region: it reaches at least its own start, so it is in the window,
+///   and so is the member it overlaps, and so on backwards — the sub-chain is unbroken and it
+///   begins before this region;
+/// - so this builder closes that ground as one locus starting before its own first base, and
+///   skips it as an earlier region's — the `locus.region.start < builder_region.start` arm of
+///   [`build_region`](super::build::build_region). Every locus it does own begins after that
+///   chain ends, which is after L's own reach.
+///
+/// The rule is kept because it is spec §6.1's, because the contract it rests on belongs to
+/// whoever feeds the builders rather than to this file, and because it costs one comparison
+/// per locus. **What it does not have is a fixture that reaches it through a real merge.** No
+/// driver builds an organiser yet, so every test below hands it fabricated outcomes, and
+/// [`displaced_locus_count`](Self::displaced_locus_count) is how a run would say the argument
+/// had failed. The same claim is made from the other end in `super::serial`, whose
+/// `tests::refuse_overlapping_ground` asserts that the loci and failed spans the **cached**
+/// driver produces never share ground, and whose `tests::refuse_displaced_loci` drives the
+/// builders' own outcomes into a real organiser and asserts that none is displaced. Both run
+/// over six of that file's twenty-eight tests — among them the two hundred random layouts —
+/// and over the 305–330 deletion that a building region's boundary falls inside, which is the
+/// shape the plan named. What the first asserts is disjointness alone: it sorts the spans
+/// together before comparing them, so the order they came out in is not checked there.
 ///
 /// **It does not yet hold the observation cache**, which arch §4 gives it. The cache is drawn
 /// forward and evicted by whoever hands regions out, and that is the parallel arrangement's
 /// shape to settle (the plan's E3); until then the two live side by side in this file rather
 /// than one inside the other.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Organiser {
     /// The next region index that may be released. Everything below it has been released
     /// already; nothing at or above it has.
@@ -558,9 +617,27 @@ pub struct Organiser {
     released_loci: VecDeque<CohortObservation>,
     /// Summed over the regions **released so far**, not over those submitted — the number
     /// spec §3.3 requires to reach the run summary. Counting at release rather than at
-    /// submission is what lets the next step drop a failed locus that an earlier one displaced
-    /// without the total having counted it already.
+    /// submission is what lets a failed locus an earlier one displaced be dropped without the
+    /// total having counted it already.
     failed_locus_count: u64,
+    /// The last base owned by a locus already resolved, or `None` before the first one — the
+    /// **frontier**, which is the word the comments and tests below use for it. A locus whose
+    /// first position is at or before it belongs to ground an earlier locus already owns, and
+    /// is dropped (spec §6.1).
+    owned_through: Option<GenomePosition>,
+    /// How often that rule fired. **Nothing in a healthy run should reach it** — see
+    /// [`Organiser`]'s note on why the rule is a safety net — so a run that reports a non-zero
+    /// figure here has had the exclusion argument broken somewhere upstream, and that is worth
+    /// being able to see rather than infer.
+    displaced_locus_count: u64,
+}
+
+impl Default for Organiser {
+    /// [`Organiser::new`], and only that: a second construction path would be a second place
+    /// to forget a field, which is the thing `new` is written out longhand to prevent.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Organiser {
@@ -576,6 +653,8 @@ impl Organiser {
             held_outcomes: BTreeMap::new(),
             released_loci: VecDeque::new(),
             failed_locus_count: 0,
+            owned_through: None,
+            displaced_locus_count: 0,
         }
     }
 
@@ -632,6 +711,18 @@ impl Organiser {
         self.failed_locus_count
     }
 
+    /// How many loci — emitted and failed alike — were dropped because an earlier locus
+    /// already owned the ground they started on (spec §6.1).
+    ///
+    /// **Expected to be zero, and that is the point.** [`Organiser`]'s note gives the argument
+    /// for why no builder working under `build_region`'s input contract can produce an
+    /// overlapping pair; this counter is what would show the argument failing on real data
+    /// instead of leaving it to be inferred from a locus quietly missing.
+    #[must_use]
+    pub fn displaced_locus_count(&self) -> u64 {
+        self.displaced_locus_count
+    }
+
     /// Nothing outstanding: every region the run handed out has been released, and every
     /// released locus taken (arch §4).
     ///
@@ -646,7 +737,7 @@ impl Organiser {
             && self.released_loci.is_empty()
     }
 
-    /// End the run: the failed-locus total, or a refusal naming what would have been lost.
+    /// End the run: what it did not emit, or a refusal naming what would have been lost.
     ///
     /// Consuming, because there is nothing to ask an organiser afterwards — production's
     /// `VcfWriter::finish` has the same shape and the same reason
@@ -656,15 +747,17 @@ impl Organiser {
     ///
     /// **Panics** when an outcome was submitted for an index the run says it never handed out,
     /// which is the same class of hand-out bug [`submit`](Self::submit) refuses.
-    pub fn finish(self, regions_handed_out: u64) -> Result<u64, RunEndedShort> {
-        // Destructured rather than field-accessed, so that anything the organiser gains at E2
-        // or E3 has to be answered for here — drained by the end of the run, or deliberately
-        // not — instead of being left behind in silence.
+    pub fn finish(self, regions_handed_out: u64) -> Result<MergeTally, RunEndedShort> {
+        // Destructured rather than field-accessed, so that anything the organiser gains at a
+        // later step has to be answered for here — drained by the end of the run, or
+        // deliberately not — instead of being left behind in silence.
         let Self {
             next_expected_region,
             held_outcomes,
             released_loci,
             failed_locus_count,
+            owned_through: _,
+            displaced_locus_count,
         } = self;
 
         if let Some((last_held, _)) = held_outcomes.last_key_value() {
@@ -682,7 +775,10 @@ impl Organiser {
         let loci = released_loci.len() as u64;
 
         match (regions, loci) {
-            (0, 0) => Ok(failed_locus_count),
+            (0, 0) => Ok(MergeTally {
+                failed_loci: failed_locus_count,
+                displaced_loci: displaced_locus_count,
+            }),
             (0, loci) => Err(RunEndedShort::LociNeverDrained { loci }),
             (regions, 0) => Err(RunEndedShort::RegionsNeverReleased {
                 first_stalled: next_expected_region,
@@ -706,13 +802,7 @@ impl Organiser {
                 cohort_observations,
                 failed_locus_spans,
             } = outcome;
-            self.released_loci.extend(cohort_observations);
-            // Saturating where the cursor below is checked, and the difference is deliberate:
-            // a saturated total is a truer answer than a wrap for a count, while a cursor that
-            // stopped advancing would release the same region for ever.
-            self.failed_locus_count = self
-                .failed_locus_count
-                .saturating_add(failed_locus_spans.len() as u64);
+            self.resolve_and_release(cohort_observations, failed_locus_spans);
             // PANIC-FREE: the cursor rises once per released region, and a run cannot hand out
             // more than `u64::MAX` building regions.
             self.next_expected_region = RegionIndex(
@@ -722,6 +812,108 @@ impl Organiser {
                     .expect("a run cannot hand out more than u64::MAX building regions"),
             );
         }
+    }
+
+    /// One region's loci and failed spans, taken in genome order, each claiming its ground or
+    /// losing it to a locus that got there first (spec §6.1).
+    ///
+    /// **The two vectors are merged rather than handled apart**, because the rule is about
+    /// ground and a failed locus owns ground exactly as an emitted one does: it wins against
+    /// what overlaps it, and the only things that differ are at the end of the line — nothing
+    /// is emitted for it, and the run counts it (spec §3.2). A separate pass over each would
+    /// let a failed locus be resolved against a frontier that had already run past it.
+    ///
+    /// **What the two vectors have to be, and who owes it.** Interleaved by first base they
+    /// must form one ascending sequence of spans that do not overlap. That is what one walk
+    /// over one region produces — it closes disjoint loci in genome order and sends each to
+    /// whichever vector its verdict picks ([`RegionOutcome`]) — but *neither vector says it
+    /// alone*, and nothing here checks it: it is the submitter's to keep, and a submitter that
+    /// breaks it sees the rule fire *inside* one region. Given it, only the join between two
+    /// regions can reach the rule at all, and [`Organiser`]'s note says why even that does not,
+    /// today.
+    fn resolve_and_release(&mut self, loci: Vec<CohortObservation>, failed: Vec<GenomeRegion>) {
+        // Driven off `next_if` rather than a peek-then-take pair, so that no branch has to
+        // assert that the value it just looked at is still there.
+        let mut loci = loci.into_iter().peekable();
+        for span in failed {
+            let span_first = first_base_of(span);
+            while let Some(locus) = loci.next_if(|locus| first_base_of(locus.region) <= span_first)
+            {
+                self.claim_and_release(locus);
+            }
+            if self.claim(span) {
+                // Saturating where the region cursor is checked, and the difference is
+                // deliberate: a saturated total is a truer answer than a wrap for a count,
+                // while a cursor that stopped advancing would release one region for ever.
+                self.failed_locus_count = self.failed_locus_count.saturating_add(1);
+            }
+        }
+        for locus in loci {
+            self.claim_and_release(locus);
+        }
+    }
+
+    /// Release `locus` if it claims its ground, and drop it if an earlier locus owns it.
+    fn claim_and_release(&mut self, locus: CohortObservation) {
+        if self.claim(locus.region) {
+            self.released_loci.push_back(locus);
+        }
+    }
+
+    /// Claim `locus_span`'s ground for the locus that covers it, or refuse it to a locus that
+    /// got there first — spec §6.1's one rule, with no special case for a failed locus. The
+    /// span is a **locus's** own ground, not a building region's, which is the other thing this
+    /// file calls a region.
+    ///
+    /// **The test is the first base, not the overlap.** A locus belongs to the builder whose
+    /// region holds its first position, so the earlier *start* is the earlier owner; asking
+    /// instead whether the two spans intersect would give the same answer here and a different
+    /// one on any pair the walk could not have produced.
+    ///
+    /// **"Earlier" means claimed first, not lower-numbered.** Under `build_region`'s input
+    /// contract the two are the same, since a builder starts a locus only inside its own
+    /// region and the regions are resolved in order. They come apart only where that contract
+    /// has already failed — a later region delivering a locus that starts before the standing
+    /// owner's — and there the standing owner keeps its ground.
+    #[must_use = "a locus that did not claim its ground is dropped, and the caller decides how"]
+    fn claim(&mut self, locus_span: GenomeRegion) -> bool {
+        if self
+            .owned_through
+            .is_some_and(|owned| first_base_of(locus_span) <= owned)
+        {
+            self.displaced_locus_count = self.displaced_locus_count.saturating_add(1);
+            return false;
+        }
+        // **Assigned, not maxed, and the frontier cannot retreat**: a span reaches here only if
+        // its first base is past the frontier, and `last_base_of` never returns anything before
+        // `first_base_of`, so its last base is past the frontier too. A `max` here would be a
+        // branch no input can take, which reads as a hazard someone guarded against and leaves
+        // the next reader looking for the case.
+        self.owned_through = Some(last_base_of(locus_span));
+        true
+    }
+}
+
+/// A locus span's first base, genome-wide — what decides which of two loci is the earlier
+/// owner.
+///
+/// **The ends are ordered rather than trusted**, as [`ObservationCache::with_observations`] and
+/// [`ObservationCache::cover`] order theirs and for the same reason: `GenomeRegion` has public
+/// fields and no constructor putting them in order, and an inverted span would otherwise walk
+/// the frontier backwards — past its own first base, releasing the locus behind it.
+fn first_base_of(locus_span: GenomeRegion) -> GenomePosition {
+    GenomePosition {
+        contig: locus_span.contig,
+        position: locus_span.start.min(locus_span.end),
+    }
+}
+
+/// A locus span's last base, genome-wide — where the frontier stands once the span is claimed.
+/// Ordered for [`first_base_of`]'s reason, and never before it.
+fn last_base_of(locus_span: GenomeRegion) -> GenomePosition {
+    GenomePosition {
+        contig: locus_span.contig,
+        position: locus_span.end.max(locus_span.start),
     }
 }
 
@@ -1706,6 +1898,13 @@ mod tests {
     }
 
     /// One region's outcome: loci over `locus_regions`, and failures over `failed_regions`.
+    ///
+    /// **Both lists must be ascending, and the two must not overlap each other**, because that
+    /// is what one walk over one region produces: every locus it closes is disjoint from the
+    /// last, and each one is either built or failed. A fixture that breaks it makes the overlap
+    /// rule fire *inside* a single region, which no builder can do — five of the fixtures
+    /// written before the rule existed did exactly that, and writing the rule is what found
+    /// them.
     fn outcome_of(
         locus_regions: &[GenomeRegion],
         failed_regions: &[GenomeRegion],
@@ -1832,7 +2031,7 @@ mod tests {
 
         organiser.submit(
             RegionIndex(0),
-            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+            outcome_of(&[region(1, 3)], &[region(10, 15)]),
         );
         organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
         drained_regions(&mut organiser);
@@ -1872,10 +2071,10 @@ mod tests {
     fn the_failed_locus_count_sums_every_released_region() {
         let mut organiser = Organiser::new();
 
-        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(21, 90)]));
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(45, 60)]));
         organiser.submit(
             RegionIndex(0),
-            outcome_of(&[], &[region(1, 60), region(3, 70)]),
+            outcome_of(&[], &[region(1, 20), region(25, 40)]),
         );
         organiser.submit(RegionIndex(2), outcome_of(&[], &[]));
 
@@ -1892,11 +2091,11 @@ mod tests {
 
         organiser.submit(
             RegionIndex(1),
-            outcome_of(&[], &[region(21, 90), region(25, 95)]),
+            outcome_of(&[], &[region(40, 60), region(65, 90)]),
         );
         assert_eq!(organiser.failed_locus_count(), 0);
 
-        organiser.submit(RegionIndex(0), outcome_of(&[], &[region(1, 60)]));
+        organiser.submit(RegionIndex(0), outcome_of(&[], &[region(1, 30)]));
         assert_eq!(organiser.failed_locus_count(), 3);
     }
 
@@ -1909,9 +2108,9 @@ mod tests {
 
         organiser.submit(
             RegionIndex(0),
-            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+            outcome_of(&[region(1, 3)], &[region(10, 60)]),
         );
-        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(21, 90)]));
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(80, 120)]));
 
         assert_eq!(organiser.failed_locus_count(), 2);
     }
@@ -1953,7 +2152,13 @@ mod tests {
 
         drained_regions(&mut organiser);
         assert!(organiser.is_finished(1));
-        assert_eq!(organiser.finish(1), Ok(0));
+        assert_eq!(
+            organiser.finish(1),
+            Ok(MergeTally {
+                failed_loci: 0,
+                displaced_loci: 0,
+            }),
+        );
     }
 
     /// Loci released and never taken truncate the output exactly as a missing region does,
@@ -2027,18 +2232,30 @@ mod tests {
         let mut organiser = Organiser::new();
         organiser.submit(
             RegionIndex(0),
-            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+            outcome_of(&[region(1, 3)], &[region(10, 60)]),
         );
         organiser.submit(RegionIndex(1), outcome_of(&[], &[]));
         drained_regions(&mut organiser);
 
-        assert_eq!(organiser.finish(2), Ok(1));
+        assert_eq!(
+            organiser.finish(2),
+            Ok(MergeTally {
+                failed_loci: 1,
+                displaced_loci: 0,
+            }),
+        );
     }
 
     /// A run over no regions at all is finished and owes nothing.
     #[test]
     fn an_organiser_that_was_given_nothing_finishes_clean() {
-        assert_eq!(Organiser::new().finish(0), Ok(0));
+        assert_eq!(
+            Organiser::new().finish(0),
+            Ok(MergeTally {
+                failed_loci: 0,
+                displaced_loci: 0,
+            }),
+        );
     }
 
     /// One outcome per region, whether or not its loci have gone out yet.
@@ -2078,6 +2295,315 @@ mod tests {
         let mut organiser = Organiser::new();
         organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
         organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+    }
+
+    // ---------------------------------------------------------------
+    // Overlap resolution. **Every fixture below is fabricated**, because no builder working
+    // under `build_region`'s input contract can produce an overlapping pair — the argument is
+    // on [`Organiser`]. These state what the rule does if it ever is reached; the fixtures
+    // `super::super::serial::tests::refuse_overlapping_ground` sees state, from the other end,
+    // that it is not needed.
+    // ---------------------------------------------------------------
+
+    /// The rule itself: of two loci that overlap, the one that starts earlier stands.
+    #[test]
+    fn a_locus_starting_on_ground_an_earlier_locus_owns_is_dropped() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 40)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(25, 60)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(10, 40)]);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+        assert_eq!(
+            organiser.finish(2),
+            Ok(MergeTally {
+                failed_loci: 0,
+                displaced_loci: 1,
+            }),
+            "the tally is what a run reads, and it must carry the displacement too",
+        );
+    }
+
+    /// **The test is the first base, not the overlap.** A locus that opens on the very last
+    /// base an earlier one owns is dropped; one that opens on the next base is kept, even
+    /// though the two are adjacent.
+    #[test]
+    fn the_boundary_is_the_earlier_locus_last_base() {
+        let mut on_the_last_base = Organiser::new();
+        on_the_last_base.submit(RegionIndex(0), outcome_of(&[region(10, 40)], &[]));
+        on_the_last_base.submit(RegionIndex(1), outcome_of(&[region(40, 55)], &[]));
+        assert_eq!(
+            drained_regions(&mut on_the_last_base),
+            vec![region(10, 40)],
+            "a locus opening on base 40 starts inside ground owned through base 40",
+        );
+
+        let mut on_the_next_base = Organiser::new();
+        on_the_next_base.submit(RegionIndex(0), outcome_of(&[region(10, 40)], &[]));
+        on_the_next_base.submit(RegionIndex(1), outcome_of(&[region(41, 55)], &[]));
+        assert_eq!(
+            drained_regions(&mut on_the_next_base),
+            vec![region(10, 40), region(41, 55)],
+        );
+        assert_eq!(on_the_next_base.displaced_locus_count(), 0);
+    }
+
+    /// **A failed locus displaces exactly as an emitted one does** (spec §3.2, §6.1). This is
+    /// the case the rule exists for: a wide deletion refused by the width bound owns ground
+    /// that a later builder, which never saw what opened there, would build from a partial
+    /// picture.
+    #[test]
+    fn a_failed_locus_displaces_what_starts_inside_its_span() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[], &[region(10, 200)]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(120, 130)], &[]));
+        organiser.submit(RegionIndex(2), outcome_of(&[region(210, 214)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(210, 214)],
+            "the locus built inside the refused span survived with nothing to displace it",
+        );
+        assert_eq!(organiser.failed_locus_count(), 1);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// And the same the other way round: a failed locus starting inside an emitted one's
+    /// ground is dropped, and — because the count is taken at release — is never counted.
+    #[test]
+    fn a_failed_locus_displaced_by_an_earlier_one_is_not_counted() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 90)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(50, 300)]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(10, 90)]);
+        assert_eq!(
+            organiser.failed_locus_count(),
+            0,
+            "a refusal the run never owned must not reach the run summary",
+        );
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// **The two lists are resolved as one sequence, not one after the other.** Region 0's
+    /// failure at 10-200 and its locus at 220-224 interleave with region 1's locus at 100-110;
+    /// resolving all the loci first and then all the failures would let the failure be judged
+    /// against a frontier that had already run to 224.
+    #[test]
+    fn loci_and_failed_spans_are_resolved_in_one_genome_order() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(220, 224)], &[region(10, 200)]),
+        );
+        organiser.submit(RegionIndex(1), outcome_of(&[region(100, 110)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(220, 224)]);
+        assert_eq!(organiser.failed_locus_count(), 1);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// One wide locus can displace several later ones, and the frontier does not retreat to
+    /// the last one kept.
+    #[test]
+    fn one_wide_locus_displaces_every_locus_that_opens_inside_it() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 300)], &[]));
+        for (index, locus) in [
+            (1, region(40, 44)),
+            (2, region(120, 124)),
+            (3, region(280, 284)),
+        ] {
+            organiser.submit(RegionIndex(index), outcome_of(&[locus], &[]));
+        }
+        organiser.submit(RegionIndex(4), outcome_of(&[region(301, 305)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(10, 300), region(301, 305)],
+        );
+        assert_eq!(organiser.displaced_locus_count(), 3);
+    }
+
+    /// **The frontier is the latest ground owned, not the first.** A locus kept after another
+    /// owns what it covers just as the first did, so the one that opens inside *it* is
+    /// displaced — which a frontier that stopped at the first locus would let through.
+    #[test]
+    fn a_locus_kept_after_another_owns_its_own_ground_too() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 20)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(30, 100)], &[]));
+        organiser.submit(RegionIndex(2), outcome_of(&[region(50, 60)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(10, 20), region(30, 100)],
+        );
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// **A displaced locus owns nothing** — the frontier stays on the standing owner's last
+    /// base, not the losing locus's. Region 1's locus reaches to 100 and loses to region 0's,
+    /// so the ground from 41 to 100 is nobody's and region 2's locus there stands. Every other
+    /// fixture here hides the difference, because in each the displaced locus ends inside the
+    /// standing owner's span.
+    #[test]
+    fn a_displaced_locus_does_not_own_the_ground_it_lost() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 40)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(25, 100)], &[]));
+        organiser.submit(RegionIndex(2), outcome_of(&[region(50, 60)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(10, 40), region(50, 60)],
+        );
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// **"Earlier" means claimed first, not lower-numbered.** A later region delivering a locus
+    /// that starts before the standing owner's cannot happen under `build_region`'s input
+    /// contract; where it does, the standing owner keeps its ground. Nothing else in the suite
+    /// separates the two readings of spec §6.1's "earlier".
+    #[test]
+    fn a_later_region_delivering_an_earlier_start_still_loses() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(30, 40)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(10, 35)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(30, 40)]);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// **A displaced locus is not a failed one.** The tally keeps them apart: the failed total
+    /// is what the width bound refused, and displacement — which here drops one locus and one
+    /// refusal — adds to neither it nor the ground the run reports as refused.
+    #[test]
+    fn the_tally_keeps_the_failed_and_the_displaced_apart() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 300)], &[]));
+        organiser.submit(
+            RegionIndex(1),
+            outcome_of(&[region(50, 60)], &[region(70, 80)]),
+        );
+        drained_regions(&mut organiser);
+
+        assert_eq!(
+            organiser.finish(2),
+            Ok(MergeTally {
+                failed_loci: 0,
+                displaced_loci: 2,
+            }),
+        );
+    }
+
+    /// A span whose ends are the wrong way round is read as the ground it names, which is how
+    /// [`ObservationCache::cover`] and [`ObservationCache::with_observations`] read one too.
+    /// Taken raw, its last base would put the frontier *behind* its own first base, and the
+    /// locus that follows would be released whether or not it overlapped.
+    #[test]
+    fn a_span_with_its_ends_the_wrong_way_round_still_owns_its_ground() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(50, 40)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(45, 60)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(50, 40)]);
+        assert_eq!(
+            organiser.displaced_locus_count(),
+            1,
+            "45 falls inside the ground 40-50 names, whichever way round it was written",
+        );
+
+        // And the other end: an inverted span *arriving* on owned ground must lose it. Read
+        // raw, this one's first base would be 50 — past the frontier at 45 — and it would
+        // claim ground 40-45 that region 0 already owns.
+        let mut arriving_inverted = Organiser::new();
+        arriving_inverted.submit(RegionIndex(0), outcome_of(&[region(10, 45)], &[]));
+        arriving_inverted.submit(RegionIndex(1), outcome_of(&[region(50, 40)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut arriving_inverted),
+            vec![region(10, 45)],
+        );
+        assert_eq!(arriving_inverted.displaced_locus_count(), 1);
+    }
+
+    /// Ownership does not cross a contig: a locus at the start of the next contig is kept
+    /// however far the last locus of the previous one reached.
+    #[test]
+    fn a_locus_on_the_next_contig_is_never_displaced() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region_on(0, 10, 4_000)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region_on(1, 5, 9)], &[]));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region_on(0, 10, 4_000), region_on(1, 5, 9)],
+        );
+        assert_eq!(organiser.displaced_locus_count(), 0);
+    }
+
+    /// **The frontier is the organiser's, not one region's**, so it carries across the join
+    /// between two regions and across a region that had nothing in it.
+    #[test]
+    fn the_frontier_carries_across_an_empty_region() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 300)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[]));
+        organiser.submit(RegionIndex(2), outcome_of(&[region(250, 260)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(10, 300)]);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// The resolution runs in **region order, not arrival order** — which is the reason the
+    /// release waits for the predecessor at all (spec §6.3). Region 1 arrives first and would
+    /// win if the frontier were built as outcomes landed; it loses because region 0 owns the
+    /// ground when the two are resolved.
+    #[test]
+    fn resolution_follows_region_order_rather_than_arrival_order() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(1), outcome_of(&[region(25, 60)], &[]));
+        organiser.submit(RegionIndex(0), outcome_of(&[region(10, 40)], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(10, 40)]);
+        assert_eq!(organiser.displaced_locus_count(), 1);
+    }
+
+    /// Nothing is displaced in a run where nothing overlaps, which is every run the builders
+    /// can actually produce.
+    #[test]
+    fn nothing_is_displaced_when_no_two_loci_overlap() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3), region(7, 9)], &[region(20, 40)]),
+        );
+        organiser.submit(
+            RegionIndex(1),
+            outcome_of(&[region(41, 44)], &[region(50, 70)]),
+        );
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(1, 3), region(7, 9), region(41, 44)],
+        );
+        assert_eq!(organiser.failed_locus_count(), 2);
+        assert_eq!(organiser.displaced_locus_count(), 0);
     }
 
     /// An outcome for a region the run says it never handed out is the same class of hand-out
