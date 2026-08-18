@@ -199,7 +199,7 @@ and reaches in; eviction drops nothing a live region can still reach.
 
 ### Milestone E — the organiser and the parallel arrangement
 
-☐ **E1 — ordered release, no overlaps yet.** `Organiser::submit` / `drain_ready` / `is_finished`,
+✅ **E1 — ordered release, no overlaps yet.** `Organiser::submit` / `drain_ready` / `is_finished`,
 keyed by region index, drained on next-expected; exactly one outcome per region including empty
 ones; a gap is an error rather than a truncation.
 *Depends:* D2. *Source:* [spec](../spec/cohort_merge.md) §6.3; [arch](../arch/cohort_merge.md) §4.

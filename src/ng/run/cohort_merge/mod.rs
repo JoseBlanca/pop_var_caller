@@ -14,12 +14,14 @@
 //! **What has landed:** this file's three parameters; [`close`]'s walk and its two
 //! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
 //! span, unified into one allele table, with each covering sample's support against it;
-//! [`organise`]'s observation cache — the window one builder is handed — and the division
-//! of the analysed ground into the regions single builders own; and [`serial`]'s **two**
-//! single-threaded drivers: the oracle every later milestone must reproduce, and the same
-//! merge read through the cache, byte for byte. **Still to come:** the organiser itself,
-//! which resolves the overlaps between builders and releases loci in genome order, and the
-//! parallel arrangement around it (`doc/devel/ng/impl_plan/cohort_merge.md`, milestone E).
+//! [`organise`]'s observation cache — the window one builder is handed — the division of the
+//! analysed ground into the regions single builders own, and the organiser's **ordered
+//! release**, which takes the builders' outcomes by region index and lets their loci out
+//! along an unbroken run of indexes; and [`serial`]'s **two** single-threaded drivers: the
+//! oracle every later milestone must reproduce, and the same merge read through the cache,
+//! byte for byte. **Still to come:** the organiser's resolution of the overlaps between
+//! neighbouring builders, and the parallel arrangement around it
+//! (`doc/devel/ng/impl_plan/cohort_merge.md`, E2 and E3).
 //!
 //! **`pub`, though the architecture calls this crate-private machinery.** The two
 //! caller objects that will own it do not exist yet, so `pub(crate)` items here would

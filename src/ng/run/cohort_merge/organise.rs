@@ -31,17 +31,28 @@
 //! [`with_observations`](ObservationCache::with_observations) takes `&self` and is a builder's
 //! only way in.
 //!
-//! **The cache lives in the organiser's file so that the split can become privacy rather than
-//! convention.** When the organiser lands — ordered release and overlap resolution, the other
-//! half of this file's name, at milestone E
-//! (`doc/devel/ng/impl_plan/cohort_merge.md`) — it is the only caller of `cover` and
-//! `evict_before`, and both can become private to this file, at which point `build.rs`, a
-//! sibling module, cannot reach them however it holds the cache. A cache in a file of its own
-//! would have to export them at least `pub(super)` and would lose that.
+//! **The organiser is the other half of this file** — [`Organiser`], which takes the builders'
+//! outcomes and releases their loci in genome order. Ordered release has landed; resolving the
+//! overlaps between neighbouring regions, and drawing the cache forward for the builders, are
+//! the next two steps (`doc/devel/ng/impl_plan/cohort_merge.md`, E2 and E3).
+//!
+//! **Whether the two belong in one file is open, and the argument for it is weaker than it
+//! first looked.** The case was that the organiser would become the cache's only writer, at
+//! which point [`cover`](ObservationCache::cover) and
+//! [`evict_before`](ObservationCache::evict_before) could turn from `pub` into private to this
+//! file — a split enforced by the compiler rather than by convention. E1's review found the
+//! premise false: `super::serial::merge_cohort_through_cache` calls both today, from a sibling
+//! module, and nothing in the plan removes that driver. So the reachable narrowing is
+//! `pub(super)`, which a file of its own would get just as well. Against that, this file is
+//! about 1,950 lines covering two types that share no field and no function. The split is
+//! recorded for the owner at Checkpoint E rather than taken here, because it would move D1 and
+//! D2's code and the architecture's file tree names `organise.rs`.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::iter::Fuse;
 
 use super::CohortLocusBuilderRegionsLen;
+use super::build::{CohortObservation, RegionOutcome};
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion, Position};
 
@@ -443,6 +454,275 @@ fn first_reaching_index(
         .iter()
         .position(|observation| observation.reach_position() >= position)
         .unwrap_or(held_observations.len())
+}
+
+/// Where one building region falls in the order the run hands them out — 0 for the run's
+/// first, 1 for its second, counting on across every analysed region of the run.
+///
+/// **It is the run's numbering, not a coordinate**, and that is the point: the organiser
+/// releases on a gapless run of indexes, so it can tell "region 7 has not arrived yet" from
+/// "region 7 found nothing", which two genome positions cannot say. The regions themselves
+/// are [`building_regions_of`]'s, taken in the order that iterator yields them.
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct RegionIndex(pub u64);
+
+impl std::fmt::Display for RegionIndex {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// A run that ended owing output — the release-level guard production keeps as
+/// `WriterError::MissingChunks` (`var_calling/vcf_writer.rs:152-158`), and what arch §5 will
+/// fold into `RunError` when that type exists.
+///
+/// **The whole of E1 is that a gap must be an error and not a truncation** (spec §6.3): the
+/// output would simply stop early, and the failed-locus total would be short by everything the
+/// lost regions refused — the one number that says the width bound is charging more than
+/// expected (spec §3.3). Both are silent, and a partly-lost run answers exactly like a complete
+/// one.
+///
+/// **An enum, because the two ways to end short can happen together and can happen apart, and
+/// no combination of them means "nothing was lost".** Arch §5 sketches one struct with one
+/// count, which production can afford because it emits from inside its own submit and has no
+/// second step to forget; here taking the released loci is the caller's own call, so a run can
+/// also end with loci released and never taken.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RunEndedShort {
+    /// Regions the run handed out whose loci never reached the caller: the first index that
+    /// stalled the drain, and how many regions from it onwards were never released. **The
+    /// count covers both halves of a stall** — the region that never delivered, and every
+    /// region behind it that delivered and could not be let out.
+    #[error(
+        "region {first_stalled} never delivered its result, so {regions} region(s) were \
+         handed out and never released"
+    )]
+    RegionsNeverReleased {
+        first_stalled: RegionIndex,
+        regions: u64,
+    },
+
+    /// Loci released in order and never taken from the organiser. Nothing stalled; the caller
+    /// stopped draining.
+    #[error("{loci} released locus/loci were never taken from the organiser")]
+    LociNeverDrained { loci: u64 },
+
+    /// Both at once, which one count could not express.
+    #[error(
+        "region {first_stalled} never delivered its result, so {regions} region(s) were \
+         handed out and never released, and {loci} released locus/loci were never taken"
+    )]
+    RegionsNeverReleasedAndLociNeverDrained {
+        first_stalled: RegionIndex,
+        regions: u64,
+        loci: u64,
+    },
+}
+
+/// Holds the builders' outcomes and releases their loci in genome order (spec §6.1, §6.3).
+///
+/// **Builders finish out of order and the consumer must see genome order**, so the outcomes
+/// are keyed by region index and drained while the head equals the next expected index — the
+/// reorder map production's VCF writer drains on `next_expected`, carried whole
+/// (`var_calling/vcf_writer.rs:168-176`).
+///
+/// **Every region delivers exactly one outcome, including the empty ones** (spec §6.3). The
+/// drain advances only along an unbroken run of indexes, so a region that found nothing must
+/// still submit — an empty [`RegionOutcome`] — or every region behind it is held for ever,
+/// and what those regions found is lost with nothing to say so. That is what
+/// [`RunEndedShort`] refuses at the end of the run.
+///
+/// **Waiting for the predecessor is not merely about order.** A region's loci can only be
+/// confirmed once the region before it has been resolved, because that is what says whether a
+/// locus owned earlier already covers this region's ground (spec §6.3). That resolution is the
+/// next step's — this one releases what it is given, in order, and drops nothing — and
+/// [`release_regions_in_turn`](Self::release_regions_in_turn) is where it will go (the plan's
+/// E2).
+///
+/// **It does not yet hold the observation cache**, which arch §4 gives it. The cache is drawn
+/// forward and evicted by whoever hands regions out, and that is the parallel arrangement's
+/// shape to settle (the plan's E3); until then the two live side by side in this file rather
+/// than one inside the other.
+#[derive(Debug, Default)]
+pub struct Organiser {
+    /// The next region index that may be released. Everything below it has been released
+    /// already; nothing at or above it has.
+    next_expected_region: RegionIndex,
+    /// Outcomes that arrived before their turn, keyed by region index.
+    held_outcomes: BTreeMap<RegionIndex, RegionOutcome>,
+    /// Loci already released, in genome order, waiting for the caller to take them. They are
+    /// held rather than handed straight on because releasing and taking are two different
+    /// moments: a region becomes releasable when its predecessor arrives, which is not when
+    /// the caller next asks.
+    released_loci: VecDeque<CohortObservation>,
+    /// Summed over the regions **released so far**, not over those submitted — the number
+    /// spec §3.3 requires to reach the run summary. Counting at release rather than at
+    /// submission is what lets the next step drop a failed locus that an earlier one displaced
+    /// without the total having counted it already.
+    failed_locus_count: u64,
+}
+
+impl Organiser {
+    /// An organiser expecting region index 0 and holding nothing.
+    ///
+    /// Written out field by field rather than deferring to `Default`, so that a field E2 or E3
+    /// adds has to be given a starting value here instead of taking whatever its own `Default`
+    /// happens to be.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next_expected_region: RegionIndex(0),
+            held_outcomes: BTreeMap::new(),
+            released_loci: VecDeque::new(),
+            failed_locus_count: 0,
+        }
+    }
+
+    /// Take one region's outcome, and release everything the arrival makes releasable.
+    ///
+    /// **Releasing here rather than in [`drain_ready`](Self::drain_ready) is production's
+    /// shape** (`var_calling/vcf_writer.rs:246`): a region becomes releasable the moment the
+    /// index in front of it arrives, which has nothing to do with when the caller next asks
+    /// for loci. Keeping the two apart is also what makes
+    /// [`failed_locus_count`](Self::failed_locus_count) meaningful before anything has been
+    /// drained.
+    ///
+    /// **Panics** when `index` was submitted already or has been released. Both are bugs in
+    /// whoever hands the regions out rather than facts about the data, and both are caught
+    /// mid-flight, where the release order is already wrong and nothing coherent can follow —
+    /// which is what separates them from [`RunEndedShort`], a bug too, but one caught at the
+    /// end of a run where what was lost can still be named and reported.
+    pub fn submit(&mut self, index: RegionIndex, outcome: RegionOutcome) {
+        assert!(
+            index >= self.next_expected_region,
+            "the outcome of region {index} arrived after it was released (next expected {}), \
+             so its loci would be released a second time, out of order",
+            self.next_expected_region,
+        );
+        // **Checked before the insert, not inside it.** Writing the map inside the assertion's
+        // condition would put the module's only insertion in an expression a later edit to
+        // `debug_assert!` would stop evaluating — and this crate's release profile leaves debug
+        // assertions off, so every region's outcome would be dropped in the shipped binary and
+        // in no test. Checking first also keeps the first outcome, rather than replacing it
+        // and then panicking.
+        assert!(
+            !self.held_outcomes.contains_key(&index),
+            "region {index} delivered a second outcome, and a region owns its loci exactly once",
+        );
+        self.held_outcomes.insert(index, outcome);
+        self.release_regions_in_turn();
+    }
+
+    /// Everything released and not yet taken, in genome order.
+    ///
+    /// **What is left when the iterator is dropped early stays here**, to be handed out by the
+    /// next call: this takes one locus at a time from the front rather than emptying the buffer
+    /// into the iterator, so a caller that stops halfway loses nothing. Loci still here at the
+    /// end of a run are what [`finish`](Self::finish) refuses.
+    #[must_use = "the loci stay in the organiser until the iterator is consumed"]
+    pub fn drain_ready(&mut self) -> impl Iterator<Item = CohortObservation> + '_ {
+        let released_loci = &mut self.released_loci;
+        std::iter::from_fn(move || released_loci.pop_front())
+    }
+
+    /// The failed loci of every region released so far, summed (spec §3.3).
+    #[must_use]
+    pub fn failed_locus_count(&self) -> u64 {
+        self.failed_locus_count
+    }
+
+    /// Nothing outstanding: every region the run handed out has been released, and every
+    /// released locus taken (arch §4).
+    ///
+    /// **`regions_handed_out` is how many building regions the run dealt out**, their indexes
+    /// being `0..regions_handed_out`. Without it the organiser cannot see a gap at the *tail*
+    /// of a run — indexes that never submitted, with no later index behind them to hold — and
+    /// a run that lost its last regions would look exactly like one that finished.
+    #[must_use]
+    pub fn is_finished(&self, regions_handed_out: u64) -> bool {
+        self.next_expected_region.0 >= regions_handed_out
+            && self.held_outcomes.is_empty()
+            && self.released_loci.is_empty()
+    }
+
+    /// End the run: the failed-locus total, or a refusal naming what would have been lost.
+    ///
+    /// Consuming, because there is nothing to ask an organiser afterwards — production's
+    /// `VcfWriter::finish` has the same shape and the same reason
+    /// (`var_calling/vcf_writer.rs:256`). `regions_handed_out` is
+    /// [`is_finished`](Self::is_finished)'s, and this returns `Ok` on exactly the runs that
+    /// method calls finished.
+    ///
+    /// **Panics** when an outcome was submitted for an index the run says it never handed out,
+    /// which is the same class of hand-out bug [`submit`](Self::submit) refuses.
+    pub fn finish(self, regions_handed_out: u64) -> Result<u64, RunEndedShort> {
+        // Destructured rather than field-accessed, so that anything the organiser gains at E2
+        // or E3 has to be answered for here — drained by the end of the run, or deliberately
+        // not — instead of being left behind in silence.
+        let Self {
+            next_expected_region,
+            held_outcomes,
+            released_loci,
+            failed_locus_count,
+        } = self;
+
+        if let Some((last_held, _)) = held_outcomes.last_key_value() {
+            assert!(
+                last_held.0 < regions_handed_out,
+                "region {last_held} delivered an outcome though the run handed out only \
+                 {regions_handed_out} region(s)",
+            );
+        }
+
+        // Every index from the cursor to the last one handed out: the region that stalled the
+        // drain, and every region behind it, whether it delivered or not. `saturating_sub`
+        // because a caller that under-reports its own hand-out is the panic above, not a wrap.
+        let regions = regions_handed_out.saturating_sub(next_expected_region.0);
+        let loci = released_loci.len() as u64;
+
+        match (regions, loci) {
+            (0, 0) => Ok(failed_locus_count),
+            (0, loci) => Err(RunEndedShort::LociNeverDrained { loci }),
+            (regions, 0) => Err(RunEndedShort::RegionsNeverReleased {
+                first_stalled: next_expected_region,
+                regions,
+            }),
+            (regions, loci) => Err(RunEndedShort::RegionsNeverReleasedAndLociNeverDrained {
+                first_stalled: next_expected_region,
+                regions,
+                loci,
+            }),
+        }
+    }
+
+    /// Release the unbroken run of regions now at the head, oldest first.
+    fn release_regions_in_turn(&mut self) {
+        while let Some(outcome) = self.held_outcomes.remove(&self.next_expected_region) {
+            // Destructured for the reason `build.rs` gives where it consumes a comparable
+            // type: anything `RegionOutcome` gains has to be answered for here — carried or
+            // dropped deliberately — rather than vanishing.
+            let RegionOutcome {
+                cohort_observations,
+                failed_locus_spans,
+            } = outcome;
+            self.released_loci.extend(cohort_observations);
+            // Saturating where the cursor below is checked, and the difference is deliberate:
+            // a saturated total is a truer answer than a wrap for a count, while a cursor that
+            // stopped advancing would release the same region for ever.
+            self.failed_locus_count = self
+                .failed_locus_count
+                .saturating_add(failed_locus_spans.len() as u64);
+            // PANIC-FREE: the cursor rises once per released region, and a run cannot hand out
+            // more than `u64::MAX` building regions.
+            self.next_expected_region = RegionIndex(
+                self.next_expected_region
+                    .0
+                    .checked_add(1)
+                    .expect("a run cannot hand out more than u64::MAX building regions"),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1412,5 +1692,401 @@ mod tests {
             disagreements.len(),
             disagreements.first().expect("not empty"),
         );
+    }
+
+    /// A cohort locus over `region`. The organiser reads nothing but where a locus sits, so
+    /// the allele table and the per-sample support are left empty: what these tests check is
+    /// which loci come out and in what order, and a fabricated one carries that in its region.
+    fn locus_at(region: GenomeRegion) -> CohortObservation {
+        CohortObservation {
+            region,
+            alleles: Vec::new(),
+            per_sample: Vec::new(),
+        }
+    }
+
+    /// One region's outcome: loci over `locus_regions`, and failures over `failed_regions`.
+    fn outcome_of(
+        locus_regions: &[GenomeRegion],
+        failed_regions: &[GenomeRegion],
+    ) -> RegionOutcome {
+        RegionOutcome {
+            cohort_observations: locus_regions.iter().copied().map(locus_at).collect(),
+            failed_locus_spans: failed_regions.to_vec(),
+        }
+    }
+
+    /// The regions of everything the organiser will now part with, in the order it parts
+    /// with them.
+    fn drained_regions(organiser: &mut Organiser) -> Vec<GenomeRegion> {
+        organiser
+            .drain_ready()
+            .map(|observation| observation.region)
+            .collect()
+    }
+
+    /// The plain case: regions arriving in their own order release as they arrive.
+    #[test]
+    fn a_region_arriving_in_its_turn_releases_at_once() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+        assert_eq!(drained_regions(&mut organiser), vec![region(1, 3)]);
+
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        assert_eq!(drained_regions(&mut organiser), vec![region(21, 24)]);
+    }
+
+    /// The reorder buffer's whole job: a region cannot pass the one in front of it.
+    #[test]
+    fn a_region_that_arrives_early_waits_for_the_one_before_it() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        assert!(
+            drained_regions(&mut organiser).is_empty(),
+            "region 1 was released before region 0 had arrived, so its loci were never \
+             offered the chance to be displaced by an earlier owner's",
+        );
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(1, 3), region(21, 24)],
+        );
+    }
+
+    /// A whole convoy held behind one missing index comes out at once, in index order, when
+    /// that index lands — and the order is the regions' own, not the order they arrived in.
+    #[test]
+    fn a_convoy_held_behind_a_gap_releases_in_region_order_when_the_gap_closes() {
+        let mut organiser = Organiser::new();
+
+        for (index, locus) in [
+            (3, region(61, 63)),
+            (1, region(21, 24)),
+            (2, region(41, 41)),
+        ] {
+            organiser.submit(RegionIndex(index), outcome_of(&[locus], &[]));
+        }
+        assert!(drained_regions(&mut organiser).is_empty());
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(1, 3), region(21, 24), region(41, 41), region(61, 63)],
+        );
+    }
+
+    /// **Exactly one outcome per region, empty ones included** (spec §6.3). The empty region
+    /// carries no loci and no failures, and delivering it is the only thing that lets the
+    /// region behind it out.
+    #[test]
+    fn an_empty_region_still_lets_the_region_behind_it_out() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        organiser.submit(RegionIndex(0), outcome_of(&[], &[]));
+
+        assert_eq!(drained_regions(&mut organiser), vec![region(21, 24)]);
+    }
+
+    /// The other half of the rule above: a region that never submits holds back every region
+    /// after it, for ever. This is what a builder dropping its result costs.
+    ///
+    /// **The three held regions carry one, two and three loci**, so the refusal's count of
+    /// *regions* (3) differs from the loci they hold (6): a count that added up the held loci
+    /// instead would read 6 and be caught here. The reviewer found that mutation alive against
+    /// an earlier fixture of three one-locus regions, where the two rules give the same number.
+    #[test]
+    fn a_region_that_never_submits_holds_back_every_region_after_it() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        organiser.submit(
+            RegionIndex(2),
+            outcome_of(&[region(31, 34), region(36, 36)], &[]),
+        );
+        organiser.submit(
+            RegionIndex(3),
+            outcome_of(&[region(41, 44), region(46, 46), region(48, 48)], &[]),
+        );
+
+        assert!(drained_regions(&mut organiser).is_empty());
+        assert!(!organiser.is_finished(4));
+        assert_eq!(
+            organiser.finish(4),
+            Err(RunEndedShort::RegionsNeverReleased {
+                first_stalled: RegionIndex(0),
+                regions: 4,
+            }),
+        );
+    }
+
+    /// **A gap at the tail of the run is a gap too**, and it is the one the organiser cannot
+    /// see from its own state: nothing is held, because the regions that went missing have no
+    /// later index behind them. Five regions dealt out, two heard from.
+    #[test]
+    fn finish_refuses_a_run_whose_last_regions_never_submitted() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+        );
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        drained_regions(&mut organiser);
+
+        assert!(
+            !organiser.is_finished(5),
+            "three of the five regions handed out never delivered an outcome",
+        );
+        assert_eq!(
+            organiser.finish(5),
+            Err(RunEndedShort::RegionsNeverReleased {
+                first_stalled: RegionIndex(2),
+                regions: 3,
+            }),
+        );
+    }
+
+    /// Within one region the builder's order is the genome's, and the organiser keeps it.
+    #[test]
+    fn the_loci_of_one_region_come_out_in_the_order_the_builder_gave_them() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3), region(7, 7), region(11, 18)], &[]),
+        );
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(1, 3), region(7, 7), region(11, 18)],
+        );
+    }
+
+    /// The count spec §3.3 needs is the sum over the regions, and it reaches it whatever
+    /// order the regions arrive in.
+    #[test]
+    fn the_failed_locus_count_sums_every_released_region() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(21, 90)]));
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[], &[region(1, 60), region(3, 70)]),
+        );
+        organiser.submit(RegionIndex(2), outcome_of(&[], &[]));
+
+        assert_eq!(organiser.failed_locus_count(), 3);
+    }
+
+    /// **The count is of what has been released, not of what has been submitted**, so that
+    /// the next step can drop a failed locus an earlier one displaced without the total
+    /// having counted it already. Region 1 is in the organiser's hands and uncounted until
+    /// region 0 lets it out.
+    #[test]
+    fn the_failed_locus_count_ignores_a_region_still_held_behind_a_gap() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(1),
+            outcome_of(&[], &[region(21, 90), region(25, 95)]),
+        );
+        assert_eq!(organiser.failed_locus_count(), 0);
+
+        organiser.submit(RegionIndex(0), outcome_of(&[], &[region(1, 60)]));
+        assert_eq!(organiser.failed_locus_count(), 3);
+    }
+
+    /// **Releasing happens when the region arrives, not when the caller asks.** Nothing has
+    /// been drained here, and the failed loci of both regions are already counted — which is
+    /// what says the release ran inside `submit`.
+    #[test]
+    fn a_region_is_released_on_arrival_rather_than_at_the_next_drain() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+        );
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[region(21, 90)]));
+
+        assert_eq!(organiser.failed_locus_count(), 2);
+    }
+
+    /// A drain the caller stops halfway leaves the rest where it was: the loci are taken one
+    /// at a time from the front, not emptied into the iterator and dropped with it.
+    #[test]
+    fn a_drain_stopped_halfway_leaves_the_rest_for_the_next_call() {
+        let mut organiser = Organiser::new();
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3), region(7, 7), region(11, 18)], &[]),
+        );
+
+        let first = organiser
+            .drain_ready()
+            .next()
+            .expect("the region's first locus");
+        assert_eq!(first.region, region(1, 3));
+
+        assert_eq!(
+            drained_regions(&mut organiser),
+            vec![region(7, 7), region(11, 18)],
+        );
+    }
+
+    /// Nothing outstanding, which is what a run asserts at its end — and `finish` returns `Ok`
+    /// on exactly those runs.
+    #[test]
+    fn an_organiser_is_finished_once_every_region_is_released_and_drained() {
+        let mut organiser = Organiser::new();
+        assert!(Organiser::new().is_finished(0));
+
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+        assert!(
+            !organiser.is_finished(1),
+            "a locus released and not yet taken is a locus the run still owes its output",
+        );
+
+        drained_regions(&mut organiser);
+        assert!(organiser.is_finished(1));
+        assert_eq!(organiser.finish(1), Ok(0));
+    }
+
+    /// Loci released and never taken truncate the output exactly as a missing region does,
+    /// so `finish` refuses them too — and says so without inventing a gap.
+    #[test]
+    fn finish_refuses_a_run_with_loci_released_and_never_drained() {
+        let mut organiser = Organiser::new();
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3), region(7, 7)], &[]),
+        );
+
+        assert_eq!(
+            organiser.finish(1),
+            Err(RunEndedShort::LociNeverDrained { loci: 2 }),
+        );
+    }
+
+    /// **Both ways of ending short at once**, each named by its own count: region 1 stalled
+    /// the drain and region 2 is held behind it — two regions handed out and never released,
+    /// though they hold three loci between them — while region 0's two loci were released and
+    /// never taken. A refusal that could carry one count at a time would drop half of this.
+    #[test]
+    fn finish_names_both_counts_when_a_stall_and_undrained_loci_coincide() {
+        let mut organiser = Organiser::new();
+
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3), region(7, 7)], &[]),
+        );
+        organiser.submit(
+            RegionIndex(2),
+            outcome_of(&[region(41, 41), region(45, 45), region(51, 51)], &[]),
+        );
+
+        assert_eq!(
+            organiser.finish(3),
+            Err(RunEndedShort::RegionsNeverReleasedAndLociNeverDrained {
+                first_stalled: RegionIndex(1),
+                regions: 2,
+                loci: 2,
+            }),
+        );
+    }
+
+    /// The refusal reads back the way a person will read it, each count against its own noun.
+    /// The two counts are deliberately different, so swapping them in the message cannot pass.
+    #[test]
+    fn the_refusal_names_each_count_against_its_own_noun() {
+        let both = RunEndedShort::RegionsNeverReleasedAndLociNeverDrained {
+            first_stalled: RegionIndex(4),
+            regions: 3,
+            loci: 7,
+        };
+        assert_eq!(
+            both.to_string(),
+            "region 4 never delivered its result, so 3 region(s) were handed out and never \
+             released, and 7 released locus/loci were never taken",
+        );
+
+        assert_eq!(
+            RunEndedShort::LociNeverDrained { loci: 7 }.to_string(),
+            "7 released locus/loci were never taken from the organiser",
+            "a run that lost nothing to a stall must not have one described to it",
+        );
+    }
+
+    /// The end of a healthy run: the failed-locus total comes back, and nothing is owed.
+    #[test]
+    fn finish_returns_the_failed_locus_total_of_a_run_that_ended_clean() {
+        let mut organiser = Organiser::new();
+        organiser.submit(
+            RegionIndex(0),
+            outcome_of(&[region(1, 3)], &[region(1, 60)]),
+        );
+        organiser.submit(RegionIndex(1), outcome_of(&[], &[]));
+        drained_regions(&mut organiser);
+
+        assert_eq!(organiser.finish(2), Ok(1));
+    }
+
+    /// A run over no regions at all is finished and owes nothing.
+    #[test]
+    fn an_organiser_that_was_given_nothing_finishes_clean() {
+        assert_eq!(Organiser::new().finish(0), Ok(0));
+    }
+
+    /// One outcome per region, whether or not its loci have gone out yet.
+    #[test]
+    #[should_panic(expected = "delivered a second outcome")]
+    fn a_region_submitted_twice_is_refused() {
+        let mut organiser = Organiser::new();
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+    }
+
+    /// The duplicate is refused **and the first outcome is the one kept** — the check runs
+    /// before the map is written, so a second delivery cannot displace what the region
+    /// already owns on its way to the panic.
+    #[test]
+    fn a_refused_second_outcome_does_not_displace_the_first() {
+        let mut organiser = Organiser::new();
+        organiser.submit(RegionIndex(1), outcome_of(&[region(21, 24)], &[]));
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            organiser.submit(RegionIndex(1), outcome_of(&[region(91, 94)], &[]));
+        }));
+        assert!(
+            refused.is_err(),
+            "a second outcome for region 1 must be refused"
+        );
+
+        organiser.submit(RegionIndex(0), outcome_of(&[], &[]));
+        assert_eq!(drained_regions(&mut organiser), vec![region(21, 24)]);
+    }
+
+    /// An index that has already been released cannot be submitted again either — the drain
+    /// has passed it, so its loci would come out behind loci that are already downstream.
+    #[test]
+    #[should_panic(expected = "arrived after it was released")]
+    fn a_region_submitted_after_it_was_released_is_refused() {
+        let mut organiser = Organiser::new();
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+        organiser.submit(RegionIndex(0), outcome_of(&[region(1, 3)], &[]));
+    }
+
+    /// An outcome for a region the run says it never handed out is the same class of hand-out
+    /// bug as a duplicate, and is refused where it is first visible.
+    #[test]
+    #[should_panic(expected = "though the run handed out only")]
+    fn an_outcome_for_a_region_never_handed_out_is_refused() {
+        let mut organiser = Organiser::new();
+        organiser.submit(RegionIndex(7), outcome_of(&[region(1, 3)], &[]));
+        let _ = organiser.finish(3);
     }
 }
