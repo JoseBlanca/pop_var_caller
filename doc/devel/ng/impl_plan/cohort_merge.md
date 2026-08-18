@@ -96,7 +96,8 @@ Nothing here needs a cache, an organiser, or a thread. Every test fabricates obs
 
 ✅ **A1 — the three parameters.** `MaxCohortLocusSpan`, `MinAltObs`,
 `CohortLocusBuilderRegionsLen`, each a `NonZeroU32` newtype, with `DEFAULT_MAX_COHORT_LOCUS_SPAN`
-= 50, `DEFAULT_MIN_ALT_OBS` = 2, `DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN` = 20.
+= 50, `DEFAULT_MIN_ALT_OBS` = 2, `DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN` = 200 (20 when
+this step was written; raised on 2026-08-18, spec §14 question 1).
 *Depends:* —. *Source:* [arch](../arch/cohort_merge.md) §1.
 
 ✅ **A2 — the two derivations, on the observation types.** `SequenceObservation::matches_reference`,

@@ -362,20 +362,36 @@ impl Default for CohortLocusBuilderRegionsLen {
     }
 }
 
-/// 20 bases — the owner's starting value, unmeasured (spec §14 question 1).
+/// 200 bases — set by the owner on 2026-08-18, on the sweep below (spec §14 question 1).
 ///
-/// The sweep that would settle it trades two things against each other: wider regions
-/// mean fewer joins between builders and so less overlapping work discarded, while
-/// narrower ones shrink the ground the observation cache must cover, which is this
-/// module's main memory.
-pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 20;
+/// **What a narrow region costs is a walk over the whole cohort, four times over, whether
+/// or not the region holds anything**: a cover, an eviction, a window, and the arrays a
+/// builder allocates before it reads an observation. Twenty bases was the starting value
+/// and it made that fixed cost fall due ten times as often as two hundred does. Measured
+/// over 20,000 fabricated bases with a record every hundred — roughly the rate at which
+/// positions vary in the tomato cohort — on 8 threads with one region in flight per
+/// thread, in a release build: **63 samples 12.2 ms at 20 bases against 2.2 at 200**,
+/// 1,000 samples 40.3 against 26.0, 3,000 samples 177 against 113. On ground 25 times
+/// denser the same change took 3,000 samples from 253 ms to 186.
+///
+/// **What it costs is the ground the observation cache holds**, which is the trade §14
+/// question 1 names: with 16 regions in flight the cache spans 3,200 bases rather than
+/// 320, and measured on that same fabricated ground at 1,000 samples it held **33 records
+/// per sample rather than 4**. That is bounded by the round either way — which is the
+/// property the streaming design was bought for — and it is eight times as much of it.
+///
+/// **What is still unmeasured is the discard rate**, the other half of §14 question 1: how
+/// much overlapping work builders throw away at the joins between their regions. Wider
+/// regions can only lower it, so it does not argue against this value, but nothing here
+/// has counted it.
+pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 200;
 
 /// How many of those regions the merge works at once (spec §6.2).
 ///
 /// **A count of regions in flight, not of threads.** The threads come from rayon's pool; what
 /// this number sets is the ground the observation cache must hold, which is
 /// `cohort_locus_builder_regions_in_flight × cohort_locus_builder_regions_len` bases plus the
-/// tail of the observations reaching past it (spec §6.4, §8) — 320 bases at 16 regions in
+/// tail of the observations reaching past it (spec §6.4, §8) — 3,200 bases at 16 regions in
 /// flight and this module's default width. One region in flight gives the serial driver's
 /// memory and its answer.
 ///
@@ -470,11 +486,11 @@ mod tests {
     fn the_defaults_are_the_documented_values() {
         assert_eq!(DEFAULT_MAX_COHORT_LOCUS_SPAN, 50);
         assert_eq!(DEFAULT_MIN_ALT_OBS, 2);
-        assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 20);
+        assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 200);
 
         assert_eq!(MaxCohortLocusSpan::default().get(), 50);
         assert_eq!(MinAltObs::default().get(), 2);
-        assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 20);
+        assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 200);
     }
 
     /// The fourth parameter's default is a rule rather than a number, so the rule is what is
@@ -493,7 +509,7 @@ mod tests {
     /// returning the default — and it is the case these parameters exist for, since all
     /// three are set from a command line and spec §3.1 expects a long-read run to raise
     /// the bound. Without this, an accessor that ignored its argument and answered with
-    /// its own default would run every cohort at 50/2/20 whatever the operator asked
+    /// its own default would run every cohort at 50/2/200 whatever the operator asked
     /// for, and no test would notice.
     #[test]
     fn get_returns_the_wrapped_value_not_the_default() {

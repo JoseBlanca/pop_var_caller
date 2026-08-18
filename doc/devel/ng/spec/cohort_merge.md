@@ -496,13 +496,13 @@ began inside a locus already open produced loci that overlap that locus; they lo
 **Why not look for safe cut points instead.** The only places known to be safe before any read is
 examined are segment boundaries — no observation crosses one
 ([`run_streaming.md`](run_streaming.md) §4.3) — and they are far too far apart to divide work at
-the 20-base grain this design needs (§6.1). Any finer cut would have to be justified from the data,
+the 200-base grain this design needs (§6.1). Any finer cut would have to be justified from the data,
 which means scanning backwards far enough that nothing could reach across, and that distance is
 bounded only by how wide an observation may be: up to `max_record_span`, **5,000 bases by default**
 and 65,535 at the ceiling
 ([`pileup/generator.rs:93,141,45`](../../../../src/ng/locus_generation/pileup/generator.rs);
 production's default at [`walker/mod.rs:67`](../../../../src/pileup/walker/mod.rs)). Scanning five
-kilobases backwards to hand out twenty bases of work is not a trade worth making, and the scan
+kilobases backwards to hand out two hundred bases of work is not a trade worth making, and the scan
 would still be a *check* whose failure the organiser has to catch anyway.
 
 So the design does not check. It builds, overlaps, and resolves.
@@ -617,8 +617,8 @@ reads the cache while the organiser draws the readers forward, the two cannot ru
 organiser covers the ground for a **round** of regions, the round's builders run, and only when
 every one of them has finished does the organiser resolve, release and evict. Every builder in a
 round therefore waits for the slowest in that round. **That is a bounded frontier, not
-production's**: it spans one round — `builders × cohort_locus_builder_regions_len` bases, 320 at
-16 builders on 20-base regions — where production's watermark spanned the whole run and never
+production's**: it spans one round — `builders × cohort_locus_builder_regions_len` bases, 3,200 at
+16 builders on 200-base regions — where production's watermark spanned the whole run and never
 advanced past its slowest chunk. What it costs is the tail of each round; what it buys is a
 reduction in open cursors and in decode work by a factor of the builder count, since two builders
 whose regions land in the same psp block now share one decode instead of each paying for it.
@@ -694,16 +694,19 @@ together. What it holds is roughly
 
 and the first factor is what the design controls: with `n` builders on regions of
 `cohort_locus_builder_regions_len` bases, they span `n × len` bases of genome. At 16 builders and
-20 bases that is 320 bases of ground; at 100 bases apiece it is 1,600, five times the memory for
+200 bases that is 3,200 bases of ground; at 20 bases apiece it is 320, a tenth of the memory for
 the same parallelism. The second factor is not controlled here — an observation may reach up to
 `max_record_span` past where it starts (§5) — but wide observations are rare, so in practice the
 first term is what moves.
 
-**`cohort_locus_builder_regions_len` — a command-line parameter, default 20 bases.** The earlier
+**`cohort_locus_builder_regions_len` — a command-line parameter, default 200 bases.** The earlier
 draft derived the width from `max_cohort_locus_span`, twice it; that was the wrong parent, because
-the width's real cost is this cache and not anything about locus widths. Twenty is the owner's
-starting value and unmeasured; open question 1 (§14) names the sweep, and the discard rate belongs
-in it, since narrower regions mean more joins and so more work thrown away at them.
+the width's real cost is this cache and not anything about locus widths. Twenty was the owner's
+starting value; two hundred replaced it on 2026-08-18, on the measurement §14 question 1 records.
+What settled it is the other side of the trade, which the draft above did not have: a narrow
+region makes the merge walk the whole cohort four times over — a cover, an eviction, a window and
+a builder's set-up — whether or not the region holds a single record, and on ground where about
+one position in a hundred varies a 20-base region holds a fifth of a locus.
 
 ## 7. Degradation at the edges
 
@@ -783,13 +786,13 @@ constant.
 
 | what | size | source of the number |
 |---|---|---|
-| the observation cache | `samples × observations over the builders' span` — the span being `builders × cohort_locus_builder_regions_len`, 320 bases at 16 builders and the 20-base default, plus the tail of observations reaching past it | the formula is §6.4's; what one observation costs in ng is **unmeasured** |
+| the observation cache | `samples × observations over the builders' span` — the span being `builders × cohort_locus_builder_regions_len`, 3,200 bases at 16 builders and the 200-base default, plus the tail of observations reaching past it | the formula is §6.4's; measured on fabricated ground with a record every hundred bases at 1,000 samples and 16 in flight: **33 records held per sample**, against 4 at the old 20-base default. What one record costs in bytes is still **unmeasured** |
 | the current locus, per builder | one `max_cohort_locus_span`-wide window per sample, held while it is assembled (§4.5) | bounded by `max_cohort_locus_span`, never by the region |
-| the cohort summary, per builder | ~24 B per position of its region (production's three-column layout, [`cohort_integration.rs:64-78`](../../../../src/var_calling/cohort_integration.rs)) | ~480 B at a 20-base region; independent of the sample count |
+| the cohort summary, per builder | ~24 B per position of its region (production's three-column layout, [`cohort_integration.rs:64-78`](../../../../src/var_calling/cohort_integration.rs)) | ~4.8 kB at a 200-base region; independent of the sample count |
 | survivors awaiting release | about 1 locus per 100 positions of resolved ground (§4.3); a failed locus adds a span and a counter, no data (§3.2) | the 28,718 / 2.83 M measurement, 50 tomato samples at ~3× |
 
-**The cache is why the builders are kept close together, and why the region width is 20 rather
-than 100.** Five times the span is five times the cache, for the same number of builders and the
+**The cache is why the builders are kept close together, and why the region width is bounded at
+all.** Ten times the span is ten times the cache, for the same number of builders and the
 same parallelism.
 
 **What cannot be priced yet is what one observation costs**, which is the first factor in the only
@@ -847,7 +850,7 @@ segments and production had none.
    built and revoked; safety was decided from cheap metadata before any real work. Carried
    **Not carried.** This design does the opposite — it builds, overlaps, and lets the organiser
    resolve (§5), because production's approach needs a backward scan bounded by how wide an
-   observation can be, and at a 20-base region that scan is hundreds of times the work it
+   observation can be, and at a 200-base region that scan is tens of times the work it
    protects. Production's own assumption behind the gap constant — that it is at least any
    record's span — lived only in a test-fixture comment
    ([`:1664`](../../../../src/var_calling/cohort_integration.rs)); ng promotes it to a named,
@@ -990,15 +993,28 @@ for the run).
 
 ## 14. Open questions
 
-1. **What should `cohort_locus_builder_regions_len` be?** — OPEN; 20 bases is the owner's starting
-   value (§6.1), unmeasured. It trades two things against each other: wider regions mean fewer
-   joins and so less overlapping work discarded, while narrower regions shrink the ground the
-   observation cache must cover, which is this module's main memory (§6.4). **Settled by:** a
-   builder-idle profile on the tomato cohort and HG002 across a sweep, reporting wall time,
-   discarded-locus count and peak buffered loci separately — the discard rate is the number that
-   says whether the joins are costing anything, and it is not visible in wall time alone.
-   Production's chunk-target sweep is the shape to copy
-   ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)).
+1. **What should `cohort_locus_builder_regions_len` be?** — **200 bases**, set by the owner on
+   2026-08-18 (§6.1); the number is settled, the reason is measured on fabricated ground only.
+
+   The draft of this question named one cost of a narrow region — more joins between builders,
+   and so more overlapping work discarded — and it turned out not to be the one that decides.
+   **A narrow region makes the merge walk the whole cohort four times over** — drawing the
+   readers forward, dropping what is past, handing out a window, and the arrays a builder
+   allocates before it reads anything — **whether or not the region holds a single record.** On
+   ground where about one position in a hundred varies, four 20-base regions in five hold no
+   record at all. Measured over 20,000 fabricated bases with a record every hundred, in a
+   release build on 8 threads with one region in flight per thread: 63 samples took 12.2 ms at
+   20 bases and 2.2 ms at 200, 1,000 samples 40.3 ms against 26.0, and 3,000 samples 177 ms
+   against 113. Against that, the cache holds **33 records per sample rather than 4** at 1,000
+   samples and 16 regions in flight — bounded by the round either way, and eight times as much
+   of it.
+
+   **Two things the draft asked for are still not measured**, and neither argues against the
+   value: the **discard rate** at the joins, which wider regions can only lower, and any
+   measurement at all **on the tomato cohort or HG002** rather than on fabricated ground. The
+   probe is `examples/ng_cohort_merge_parallel_cost.rs`, which sweeps width, cohort size and
+   thread count; the builder-idle profile this question asked for
+   ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)) is still owed.
 2. **When a sample has two separate observations inside one locus, is its allele the combination
    of both?** — OPEN, and it is the question projection raises that byte-equality does not answer.
    A sample with a SNP at one position and another three bases along, both inside one cohort locus,

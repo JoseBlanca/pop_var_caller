@@ -54,10 +54,10 @@ use crate::ng::types::{GenomePosition, GenomeRegion, Position};
 /// which draws it forward, and [`evict_before`](Self::evict_before), which drops from its
 /// left edge.
 ///
-/// **This is the module's dominant memory** (spec §8), which is why building regions are
-/// short: the ground it spans is `builders × cohort_locus_builder_regions_len` — 320 bases at
-/// 16 builders on the default 20-base regions — plus the tail of observations reaching past
-/// it.
+/// **This is the module's dominant memory** (spec §8), and it is what a building region's
+/// width is paid for in: the ground it spans is `builders × cohort_locus_builder_regions_len`
+/// — 3,200 bases at 16 builders on the default 200-base regions — plus the tail of
+/// observations reaching past it.
 ///
 /// **A source is any iterator of one sample's observations in coordinate order, and its error
 /// type is its own.** The architecture writes `cover(…) -> Result<(), RunError>` and names

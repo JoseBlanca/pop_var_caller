@@ -11,8 +11,9 @@
 //! regions, the round's builders run, and only when every one of them has finished does it
 //! resolve, release and evict. Every builder therefore waits for the slowest in its own round.
 //! That is a bounded frontier — one round spans
-//! `cohort_locus_builder_regions_in_flight × cohort_locus_builder_regions_len` bases, 320 at 16
-//! regions in flight on 20-base regions — where production's watermark spanned the whole run.
+//! `cohort_locus_builder_regions_in_flight × cohort_locus_builder_regions_len` bases, 3,200 at
+//! 16 regions in flight on the default 200-base regions — where production's watermark spanned
+//! the whole run.
 //! What it buys is one reader per sample instead of one per sample per region in flight: 3,000
 //! cursors at a cohort of 3,000 samples and 16 regions in flight, against 48,000.
 //!

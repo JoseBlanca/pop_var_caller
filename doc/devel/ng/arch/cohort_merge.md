@@ -127,11 +127,12 @@ pub struct MinAltObs(pub NonZeroU32);
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
 
 /// How many reference bases one builder's region covers (spec §6.1). **A command-line
-/// parameter, default 20.** It is not derived from `max_cohort_locus_span`: what it really
-/// costs is the observation cache, which must cover every region in play at once, so
-/// `builders × this` is the ground held resident (spec §6.4, §8).
+/// parameter, default 200** (raised from 20 on 2026-08-18, spec §14 question 1). It is not
+/// derived from `max_cohort_locus_span`: what it really costs is the observation cache, which
+/// must cover every region in play at once, so `builders × this` is the ground held resident
+/// (spec §6.4, §8).
 pub struct CohortLocusBuilderRegionsLen(pub NonZeroU32);
-pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 20;
+pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 200;
 
 /// The default, and it is soft — the owner's number, unmeasured (spec §14 question 3).
 pub const DEFAULT_MAX_COHORT_LOCUS_SPAN: u32 = 50;
