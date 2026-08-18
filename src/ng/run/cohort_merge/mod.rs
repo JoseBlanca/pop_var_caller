@@ -35,6 +35,7 @@
 
 pub mod build;
 pub mod close;
+pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
 pub mod serial;

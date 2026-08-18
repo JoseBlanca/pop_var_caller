@@ -20,7 +20,7 @@
 //! organiser's overlap resolution settles (spec §6.1).
 
 use super::build::{RegionOutcome, build_region};
-use super::organise::{ObservationCache, building_regions_of};
+use super::observation_cache::{ObservationCache, building_regions_of};
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs, refuse_malformed_analysed_regions,
 };

@@ -26,7 +26,8 @@
 use rayon::prelude::*;
 
 use super::build::{RegionOutcome, build_region};
-use super::organise::{ObservationCache, Organiser, RegionIndex, building_regions_of};
+use super::observation_cache::{ObservationCache, building_regions_of};
+use super::organise::{Organiser, RegionIndex};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
     refuse_malformed_analysed_regions,
@@ -203,7 +204,7 @@ mod tests {
         SourceFailed, in_flight, member, refuse_any_difference, region, region_on, source_of,
         three_samples_over_six_hundred_bases, width,
     };
-    use super::super::organise::building_regions_of;
+    use super::super::observation_cache::building_regions_of;
     use super::super::serial::{merge_cohort_serially, merge_cohort_through_cache};
     use super::*;
     use crate::ng::types::Position;
