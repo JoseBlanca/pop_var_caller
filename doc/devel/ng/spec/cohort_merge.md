@@ -676,9 +676,11 @@ cohort's were timed side by side on the tomato benchmark
 **2.21 s** in the generic locus generator against **95 ms** in the merge on 8 threads, and 63
 accessions over 200 kb cost **12.09 s** against about **850 ms**. Both stages take threads —
 the generator perfectly, since samples are independent files, the merge by 1.4× — so on 8
-threads the generator is still about twice the merge. Recovering the 12–14% the overlap is
-worth would move a whole run by roughly four parts in a hundred. **Nothing in this section
-should be built before the run it belongs to has been assembled and timed end to end.**
+threads the generator is still about twice the merge. At **one** sample the gap is far wider:
+HG002 over 76,530 bases cost 1.81 s to walk and 12.7 ms to merge, a factor of **142**.
+Recovering the 12–14% the overlap is worth would move a whole run by roughly four parts in a
+hundred at 16 samples and by nothing measurable at one. **Nothing in this section should be
+built before the run it belongs to has been assembled and timed end to end.**
 
 ### 6.3 The organising thread: order, overlaps, emission
 
@@ -1077,10 +1079,24 @@ for the run).
    So 200 stands, and what it is for is the organiser: the per-region cost falls on the one
    thread that covers and evicts, so a narrow region starves the others.
 
+   **The opposite corner says the same thing about density and moves the optimum.** HG002 at
+   high coverage, one sample, over 20 of the GIAB benchmark's intervals (76,530 bases): again
+   **one record per covered base** — 76,141 of them — and again **no building region empty at
+   any width**, because high coverage leaves no gaps. The width optimum there is 500 bases at
+   both 4 and 8 threads (11.7 and 12.7 ms, against 15.9 and 20.6 at 200), where at 63 samples
+   it is 100–200. So the best width falls as the cohort grows, and 200 is within a tenth of the
+   best at 16 and 63 samples and 1.6× off it at one — where the whole merge takes 20 ms.
+
+   **That run also shows what this module is for, on real ground.** Twenty scattered intervals,
+   one sample: the oracle takes **62.6 ms** and the cached driver **16.6**, because the oracle
+   hands every analysed region the whole set of observations and closes the prefix in front of
+   it each time (§6.4). Nearly four times, at one sample, on twenty intervals — the effect the
+   C1 and C2 reviews measured on fabricated ground, now on real.
+
    **What is still owed** is the **discard rate** at the joins, which wider regions can only
-   lower and which no measurement here has counted, and the same walk on HG002 — high coverage
-   and three samples, the opposite corner from 63 accessions at 3×. The builder-idle profile
-   this question originally asked for
+   lower and which no measurement here has counted, and a cohort of *thousands*, which nothing
+   real reaches: 63 accessions is the largest measured. The builder-idle profile this question
+   originally asked for
    ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)) is superseded by the phase
    timings in §6.2, which say where the merge's time goes without one.
 2. **When a sample has two separate observations inside one locus, is its allele the combination
