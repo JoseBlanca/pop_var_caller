@@ -190,6 +190,208 @@ pub(super) fn span_of(region: GenomeRegion) -> u64 {
         .saturating_add(1)
 }
 
+/// Where one sample's next observation begins, as the merge orders them: contig, then
+/// position along it, then the sample index as the tie-break.
+///
+/// **The field order is layout; the [`Ord`] impl is meaning.** Written in genome order —
+/// contig, then position — the `u32` contig would be followed by four bytes of padding
+/// before the `u64` position, and the key would take 24 bytes. Putting the `u64` first packs
+/// it into 16, which is what the merge compares and moves once per level of the tournament
+/// below; narrowing it alone took one 20-base region at 1,000 samples from 913 µs to 646
+/// (the review's measurement, release build).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HeadKey {
+    position: u64,
+    contig: u32,
+    sample: u32,
+}
+
+impl HeadKey {
+    #[inline]
+    fn of(at: GenomePosition, sample: usize) -> Self {
+        Self {
+            position: at.position.get(),
+            contig: at.contig.get(),
+            sample: u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
+        }
+    }
+
+    /// Past every real key: what a leaf holds once its sample's last observation is taken,
+    /// so that the tournament keeps its size and a spent sample can never win a match.
+    ///
+    /// **It orders spent leaves last and nothing more.** Whether the walk is finished is
+    /// counted rather than read off this key ([`PendingHeads::live_leaves`]), so an
+    /// observation that happened to sit on contig `u32::MAX` at position `u64::MAX` would
+    /// still be handed out rather than mistaken for an exhausted sample.
+    #[inline]
+    fn spent(sample: usize) -> Self {
+        Self {
+            position: u64::MAX,
+            contig: u32::MAX,
+            sample: u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
+        }
+    }
+}
+
+impl Ord for HeadKey {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.contig, self.position, self.sample).cmp(&(other.contig, other.position, other.sample))
+    }
+}
+
+impl PartialOrd for HeadKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Which sample comes next, as a **tournament tree**: one leaf per sample that has anything
+/// in this walk, every internal node holding the loser of the match below it, and the
+/// winner — the earliest head — sitting at `tree[0]`.
+///
+/// **The merge's k never changes, and that is what this exploits.** Which samples have
+/// observations is settled when the walk is built and no sample ever joins, so the tree is
+/// allocated once and only its values change: taking an observation writes that sample's
+/// next beginning into its leaf and replays the matches up to the root, **one comparison a
+/// level**, with nothing pushed, popped or resized. A binary heap's replace-top compares
+/// *both* children at each level to decide where to sink; this compares once, because the
+/// tree already remembers who lost.
+///
+/// **One leaf per *covering* sample, not per cohort sample**, and that is what makes it win
+/// at the sparse end too: a 20-base building region that only a tenth of a 3,000-sample
+/// cohort covers builds a 300-leaf tree and replays 9 matches rather than 12. Over the whole
+/// cohort it would be slower than a heap there — 74 µs against 38 — and keyed to the
+/// covering samples it is the fastest of everything the review measured, at 28 µs.
+///
+/// **A binary heap was built first and measured against this**, which is where those two
+/// paragraphs come from. Over the same regions the heap cost 19.2 µs at 63 samples, 119 µs
+/// at 250, 773 µs at 1,000 and 3.1 ms at 3,000, against this tournament's 15.9, 81.9, 391
+/// and 2,314 — a fifth to nearly half off, on a walk whose ordering is about two thirds of
+/// its own cost (measured by the review: an oracle that already knows the merge order runs
+/// the same fixture in 7.3 µs at 63 samples and 1.03 ms at 3,000).
+struct PendingHeads {
+    /// `keys[leaf]` for each leaf, then one extra below every real key: the seed every
+    /// internal node starts holding, so the first pass of matches fills the tree without a
+    /// "no loser yet" case inside the match.
+    keys: Vec<HeadKey>,
+    /// `tree[0]` is the winning leaf; `tree[1..]` are the losers of each internal match.
+    tree: Vec<u32>,
+    /// Which leaf a sample sits at, [`NO_LEAF`](Self::NO_LEAF) for a sample with nothing in
+    /// this walk. Indexed by the run's sample order, which is what the walk speaks.
+    leaf_of_sample: Vec<u32>,
+    /// How many leaves the tournament has — the covering samples, fixed for the walk.
+    leaves: usize,
+    /// How many of them have had their last observation taken. **Counted, not inferred**:
+    /// this is what says the walk is finished, so no real key can be mistaken for the
+    /// sentinel that orders a spent leaf last.
+    spent_leaves: usize,
+}
+
+impl PendingHeads {
+    /// A sample with no observation at all in this walk sits at no leaf.
+    const NO_LEAF: u32 = u32::MAX;
+
+    /// Build over the samples' first beginnings, `None` where a sample has nothing.
+    fn over(heads: impl ExactSizeIterator<Item = Option<GenomePosition>>) -> Self {
+        let samples = heads.len();
+        let mut keys = Vec::with_capacity(samples + 1);
+        let mut leaf_of_sample = vec![Self::NO_LEAF; samples];
+        for (sample, head) in heads.enumerate() {
+            if let Some(at) = head {
+                leaf_of_sample[sample] = u32::try_from(keys.len())
+                    .expect("a cohort has fewer than four billion samples");
+                keys.push(HeadKey::of(at, sample));
+            }
+        }
+        let leaves = keys.len();
+        if leaves == 0 {
+            return Self {
+                keys,
+                tree: Vec::new(),
+                leaf_of_sample,
+                leaves: 0,
+                spent_leaves: 0,
+            };
+        }
+        // The seed, below every real key: every internal node starts holding it, so the
+        // first match at each node displaces it rather than needing a case of its own.
+        keys.push(HeadKey {
+            position: 0,
+            contig: 0,
+            sample: 0,
+        });
+        let mut pending = Self {
+            keys,
+            tree: vec![
+                u32::try_from(leaves).expect("a cohort has fewer than four billion samples");
+                leaves
+            ],
+            leaf_of_sample,
+            leaves,
+            spent_leaves: 0,
+        };
+        for leaf in (0..leaves).rev() {
+            pending.replay_from(leaf);
+        }
+        pending
+    }
+
+    /// Replay the matches from `leaf` up to the root, leaving the winner at `tree[0]`.
+    ///
+    /// The leaf's own match sits at internal node `(leaf + leaves) / 2` — the leaves are the
+    /// implicit level below `tree`, at `leaves..2 * leaves`. At each node the carried key
+    /// and the sitting one are compared, the loser stays, and the winner carries on up.
+    #[inline]
+    fn replay_from(&mut self, leaf: usize) {
+        let mut carried = leaf;
+        let mut node = (leaf + self.leaves) / 2;
+        while node > 0 {
+            let sitting = self.tree[node] as usize;
+            if self.keys[carried] > self.keys[sitting] {
+                self.tree[node] =
+                    u32::try_from(carried).expect("a leaf index fits, it came from one");
+                carried = sitting;
+            }
+            node /= 2;
+        }
+        self.tree[0] = u32::try_from(carried).expect("a leaf index fits, it came from one");
+    }
+
+    /// The sample whose head is earliest, ties to the lowest sample index — `None` once
+    /// every covering sample has been spent.
+    #[inline]
+    fn earliest(&self) -> Option<usize> {
+        if self.live_leaves() == 0 {
+            return None;
+        }
+        let winner = *self.tree.first()? as usize;
+        Some(self.keys[winner].sample as usize)
+    }
+
+    /// How many covering samples still have an observation — what says the walk is not
+    /// finished, and the structure the walk's `log k` cost rests on.
+    #[inline]
+    fn live_leaves(&self) -> usize {
+        self.leaves - self.spent_leaves
+    }
+
+    /// Put `next` in place of the head just taken from `sample`, or mark that sample spent.
+    #[inline]
+    fn replace_head(&mut self, sample: usize, next: Option<GenomePosition>) {
+        let leaf = self.leaf_of_sample[sample] as usize;
+        self.keys[leaf] = match next {
+            Some(at) => HeadKey::of(at, sample),
+            None => {
+                self.spent_leaves += 1;
+                HeadKey::spent(sample)
+            }
+        };
+        self.replay_from(leaf);
+    }
+}
+
 /// Walks the samples' observations merged by position and closes each locus as its
 /// reach stops growing (spec §4.1).
 ///
@@ -208,12 +410,17 @@ pub(super) fn span_of(region: GenomeRegion) -> u64 {
 ///
 /// A locus never crosses a contig, because no observation does.
 ///
-/// **The four per-sample vectors are parallel on purpose**, and `over` is the one place
-/// their lengths are set. Folding them into one vector of a per-sample struct would let
-/// the compiler check that, at the cost of the thing the layout exists for: picking the
-/// next observation scans `keys` and nothing else, and it is contiguous only while it is
-/// its own array. The sibling merge makes the same trade for the same reason
-/// (`MergedCursors`, `read/input/sample_cursor.rs`).
+/// **Which sample comes next is answered by a tournament, not by scanning the cohort**, and
+/// that is what makes the walk affordable at the cohort sizes this caller commits to.
+/// Scanning every sample's next position for every observation costs the cohort size per
+/// observation, so the walk grew with the *square* of the cohort. Measured in a release
+/// build by `examples/ng_cohort_merge_walk_cost.rs`, one 20-base region with every sample
+/// carrying a record at every position: **57 µs at 63 samples, 793 µs at 250, 11.6 ms at
+/// 1,000 and 101 ms at 3,000** — four times the cohort for about fourteen times the time at
+/// each step. Over the tournament ([`PendingHeads`]) the same regions cost **15.9 µs,
+/// 81.9 µs, 391 µs and 2.3 ms**, which grows about as fast as the cohort itself: taking an
+/// observation replays `log k` matches at one comparison each, about 12 at 3,000 samples
+/// where the scan made 3,000 comparisons.
 pub struct LocusCloser<'a> {
     /// One slice per sample, each in coordinate order.
     ///
@@ -223,19 +430,16 @@ pub struct LocusCloser<'a> {
     /// alive alongside the data. Copying k pointers once per walk costs nothing and
     /// leaves the borrow where it belongs — on the observations.
     observations_per_sample: Vec<&'a [SampleLocusObservations]>,
-    /// How far each sample has been consumed — the cursor the argmin advances.
+    /// How far each sample has been consumed — the cursor the walk advances.
     cursors: Vec<usize>,
-    /// `keys[sample]` is where `observations_per_sample[sample][cursors[sample]]`
-    /// starts; `None` once that sample is spent. Refreshed only for the sample just
-    /// advanced.
+    /// Where every sample that still has an observation begins: one leaf per covering
+    /// sample, the winner of the tournament being the next observation of the merge.
     ///
-    /// **Keys beside the cursors, not read through them** — the layout `MergedCursors`
-    /// settled on for the same argmin (`read/input/sample_cursor.rs`). Picking the next
-    /// observation compares k keys, and holding them contiguously makes that a linear
-    /// scan of one array in cache rather than k jumps into observations scattered across
-    /// the heap. It matters more here than there, because k is the cohort size: this
-    /// walk runs over every observation of every sample on every calling run.
-    keys: Vec<Option<GenomePosition>>,
+    /// **The sample index in the key is the tie-break, not decoration.** Two samples
+    /// beginning at the same base compare on the index next, so the lower one comes out
+    /// first — the same rule the scan this replaced had, and the read layer's rule for the
+    /// same merge (`MergedCursors::argmin`, `read/input/sample_cursor.rs`).
+    pending: PendingHeads,
     /// Where each cursor stood when the open locus opened — scratch, refilled per locus
     /// and never reallocated, since its length is the sample count for the whole walk.
     cursors_at_open: Vec<usize>,
@@ -274,19 +478,16 @@ impl<'a> LocusCloser<'a> {
         max_cohort_locus_span: MaxCohortLocusSpan,
         min_alt_obs: MinAltObs,
     ) -> Self {
-        let keys = observations_per_sample
-            .iter()
-            .map(|observations| {
-                observations
-                    .first()
-                    .map(SampleLocusObservations::start_position)
-            })
-            .collect();
+        let pending = PendingHeads::over(observations_per_sample.iter().map(|observations| {
+            observations
+                .first()
+                .map(SampleLocusObservations::start_position)
+        }));
         Self {
             cursors: vec![0; observations_per_sample.len()],
             cursors_at_open: vec![0; observations_per_sample.len()],
             observations_per_sample: observations_per_sample.to_vec(),
-            keys,
+            pending,
             max_cohort_locus_span,
             min_alt_obs,
         }
@@ -297,15 +498,32 @@ impl<'a> LocusCloser<'a> {
         self.observations_per_sample[sample].get(self.cursors[sample])
     }
 
-    /// Consume sample `sample`'s head and refresh just that sample's key.
-    fn advance(&mut self, sample: usize) {
+    /// Consume the head the tournament is showing, and put that sample's next beginning in
+    /// its place.
+    ///
+    /// **It takes no sample, and that is deliberate.** Only the winning sample may be
+    /// consumed — the leaf overwritten must be the one the caller was just shown, or the
+    /// tournament's leaf per sample and the cursor beside it fall out of step. An earlier
+    /// version took the sample as an argument and asserted the two agreed; the review made
+    /// them disagree and measured what follows, in a release build: one wrong locus is
+    /// emitted — holding one sample's record while another's two observations vanish from
+    /// the run — before the walk dies on a key with no head. Reading the sample out of the
+    /// tournament makes the disagreement unrepresentable, which is cheaper than a check and
+    /// stronger than one.
+    fn take_head(&mut self) {
+        let Some(sample) = self.pending.earliest() else {
+            unreachable!("the walk consumes a head only after the tournament showed it one");
+        };
         self.cursors[sample] += 1;
-        self.keys[sample] = self
+        let next = self
             .head(sample)
             .map(SampleLocusObservations::start_position);
+        self.pending.replace_head(sample, next);
     }
 
-    /// The sample whose head starts earliest, **ties to the lowest sample index**.
+    /// The sample whose head starts earliest, **ties to the lowest sample index** — read
+    /// from the top of the heap without consuming it, so a caller can look at the next
+    /// observation and decide whether it belongs to the open locus.
     ///
     /// **Nothing in a closed locus depends on the tie-break today**, and saying so is
     /// the point: the members come out in ascending sample order because they are
@@ -314,23 +532,16 @@ impl<'a> LocusCloser<'a> {
     /// than by the order they were visited in. A tie-break toward the highest sample
     /// index would give identical loci.
     ///
-    /// The rule is fixed anyway, at no cost. It is the read layer's rule for the same
-    /// argmin (`MergedCursors::argmin`, `read/input/sample_cursor.rs`), and a later step
-    /// that emitted members in the order they were consumed — rather than collecting
-    /// them by sample afterwards — would need it.
+    /// The rule is fixed anyway, at no cost — it falls out of the key's second field. It
+    /// is the read layer's rule for the same merge (`MergedCursors::argmin`,
+    /// `read/input/sample_cursor.rs`), and a later step that emitted members in the order
+    /// they were consumed — rather than collecting them by sample afterwards — would need
+    /// it.
     fn sample_with_earliest_head(&self) -> Option<(usize, &'a SampleLocusObservations)> {
-        let mut best: Option<(usize, GenomePosition)> = None;
-        for (sample, key) in self.keys.iter().enumerate() {
-            let Some(key) = *key else { continue };
-            // Strictly less, so an equal key leaves the earlier sample in place — that
-            // *is* the tie-break.
-            if best.is_none_or(|(_, best_key)| key < best_key) {
-                best = Some((sample, key));
-            }
-        }
         // The head comes back with the sample it was found in, so no caller looks it up a
-        // second time or has to state an invariant the scan already knows.
-        best.map(|(sample, _)| (sample, self.head(sample).expect("a key implies a head")))
+        // second time or has to state an invariant the tournament already knows.
+        let sample = self.pending.earliest()?;
+        Some((sample, self.head(sample).expect("a key implies a head")))
     }
 }
 
@@ -420,7 +631,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             if self.cursors[sample] == self.cursors_at_open[sample] {
                 covering_samples += 1;
             }
-            self.advance(sample);
+            self.take_head();
         }
 
         // **Progress, asserted rather than assumed.** Every call must consume at least
@@ -1189,7 +1400,7 @@ mod tests {
     /// reach it — the sibling read-layer merge keeps a test for exactly this shape
     /// (`MergedCursors`, `read/input/sample_cursor.rs`).
     #[test]
-    fn the_argmin_scans_every_sample() {
+    fn the_merge_looks_past_the_first_two_samples() {
         let first = [observation(region(10, 10), 1)];
         let second = [observation(region(20, 20), 1)];
         let third = [observation(region(50, 50), 1)];
@@ -1339,6 +1550,261 @@ mod tests {
         assert_eq!(
             total_members, 5,
             "every observation is a member exactly once"
+        );
+    }
+
+    /// **The loci this walk closes are the loci a sorted list closes** — an oracle written
+    /// a different way, over 300 random cohorts.
+    ///
+    /// The walk answers "which sample comes next?" with a heap, which is what makes it
+    /// affordable at thousands of samples (one 20-base region with every sample covering
+    /// every position: 56.9 µs at 63 samples and 101 ms at 3,000 when it scanned the whole
+    /// cohort, 19.2 µs and 3.1 ms with the heap — measured in a release build by
+    /// `examples/ng_cohort_merge_walk_cost.rs`). A heap gets the *order* wrong in ways a
+    /// hand-written fixture will not show, so the check is against a reference that has no
+    /// merge in it at all: put every observation in one list, sort it, and chain.
+    ///
+    /// It compares the spans and each locus's per-sample member counts, so a walk that
+    /// grouped the right ground but attributed a member to the wrong sample fails too — and
+    /// then checks, by identity, that **every sample was handed back its own observations,
+    /// once each, in its own order, none of them outside its locus's ground.** Counts alone
+    /// cannot see a member window shifted by the same amount at both ends.
+    #[test]
+    fn the_walk_closes_what_a_sorted_list_closes() {
+        struct Seeded(u64);
+        impl Seeded {
+            fn next(&mut self, bound: u64) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (self.0 >> 33) % bound
+            }
+        }
+
+        for seed in 0..300u64 {
+            let mut draw = Seeded(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xC0FFEE);
+            // **The cohort size is swept rather than sat at the bottom of the range**, and
+            // a sample is allowed to cover nothing: an empty sample never enters the heap
+            // and a spent one leaves it for good, which are the two shapes a heap gets
+            // wrong and a small dense cohort never produces (the review measured the first
+            // generator: 0 of 300 cohorts had an empty sample, and none had a sample whose
+            // observations all preceded another's).
+            let samples = match seed % 10 {
+                0 => 1,
+                1 => 400,
+                _ => 1 + draw.next(12) as usize,
+            };
+            let contigs = 1 + draw.next(3) as u32;
+
+            let layouts: Vec<Vec<SampleLocusObservations>> = (0..samples)
+                .map(|_| {
+                    if draw.next(5) == 0 {
+                        // A sample that covered nothing here — ordinary at a few reads a
+                        // position, not an edge case.
+                        return Vec::new();
+                    }
+                    let mut records = Vec::new();
+                    for contig in 0..contigs {
+                        // The first base varies over the whole stretch, so one sample's
+                        // observations can lie wholly before another's — the case where a
+                        // sample leaves the heap while others still have records.
+                        let mut at_base = 1 + draw.next(150);
+                        while at_base <= 200 {
+                            let width = match draw.next(8) {
+                                0 => 1 + draw.next(30),
+                                _ => 1 + draw.next(3),
+                            };
+                            let end = at_base + width - 1;
+                            records.push(observation(region_on(contig, at_base, end), 1));
+                            at_base = end + 1 + draw.next(5);
+                        }
+                    }
+                    records
+                })
+                .collect();
+            let per_sample: Vec<&[SampleLocusObservations]> =
+                layouts.iter().map(Vec::as_slice).collect();
+
+            // The oracle: every observation in one list, sorted, then chained. No merge,
+            // no cursors, no heap.
+            let mut all: Vec<(GenomePosition, GenomePosition, usize)> = layouts
+                .iter()
+                .enumerate()
+                .flat_map(|(sample, records)| {
+                    records.iter().map(move |record| {
+                        (record.start_position(), record.reach_position(), sample)
+                    })
+                })
+                .collect();
+            all.sort();
+
+            let mut expected: Vec<(GenomeRegion, Vec<usize>)> = Vec::new();
+            for (start, reach, sample) in all {
+                match expected.last_mut() {
+                    Some((open, members))
+                        if open.contig == start.contig && start.position <= open.end =>
+                    {
+                        open.end = open.end.max(reach.position);
+                        members[sample] += 1;
+                    }
+                    _ => {
+                        let mut members = vec![0usize; samples];
+                        members[sample] += 1;
+                        expected.push((
+                            GenomeRegion {
+                                contig: start.contig,
+                                start: start.position,
+                                end: reach.position,
+                            },
+                            members,
+                        ));
+                    }
+                }
+            }
+
+            let closed: Vec<(GenomeRegion, Vec<usize>)> =
+                LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT)
+                    .map(|locus| {
+                        let mut members = vec![0usize; samples];
+                        for held in &locus.members {
+                            members[held.sample] += held.observations.len();
+                        }
+                        (locus.region, members)
+                    })
+                    .collect();
+
+            assert_eq!(closed, expected, "seed {seed}");
+
+            // By identity, not by value: the walk hands out borrowed runs, and a window
+            // shifted by the same amount at both ends holds the right *number* of the
+            // wrong observations.
+            let mut handed_back: Vec<Vec<*const SampleLocusObservations>> =
+                vec![Vec::new(); samples];
+            for locus in
+                LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT)
+            {
+                for held in &locus.members {
+                    assert!(
+                        !held.observations.is_empty(),
+                        "seed {seed}: a member window with nothing in it",
+                    );
+                    for observation in held.observations {
+                        assert!(
+                            observation.region.contig == locus.region.contig
+                                && observation.region.start >= locus.region.start
+                                && observation.reach() <= locus.region.end,
+                            "seed {seed}: the member {} lies outside its locus {}",
+                            observation.region,
+                            locus.region,
+                        );
+                        handed_back[held.sample].push(std::ptr::from_ref(observation));
+                    }
+                }
+            }
+            for (sample, layout) in layouts.iter().enumerate() {
+                let own: Vec<*const SampleLocusObservations> =
+                    layout.iter().map(std::ptr::from_ref).collect();
+                assert_eq!(
+                    handed_back[sample], own,
+                    "seed {seed}: sample {sample} was not handed back its own \
+                     observations, once each, in order",
+                );
+            }
+        }
+    }
+
+    /// **Two samples starting on the same base come out lowest-index first.** Nothing in a
+    /// closed locus depends on it today — flipping the tie-break leaves every other test in
+    /// this file green, which the review measured — and that is exactly why the rule needs
+    /// a test of its own: it is a promise to the step that would emit members in the order
+    /// they were consumed rather than collecting them by sample afterwards.
+    #[test]
+    fn the_tournament_names_the_lowest_sample_index_when_two_samples_start_together() {
+        let first = [observation(region(10, 10), 1)];
+        let second = [observation(region(10, 10), 1)];
+        let third = [observation(region(10, 10), 1)];
+
+        let closer = LocusCloser::over(
+            &[&first, &second, &third],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        let (named, _) = closer
+            .sample_with_earliest_head()
+            .expect("three heads, all at base 10");
+        assert_eq!(named, 0, "ties go to the lowest sample index");
+    }
+
+    /// **The tournament holds one live leaf per unspent sample, and every observation is
+    /// consumed exactly once** — the two facts that make the walk cost `log k` per
+    /// observation rather than `k`.
+    ///
+    /// **This is the only thing in the suite that would notice the cost going back up.**
+    /// Replacing the tournament with a scan over the cohort closes exactly the same loci, so
+    /// every other test here passes either way; what a scan cannot do is keep this
+    /// structure. Written as a structural assertion rather than a timing one, which no test
+    /// in this repo makes.
+    #[test]
+    fn the_tournament_holds_one_live_leaf_per_unspent_sample() {
+        let layouts: Vec<Vec<SampleLocusObservations>> = (0..64u64)
+            .map(|sample| {
+                (1u64..=20)
+                    .map(|at| {
+                        let base = at * 3 + sample % 5;
+                        observation(region(base, base), 1)
+                    })
+                    .collect()
+            })
+            .collect();
+        let per_sample: Vec<&[SampleLocusObservations]> =
+            layouts.iter().map(Vec::as_slice).collect();
+        let mut closer =
+            LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT);
+
+        let mut consumed = 0usize;
+        while let Some(locus) = closer.next() {
+            consumed += locus
+                .members
+                .iter()
+                .map(|held| held.observations.len())
+                .sum::<usize>();
+            let unspent = (0..layouts.len())
+                .filter(|&sample| closer.cursors[sample] < layouts[sample].len())
+                .count();
+            assert_eq!(
+                closer.pending.live_leaves(),
+                unspent,
+                "one live leaf per unspent sample, no more and no fewer",
+            );
+        }
+        assert_eq!(
+            consumed,
+            layouts.iter().map(Vec::len).sum::<usize>(),
+            "every observation consumed exactly once",
+        );
+    }
+
+    /// **A sample whose observations all precede another's** — the heap shrinks to one
+    /// entry as the first sample is spent, and grows again when the next opens. The
+    /// randomised cohorts below reach this only since their generator was widened; it is
+    /// pinned here as a case a reader can see.
+    #[test]
+    fn a_sample_wholly_before_another_closes_the_same_loci() {
+        let early = [
+            observation(region(10, 10), 1),
+            observation(region(12, 12), 1),
+        ];
+        let late = [
+            observation(region(100, 100), 1),
+            observation(region(102, 102), 1),
+        ];
+        let latest = [observation(region(200, 200), 1)];
+
+        assert_eq!(
+            closed_spans(&[&early, &late, &latest]),
+            vec![(10, 10), (12, 12), (100, 100), (102, 102), (200, 200)],
         );
     }
 }
