@@ -15,13 +15,15 @@
 //! and its whole claim is that its output is the oracle's byte for byte (the plan's D2). It is
 //! still one builder on one thread; what changes is the *view* — a window over each builder's
 //! own ground instead of the whole stretch, which is what makes short building regions
-//! affordable. What is still to come is the organiser's overlap resolution and the builders in
-//! parallel (milestone E); the loci that differ once builders see different windows are exactly
-//! what that resolution settles (spec §6.1).
+//! affordable. The builders run at the same time as each other in [`parallel`](super::parallel),
+//! over this same cache; the loci that differ once builders see different windows are what the
+//! organiser's overlap resolution settles (spec §6.1).
 
 use super::build::{RegionOutcome, build_region};
 use super::organise::{ObservationCache, building_regions_of};
-use super::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs};
+use super::{
+    CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs, refuse_malformed_analysed_regions,
+};
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
@@ -179,67 +181,16 @@ where
     Ok(merged)
 }
 
-/// Refuse the analysed regions neither driver can merge — see [`merge_cohort_serially`],
-/// whose doc says what a duplicate would cost.
-///
-/// **Two rules, and the second was found by D2's review.** A region must not overlap or precede
-/// the one before it, or the loci in the ground they share are built — and carried — twice. And
-/// a region's own ends must be the right way round: the division orders them
-/// ([`building_regions_of`]) and [`build_region`] does not, so on `50-1` the cached driver
-/// builds the whole of 1–50 and the oracle builds nothing. That is the byte-identity this
-/// module claims, broken by an input nothing was checking.
-fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
-    for region in analysed {
-        assert!(
-            region.start <= region.end,
-            "the analysed region {region} has its ends the wrong way round, and the two \
-             drivers do not read such a region the same way",
-        );
-    }
-    for pair in analysed.windows(2) {
-        let (earlier, later) = (pair[0], pair[1]);
-        assert!(
-            (earlier.contig, earlier.end) < (later.contig, later.start),
-            "the analysed regions {earlier} and {later} are not disjoint and ascending, so \
-             the loci opening in the ground they share would be built — and carried — twice",
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{SourceFailed, region, region_on};
+    use super::super::fixtures::{
+        SourceFailed, member, region, region_on, render, source_of,
+        three_samples_over_six_hundred_bases, width,
+    };
     use super::super::organise::{Organiser, RegionIndex};
     use super::*;
-    use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
-    use crate::ng::types::{ContigId, Position, ReadGroupId};
-
-    /// One sample's record over `region`, showing `observed_bases` to three reads.
-    fn member(
-        region: GenomeRegion,
-        reference_bases: &[u8],
-        observed_bases: &[u8],
-    ) -> SampleLocusObservations {
-        SampleLocusObservations {
-            region,
-            reference_bases: Box::from(reference_bases),
-            observations: vec![SequenceObservation {
-                bases: Box::from(observed_bases),
-                read_witness: ReadWitness::Complete,
-                read_group: ReadGroupId(0),
-                num_obs: 3,
-                num_fwd: 3,
-                q_sum: -6.0,
-                mapq_sum: 180,
-                mapq_sum_sq: 10_800,
-                placed_left: 0,
-                chain_ids: vec![1, 2, 3],
-            }],
-            reads_without_observation: 0,
-            reads_discarded_by_cap: 0,
-            kind: LocusKind::Generic,
-        }
-    }
+    use crate::ng::locus_generation::SequenceObservation;
+    use crate::ng::types::{ContigId, Position};
 
     /// The observations come out in genome order across several analysed regions, and each
     /// locus is built exactly once — by the region its first position falls in.
@@ -850,24 +801,6 @@ mod tests {
     // one thing: the cache changes nothing (the plan's Checkpoint D).
     // ---------------------------------------------------------------
 
-    /// One sample's forward reader over the observations it minted.
-    fn source_of(
-        observations: &[SampleLocusObservations],
-    ) -> std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>> {
-        observations
-            .iter()
-            .cloned()
-            .map(Ok)
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    fn width(bases: u32) -> CohortLocusBuilderRegionsLen {
-        CohortLocusBuilderRegionsLen(
-            std::num::NonZeroU32::new(bases).expect("a fixture width is non-zero"),
-        )
-    }
-
     /// Run both drivers over the same observations, refuse any difference, and hand back the
     /// outcome they agree on.
     ///
@@ -905,20 +838,7 @@ mod tests {
         )
         .expect("the fixture sources hold");
 
-        let rendered = |outcome: &RegionOutcome| -> Vec<String> {
-            outcome
-                .cohort_observations
-                .iter()
-                .map(|observed| format!("{observed:?}"))
-                .chain(
-                    outcome
-                        .failed_locus_spans
-                        .iter()
-                        .map(|span| format!("failed {span}")),
-                )
-                .collect()
-        };
-        let (from_oracle, from_cache) = (rendered(&oracle), rendered(&through_cache));
+        let (from_oracle, from_cache) = (render(&oracle), render(&through_cache));
         let bases = building_region_width.get();
         // **Before the comparison, not after.** Once the two drivers are known equal, the
         // cached output *is* the oracle's, whose loci one walk per analysed region makes
@@ -1162,17 +1082,8 @@ mod tests {
     /// six hundred, the whole analysed stretch as one region, which is what the oracle does.
     #[test]
     fn the_cache_changes_nothing_at_every_building_region_width() {
-        // The whole fixture's reference is `A`, because a locus gathers its reference from
-        // its members and two members that disagree over shared ground are refused — the
-        // deletion's ground covers two of the dotted sample's positions.
-        let dotted: Vec<_> = (0..60)
-            .map(|locus| {
-                let at = 10 * locus + 1;
-                member(region(at, at), b"A", b"T")
-            })
-            .collect();
-        let deleting = [member(region(305, 330), &[b'A'; 26], b"A")];
-        let inside = [member(region(310, 310), b"A", b"C")];
+        let layouts = three_samples_over_six_hundred_bases();
+        let (dotted, deleting, inside) = (&layouts[0], &layouts[1], &layouts[2]);
         let analysed = [region(1, 600)];
         let per_sample: [&[SampleLocusObservations]; 3] = [&dotted, &deleting, &inside];
 

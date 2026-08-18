@@ -211,7 +211,7 @@ it — which needs a wide deletion beginning before a building region and reachi
 fixture must contain one.
 *Depends:* E1. *Source:* [spec](../spec/cohort_merge.md) §6.1.
 
-☐ **E3 — builders in parallel.** Regions handed out, builders reading the shared cache, the
+✅ **E3 — builders in parallel.** Regions handed out, builders reading the shared cache, the
 organiser collecting.
 *Depends:* E2. *Source:* [spec](../spec/cohort_merge.md) §6.1, §6.2.
 

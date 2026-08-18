@@ -597,17 +597,41 @@ One region, one builder, no shared mutable state. The builder:
 5. delivers the region's result — its survivors, possibly none, and its failed-locus count,
    possibly zero — to the ordered emitter (§6.3).
 
-**How a builder reaches its samples' data: k cursors, one per sample, owned by the region's
-task** — the shape [`run_streaming.md`](run_streaming.md) §3.4 already fixed ("a parallel loop
-gives each in-flight region its own source per sample, over the sample's one open file"). This is
-where a `builders × samples` memory product genuinely exists, and it is not new: it is §7.1 of
-[`run_streaming.md`](run_streaming.md)'s `look-ahead × samples × one decoded block` row, since at
-most `look-ahead` regions are in flight. §8 prices it at both ends of the range. A shared
-per-sample window was considered and rejected: it re-creates the global frontier this design
-exists to remove — every builder's progress would couple through the window's trailing edge,
-which is production's watermark (§10, lesson 5). Two builders whose regions land in the same
-psp block each decode it — duplication bounded by the look-ahead and paid in time, not
-correctness.
+**How a builder reaches its samples' data: it reads the organiser's observation cache, and
+holds no reader of its own** (§6.4). **This reverses what this section said before, and the
+reversal is the owner's, 2026-08-18.** The paragraph below is kept because its objection was
+right and is now a cost this design accepts rather than one it avoids.
+
+**What it said, and why it was overruled.** It said each region's task owns k cursors, one per
+sample — the shape [`run_streaming.md`](run_streaming.md) §3.4 fixed ("a parallel loop gives each
+in-flight region its own source per sample, over the sample's one open file") — and that a shared
+per-sample window was considered and rejected, because *"it re-creates the global frontier this
+design exists to remove: every builder's progress would couple through the window's trailing edge,
+which is production's watermark (§10, lesson 5)."* §6.4, decided a day later, chose the shared
+window anyway, for a reason this section had not weighed: a reader per builder per sample is
+`builders × k` open cursors, where `k` is the cohort's sample count — at 3,000 samples and 16
+builders, 48,000 of them, against 3,000.
+
+**So the coupling is real and it is accepted, and this is its exact shape.** Because a builder
+reads the cache while the organiser draws the readers forward, the two cannot run at once: the
+organiser covers the ground for a **round** of regions, the round's builders run, and only when
+every one of them has finished does the organiser resolve, release and evict. Every builder in a
+round therefore waits for the slowest in that round. **That is a bounded frontier, not
+production's**: it spans one round — `builders × cohort_locus_builder_regions_len` bases, 320 at
+16 builders on 20-base regions — where production's watermark spanned the whole run and never
+advanced past its slowest chunk. What it costs is the tail of each round; what it buys is a
+reduction in open cursors and in decode work by a factor of the builder count, since two builders
+whose regions land in the same psp block now share one decode instead of each paying for it.
+
+**The memory product this section named still exists and is unchanged in kind.** It is
+`samples × the ground the round spans`, which §6.4 states and §8 prices at both ends of the
+range; the round replaces `look-ahead` as what sets it.
+
+**What is not decided here** is whether the round is the final arrangement. A shape that lets one
+builder start its next region while others are still working — an `RwLock` over the cache, or
+windows handed out as owned copies — removes the round's tail at the cost of a lock or a copy per
+region. Neither is needed to be correct, and neither should be reached for before the round's tail
+has been measured.
 
 ### 6.3 The organising thread: order, overlaps, emission
 

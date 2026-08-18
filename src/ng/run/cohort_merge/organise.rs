@@ -573,8 +573,9 @@ pub struct MergeTally {
 ///   own first base (`super::serial::merge_cohort_through_cache`), so everything reaching into
 ///   the region survives. Hand it the region's *last* base instead and the argument fails at
 ///   once — measured, and the regression test is
-///   `super::serial::tests::refuse_displaced_loci`. E3 gives the choice to the organiser with
-///   several builders in flight, where the safe point is the earliest live region's first base;
+///   `super::serial::tests::refuse_displaced_loci`. With several builders in flight the choice
+///   is `super::parallel::merge_cohort_in_parallel`'s, and it evicts at the first base of the
+///   round's first region — the earliest that is live — which keeps the argument as it stands;
 /// - so if a locus L owned by an earlier region reaches into this one, every member of L that
 ///   reaches this region's first base is in this builder's window. Take any member of L
 ///   starting inside this region: it reaches at least its own start, so it is in the window,

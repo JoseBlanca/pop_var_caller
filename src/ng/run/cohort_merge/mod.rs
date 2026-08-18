@@ -11,17 +11,20 @@
 //! Design: `doc/devel/ng/spec/cohort_merge.md` (what and why),
 //! `doc/devel/ng/arch/cohort_merge.md` (types and contracts).
 //!
-//! **What has landed:** this file's three parameters; [`close`]'s walk and its two
+//! **What has landed:** this file's four parameters; [`close`]'s walk and its two
 //! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
 //! span, unified into one allele table, with each covering sample's support against it;
 //! [`organise`]'s observation cache — the window one builder is handed — the division of the
-//! analysed ground into the regions single builders own, and the organiser's **ordered
-//! release**, which takes the builders' outcomes by region index and lets their loci out
-//! along an unbroken run of indexes; and [`serial`]'s **two** single-threaded drivers: the
-//! oracle every later milestone must reproduce, and the same merge read through the cache,
-//! byte for byte. **Still to come:** the organiser's resolution of the overlaps between
-//! neighbouring builders, and the parallel arrangement around it
-//! (`doc/devel/ng/impl_plan/cohort_merge.md`, E2 and E3).
+//! analysed ground into the regions single builders own, the organiser's **ordered release**,
+//! which takes the builders' outcomes by region index and lets their loci out along an
+//! unbroken run of indexes, and its resolution of the overlaps between neighbouring builders;
+//! [`serial`]'s **two** single-threaded drivers, the oracle every later milestone must
+//! reproduce and the same merge read through the cache, byte for byte; and [`parallel`]'s
+//! round-by-round arrangement of the builders, whose output is those two byte for byte at any
+//! number of regions in flight and any region width.
+//!
+//! **Still to come:** the caller objects that will own these parameters and this cache, and
+//! the run summary that reports what the merge refused (spec §13).
 //!
 //! **`pub`, though the architecture calls this crate-private machinery.** The two
 //! caller objects that will own it do not exist yet, so `pub(crate)` items here would
@@ -33,6 +36,7 @@
 pub mod build;
 pub mod close;
 pub mod organise;
+pub mod parallel;
 pub mod serial;
 
 /// The fixtures the module's test suites share — the coordinates every test writes and the
@@ -44,7 +48,10 @@ pub mod serial;
 /// [`close`] still carry their own and are the next two to fold in.
 #[cfg(test)]
 pub(super) mod fixtures {
-    use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
+    use crate::ng::locus_generation::{
+        LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    };
+    use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
 
     /// A region on the named contig, both ends inclusive.
     pub(super) fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
@@ -68,6 +75,138 @@ pub(super) mod fixtures {
         }
     }
 
+    /// One sample's record over `region`, showing `observed_bases` to three reads.
+    ///
+    /// **Here rather than in one test module, because three drivers want it** — the two serial
+    /// ones, and the parallel one that must reproduce them. A fixture that differs between the
+    /// files comparing their outputs is a difference nobody would look for.
+    pub(super) fn member(
+        region: GenomeRegion,
+        reference_bases: &[u8],
+        observed_bases: &[u8],
+    ) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region,
+            reference_bases: Box::from(reference_bases),
+            observations: vec![SequenceObservation {
+                bases: Box::from(observed_bases),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(0),
+                num_obs: 3,
+                num_fwd: 3,
+                q_sum: -6.0,
+                mapq_sum: 180,
+                mapq_sum_sq: 10_800,
+                placed_left: 0,
+                chain_ids: vec![1, 2, 3],
+            }],
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// One sample's forward reader over the observations it minted.
+    pub(super) fn source_of(
+        observations: &[SampleLocusObservations],
+    ) -> std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>> {
+        observations
+            .iter()
+            .cloned()
+            .map(Ok)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// A building-region width in reference bases.
+    pub(super) fn width(bases: u32) -> super::CohortLocusBuilderRegionsLen {
+        super::CohortLocusBuilderRegionsLen(
+            std::num::NonZeroU32::new(bases).expect("a fixture width is non-zero"),
+        )
+    }
+
+    /// How many building regions a fixture works at once.
+    pub(super) fn in_flight(regions: usize) -> super::CohortLocusBuilderRegionsInFlight {
+        super::CohortLocusBuilderRegionsInFlight(
+            std::num::NonZeroUsize::new(regions).expect("a fixture region count is non-zero"),
+        )
+    }
+
+    /// **The fixture the module's byte-identity claims rest on**, and the reason it is here:
+    /// three drivers compare their outputs on it, and a copy that drifted would leave each
+    /// file passing while they merged different ground.
+    ///
+    /// Sixty single-base loci every ten bases, a deletion at 305–330 that carries a locus
+    /// across whatever boundary a region width puts near it, and a third sample whose one
+    /// record sits inside that deletion — so two samples chain into one locus however finely
+    /// the ground is divided. The whole fixture's reference is `A`, because a locus gathers
+    /// its reference from its members and two members that disagree over shared ground are
+    /// refused: the deletion's ground covers two of the dotted sample's positions.
+    pub(super) fn three_samples_over_six_hundred_bases() -> Vec<Vec<SampleLocusObservations>> {
+        let dotted: Vec<_> = (0..60)
+            .map(|locus| {
+                let at = 10 * locus + 1;
+                member(region(at, at), b"A", b"T")
+            })
+            .collect();
+        vec![
+            dotted,
+            vec![member(region(305, 330), &[b'A'; 26], b"A")],
+            vec![member(region(310, 310), b"A", b"C")],
+        ]
+    }
+
+    /// A whole outcome rendered entry by entry — what "the same answer" means across this
+    /// module's drivers.
+    ///
+    /// **The comparison is on the `Debug` rendering**: `CohortObservation` has no `PartialEq`,
+    /// a comparison written field by field would silently stop covering a field added later,
+    /// and two distinct `f64` sums render as distinct strings, so a quality divided differently
+    /// shows.
+    pub(super) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
+        outcome
+            .cohort_observations
+            .iter()
+            .map(|observed| format!("{observed:?}"))
+            .chain(
+                outcome
+                    .failed_locus_spans
+                    .iter()
+                    .map(|span| format!("failed {span}")),
+            )
+            .collect()
+    }
+
+    /// Refuse any difference between two rendered outcomes, naming the **first** entry that
+    /// differs and `what_changed` as the setting that produced it.
+    ///
+    /// **Entry by entry rather than whole**: the widest fixture in this module renders as 26 kB,
+    /// and two of those inside one `assert_eq!` message is not something a reader can diff by
+    /// eye.
+    pub(super) fn refuse_any_difference(
+        what_changed: &str,
+        expected: &super::build::RegionOutcome,
+        actual: &super::build::RegionOutcome,
+    ) {
+        let (expected, actual) = (render(expected), render(actual));
+        if let Some(first) = expected
+            .iter()
+            .zip(&actual)
+            .position(|(one, other)| one != other)
+        {
+            panic!(
+                "{what_changed} changed the merge, first at entry {first}:\
+                 \n  expected: {}\n  actual:   {}",
+                expected[first], actual[first],
+            );
+        }
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what_changed} changed how many entries the merge produced",
+        );
+    }
+
     /// What a source failure looks like in a test. The run's own error type does not exist
     /// yet, so the cache is generic over the source's and both drivers pass it through
     /// (`doc/devel/ng/arch/run_streaming.md` §2, §5).
@@ -75,7 +214,9 @@ pub(super) mod fixtures {
     pub(super) struct SourceFailed(pub &'static str);
 }
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use crate::ng::types::GenomeRegion;
 
 /// The widest cohort locus the caller undertakes to build, in reference bases.
 ///
@@ -223,6 +364,78 @@ impl Default for CohortLocusBuilderRegionsLen {
 /// module's main memory.
 pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 20;
 
+/// How many of those regions the merge works at once (spec §6.2).
+///
+/// **A count of regions in flight, not of threads.** The threads come from rayon's pool; what
+/// this number sets is the ground the observation cache must hold, which is
+/// `cohort_locus_builder_regions_in_flight × cohort_locus_builder_regions_len` bases plus the
+/// tail of the observations reaching past it (spec §6.4, §8) — 320 bases at 16 regions in
+/// flight and this module's default width. One region in flight gives the serial driver's
+/// memory and its answer.
+///
+/// **A command-line parameter, and the only one of this module's four with no constant
+/// default**: what it should be depends on the machine's cores and on how much memory the
+/// cohort's width leaves, neither of which is knowable where the other three defaults are
+/// written. A run given no value takes [`one_per_worker_thread`](Self::one_per_worker_thread).
+///
+/// **Owed:** the resolved value belongs in the run's output beside the other three, because
+/// two runs differing only in it differ in memory and in nothing a reader of the output can
+/// see.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct CohortLocusBuilderRegionsInFlight(pub NonZeroUsize);
+
+impl CohortLocusBuilderRegionsInFlight {
+    /// One region in flight per thread in rayon's pool — what a run takes when the operator
+    /// names no value.
+    ///
+    /// Never zero, and not by an assertion: rayon's pool has at least one thread, and the
+    /// fallback says what to do if that ever stops being true rather than panicking part-way
+    /// through a run.
+    #[must_use]
+    pub fn one_per_worker_thread() -> Self {
+        Self(NonZeroUsize::new(rayon::current_num_threads()).unwrap_or(NonZeroUsize::MIN))
+    }
+
+    /// How many regions are worked at once.
+    #[inline]
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Refuse the analysed regions no driver in this module can merge — see
+/// [`merge_cohort_serially`](serial::merge_cohort_serially), whose doc says what a duplicate
+/// would cost.
+///
+/// **Two rules, and the second was found by D2's review.** A region must not overlap or precede
+/// the one before it, or the loci in the ground they share are built — and carried — twice. And
+/// a region's own ends must be the right way round: the division orders them
+/// ([`building_regions_of`](organise::building_regions_of)) and
+/// [`build_region`](build::build_region) does not, so on `50-1` the cached driver builds the
+/// whole of 1–50 and the oracle builds nothing. That is the byte-identity this module claims,
+/// broken by an input nothing was checking.
+///
+/// **Here rather than in one driver's file, because it is the contract all three share.** Every
+/// driver opens by calling it, so a reader of any of them finds the rule where the module's
+/// other shared terms are, not in the file named for a different arrangement.
+pub(super) fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
+    for region in analysed {
+        assert!(
+            region.start <= region.end,
+            "the analysed region {region} has its ends the wrong way round, and the drivers \
+             do not read such a region the same way",
+        );
+    }
+    for pair in analysed.windows(2) {
+        let (earlier, later) = (pair[0], pair[1]);
+        assert!(
+            (earlier.contig, earlier.end) < (later.contig, later.start),
+            "the analysed regions {earlier} and {later} are not disjoint and ascending, so \
+             the loci opening in the ground they share would be built — and carried — twice",
+        );
+    }
+}
+
 /// A default's value as the [`NonZeroU32`] the newtypes hold.
 ///
 /// **A zero default is a build error, not a panic**, and it is the *call* that makes it
@@ -256,6 +469,18 @@ mod tests {
         assert_eq!(MaxCohortLocusSpan::default().get(), 50);
         assert_eq!(MinAltObs::default().get(), 2);
         assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 20);
+    }
+
+    /// The fourth parameter's default is a rule rather than a number, so the rule is what is
+    /// pinned: one region in flight per thread in rayon's pool, whatever that machine's pool
+    /// turns out to be. A default that ignored the pool — one, or a constant 16 — would pass
+    /// every other test in this module, since the merge's answer is the same at every count.
+    #[test]
+    fn the_regions_in_flight_default_is_one_per_worker_thread() {
+        assert_eq!(
+            CohortLocusBuilderRegionsInFlight::one_per_worker_thread().get(),
+            rayon::current_num_threads().max(1),
+        );
     }
 
     /// An operator-set value is the only case that tells reading the field apart from
