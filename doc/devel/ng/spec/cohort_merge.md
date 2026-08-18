@@ -630,8 +630,44 @@ range; the round replaces `look-ahead` as what sets it.
 **What is not decided here** is whether the round is the final arrangement. A shape that lets one
 builder start its next region while others are still working — an `RwLock` over the cache, or
 windows handed out as owned copies — removes the round's tail at the cost of a lock or a copy per
-region. Neither is needed to be correct, and neither should be reached for before the round's tail
-has been measured.
+region.
+
+**The round's tail is not what costs, and it was the wrong thing to gate on.** This paragraph
+used to say neither alternative should be reached for before the tail had been measured. What
+was measured on 2026-08-18 instead was every phase of a round, with timers, at 200-base regions
+and one region in flight per thread. On 8 threads the builders are 40–52% of the merge and the
+organiser's own work — resolving overlaps, releasing loci, submitting outcomes — is **0.02 ms of
+a 24 ms merge**. Everything else is the cache's two writers: drawing the readers forward 25–34%
+and dropping what is past 16–32%. So **48–60% of the merge runs while every builder waits**, and
+that is the round's *head*, not its tail. Fitting `time = serial + parallel ÷ threads` to the
+one- and eight-thread times says the same from outside: 42–67%. It is why 4 threads buy only
+1.4× and 8 buy 1.4–2.0× over one.
+
+**Windows handed out as owned copies was then built and measured, and it does not pay.** The
+driver took each round's window out of the cache as an owned vector — leaving behind a copy of
+only the observations reaching past the round, which the next round chains through — so that the
+builders read memory the organiser could not touch, and the cover for the next round ran beside
+them. All 227 of the module's tests passed on it, output unchanged. What it did to the clock, on
+8 threads against the arrangement above:
+
+- **the overlap works**: covering the next round beside the builders took 12–14% off the merge
+  at 1,000 and 3,000 samples on ground varying at about one position in a hundred;
+- **the handover costs more than that**: 19–23% at the same two sizes, and 2–6% on ground
+  twenty-five times denser;
+- **net, it was 1–6% slower** everywhere but one cell, and it held **1.8 times the records** —
+  the round the builders read plus the round the cache has drawn.
+
+The handover cannot be made much cheaper as long as a sample's window is one vector: what it
+copies is the observations that reach past the round's end, and those must be in the builders'
+window *and* in what the cache keeps, so they are cloned once per sample per round. The version
+that could pay is a different cache: per-sample **append-only storage whose addresses do not
+move**, where a builder holds a range into memory the organiser is appending elsewhere in, so
+the handover is a range and not a copy. That is a redesign of §6.4's cache, not a change to this
+section, and nothing has been built or measured for it.
+
+**The `RwLock` alternative is not a way round this.** A builder holds its window for the length
+of its build and the organiser's draw would move that window, so the lock would be held for the
+whole of one or the other — which is the round, arrived at through a lock.
 
 ### 6.3 The organising thread: order, overlaps, emission
 
