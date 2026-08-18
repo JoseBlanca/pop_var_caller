@@ -126,15 +126,29 @@ where
 
             // **Evict, then cover the whole round, then let it run.** What ends before the
             // round's first base can reach no locus any builder in the round can own, and
-            // covering every region before any builder starts is what lets them all read a
+            // covering the ground before any builder starts is what lets them all read a
             // cache nobody is drawing forward.
+            //
+            // **One cover for the round, not one per region.** A cover draws every sample
+            // forward until the chain from its region's last base closes, and the chain from
+            // the round's last base contains every one of those — so covering the round's
+            // whole span draws the same observations and leaves the same window, in one pass
+            // over the cohort instead of `regions_in_flight` of them. Measured on 8 threads
+            // with 8 regions in flight: 11–13% off the whole merge at 3,000 samples on both
+            // the densities `examples/ng_cohort_merge_parallel_cost.rs` walks.
             cache.evict_before(GenomePosition {
                 contig: first.contig,
                 position: first.start,
             });
-            for building_region in &regions_in_round {
-                cache.cover(*building_region)?;
-            }
+            let last = regions_in_round
+                .last()
+                .copied()
+                .expect("the round is not empty");
+            cache.cover(GenomeRegion {
+                contig: first.contig,
+                start: first.start,
+                end: last.end,
+            })?;
 
             let cache = &*cache;
             let outcomes = in_region_order(regions_in_round.par_iter().map(|building_region| {
