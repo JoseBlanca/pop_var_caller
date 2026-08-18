@@ -691,15 +691,24 @@ pub struct RegionOutcome {
 /// hands over whole analysed regions rather than short ones, where the prefix is empty by
 /// construction.
 ///
-/// **A region no locus can begin in is answered without opening the walk**, which on ground
-/// like a real cohort's is most of them. Closing loci over a region costs five arrays the
-/// length of the cohort before it reads an observation — a tournament over the samples'
-/// heads and the cursors beside it ([`LocusCloser::over`]) — and that cost falls due once per
-/// region whether or not the region holds anything. Measured on 2026-08-18 over 20,000 bases
-/// at 1,000 samples with a record every hundred, on 20-base regions: the builders took 42.9
-/// ms of a 62.3 ms merge, against 14.1 ms for the same loci closed in one region by the
-/// oracle, and four regions in five held no record at all. [`no_locus_can_begin_in`] settles
-/// those four for one read per sample.
+/// **A region no locus can begin in is answered without opening the walk.** Closing loci over
+/// a region costs five arrays the length of the cohort before it reads an observation — a
+/// tournament over the samples' heads and the cursors beside it ([`LocusCloser::over`]) — and
+/// that cost falls due once per region whether or not the region holds anything. Over
+/// fabricated ground with a record every hundred bases, at 1,000 samples on 20-base regions,
+/// four regions in five held no record at all and the builders took 42.9 ms of a 62.3 ms
+/// merge against 14.1 ms for the same loci closed in one region by the oracle; the skip took
+/// a third off that merge.
+///
+/// **On a real cohort it never fires, and it is free.** The generic locus generator emits one
+/// record per *covered* position, not one per varying position, so observations arrive about
+/// one per base per sample: on the tomato benchmark's 63 accessions over 100 kb of SL4.0,
+/// **0 of 5,000 twenty-base regions and 0 of 500 two-hundred-base regions held no record**.
+/// What that costs is nothing measurable — replacing the test below with a constant `false`,
+/// so the call stands and does no work, changes the merge by under 1% at 16 samples (131.9 ms
+/// against 131.6). It short-circuits at the first sample that has a record in range, which on
+/// that data is the first sample. So it is kept for the input the module also has to serve —
+/// one sample, or coverage thin enough to leave gaps — and costs the dense case nothing.
 pub fn build_region(
     builder_region: GenomeRegion,
     observations_per_sample: &[&[SampleLocusObservations]],
@@ -763,6 +772,12 @@ pub fn build_region(
 /// observations that begin *before* the region and reach into it — those open a locus an
 /// earlier builder owns, and are skipped by the ownership rule rather than by this — so the
 /// answer is *no* whenever any of them is held, and the walk runs as it always did.
+///
+/// **A region can be empty even where a cohort is deep**: it needs no *sample* to have an
+/// observation beginning in it, and at one sample over the same tomato ground 12 of 5,000
+/// twenty-base regions were empty. Which is to say the skip is worth what the input's sparsest
+/// corner is worth, and that corner is a single low-coverage sample — the case
+/// `design_principles.md` §0 names as the hardest and the one this caller still has to serve.
 ///
 /// **It is a claim about the walk, not a guess at it**, which is what
 /// `tests::a_region_the_skip_refuses_would_have_built_nothing` pins: over a hundred random

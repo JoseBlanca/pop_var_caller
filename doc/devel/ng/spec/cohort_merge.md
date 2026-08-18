@@ -669,6 +669,17 @@ section, and nothing has been built or measured for it.
 of its build and the organiser's draw would move that window, so the lock would be held for the
 whole of one or the other — which is the round, arrived at through a lock.
 
+**And the stage upstream is fourteen to twenty-three times the merge, which is what decides
+whether any of this is worth building.** Producing a sample's observations and merging the
+cohort's were timed side by side on the tomato benchmark
+(`examples/ng_cohort_merge_real_cost.rs`, 2026-08-18): 16 accessions over 100 kb of SL4.0 cost
+**2.21 s** in the generic locus generator against **95 ms** in the merge on 8 threads, and 63
+accessions over 200 kb cost **12.09 s** against about **850 ms**. Both stages take threads —
+the generator perfectly, since samples are independent files, the merge by 1.4× — so on 8
+threads the generator is still about twice the merge. Recovering the 12–14% the overlap is
+worth would move a whole run by roughly four parts in a hundred. **Nothing in this section
+should be built before the run it belongs to has been assembled and timed end to end.**
+
 ### 6.3 The organising thread: order, overlaps, emission
 
 One thread receives every builder's output and does three things: it keeps the cache, it resolves
@@ -1045,12 +1056,33 @@ for the run).
    samples and 16 regions in flight — bounded by the round either way, and eight times as much
    of it.
 
-   **Two things the draft asked for are still not measured**, and neither argues against the
-   value: the **discard rate** at the joins, which wider regions can only lower, and any
-   measurement at all **on the tomato cohort or HG002** rather than on fabricated ground. The
-   probe is `examples/ng_cohort_merge_parallel_cost.rs`, which sweeps width, cohort size and
-   thread count; the builder-idle profile this question asked for
-   ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)) is still owed.
+   **The tomato cohort was then measured, and it changes the reason without changing the
+   value.** `examples/ng_cohort_merge_real_cost.rs` walks the benchmark's 63 accessions through
+   the generic locus generator over 100 kb of SL4.0 and merges what comes out. Two things it
+   found:
+
+   - **Observations arrive about one per covered base per sample, not one per varying
+     position.** 96,605 records per sample over 100,000 bases — the generator emits at every
+     position its reads cover, and the keep rule that discards the quiet ones runs inside the
+     merge (§4.3), not before it. The fabricated ground this question was settled on had a
+     record every hundred bases, so it was **a hundred times too thin**, and every ratio taken
+     on it overstates what the width is worth.
+   - **On real observations the width barely moves the merge on one thread and decides whether
+     threads help at all.** One thread, 63 samples: 656 ms at 20 bases, 615 at 100, 616 at 200,
+     624 at 500, 636 at 1,000 — 6% across a fiftyfold range. Eight threads at 16 samples: 173 ms
+     at 20 bases against 130 ms on one thread, so **a 20-base region makes threads a
+     pessimisation**, and 93 ms at 200, which is 1.4× one thread. The eight-thread optimum is
+     100–200 bases at both cohort sizes measured.
+
+   So 200 stands, and what it is for is the organiser: the per-region cost falls on the one
+   thread that covers and evicts, so a narrow region starves the others.
+
+   **What is still owed** is the **discard rate** at the joins, which wider regions can only
+   lower and which no measurement here has counted, and the same walk on HG002 — high coverage
+   and three samples, the opposite corner from 63 accessions at 3×. The builder-idle profile
+   this question originally asked for
+   ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)) is superseded by the phase
+   timings in §6.2, which say where the merge's time goes without one.
 2. **When a sample has two separate observations inside one locus, is its allele the combination
    of both?** — OPEN, and it is the question projection raises that byte-equality does not answer.
    A sample with a SNP at one position and another three bases along, both inside one cohort locus,

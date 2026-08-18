@@ -362,28 +362,28 @@ impl Default for CohortLocusBuilderRegionsLen {
     }
 }
 
-/// 200 bases — set by the owner on 2026-08-18, on the sweep below (spec §14 question 1).
+/// 200 bases — set by the owner on 2026-08-18, and confirmed on a real cohort the day it was
+/// set (spec §14 question 1).
 ///
-/// **What a narrow region costs is a walk over the whole cohort, four times over, whether
-/// or not the region holds anything**: a cover, an eviction, a window, and the arrays a
-/// builder allocates before it reads an observation. Twenty bases was the starting value
-/// and it made that fixed cost fall due ten times as often as two hundred does. Measured
-/// over 20,000 fabricated bases with a record every hundred — roughly the rate at which
-/// positions vary in the tomato cohort — on 8 threads with one region in flight per
-/// thread, in a release build: **63 samples 12.2 ms at 20 bases against 2.2 at 200**,
-/// 1,000 samples 40.3 against 26.0, 3,000 samples 177 against 113. On ground 25 times
-/// denser the same change took 3,000 samples from 253 ms to 186.
+/// **What a region's width really decides is whether threads help at all.** Measured on the
+/// tomato benchmark's 63 accessions over 100 kb of SL4.0 — real reads through the generic
+/// locus generator, one record per covered position per sample — the merge on **one thread
+/// barely notices the width**: 656 ms at 20 bases against 615 at 100, 616 at 200, 624 at 500
+/// and 636 at 1,000. On eight threads it notices a great deal, because the cost a narrow
+/// region adds falls on the organiser, which no thread but one ever runs: at 16 samples, eight
+/// threads take 173 ms at 20 bases against 130 ms on one thread — **threads make a 20-base
+/// merge slower than no threads** — and 93 ms at 200 bases, which is 1.4 times one thread.
+/// The eight-thread optimum on that data is 100–200 bases at both cohort sizes.
 ///
-/// **What it costs is the ground the observation cache holds**, which is the trade §14
-/// question 1 names: with 16 regions in flight the cache spans 3,200 bases rather than
-/// 320, and measured on that same fabricated ground at 1,000 samples it held **33 records
-/// per sample rather than 4**. That is bounded by the round either way — which is the
-/// property the streaming design was bought for — and it is eight times as much of it.
+/// **What it costs is the ground the observation cache holds**, which is §14 question 1's
+/// trade: with 16 regions in flight the cache spans 3,200 bases rather than 320.
 ///
-/// **What is still unmeasured is the discard rate**, the other half of §14 question 1: how
-/// much overlapping work builders throw away at the joins between their regions. Wider
-/// regions can only lower it, so it does not argue against this value, but nothing here
-/// has counted it.
+/// **The fabricated fixture that first argued for this number argued too strongly**, and the
+/// note it left is kept as a caution. Over ground with a record every hundred bases it made 200
+/// look 1.7 times better than 20 and wider still better again; real observations arrive about
+/// **one per covered base**, a hundred times denser, and there the same change is worth 3–6% on
+/// one thread. The threading result above is the real reason, and no fabricated ground showed
+/// it.
 pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 200;
 
 /// How many of those regions the merge works at once (spec §6.2).

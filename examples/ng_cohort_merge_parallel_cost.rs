@@ -11,13 +11,23 @@
 //! (`merge_cohort_in_parallel`) at several counts of regions in flight. All three produce the
 //! same answer, which the test suite already asserts; what differs is time.
 //!
-//! **Two densities, because the answer differs between them.** *Dense* is 2,000 bases with a
-//! record every four, so every 20-base building region holds five records per sample: the
-//! ground the first measurements were taken on. *Sparse* is 20,000 bases with a record every
-//! hundred — roughly the measured tomato corner, where about one position in a hundred varies —
-//! so four building regions in five hold no record for any sample at all. Sparse ground is
-//! where the cache's fixed per-region cost shows: the builders have nothing to do and the walk
-//! over the cohort happens anyway.
+//! **Two densities, and neither is what a run sees.** *Dense* is 2,000 bases with a record
+//! every four; *sparse* is 20,000 bases with a record every hundred, where four 20-base
+//! building regions in five hold no record for any sample at all. Sparse ground is where the
+//! per-region costs show, because the builders have nothing to do and the walk over the cohort
+//! happens anyway.
+//!
+//! **Real observations are denser than either**, and this header said the opposite until
+//! 2026-08-18: it called the sparse ground "roughly the measured tomato corner, where about one
+//! position in a hundred varies". One position in a hundred *varies*, but the generic locus
+//! generator emits a record at every position its reads **cover**, and the rule that discards
+//! the quiet ones runs inside the merge (`cohort_merge.md` §4.3). Measured on the tomato
+//! benchmark's 63 accessions, observations arrive about **one per base per sample** — a hundred
+//! times the sparse fixture. `examples/ng_cohort_merge_real_cost.rs` is the probe that measures
+//! that, and it is the one to believe about how wide a building region should be or how often
+//! one is empty. What these two fixtures are still good for is the *shape* of the cost: they
+//! bracket a real cohort's density from below, and a change that helps at both ends of a
+//! hundredfold range is not a change tuned to one fixture.
 //!
 //! **The fixture is built outside the clock.** The cache owns the observations it is handed, so
 //! every repeat needs its own copy of the cohort; at 3,000 samples that copy is a million
