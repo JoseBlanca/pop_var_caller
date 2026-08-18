@@ -37,7 +37,7 @@ use ahash::AHashMap;
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::{MaxCohortLocusSpan, MinAltObs};
 use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{GenomePosition, GenomeRegion};
 use crate::pileup_record::ChainId;
 
 /// The byte a gathered reference position starts as, so that a position no member
@@ -690,6 +690,16 @@ pub struct RegionOutcome {
 /// is what the observation cache is for (milestone D); until it exists, the serial driver
 /// hands over whole analysed regions rather than short ones, where the prefix is empty by
 /// construction.
+///
+/// **A region no locus can begin in is answered without opening the walk**, which on ground
+/// like a real cohort's is most of them. Closing loci over a region costs five arrays the
+/// length of the cohort before it reads an observation — a tournament over the samples'
+/// heads and the cursors beside it ([`LocusCloser::over`]) — and that cost falls due once per
+/// region whether or not the region holds anything. Measured on 2026-08-18 over 20,000 bases
+/// at 1,000 samples with a record every hundred, on 20-base regions: the builders took 42.9
+/// ms of a 62.3 ms merge, against 14.1 ms for the same loci closed in one region by the
+/// oracle, and four regions in five held no record at all. [`no_locus_can_begin_in`] settles
+/// those four for one read per sample.
 pub fn build_region(
     builder_region: GenomeRegion,
     observations_per_sample: &[&[SampleLocusObservations]],
@@ -697,6 +707,9 @@ pub fn build_region(
     min_alt_obs: MinAltObs,
 ) -> RegionOutcome {
     let mut outcome = RegionOutcome::default();
+    if no_locus_can_begin_in(builder_region, observations_per_sample) {
+        return outcome;
+    }
 
     for locus in LocusCloser::over(observations_per_sample, max_cohort_locus_span, min_alt_obs) {
         // **Ownership, and the two ways a locus can fail to be ours.** One starting before
@@ -733,6 +746,45 @@ pub fn build_region(
     }
 
     outcome
+}
+
+/// Whether no locus this builder could own can begin in `builder_region` — so the outcome is
+/// empty and the walk need not be opened.
+///
+/// **A locus begins where one of its member observations begins.** The walk opens each locus
+/// on the earliest observation it has not yet placed, so every locus it yields starts at some
+/// observation's first base, including one the width bound cut short — that locus opens on
+/// the observation the cut one stopped before. So a region no observation begins in owns no
+/// locus, whatever the walk would have found there.
+///
+/// **Each sample's window is in coordinate order, so its first observation begins earliest in
+/// it.** The earliest beginning in the cohort is therefore the earliest of those firsts, and
+/// this asks whether even that one lies past the region's last base. It says nothing about
+/// observations that begin *before* the region and reach into it — those open a locus an
+/// earlier builder owns, and are skipped by the ownership rule rather than by this — so the
+/// answer is *no* whenever any of them is held, and the walk runs as it always did.
+///
+/// **It is a claim about the walk, not a guess at it**, which is what
+/// `tests::a_region_the_skip_refuses_would_have_built_nothing` pins: over a hundred random
+/// cohorts it opens the walk even where this refuses the region, and asserts that no locus it
+/// yields is one the region owns. Refusing a region the walk owns a locus in loses that locus
+/// from the run, and nothing in a merge's output would show it — the ground would read as a
+/// cohort that was quiet there.
+fn no_locus_can_begin_in(
+    builder_region: GenomeRegion,
+    observations_per_sample: &[&[SampleLocusObservations]],
+) -> bool {
+    // `max`, because `GenomeRegion` has public fields and no constructor ordering them, and
+    // an inverted region read the other way round would refuse ground it holds loci in.
+    let last_base = GenomePosition {
+        contig: builder_region.contig,
+        position: builder_region.end.max(builder_region.start),
+    };
+    !observations_per_sample.iter().any(|observations| {
+        observations
+            .first()
+            .is_some_and(|first| first.start_position() <= last_base)
+    })
 }
 
 /// One cohort locus, assembled: the ground, the alleles the cohort showed over it, and
@@ -3474,6 +3526,120 @@ mod tests {
             alleles_of(&table),
             vec![&b"ACGTA"[..], b"ACTTA", b"A"],
             "the partial's `A` would have been a fourth allele",
+        );
+    }
+
+    /// **A building region the skip refuses holds no locus the walk would have owned** —
+    /// which is the whole claim [`no_locus_can_begin_in`] makes, and nothing in a merge's
+    /// output can check it: a region wrongly refused looks exactly like ground the cohort was
+    /// quiet over.
+    ///
+    /// So the walk is opened here even where the skip refuses the region, and the loci it
+    /// yields are filtered by the same ownership rule [`build_region`] applies. The windows
+    /// are the observation cache's shape rather than whole slices — each sample's records
+    /// from the first that reaches the region's first base — because that is what a builder
+    /// is handed, and whole slices would put an early record in front of every region and
+    /// leave the skip untested.
+    ///
+    /// **The counters are what keep it from passing vacuously.** A generator narrowed until
+    /// no region is ever refused, or until the refused ones are the only ones there are,
+    /// would leave this green and prove nothing.
+    #[test]
+    fn a_region_the_skip_refuses_would_have_built_nothing() {
+        /// The seeded generator `serial.rs`'s random-layout test uses, for its reason: no
+        /// dependency, and the seed is in the failure message.
+        struct Seeded(u64);
+        impl Seeded {
+            fn next(&mut self, bound: u64) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (self.0 >> 33) % bound
+            }
+        }
+
+        let ground_end = 300u64;
+        let (mut refused, mut walked, mut loci_owned) = (0u32, 0u32, 0u32);
+
+        for seed in 0..100u64 {
+            let mut draw = Seeded(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xB01D);
+            let samples = 1 + draw.next(4) as usize;
+            let bound = MaxCohortLocusSpan(
+                std::num::NonZeroU32::new(5 + u32::try_from(draw.next(40)).expect("small"))
+                    .expect("at least five"),
+            );
+            let keep = MinAltObs(
+                std::num::NonZeroU32::new(1 + u32::try_from(draw.next(3)).expect("small"))
+                    .expect("at least one"),
+            );
+            let width = 1 + draw.next(20);
+
+            let layouts: Vec<Vec<SampleLocusObservations>> = (0..samples)
+                .map(|_| {
+                    let mut records = Vec::new();
+                    // Gaps of up to sixty bases, so that most building regions hold nothing
+                    // — the ground this skip exists for.
+                    let mut at_base = 1 + draw.next(40);
+                    while at_base <= ground_end {
+                        let bases = 1 + draw.next(6);
+                        let end = at_base + bases - 1;
+                        let span = usize::try_from(end - at_base + 1).expect("small");
+                        records.push(member(region(at_base, end), &vec![b'A'; span], b"T"));
+                        at_base = end + 1 + draw.next(60);
+                    }
+                    records
+                })
+                .collect();
+
+            let mut first_base = 1u64;
+            while first_base <= ground_end {
+                let building_region = region(first_base, (first_base + width - 1).min(ground_end));
+                let opens_at = GenomePosition {
+                    contig: building_region.contig,
+                    position: building_region.start,
+                };
+                // The window the cache would hand a builder over this region: everything from
+                // the first record that still reaches its first base.
+                let windows: Vec<&[SampleLocusObservations]> = layouts
+                    .iter()
+                    .map(|records| {
+                        let from = records
+                            .iter()
+                            .position(|record| record.reach_position() >= opens_at)
+                            .unwrap_or(records.len());
+                        &records[from..]
+                    })
+                    .collect();
+
+                let owned = LocusCloser::over(&windows, bound, keep)
+                    .filter(|locus| {
+                        locus.region.contig == building_region.contig
+                            && locus.region.start >= building_region.start
+                            && locus.region.start <= building_region.end
+                    })
+                    .count();
+
+                if no_locus_can_begin_in(building_region, &windows) {
+                    refused += 1;
+                    assert_eq!(
+                        owned, 0,
+                        "seed {seed}: the skip refused {building_region}, and the walk owns \
+                         {owned} loci there",
+                    );
+                } else {
+                    walked += 1;
+                    loci_owned += u32::try_from(owned).expect("a small count");
+                }
+                first_base = building_region.end.0 + 1;
+            }
+        }
+
+        assert!(refused > 100, "only {refused} regions were refused");
+        assert!(walked > 100, "only {walked} regions were walked");
+        assert!(
+            loci_owned > 100,
+            "the walked regions owned only {loci_owned} loci"
         );
     }
 }
