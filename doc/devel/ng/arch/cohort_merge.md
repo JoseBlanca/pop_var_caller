@@ -19,12 +19,24 @@ Everything here is crate-private machinery inside the two caller objects
 
 ```
 src/ng/run/cohort_merge/
-├── mod.rs    – CohortObservation, RegionOutcome, the two span constants, error additions
-├── close.rs  – LocusCloser: the reach walk that closes loci and judges them,
-│               the two per-locus verdicts
-├── build.rs  – build_region: assembling survivors into CohortObservations
-└── organise.rs – Organiser: overlap resolution and genome-ordered release
+├── mod.rs               – the four run parameters, the shared analysed-region guard,
+│                          the module's test fixtures
+├── close.rs             – LocusCloser: the reach walk that closes loci and judges them,
+│                          the two per-locus verdicts
+├── build.rs             – build_region: assembling survivors into CohortObservations;
+│                          CohortObservation, SampleSupport, RegionOutcome live here
+├── observation_cache.rs – ObservationCache: one forward reader per sample and the window
+│                          the builders read; building_regions_of, the geometry
+├── organise.rs          – Organiser: ordered release and overlap resolution
+├── serial.rs            – the oracle, and the same merge read through the cache
+└── parallel.rs          – the builders working a round of regions at a time
 ```
+
+**Amended 2026-08-18, after milestone E**, in three places: the cache is its own file, not part
+of `organise.rs` (the argument for keeping them together assumed the organiser would be the
+cache's only writer, and the cached serial driver is a second one); the observation types live
+with the code that builds them rather than in `mod.rs`; and the two drivers of milestone C and
+the parallel arrangement of milestone E are files this tree did not have.
 
 `close.rs` holds everything decided before anything is assembled; `build.rs`
 holds the only code that touches heavy columns. **This revises
@@ -86,7 +98,8 @@ it; each row says what carries over and what does not.
 ## 1. The constants (`mod.rs`)
 
 Two of them are spans with different jobs and are separate types so they cannot be swapped
-(spec §11). The third is the keep threshold.
+(spec §11). The third is the keep threshold. **The fourth was added by milestone E** and is
+described at the end of this section.
 
 ```rust
 /// The policy bound: the widest cohort locus the caller undertakes to build, in reference
@@ -138,6 +151,25 @@ The psp header therefore gains one recorded value — the writing run's ceiling.
 the run spec's §6.1 does not carry the field yet.**
 
 ---
+
+**The fourth, added 2026-08-18 with the parallel arrangement.**
+
+```rust
+/// How many building regions the merge works at once (spec §6.2).
+///
+/// **A count of regions in flight, not of threads.** The threads come from rayon's pool; what
+/// this number sets is the ground the observation cache must hold, which is
+/// `cohort_locus_builder_regions_in_flight × cohort_locus_builder_regions_len` bases plus the
+/// tail of the observations reaching past it (spec §6.4, §8).
+pub struct CohortLocusBuilderRegionsInFlight(pub NonZeroUsize);
+```
+
+**It is the only one of the four with no constant default**, and deliberately: what it should
+be depends on the machine's cores and on how much memory the cohort's width leaves, neither of
+which is knowable where the other three defaults are written. A run given no value takes
+`one_per_worker_thread()` — one region in flight per thread in rayon's pool. Like the other
+three, its resolved value belongs in the run's output, because two runs differing only in it
+differ in memory and in nothing a reader of the output can see.
 
 ## 2. What a builder reads
 
@@ -382,10 +414,6 @@ pub struct Organiser { /* next_expected, held: BTreeMap<RegionIndex, RegionOutco
 impl Organiser {
     pub fn submit(&mut self, index: RegionIndex, outcome: RegionOutcome);
 
-    /// The cache §6.4 describes. Filled before a region is handed out, evicted behind the
-    /// released frontier.
-    pub fn cache(&mut self) -> &mut ObservationCache;
-
     /// Everything now releasable, in genome order. **A region is releasable only once its
     /// predecessor has arrived**, because that is what says whether a locus owned earlier
     /// covers this region's first loci (spec §6.3). Failed spans participate in that
@@ -395,10 +423,46 @@ impl Organiser {
     /// Summed across every region — the number spec §3.3 requires to reach the run summary.
     pub fn failed_locus_count(&self) -> u64;
 
-    /// Nothing held and nothing outstanding — asserted at the end of a run.
-    pub fn is_finished(&self) -> bool;
+    /// How many loci — emitted and failed alike — were dropped because an earlier locus already
+    /// owned the ground they started on (spec §6.1). **Expected to be zero**, and that is the
+    /// point: under `build_region`'s input contract two loci owned by different regions cannot
+    /// overlap, so this is what a run would say if that argument failed on real data.
+    pub fn displaced_locus_count(&self) -> u64;
+
+    /// Nothing outstanding: every region the run handed out released, every released locus
+    /// taken. `regions_handed_out` is how many building regions the run dealt out, their
+    /// indexes being `0..regions_handed_out`.
+    pub fn is_finished(&self, regions_handed_out: u64) -> bool;
+
+    /// End the run: what it did not emit, or a refusal naming what would have been lost.
+    pub fn finish(self, regions_handed_out: u64) -> Result<MergeTally, RunEndedShort>;
+}
+
+/// What a finished run has to say about the loci it did not emit. **Both counts leave with the
+/// organiser**, because `finish` consumes it: a caller that read them afterwards could not, and
+/// one that had to read them first would lose them by taking the obvious order.
+pub struct MergeTally {
+    pub failed_loci: u64,
+    pub displaced_loci: u64,
 }
 ```
+
+**Amended 2026-08-18, after milestone E**, in three places, and each was forced by something
+this sketch was written before knowing:
+
+- **`is_finished` and `finish` take how many regions the run handed out.** Without it the
+  organiser cannot see a gap at the *tail* of a run — indexes that never submitted, with no
+  later index behind them to hold — so a run that lost its last regions was indistinguishable
+  from one that finished. All three of E1's review agents found that independently.
+- **`finish` returns a `MergeTally`** rather than nothing. `displaced_locus_count` exists to be
+  noticed, and a number readable only *before* the consuming call is one the natural call order
+  loses.
+- **`cache()` is gone, and the organiser does not hold the cache.** The cache is generic over
+  its source's error type, because the run's `ObservationSource` and `RunError` do not exist
+  yet; making the organiser generic over the same parameters would push that genericity into a
+  type with no other use for it. Drawing the readers forward is the driver's
+  (`parallel::merge_cohort_in_parallel`), which is also what evicts. **Still owed** when the
+  run's own types land.
 
 **Contract, `Organiser`.** Where two loci overlap, the one whose first position is earlier stands
 and the other is dropped, whether the earlier one is emitted or failed — one rule, no special case
@@ -433,6 +497,37 @@ pub enum RunError {
     MissingRegionResults { count: usize },
 }
 ```
+
+**Amended 2026-08-18: `MissingRegionResults` became `RunEndedShort`, a three-variant enum**, and
+lives in `organise.rs` until `RunError` exists to fold it into.
+
+```rust
+#[non_exhaustive]
+pub enum RunEndedShort {
+    /// Regions the run handed out whose loci never reached the caller: the first index that
+    /// stalled the drain, and how many regions from it onwards were never released.
+    RegionsNeverReleased { first_stalled: RegionIndex, regions: u64 },
+    /// Loci released in order and never taken. Nothing stalled; the caller stopped draining.
+    LociNeverDrained { loci: u64 },
+    /// Both at once, which one count could not express.
+    RegionsNeverReleasedAndLociNeverDrained { first_stalled: RegionIndex, regions: u64, loci: u64 },
+}
+```
+
+Three things the single struct could not carry. **There are two ways to end short, not one**:
+production emits from inside its own submit and has no second step to forget, whereas here
+taking the released loci is the caller's own call, so a run can also end with loci released and
+never taken. **They can happen together**, which is why the third variant exists. And **one
+count told the wrong story**: against a run that had merely stopped draining, the single
+message said "a gap stalled the ordered drain" when no gap had. Each variant now names only
+what happened, and the two with a stall carry `first_stalled` — the index an operator can map
+to a building region and to a builder, which a bare count cannot.
+
+**What stays a panic rather than joining this enum:** a region submitted twice, and one
+submitted after it was released. Both are bugs in whoever hands the regions out rather than
+facts about the data, and both are caught mid-flight, where the release order is already wrong
+and nothing coherent can follow — which is what separates them from a run that ends short,
+caught at the end where what was lost can still be named and reported.
 
 ---
 
@@ -519,6 +614,24 @@ Implementation-time confirmations (nothing to decide, pin when coding):
   sample table at construction.
 - Fold scratch reuse across loci and regions (production's double-buffer pattern) — measure
   before adding anything cleverer.
+
+**Owed after milestone E (2026-08-18):**
+
+- **The organiser should hold the cache**, as §4 originally sketched. It cannot while the cache
+  is generic over its source's error type; when `run_streaming.md` arch §2's `ObservationSource`
+  and §5's `RunError` land, that genericity goes and `cache()` can come back.
+- **`RunEndedShort` should fold into `RunError`** with `ObservationExceedsReachCeiling`, at the
+  same moment.
+- **`ObservationCache::cover` and `evict_before` are `pub(super)`** and should become private to
+  `observation_cache.rs` once the organiser is their only caller — which is the same moment
+  again.
+- **The round's tail is unmeasured**, and spec §6.2 gates the two alternatives to it (an
+  `RwLock` over the cache, or windows handed out as owned copies) on measuring it first. What
+  *is* measured, on a fabricated 2,000-base stretch with a record every four bases and 8
+  threads: at 1,000 samples the whole cached merge takes 111 ms of which the builders are 10 ms,
+  so the parallel arrangement can only reach what is left — 82 ms at 16 regions in flight, and
+  26 of the 29 ms saved come from evicting once per round rather than once per region, not from
+  the builders. **The next performance question this module has is `cover`, not the round.**
 - Where the summed `FailedLocusCount` rides at the run's finish — beside the read-filter
   tallies (run spec §8); the reporting surface is the emission step's (spec §13).
 
