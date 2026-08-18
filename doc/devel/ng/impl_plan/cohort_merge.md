@@ -215,7 +215,7 @@ fixture must contain one.
 organiser collecting.
 *Depends:* E2. *Source:* [spec](../spec/cohort_merge.md) §6.1, §6.2.
 
-☐ **E4 — assert the milestone.** Same cohort observations and same failed spans as C2, at 1, 2, 4,
+✅ **E4 — assert the milestone.** Same cohort observations and same failed spans as C2, at 1, 2, 4,
 8 and 16 builders and at several values of `cohort_locus_builder_regions_len`.
 *Depends:* E3. *Source:* [spec](../spec/cohort_merge.md) §15.
 

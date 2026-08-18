@@ -164,13 +164,18 @@ pub(super) mod fixtures {
     /// and two distinct `f64` sums render as distinct strings, so a quality divided differently
     /// shows.
     pub(super) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
-        outcome
-            .cohort_observations
+        // Destructured, not field-accessed: this function is what "the same answer" means for
+        // every comparison in the module, so a field `RegionOutcome` gains has to be answered
+        // for here or it silently drops out of all of them.
+        let super::build::RegionOutcome {
+            cohort_observations,
+            failed_locus_spans,
+        } = outcome;
+        cohort_observations
             .iter()
             .map(|observed| format!("{observed:?}"))
             .chain(
-                outcome
-                    .failed_locus_spans
+                failed_locus_spans
                     .iter()
                     .map(|span| format!("failed {span}")),
             )

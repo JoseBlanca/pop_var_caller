@@ -203,6 +203,7 @@ mod tests {
         SourceFailed, in_flight, member, refuse_any_difference, region, region_on, source_of,
         three_samples_over_six_hundred_bases, width,
     };
+    use super::super::organise::building_regions_of;
     use super::super::serial::{merge_cohort_serially, merge_cohort_through_cache};
     use super::*;
     use crate::ng::types::Position;
@@ -535,6 +536,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Milestone E's claim, stated once: **dividing the genome among builders changes nothing
+    // a caller sees.** Everything the milestone added — the ordered release, the overlap
+    // resolution, the rounds — is about speed and memory, so anything that changes the answer
+    // is a defect rather than a trade (spec §15).
+    // ---------------------------------------------------------------
+
+    /// **The whole cross-product, against the oracle**: five counts of regions in flight by
+    /// five region widths, on ground carrying both shapes the division can get wrong.
+    ///
+    /// The comparison is with [`merge_cohort_serially`] and not with the cached driver, because
+    /// the oracle is what the milestone undertakes to reproduce — the simplest thing that gives
+    /// the right answer, holding every sample's observations at once and dividing nothing. The
+    /// cached driver's own agreement is a separate claim, and `serial.rs` keeps it.
+    ///
+    /// **The fixture has to reach both shapes or the sweep proves nothing.** It carries a
+    /// deletion at 305–330, which chains two samples into one locus, and a 91-base record the
+    /// 50-base default bound refuses, which puts a failed span across many regions at the
+    /// narrow widths. Both are asserted present in the oracle before the sweep, so the
+    /// twenty-five comparisons cannot pass by comparing nothing.
+    ///
+    /// The deletion **reaches across a region boundary at four of the five widths** — it touches
+    /// 26, 9, 2 and 2 building regions at widths 1, 3, 20 and 47, and 1 at width 600, where the
+    /// whole analysed stretch is a single region and nothing is divided. **That row is the
+    /// undivided control the other four are read against**, and it is also where one round
+    /// stands fifteen-sixteenths idle at 16 in flight.
+    ///
+    /// **Those counts are asserted per width, not inferred**, because the two shape assertions
+    /// below are made against the oracle — which divides nothing — so neither can fail if the
+    /// width list is edited to widths that stop dividing the fixture. Without the per-width
+    /// check the sweep could come to compare five undivided merges against an undivided oracle
+    /// and still report the milestone proved.
+    ///
+    /// A width of 600 makes one region of the whole analysed stretch, so at 16 in flight the
+    /// round is fifteen-sixteenths idle; a width of 1 makes 600 regions, so the round is always
+    /// full. Both ends are in the sweep on purpose.
+    #[test]
+    fn the_parallel_merge_is_the_oracles_at_every_width_and_count() {
+        let mut layouts = three_samples_over_six_hundred_bases();
+        layouts.push(vec![member(region(420, 510), &[b'A'; 91], b"A")]);
+        let analysed = [region(1, 600)];
+
+        let oracle = merge_fixture_serially(&analysed, &layouts);
+        assert!(
+            oracle
+                .cohort_observations
+                .iter()
+                .any(|observed| observed.region == region(305, 330)),
+            "the fixture must carry a locus reaching across a building-region boundary",
+        );
+        assert_eq!(
+            oracle.failed_locus_spans,
+            vec![region(420, 510)],
+            "the fixture must carry a locus the width bound refuses",
+        );
+        assert_eq!(
+            oracle.cohort_observations.len(),
+            50,
+            "60 dotted loci, less the two the deletion swallowed, less the nine the refused \
+             91-base record at 420–510 absorbed — pinned so that an edit to the shared fixture \
+             cannot leave the sweep agreeing on a nearly empty answer",
+        );
+
+        for (bases, regions_over_the_deletion) in [(1, 26), (3, 9), (20, 2), (47, 2), (600, 1)] {
+            assert_eq!(
+                building_regions_of(analysed[0], width(bases))
+                    .filter(
+                        |building| building.start <= Position(330) && building.end >= Position(305)
+                    )
+                    .count(),
+                regions_over_the_deletion,
+                "at {bases}-base regions the sweep no longer divides the straddling locus the \
+                 way this test's doc claims",
+            );
+            for regions in [1, 2, 4, 8, 16] {
+                refuse_any_difference(
+                    &format!("{regions} regions in flight on {bases}-base regions"),
+                    &oracle,
+                    &merge_fixture_in_parallel(
+                        &analysed,
+                        &layouts,
+                        width(bases),
+                        in_flight(regions),
+                    ),
+                );
+            }
+        }
+    }
+
+    /// **A round asked for more regions than the interval holds is the interval's round**, and
+    /// the count in flight is never turned into an allocation — the driver grows the round's
+    /// buffer rather than reserving on a number a caller sets, and nothing else pinned that.
+    #[test]
+    fn merging_with_more_regions_in_flight_than_the_interval_holds_gives_the_oracles_answer() {
+        let layouts = three_samples_over_six_hundred_bases();
+        let analysed = [region(1, 600)];
+
+        refuse_any_difference(
+            "usize::MAX regions in flight on one-base regions",
+            &merge_fixture_serially(&analysed, &layouts),
+            &merge_fixture_in_parallel(&analysed, &layouts, width(1), in_flight(usize::MAX)),
+        );
     }
 
     /// **The parallel driver agrees with the oracle on random layouts, at a random count in

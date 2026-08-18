@@ -184,10 +184,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{
-        SourceFailed, member, region, region_on, render, source_of,
-        three_samples_over_six_hundred_bases, width,
+        SourceFailed, in_flight, member, refuse_any_difference, region, region_on, render,
+        source_of, three_samples_over_six_hundred_bases, width,
     };
     use super::super::organise::{Organiser, RegionIndex};
+    use super::super::parallel::merge_cohort_in_parallel;
     use super::*;
     use crate::ng::locus_generation::SequenceObservation;
     use crate::ng::types::{ContigId, Position};
@@ -854,6 +855,14 @@ mod tests {
             max_cohort_locus_span,
             min_alt_obs,
         );
+        refuse_a_parallel_difference(
+            analysed,
+            per_sample,
+            building_region_width,
+            max_cohort_locus_span,
+            min_alt_obs,
+            &oracle,
+        );
         if let Some(first) = from_oracle
             .iter()
             .zip(&from_cache)
@@ -872,6 +881,55 @@ mod tests {
         );
 
         oracle
+    }
+
+    /// **The parallel driver's answer is the oracle's, on every fixture this helper sees** —
+    /// milestone E's claim (spec §15), made here rather than only on the parallel file's own
+    /// fixtures so that it covers what those cannot: the two hundred random layouts, and the
+    /// locus built from observations the generic generator actually minted.
+    ///
+    /// **One, four and sixteen regions in flight, not the full sweep**, because the helper's
+    /// busiest caller runs it two hundred times. One is the round that is not a round, which
+    /// makes every building-region boundary a round boundary too. Four puts several builders in
+    /// one round at every width this file uses **except 600**, where the analysed stretch is a
+    /// single building region and every count gives the same one-builder round. Sixteen is here
+    /// because E4's review measured what the smaller two miss: a defect confined to a round's
+    /// fifth region or later fails five tests and **none** of them is in this file.
+    ///
+    /// The exhaustive width × count sweep is
+    /// `super::super::parallel::tests::the_parallel_merge_is_the_oracles_at_every_width_and_count`;
+    /// what this adds is reach — the two hundred random layouts, and the locus built from
+    /// observations the generic generator actually minted, neither of which the parallel file
+    /// has.
+    fn refuse_a_parallel_difference(
+        analysed: &[GenomeRegion],
+        per_sample: &[&[SampleLocusObservations]],
+        building_region_width: CohortLocusBuilderRegionsLen,
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_obs: MinAltObs,
+        oracle: &RegionOutcome,
+    ) {
+        for regions in [1, 4, 16] {
+            let mut cache =
+                ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+            let in_parallel = merge_cohort_in_parallel(
+                analysed,
+                &mut cache,
+                building_region_width,
+                in_flight(regions),
+                max_cohort_locus_span,
+                min_alt_obs,
+            )
+            .expect("the fixture sources hold");
+            refuse_any_difference(
+                &format!(
+                    "{regions} regions in flight on {}-base regions",
+                    building_region_width.get()
+                ),
+                oracle,
+                &in_parallel,
+            );
+        }
     }
 
     /// **A real merge never displaces a locus** — the same claim as
