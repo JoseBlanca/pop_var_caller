@@ -45,9 +45,13 @@
 //! that uses no pool at all. That last one is the honest baseline for *what threads buy*: the
 //! parallel driver at one thread still pays rayon for every round.
 //!
-//! Run in release: `cargo run --release --example ng_cohort_merge_parallel_cost`.
-//! `NG_MERGE_COST_COHORTS=1,63`, `NG_MERGE_COST_WIDTHS=20`, `NG_MERGE_COST_GROUND=sparse` and
-//! `NG_MERGE_COST_THREADS=1,4` narrow it while iterating.
+//! Run in release: `./scripts/dev.sh cargo run --release --example
+//! ng_cohort_merge_parallel_cost`. `NG_MERGE_COST_COHORTS=1,63`, `NG_MERGE_COST_WIDTHS=20`,
+//! `NG_MERGE_COST_GROUND=sparse` and `NG_MERGE_COST_THREADS=1,4` narrow it while iterating —
+//! **through `env` inside the container**, as in `./scripts/dev.sh env
+//! NG_MERGE_COST_COHORTS=63 cargo run …`, because `scripts/dev.sh` forwards two variables of
+//! its own and no others. Set on the host side of it they are silently ignored and the whole
+//! matrix runs.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Instant;
@@ -277,8 +281,8 @@ fn main() {
             })
             .collect(),
         Err(_) => vec![
+            CohortLocusBuilderRegionsLen(NonZeroU32::new(20).expect("non-zero")),
             CohortLocusBuilderRegionsLen::DEFAULT,
-            CohortLocusBuilderRegionsLen(NonZeroU32::new(200).expect("non-zero")),
         ],
     };
 
