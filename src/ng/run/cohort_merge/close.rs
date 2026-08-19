@@ -644,12 +644,18 @@ impl<'a> Iterator for LocusCloser<'a> {
             // sample about its own reads** (spec §4.3). Summing them into one cohort
             // total and comparing that — the rule until 2026-08-19 — asks a question
             // whose answer moves when a sample that carries nothing is added to the run.
-            let alt = head.non_reference_reads();
+            // **Both counts in one walk of the record's sequences.** They are the numerator
+            // and the denominator of the same question, they filter on the same witness and
+            // they read the same `num_obs`; asked separately, this record's sequences are
+            // walked twice. What that is worth grows with the reads at a position rather than
+            // with the cohort — at the tomato panel's 1.03 sequences a record there is barely
+            // a loop to fuse, and at GIAB's 313 compared reads a sample there is.
+            let (alt, compared) = head.non_reference_and_compared_reads();
             non_reference_reads = non_reference_reads.saturating_add(alt);
             self.alt_reads_per_sample[sample] =
                 self.alt_reads_per_sample[sample].saturating_add(alt);
-            self.compared_reads_per_sample[sample] = self.compared_reads_per_sample[sample]
-                .saturating_add(head.reads_compared_with_reference());
+            self.compared_reads_per_sample[sample] =
+                self.compared_reads_per_sample[sample].saturating_add(compared);
             // A sample's first observation inside this locus is exactly the one taken
             // while its cursor still stands where the locus opened — so the member count
             // is exact and free, and the vector below is allocated once.
