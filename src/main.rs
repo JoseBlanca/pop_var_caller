@@ -4,11 +4,14 @@
 
 use std::process;
 
-// Opt-in `mimalloc` global allocator (`--features alloc-mimalloc`, off by
-// default). The cohort `var-calling` path is allocation-churn-heavy (per-allele
-// record building across the worker pool); on a T=8 / N=50 tomato cohort
-// mimalloc cut peak RSS ~9% and shaved wall time vs the system allocator,
-// byte-identical. Off by default so production builds carry no vendored-C dep.
+// The `mimalloc` global allocator, **on by default** since 2026-08-19
+// (`alloc-mimalloc`; `--no-default-features` opts out). This path is
+// allocation-churn-heavy — per-allele record building across the worker pool —
+// and on a T=8 / N=50 tomato cohort mimalloc cut peak RSS ~9% and shaved wall
+// time against the system allocator, byte-identical. The ng cohort merge then
+// measured the same shape and larger: a quarter to two fifths off the merge and
+// 9% off peak resident at 63 accessions (`Cargo.toml`, the feature's own note).
+// What it costs is a vendored C allocator in every build.
 #[cfg(feature = "alloc-mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
