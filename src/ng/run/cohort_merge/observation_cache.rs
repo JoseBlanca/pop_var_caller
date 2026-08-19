@@ -514,10 +514,19 @@ fn first_reaching_index(
     held_observations: &[SampleLocusObservations],
     position: GenomePosition,
 ) -> usize {
-    held_observations
-        .iter()
-        .position(|observation| observation.reach_position() >= position)
-        .unwrap_or(held_observations.len())
+    // **A bisection, and it is what makes the window's ordering load-bearing.** A sample's
+    // records are disjoint and ascending — `build_region` refuses a sample whose are not — so
+    // reach is monotone across the window and "does this one reach `position`" is false over a
+    // prefix and true over the rest, which is the shape `partition_point` needs. The scan this
+    // replaced would have given the same answer on a window that was not ordered; this one
+    // gives a wrong answer instead of a slow one, which is why the precondition is stated here
+    // rather than left to `evict_before`'s doc.
+    //
+    // It is worth nothing to the cached serial driver, whose window starts at the left edge
+    // because it evicts immediately before every cover, and about a tenth of the parallel
+    // driver's merge, where eviction opens a whole round and a region late in that round would
+    // otherwise walk past every earlier region's records first.
+    held_observations.partition_point(|observation| observation.reach_position() < position)
 }
 
 #[cfg(test)]
