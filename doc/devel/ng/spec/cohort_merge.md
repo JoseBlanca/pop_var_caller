@@ -417,34 +417,66 @@ builder emits evidence only (§1.2).
 
 ### 4.3 The variability filter: builders discard, nothing upstream does
 
-**Most of the genome does not vary, and the builder throws those loci away itself.** A locus whose
-non-reference reads do not reach `min_alt_obs` — which includes every locus where no sample varied
-at all — is dropped by the builder: nothing is assembled, nothing goes to the organiser. Only what is left waits to be emitted, which is why the
-organiser holds so little.
+**Most of the genome does not vary, and the builder throws those loci away itself.** A locus no
+sample showed enough non-reference evidence at — which includes every locus where no sample varied
+at all — is dropped by the builder: nothing is assembled, nothing goes to the organiser. Only what
+is left waits to be emitted, which is why the organiser holds so little.
 
-How little: about **one position in a hundred** survives — 28,718 loci from 2.83 million positions,
-measured on a 50-sample tomato run at about three reads a position. That is a fact about that
-corner rather than about the caller, and §7.3 says what happens to it at the far end of the
-range.
+**The rule asks one sample at a time.** A locus is built when **some single sample** shows at
+least
 
-**The threshold is `min_alt_obs`, and a locus needs to reach it to survive.** Not "any
-non-reference read at all": a locus is kept when the non-reference reads across it sum to at least
-`min_alt_obs`. Production's default is **2**
-([`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)), and its rule sums the
-per-position maxima across the locus rather than taking a single position's count
-(`derive_is_kept`,
-[`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs)).
+    max(min_alt_obs, ceil(min_alt_read_share × that sample's compared reads))
 
-**It is kept because it earns its keep twice over.** It removes a large number of very
-low-quality variants that would otherwise be built, called and then filtered downstream, and
-in production it improved performance substantially — the work never done is the cheapest work
-there is. A locus supported by a single non-reference read in a single sample is, at the depths
-this caller runs at, far more often an error than a variant.
+non-reference reads. *Compared reads* is the denominator the numerator was drawn from: the reads
+whose whole sequence over the locus was compared against the reference
+([`SampleLocusObservations::reads_compared_with_reference`](../../../../src/ng/locus_generation/mod.rs)),
+which is neither read depth nor the reads that merely covered the ground. A partial read, whose
+bases stop inside the locus, is in neither half.
 
-**What it costs, stated plainly:** a real variant seen exactly once in exactly one sample is
-dropped, and no downstream step can recover it, because nothing is emitted for that locus at all.
-That is a deliberate trade and it is the same one production makes. Raising `min_alt_obs` trades
-more of those away for less work; lowering it to 1 restores them and restores the cost.
+The two parameters are the two ends of the depth axis, and neither alone would serve:
+
+- `min_alt_obs`, default **2**, decides at low coverage, where a share of three reads rounds to
+  nothing;
+- `min_alt_read_share`, default **2 in 100**, decides at high coverage, where two reads out of
+  three hundred is the sequencing error rate rather than an allele.
+
+**Why one sample and not the cohort's sum.** ng summed every sample's non-reference reads and
+compared that against `min_alt_obs` until 2026-08-19. The owner retired that rule on the
+measurement below: because the bar was a fixed count and the sum grows with the cohort, the rule
+stopped filtering as samples were added. On one 100 kb interval of the tomato panel it discarded
+997 loci in every 1,000 at one accession, 878 at 16 and only 439 at 63 — where the merge went on
+to assemble a cohort observation at 546 positions per kilobase, better than one every two bases,
+and assembling them cost 170 ms of a 425 ms single-threaded merge.
+
+Taking the share of the **cohort's** reads instead fixes the count and breaks something worse. That
+bar grows with sample count while a rare allele's evidence does not: one carrier's handful of reads
+is the same handful whether the run holds 10 samples or 10,000. At 63 tomato accessions it would
+ask for about 14 non-reference reads, so an allele carried by one or two accessions at three reads
+a position could not be seen; at 1,000 samples it would ask for about 200, near 100 carriers, and
+nothing below about 5% frequency would survive. A study is run at that size to find exactly the
+variation such a rule discards. The per-sample denominator has no such drift — it is the same
+question at one sample and at a thousand.
+
+**What each end of the range gets.** At **one sample** the rule is exactly the cohort-sum rule it
+replaced, because a sum over one sample is that sample's own count. At **3 reads a position** the
+share never reaches the floor and the floor is the whole rule — on the tomato panel it moved 12,034
+kept loci to 12,033. At **313 reads a sample**, which is the GIAB trio's depth, the share does all
+the work: 53,796 kept loci become 2,721 over 136 kb, and a true heterozygote there shows about 156
+non-reference reads, a factor of 20 above the bar.
+
+**What it costs, stated plainly:** a real variant no single sample showed twice is dropped, and no
+downstream step can recover it, because nothing is emitted for that locus at all. At three reads a
+position a heterozygous carrier shows a single read about four times in ten, so this is not an
+empty class. It is the same trade production makes, whose rule is also per-sample (`derive_is_kept`
+over `max_nonref_obs`,
+[`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs)), at the same
+default of 2 ([`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)). Lowering
+`min_alt_obs` to 1 restores those variants and restores the cost.
+
+**Neither number has been measured against a truth set.** Both were chosen against loci-kept counts
+on two benchmarks a hundredfold apart in depth. What is still owed is a recall check: the tomato
+panel's and GIAB's calls under the old rule and the new, so the variants this drops can be counted
+rather than reasoned about.
 
 **A kept locus is kept whole**, quiet positions and all — the threshold decides whether the locus
 survives, never which of its positions do
@@ -815,16 +847,35 @@ plumbing).
 
 ### 7.3 The large cohort, honestly
 
-The one-in-a-hundred survivor rate is a fact about 50 samples at three reads a position (§4.3).
-The keep rule is *any non-reference read in any sample*, so the kept fraction can only grow with
-cohort size and depth: at 3,000 samples of deep data, most positions will carry some
-non-reference read somewhere — sequencing error guarantees it — and the filter's saving erodes
-toward building nearly everything. What that costs is wall and reorder-buffer occupancy, not
-correctness and not unbounded memory (§8's bounds do not depend on the keep rate; the buffer
-holds at most `look-ahead` regions' survivors). Whether the far end ever needs a cohort-scaled
-keep threshold is open question 3, with a leaning to *no* — a threshold trades exactly the rare
-variants a large cohort is for — and the measurement is cheap: keep rate versus cohort size on
-the tomato cohort and the GIAB trio.
+**This section used to warn that the keep rule would erode as the cohort grew, and it was
+right — that was the cohort-sum rule, and it was replaced on 2026-08-19 (§4.3).** The
+measurement it asked for was made on the tomato panel, one 100 kb interval, and it is the
+reason the rule changed. Loci discarded out of every 1,000 the merge closed, under the old
+rule and the new:
+
+| accessions | closed | old rule (cohort sum ≥ 2) | new rule (some sample reaches it) |
+|---|---|---|---|
+| 1 | 96,082 | 997 in 1,000 | 997 in 1,000 |
+| 16 | 98,726 | 878 | 960 |
+| 63 | 97,408 | 439 | 876 |
+
+The old rule's saving fell away as samples were added — at 63 accessions it built a cohort
+observation at 546 positions per kilobase — because a fixed bar of 2 summed over the cohort is
+reached by sequencing error somewhere as soon as the cohort is large. The new rule does not
+drift: the question it asks of a sample does not change when a sample that carries nothing joins
+the run, so the kept fraction tracks how much variation the cohort holds rather than how many
+samples it has. Between 16 and 63 accessions it still fell, from 960 discarded in 1,000 to 876,
+and that is real variation being found — three times the accessions carry more segregating
+sites — not the rule weakening.
+
+What remains true from the old warning is the shape of the cost if the kept fraction does climb:
+wall and reorder-buffer occupancy, not correctness and not unbounded memory (§8's bounds do not
+depend on the keep rate; the buffer holds at most `look-ahead` regions' survivors).
+
+**Depth is the other axis and it is now covered too**, which the fixed bar never was: on the
+GIAB trio at 313 compared reads a sample, three samples were enough for the old rule to build
+57 loci in 100. The share brings that to 2 in 100 (§4.3). Neither number has been checked
+against a truth set — see §4.3's last paragraph.
 
 ---
 
@@ -1120,10 +1171,15 @@ for the run).
    bases (the events the caller gives up) and the length distribution just below — how much real
    signal sits within reach of a larger bound, against §8's assembly window growing with
    `max_cohort_locus_span`.
-4. **Does the far end need a cohort-scaled keep threshold?** — OPEN; leaning no (§7.3 — a
-   threshold drops rare variants, which are the large cohort's purpose). **Settled by:** keep
-   rate versus cohort size and depth, tomato 1→63 and the GIAB trio; the cost being bought is
-   wall, so the measurement is wall at the observed keep rates.
+4. **Does the far end need a cohort-scaled keep threshold?** — **SETTLED 2026-08-19, and the
+   answer is no in both directions.** The measurement this asked for was made (§7.3): the
+   cohort-*sum* rule it was written about had the defect from the other side — its bar was fixed
+   while the sum grew, so it stopped filtering as samples were added. The rule is now asked of
+   one sample at a time, which neither scales with the cohort nor needs to. Scaling the bar with
+   the cohort was also tried on paper and rejected for the reason the old leaning gave: at 1,000
+   samples a 2% share of the cohort's reads asks for about 100 carriers, which drops exactly the
+   rare variants a large cohort is run to find (§4.3). What is still owed is the recall check —
+   §4.3's last paragraph, and it is a different question from this one.
 5. **How do failed loci surface beyond the count?** — OPEN; leaning: log each failed locus's
    span at warning level up to a small cap, then count only — deterministic, since the drain
    emits in region order (§9). A machine-readable sidecar (a BED of failed spans) is the step up
@@ -1150,7 +1206,7 @@ listed after the table.
 | `staged_channel_path_matches_owned_across_intervals` `:1905` | k = 1 across many intervals equals the serial reference — the shape that found the stale-marker desync | k = 1 through the full parallel path over many regions and segments equals serial; run first, not last |
 | `fold_unions_positions_and_maxes_aggregates` `:1302`, `merge_reduce_tree_is_order_independent_with_ties` `:1960` | fold commutes and associates, ties included | same properties on ng's fold, ties at shared positions included |
 | `keep_threshold_one_is_variant_filter` `:1318` | threshold-1 keep is a variant filter | the variability filter keeps exactly the loci with a candidate position |
-| `over_approximation_is_max_not_sum` `:1335` | production's keep is a `max` over-approximation | inverted: two samples with one non-reference read each at one position **are** kept — ng's rule is exact "any", and this test pins the difference |
+| `over_approximation_is_max_not_sum` `:1335` | production's keep is a `max` over samples, not a sum | **followed, not inverted, since 2026-08-19**: two samples with one non-reference read each at one position are **not** kept, because no single sample reached two (`one_non_reference_read_in_each_of_two_samples_does_not_reach_the_threshold`). ng adds a share of the sample's own reads on top, which production has no counterpart for (`the_share_decides_once_depth_makes_it_the_larger`) |
 | `multi_position_group_kept_whole` `:1344` | a kept group keeps its quiet member positions | same: a kept locus carries its reference-only member positions |
 | `interval_with_no_variants_yields_no_chunks` `:1640` | variant-free ground emits nothing, order stays gapless | an all-reference region emits no observation and still delivers its result; the drain's gap guard fires when it does not |
 | the eager-decode oracle ([`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs)) | two-phase equals eager, byte for byte | an eager whole-region build, tests only, as the oracle the two-phase builder is compared against |

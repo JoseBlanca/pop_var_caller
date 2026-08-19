@@ -35,7 +35,7 @@
 use ahash::AHashMap;
 
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
-use super::{MaxCohortLocusSpan, MinAltObs};
+use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
 use crate::ng::types::{GenomePosition, GenomeRegion};
 use crate::pileup_record::ChainId;
@@ -713,14 +713,18 @@ pub fn build_region(
     builder_region: GenomeRegion,
     observations_per_sample: &[&[SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
+    min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
     let mut outcome = RegionOutcome::default();
     if no_locus_can_begin_in(builder_region, observations_per_sample) {
         return outcome;
     }
 
-    for locus in LocusCloser::over(observations_per_sample, max_cohort_locus_span, min_alt_obs) {
+    for locus in LocusCloser::over(
+        observations_per_sample,
+        max_cohort_locus_span,
+        min_alt_reads,
+    ) {
         // **Ownership, and the two ways a locus can fail to be ours.** One starting before
         // this builder's ground belongs to an earlier builder, which sees it whole; one
         // starting after its last base belongs to a later builder. Both are skipped rather
@@ -1495,7 +1499,9 @@ mod tests {
     use super::*;
     use crate::ng::locus_generation::LocusKind;
     use crate::ng::run::cohort_merge::close::LocusCloser;
-    use crate::ng::run::cohort_merge::{MaxCohortLocusSpan, MinAltObs};
+    use crate::ng::run::cohort_merge::{
+        MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads,
+    };
     use crate::ng::types::{ContigId, Position, ReadGroupId};
 
     fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
@@ -2053,7 +2059,10 @@ mod tests {
         let loci: Vec<_> = LocusCloser::over(
             &[&here, &far_away],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs(std::num::NonZeroU32::new(1).expect("1 is non-zero")),
+            MinAltReads {
+                floor: MinAltObs(std::num::NonZeroU32::new(1).expect("1 is non-zero")),
+                share: MinAltReadShare::DEFAULT,
+            },
         )
         .collect();
         assert_eq!(loci.len(), 2, "the two placements never chain");
@@ -3132,7 +3141,7 @@ mod tests {
         let loci: Vec<_> = LocusCloser::over(
             &[&covering, &nothing, &deletion],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .collect();
         assert_eq!(loci.len(), 1, "one locus, held open by the deletion");
@@ -3225,7 +3234,7 @@ mod tests {
             region(1, 100),
             &[&sample],
             MaxCohortLocusSpan(std::num::NonZeroU32::new(5).expect("5 is non-zero")),
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -3257,7 +3266,7 @@ mod tests {
             region(10, 50),
             &[&deletion, &snp],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert!(
@@ -3279,7 +3288,7 @@ mod tests {
             region(10, 50),
             &[&deletion, &snp],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -3311,7 +3320,7 @@ mod tests {
             region(1, 50),
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -3335,7 +3344,7 @@ mod tests {
             region(1, 50),
             &[&nothing],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert!(outcome.cohort_observations.is_empty());
@@ -3358,7 +3367,7 @@ mod tests {
             region_on(1, 1, 50),
             &[&elsewhere, &here],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -3383,13 +3392,16 @@ mod tests {
             region(1, 50),
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
         let too_quiet = build_region(
             region(1, 50),
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+            MinAltReads {
+                floor: MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+                share: MinAltReadShare::DEFAULT,
+            },
         );
 
         assert_eq!(built.cohort_observations.len(), 1, "three reads reach two");
@@ -3416,7 +3428,7 @@ mod tests {
             region(21, 30),
             &[&opening_on_the_boundary, &opening_on_the_last_base],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -3451,7 +3463,7 @@ mod tests {
         let samples: [&[SampleLocusObservations]; 2] = [&deletions, &others];
         let bound = MaxCohortLocusSpan(std::num::NonZeroU32::new(5).expect("5 is non-zero"));
 
-        let whole = build_region(region(1, 100), &samples, bound, MinAltObs::DEFAULT);
+        let whole = build_region(region(1, 100), &samples, bound, MinAltReads::DEFAULT);
 
         let mut in_pieces = RegionOutcome::default();
         for tenth in 0..10u64 {
@@ -3459,7 +3471,7 @@ mod tests {
                 region(tenth * 10 + 1, tenth * 10 + 10),
                 &samples,
                 bound,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             );
             in_pieces
                 .cohort_observations
@@ -3584,10 +3596,13 @@ mod tests {
                 std::num::NonZeroU32::new(5 + u32::try_from(draw.next(40)).expect("small"))
                     .expect("at least five"),
             );
-            let keep = MinAltObs(
-                std::num::NonZeroU32::new(1 + u32::try_from(draw.next(3)).expect("small"))
-                    .expect("at least one"),
-            );
+            let keep = MinAltReads {
+                floor: MinAltObs(
+                    std::num::NonZeroU32::new(1 + u32::try_from(draw.next(3)).expect("small"))
+                        .expect("at least one"),
+                ),
+                share: MinAltReadShare::DEFAULT,
+            };
             let width = 1 + draw.next(20);
 
             let layouts: Vec<Vec<SampleLocusObservations>> = (0..samples)

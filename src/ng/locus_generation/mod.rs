@@ -224,6 +224,31 @@ impl SampleLocusObservations {
             .filter(|obs| !obs.matches_reference(&self.reference_bases))
             .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
     }
+
+    /// How many reads here were compared against the reference at all — the denominator
+    /// [`non_reference_reads`](Self::non_reference_reads) is the numerator of.
+    ///
+    /// **The same subset, and that is the whole reason it exists as its own method.** The
+    /// cohort merge's keep rule asks whether a sample's non-reference reads reach a
+    /// *share* of its reads (`spec/cohort_merge.md` §4.3), and a share whose two halves
+    /// count different reads is not a share. So this counts the
+    /// [`Complete`](ReadWitness::Complete) observations and nothing else: the partials are
+    /// excluded because their bases cover less than the locus and the numerator cannot
+    /// score them, and [`reads_without_observation`](Self::reads_without_observation) is
+    /// excluded because those reads showed nothing to compare.
+    ///
+    /// The consequence is worth stating plainly, because it is a difference from read
+    /// depth: at a locus where most reads are partial, this is far below the number of
+    /// reads that covered the ground, and the share is taken of what was actually scored.
+    /// A rule taking the share of *depth* would raise the bar using reads that could
+    /// never have cleared it.
+    ///
+    /// Saturating for the same reason as the numerator: the only consumer compares the
+    /// two, and reaching the cap needs four billion reads at one locus.
+    pub fn reads_compared_with_reference(&self) -> u32 {
+        self.complete_observations()
+            .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
+    }
 }
 
 /// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
@@ -1924,6 +1949,44 @@ mod tests {
             vec![obs(b"ACGT", ReadWitness::Complete, 40)],
         );
         assert_eq!(quiet.non_reference_reads(), 0);
+    }
+
+    /// **The denominator counts the same reads the numerator was chosen from**, which is
+    /// what makes their ratio a share at all — the cohort merge's keep rule divides one
+    /// by the other (`run/cohort_merge/mod.rs`, `MinAltReads`).
+    ///
+    /// The same fixture as above: 45 reads compared against the reference, 5 of them
+    /// differing, so the share is 5 in 45. The partial is what makes this discriminating
+    /// — its read covered the ground but its bases cover less than the locus, so the
+    /// numerator cannot score it and the denominator must not count it. Counting it would
+    /// report 55 compared reads and quietly shrink every share at a locus where reads run
+    /// off the end.
+    #[test]
+    fn the_compared_reads_are_the_ones_the_non_reference_count_was_drawn_from() {
+        let l = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![
+                obs(b"ACGT", ReadWitness::Complete, 40),
+                obs(b"ACCT", ReadWitness::Complete, 3),
+                obs(b"AGGT", ReadWitness::Complete, 2),
+                obs(
+                    b"AC",
+                    ReadWitness::from_left(2, LocusLen::from_positions(4))
+                        .expect("a run covering at least one position"),
+                    10,
+                ),
+            ],
+        );
+
+        assert_eq!(l.non_reference_reads(), 5);
+        assert_eq!(l.reads_compared_with_reference(), 45);
+
+        // Reads that covered the locus and showed nothing are not compared either: they
+        // are a scalar beside the observations, not an observation.
+        let mut with_silent_reads = l;
+        with_silent_reads.reads_without_observation = 100;
+        assert_eq!(with_silent_reads.reads_compared_with_reference(), 45);
     }
 
     /// **A partial is not counted, and the fixture says why.** This partial's read agreed

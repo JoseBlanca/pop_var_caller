@@ -19,7 +19,7 @@ use pop_var_caller::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
 use pop_var_caller::ng::run::cohort_merge::build::build_region;
-use pop_var_caller::ng::run::cohort_merge::{MaxCohortLocusSpan, MinAltObs};
+use pop_var_caller::ng::run::cohort_merge::{MaxCohortLocusSpan, MinAltReads};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
 /// One sample's record at one position, showing the reference to three reads.
@@ -74,7 +74,7 @@ fn main() {
                 region,
                 &slices,
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             );
             let walks = if samples >= 1000 { 30 } else { 300 };
             let mut each_repeat: Vec<f64> = (0..7)
@@ -85,7 +85,7 @@ fn main() {
                             region,
                             &slices,
                             MaxCohortLocusSpan::DEFAULT,
-                            MinAltObs::DEFAULT,
+                            MinAltReads::DEFAULT,
                         );
                         std::hint::black_box(&outcome);
                     }

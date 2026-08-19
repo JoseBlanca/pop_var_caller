@@ -30,8 +30,8 @@ use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{ObservationCache, building_regions_of};
 use super::organise::{Organiser, RegionIndex};
 use super::{
-    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
-    refuse_malformed_analysed_regions,
+    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
+    MinAltReads, refuse_malformed_analysed_regions,
 };
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
@@ -98,7 +98,7 @@ pub fn merge_cohort_in_parallel<S, E>(
     cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     regions_in_flight: CohortLocusBuilderRegionsInFlight,
     max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
+    min_alt_reads: MinAltReads,
 ) -> Result<RegionOutcome, E>
 where
     S: Iterator<Item = Result<SampleLocusObservations, E>> + Sync,
@@ -157,7 +157,7 @@ where
                         *building_region,
                         observations_per_sample,
                         max_cohort_locus_span,
-                        min_alt_obs,
+                        min_alt_reads,
                     )
                 })
             }));
@@ -249,7 +249,7 @@ mod tests {
             building_region_width,
             regions_in_flight,
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("the fixture sources hold")
     }
@@ -265,7 +265,7 @@ mod tests {
             analysed,
             &per_sample,
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
     }
 
@@ -322,7 +322,7 @@ mod tests {
                 width(20),
                 in_flight(regions),
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
             .expect("the fixture sources hold");
             cache.held_observations_len()
@@ -427,7 +427,7 @@ mod tests {
             width(20),
             in_flight(4),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -456,7 +456,7 @@ mod tests {
                 width(20),
                 in_flight(16),
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
         }));
 
@@ -535,7 +535,7 @@ mod tests {
                 &mut cache_over(&layouts),
                 width(bases),
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
             .expect("the fixture sources hold");
 

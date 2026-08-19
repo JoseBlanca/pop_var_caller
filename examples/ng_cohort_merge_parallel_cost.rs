@@ -75,7 +75,8 @@ use pop_var_caller::ng::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
 use pop_var_caller::ng::run::cohort_merge::{
-    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
+    CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
+    MinAltReads,
 };
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 
@@ -218,7 +219,7 @@ fn threads_sweep(
                 &mut cache,
                 width,
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
             .expect("the probe's sources cannot fail");
             std::hint::black_box(&outcome);
@@ -245,7 +246,7 @@ fn threads_sweep(
                         width,
                         regions,
                         MaxCohortLocusSpan::DEFAULT,
-                        MinAltObs::DEFAULT,
+                        MinAltReads::DEFAULT,
                     )
                     .expect("the probe's sources cannot fail");
                     std::hint::black_box(&outcome);
@@ -329,7 +330,7 @@ fn main() {
                         &analysed,
                         &slices,
                         MaxCohortLocusSpan::DEFAULT,
-                        MinAltObs::DEFAULT,
+                        MinAltReads::DEFAULT,
                     );
                     std::hint::black_box(&outcome);
                 },
@@ -346,7 +347,7 @@ fn main() {
                             &mut cache,
                             width,
                             MaxCohortLocusSpan::DEFAULT,
-                            MinAltObs::DEFAULT,
+                            MinAltReads::DEFAULT,
                         )
                         .expect("the probe's sources cannot fail");
                         std::hint::black_box(&outcome);
@@ -370,7 +371,7 @@ fn main() {
                                 width,
                                 regions,
                                 MaxCohortLocusSpan::DEFAULT,
-                                MinAltObs::DEFAULT,
+                                MinAltReads::DEFAULT,
                             )
                             .expect("the probe's sources cannot fail");
                             std::hint::black_box(&outcome);

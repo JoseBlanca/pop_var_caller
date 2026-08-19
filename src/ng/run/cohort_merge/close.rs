@@ -7,16 +7,19 @@
 //! the design is `doc/devel/ng/spec/cohort_merge.md` §4.1 with the types in
 //! `doc/devel/ng/arch/cohort_merge.md` §3.
 //!
-//! **Two things differ from production besides the columns, and both are deliberate.**
+//! **One thing differs from production besides the columns, and it is deliberate.**
 //! Production judges in the same loop — it decides which positions to keep as it groups
 //! them — where this walk only groups and hands every closed locus out, judging being
-//! the next step's (`doc/devel/ng/impl_plan/cohort_merge.md` A4). And the quantity
-//! summed is not the same: production adds the per-position *maximum* over samples,
-//! this walk adds every sample's own non-reference reads, which is the difference
-//! [`super::MinAltObs`] sets out — a maximum never exceeds a sum, so at one threshold
-//! the two rules keep different loci.
+//! the next step's (`doc/devel/ng/impl_plan/cohort_merge.md` A4).
+//!
+//! **What the walk counts is per sample, and that is what the keep rule needs.** Each
+//! sample's non-reference reads and the reads they were drawn from are accumulated apart
+//! from every other sample's, because the rule asks whether *some one sample* showed
+//! enough — see [`super::MinAltReads`] for why the cohort's sum is the wrong question.
+//! The cohort total is still reported on each closed locus, as the locus's size in
+//! evidence rather than as a decision.
 
-use super::{MaxCohortLocusSpan, MinAltObs};
+use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
@@ -49,7 +52,7 @@ pub struct SampleMembers<'a> {
 /// and the failed count would then stop meaning what spec §3.3 says it means, silently.
 ///
 /// **Which loci the order actually moves is worth being exact about**, because it is not
-/// the case §3.3 leads with. A long deletion carries far more than `min_alt_obs`
+/// the case §3.3 leads with. A long deletion carries far more than `min_alt_reads`
 /// non-reference reads, so it is `Failed` under either order and the count is right
 /// either way. The loci that move are the ones qualifying for *both* tests — wide and
 /// below the keep threshold — which is a chain of overlapping observations at a few
@@ -62,22 +65,25 @@ pub enum Verdict {
     /// to yield the locus rather than swallow it, so that the count has something to
     /// count and the organiser has a span to displace overlapping loci with (§3.2, §6.1).
     Failed,
-    /// Fewer non-reference reads across it than `min_alt_obs`: not assembled and **not
-    /// counted**. A failure is ground the caller refused; this is ground it judged empty,
-    /// and conflating the two would make the failed count unreadable (spec §4.3 for the
-    /// threshold; §1.3 and §3.3 for why only a failure is counted).
+    /// No single sample showed the non-reference reads `MinAltReads` asks of it: not
+    /// assembled and **not counted**. A failure is ground the caller refused; this is
+    /// ground it judged empty, and conflating the two would make the failed count
+    /// unreadable (spec §4.3 for the threshold; §1.3 and §3.3 for why only a failure is
+    /// counted).
     TooQuiet,
     /// Assemble it (spec §4.2).
     Build,
 }
 
-/// Judge one closed locus — a pure function of its span, its non-reference total and the
-/// two parameters, so the order the two tests are applied in can be checked on its own.
+/// Judge one closed locus — a pure function of its span, whether any one sample reached
+/// the keep rule and the width bound, so the order the two tests are applied in can be
+/// checked on its own.
 ///
 /// A locus exactly `max_cohort_locus_span` bases wide is built: the bound is the widest
-/// the caller undertakes to build, not the first width it refuses (spec §4.1). A total
-/// exactly `min_alt_obs` is likewise built — the locus is kept when the reads *reach* the
-/// threshold (spec §4.3).
+/// the caller undertakes to build, not the first width it refuses (spec §4.1). A sample
+/// whose non-reference reads land exactly on what `MinAltReads` asks of it likewise
+/// builds — the locus is kept when the reads *reach* the threshold (spec §4.3), which is
+/// where `some_sample_reached_the_threshold` is decided.
 ///
 /// **The width test governs generic loci only** (spec §3.1, and the owner's 2026-08-17
 /// ruling). The two paths are not variations on one thing:
@@ -103,10 +109,9 @@ pub enum Verdict {
 /// chain with a generic stretch's. The walk asserts it rather than assuming it.
 fn judge(
     span: u64,
-    non_reference_reads: u32,
+    some_sample_reached_the_threshold: bool,
     kind: &LocusKind,
     max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
 ) -> Verdict {
     // Exhaustive on purpose: a new kind of locus should not silently inherit either
     // answer, so adding one is a compile error here until somebody decides.
@@ -117,7 +122,7 @@ fn judge(
 
     if bounded_by_policy && span > u64::from(max_cohort_locus_span.get()) {
         Verdict::Failed
-    } else if non_reference_reads < min_alt_obs.get() {
+    } else if !some_sample_reached_the_threshold {
         Verdict::TooQuiet
     } else {
         Verdict::Build
@@ -142,13 +147,18 @@ pub struct ClosedLocus<'a> {
     /// caller ever wants that back, the shape to reach for is internal iteration, and
     /// A4 and B1 are where a real caller decides.
     pub members: Vec<SampleMembers<'a>>,
-    /// Non-reference reads summed across every member — what the keep threshold is
-    /// compared against (spec §4.3). Summed as the walk passes each observation, so
-    /// nothing revisits the locus to compute it.
+    /// Non-reference reads summed across every member. Summed as the walk passes each
+    /// observation, so nothing revisits the locus to compute it.
     ///
-    /// Saturating, and it costs nothing: the only consumer compares the total against
-    /// `min_alt_obs`, so a total pinned at `u32::MAX` gives the same verdict as the true
-    /// one — and reaching the cap needs four billion non-reference reads in one locus.
+    /// **Not what the keep rule compares against, and it was until 2026-08-19.** The rule
+    /// asks each sample about its own reads and keeps the locus if any one of them
+    /// reaches the threshold (spec §4.3); this total is the locus's size in evidence,
+    /// which every probe in `examples/` reports and no decision reads. Two facts, so two
+    /// fields — [`verdict`](Self::verdict) is the decision.
+    ///
+    /// Saturating: reaching the cap needs four billion non-reference reads in one locus,
+    /// and nothing compares the total against a threshold that a pinned value could put
+    /// on the wrong side of.
     pub non_reference_reads: u32,
     /// What the caller undertakes to do with it, decided width first (see [`Verdict`]).
     ///
@@ -446,8 +456,23 @@ pub struct LocusCloser<'a> {
     /// The widest locus the caller undertakes to build. Read only to judge; closing is
     /// uncapped (spec §4.1).
     max_cohort_locus_span: MaxCohortLocusSpan,
-    /// The keep threshold, in non-reference reads summed across a locus.
-    min_alt_obs: MinAltObs,
+    /// The keep threshold, asked of each sample about its own reads.
+    min_alt_reads: MinAltReads,
+    /// Per sample, over the open locus: its non-reference reads, and the reads those were
+    /// drawn from. **Scratch, one pair per sample for the whole walk** — filled as the
+    /// walk passes each observation and returned to zero as the locus closes, so a locus
+    /// is never revisited to work out what any sample showed, and nothing is allocated
+    /// per locus.
+    ///
+    /// **Zero between loci is an invariant of the close, not of the open.** The reset
+    /// happens in the same scan that reads them, over exactly the samples that
+    /// contributed — which is the set the walk can name for free from its two cursor
+    /// arrays. Resetting the whole cohort instead would cost the sample count at every
+    /// locus, which at a record per covered base is the cohort size per genome position.
+    alt_reads_per_sample: Vec<u32>,
+    /// The denominator beside [`alt_reads_per_sample`](Self::alt_reads_per_sample), and
+    /// reset with it.
+    compared_reads_per_sample: Vec<u32>,
 }
 
 impl<'a> LocusCloser<'a> {
@@ -464,11 +489,11 @@ impl<'a> LocusCloser<'a> {
     /// Whatever it is handed, the walk terminates and consumes every observation exactly
     /// once.
     ///
-    /// **`max_cohort_locus_span` and `min_alt_obs` are read only to judge each closed
+    /// **`max_cohort_locus_span` and `min_alt_reads` are read only to judge each closed
     /// locus** (see [`Verdict`]); neither changes which observations group together, so
     /// this walk closes the same loci at any values of them. The first is the widest
-    /// locus the caller undertakes to build; the second is how many non-reference reads a
-    /// locus needs, summed across it, to be worth building.
+    /// locus the caller undertakes to build; the second is how much non-reference
+    /// evidence one sample must show for the locus to be worth building.
     ///
     /// Zero samples yields nothing rather than failing: refusing a zero-sample *run* is
     /// the caller's job and happens at construction (spec §7.2), and a walk over an
@@ -476,7 +501,7 @@ impl<'a> LocusCloser<'a> {
     pub fn over(
         observations_per_sample: &[&'a [SampleLocusObservations]],
         max_cohort_locus_span: MaxCohortLocusSpan,
-        min_alt_obs: MinAltObs,
+        min_alt_reads: MinAltReads,
     ) -> Self {
         let pending = PendingHeads::over(observations_per_sample.iter().map(|observations| {
             observations
@@ -486,10 +511,12 @@ impl<'a> LocusCloser<'a> {
         Self {
             cursors: vec![0; observations_per_sample.len()],
             cursors_at_open: vec![0; observations_per_sample.len()],
+            alt_reads_per_sample: vec![0; observations_per_sample.len()],
+            compared_reads_per_sample: vec![0; observations_per_sample.len()],
             observations_per_sample: observations_per_sample.to_vec(),
             pending,
             max_cohort_locus_span,
-            min_alt_obs,
+            min_alt_reads,
         }
     }
 
@@ -624,7 +651,16 @@ impl<'a> Iterator for LocusCloser<'a> {
                 head.kind,
             );
             reach = reach.max(head.reach());
-            non_reference_reads = non_reference_reads.saturating_add(head.non_reference_reads());
+            // **Each sample's two totals are kept apart, because the keep rule asks each
+            // sample about its own reads** (spec §4.3). Summing them into one cohort
+            // total and comparing that — the rule until 2026-08-19 — asks a question
+            // whose answer moves when a sample that carries nothing is added to the run.
+            let alt = head.non_reference_reads();
+            non_reference_reads = non_reference_reads.saturating_add(alt);
+            self.alt_reads_per_sample[sample] =
+                self.alt_reads_per_sample[sample].saturating_add(alt);
+            self.compared_reads_per_sample[sample] = self.compared_reads_per_sample[sample]
+                .saturating_add(head.reads_compared_with_reference());
             // A sample's first observation inside this locus is exactly the one taken
             // while its cursor still stands where the locus opened — so the member count
             // is exact and free, and the vector below is allocated once.
@@ -649,17 +685,30 @@ impl<'a> Iterator for LocusCloser<'a> {
             start.get()
         );
 
+        // **One scan over the cohort does three things**, because they need the same
+        // answer — which samples contributed — and that answer costs a comparison per
+        // sample: it collects the members, asks the keep rule of each contributor, and
+        // returns that contributor's scratch to zero for the next locus. Three scans
+        // would cost three times the cohort size at every locus, and at a record per
+        // covered base that is three times the cohort size per genome position.
         let mut members = Vec::with_capacity(covering_samples);
-        members.extend(
-            self.cursors_at_open
-                .iter()
-                .enumerate()
-                .filter(|&(sample, &from)| from < self.cursors[sample])
-                .map(|(sample, &from)| SampleMembers {
-                    sample,
-                    observations: &self.observations_per_sample[sample][from..self.cursors[sample]],
-                }),
-        );
+        let mut some_sample_reached_the_threshold = false;
+        for sample in 0..self.cursors_at_open.len() {
+            let from = self.cursors_at_open[sample];
+            let to = self.cursors[sample];
+            if from >= to {
+                continue;
+            }
+            // Taken rather than read, so the scratch is zero when the next locus opens
+            // and the invariant is discharged by the same line that consumes the value.
+            let alt = std::mem::take(&mut self.alt_reads_per_sample[sample]);
+            let compared = std::mem::take(&mut self.compared_reads_per_sample[sample]);
+            some_sample_reached_the_threshold |= self.min_alt_reads.reached_by(alt, compared);
+            members.push(SampleMembers {
+                sample,
+                observations: &self.observations_per_sample[sample][from..to],
+            });
+        }
 
         let region = GenomeRegion {
             contig,
@@ -672,10 +721,9 @@ impl<'a> Iterator for LocusCloser<'a> {
             non_reference_reads,
             verdict: judge(
                 span_of(region),
-                non_reference_reads,
+                some_sample_reached_the_threshold,
                 kind,
                 self.max_cohort_locus_span,
-                self.min_alt_obs,
             ),
         })
     }
@@ -683,6 +731,7 @@ impl<'a> Iterator for LocusCloser<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
     use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
     use crate::ng::types::Motif;
@@ -693,8 +742,14 @@ mod tests {
         MaxCohortLocusSpan(NonZeroU32::new(bases).expect("not zero"))
     }
 
-    fn keep_at(reads: u32) -> MinAltObs {
-        MinAltObs(NonZeroU32::new(reads).expect("not zero"))
+    /// A keep rule with `reads` as its floor and the default share — the shape almost
+    /// every test here wants, because at the read counts these fixtures carry the share
+    /// never reaches the floor and the floor is the whole rule.
+    fn keep_at(reads: u32) -> MinAltReads {
+        MinAltReads {
+            floor: MinAltObs(NonZeroU32::new(reads).expect("not zero")),
+            share: MinAltReadShare::DEFAULT,
+        }
     }
 
     fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
@@ -745,6 +800,32 @@ mod tests {
         }
     }
 
+    /// One sample's observation carrying **both** counts — `non_reference_reads` reads
+    /// of the alternative sequence and `reference_reads` of the reference one.
+    ///
+    /// The tests about the *share* need this and [`observation`] cannot serve them: an
+    /// observation with only non-reference reads has every read it compared differing
+    /// from the reference, so its share is 1 whatever the counts and no share below 1
+    /// could ever refuse it.
+    fn with_reference_reads(
+        region: GenomeRegion,
+        non_reference_reads: u32,
+        reference_reads: u32,
+    ) -> SampleLocusObservations {
+        let width = region.len().max(1) as usize;
+        SampleLocusObservations {
+            region,
+            reference_bases: vec![b'A'; width].into_boxed_slice(),
+            observations: vec![
+                sequence(&vec![b'C'; width], non_reference_reads),
+                sequence(&vec![b'A'; width], reference_reads),
+            ],
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
     /// An observation whose reads all matched the reference — `reference_reads` of them,
     /// and no non-reference reads at all.
     fn all_reference_observation(
@@ -775,7 +856,7 @@ mod tests {
     /// the keep threshold is production's default. The tests that are *about* the
     /// verdicts call [`LocusCloser::over`] with their own.
     fn walk<'a>(observations_per_sample: &[&'a [SampleLocusObservations]]) -> LocusCloser<'a> {
-        LocusCloser::over(observations_per_sample, unbounded(), MinAltObs::DEFAULT)
+        LocusCloser::over(observations_per_sample, unbounded(), MinAltReads::DEFAULT)
     }
 
     /// The spans of every locus the walk closes, in order — what most of these tests
@@ -902,17 +983,19 @@ mod tests {
         assert_eq!(closed[1].region, region_on(1, 10, 10));
     }
 
-    /// **Production's `over_approximation_is_max_not_sum`, inverted** — the divergence
-    /// spec §4.3 chose deliberately and spec §15 requires pinned.
+    /// **The keep rule asks one sample, not the cohort** — the fixture that separates
+    /// the two, and the one the owner's 2026-08-19 ruling turns on (spec §4.3).
     ///
-    /// Two samples, one non-reference read each, at the *same* position. Production sums
-    /// the per-position maximum across samples and answers 1, so at the default
-    /// `min_alt_obs` of 2 it drops the group; ng sums every sample's reads and answers 2,
-    /// so the locus reaches the threshold. The shared position is what makes this the
-    /// discriminating fixture: spread the same reads across different positions and the
-    /// two rules agree.
+    /// Two samples, one non-reference read each, at the same position. Their sum is 2 and
+    /// reaches the default floor; neither sample on its own does, so the locus is
+    /// **dropped**. Until 2026-08-19 ng summed and built it, which is what made the rule
+    /// weaken as samples were added: a cohort large enough will always find two stray
+    /// reads somewhere.
+    ///
+    /// The total is still reported, and this pins that the two are now different facts —
+    /// `non_reference_reads` says 2 and the verdict says quiet.
     #[test]
-    fn one_non_reference_read_in_each_of_two_samples_sums_to_two() {
+    fn one_non_reference_read_in_each_of_two_samples_does_not_reach_the_threshold() {
         let first = [observation(region(20, 20), 1)];
         let second = [observation(region(20, 20), 1)];
 
@@ -920,19 +1003,106 @@ mod tests {
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0].non_reference_reads, 2,
-            "production's maximum over these same two samples is 1"
+            "the total is still the sum"
+        );
+        assert_eq!(
+            closed[0].verdict,
+            Verdict::TooQuiet,
+            "no single sample reached two"
+        );
+    }
+
+    /// The same two reads in **one** sample do reach it — the other half of the fixture
+    /// above, and what stops the rule reading as "two samples are needed".
+    #[test]
+    fn two_non_reference_reads_in_one_sample_reach_the_threshold() {
+        let carrier = [observation(region(20, 20), 2)];
+        let quiet = [all_reference_observation(region(20, 20), 30)];
+
+        let closed: Vec<_> = walk(&[&carrier, &quiet]).collect();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+    }
+
+    /// **A sample's own reads are the denominator, so a deep cohort does not raise its
+    /// neighbours' bar.** Two samples at the same position: one carrier with 4
+    /// non-reference reads out of 20, and one sample with 400 reads that all matched.
+    ///
+    /// The carrier is asked for `max(2, 2% of 20)` — 2 — and clears it. Were the share
+    /// taken of the cohort's 420 reads the bar would be 9 and the locus would be dropped,
+    /// which is the failure mode the per-sample denominator exists to avoid: a rare
+    /// allele's evidence does not grow when a sample that does not carry it joins the run.
+    #[test]
+    fn a_deep_sample_does_not_raise_the_bar_for_the_carrier_beside_it() {
+        let carrier = [observation(region(20, 20), 4)];
+        let deep_and_quiet = [all_reference_observation(region(20, 20), 400)];
+
+        let closed: Vec<_> = walk(&[&carrier, &deep_and_quiet]).collect();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+    }
+
+    /// **At high depth the share decides and the floor is irrelevant.** One sample, 300
+    /// reads compared with the reference: 2 in 100 asks for 6, so 5 non-reference reads
+    /// is quiet where 6 builds. Under the floor alone both would build, and 5 reads in
+    /// 300 is the sequencing error rate rather than an allele.
+    #[test]
+    fn the_share_decides_once_depth_makes_it_the_larger() {
+        let five_of_three_hundred = [with_reference_reads(region(20, 20), 5, 295)];
+        let six_of_three_hundred = [with_reference_reads(region(20, 20), 6, 294)];
+
+        let quiet: Vec<_> = walk(&[&five_of_three_hundred]).collect();
+        let built: Vec<_> = walk(&[&six_of_three_hundred]).collect();
+
+        assert_eq!(quiet[0].verdict, Verdict::TooQuiet, "5 in 300 is under 2%");
+        assert_eq!(built[0].verdict, Verdict::Build, "6 in 300 reaches it");
+    }
+
+    /// **The share is taken over the whole locus, not one observation of it.** One
+    /// sample, two chained records: 3 non-reference reads out of 150 and 3 out of 150.
+    /// Each record alone is 2 in 100 exactly and would build; together they are 6 out of
+    /// 300, which is the same share and also builds — what this pins is that the totals
+    /// accumulate per sample across the locus rather than being judged record by record.
+    #[test]
+    fn a_samples_totals_accumulate_across_the_records_of_one_locus() {
+        let two_records = [
+            with_reference_reads(region(20, 24), 3, 147),
+            with_reference_reads(region(22, 26), 3, 147),
+        ];
+
+        let closed: Vec<_> = walk(&[&two_records]).collect();
+        assert_eq!(closed.len(), 1, "the two records chain into one locus");
+        assert_eq!(closed[0].verdict, Verdict::Build);
+    }
+
+    /// **The scratch a sample's totals accumulate in is empty when the next locus
+    /// opens.** Two loci far apart in one sample: 2 non-reference reads at the first and
+    /// 1 at the second. If the first locus's reads carried over, the second would be
+    /// judged on 3 and build; it must be dropped on its own single read.
+    #[test]
+    fn one_locuss_totals_do_not_carry_into_the_next() {
+        let sample = [
+            observation(region(20, 20), 2),
+            observation(region(40, 40), 1),
+        ];
+
+        let closed: Vec<_> = walk(&[&sample]).collect();
+        assert_eq!(closed.len(), 2);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+        assert_eq!(
+            closed[1].verdict,
+            Verdict::TooQuiet,
+            "judged on its own read"
         );
     }
 
     /// The non-reference total is summed across every member of the locus, over samples
-    /// and positions alike — the number A4's keep verdict is compared against.
+    /// and positions alike — the locus's size in evidence, which no verdict now reads.
     ///
     /// Three samples, 3 + 2 + 4 non-reference reads, and a fourth sample whose reads all
     /// matched the reference contributing none. Nine reference reads sit in that fourth
     /// sample, so an implementation summing `num_obs` rather than the non-reference part
-    /// answers 18 here. **It does not separate ng's rule from production's** — the three
-    /// non-reference observations sit at three different positions, where a per-position
-    /// maximum also sums to 9; the test above is the one that does.
+    /// answers 18 here.
     #[test]
     fn the_non_reference_total_is_summed_across_the_locus() {
         let wide = [observation(region(10, 20), 3)];
@@ -1032,7 +1202,7 @@ mod tests {
     }
 
     /// The locus is kept when its non-reference reads *reach* the threshold — so exactly
-    /// `min_alt_obs` builds, and one read short is too quiet.
+    /// `min_alt_reads` builds, and one read short is too quiet.
     #[test]
     fn a_locus_exactly_at_the_keep_threshold_is_built() {
         let two_reads = [observation(region(10, 10), 2)];
@@ -1267,23 +1437,23 @@ mod tests {
     fn the_verdict_is_decided_width_first() {
         let wide = 11;
         let narrow = 5;
-        let loud = 4;
-        let quiet = 0;
+        let loud = true;
+        let quiet = false;
 
         assert_eq!(
-            judge(narrow, loud, &LocusKind::Generic, max_span(10), keep_at(2)),
+            judge(narrow, loud, &LocusKind::Generic, max_span(10)),
             Verdict::Build
         );
         assert_eq!(
-            judge(narrow, quiet, &LocusKind::Generic, max_span(10), keep_at(2)),
+            judge(narrow, quiet, &LocusKind::Generic, max_span(10)),
             Verdict::TooQuiet
         );
         assert_eq!(
-            judge(wide, loud, &LocusKind::Generic, max_span(10), keep_at(2)),
+            judge(wide, loud, &LocusKind::Generic, max_span(10)),
             Verdict::Failed
         );
         assert_eq!(
-            judge(wide, quiet, &LocusKind::Generic, max_span(10), keep_at(2)),
+            judge(wide, quiet, &LocusKind::Generic, max_span(10)),
             Verdict::Failed,
             "qualifies for both: the width verdict is the one that stands"
         );
@@ -1329,7 +1499,7 @@ mod tests {
     /// The total saturates rather than wrapping. Toward the top of the committed cohort
     /// range a locus can carry more non-reference reads than a `u32` holds, and in the
     /// release profile — overflow checks off — a wrapped total would fall *below*
-    /// `min_alt_obs` and drop the deepest loci in the cohort, counting nothing.
+    /// `min_alt_reads` and drop the deepest loci in the cohort, counting nothing.
     #[test]
     fn the_non_reference_total_saturates_at_the_u32_ceiling() {
         let first = [observation(region(10, 10), u32::MAX)];
@@ -1663,16 +1833,19 @@ mod tests {
                 }
             }
 
-            let closed: Vec<(GenomeRegion, Vec<usize>)> =
-                LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT)
-                    .map(|locus| {
-                        let mut members = vec![0usize; samples];
-                        for held in &locus.members {
-                            members[held.sample] += held.observations.len();
-                        }
-                        (locus.region, members)
-                    })
-                    .collect();
+            let closed: Vec<(GenomeRegion, Vec<usize>)> = LocusCloser::over(
+                &per_sample,
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltReads::DEFAULT,
+            )
+            .map(|locus| {
+                let mut members = vec![0usize; samples];
+                for held in &locus.members {
+                    members[held.sample] += held.observations.len();
+                }
+                (locus.region, members)
+            })
+            .collect();
 
             assert_eq!(closed, expected, "seed {seed}");
 
@@ -1681,9 +1854,11 @@ mod tests {
             // wrong observations.
             let mut handed_back: Vec<Vec<*const SampleLocusObservations>> =
                 vec![Vec::new(); samples];
-            for locus in
-                LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT)
-            {
+            for locus in LocusCloser::over(
+                &per_sample,
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltReads::DEFAULT,
+            ) {
                 for held in &locus.members {
                     assert!(
                         !held.observations.is_empty(),
@@ -1728,7 +1903,7 @@ mod tests {
         let closer = LocusCloser::over(
             &[&first, &second, &third],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         let (named, _) = closer
@@ -1760,8 +1935,11 @@ mod tests {
             .collect();
         let per_sample: Vec<&[SampleLocusObservations]> =
             layouts.iter().map(Vec::as_slice).collect();
-        let mut closer =
-            LocusCloser::over(&per_sample, MaxCohortLocusSpan::DEFAULT, MinAltObs::DEFAULT);
+        let mut closer = LocusCloser::over(
+            &per_sample,
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltReads::DEFAULT,
+        );
 
         let mut consumed = 0usize;
         while let Some(locus) = closer.next() {

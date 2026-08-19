@@ -60,6 +60,7 @@ use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion};
+use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
 use pop_var_caller::ng::run::cohort_merge::observation_cache::{
     ObservationCache, building_regions_of,
 };
@@ -69,6 +70,7 @@ use pop_var_caller::ng::run::cohort_merge::serial::{
 };
 use pop_var_caller::ng::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
+    MinAltReadShare, MinAltReads,
 };
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
@@ -382,6 +384,67 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         record_bases as f64 / records as f64
     );
 
+    // **The keep rule, and the two knobs that sweep it** (`cohort_merge.md` §4.3).
+    // `NG_REAL_MIN_ALT=n` sets the floor and `NG_REAL_ALT_SHARE=f` the share, so what the
+    // built loci cost can be read off by raising either until nothing builds.
+    let min_alt_reads = MinAltReads {
+        floor: match std::env::var("NG_REAL_MIN_ALT").ok() {
+            Some(raw) => MinAltObs(
+                std::num::NonZeroU32::new(raw.parse().expect("NG_REAL_MIN_ALT is a number"))
+                    .expect("NG_REAL_MIN_ALT is non-zero"),
+            ),
+            None => MinAltObs::DEFAULT,
+        },
+        share: match std::env::var("NG_REAL_ALT_SHARE").ok() {
+            Some(raw) => MinAltReadShare::new(raw.parse().expect("NG_REAL_ALT_SHARE is a number"))
+                .expect("NG_REAL_ALT_SHARE is a fraction of one"),
+            None => MinAltReadShare::DEFAULT,
+        },
+    };
+
+    // **What the merge discards before assembling anything, and the depth the share is
+    // taken of.** The keep rule asks each sample about its own compared reads, so the
+    // mean below is the number that decides which half of the rule is doing the work:
+    // under about a hundred the floor decides, above it the share does.
+    {
+        let all: Vec<&[SampleLocusObservations]> = cohort.iter().map(Vec::as_slice).collect();
+        let (mut built, mut quiet, mut failed) = (0usize, 0usize, 0usize);
+        let (mut compared_total, mut contributing_members) = (0u64, 0u64);
+        for locus in LocusCloser::over(&all, MaxCohortLocusSpan::DEFAULT, min_alt_reads) {
+            match locus.verdict {
+                Verdict::Build => built += 1,
+                Verdict::TooQuiet => quiet += 1,
+                Verdict::Failed => failed += 1,
+            }
+            for member in &locus.members {
+                compared_total += member
+                    .observations
+                    .iter()
+                    .map(|obs| u64::from(obs.reads_compared_with_reference()))
+                    .sum::<u64>();
+                contributing_members += 1;
+            }
+        }
+        let closed = built + quiet + failed;
+        println!(
+            "# keep rule: floor {} reads or {:.1}% of a sample's compared reads",
+            min_alt_reads.floor.get(),
+            100.0 * min_alt_reads.share.get(),
+        );
+        println!("# cohort loci closed: {closed}");
+        println!(
+            "# of those built: {built}, too quiet: {quiet} ({:.1}%), failed on width: {failed}",
+            100.0 * quiet as f64 / closed.max(1) as f64
+        );
+        println!(
+            "# mean compared reads per sample at a closed locus: {:.1}, so the rule asks {} \
+             of a sample at that depth",
+            compared_total as f64 / contributing_members.max(1) as f64,
+            min_alt_reads.required_of(
+                (compared_total / contributing_members.max(1)).min(u64::from(u32::MAX)) as u32
+            ),
+        );
+    }
     println!("\nwidth_bases, regions_with_a_start, regions_without");
     for bases in WIDTHS {
         let width =
@@ -401,7 +464,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 &analysed,
                 &slices,
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                min_alt_reads,
             ));
         },
     );
@@ -420,7 +483,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                         &mut cache,
                         width,
                         MaxCohortLocusSpan::DEFAULT,
-                        MinAltObs::DEFAULT,
+                        min_alt_reads,
                     )
                     .expect("the probe's sources cannot fail"),
                 );
@@ -447,7 +510,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                                 width,
                                 in_flight,
                                 MaxCohortLocusSpan::DEFAULT,
-                                MinAltObs::DEFAULT,
+                                min_alt_reads,
                             )
                             .expect("the probe's sources cannot fail"),
                         );

@@ -11,7 +11,7 @@
 //! Design: `doc/devel/ng/spec/cohort_merge.md` (what and why),
 //! `doc/devel/ng/arch/cohort_merge.md` (types and contracts).
 //!
-//! **What has landed:** this file's four parameters; [`close`]'s walk and its two
+//! **What has landed:** this file's five parameters; [`close`]'s walk and its two
 //! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
 //! span, unified into one allele table, with each covering sample's support against it;
 //! [`organise`]'s observation cache — the window one builder is handed — the division of the
@@ -274,17 +274,17 @@ impl Default for MaxCohortLocusSpan {
 /// — can be made against records that already exist.
 pub const DEFAULT_MAX_COHORT_LOCUS_SPAN: u32 = 50;
 
-/// How many non-reference **reads** a cohort locus needs, summed across it, to be built
-/// at all (spec §4.3).
+/// The fewest non-reference **reads** one sample may show at a cohort locus and still
+/// have it built — the floor half of [`MinAltReads`] (spec §4.3).
 ///
 /// The `Obs` is production's word for a read's allele observation, and **not** this
 /// module's `observation`, which is one sample's whole record over a stretch of genome
 /// (spec §1.3). One observation can carry many of these reads.
 ///
-/// Below the threshold the locus is **dropped**: nothing is assembled, nothing is
-/// emitted, and — unlike a locus that failed [`MaxCohortLocusSpan`] — nothing is
-/// counted. A failure is ground the caller refused; this is ground it judged empty, and
-/// conflating the two would stop the failed count meaning anything.
+/// Below the threshold in *every* sample the locus is **dropped**: nothing is assembled,
+/// nothing is emitted, and — unlike a locus that failed [`MaxCohortLocusSpan`] — nothing
+/// is counted. A failure is ground the caller refused; this is ground it judged empty,
+/// and conflating the two would stop the failed count meaning anything.
 ///
 /// **A command-line parameter**, default [`DEFAULT_MIN_ALT_OBS`], and the reason it
 /// exists is measured rather than aesthetic: in production, under production's rule
@@ -311,19 +311,18 @@ impl Default for MinAltObs {
     }
 }
 
-/// 2 reads — production's number, over a rule that is not production's.
+/// 2 reads — production's number, over a rule that is now production's shape.
 ///
-/// **The rule differs, so the number does not mean quite the same thing.** Production
-/// sums, across a group's positions, the *maximum over samples* of that sample's
-/// non-reference observations (`max_nonref_obs`, `cohort_integration.rs:64-78`, summed
-/// in `derive_is_kept`); ng sums every sample's non-reference reads, which spec §4.3
-/// chose deliberately and spec §15 pins with a test inverting production's. A maximum
-/// is never larger than a sum, so at the same threshold ng keeps everything production
-/// keeps and more: identically at one sample, and by a widening margin as the cohort
-/// grows — at 63 samples, one non-reference read in each of two samples at one position
-/// reaches ng's 2 and never reaches production's. The performance claim above was
-/// measured under production's rule, so it is inherited evidence rather than evidence
-/// about ng.
+/// **ng asks the same question production asks, and asks it of a share as well.**
+/// Production takes, across a group's positions, the *maximum over samples* of that
+/// sample's non-reference observations (`max_nonref_obs`,
+/// `cohort_integration.rs:64-78`, summed in `derive_is_kept`) — a per-sample test. ng
+/// summed every sample's non-reference reads instead until 2026-08-19, and the owner
+/// retired that rule when it was measured: because the bar was a fixed count and the sum
+/// grows with the cohort, it stopped filtering as samples were added. Over one 100 kb
+/// tomato interval it discarded 997 loci in 1,000 at one accession and only 439 in 1,000
+/// at 63, where the merge then assembled a cohort observation at 546 positions per
+/// kilobase.
 ///
 /// The value is copied and the name is not. Production spells it
 /// [`DEFAULT_MIN_ALT_OBS_PER_SAMPLE`], the default of `--min-alt-obs-per-sample`, and
@@ -334,6 +333,123 @@ impl Default for MinAltObs {
 ///
 /// [`DEFAULT_MIN_ALT_OBS_PER_SAMPLE`]: crate::var_calling::DEFAULT_MIN_ALT_OBS_PER_SAMPLE
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
+
+/// What share of one sample's compared reads must be non-reference — the share half of
+/// [`MinAltReads`] (spec §4.3).
+///
+/// A fraction of 1, not a percentage: 0.02 is two reads in a hundred.
+///
+/// **The denominator is the sample's own reads, and that is the whole design.** A share
+/// taken of the *cohort's* reads would grow its bar as samples are added while a rare
+/// allele's evidence stays where it is — one carrier's handful of reads — so a large
+/// study could not call the rare variation it was run to find (spec §4.3, and the
+/// derivation there).
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct MinAltReadShare(f64);
+
+impl MinAltReadShare {
+    /// The default share, [`DEFAULT_MIN_ALT_READ_SHARE`].
+    pub const DEFAULT: Self = Self(DEFAULT_MIN_ALT_READ_SHARE);
+
+    /// The share, or `None` if it is not a fraction of 1 — negative, above one, or not a
+    /// number. Rejecting rather than clamping: a mistyped share is a run that quietly
+    /// keeps everything or nothing, and neither is visible in the output.
+    pub fn new(share: f64) -> Option<Self> {
+        (share.is_finite() && (0.0..=1.0).contains(&share)).then_some(Self(share))
+    }
+
+    /// The share, as a fraction of 1.
+    #[inline]
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for MinAltReadShare {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// 2 reads in a hundred — the owner's number, chosen against two measurements a
+/// hundredfold apart in depth and not yet against a truth set.
+///
+/// **It is the half of the rule that only high depth can exercise.** At the tomato
+/// panel's 11 reads a sample at a locus, two in a hundred asks for 0.22 reads and
+/// [`MinAltObs`]'s floor of 2 decides everything — the share changed 12,034 kept loci to
+/// 12,033. At the GIAB trio's 313 reads a sample it asks for 7, and there it does all
+/// the work: 53,796 kept loci become 2,721 over 136 kb. A true heterozygote at that
+/// depth shows about 156 non-reference reads, so the bar sits a factor of 20 below what
+/// a real carrier produces.
+pub const DEFAULT_MIN_ALT_READ_SHARE: f64 = 0.02;
+
+/// **How much non-reference evidence one sample must show before the cohort builds a
+/// locus** — the merge's keep rule, and the two numbers it is made of (spec §4.3).
+///
+/// A locus is built when **some single sample** shows at least
+/// [`required_of`](Self::required_of) its compared reads as non-reference. Not the sum
+/// across the cohort: a real variant concentrates its evidence in the samples that carry
+/// it, so asking one sample is what tracks a carrier, and it is the only form of the
+/// question whose answer does not drift as samples are added.
+///
+/// The two numbers answer the two ends of the depth axis, which is why neither alone
+/// would do:
+///
+/// - the **floor** ([`MinAltObs`], 2 reads) is what decides at low coverage, where a
+///   share of three reads rounds to nothing;
+/// - the **share** ([`MinAltReadShare`], 2 in 100) is what decides at high coverage,
+///   where two reads out of 300 is the error rate rather than an allele.
+///
+/// At one sample the rule is exactly what the cohort-sum rule it replaced was, because a
+/// sum over one sample is that sample's own count.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug, Default)]
+pub struct MinAltReads {
+    /// The fewest non-reference reads that can ever suffice, whatever the depth.
+    pub floor: MinAltObs,
+    /// The share of a sample's compared reads asked for once depth makes it the larger.
+    pub share: MinAltReadShare,
+}
+
+impl MinAltReads {
+    /// The default rule: [`MinAltObs::DEFAULT`] reads or [`MinAltReadShare::DEFAULT`] of
+    /// the sample's own, whichever is more.
+    pub const DEFAULT: Self = Self {
+        floor: MinAltObs::DEFAULT,
+        share: MinAltReadShare::DEFAULT,
+    };
+
+    /// How many non-reference reads a sample that compared `reads_compared_with_reference`
+    /// against the reference must show — the floor, or the share of those reads rounded
+    /// **up**, whichever is larger.
+    ///
+    /// Rounded up because rounding down would let the share ask for less than it says: at
+    /// 200 reads and a share of 2 in 100, 4 reads is the bar and 3 is not.
+    ///
+    /// The cast cannot go wrong at either end. The product is finite and never negative,
+    /// so a share of 1 at the largest possible read count lands exactly on `u32::MAX`;
+    /// anything past that saturates rather than wrapping, which is Rust's rule for
+    /// float-to-integer casts since 1.45.
+    #[inline]
+    pub fn required_of(self, reads_compared_with_reference: u32) -> u32 {
+        let asked = (self.share.get() * f64::from(reads_compared_with_reference)).ceil();
+        self.floor.get().max(asked as u32)
+    }
+
+    /// Whether one sample that showed `non_reference_reads` out of
+    /// `reads_compared_with_reference` reaches the rule — the question the merge asks of
+    /// every contributing sample at every locus.
+    ///
+    /// **The floor is tested first because it is the cheap half and it cannot be
+    /// skipped.** [`required_of`](Self::required_of) is never below the floor, so a
+    /// sample under the floor fails whatever its depth — and answering it by integer
+    /// comparison keeps the multiply off the path taken at almost every position, where
+    /// the sample showed no non-reference read at all.
+    #[inline]
+    pub fn reached_by(self, non_reference_reads: u32, reads_compared_with_reference: u32) -> bool {
+        non_reference_reads >= self.floor.get()
+            && non_reference_reads >= self.required_of(reads_compared_with_reference)
+    }
+}
 
 /// How many reference bases one builder's region covers (spec §6.1).
 ///
@@ -486,11 +602,105 @@ mod tests {
     fn the_defaults_are_the_documented_values() {
         assert_eq!(DEFAULT_MAX_COHORT_LOCUS_SPAN, 50);
         assert_eq!(DEFAULT_MIN_ALT_OBS, 2);
+        assert_eq!(DEFAULT_MIN_ALT_READ_SHARE, 0.02);
         assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 200);
 
         assert_eq!(MaxCohortLocusSpan::default().get(), 50);
         assert_eq!(MinAltObs::default().get(), 2);
+        assert_eq!(MinAltReadShare::default().get(), 0.02);
         assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 200);
+
+        assert_eq!(MinAltReads::default(), MinAltReads::DEFAULT);
+        assert_eq!(MinAltReads::DEFAULT.floor.get(), 2);
+        assert_eq!(MinAltReads::DEFAULT.share.get(), 0.02);
+    }
+
+    /// **The two halves of the keep rule, each at the depth where it decides.** The
+    /// crossing point is where the share first exceeds the floor, and it is the number
+    /// this rule's behaviour hinges on: below it every sample is asked for the floor, and
+    /// above it the bar climbs with the sample's own depth.
+    #[test]
+    fn the_floor_decides_at_low_depth_and_the_share_at_high() {
+        let rule = MinAltReads::DEFAULT;
+
+        // At and below 100 reads, 2% asks for no more than the floor of 2.
+        assert_eq!(
+            rule.required_of(0),
+            2,
+            "no reads at all still asks the floor"
+        );
+        assert_eq!(rule.required_of(3), 2, "2% of 3 rounds up to 1");
+        assert_eq!(rule.required_of(100), 2, "2% of 100 is exactly the floor");
+
+        // Above it the share takes over, and it rounds up rather than down: 2% of 150 is
+        // 3 exactly, and 2% of 151 is 3.02, which asks for 4.
+        assert_eq!(
+            rule.required_of(101),
+            3,
+            "the first depth the share decides"
+        );
+        assert_eq!(rule.required_of(150), 3);
+        assert_eq!(rule.required_of(151), 4, "rounded up, not down");
+        assert_eq!(rule.required_of(313), 7, "the GIAB trio's depth a sample");
+    }
+
+    /// `reached_by` is `required_of` with the comparison folded in — pinned separately
+    /// because it carries a short-circuit on the floor, and a short-circuit that answered
+    /// differently from the arithmetic it is skipping would be invisible in the merge's
+    /// output.
+    #[test]
+    fn reaching_the_rule_agrees_with_what_it_asks_for() {
+        let rule = MinAltReads::DEFAULT;
+
+        for compared in [0u32, 1, 3, 50, 100, 101, 150, 313, 1_000] {
+            for alt in 0..=12u32 {
+                assert_eq!(
+                    rule.reached_by(alt, compared),
+                    alt >= rule.required_of(compared),
+                    "{alt} non-reference of {compared} compared"
+                );
+            }
+        }
+    }
+
+    /// A share is a fraction of one, and anything else is refused rather than clamped —
+    /// a run that silently kept everything or nothing would look like a run that found
+    /// everything or nothing.
+    #[test]
+    fn a_share_outside_a_fraction_of_one_is_refused() {
+        assert_eq!(
+            MinAltReadShare::new(0.0).map(MinAltReadShare::get),
+            Some(0.0)
+        );
+        assert_eq!(
+            MinAltReadShare::new(1.0).map(MinAltReadShare::get),
+            Some(1.0)
+        );
+        assert_eq!(
+            MinAltReadShare::new(0.02).map(MinAltReadShare::get),
+            Some(0.02)
+        );
+
+        assert!(MinAltReadShare::new(-0.01).is_none(), "below zero");
+        assert!(MinAltReadShare::new(1.01).is_none(), "above one");
+        assert!(MinAltReadShare::new(f64::NAN).is_none(), "not a number");
+        assert!(MinAltReadShare::new(f64::INFINITY).is_none(), "not finite");
+    }
+
+    /// **A share of one at the largest read count lands on `u32::MAX` and does not
+    /// wrap.** The cast in `required_of` is the only arithmetic in this module that could
+    /// answer a number smaller than the truth, and a keep rule that asked for *less* at
+    /// the extreme would build every locus in a run that had asked for none.
+    #[test]
+    fn the_share_at_its_extreme_saturates_rather_than_wrapping() {
+        let everything = MinAltReads {
+            floor: MinAltObs::DEFAULT,
+            share: MinAltReadShare::new(1.0).expect("a fraction of one"),
+        };
+
+        assert_eq!(everything.required_of(u32::MAX), u32::MAX);
+        assert!(!everything.reached_by(u32::MAX - 1, u32::MAX));
+        assert!(everything.reached_by(u32::MAX, u32::MAX));
     }
 
     /// The fourth parameter's default is a rule rather than a number, so the rule is what is

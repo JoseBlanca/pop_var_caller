@@ -22,7 +22,8 @@
 use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{ObservationCache, building_regions_of};
 use super::{
-    CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs, refuse_malformed_analysed_regions,
+    CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
+    refuse_malformed_analysed_regions,
 };
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion};
@@ -64,7 +65,7 @@ pub fn merge_cohort_serially(
     analysed: &[GenomeRegion],
     observations_per_sample: &[&[SampleLocusObservations]],
     max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
+    min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
     let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
@@ -74,7 +75,7 @@ pub fn merge_cohort_serially(
             *region,
             observations_per_sample,
             max_cohort_locus_span,
-            min_alt_obs,
+            min_alt_reads,
         );
         merged
             .cohort_observations
@@ -146,7 +147,7 @@ pub fn merge_cohort_through_cache<S, E>(
     cache: &mut ObservationCache<S>,
     cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
+    min_alt_reads: MinAltReads,
 ) -> Result<RegionOutcome, E>
 where
     S: Iterator<Item = Result<SampleLocusObservations, E>>,
@@ -168,7 +169,7 @@ where
                     building_region,
                     observations_per_sample,
                     max_cohort_locus_span,
-                    min_alt_obs,
+                    min_alt_reads,
                 )
             });
             merged
@@ -189,6 +190,7 @@ mod tests {
     };
     use super::super::organise::{Organiser, RegionIndex};
     use super::super::parallel::merge_cohort_in_parallel;
+    use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
     use crate::ng::locus_generation::SequenceObservation;
     use crate::ng::types::{ContigId, Position};
@@ -208,7 +210,7 @@ mod tests {
             &analysed,
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -235,7 +237,7 @@ mod tests {
             &analysed,
             &[&first, &second],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -278,7 +280,7 @@ mod tests {
             &analysed,
             &[&wide, &quiet],
             MaxCohortLocusSpan(std::num::NonZeroU32::new(20).expect("20 is non-zero")),
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert!(merged.cohort_observations.is_empty());
@@ -475,7 +477,7 @@ mod tests {
             &[analysed],
             &[&first, &second],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(merged.cohort_observations.len(), 1, "one locus, not two");
@@ -588,7 +590,7 @@ mod tests {
                 &analysed,
                 &[&sample],
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
             .cohort_observations
             .iter()
@@ -619,7 +621,7 @@ mod tests {
             &[region(1, 60), region(40, 100)],
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -635,7 +637,7 @@ mod tests {
             &[region(61, 100), region(1, 60)],
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -650,13 +652,16 @@ mod tests {
             &analysed,
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
         let too_quiet = merge_cohort_serially(
             &analysed,
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+            MinAltReads {
+                floor: MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+                share: MinAltReadShare::DEFAULT,
+            },
         );
 
         assert_eq!(built.cohort_observations.len(), 1, "three reads reach two");
@@ -701,10 +706,13 @@ mod tests {
                 std::num::NonZeroU32::new(5 + u32::try_from(draw.next(60)).expect("small"))
                     .expect("at least five"),
             );
-            let keep = MinAltObs(
-                std::num::NonZeroU32::new(1 + u32::try_from(draw.next(4)).expect("small"))
-                    .expect("at least one"),
-            );
+            let keep = MinAltReads {
+                floor: MinAltObs(
+                    std::num::NonZeroU32::new(1 + u32::try_from(draw.next(4)).expect("small"))
+                        .expect("at least one"),
+                ),
+                share: MinAltReadShare::DEFAULT,
+            };
 
             // Every reference base is `A`: two members of one locus that disagree on the
             // reference are refused by `build_region`, in both drivers alike.
@@ -791,7 +799,7 @@ mod tests {
             &[],
             &[&sample],
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert!(merged.cohort_observations.is_empty() && merged.failed_locus_spans.is_empty());
@@ -824,10 +832,10 @@ mod tests {
         per_sample: &[&[SampleLocusObservations]],
         building_region_width: CohortLocusBuilderRegionsLen,
         max_cohort_locus_span: MaxCohortLocusSpan,
-        min_alt_obs: MinAltObs,
+        min_alt_reads: MinAltReads,
     ) -> RegionOutcome {
         let oracle =
-            merge_cohort_serially(analysed, per_sample, max_cohort_locus_span, min_alt_obs);
+            merge_cohort_serially(analysed, per_sample, max_cohort_locus_span, min_alt_reads);
         let mut cache =
             ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
         let through_cache = merge_cohort_through_cache(
@@ -835,7 +843,7 @@ mod tests {
             &mut cache,
             building_region_width,
             max_cohort_locus_span,
-            min_alt_obs,
+            min_alt_reads,
         )
         .expect("the fixture sources hold");
 
@@ -853,14 +861,14 @@ mod tests {
             per_sample,
             building_region_width,
             max_cohort_locus_span,
-            min_alt_obs,
+            min_alt_reads,
         );
         refuse_a_parallel_difference(
             analysed,
             per_sample,
             building_region_width,
             max_cohort_locus_span,
-            min_alt_obs,
+            min_alt_reads,
             &oracle,
         );
         if let Some(first) = from_oracle
@@ -906,7 +914,7 @@ mod tests {
         per_sample: &[&[SampleLocusObservations]],
         building_region_width: CohortLocusBuilderRegionsLen,
         max_cohort_locus_span: MaxCohortLocusSpan,
-        min_alt_obs: MinAltObs,
+        min_alt_reads: MinAltReads,
         oracle: &RegionOutcome,
     ) {
         for regions in [1, 4, 16] {
@@ -918,7 +926,7 @@ mod tests {
                 building_region_width,
                 in_flight(regions),
                 max_cohort_locus_span,
-                min_alt_obs,
+                min_alt_reads,
             )
             .expect("the fixture sources hold");
             refuse_any_difference(
@@ -962,7 +970,7 @@ mod tests {
         per_sample: &[&[SampleLocusObservations]],
         building_region_width: CohortLocusBuilderRegionsLen,
         max_cohort_locus_span: MaxCohortLocusSpan,
-        min_alt_obs: MinAltObs,
+        min_alt_reads: MinAltReads,
     ) {
         let mut cache =
             ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
@@ -983,7 +991,7 @@ mod tests {
                         building_region,
                         observations_per_sample,
                         max_cohort_locus_span,
-                        min_alt_obs,
+                        min_alt_reads,
                     )
                 });
                 organiser.submit(RegionIndex(next_index), outcome);
@@ -1151,7 +1159,7 @@ mod tests {
                 &per_sample,
                 width(bases),
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             );
             assert_eq!(
                 merged.cohort_observations.len(),
@@ -1181,7 +1189,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("the fixture sources hold");
 
@@ -1210,7 +1218,7 @@ mod tests {
             &[&deleting, &inside],
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -1230,7 +1238,7 @@ mod tests {
             &[&sample],
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -1267,7 +1275,7 @@ mod tests {
             &[&wide, &quiet],
             width(7),
             bound,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -1300,7 +1308,7 @@ mod tests {
             &[&first, &second],
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -1351,7 +1359,7 @@ mod tests {
             &[&first, &second],
             width(4),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert_eq!(
@@ -1391,7 +1399,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         // `RegionOutcome` has no `PartialEq` — deliberately, since every comparison of one is
@@ -1415,7 +1423,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -1449,7 +1457,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
 
@@ -1489,7 +1497,7 @@ mod tests {
                 &mut cache,
                 width(bases),
                 MaxCohortLocusSpan::DEFAULT,
-                MinAltObs::DEFAULT,
+                MinAltReads::DEFAULT,
             )
             .expect("the fixture source holds");
             cache.held_observations_len()
@@ -1527,7 +1535,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
 
         assert!(outcome.is_err());
@@ -1559,7 +1567,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -1578,7 +1586,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         );
     }
 
@@ -1594,7 +1602,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("nothing can fail");
 
@@ -1616,7 +1624,7 @@ mod tests {
             &mut cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("nothing can fail");
 
@@ -1635,7 +1643,7 @@ mod tests {
             &mut built_cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs::DEFAULT,
+            MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
         let mut quiet_cache = ObservationCache::over(vec![source_of(&sample)]);
@@ -1644,7 +1652,10 @@ mod tests {
             &mut quiet_cache,
             width(20),
             MaxCohortLocusSpan::DEFAULT,
-            MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+            MinAltReads {
+                floor: MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+                share: MinAltReadShare::DEFAULT,
+            },
         )
         .expect("the fixture source holds");
 

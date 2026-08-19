@@ -1309,7 +1309,7 @@ mod tests {
     #[test]
     fn a_builder_fed_from_the_cache_closes_the_loci_a_whole_stretch_would() {
         use super::super::build::build_region;
-        use super::super::{MaxCohortLocusSpan, MinAltObs};
+        use super::super::{MaxCohortLocusSpan, MinAltReads};
 
         /// A seeded linear congruential generator — no dependency, and the seed is in the
         /// failure message.
@@ -1325,7 +1325,7 @@ mod tests {
         }
 
         let max_span = MaxCohortLocusSpan::DEFAULT;
-        let keep = MinAltObs::DEFAULT;
+        let keep = MinAltReads::DEFAULT;
         let ground_end = 400u64;
         let mut disagreements = Vec::new();
 

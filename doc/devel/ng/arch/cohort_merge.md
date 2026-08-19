@@ -19,7 +19,7 @@ Everything here is crate-private machinery inside the two caller objects
 
 ```
 src/ng/run/cohort_merge/
-├── mod.rs               – the four run parameters, the shared analysed-region guard,
+├── mod.rs               – the five run parameters, the shared analysed-region guard,
 │                          the module's test fixtures
 ├── close.rs             – LocusCloser: the reach walk that closes loci and judges them,
 │                          the two per-locus verdicts
@@ -59,12 +59,14 @@ nothing here re-argues one.
    forward reader along. This is the module's memory, which is why the regions are short and the
    builders stay close together (spec §6.4).
 3. **A builder takes one region and walks the samples' observations merged by position** (spec
-   §4.1). It keeps three running values: where the open locus starts, how far it reaches, and its
-   non-reference read total. Each observation extends the reach if it goes further; when the next
-   one starts beyond the reach, the locus closes.
+   §4.1). It keeps where the open locus starts, how far it reaches, and — **per sample** — that
+   sample's non-reference reads and the reads they were compared against. Each observation
+   extends the reach if it goes further; when the next one starts beyond the reach, the locus
+   closes.
 4. **It judges each closed locus, width first.** Wider than `max_cohort_locus_span` → failed:
    not assembled, counted, and its ground still displaces overlapping loci (spec §3.2). Otherwise
-   under `min_alt_obs` → dropped, not counted, ground judged empty (spec §4.3). Otherwise built.
+   no single sample reaching `min_alt_reads` → dropped, not counted, ground judged empty (spec
+   §4.3). Otherwise built.
 5. **It assembles the survivors** — every sample's observations projected onto the locus span and
    identical projections unified into one allele table, each sample's support expressed against it
    (spec §4.2).
@@ -90,7 +92,7 @@ it; each row says what carries over and what does not.
 | projecting each sample's alleles onto the group span and unifying them | `PerGroupMerger` [`per_group_merger.rs:585`](../../../../src/var_calling/per_group_merger.rs), module doc [`:1-20`](../../../../src/var_calling/per_group_merger.rs) | step 5 is this, minus the likelihoods it also computes — here the builder emits evidence only |
 | the k-way merge across samples | `PerPositionMerger` [`per_position_merger.rs:145`](../../../../src/var_calling/per_position_merger.rs) | **upstream of this module**, and what makes step 3 a single pass ([`run_streaming.md`](run_streaming.md) §3.2) |
 | emitting out-of-order results in genome order | `VcfWriter`'s reorder map [`vcf_writer.rs:162-176`](../../../../src/var_calling/vcf_writer.rs), gap guard [`:152-158`](../../../../src/var_calling/vcf_writer.rs) | step 8's structure, carried whole |
-| the keep threshold | `min_alt_obs` in `derive_is_kept`, default 2 [`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs) | step 4's second verdict, carried with its default |
+| the keep threshold | `max_nonref_obs` per sample in `derive_is_kept`, default 2 [`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs) | step 4's second verdict, per sample as production's is, with a share added for depth |
 | cutting work at gaps no group can span | `merge_block_ranges` [`cohort_integration.rs:403-430`](../../../../src/var_calling/cohort_integration.rs) | **not carried** — this design overlaps and resolves instead (spec §5) |
 | the staged producer/caller pipeline | [`pipeline.rs:1-30`](../../../../src/var_calling/pipeline.rs) | **not carried** — production's fold is serial on one thread; here it is what parallelises |
 | deferring the expensive columns until the keep decision | `TwoPhaseSegment` [`sample_reader.rs:698`](../../../../src/var_calling/sample_reader.rs), `set_variable_rows` [`:789`](../../../../src/var_calling/sample_reader.rs) | the psp path only; the direct path defers nothing (§2) |
@@ -98,8 +100,9 @@ it; each row says what carries over and what does not.
 ## 1. The constants (`mod.rs`)
 
 Two of them are spans with different jobs and are separate types so they cannot be swapped
-(spec §11). The third is the keep threshold. **The fourth was added by milestone E** and is
-described at the end of this section.
+(spec §11). The third and fourth are the two halves of the keep rule, bundled into one value so
+that no call site can pass a floor and a share that were not chosen together. **The fifth was
+added by milestone E** and is described at the end of this section.
 
 ```rust
 /// The policy bound: the widest cohort locus the caller undertakes to build, in reference
@@ -113,18 +116,44 @@ described at the end of this section.
 /// values are otherwise indistinguishable (spec §3.1, §3.3).
 pub struct MaxCohortLocusSpan(pub NonZeroU32);
 
-/// How many non-reference reads a cohort locus needs, summed across it, to be built at all
-/// (spec §4.3). Below it the locus is dropped: not assembled, not emitted, and **not counted**
-/// as a failure — a failure is ground the caller refused, and this is ground it judged empty.
+/// **How much non-reference evidence one sample must show for the cohort to build a locus**
+/// (spec §4.3). A locus no single sample reaches is dropped: not assembled, not emitted, and
+/// **not counted** as a failure — a failure is ground the caller refused, and this is ground it
+/// judged empty.
 ///
-/// **A command-line parameter**, and the reason it exists is measured rather than aesthetic:
-/// in production it removes a large number of very low-quality variants and improves
-/// performance substantially. Its cost is that a variant seen once in one sample is
+/// Two numbers, for the two ends of the depth axis: the floor decides at low coverage, where a
+/// share of three reads rounds to nothing, and the share decides at high coverage, where two
+/// reads out of three hundred is the error rate rather than an allele. Asked of the sample's own
+/// reads, never the cohort's — a share of the cohort's would raise its bar as samples are added
+/// while a rare allele's evidence stays where it is (spec §4.3).
+pub struct MinAltReads {
+    pub floor: MinAltObs,
+    pub share: MinAltReadShare,
+}
+
+impl MinAltReads {
+    /// The floor, or the share of `reads_compared_with_reference` rounded up, whichever is more.
+    pub fn required_of(self, reads_compared_with_reference: u32) -> u32;
+    /// Whether one sample's counts reach it — `required_of` with the comparison folded in.
+    pub fn reached_by(self, non_reference_reads: u32, reads_compared_with_reference: u32) -> bool;
+}
+
+/// The floor half. **A command-line parameter**, and the reason it exists is measured rather
+/// than aesthetic: in production it removes a large number of very low-quality variants and
+/// improves performance substantially. Its cost is that a variant no sample showed twice is
 /// unrecoverable.
 pub struct MinAltObs(pub NonZeroU32);
 
+/// The share half, as a fraction of one. **A command-line parameter.** Constructed through a
+/// checked `new`, which refuses anything that is not a fraction of one rather than clamping.
+pub struct MinAltReadShare(f64);
+
 /// Production's default, carried over ([`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)).
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
+
+/// Two reads in a hundred — the owner's number (spec §4.3), chosen against loci-kept counts on
+/// two benchmarks a hundredfold apart in depth and not yet against a truth set.
+pub const DEFAULT_MIN_ALT_READ_SHARE: f64 = 0.02;
 
 /// How many reference bases one builder's region covers (spec §6.1). **A command-line
 /// parameter, default 200** (raised from 20 on 2026-08-18, spec §14 question 1). It is not
@@ -272,7 +301,8 @@ pub enum Verdict {
     /// Wider than `max_cohort_locus_span`: not assembled, counted, and its span still
     /// displaces overlapping loci (spec §3.2, §6.1).
     Failed,
-    /// Under `min_alt_obs`: not assembled, not counted — ground judged empty, not refused.
+    /// No single sample reached `min_alt_reads`: not assembled, not counted — ground judged
+    /// empty, not refused.
     TooQuiet,
     /// Assemble it (§4).
     Build,
@@ -325,7 +355,7 @@ pub fn build_region(
     region: &GenomeRegion,
     cache: &ObservationCache,
     bound: MaxCohortLocusSpan,
-    min_alt_obs: MinAltObs,
+    min_alt_reads: MinAltReads,
 ) -> RegionOutcome;
 
 /// What one region delivers to the organiser — exactly one per region, even when every field

@@ -98,10 +98,14 @@ Nothing here needs a cache, an organiser, or a thread. Every test fabricates obs
 `CohortLocusBuilderRegionsLen`, each a `NonZeroU32` newtype, with `DEFAULT_MAX_COHORT_LOCUS_SPAN`
 = 50, `DEFAULT_MIN_ALT_OBS` = 2, `DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN` = 200 (20 when
 this step was written; raised on 2026-08-18, spec §14 question 1).
+**Amended 2026-08-19:** `MinAltObs` is now the floor half of `MinAltReads`, which pairs it with
+`MinAltReadShare` (`DEFAULT_MIN_ALT_READ_SHARE` = 0.02) and is what the merge threads — the keep
+rule became per sample with a depth-relative bar (spec §4.3).
 *Depends:* —. *Source:* [arch](../arch/cohort_merge.md) §1.
 
 ✅ **A2 — the two derivations, on the observation types.** `SequenceObservation::matches_reference`,
-`SampleLocusObservations::reach` and `::non_reference_reads`; then move
+`SampleLocusObservations::reach` and `::non_reference_reads` — joined on 2026-08-19 by
+`::reads_compared_with_reference`, the denominator the keep rule takes its share of; then move
 `CensusWriter::add_generic` onto the predicate. **The census's existing tests must stay green** —
 that is what says the move changed nothing.
 *Depends:* —. *Source:* [arch](../arch/cohort_merge.md) §2.
@@ -117,6 +121,9 @@ second pass.
 order. **Own commit, do not bundle.** The order is the silent part: a reference-only chain wider
 than `max_cohort_locus_span` must count as failed, not vanish as too quiet, or the count stops
 meaning "ground the caller refused". Assert both verdicts on a locus that qualifies for both.
+**Amended 2026-08-19:** `TooQuiet` now means no *single sample* reached `MinAltReads`, where it
+meant the cohort's sum was under `MinAltObs` — the walk accumulates each sample's two totals
+apart from the others' and resets them in the scan that reads them (spec §4.3).
 *Depends:* A3. *Source:* [spec](../spec/cohort_merge.md) §3.2, §4.3.
 
 > **Checkpoint A:** loci close correctly and are judged correctly, on fabricated observations, with
