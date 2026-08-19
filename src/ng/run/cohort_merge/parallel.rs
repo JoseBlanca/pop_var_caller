@@ -158,7 +158,7 @@ where
                 .last()
                 .copied()
                 .expect("the round is not empty");
-            cache.cover(GenomeRegion {
+            cache.cover_in_parallel(GenomeRegion {
                 contig: first.contig,
                 start: first.start,
                 end: last.end,
