@@ -441,11 +441,15 @@ These were built and timed. They are recorded so that the next review does not s
 - **A record costs 4.5 heap blocks, and that is the biggest lever left anywhere near this module —
   now with the number that sizes it.** `SampleLocusObservations` carries a boxed reference sequence
   and a `Vec<SequenceObservation>`, and each observation carries a boxed sequence and a
-  `Vec<ChainId>`; dhat counts 1,309,793 blocks allocated for 289,581 records. **Of a 241 ms round,
-  about 90 ms is the merge's own work and about 150 ms is making these records and taking them
-  apart** — the 90 measured by leaking, the rest by difference. H6 shows that removing the
-  allocator calls recovers only a seventh of it, so the cost is the scattered memory itself. Two
-  shapes would remove it and both belong to the generator, not here:
+  `Vec<ChainId>`; dhat counts 1,309,793 blocks allocated for 289,581 records. **Of a 245 ms round,
+  about 90 ms is the merge's own work and 155 ms is taking these records apart again** — both from
+  the same leak experiment, with the records already built before the clock started. *Taking apart*
+  and not *making*: producing them is the generator's or the decoder's, upstream, and no experiment
+  here separates its cost cleanly. What the merge consumes and what it emits are three orders of
+  magnitude apart — **6,086,115 per-sample records in, 12,029 cohort observations out** — and
+  assembling those 12,029 is about a seventh of the parallel merge. H6 shows that removing the
+  allocator calls recovers only a seventh of the 155 ms, so what costs is the scattered memory
+  itself. Two shapes would remove it and both belong to the generator, not here:
   - **A flatter record**, with its bytes inside it and a heap fallback only for the rare wide one.
     Almost every record here is one base, one sequence and a few read identifiers — a few dozen
     bytes of content inside four allocations.
