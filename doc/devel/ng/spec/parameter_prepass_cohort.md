@@ -178,6 +178,18 @@ observed heterozygosity  =  expected heterozygosity × (1 − F)
   Hexp = mean over samples of   Hobs(sample) / (1 − F(sample))
 ```
 
+**A mean over one sample is still a measurement, and a consumer now depends on that.** With a
+single genome the formula returns that genome's own observed heterozygosity divided by its own
+`(1 − F)`. Nothing is borrowed and nothing is defaulted: one diploid genome carries two copies of
+every site, and how often those two copies differ is exactly what expected heterozygosity asks —
+the inbreeding correction is what turns the answer from a statement about the individual into a
+statement about the population it was drawn from. **So this quantity is fitted at every cohort size
+down to one**, unlike the spectrum in §4, which needs a panel to have a shape at all. The genotype
+prior leans on precisely that difference: it takes its scale from here at one sample and its shape
+from §4 only when there is a panel ([`calling_priors.md`](calling_priors.md) §4.1). Where the
+estimate is not available at all — too few sites to fit, or a sample whose `F` is unknown — that is
+the fallback case of §8, and it must be reported as such rather than blended in.
+
 **and it is the ratio estimator ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.1) for `F_hom_excess` read backwards.** That estimator is `F = 1 − Hobs/Hexp`
 — the same equation solved for the other unknown. Which raises a trap worth stating plainly:
 
@@ -243,6 +255,95 @@ gap to unmodelled demography rather than to statistical power. Our case is harde
 three counts — about 3 reads per plant against the 10–20× that route wants, selfing, and a
 domestication bottleneck, which is precisely the unmodelled demography blamed there. Since the census
 sites reach the spectrum directly, this route is a curiosity rather than a fallback.
+
+### 4.1 Holding the estimate where there is nothing to fit
+
+**The spectrum has one class for every possible allele count in the panel, and most of them are
+empty in a small cohort.** A panel of `N` individuals has `2N + 1` classes — no copies of the
+alternative allele, one copy, two, up to every chromosome carrying it — and the census sites that
+vary have to fill all of them. Ten thousand variable sites across a panel of a thousand is a couple
+of sites per class. **At one sample there is no variable class at all**, because a site cannot vary
+*across* a panel of one. Left alone, the fitting loop answers those cases with whatever the noise
+says, and the answer arrives looking exactly like a measurement.
+
+**So the estimate is held toward the neutral spectrum, and the strength of that hold is a
+parameter.** The neutral spectrum is the same statement §3's diversity makes, written across a
+panel instead of within a genome: under neutrality the expected number of sites at which `k` of
+the panel's chromosomes carry the alternative allele falls off as `θ/k`, so most variants are rare
+and few are common.
+
+**How it enters the fit: as sites that were never observed.** The spectrum is a probability over
+allele-count classes, so a Dirichlet prior on it is a vector of pseudo-counts, and the
+maximization step adds them to the counts the census sites supplied:
+
+```text
+each round:   spectrum(k)  =  (  Σ over census sites of P(this site has k copies | its likelihoods)
+                               + pseudo(k) )
+                            /  ( number of census sites + prior strength )
+
+              pseudo(k)    =  prior strength × neutral(k),   with Σ_k neutral(k) = 1
+```
+
+Nothing else about the expectation-maximization changes: the expectation step still computes each
+site's posterior over allele counts from genotype likelihoods without calling a genotype.
+
+**Trap — use the form above and not the textbook maximum-a-posteriori one.** The familiar
+maximum-a-posteriori update subtracts one from each concentration before dividing. Almost every
+class here has a pseudo-count far below one — in a 26-accession panel at a prior strength of ten
+sites, the class where 45 of the 52 chromosomes carry the alternative allele receives 0.05 sites'
+worth — so that form would drive most classes negative and the result would not be a distribution
+at all. The form above is the posterior mean, it is what "pseudo-counts" means arithmetically, and
+it is non-negative by construction.
+
+**The neutral shape has to be written in the panel's own sampling, not in independent
+chromosomes.** `θ/k` counts `2N` chromosomes drawn independently from the population. A panel's
+chromosomes are not independent when its samples are inbred: each individual contributes two
+copies that are identical by descent with probability `F`, so its two copies tend to carry the same
+allele and the panel's counts come in pairs. **On the tomato benchmark this is the dominant feature
+of the spectrum, not a correction to it.** In the cohort VCF our own caller produced for
+`benchmarks/tomato1` — 26 accessions, about 3 reads a position, 8 Mb of SL4.0 — 10,786 sites carry
+the alternative allele on exactly two chromosomes against 5,142 on exactly one. **Doubletons
+outnumber singletons 2.1 to 1**, and no independent-chromosome spectrum produces that at any `θ`,
+because `θ/k` falls monotonically. So the prior's shape must be the neutral frequency density put
+through the same two-branch sampling the genotype prior itself uses — homozygous by descent with
+probability `F`, two independent draws otherwise
+([`calling_priors.md`](calling_priors.md) §3.2) — at the panel's inbreeding from §3. Regularizing
+toward the independent-chromosome shape instead would pull a selfing panel toward a shape no
+selfing panel has.
+
+**The strength is a named, overridable parameter, and the run must say which regime produced the
+answer.** Call it what it is — **how many sites' worth of pseudo-counts the neutral shape is
+worth** — and emit it beside the spectrum, together with **the number of census sites that came out
+variable**. Those two numbers are the ratio a reader needs, and a label alone will not do: this is
+the same complaint §3 makes about a diversity that fell back to a species-range constant, for the
+same reason, which is that two runs that used different information are otherwise indistinguishable
+in their output.
+
+**Report the ratio per class and not only in aggregate, because the two differ by two orders of
+magnitude.** Measured on the same tomato cohort VCF — 31,084 variable SNP sites over 52
+chromosomes — a prior worth ten sites is outweighed 3,100 to 1 across the spectrum as a whole, but
+the thinnest class in that panel (43 of 52 chromosomes carrying the alternative allele, 2 sites)
+outweighs it only 39 to 1. **The aggregate ratio says nothing about the tail**, which is exactly
+where the prior is doing its work and exactly where a consumer will read a number that came mostly
+from the prior.
+
+**What this gives at each end of the committed cohort range**
+([`CLAUDE.md`](../../../../CLAUDE.md), *What this caller has to work on*):
+
+- **One sample.** No census site is variable across the panel, so every site's posterior mass sits
+  in the class where no chromosome carries an alternative allele, and the shape that comes out is
+  the prior's, untouched. **That is the correct answer rather than a degraded one** — a single
+  genome carries no information about how common an allele is in a population. The panel's
+  *diversity* is still measured, from that genome's own heterozygosity corrected for its own
+  inbreeding (§3), so the scale is fitted even where the shape is not.
+- **Tens to thousands of samples.** The variable census sites outweigh the pseudo-counts by the
+  ratios above and the panel's own spectrum takes over. §10's floor on panel size still applies:
+  below it the spectrum is emitted as absent, because a spectrum that is mostly its own prior
+  should not be handed to a consumer as a measurement of this panel.
+
+**One formula covers both ends, with no branch on cohort size.** That is the property the genotype
+prior depends on ([`calling_priors.md`](calling_priors.md) §4.1), and it is why the neutral shape
+enters as a prior on the estimate rather than as a separate small-cohort code path.
 
 ---
 
@@ -394,11 +495,16 @@ determinism for a saving nobody will measure.
    disagree on the tomato cohort, because §3's relation is neutral-equilibrium and a domesticated
    selfing crop is neither. **Settled by:** computing both on tomato and comparing. **This is the
    first thing to run once both exist.**
-2. **How many samples does a usable spectrum need?** — OPEN. The singleton class is the best-resolved
+2. **How strong should the neutral prior on the spectrum be?** — OPEN (§4.1). *Leaning:* worth a
+   few sites, so it binds only where a class has nothing in it. **Settled by:** sweeping it on the
+   tomato panel and watching where the fitted spectrum stops moving — the same sweep the genotype
+   prior needs for its own copy of this question ([`calling_priors.md`](calling_priors.md) §11,
+   Q4a), so it should be run once and reported to both.
+3. **How many samples does a usable spectrum need?** — OPEN. The singleton class is the best-resolved
    and the most informative, and it is also the one that shrinks fastest as the panel shrinks.
    *Leaning:* set a floor and emit the spectrum as absent below it, rather than emitting a noisy one.
    **Settled by:** subsampling the tomato cohort and watching where the spectrum stops being stable.
-3. **Should contamination be estimated per read group or per sample?** — OPEN. Contamination and
+4. **Should contamination be estimated per read group or per sample?** — OPEN. Contamination and
    index hopping are properties of a library and a run, which argues for the read group; a sample
    swap is a property of the sample. *Leaning:* per read group, because it matches where the error
    rate that absorbs it is fitted ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §3). **Settled by:** whether a multi-library sample ever
@@ -416,11 +522,23 @@ determinism for a saving nobody will measure.
    fitted from the census sites must match the spectrum computed from the true genotypes, within its
    own error. This is the test that the sampling in [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) is unbiased — if the census sites
    were selected on the data, this is where it shows.
-3. **Mismatched summaries are refused.** Gather two summaries differing in the selection seed, in the
+3. **The neutral prior is a distribution, at every strength and panel size.** The pseudo-counts
+   are non-negative and the spectrum they produce sums to one — the check that the maximization
+   step uses the posterior-mean form and not the maximum-a-posteriori one, whose subtraction of one
+   would drive most classes negative (§4.1). Run it at a panel size where a class's pseudo-count is
+   far below one, which is every realistic panel.
+4. **One sample returns the prior's shape, with no cohort-size branch.** With a single sample no
+   census site is variable, so the fitted spectrum must equal the neutral shape to floating-point
+   tolerance — and the code path that produced it must be the same one a thousand samples take.
+5. **An inbred panel is not pulled toward an outbred shape.** Simulate a panel at a known `F` and a
+   known spectrum, thin enough that the prior binds; the fitted spectrum must sit near the truth
+   rather than near the independent-chromosome `θ/k` shape. This is the test that the prior's
+   sampling model carries `F` (§4.1), and it fails loudly if it does not.
+6. **Mismatched summaries are refused.** Gather two summaries differing in the selection seed, in the
    reference digest, in the analysed region set, and in the region-typing parameters — four separate
    cases, and the third is the one that will happen in practice. Each must fail and name what
    differs, never average (§8). The fourth is the subtlest: it moves loci between the two censuses
    sets rather than changing either set's size, so both summaries look entirely well-formed.
-4. **The gather is order-independent** — same summaries, same parameters, whatever order they are
+7. **The gather is order-independent** — same summaries, same parameters, whatever order they are
    read in.
-5. **A cohort too small for a panel quantity reports it as absent**, not as a number.
+8. **A cohort too small for a panel quantity reports it as absent**, not as a number.
