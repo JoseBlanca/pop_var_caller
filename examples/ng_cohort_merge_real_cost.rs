@@ -298,6 +298,29 @@ fn timed<T>(mut prepare: impl FnMut() -> T, mut one_merge: impl FnMut(T)) -> (f6
     (each[each.len() / 2], each[0], each[each.len() - 1])
 }
 
+/// The most memory this process has ever held, as the kernel counted it.
+///
+/// **The allocator question needs this beside the clock.** Swapping the allocator is the
+/// largest single lever measured on this merge, and the project's reason for existing is
+/// trading memory for sample-count scaling — so a speed-up that costs resident memory is a
+/// different decision from one that does not, and the probe should not make the reader go and
+/// find out separately.
+///
+/// Read from `/proc/self/status`, which only Linux has; the container is where the release
+/// numbers are taken, so that is where it answers. Elsewhere it says so rather than guessing.
+fn peak_resident() -> String {
+    match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .map_or_else(
+                || "unknown (no VmHWM in /proc/self/status)".to_string(),
+                |value| value.trim().to_string(),
+            ),
+        Err(_) => "not measured (no /proc — this is not Linux)".to_string(),
+    }
+}
+
 /// One source per sample over `cohort`, each a fresh copy the cache then owns.
 fn sources_over(
     cohort: &[Vec<SampleLocusObservations>],
@@ -696,6 +719,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             );
         }
         each_round.sort_by(f64::total_cmp);
+        println!("# peak resident: {}", peak_resident());
         println!(
             "\ndriver, rounds, width_bases, threads, loci_per_round, median_ms, min_ms, \
              max_ms, seconds_all_rounds_including_copies"
