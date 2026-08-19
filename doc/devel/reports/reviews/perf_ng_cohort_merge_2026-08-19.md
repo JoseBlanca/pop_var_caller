@@ -2,7 +2,7 @@
 **Date:** 2026-08-19
 **Reviewer:** rust-performance-review skill (orchestrator), with five per-category reviewers in isolated worktrees
 **Scope:** `src/ng/run/cohort_merge/` — all three drivers, the observation cache, the k-way walk and the builder
-**Verdict:** Apply the listed wins — six were applied and measured; eight were measured and closed
+**Verdict:** Apply the listed wins — seven were applied and measured; eight were measured and closed
 **Hot-path evidence:** two sampling profiles (macOS `sample`, container `perf record -e cpu-clock`), plus interleaved A/B wall-clock on real reads and deterministic instruction counts from callgrind
 
 ---
@@ -70,7 +70,7 @@ iterator, and the psp path that will read from a file is not built.
 
 ## 2. Verdict
 
-**Apply the listed wins.** Six changes were applied, each measured before and after on the real
+**Apply the listed wins.** Seven changes were applied, each measured before and after on the real
 tomato panel with the runs interleaved, each committed on its own with its numbers, and all 236 of
 the module's tests green after every one — including the three that pin the drivers to byte-identical
 output. Eight further candidates were built and measured and did **not** pay; they are recorded in
@@ -105,6 +105,14 @@ SL4.0, container release build, the merge timed alone (median of 12 rounds, two 
 And **peak resident memory fell with it** — 5.66 GB to 5.12 GB on 8 threads, 5.45 to 5.09 on one —
 because the allocator change is smaller as well as faster. Nothing in this review trades memory for
 speed.
+
+**The seventh change came after that table and changes what the table means**, so it is stated
+apart from it (§5, H6). Every number above was taken with the cohort's records copied *before* the
+clock started, which charges the merge for none of the cost of producing them. Timed with
+production inside — which is what the psp path is, since there a record is decoded from a file
+rather than handed over ready-made — the eight-thread driver is **2.2 times** the single-threaded
+cached one, 223 ms against 499, where with production hoisted out it was 6%. **The threading earns
+its keep on the path that matters and barely earns it on the one measured here.**
 
 **Across the committed range**, which is the test a gain measured at 63 accessions and 11 reads a
 sample has to pass:
@@ -307,6 +315,32 @@ still says 1.95.
   size** — which the GIAB corner then confirmed, where the whole stack is worth −77% against −51% on
   tomato.
 
+#### H6: [observation_cache.rs](../../../../src/ng/run/cohort_merge/observation_cache.rs) — the merge freed records nobody needed freed — **applied in `05d9debb`**
+
+- **Confidence:** High
+- **Hot-path evidence:** the decisive experiment is an ablation rather than a profile. Making the
+  merge **leak** the records it evicts instead of freeing them: 245 ms → 90 on 8 threads at 63
+  accessions, and 265 → 204 on one. So freeing is **63% of the eight-thread merge** and 23% of the
+  single-threaded one — after the allocator change, after the deferred free, after everything else
+  in this review.
+- **Mechanism:** the records were allocated by the stage upstream and are released as the merge
+  passes them. A source is now a trait rather than an `Iterator`, and `next_observation` takes a
+  record the merge has finished with; a source that mints records fills that one instead of
+  allocating. The offer is not an obligation, and a blanket implementation over every `Iterator`
+  ignores it, so nothing that exists today had to change.
+- **Measured:** with a source that refills against one that allocates, 8 threads
+  241.7 / 240.9 / 240.2 ms → 224.3 / 223.3 / 223.4 (−7%); one reader per sample
+  531.6 / 544.6 / 538.0 → 497.8 / 500.2 / 498.9 (−7%). Peak resident unchanged.
+- **Seven percent for 84% fewer allocator calls, and that ratio is the finding.** Counted with
+  dhat at 3 accessions: 1,309,793 heap blocks allocated per round become 212,486. **A record costs
+  4.5 heap blocks** — measured, not assumed. If calling the allocator were the cost this would have
+  been worth far more; the leak says the class is worth 63%. So what costs is **touching four
+  scattered pieces of memory per record, six million times**, which leasing keeps because it still
+  copies each record's content into the buffers it reuses. §6 says what would remove it.
+- **Complexity cost:** a public bound changes from `Iterator` to `ObservationSource`, and the
+  window's fuse becomes a flag of the cache's own. Both are carried by the blanket implementation
+  for every existing caller.
+
 ### Likely
 
 #### L1: [observation_cache.rs:440](../../../../src/ng/run/cohort_merge/observation_cache.rs#L440) — the window's left edge was found by walking — **applied in `1a9419ba`**
@@ -404,13 +438,23 @@ These were built and timed. They are recorded so that the next review does not s
 
 ## 6. Out-of-scope observations
 
-- **A record costs four allocations, and that is the biggest lever left anywhere near this module.**
-  `SampleLocusObservations` carries a boxed reference sequence and a `Vec<SequenceObservation>`, and
-  each observation carries a boxed sequence and a `Vec<ChainId>`. At 6.09 M records that is the 6.4 M
-  frees a round this whole review has been working around. The merge cannot fix it — the type is the
-  generator's — but a record shape that packed its bytes into one allocation would remove the cost
-  rather than move it. Follow-up: the observation type's own spec, measured with the freed-block
-  count the probe now reports.
+- **A record costs 4.5 heap blocks, and that is the biggest lever left anywhere near this module —
+  now with the number that sizes it.** `SampleLocusObservations` carries a boxed reference sequence
+  and a `Vec<SequenceObservation>`, and each observation carries a boxed sequence and a
+  `Vec<ChainId>`; dhat counts 1,309,793 blocks allocated for 289,581 records. **Of a 241 ms round,
+  about 90 ms is the merge's own work and about 150 ms is making these records and taking them
+  apart** — the 90 measured by leaking, the rest by difference. H6 shows that removing the
+  allocator calls recovers only a seventh of it, so the cost is the scattered memory itself. Two
+  shapes would remove it and both belong to the generator, not here:
+  - **A flatter record**, with its bytes inside it and a heap fallback only for the rare wide one.
+    Almost every record here is one base, one sequence and a few read identifiers — a few dozen
+    bytes of content inside four allocations.
+  - **A record covering a run of positions.** The generator writes one per covered base — 96,605
+    per sample over 100,000 — and the merge discards 85,375 of the 97,408 loci it closes as too
+    quiet. A record saying *"1,000 to 1,240 are all reference at depth 11"* replaces 240 with one.
+    The keep rule needs each position's compared-read count, so a run must end where depth changes;
+    depth changes slowly. **Unmeasured** — this is arithmetic from the record counts, not an
+    experiment.
 - **`examples/dhat_ng_merge.rs` profiles a different merge** — `SampleReads`' file merge, with zero
   mentions of `cohort_merge`. The cohort merge had no heap profile at all until this review wired
   counting into `ng_cohort_merge_real_cost.rs`. Either rename that example or point it at this
