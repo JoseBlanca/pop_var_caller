@@ -132,7 +132,7 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion};
 use pop_var_caller::ng::run::cohort_merge::close::{LocusCloser, Verdict};
 use pop_var_caller::ng::run::cohort_merge::observation_cache::{
-    ObservationCache, building_regions_of,
+    ObservationCache, ObservationSource, building_regions_of,
 };
 use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
 use pop_var_caller::ng::run::cohort_merge::serial::{
@@ -321,19 +321,110 @@ fn peak_resident() -> String {
     }
 }
 
-/// One source per sample over `cohort`, each a fresh copy the cache then owns.
-fn sources_over(
-    cohort: &[Vec<SampleLocusObservations>],
-) -> Vec<std::vec::IntoIter<Result<SampleLocusObservations, Never>>> {
+/// One sample's records, produced one at a time as the cache asks for them.
+///
+/// **Both ways of producing them do it inside the clock, and that is deliberate.** The cache
+/// consumes its readers, so every round needs the sample's records made again; producing them
+/// up front and handing over a finished vector charges the merge for none of it, and the
+/// question here is precisely what producing a record costs. So both variants below mint on
+/// demand, and the only difference between them is where the memory comes from.
+enum ProbeSource<'a> {
+    /// A fresh record every time, which is what the generator does today.
+    Minting {
+        template: &'a [SampleLocusObservations],
+        at: usize,
+    },
+    /// The record the merge handed back, filled again — what a generator that leased its
+    /// records would do, standing in for one so the saving can be measured before it is built.
+    Leasing {
+        template: &'a [SampleLocusObservations],
+        at: usize,
+    },
+}
+
+impl ObservationSource for ProbeSource<'_> {
+    type Error = Never;
+
+    fn next_observation(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<SampleLocusObservations, Never>> {
+        let (template, at, leasing) = match self {
+            ProbeSource::Minting { template, at } => (*template, at, false),
+            ProbeSource::Leasing { template, at } => (*template, at, true),
+        };
+        let next = template.get(*at)?;
+        *at += 1;
+        Some(Ok(match (leasing, spare) {
+            (true, Some(mut spare)) => {
+                refill(&mut spare, next);
+                spare
+            }
+            (_, spare) => {
+                drop(spare);
+                next.clone()
+            }
+        }))
+    }
+}
+
+/// Fill `into` with what `from` holds, keeping every buffer of `into` that is the right size.
+///
+/// On generic ground every record covers one base and carries about one sequence, so nothing
+/// here reallocates after the first window — which is the whole point of the exercise.
+fn refill(into: &mut SampleLocusObservations, from: &SampleLocusObservations) {
+    into.region = from.region;
+    if into.reference_bases.len() == from.reference_bases.len() {
+        into.reference_bases.copy_from_slice(&from.reference_bases);
+    } else {
+        into.reference_bases = from.reference_bases.clone();
+    }
+    into.reads_without_observation = from.reads_without_observation;
+    into.reads_discarded_by_cap = from.reads_discarded_by_cap;
+    into.kind = from.kind.clone();
+
+    let reused = into.observations.len().min(from.observations.len());
+    into.observations.truncate(reused);
+    for (slot, source) in into.observations.iter_mut().zip(&from.observations) {
+        if slot.bases.len() == source.bases.len() {
+            slot.bases.copy_from_slice(&source.bases);
+        } else {
+            slot.bases = source.bases.clone();
+        }
+        slot.read_witness = source.read_witness.clone();
+        slot.read_group = source.read_group;
+        slot.num_obs = source.num_obs;
+        slot.num_fwd = source.num_fwd;
+        slot.q_sum = source.q_sum;
+        slot.mapq_sum = source.mapq_sum;
+        slot.mapq_sum_sq = source.mapq_sum_sq;
+        slot.placed_left = source.placed_left;
+        slot.chain_ids.clear();
+        slot.chain_ids.extend_from_slice(&source.chain_ids);
+    }
+    for extra in &from.observations[reused..] {
+        into.observations.push(extra.clone());
+    }
+}
+
+/// One source per sample over `cohort`. `NG_REAL_LEASE=1` makes them reuse what the merge
+/// hands back instead of allocating a record a position.
+fn sources_over(cohort: &[Vec<SampleLocusObservations>]) -> Vec<ProbeSource<'_>> {
+    let leasing = std::env::var("NG_REAL_LEASE").is_ok_and(|value| value != "0");
     cohort
         .iter()
         .map(|sample| {
-            sample
-                .iter()
-                .cloned()
-                .map(Ok)
-                .collect::<Vec<_>>()
-                .into_iter()
+            if leasing {
+                ProbeSource::Leasing {
+                    template: sample,
+                    at: 0,
+                }
+            } else {
+                ProbeSource::Minting {
+                    template: sample,
+                    at: 0,
+                }
+            }
         })
         .collect()
 }

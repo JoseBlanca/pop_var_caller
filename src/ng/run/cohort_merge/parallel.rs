@@ -27,7 +27,7 @@
 use rayon::prelude::*;
 
 use super::build::{RegionOutcome, build_region};
-use super::observation_cache::{ObservationCache, building_regions_of};
+use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::organise::{Organiser, RegionIndex};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
@@ -101,7 +101,7 @@ pub fn merge_cohort_in_parallel<S, E>(
     min_alt_reads: MinAltReads,
 ) -> Result<RegionOutcome, E>
 where
-    S: Iterator<Item = Result<SampleLocusObservations, E>> + Sync + Send,
+    S: ObservationSource<Error = E> + Sync + Send,
     E: Send,
 {
     let mut merged = RegionOutcome::default();

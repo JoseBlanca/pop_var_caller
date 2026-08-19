@@ -20,7 +20,7 @@
 //! organiser's overlap resolution settles (spec §6.1).
 
 use super::build::{RegionOutcome, build_region};
-use super::observation_cache::{ObservationCache, building_regions_of};
+use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
@@ -150,7 +150,7 @@ pub fn merge_cohort_through_cache<S, E>(
     min_alt_reads: MinAltReads,
 ) -> Result<RegionOutcome, E>
 where
-    S: Iterator<Item = Result<SampleLocusObservations, E>>,
+    S: ObservationSource<Error = E>,
 {
     let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
