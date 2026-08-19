@@ -500,7 +500,13 @@ departs from production's shape rather than porting it:
 shape:  the mass falls off geometrically with distance from the cohort's modal repeat count
         weight(allele j) ∝ decay ^ |Δ_j|,   Δ_j = (repeat count of j) − (cohort modal count)
 
-total:  the weights are scaled so that Σ α = the cohort's STR gene diversity from the pre-pass
+total:  the weights are scaled so that the prior's own implied gene diversity equals the
+        cohort's STR gene diversity D from the pre-pass, which for a shape whose Simpson
+        index is c means
+
+              Σ α  =  D / (1 − c − D),        c = Σ_j (weight_j / Σ weights)²
+
+        and not Σ α = D, which is a different quantity in different units
 ```
 
 The **shape** is production's `G₀`, ported: a geometric decay in unit offset from the locus's modal
@@ -521,9 +527,33 @@ repeat tract is unmeasured; production carries the question as a deferred re-tun
 quantity that answers it, which is why ng sets the total from that and leaves `G₀` to do only the
 job it was fitted for.
 
-**Separating the two questions is what makes the STR prior defensible at all:** the pre-pass
+**Setting `Σα` to `D` itself would be a units error, and it was in this document until
+2026-08-19.** Gene diversity is a probability — the chance two copies drawn at random carry
+different lengths — while a concentration is a count of chromosomes (§1). What a Dirichlet with
+total `A` and shape index `c` actually implies is `A(1 − c)/(A + 1)`, so `A = D` asserts
+`D(1 − c)/(D + 1)`, which is always less than `D`. **Measured on 1,236 polymorphic tomato STR
+loci** at the coded fallback decay of `0.5`: the median locus carries `D = 0.087` and the prior
+would assert `0.030` — a paired median ratio of **0.40**, tenth percentile 0.22. The total that
+reproduces the measurement is a median of **2.8 × D**, ninetieth percentile 8.5
+([`../../../../benchmarks/ssr_tomato1/scripts/g0_total_vs_gene_diversity.py`](../../../../benchmarks/ssr_tomato1/scripts/g0_total_vs_gene_diversity.py)).
+So the correction is one-directional, modest in the middle of the distribution and large in its
+tail.
+
+**A ceiling the total cannot reach, and this is the harder half.** `A(1 − c)/(A + 1)` rises to
+`1 − c` and stops, so a locus whose measured `D` is at or above `1 − c` **has no concentration that
+reproduces it at all** — the geometry itself cannot express that much diversity, and rescaling is
+not a repair. At the fallback decay that is **119 of those 1,236 loci, about one in ten**; 242 at a
+decay of `0.3` and 49 at `0.7`. **The knob that moves it is the decay**, which is fitted for a
+different job entirely, so this is a defect in the *shape* rather than in the total and §5.1's
+separation of the two questions does not resolve it. **Both figures are, if anything, optimistic:**
+the measured `D` comes from called genotypes at about 3 reads a position on a panel whose apparent
+`F_IS` is 0.82, and low-depth calling in a selfer books ambiguous sites as homozygous, which
+understates allele diversity. Open (Q2, §11).
+
+**Separating the two questions is still what makes the STR prior defensible:** the pre-pass
 measures how variable repeat tracts are in this panel, and the geometry says where that variability
-sits relative to the mode. Neither number is asked to do the other's job.
+sits relative to the mode. Neither number is asked to do the other's job — but the geometry has to
+be able to hold what the measurement reports, and at one locus in ten it cannot.
 
 ### 5.2 Two alleles of the same length
 
@@ -871,10 +901,24 @@ rate at matched recall on GIAB, where the truth set distinguishes the classes. *
 code** only in the sense that the concentration function must take the class as an argument even
 if both classes pass the same value — otherwise splitting later touches every call site.
 
-**Q2 — is the STR total concentration the pre-pass's STR gene diversity?** *Leaning: yes* (§5.1).
-It is the only measured quantity that answers the question the concentration asks. **Settled by:**
-running the STR prior at the pre-pass's value against production's inherited `G₀` total on a panel
-where the truth is known — which is Q5's benchmark, not a separate experiment.
+**Q2 — reopened 2026-08-19, and it is now a question about the shape rather than the total.** As
+posed it asked whether the STR total concentration is the pre-pass's STR gene diversity. It is not,
+in those words: gene diversity is a probability and a concentration is a count of chromosomes, and
+`Σα = D` makes the prior assert about two-fifths of what was measured on tomato. §5.1 carries the
+mapping that fixes it, `Σα = D/(1 − c − D)`, and that part is settled.
+
+**What is open is the locus the geometry cannot hold at any total.** The prior's implied diversity
+is bounded by `1 − c`, and on 1,236 polymorphic tomato loci **119 — about one in ten — measure at or
+above that bound** at the coded fallback decay, 242 at `0.3` and 49 at `0.7`. Three candidate
+answers, none measured: fit the decay against gene diversity as well as against stutter, so the
+shape has to be able to hold what the panel shows; carry a floor of prior mass on the alleles the
+geometry starves, which is the `G₀` floor doing a second job; or let the seed refuse such loci to
+the reads entirely, which is honest and gives up the regulariser exactly where the locus is most
+polymorphic. *Leaning: none — the choice needs the number of affected loci on a second panel, since
+one in ten on a selfing crop at 3 reads a position may be a tomato figure rather than a caller
+figure.* **Settled by:** re-running [`../../../../benchmarks/ssr_tomato1/scripts/g0_total_vs_gene_diversity.py`](../../../../benchmarks/ssr_tomato1/scripts/g0_total_vs_gene_diversity.py)
+on the GIAB HG002 bundle, where depth is high and the genotypes are not a selfer's, and then the
+surviving option against truth on Q5's benchmark.
 
 **Q3 — how is a rung's weight divided between two alleles of the same length?** *Leaning: divide
 it, so a locus's total prior mass does not grow with the number of spellings the cohort showed*
@@ -980,7 +1024,7 @@ production already tests and ng's port should carry across:
 4. **The independent oracle.** Every log-prior matches a rising-factorial computation that uses no
    `lgamma` (§9).
 
-Six more are ng's own, and each pins a claim this document makes:
+Seven more are ng's own, and each pins a claim this document makes:
 
 5. **A neutral spectrum projects to `(1, θ)`.** Build the target as the **exact expected spectrum**
    of `Dirichlet(1, θ)` at the panel size under test, in closed form. **Not** by writing the counts
@@ -1003,9 +1047,14 @@ Six more are ng's own, and each pins a claim this document makes:
    equals the starting concentration, bit for bit, at every locus — no tolerance, no branch.
 9. **Monotone in cohort evidence.** Raising the expected copies of an allele across the cohort
    cannot lower its prior weight for a sample that did not contribute the rise.
-10. **The STR total is the pre-pass's, not `G₀`'s.** Summing the STR starting concentration recovers
-   the pre-pass's STR gene diversity to floating-point tolerance, whatever the decay and however
-   many alleles the locus carries (§5.1).
+10. **The STR seed implies the diversity the pre-pass measured — the prior's own `A(1 − c)/(A + 1)`
+    recovers `D` to floating-point tolerance**, whatever the decay and however many alleles the locus
+    carries (§5.1). **Not** that the concentration sums to `D`, which is the units error §5.1
+    records; a test written that way passes on a prior asserting two-fifths of the measurement.
+11. **A locus the geometry cannot hold is refused, not silently rescaled.** Where the measured `D` is
+    at or above `1 − c` no total reproduces it, so the seed builder must say so — one locus in ten on
+    tomato at the fallback decay (§5.1). What it does instead is Q2's to settle; what it must not do
+    is return the closest total it can reach as though it had met the target.
 
 **The end-to-end check, and the definition of done for the manager:** the GIAB single-sample 5×
 regression of §2.2 — genotype accuracy at true variants and the count of true homozygous-variant
