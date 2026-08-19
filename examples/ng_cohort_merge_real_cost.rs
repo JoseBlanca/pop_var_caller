@@ -540,7 +540,8 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         let width =
             CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
         let in_flight = CohortLocusBuilderRegionsInFlight(
-            std::num::NonZeroUsize::new(threads).expect("non-zero"),
+            std::num::NonZeroUsize::new(limit_of("NG_REAL_IN_FLIGHT").unwrap_or(threads).max(1))
+                .expect("non-zero"),
         );
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)

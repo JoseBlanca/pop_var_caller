@@ -227,6 +227,33 @@ impl<S> ObservationCache<S> {
             sample.held_observations.drain(..first_survivor);
         }
     }
+
+    /// [`evict_before`](Self::evict_before), moving what it drops into `graveyard` instead of
+    /// freeing it here.
+    ///
+    /// **Same records dropped, freed somewhere else.** What eviction costs is not deciding what
+    /// to drop — that is one walk of the window's prefix — but returning every record's
+    /// buffers to the allocator, and that runs on whichever thread calls it. Moving the records
+    /// out first makes the free a job of its own that a caller can put beside work rather than
+    /// in front of it; the caller owns `graveyard` and decides when it dies.
+    ///
+    /// **The records moved out are unreachable by construction**, which is what makes this safe
+    /// to hand to another thread: they are exactly the ones
+    /// [`evict_before`](Self::evict_before) would have dropped, so nothing the cache still
+    /// holds and no window a builder can be given refers to them.
+    ///
+    /// A caller that never empties `graveyard` holds every record the run ever evicted, which
+    /// is the whole cohort — so it is a buffer to drain each round, not one to accumulate.
+    pub(super) fn evict_before_into(
+        &mut self,
+        position: GenomePosition,
+        graveyard: &mut Vec<SampleLocusObservations>,
+    ) {
+        for sample in &mut self.samples {
+            let first_survivor = first_reaching_index(&sample.held_observations, position);
+            graveyard.extend(sample.held_observations.drain(..first_survivor));
+        }
+    }
 }
 
 impl<S, E> ObservationCache<S>
@@ -286,6 +313,52 @@ where
 
         // The fixpoint: sweep until a whole sweep moves nothing.
         while self.sweep(&mut chain_reach)? {}
+
+        self.covered_to = Some(
+            self.covered_to
+                .map_or(chain_reach, |reached| reached.max(chain_reach)),
+        );
+        Ok(())
+    }
+
+    /// [`cover`](Self::cover), with each sweep's samples swept concurrently.
+    ///
+    /// **Same fixpoint, a different schedule.** The serial sweep is Gauss-Seidel — sample `j`
+    /// sees the reach sample `i < j` widened inside the same sweep — and this is Jacobi: every
+    /// sample is drawn against the reach the last sweep ended on, and the sweep's answer is the
+    /// widest of theirs. Drawing is monotone in the reach it is given and the reach only ever
+    /// grows, so both schedules climb to the same least fixpoint above the region's last base,
+    /// and the held window is the same because every sample's last draw is against that
+    /// fixpoint. What differs is the sweep count: a chain that runs through the cohort in
+    /// decreasing sample order costs one sweep per link either way, but a chain the serial form
+    /// follows within one sweep costs this one a sweep per link.
+    pub(super) fn cover_in_parallel(&mut self, region: GenomeRegion) -> Result<(), E>
+    where
+        S: Send,
+        E: Send,
+    {
+        use rayon::prelude::*;
+
+        let mut chain_reach = GenomePosition {
+            contig: region.contig,
+            position: region.end.max(region.start),
+        };
+        loop {
+            let snapshot = chain_reach;
+            let widest = self
+                .samples
+                .par_iter_mut()
+                .map(|sample| {
+                    let mut reach = snapshot;
+                    sample.draw_to(&mut reach)?;
+                    Ok(reach)
+                })
+                .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
+            if widest == chain_reach {
+                break;
+            }
+            chain_reach = widest;
+        }
 
         self.covered_to = Some(
             self.covered_to

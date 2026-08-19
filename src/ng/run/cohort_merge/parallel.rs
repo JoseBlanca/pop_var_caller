@@ -101,7 +101,8 @@ pub fn merge_cohort_in_parallel<S, E>(
     min_alt_reads: MinAltReads,
 ) -> Result<RegionOutcome, E>
 where
-    S: Iterator<Item = Result<SampleLocusObservations, E>> + Sync,
+    S: Iterator<Item = Result<SampleLocusObservations, E>> + Sync + Send,
+    E: Send,
 {
     let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
@@ -111,6 +112,8 @@ where
     // Grown rather than reserved: `regions_in_flight` is a knob a caller sets, and reserving on
     // it would let a merge over thirty regions try to allocate for `usize::MAX` of them.
     let mut regions_in_round: Vec<GenomeRegion> = Vec::new();
+    // What eviction drops, held until a worker frees it beside the round's builders.
+    let mut graveyard: Vec<SampleLocusObservations> = Vec::new();
 
     for analysed_region in analysed {
         let mut building_regions =
@@ -136,10 +139,21 @@ where
             // over the cohort instead of `regions_in_flight` of them. Measured on 8 threads
             // with 8 regions in flight: 11–13% off the whole merge at 3,000 samples on both
             // the densities `examples/ng_cohort_merge_parallel_cost.rs` walks.
-            cache.evict_before(GenomePosition {
+            let evicted_base = GenomePosition {
                 contig: first.contig,
                 position: first.start,
-            });
+            };
+            // **On one thread there is nobody to hand the dead records to.** `join`'s second
+            // closure then runs inline after the first, so moving the records out buys nothing
+            // and costs a move of each of them — measured at about 6% of a one-thread merge.
+            // The pool's size is the thing to ask, not the count of regions in flight: a run
+            // with sixteen regions on one worker still has one worker.
+            let beside_the_builders = rayon::current_num_threads() > 1;
+            if beside_the_builders {
+                cache.evict_before_into(evicted_base, &mut graveyard);
+            } else {
+                cache.evict_before(evicted_base);
+            }
             let last = regions_in_round
                 .last()
                 .copied()
@@ -151,16 +165,35 @@ where
             })?;
 
             let cache = &*cache;
-            let outcomes = in_region_order(regions_in_round.par_iter().map(|building_region| {
-                cache.with_observations(*building_region, |observations_per_sample| {
-                    build_region(
-                        *building_region,
-                        observations_per_sample,
-                        max_cohort_locus_span,
-                        min_alt_reads,
-                    )
-                })
-            }));
+            // **The round's dead records are freed beside its builders, not in front of them.**
+            // What eviction drops is unreachable from every window this round hands out, so
+            // returning it to the allocator is disjoint from what the builders read and is the
+            // one piece of the organiser's work that can run at the same time as them. It is
+            // handed to `join`'s second closure, which an idle worker steals; the emptied
+            // buffer comes back so the next round's eviction reuses its capacity.
+            let build_the_round = || {
+                in_region_order(regions_in_round.par_iter().map(|building_region| {
+                    cache.with_observations(*building_region, |observations_per_sample| {
+                        build_region(
+                            *building_region,
+                            observations_per_sample,
+                            max_cohort_locus_span,
+                            min_alt_reads,
+                        )
+                    })
+                }))
+            };
+            let outcomes = if beside_the_builders {
+                let mut dead = std::mem::take(&mut graveyard);
+                let (outcomes, emptied) = rayon::join(build_the_round, move || {
+                    dead.clear();
+                    dead
+                });
+                graveyard = emptied;
+                outcomes
+            } else {
+                build_the_round()
+            };
 
             for outcome in outcomes {
                 // Destructured for the reason `organise.rs` gives at its own two consumers of
