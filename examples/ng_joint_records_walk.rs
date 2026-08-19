@@ -59,9 +59,9 @@ use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
 };
 use pop_var_caller::ng::parameter_estimation::joint::coverage::{
-    CoverageAccumulator, CoverageGrid,
+    CoverageAccumulator, CoverageGrid, GC_BINS,
 };
-use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
+use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, ReferenceDigest, RegionSetDigest, SelectableRegions, SelectionIdentity,
     UnambiguousRuns, select_kept_loci,
@@ -206,9 +206,10 @@ fn main() {
 
     // ---- one walk per sample -------------------------------------------------------------
     let mut cohort: Vec<SampleRecords> = Vec::new();
+    let mut window_gc: Vec<f32> = Vec::new();
     for alignment in &alignments {
         let at = Instant::now();
-        let records = walk_one(
+        let (records, gc) = walk_one(
             &fasta,
             &info,
             &contigs,
@@ -227,6 +228,7 @@ fn main() {
         );
         report_sizes(&records);
         cohort.push(records);
+        window_gc = gc;
     }
 
     // ---- do they pool at all? --------------------------------------------------------------
@@ -303,7 +305,26 @@ fn main() {
 
     depth_code_census(&cohort);
 
-    fit_the_cohort(&cohort, coverage_odds, kept.generic(), &contigs);
+    // **What the duplicated class claims on real reads, and whether the reads agree.** The
+    // class is on by default and on this panel it takes the median accession's heterozygosity
+    // from 0.867 to 0.064 per kilobase; the audit fits the cohort both ways and asks the two
+    // questions the fit itself cannot answer — do the positions it claims carry twice their
+    // sample's normal depth, and how many samples carry the alternative allele there.
+    match std::env::var("DUPLICATED_CLASS_AUDIT") {
+        Ok(path) => duplicated_class_audit(
+            &cohort,
+            &grid,
+            &window_gc,
+            kept.generic(),
+            &contigs,
+            if path == "1" {
+                None
+            } else {
+                Some(path.as_str())
+            },
+        ),
+        Err(_) => fit_the_cohort(&cohort, coverage_odds, kept.generic(), &contigs),
+    }
 
     println!(
         "\ntotal            {:.1} s",
@@ -682,6 +703,631 @@ fn fit_the_cohort(
     }
 }
 
+// =====================================================================================
+// What the duplicated class claims on real reads
+// =====================================================================================
+
+/// The GC-corrected relative depth of every kept position, for one sample.
+///
+/// **1.0 is this sample's own normal depth and 2.0 is twice it**, which is what a stretch of
+/// genome the sample carries twice and the reference holds once collects. Three steps, all of
+/// them the ones `duplicated_locus_probe_2026-08-12.md` §2 measured on real alignments:
+///
+/// 1. **Windows are summed until they hold about 12,000 aligned bases**, because below that a
+///    window's mean depth is scatter — one 500 bp window at 25 reads a position, ten at 2.5.
+///    Only windows that abut *in the genome* are summed: a run over a BED holds windows that
+///    are neighbours in the summary and megabases apart on the chromosome.
+/// 2. **The sum is divided by what this sample's coverage does at that stretch's GC content.**
+///    On tomato the depth-against-GC curve spans a factor of 1.79 — 16.2 reads a position at
+///    20% GC against 29.0 at 36% — which is larger than the doubling being looked for, so an
+///    uncorrected reading is mostly GC content.
+/// 3. **The result is rescaled so the median window reads 1.0.**
+///
+/// `f32::NAN` at a position no window holds, or where the reference has no called base to take
+/// a GC fraction from.
+fn relative_depth(
+    records: &SampleRecords,
+    grid: &CoverageGrid,
+    window_gc: &[f32],
+    kept: &[pop_var_caller::ng::types::GenomePosition],
+) -> Vec<f32> {
+    let coverage = records
+        .coverage
+        .as_ref()
+        .expect("every walk here builds a coverage summary");
+    let span = coverage.windows_to_sum();
+    let curve = coverage.gc_curve();
+    let mut raw = vec![f32::NAN; coverage.len()];
+    for slot in 0..coverage.len() {
+        let (mut first, mut last) = (slot, slot + 1);
+        while last - first < span {
+            let left = first > 0 && grid.adjacent(first - 1, first);
+            let right = last < coverage.len() && grid.adjacent(last - 1, last);
+            if !left && !right {
+                break;
+            }
+            if left && (!right || slot - first <= last - slot) {
+                first -= 1;
+            } else {
+                last += 1;
+            }
+        }
+        let (mut gc_sum, mut counted) = (0.0_f64, 0_u32);
+        for window in first..last {
+            if window_gc[window].is_finite() {
+                gc_sum += f64::from(window_gc[window]);
+                counted += 1;
+            }
+        }
+        if counted == 0 {
+            continue;
+        }
+        let bin = ((gc_sum / f64::from(counted) * (GC_BINS - 1) as f64).round() as usize)
+            .min(GC_BINS - 1);
+        let expected = f64::from(curve[bin]).max(1e-6);
+        raw[slot] = (f64::from(coverage.mean_depth_over(first..last)) / expected) as f32;
+    }
+    let mut finite: Vec<f32> = raw.iter().copied().filter(|v| v.is_finite()).collect();
+    let scale = f64::from(median_of(&mut finite)).max(1e-6);
+    kept.iter()
+        .map(|position| {
+            grid.slot_of(position.contig, position.position)
+                .map_or(f32::NAN, |slot| (f64::from(raw[slot]) / scale) as f32)
+        })
+        .collect()
+}
+
+/// Sorts in place and hands back the middle value, or `NaN` where there is none.
+fn median_of(values: &mut [f32]) -> f32 {
+    if values.is_empty() {
+        return f32::NAN;
+    }
+    values.sort_by(f32::total_cmp);
+    values[values.len() / 2]
+}
+
+/// One accession's reads at every kept position, as the audit needs them.
+struct SampleReadsAtPositions {
+    /// Reads disagreeing with the reference.
+    non_reference: Vec<u32>,
+    /// Reads in total, taken as the middle of the range the stored code stands for.
+    depth: Vec<u32>,
+}
+
+fn reads_at_positions(records: &SampleRecords, positions: usize) -> SampleReadsAtPositions {
+    let edges = DepthBinEdges::new();
+    let mut non_reference = vec![0_u32; positions];
+    let mut depth = vec![0_u32; positions];
+    for group in records.generic.values() {
+        for observation in group.non_reference() {
+            non_reference[observation.index as usize] += observation.reads;
+        }
+        for index in 0..positions {
+            if let DepthCode::Binned(bin) = group.depth().get(index) {
+                let range = edges.recorded_depths(bin);
+                depth[index] += (*range.start() + *range.end()) / 2;
+            }
+        }
+    }
+    SampleReadsAtPositions {
+        non_reference,
+        depth,
+    }
+}
+
+/// The fit's summary numbers, for one arm of the audit.
+struct ArmSummary {
+    median_heterozygosity: f64,
+    median_hom_excess: f64,
+    expected_heterozygosity: f64,
+    density_a: f64,
+    density_b: f64,
+    p_invariant: f64,
+    class_share: f64,
+    carrier_a: f64,
+    carrier_b: f64,
+    passes: u32,
+    converged: bool,
+}
+
+fn fit_one_arm(
+    cohort: &[SampleRecords],
+    name: &str,
+    with_class: bool,
+    coverage_odds: Vec<Arc<[f32]>>,
+) -> (JointFit, ArmSummary) {
+    let at = Instant::now();
+    let config = JointFitConfig {
+        quadrature_nodes: 12,
+        duplicated_positions: with_class,
+        coverage_odds,
+        genotype_posteriors: true,
+        max_passes: std::env::var("MAX_PASSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200),
+        ..JointFitConfig::default()
+    };
+    let fit = fit_jointly(cohort, &config).expect("the cohort fits");
+    let mut heterozygosity: Vec<f32> = fit
+        .rates
+        .values()
+        .map(|estimate| estimate.value.heterozygous as f32)
+        .collect();
+    let mut excess: Vec<f32> = fit
+        .hom_excess
+        .values()
+        .map(|estimate| estimate.value.get() as f32)
+        .collect();
+    let summary = ArmSummary {
+        median_heterozygosity: f64::from(median_of(&mut heterozygosity)),
+        median_hom_excess: f64::from(median_of(&mut excess)),
+        expected_heterozygosity: fit.expected_heterozygosity,
+        density_a: fit.density.value.a,
+        density_b: fit.density.value.b,
+        p_invariant: fit.density.value.p_invariant,
+        class_share: fit.duplicated.as_ref().map_or(0.0, |d| d.value.share),
+        carrier_a: fit.duplicated.as_ref().map_or(0.0, |d| d.value.carrier_a),
+        carrier_b: fit.duplicated.as_ref().map_or(0.0, |d| d.value.carrier_b),
+        passes: fit.passes,
+        converged: fit.converged,
+    };
+    println!(
+        "  {:<30}{:>8}{:>12}{:>14.3}{:>14.3}{:>14.3}{:>10.0} s",
+        name,
+        summary.passes,
+        if summary.converged {
+            "converged"
+        } else {
+            "ran out"
+        },
+        1_000.0 * summary.median_heterozygosity,
+        summary.median_hom_excess,
+        1_000.0 * summary.expected_heterozygosity,
+        at.elapsed().as_secs_f64()
+    );
+    (fit, summary)
+}
+
+/// **Does the class claim duplications, or rare real variants?** The fit cannot answer that
+/// about itself — inside its own model a claimed position is a duplication by construction —
+/// so this asks two things the fit never looks at.
+///
+/// 1. **Read depth.** A stretch of genome a plant carries twice collects two copies' reads, so
+///    the positions the class claims should sit at about twice that accession's normal depth
+///    for their GC content. If they sit at ordinary depth they are not duplications. This is
+///    independent of every piece of evidence the class itself uses.
+/// 2. **How many accessions carry the alternative allele.** A duplication and a rare variant
+///    both have few carriers, so a claim rate that is flat in the carrier count is what a
+///    duplication population looks like, and one that climbs as the allele gets rarer is what
+///    claiming rare variants looks like.
+///
+/// **Neither is a truth set**, and there is none for duplications in this cohort. Every number
+/// below compares two discriminators with each other.
+fn duplicated_class_audit(
+    cohort: &[SampleRecords],
+    grid: &CoverageGrid,
+    window_gc: &[f32],
+    kept: &[pop_var_caller::ng::types::GenomePosition],
+    contigs: &ContigList,
+    dump: Option<&str>,
+) {
+    let positions = kept.len();
+    let samples = cohort.len();
+    println!("\n--- the duplicated class on real reads: the same cohort fitted three ways ---");
+    println!(
+        "  {:<30}{:>8}{:>12}{:>14}{:>14}{:>14}{:>12}",
+        "", "passes", "", "median het/kb", "less het by", "population/kb", "time"
+    );
+
+    // The class-off arm's per-position heterozygosity is all that is kept from it: which
+    // positions the class-on arm takes its heterozygosity from is the question, and one number
+    // a position answers it. The 1.5 GB of per-sample posteriors goes when the fit does.
+    let (heterozygous_without_class, without) = {
+        let (fit, summary) = fit_one_arm(cohort, "the class off", false, Vec::new());
+        let per_sample: Vec<f32> = (0..positions * samples)
+            .map(|slot| fit.genotype_posterior[slot * 3])
+            .collect();
+        (per_sample, summary)
+    };
+    let heterozygosity_without_class: Vec<f32> = (0..positions)
+        .map(|index| {
+            heterozygous_without_class[index * samples..][..samples]
+                .iter()
+                .sum()
+        })
+        .collect();
+    let (fit, with) = fit_one_arm(cohort, "the class on", true, Vec::new());
+
+    // **The third arm: the class handed the depth reading as well.** Everything the class knows
+    // by default is the cohort's genotype composition; this arm adds, per accession per
+    // position, how much more likely that accession's read depth around there is if it has two
+    // copies rather than one — GC-corrected, which the stored summary alone cannot do.
+    let with_coverage = if std::env::var("SKIP_COVERAGE_ARM").is_ok() {
+        None
+    } else {
+        let odds: Vec<Arc<[f32]>> = cohort
+            .iter()
+            .map(|records| {
+                let coverage = records.coverage.as_ref().expect("a coverage summary");
+                let aligned = f64::from(coverage.median_depth())
+                    * coverage.window_bp().get() as f64
+                    * coverage.windows_to_sum() as f64;
+                let sd = |copies: f64| {
+                    (copies * copies * 0.194 * 0.194 + copies * 313.0 / aligned.max(1.0)).sqrt()
+                };
+                let relative = relative_depth(records, grid, window_gc, kept);
+                let odds: Vec<f32> = relative
+                    .iter()
+                    .map(|value| {
+                        if !value.is_finite() {
+                            return 0.0;
+                        }
+                        let reading = f64::from(*value).clamp(0.02, 8.0);
+                        let ln_normal = |copies: f64| {
+                            let s = sd(copies);
+                            -0.5 * ((reading - copies) / s).powi(2) - s.ln()
+                        };
+                        (ln_normal(2.0) - ln_normal(1.0)) as f32
+                    })
+                    .collect();
+                Arc::from(odds)
+            })
+            .collect();
+        let (_, summary) = fit_one_arm(cohort, "the class on, with depth", true, odds);
+        Some(summary)
+    };
+
+    println!("\n  the population's allele-frequency density, which is what H3 asks about");
+    println!(
+        "  {:<26}{:>16}{:>21}{:>18}{:>14}",
+        "", "carrying only", "the rest", "expected het/kb", "class weight"
+    );
+    println!(
+        "  {:<26}{:>16}{:>21}{:>18}{:>14}",
+        "", "the reference", "segregate with", "", ""
+    );
+    let mut arms: Vec<(&str, &ArmSummary)> =
+        vec![("the class off", &without), ("the class on", &with)];
+    if let Some(summary) = with_coverage.as_ref() {
+        arms.push(("the class on, with depth", summary));
+    }
+    for (name, arm) in &arms {
+        println!(
+            "  {:<26}{:>16.4}{:>21}{:>18.3}{:>14.5}",
+            name,
+            arm.p_invariant,
+            format!("Beta({:.3}, {:.3})", arm.density_a, arm.density_b),
+            1_000.0 * arm.expected_heterozygosity,
+            arm.class_share
+        );
+    }
+
+    // ---- the cheapest check: how many positions does the class claim? ----------------------
+    let class = &fit.duplicated_posterior;
+    let expected_positions: f64 = class.iter().map(|p| f64::from(*p)).sum();
+    let above_half = class.iter().filter(|p| **p > 0.5).count();
+    let above_ninety = class.iter().filter(|p| **p > 0.9).count();
+    println!("\n  --- how many positions the class claims ---");
+    println!(
+        "  fitted share of positions                 {:.5}  (Beta({:.3}, {:.3}) for the share \
+         of the panel carrying one)",
+        with.class_share, with.carrier_a, with.carrier_b
+    );
+    println!(
+        "  expected positions in the class           {:>12.0} of {positions} — 1 in {:.0}",
+        expected_positions,
+        positions as f64 / expected_positions.max(1e-9)
+    );
+    println!(
+        "  positions more likely in it than not      {above_half:>12} — 1 in {:.0}",
+        positions as f64 / (above_half.max(1) as f64)
+    );
+    println!(
+        "  positions at a posterior above 0.9        {above_ninety:>12} — 1 in {:.0}",
+        positions as f64 / (above_ninety.max(1) as f64)
+    );
+
+    // ---- the per-accession pass ------------------------------------------------------------
+    //
+    // One accession at a time: its reads, its relative depth and its own carrier posteriors,
+    // held together only for as long as it takes to count them.
+    let mut carriers_at: Vec<u16> = vec![0; positions];
+    let mut carriers_any: Vec<u16> = vec![0; positions];
+    let mut class_carriers: Vec<f32> = vec![0.0; positions];
+    let claimed: Vec<usize> = (0..positions).filter(|index| class[*index] > 0.5).collect();
+    let mut claimed_alt_share = vec![0.0_f32; claimed.len()];
+    let mut claimed_relative = vec![0.0_f32; claimed.len()];
+    let mut claimed_carriers = vec![0.0_f32; claimed.len()];
+
+    println!(
+        "\n  --- H1, the depth test: is a claimed position at twice its accession's depth? ---"
+    );
+    println!(
+        "  Relative depth is 1.0 at this accession's own normal for that stretch's GC content \
+         and 2.0 at twice it."
+    );
+    println!(
+        "  Beside each accession's claimed positions stand the ones the same fit calls \
+         heterozygous\n  with the class switched off, which is where the class's claims came \
+         from, and the whole\n  genome, which is what a position picked at random reads."
+    );
+    println!(
+        "\n  {:<24}{:>8}{:>9}{:>10}{:>12}{:>12}{:>10}{:>12}{:>12}",
+        "accession",
+        "reads/pos",
+        "read at",
+        "claimed",
+        "median rel.",
+        "in 1.6–2.4",
+        "het, off",
+        "in 1.6–2.4",
+        "background"
+    );
+    let mut per_accession: Vec<(String, f64, f64, usize, f64, f64, f64)> = Vec::new();
+    let mut probe_cell: Vec<(String, f64, f64, u64, f64, u64, f64)> = Vec::new();
+    for (s, records) in cohort.iter().enumerate() {
+        let reads = reads_at_positions(records, positions);
+        let relative = relative_depth(records, grid, window_gc, kept);
+        let coverage = records.coverage.as_ref().expect("a coverage summary");
+        let width_kb = coverage.windows_to_sum() as f64 * coverage.window_bp().get() as f64 / 1e3;
+
+        let mut background_two_copy = 0_u64;
+        let mut background_scored = 0_u64;
+        let mut claimed_relatives: Vec<f32> = Vec::new();
+        let mut claimed_two_copy = 0_u64;
+        let mut expected_claimed = 0.0_f64;
+        let (mut heterozygous_here, mut heterozygous_two_copy) = (0_u64, 0_u64);
+        // The measurement the duplication probe made on real alignments, taken here on the
+        // kept positions so the two are over the same list: a position reading between 35%
+        // and 65% non-reference at eight reads or more, inside a window near two copies —
+        // and the same near-half positions at ordinary coverage, which is the contrast that
+        // says whether the class is following depth at all.
+        let (mut near_half_two_copy, mut near_half_one_copy) = (0_u64, 0_u64);
+        let (mut claim_in_two_copy, mut claim_in_one_copy) = (0.0_f64, 0.0_f64);
+
+        for index in 0..positions {
+            let carrier = fit.genotype_posterior[(index * samples + s) * 3 + 2];
+            expected_claimed += f64::from(carrier);
+            class_carriers[index] += carrier;
+            if reads.non_reference[index] >= 1 {
+                carriers_any[index] += 1;
+            }
+            if reads.non_reference[index] >= 2 {
+                carriers_at[index] += 1;
+            }
+            let value = relative[index];
+            if value.is_finite() {
+                background_scored += 1;
+                if (1.6..=2.4).contains(&value) {
+                    background_two_copy += 1;
+                }
+            }
+            if carrier > 0.5 && value.is_finite() {
+                claimed_relatives.push(value);
+                if (1.6..=2.4).contains(&value) {
+                    claimed_two_copy += 1;
+                }
+            }
+            if heterozygous_without_class[index * samples + s] > 0.5 && value.is_finite() {
+                heterozygous_here += 1;
+                if (1.6..=2.4).contains(&value) {
+                    heterozygous_two_copy += 1;
+                }
+            }
+            let depth = reads.depth[index];
+            if depth >= 8 && value.is_finite() {
+                let share = f64::from(reads.non_reference[index]) / f64::from(depth);
+                if (0.35..=0.65).contains(&share) {
+                    if (1.6..=2.4).contains(&value) {
+                        near_half_two_copy += 1;
+                        claim_in_two_copy += f64::from(carrier);
+                    } else if (0.6..=1.4).contains(&value) {
+                        near_half_one_copy += 1;
+                        claim_in_one_copy += f64::from(carrier);
+                    }
+                }
+            }
+        }
+        for (slot, index) in claimed.iter().enumerate() {
+            let carrier = fit.genotype_posterior[(index * samples + s) * 3 + 2];
+            if carrier > 0.5 {
+                claimed_carriers[slot] += 1.0;
+                claimed_relative[slot] += relative[*index];
+                let depth = reads.depth[*index];
+                if depth > 0 {
+                    claimed_alt_share[slot] += reads.non_reference[*index] as f32 / depth as f32;
+                }
+            }
+        }
+
+        let claimed_here = claimed_relatives.len();
+        let median_claimed = f64::from(median_of(&mut claimed_relatives));
+        let share_claimed = claimed_two_copy as f64 / claimed_here.max(1) as f64;
+        let share_background = background_two_copy as f64 / background_scored.max(1) as f64;
+        println!(
+            "  {:<24}{:>8.1}{:>7.1} kb{:>10}{:>12.2}{:>11.1}%{:>10}{:>11.1}%{:>11.1}%",
+            records.sample,
+            coverage.median_depth(),
+            width_kb,
+            claimed_here,
+            median_claimed,
+            100.0 * share_claimed,
+            heterozygous_here,
+            100.0 * heterozygous_two_copy as f64 / heterozygous_here.max(1) as f64,
+            100.0 * share_background,
+        );
+        per_accession.push((
+            records.sample.clone(),
+            f64::from(coverage.median_depth()),
+            expected_claimed,
+            claimed_here,
+            median_claimed,
+            share_claimed,
+            share_background,
+        ));
+        probe_cell.push((
+            records.sample.clone(),
+            f64::from(coverage.median_depth()),
+            expected_claimed,
+            near_half_two_copy,
+            claim_in_two_copy / near_half_two_copy.max(1) as f64,
+            near_half_one_copy,
+            claim_in_one_copy / near_half_one_copy.max(1) as f64,
+        ));
+    }
+
+    // ---- the probe's own cell, on the kept positions ---------------------------------------
+    println!(
+        "\n  --- the same positions the duplication probe counts, and what the class does with \
+         them ---"
+    );
+    println!(
+        "  A near-half position reads 35–65% non-reference at eight reads or more. The probe \
+         counted\n  those inside windows near two copies and found 150 to 590 in two million \
+         (1 in 4,000)."
+    );
+    println!(
+        "  Beside them stands the count the class books for that accession — the sum of its own \
+         posteriors\n  that the accession carries an extra copy — with both scaled to two \
+         million positions."
+    );
+    println!(
+        "\n  {:<24}{:>10}{:>12}{:>10}{:>12}{:>12}{:>12}{:>12}",
+        "accession",
+        "reads/pos",
+        "the class",
+        "per 2 M",
+        "near half",
+        "per 2 M",
+        "taken",
+        "near half"
+    );
+    println!(
+        "  {:<24}{:>10}{:>12}{:>10}{:>12}{:>12}{:>12}{:>12}{:>12}",
+        "", "", "books", "", "at 2×", "", "", "at 1×", "taken"
+    );
+    let scale = 2e6 / positions as f64;
+    for (name, depth, books, two, claim_two, one, claim_one) in &probe_cell {
+        println!(
+            "  {name:<24}{depth:>10.1}{books:>12.0}{:>10.0}{two:>12}{:>12.0}{:>11.1}%{one:>12}\
+             {:>11.1}%",
+            books * scale,
+            *two as f64 * scale,
+            100.0 * claim_two,
+            100.0 * claim_one,
+        );
+    }
+
+    // ---- H2: the posterior against how many accessions carry the allele ---------------------
+    println!("\n  --- H2, the carrier-count test ---");
+    println!(
+        "  An accession counts as carrying the alternative allele where two or more of its \
+         reads show it."
+    );
+    let silent = claimed
+        .iter()
+        .filter(|index| carriers_any[**index] == 0)
+        .count();
+    println!(
+        "  {silent} of the {} positions the class claims outright have no accession showing \
+         even one\n  read that disagrees with the reference.",
+        claimed.len()
+    );
+    println!(
+        "\n  {:>18}{:>14}{:>18}{:>20}{:>18}{:>20}",
+        "accessions carrying",
+        "positions",
+        "the class claims",
+        "share of them claimed",
+        "carriers it sees",
+        "heterozygosity there"
+    );
+    let bands: [(u16, u16); 10] = [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 5),
+        (6, 10),
+        (11, 20),
+        (21, 40),
+        (41, 62),
+        (63, u16::MAX),
+    ];
+    for (low, high) in bands {
+        let (mut count, mut mass, mut het, mut seen) = (0_u64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for index in 0..positions {
+            if (low..=high).contains(&carriers_at[index]) {
+                count += 1;
+                mass += f64::from(class[index]);
+                het += f64::from(heterozygosity_without_class[index]);
+                seen += f64::from(class_carriers[index]);
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        println!(
+            "  {:>18}{count:>14}{mass:>18.0}{:>19.2}%{:>18.2}{:>20.0}",
+            if low == high {
+                format!("{low}")
+            } else if high == u16::MAX {
+                format!("{low} or more")
+            } else {
+                format!("{low}–{high}")
+            },
+            100.0 * mass / count as f64,
+            seen / mass.max(1e-9),
+            het
+        );
+    }
+
+    // ---- where the heterozygosity went -------------------------------------------------------
+    let total_het: f64 = heterozygosity_without_class
+        .iter()
+        .map(|v| f64::from(*v))
+        .sum();
+    let at_claimed: f64 = claimed
+        .iter()
+        .map(|index| f64::from(heterozygosity_without_class[*index]))
+        .sum();
+    println!("\n  --- where the class took the heterozygosity from ---");
+    println!(
+        "  with the class off the fit books {total_het:.0} heterozygous sample-positions; \
+         {at_claimed:.0} of them\n  ({:.1}%) sit at the {} positions the class claims outright.",
+        100.0 * at_claimed / total_het.max(1e-9),
+        claimed.len()
+    );
+
+    // ---- the claimed positions themselves ----------------------------------------------------
+    if let Some(path) = dump {
+        let mut out = String::from(
+            "contig\tposition\tclass_posterior\tmismapped_posterior\tcarriers\t\
+             carriers_claimed\tmean_alt_share\tmean_relative_depth\theterozygosity_class_off\n",
+        );
+        for (slot, index) in claimed.iter().enumerate() {
+            let claimed_here = claimed_carriers[slot].max(1.0);
+            out.push_str(&format!(
+                "{}\t{}\t{:.4}\t{:.4}\t{}\t{:.0}\t{:.3}\t{:.3}\t{:.3}\n",
+                contigs.entries[kept[*index].contig.get() as usize].name,
+                kept[*index].position.get(),
+                class[*index],
+                fit.noisy_posterior[*index],
+                carriers_at[*index],
+                claimed_carriers[slot],
+                claimed_alt_share[slot] / claimed_here,
+                claimed_relative[slot] / claimed_here,
+                heterozygosity_without_class[*index],
+            ));
+        }
+        std::fs::write(path, out).expect("the audit dump path is writable");
+        println!("\n  the claimed positions   {path}");
+    }
+
+    let _ = per_accession;
+}
+
 /// `ln P(this sample's depth around here | it has two copies) − ln P(… | one copy)`, per sample
 /// per kept position.
 ///
@@ -742,6 +1388,13 @@ fn coverage_odds(
 }
 
 /// One sample: one walk, filling the records and the coverage summary together.
+///
+/// Returns the records and, beside them, **each coverage window's reference GC fraction** —
+/// `f32::NAN` where the window holds no called base. That is a property of the reference and
+/// the grid rather than of the sample, so every walk returns the same list; the stored summary
+/// keeps the sample's depth-against-GC curve but not the window's own GC, so without this the
+/// curve cannot be looked up and a relative depth reading is copy number times GC content
+/// (`duplicated_locus_probe_2026-08-12.md` §2).
 #[allow(
     clippy::too_many_arguments,
     reason = "a walk needs all of it, and a config struct \
@@ -758,7 +1411,7 @@ fn walk_one(
     grid: &CoverageGrid,
     kept: &pop_var_caller::ng::parameter_estimation::joint::loci::KeptLoci,
     identity: &SelectionIdentity,
-) -> SampleRecords {
+) -> (SampleRecords, Vec<f32>) {
     let read_groups =
         build_read_groups(&[alignment.to_path_buf()]).expect("the header declares read groups");
     let sample = match read_groups.read_groups_per_sample() {
@@ -900,7 +1553,10 @@ fn walk_one(
             .ceil()
             .max(1.0)
     );
-    writer.finish(Some(coverage.finish()))
+    let window_gc: Vec<f32> = (0..coverage.grid().len())
+        .map(|slot| coverage.gc_fraction(slot).unwrap_or(f32::NAN))
+        .collect();
+    (writer.finish(Some(coverage.finish())), window_gc)
 }
 
 /// What one sample's records weigh, each object on its own line.

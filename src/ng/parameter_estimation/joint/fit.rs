@@ -227,14 +227,28 @@ pub struct JointFit {
     /// Four bytes a position: 8 MB at the two-million-position budget.
     pub noisy_posterior: Vec<f32>,
     /// **For every kept position, in position order, each sample's posterior that it is
-    /// heterozygous there and that both its copies are non-reference** — two values a sample,
-    /// the samples in the order they were handed in. Empty unless the run asked for it, which
-    /// is [`JointFitConfig::genotype_posteriors`].
+    /// heterozygous there, that both its copies are non-reference, and that it carries an
+    /// extra copy of the position** — three values a sample, the samples in the order they
+    /// were handed in. Empty unless the run asked for it, which is
+    /// [`JointFitConfig::genotype_posteriors`].
     ///
     /// The per-sample rates are these values' means, so this is what a comparison against a
     /// benchmark VCF needs in order to ask *which* positions the two disagree at rather than
     /// only by how much.
     pub genotype_posterior: Vec<f32>,
+    /// **For every kept position, in position order, the probability that the position is
+    /// drawn from the duplicated class** — that some sample carries more copies of it than the
+    /// reference does. Empty unless the run asked for it
+    /// ([`JointFitConfig::genotype_posteriors`]), and zero at every position when the run did
+    /// not fit the class.
+    ///
+    /// The class's own `share` is this value's mean. Kept separately because a share says how
+    /// many positions the class claims and says nothing about *which*, and every check that
+    /// the claimed positions are duplications rather than rare variants — their read depth,
+    /// their carrier count — is a check on the list.
+    ///
+    /// Four bytes a position: 8 MB at the two-million-position budget.
+    pub duplicated_posterior: Vec<f32>,
     /// One entry per pass of the alternation, when the run asked for it. Empty otherwise.
     pub trace: Vec<PassSummary>,
     /// How the fit ended. **Running out of passes is never reported as convergence.**
@@ -350,10 +364,12 @@ pub struct JointFitConfig {
     /// the run. Empty — the default — leaves the class identified by the cohort alone.
     pub coverage_odds: Vec<Arc<[f32]>>,
     /// Whether to keep, for each sample at each kept position, the posterior that it is
-    /// heterozygous there and the posterior that both its copies are non-reference.
+    /// heterozygous there, that both its copies are non-reference, and that it carries an
+    /// extra copy of the position — and, once per position, the probability that the position
+    /// belongs to the duplicated class at all.
     ///
-    /// **Off by default because of what it weighs**: eight bytes a position a sample, which is
-    /// 10 MB for three samples over the benchmark trio's positions and a gigabyte for fifty
+    /// **Off by default because of what it weighs**: twelve bytes a position a sample, which
+    /// is 16 MB for three samples over the benchmark trio's positions and 1.5 GB for fifty
     /// samples over two million. What it is for is checking the fitted rates against a truth
     /// set position by position rather than as one mean.
     pub genotype_posteriors: bool,
@@ -888,10 +904,13 @@ struct Statistics {
     noisy_posterior: Vec<f32>,
     collect_noisy_posterior: bool,
     /// **Per position visited, then per sample, the posterior that the sample is heterozygous
-    /// there and the posterior that both its copies are non-reference** — the same
-    /// position-order list as `noisy_posterior` with two values a sample instead of one.
-    /// Empty unless the run asked for it.
+    /// there, that both its copies are non-reference, and that it carries an extra copy** —
+    /// the same position-order list as `noisy_posterior` with three values a sample instead of
+    /// one. Empty unless the run asked for it.
     genotype_posterior: Vec<f32>,
+    /// **Per position visited, the posterior that the position is drawn from the duplicated
+    /// class**, in the same position order. Collected with `genotype_posterior`.
+    duplicated_posterior: Vec<f32>,
     collect_genotype_posterior: bool,
 }
 
@@ -945,6 +964,7 @@ impl Statistics {
             noisy_posterior: Vec::new(),
             collect_noisy_posterior: false,
             genotype_posterior: Vec::new(),
+            duplicated_posterior: Vec::new(),
             collect_genotype_posterior: false,
         }
     }
@@ -1008,6 +1028,8 @@ impl Statistics {
             .extend_from_slice(&other.noisy_posterior);
         self.genotype_posterior
             .extend_from_slice(&other.genotype_posterior);
+        self.duplicated_posterior
+            .extend_from_slice(&other.duplicated_posterior);
     }
 }
 
@@ -1105,6 +1127,7 @@ pub fn fit_jointly(
     let (score, parameters, mut statistics, passes, converged, trace) =
         best.expect("a run always has at least one starting point");
     let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
+    let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
 
     let observations = statistics.positions as u64;
     let noise = groups
@@ -1208,6 +1231,7 @@ pub fn fit_jointly(
         }),
         noisy_posterior: statistics.noisy_posterior,
         genotype_posterior,
+        duplicated_posterior,
         trace,
         passes,
         converged,
@@ -1365,7 +1389,8 @@ fn expectation_pass(
         if collect_genotype_posterior {
             statistics
                 .genotype_posterior
-                .reserve((end - first) * samples.len() * 2);
+                .reserve((end - first) * samples.len() * 3);
+            statistics.duplicated_posterior.reserve(end - first);
         }
         let mut cursor = EvidenceCursor::over(
             samples,
@@ -1418,7 +1443,8 @@ fn expectation_pass(
         into.noisy_posterior.reserve(positions);
         if collect_genotype_posterior {
             into.genotype_posterior
-                .reserve(positions * samples.len() * 2);
+                .reserve(positions * samples.len() * 3);
+            into.duplicated_posterior.reserve(positions);
         }
         for chunk in &chunks {
             into.absorb(chunk);
@@ -1485,9 +1511,9 @@ struct Scratch {
     /// `[sample]` — the same for the duplicated branch, where a sample has two states rather
     /// than three: it carries the extra copy or it does not.
     carrier_weight: Vec<f64>,
-    /// `[sample][heterozygous, homozygous non-reference]` — this one position's posteriors,
-    /// summed over both classes and every branch, so that a run asking to keep them has a
-    /// value to keep. Zeroed per position.
+    /// `[sample][heterozygous, homozygous non-reference, carries an extra copy]` — this one
+    /// position's posteriors, summed over both classes and every branch, so that a run asking
+    /// to keep them has a value to keep. Zeroed per position.
     position_genotype: Vec<f64>,
     /// `[candidate][sample][genotype]`, the same before the candidates are collapsed, because
     /// which reads count as the allele depends on which allele it is.
@@ -1518,7 +1544,7 @@ impl Scratch {
             multiplicity: Vec::with_capacity(MAX_CANDIDATES),
             genotype_weight: vec![0.0; samples * 3],
             carrier_weight: vec![0.0; samples],
-            position_genotype: vec![0.0; samples * 2],
+            position_genotype: vec![0.0; samples * 3],
             per_candidate_weight: vec![0.0; MAX_CANDIDATES * samples * 3],
             shares: Vec::with_capacity(MAX_CANDIDATES * nodes),
         }
@@ -1779,11 +1805,13 @@ fn one_position(
         if statistics.collect_genotype_posterior {
             statistics
                 .genotype_posterior
-                .extend(std::iter::repeat_n(0.0_f32, samples * 2));
+                .extend(std::iter::repeat_n(0.0_f32, samples * 3));
+            statistics.duplicated_posterior.push(0.0);
         }
         return;
     }
     scratch.position_genotype.fill(0.0);
+    let mut duplicated_here = 0.0_f64;
     statistics.log_likelihood += position_ln;
     if statistics.collect_noisy_posterior {
         statistics
@@ -1812,6 +1840,7 @@ fn one_position(
         statistics.fixed_alt += branch[1];
         statistics.segregating += branch[2];
         statistics.duplicated += branch[DUPLICATED];
+        duplicated_here += branch[DUPLICATED];
 
         // The invariant branch: every sample is homozygous reference, and every read that is
         // not on the reference base is an error, so none of them is "the allele".
@@ -1861,7 +1890,7 @@ fn one_position(
                         tally.reference += share * counts.reference;
                     }
                     statistics.homozygous_alt[s] += share;
-                    scratch.position_genotype[s * 2 + 1] += share;
+                    scratch.position_genotype[s * 3 + 1] += share;
                 }
             }
         }
@@ -1938,8 +1967,8 @@ fn one_position(
             for s in 0..samples {
                 statistics.heterozygous[s] += scratch.genotype_weight[s * 3 + 1];
                 statistics.homozygous_alt[s] += scratch.genotype_weight[s * 3 + 2];
-                scratch.position_genotype[s * 2] += scratch.genotype_weight[s * 3 + 1];
-                scratch.position_genotype[s * 2 + 1] += scratch.genotype_weight[s * 3 + 2];
+                scratch.position_genotype[s * 3] += scratch.genotype_weight[s * 3 + 1];
+                scratch.position_genotype[s * 3 + 1] += scratch.genotype_weight[s * 3 + 2];
             }
         }
 
@@ -2014,6 +2043,7 @@ fn one_position(
                 }
                 for s in 0..samples {
                     statistics.carrier[s] += scratch.carrier_weight[s];
+                    scratch.position_genotype[s * 3 + 2] += scratch.carrier_weight[s];
                 }
             }
         }
@@ -2023,6 +2053,7 @@ fn one_position(
         statistics
             .genotype_posterior
             .extend(scratch.position_genotype.iter().map(|v| *v as f32));
+        statistics.duplicated_posterior.push(duplicated_here as f32);
     }
 }
 
