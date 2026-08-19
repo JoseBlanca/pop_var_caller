@@ -445,6 +445,108 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             ),
         );
     }
+    // **One driver by itself, for a profiler to look at.** A sampling profiler attributes
+    // whatever the process was doing when it interrupted it, so a run that walks the reads and
+    // then sweeps five widths across three pool sizes gives a tree in which the merge is a
+    // minority of the samples and each driver a minority of that. `NG_REAL_ONLY=oracle|cache|
+    // parallel` runs one driver and nothing else, `NG_REAL_ROUNDS` times (default 20), at
+    // `NG_REAL_WIDTH` bases (default 200) on `NG_REAL_THREADS` threads (default 8).
+    //
+    // **Rebuilding the sources between rounds is unavoidable and is not hidden**: the cache
+    // consumes its readers, so every round after the first needs a fresh copy of every
+    // sample's observations. That copying is real time in the process and shows in the profile
+    // under `sources_over`, which is a subtree of its own — read the merge's share under
+    // `merge_cohort_*` and leave the copying where it is. The oracle needs no copy at all.
+    if let Ok(driver) = std::env::var("NG_REAL_ONLY") {
+        let rounds = limit_of("NG_REAL_ROUNDS").unwrap_or(20).max(1);
+        let bases = u32::try_from(limit_of("NG_REAL_WIDTH").unwrap_or(200)).expect("a width");
+        let threads = limit_of("NG_REAL_THREADS").unwrap_or(8).max(1);
+        let width =
+            CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
+        let in_flight = CohortLocusBuilderRegionsInFlight(
+            std::num::NonZeroUsize::new(threads).expect("non-zero"),
+        );
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a pool of the asked-for size");
+        let slices: Vec<&[SampleLocusObservations]> = cohort.iter().map(Vec::as_slice).collect();
+
+        // **The cohort's observations are copied between rounds and that is not the merge.**
+        // A cache consumes its readers, so every round after the first needs a fresh copy of
+        // every sample's records; timing it with the merge would charge the two cached drivers
+        // for work the oracle is never asked to do. The copy happens before the inner clock
+        // starts, so `merge_seconds` below is the merge and nothing else.
+        println!("# profile-start: {driver}");
+        let started = Instant::now();
+        let mut merging = 0.0f64;
+        let mut loci = 0usize;
+        for _ in 0..rounds {
+            match driver.as_str() {
+                "oracle" => {
+                    let at = Instant::now();
+                    let merged = merge_cohort_serially(
+                        &analysed,
+                        &slices,
+                        MaxCohortLocusSpan::DEFAULT,
+                        min_alt_reads,
+                    );
+                    merging += at.elapsed().as_secs_f64();
+                    loci += merged.cohort_observations.len();
+                }
+                "cache" => {
+                    let mut cache = ObservationCache::over(sources_over(&cohort));
+                    let at = Instant::now();
+                    let merged = merge_cohort_through_cache(
+                        &analysed,
+                        &mut cache,
+                        width,
+                        MaxCohortLocusSpan::DEFAULT,
+                        min_alt_reads,
+                    )
+                    .expect("the probe's sources cannot fail");
+                    merging += at.elapsed().as_secs_f64();
+                    loci += merged.cohort_observations.len();
+                }
+                "parallel" => {
+                    let mut cache = ObservationCache::over(sources_over(&cohort));
+                    let at = Instant::now();
+                    let merged = pool
+                        .install(|| {
+                            merge_cohort_in_parallel(
+                                &analysed,
+                                &mut cache,
+                                width,
+                                in_flight,
+                                MaxCohortLocusSpan::DEFAULT,
+                                min_alt_reads,
+                            )
+                        })
+                        .expect("the probe's sources cannot fail");
+                    merging += at.elapsed().as_secs_f64();
+                    loci += merged.cohort_observations.len();
+                }
+                other => {
+                    return Err(format!(
+                        "NG_REAL_ONLY must be oracle, cache or parallel, not {other}"
+                    )
+                    .into());
+                }
+            }
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        println!(
+            "\ndriver, rounds, width_bases, threads, loci_per_round, merge_ms, \
+             seconds_all_rounds_including_copies"
+        );
+        println!(
+            "{driver}, {rounds}, {bases}, {threads}, {}, {:.2}, {seconds:.2}",
+            loci / rounds,
+            1e3 * merging / rounds as f64,
+        );
+        return Ok(());
+    }
+
     println!("\nwidth_bases, regions_with_a_start, regions_without");
     for bases in WIDTHS {
         let width =
