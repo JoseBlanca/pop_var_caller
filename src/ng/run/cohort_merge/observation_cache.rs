@@ -41,11 +41,74 @@
 //! and against it stood one file of two thousand-odd lines covering two types that share no
 //! field and no function.
 
-use std::iter::Fuse;
-
 use super::CohortLocusBuilderRegionsLen;
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::types::{GenomePosition, GenomeRegion, Position};
+
+/// One sample's observations in coordinate order, **and the place a record goes when the
+/// merge has finished with it**.
+///
+/// **The second half is why this is a trait and not an `Iterator` bound.** The merge frees
+/// far more than it allocates — 6.4 million blocks a round against 216 thousand on the
+/// tomato panel, counted — because the records it walks were allocated by the stage upstream
+/// and are released as it passes them. Measured by making the merge leak instead of free,
+/// that is **63% of the eight-thread merge** and 23% of the single-threaded one. No
+/// scheduling change reaches it: the work is real, it is just work nobody needs done.
+///
+/// So a source is offered its own spent records back. A source that mints them — the
+/// generator, or a psp reader decoding into buffers — can fill the record it is handed
+/// instead of allocating a new one, and then neither side allocates per position after the
+/// first window. A source that cannot simply ignores the offer, which is what the blanket
+/// implementation below does for every plain iterator, so nothing that exists today has to
+/// change.
+///
+/// **The spare is an offer and not an obligation**, and that is the whole of the contract: a
+/// source may fill it, drop it, or keep it for later, and the record it returns need have
+/// nothing to do with it. Making it an obligation would mean a source could not decide per
+/// record whether reuse is possible — which a decoder must, since a record whose buffers are
+/// the wrong size is cheaper to allocate than to reshape.
+pub trait ObservationSource {
+    /// What a failed read is. The cache adds nothing to it and passes it through, so it must
+    /// name the sample it came from (arch §5).
+    type Error;
+
+    /// The next observation, or `None` once this sample is spent.
+    ///
+    /// `spare` is a record the merge will not read again, offered for reuse. It is `None`
+    /// when the cache has none to hand back.
+    ///
+    /// **Once this answers `None` it is never called again**, which the cache guarantees with
+    /// a flag of its own — the guard [`Fuse`](std::iter::Fuse) used to give, and the reason it
+    /// matters is unchanged: a source that yielded `Some` after a `None` would be drawn in
+    /// behind the window's own right edge and so silently out of coordinate order. A
+    /// *failure* is `Some(Err(_))` and leaves the source live, which is what lets a cover be
+    /// made again.
+    fn next_observation(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<SampleLocusObservations, Self::Error>>;
+}
+
+/// Every iterator of one sample's observations is a source that does not reuse.
+///
+/// This is what keeps the trait from being a migration: the fixtures, the probes and the
+/// direct path all hand the cache a plain iterator and go on working, paying exactly the
+/// allocator traffic they paid before. Reuse is something a source opts into by implementing
+/// the trait itself.
+impl<I, E> ObservationSource for I
+where
+    I: Iterator<Item = Result<SampleLocusObservations, E>>,
+{
+    type Error = E;
+
+    fn next_observation(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<SampleLocusObservations, E>> {
+        drop(spare);
+        self.next()
+    }
+}
 
 /// Every sample's observations over the ground currently assigned to builders (spec §6.4).
 ///
@@ -86,14 +149,22 @@ pub struct ObservationCache<S> {
 /// One sample's reader and the observations drawn from it that have not been evicted.
 struct SampleWindow<S> {
     /// The forward reader. Never seeks, never rewinds.
+    source: S,
+    /// Whether the source has already answered `None`.
     ///
-    /// **Fused**, because an iterator is not required to be: a source that yielded `Some`
-    /// after a `None` would be drawn in behind the window's own right edge, and so silently
-    /// out of coordinate order. [`Fuse`] is the standard library's guard for exactly that,
-    /// and using it means there is no flag of our own to set on the right branch — in
-    /// particular, a failure is `Some(Err(_))` and so leaves the source live, which is what
-    /// lets a cover be made again.
-    source: Fuse<S>,
+    /// **This is the guard [`Fuse`](std::iter::Fuse) used to be**, kept because the reason
+    /// for it is unchanged and moved here because a source is now a trait rather than an
+    /// iterator: one that yielded `Some` after a `None` would be drawn in behind the window's
+    /// own right edge, and so silently out of coordinate order. Set only on `None`, so a
+    /// *failure* — `Some(Err(_))` — leaves the source live and a cover can be made again.
+    spent: bool,
+    /// Records this sample's window has finished with, offered back to its source.
+    ///
+    /// **Capped at what the sample currently holds**, which is the round's own ground and is
+    /// the term spec §8 already prices — so recycling cannot make the cache's memory a
+    /// different shape from the one that section bounds. What does not fit is freed as
+    /// before.
+    spare: Vec<SampleLocusObservations>,
     /// What has been drawn and not yet evicted, in coordinate order.
     ///
     /// **A `Vec` and not a `VecDeque`**, because a builder is handed a contiguous slice of it
@@ -104,7 +175,7 @@ struct SampleWindow<S> {
     last_drawn: Option<GenomePosition>,
 }
 
-impl<S: Iterator> ObservationCache<S> {
+impl<S> ObservationCache<S> {
     /// A cache over one source per sample, in the run's sample order.
     ///
     /// Zero samples is not an error here: refusing a zero-sample *run* happens where the run
@@ -115,7 +186,9 @@ impl<S: Iterator> ObservationCache<S> {
             samples: sources
                 .into_iter()
                 .map(|source| SampleWindow {
-                    source: source.fuse(),
+                    source,
+                    spent: false,
+                    spare: Vec::new(),
                     held_observations: Vec::new(),
                     last_drawn: None,
                 })
@@ -224,14 +297,70 @@ impl<S> ObservationCache<S> {
     pub(super) fn evict_before(&mut self, position: GenomePosition) {
         for sample in &mut self.samples {
             let first_survivor = first_reaching_index(&sample.held_observations, position);
-            sample.held_observations.drain(..first_survivor);
+            // **Destructured so that the drain and the spare list are two borrows, not
+            // one.** Both live on the same `SampleWindow`, and a method call inside the
+            // drain would borrow the whole of it a second time.
+            let SampleWindow {
+                held_observations,
+                spare,
+                ..
+            } = sample;
+            let room = held_observations.len();
+            for record in held_observations.drain(..first_survivor) {
+                if spare.len() < room {
+                    spare.push(record);
+                }
+            }
+        }
+    }
+
+    /// [`evict_before`](Self::evict_before), moving what it drops into `graveyard` instead of
+    /// freeing it here.
+    ///
+    /// **Same records dropped, freed somewhere else.** What eviction costs is not deciding what
+    /// to drop — that is one walk of the window's prefix — but returning every record's
+    /// buffers to the allocator, and that runs on whichever thread calls it. Moving the records
+    /// out first makes the free a job of its own that a caller can put beside work rather than
+    /// in front of it; the caller owns `graveyard` and decides when it dies.
+    ///
+    /// **The records moved out are unreachable by construction**, which is what makes this safe
+    /// to hand to another thread: they are exactly the ones
+    /// [`evict_before`](Self::evict_before) would have dropped, so nothing the cache still
+    /// holds and no window a builder can be given refers to them.
+    ///
+    /// A caller that never empties `graveyard` holds every record the run ever evicted, which
+    /// is the whole cohort — so it is a buffer to drain each round, not one to accumulate.
+    pub(super) fn evict_before_into(
+        &mut self,
+        position: GenomePosition,
+        graveyard: &mut Vec<SampleLocusObservations>,
+    ) {
+        for sample in &mut self.samples {
+            let first_survivor = first_reaching_index(&sample.held_observations, position);
+            let SampleWindow {
+                held_observations,
+                spare,
+                ..
+            } = sample;
+            let room = held_observations.len();
+            for record in held_observations.drain(..first_survivor) {
+                // **The source's offer comes first, the graveyard second.** A record the
+                // source will refill costs nothing to keep and saves the allocation the next
+                // draw would make; only what the sample cannot hold goes on to be freed, and
+                // that freeing is what the caller's partner thread is for.
+                if spare.len() < room {
+                    spare.push(record);
+                } else {
+                    graveyard.push(record);
+                }
+            }
         }
     }
 }
 
 impl<S, E> ObservationCache<S>
 where
-    S: Iterator<Item = Result<SampleLocusObservations, E>>,
+    S: ObservationSource<Error = E>,
 {
     /// Draw every sample forward until `region` is covered, and far enough past it to hold
     /// what a locus starting inside it can reach (spec §6.4).
@@ -294,6 +423,52 @@ where
         Ok(())
     }
 
+    /// [`cover`](Self::cover), with each sweep's samples swept concurrently.
+    ///
+    /// **Same fixpoint, a different schedule.** The serial sweep is Gauss-Seidel — sample `j`
+    /// sees the reach sample `i < j` widened inside the same sweep — and this is Jacobi: every
+    /// sample is drawn against the reach the last sweep ended on, and the sweep's answer is the
+    /// widest of theirs. Drawing is monotone in the reach it is given and the reach only ever
+    /// grows, so both schedules climb to the same least fixpoint above the region's last base,
+    /// and the held window is the same because every sample's last draw is against that
+    /// fixpoint. What differs is the sweep count: a chain that runs through the cohort in
+    /// decreasing sample order costs one sweep per link either way, but a chain the serial form
+    /// follows within one sweep costs this one a sweep per link.
+    pub(super) fn cover_in_parallel(&mut self, region: GenomeRegion) -> Result<(), E>
+    where
+        S: Send,
+        E: Send,
+    {
+        use rayon::prelude::*;
+
+        let mut chain_reach = GenomePosition {
+            contig: region.contig,
+            position: region.end.max(region.start),
+        };
+        loop {
+            let snapshot = chain_reach;
+            let widest = self
+                .samples
+                .par_iter_mut()
+                .map(|sample| {
+                    let mut reach = snapshot;
+                    sample.draw_to(&mut reach)?;
+                    Ok(reach)
+                })
+                .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
+            if widest == chain_reach {
+                break;
+            }
+            chain_reach = widest;
+        }
+
+        self.covered_to = Some(
+            self.covered_to
+                .map_or(chain_reach, |reached| reached.max(chain_reach)),
+        );
+        Ok(())
+    }
+
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
     fn sweep(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
@@ -310,7 +485,7 @@ where
 
 impl<S, E> SampleWindow<S>
 where
-    S: Iterator<Item = Result<SampleLocusObservations, E>>,
+    S: ObservationSource<Error = E>,
 {
     /// Widen `chain_reach` with this sample's observations while they begin at or before it,
     /// drawing from the source as the held ones run out. Answers whether the reach moved.
@@ -352,7 +527,15 @@ where
 
     /// The next observation from the source, or `None` once it is spent.
     fn draw_next(&mut self) -> Result<Option<SampleLocusObservations>, E> {
-        let Some(next) = self.source.next().transpose()? else {
+        if self.spent {
+            return Ok(None);
+        }
+        // **The offer, and it is the whole of the recycling.** A source that mints records
+        // fills this one instead of allocating; a source that cannot drops it and allocates,
+        // which is what every plain iterator does.
+        let spare = self.spare.pop();
+        let Some(next) = self.source.next_observation(spare).transpose()? else {
+            self.spent = true;
             return Ok(None);
         };
 
@@ -441,10 +624,19 @@ fn first_reaching_index(
     held_observations: &[SampleLocusObservations],
     position: GenomePosition,
 ) -> usize {
-    held_observations
-        .iter()
-        .position(|observation| observation.reach_position() >= position)
-        .unwrap_or(held_observations.len())
+    // **A bisection, and it is what makes the window's ordering load-bearing.** A sample's
+    // records are disjoint and ascending — `build_region` refuses a sample whose are not — so
+    // reach is monotone across the window and "does this one reach `position`" is false over a
+    // prefix and true over the rest, which is the shape `partition_point` needs. The scan this
+    // replaced would have given the same answer on a window that was not ordered; this one
+    // gives a wrong answer instead of a slow one, which is why the precondition is stated here
+    // rather than left to `evict_before`'s doc.
+    //
+    // It is worth nothing to the cached serial driver, whose window starts at the left edge
+    // because it evicts immediately before every cover, and about a tenth of the parallel
+    // driver's merge, where eviction opens a whole round and a region late in that round would
+    // otherwise walk past every earlier region's records first.
+    held_observations.partition_point(|observation| observation.reach_position() < position)
 }
 
 #[cfg(test)]

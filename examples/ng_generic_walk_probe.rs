@@ -100,8 +100,9 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 // contradiction only matters to a *run*. [`allocator_is_ambiguous`] fails that one at
 // startup.
 //
-// **What this does and does not catch, stated plainly.** It catches an operator who asked
-// for both, which is a contradiction they typed. It does *not* catch the silent case — a
+// **What this does and does not catch, stated plainly.** It catches an operator who has both
+// on — which since `alloc-mimalloc` became a default feature (2026-08-19) is what asking for
+// `dhat-heap` alone does, so the message names the invocation that works. It does *not* catch the silent case — a
 // run under `alloc-mimalloc` alone and a run under neither print the same eighteen lines,
 // because none of them names the allocator. That gap is real and is left open here rather
 // than papered over.
@@ -702,7 +703,9 @@ fn main() -> ExitCode {
     if allocator_is_ambiguous() {
         eprintln!(
             "error: alloc-mimalloc and dhat-heap both install a #[global_allocator]; enable \
-             exactly one. dhat-heap holds the slot, so this run would measure dhat's \
+             exactly one, with `--no-default-features --features dhat-heap` — \
+             `alloc-mimalloc` is a default feature, so asking for dhat alone still \
+             brings it. dhat-heap holds the slot, so this run would measure dhat's \
              allocator while its invocation names mimalloc."
         );
         return ExitCode::from(2);

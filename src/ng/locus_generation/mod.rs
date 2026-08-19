@@ -249,6 +249,31 @@ impl SampleLocusObservations {
         self.complete_observations()
             .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
     }
+
+    /// [`non_reference_reads`](Self::non_reference_reads) and
+    /// [`reads_compared_with_reference`](Self::reads_compared_with_reference) in **one pass**
+    /// over this record's sequences — the numerator and the denominator of the cohort merge's
+    /// keep rule, which asks for both at every record it walks
+    /// (`spec/cohort_merge.md` §4.3).
+    ///
+    /// The two methods above stay, because a caller that wants one of the numbers should not
+    /// have to discard the other; this exists because the merge wants both, and taken
+    /// separately they walk the same `observations` vector, apply the same
+    /// [`Complete`](ReadWitness::Complete) filter and read the same `num_obs` twice.
+    pub fn non_reference_and_compared_reads(&self) -> (u32, u32) {
+        let mut non_reference = 0u32;
+        let mut compared = 0u32;
+        for observation in &self.observations {
+            if observation.read_witness != ReadWitness::Complete {
+                continue;
+            }
+            compared = compared.saturating_add(observation.num_obs);
+            if !observation.matches_reference(&self.reference_bases) {
+                non_reference = non_reference.saturating_add(observation.num_obs);
+            }
+        }
+        (non_reference, compared)
+    }
 }
 
 /// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
@@ -372,8 +397,18 @@ impl SequenceObservation {
     /// would report a read that matched everything it saw as non-reference. Callers that
     /// cannot supply the matching stretch should stay on
     /// [`complete_observations`](SampleLocusObservations::complete_observations).
+    ///
+    /// **The one-base case is settled here rather than in `memcmp`.** The generic mint writes
+    /// one record per covered base, so on the tomato panel a record's reference is one byte
+    /// long (`examples/ng_cohort_merge_real_cost.rs` reports 1.00 bases a record over 63
+    /// accessions), and slice equality on `[u8]` reaches `memcmp` through a call whatever the
+    /// length. Naming the one-byte shape lets the compiler compare two bytes in place; every
+    /// other length falls through to the same slice equality as before.
     pub fn matches_reference(&self, reference_bases: &[u8]) -> bool {
-        *self.bases == *reference_bases
+        match (&*self.bases, reference_bases) {
+            ([shown], [reference]) => shown == reference,
+            (shown, reference) => *shown == *reference,
+        }
     }
 }
 

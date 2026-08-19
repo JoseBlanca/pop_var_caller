@@ -158,10 +158,22 @@ zstd = "0.13"
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.
 dhat-heap = ["dep:dhat"]
-# Enable in `cargo bench --features alloc-mimalloc --bench psp_writer_perf`
-# (or any other bench / example) to swap the global allocator for
-# `mimalloc`. Off by default so production binaries pick the system
-# allocator.
+# **On by default since 2026-08-19**, so every binary and every
+# measurement uses `mimalloc` unless a build says otherwise. It is faster
+# *and* smaller here, which is what settled it: the cohort merge on 63
+# tomato accessions over 100 kb goes from 333 and 335 ms to 249 and 258 on
+# 8 threads and from 451 and 453 to 270 and 270 on one, while the most
+# memory the process ever holds falls from 5.66 GB to 5.12 GB and from
+# 5.45 to 5.09. The production `var-calling` path had already measured the
+# same 9% off peak resident (`src/main.rs`). What it costs is a vendored C
+# allocator compiled into every build; `--no-default-features` opts out.
+#
+# The reason it pays is what the merge does to memory rather than how much
+# it uses: it frees far more blocks than it allocates — 6.4 million
+# against 216 thousand a round, counted — because the observations it
+# walks were allocated upstream and released as it passes them. glibc
+# takes an arena lock per free, and those frees are concentrated on one
+# thread; mimalloc frees into a per-thread heap without one.
 #
 # Only one `#[global_allocator]` may exist, so a target that offers both gates
 # its mimalloc declaration on `not(feature = "dhat-heap")` and dhat wins when
@@ -172,6 +184,13 @@ dhat-heap = ["dep:dhat"]
 # matters — a measurement naming one allocator while running another — the
 # target refuses at startup instead (`ng_generic_walk_probe`).
 alloc-mimalloc = ["dep:mimalloc"]
+# `alloc-mimalloc` is the default; `dhat-heap` is not, and a heap profile
+# needs `--no-default-features --features dhat-heap` so that mimalloc is
+# not also asked for. Targets offering both already gate their mimalloc
+# declaration on `not(feature = "dhat-heap")`, so asking for both still
+# *builds* — which `--all-features` in CI requires — and dhat takes the
+# slot.
+default = ["alloc-mimalloc"]
 # Compile the joint fit's drawn-evidence generators — `ssr_fit::bench_fixtures`
 # (a stratum drawn at a known slippage) and `fit::bench_fixtures` (a cohort drawn
 # at a known error rate, heterozygosity and inbreeding) — outside `cfg(test)`, so

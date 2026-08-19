@@ -9,9 +9,13 @@
 //! - `dhat-heap` — opt-in `dhat::Alloc` global allocator for heap
 //!   profiling under benches and examples. Bench/example use only;
 //!   not for production builds.
-//! - `alloc-mimalloc` — opt-in `mimalloc` global allocator for
-//!   benches and examples. Cannot be combined with `dhat-heap` at
-//!   the `#[global_allocator]` declaration in a bench/example shim.
+//! - `alloc-mimalloc` — the `mimalloc` global allocator, **on by
+//!   default**: faster and smaller than the system allocator on this
+//!   crate's workloads, measured on both the production `var-calling`
+//!   path and the ng cohort merge. `--no-default-features` opts out.
+//!   Cannot hold the `#[global_allocator]` slot alongside `dhat-heap`,
+//!   which wins it — so a heap profile is
+//!   `--no-default-features --features dhat-heap`.
 
 #![forbid(unsafe_code)]
 
