@@ -41,6 +41,76 @@
 //! cohort's samples in parallel, so the ratio printed here is the pessimistic one for the
 //! merge — divide the generator's share by the threads a real run would give it.
 
+// **The allocator this run measures, named in its own output.** The merge's Linux profile is
+// 39% allocator, so which allocator is installed is part of what every number here means.
+// `--features alloc-mimalloc` swaps it and `--features dhat-heap` counts it; `ALLOCATOR` below
+// is printed so a run cannot claim one allocator while carrying another.
+//
+// Only one `#[global_allocator]` may exist and dhat takes the slot when both features are on,
+// which is why the mimalloc arm excludes it rather than colliding with it.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Which global allocator this build installed.
+#[cfg(feature = "dhat-heap")]
+const ALLOCATOR: &str = "dhat (counting)";
+/// Which global allocator this build installed.
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
+const ALLOCATOR: &str = "mimalloc";
+/// Which global allocator this build installed.
+#[cfg(not(any(feature = "alloc-mimalloc", feature = "dhat-heap")))]
+const ALLOCATOR: &str = "system";
+
+/// How many heap blocks this process has allocated so far, counting from its start.
+///
+/// **Zero without the `dhat-heap` feature**, because nothing is counting: the project forbids
+/// `unsafe`, so the only counting allocator available is dhat's. A run that wants the count
+/// asks for it at the build.
+fn allocated_blocks() -> u64 {
+    #[cfg(feature = "dhat-heap")]
+    {
+        dhat::HeapStats::get().total_blocks
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    {
+        0
+    }
+}
+
+/// How many heap blocks are live right now. Zero without `dhat-heap`, as above.
+///
+/// **This is what prices the merge's deallocation**, which is most of what it asks the
+/// allocator for and which no count of allocations can see: the records a cached driver evicts
+/// were allocated before the clock started, so they raise nothing in `allocated_blocks` and
+/// lower this.
+fn live_blocks() -> u64 {
+    #[cfg(feature = "dhat-heap")]
+    {
+        dhat::HeapStats::get().curr_blocks as u64
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    {
+        0
+    }
+}
+
+/// How many heap bytes this process has allocated so far. Zero without `dhat-heap`, as above.
+fn allocated_bytes() -> u64 {
+    #[cfg(feature = "dhat-heap")]
+    {
+        dhat::HeapStats::get().total_bytes
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    {
+        0
+    }
+}
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -275,6 +345,11 @@ fn regions_with_a_locus_start(
 }
 
 fn main() -> ExitCode {
+    // The counting allocator's bookkeeping, which `allocated_blocks` reads. Dropping it at the
+    // end of `main` writes `dhat-heap.json` beside the run.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let args: Vec<String> = std::env::args().collect();
     let [_, fasta, crams, bed] = args.as_slice() else {
         eprintln!(
@@ -345,6 +420,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     println!("# analysed bases: {analysed_bases}");
     println!("# samples: {}", cram_paths.len());
     println!("# threads available: {}", rayon::current_num_threads());
+    println!("# global allocator: {ALLOCATOR}");
 
     let mut cohort: Vec<Vec<SampleLocusObservations>> = Vec::with_capacity(cram_paths.len());
     let mut generator_seconds = 0.0;
@@ -479,11 +555,25 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         // starts, so `merge_seconds` below is the merge and nothing else.
         println!("# profile-start: {driver}");
         let started = Instant::now();
-        let mut merging = 0.0f64;
+        // **Every round's own time, not a running sum.** One descheduled round moves a mean
+        // and leaves nothing to show it did, and this machine's swing between two runs of one
+        // unchanged binary has been measured at 13–26% — larger than most of the effects this
+        // probe is used to judge. The three other probes in this module already print the
+        // median with its two extremes; this is the one that did not.
+        let mut each_round: Vec<f64> = Vec::with_capacity(rounds);
         let mut loci = 0usize;
+        // **What the merge allocates, which is the same on every run of the same code on the
+        // same input where the milliseconds are not.** Counted only under `--features
+        // dhat-heap`; zero otherwise, and printed only when it is non-zero.
+        let mut blocks = 0u64;
+        let mut bytes = 0u64;
+        let mut freed = 0u64;
         for _ in 0..rounds {
             match driver.as_str() {
                 "oracle" => {
+                    let blocks_at = allocated_blocks();
+                    let bytes_at = allocated_bytes();
+                    let live_at = live_blocks();
                     let at = Instant::now();
                     let merged = merge_cohort_serially(
                         &analysed,
@@ -491,11 +581,53 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                         MaxCohortLocusSpan::DEFAULT,
                         min_alt_reads,
                     );
-                    merging += at.elapsed().as_secs_f64();
+                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                    let allocated_here = allocated_blocks() - blocks_at;
+                    blocks += allocated_here;
+                    bytes += allocated_bytes() - bytes_at;
+                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
+                        as u64;
                     loci += merged.cohort_observations.len();
+                }
+                // **The oracle asked to own what it merges, so the two sides free the same
+                // records inside the same clock.** The plain `oracle` above borrows the
+                // cohort and so frees nothing while it is timed, while both cached drivers
+                // own their copy and free every record of it through eviction. Comparing
+                // those two charges the cache for a deallocation the oracle's caller pays
+                // later and out of shot. This arm gives the oracle its own copy — built
+                // before the clock, exactly as `sources_over` is — and drops it inside.
+                "oracle_owned" => {
+                    let owned: Vec<Vec<SampleLocusObservations>> = cohort.clone();
+                    let blocks_at = allocated_blocks();
+                    let bytes_at = allocated_bytes();
+                    let live_at = live_blocks();
+                    let at = Instant::now();
+                    let merged = {
+                        let slices: Vec<&[SampleLocusObservations]> =
+                            owned.iter().map(Vec::as_slice).collect();
+                        merge_cohort_serially(
+                            &analysed,
+                            &slices,
+                            MaxCohortLocusSpan::DEFAULT,
+                            min_alt_reads,
+                        )
+                    };
+                    let built = merged.cohort_observations.len();
+                    drop(owned);
+                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                    let allocated_here = allocated_blocks() - blocks_at;
+                    blocks += allocated_here;
+                    bytes += allocated_bytes() - bytes_at;
+                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
+                        as u64;
+                    loci += built;
+                    drop(merged);
                 }
                 "cache" => {
                     let mut cache = ObservationCache::over(sources_over(&cohort));
+                    let blocks_at = allocated_blocks();
+                    let bytes_at = allocated_bytes();
+                    let live_at = live_blocks();
                     let at = Instant::now();
                     let merged = merge_cohort_through_cache(
                         &analysed,
@@ -505,11 +637,19 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                         min_alt_reads,
                     )
                     .expect("the probe's sources cannot fail");
-                    merging += at.elapsed().as_secs_f64();
+                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                    let allocated_here = allocated_blocks() - blocks_at;
+                    blocks += allocated_here;
+                    bytes += allocated_bytes() - bytes_at;
+                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
+                        as u64;
                     loci += merged.cohort_observations.len();
                 }
                 "parallel" => {
                     let mut cache = ObservationCache::over(sources_over(&cohort));
+                    let blocks_at = allocated_blocks();
+                    let bytes_at = allocated_bytes();
+                    let live_at = live_blocks();
                     let at = Instant::now();
                     let merged = pool
                         .install(|| {
@@ -523,26 +663,48 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                             )
                         })
                         .expect("the probe's sources cannot fail");
-                    merging += at.elapsed().as_secs_f64();
+                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                    let allocated_here = allocated_blocks() - blocks_at;
+                    blocks += allocated_here;
+                    bytes += allocated_bytes() - bytes_at;
+                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
+                        as u64;
                     loci += merged.cohort_observations.len();
                 }
                 other => {
                     return Err(format!(
-                        "NG_REAL_ONLY must be oracle, cache or parallel, not {other}"
+                        "NG_REAL_ONLY must be oracle, oracle_owned, cache or parallel, not {other}"
                     )
                     .into());
                 }
             }
         }
         let seconds = started.elapsed().as_secs_f64();
+        if blocks > 0 {
+            println!(
+                "# heap blocks allocated inside the merge, per round: {}",
+                blocks / rounds as u64
+            );
+            println!(
+                "# heap bytes allocated inside the merge, per round: {}",
+                bytes / rounds as u64
+            );
+            println!(
+                "# heap blocks freed inside the merge, per round: {}",
+                freed / rounds as u64
+            );
+        }
+        each_round.sort_by(f64::total_cmp);
         println!(
-            "\ndriver, rounds, width_bases, threads, loci_per_round, merge_ms, \
-             seconds_all_rounds_including_copies"
+            "\ndriver, rounds, width_bases, threads, loci_per_round, median_ms, min_ms, \
+             max_ms, seconds_all_rounds_including_copies"
         );
         println!(
-            "{driver}, {rounds}, {bases}, {threads}, {}, {:.2}, {seconds:.2}",
+            "{driver}, {rounds}, {bases}, {threads}, {}, {:.2}, {:.2}, {:.2}, {seconds:.2}",
             loci / rounds,
-            1e3 * merging / rounds as f64,
+            each_round[each_round.len() / 2],
+            each_round[0],
+            each_round[each_round.len() - 1],
         );
         return Ok(());
     }
