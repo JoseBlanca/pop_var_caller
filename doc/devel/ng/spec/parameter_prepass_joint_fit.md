@@ -1334,20 +1334,42 @@ not being reopened for a rename. It means `F_autozygosity` everywhere.)*
 | how | walk 100 kb windows, ask each whether it sits inside a long stretch nearly free of heterozygotes | `1 − Hobs/Hexp`, with `Hexp` from the fitted spectrum |
 | needs | one sample | the whole panel |
 | produced by | the per-sample genome walk ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6) | this route, §5.1 |
-| what the caller's prior asks for | **this one** | — |
+| what the caller's prior is handed | **this one**, for the estimation reasons below | — |
+| what the caller's prior's mixture is calibrated by | — | **this one**, and the gap is accepted |
 | the literature's name for it | `F_ROH`, the inbreeding coefficient from runs of homozygosity | `F_IS`, the within-population fixation index |
 
-**The caller's genotype prior mixes `F_autozygosity·π_i + (1−F_autozygosity)·π_i^ploidy`**
-([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6) — that is literally the question
-*did these two copies come from the same ancestral copy?*, so realized autozygosity is what it wants.
-Homozygote excess coincides with it only when nothing else suppresses heterozygosity.
+**The caller's genotype prior mixes `F·π_i + (1−F)·π_i^ploidy`**
+([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6), and which of the two belongs
+there is **not** settled by the mixture's mechanism, though it looks as though it should be. Read as
+a question about ancestry — *did these two copies come from the same ancestral copy?* — it asks for
+realized autozygosity. But **the frequencies it mixes against are pooled over the whole panel**
+([`calling_priors.md`](calling_priors.md) §6), and pooled frequencies over-predict heterozygotes on a
+structured panel by exactly twice the frequency's variance across subpopulations — a distortion
+algebraically identical to inbreeding, `P(Aa) = 2p̄q̄(1 − F_ST)`. **What the mixture has to be
+calibrated by is therefore the total deficit against the pooled panel**, which is `F_hom_excess`'s
+definition and not `F_autozygosity`'s.
 
-**Three things make them come apart, and all three are live on the tomato cohort.**
+**The caller is handed `F_autozygosity` nonetheless, and the reasons are about estimation rather
+than meaning.** `F_hom_excess` is `1 − Hobs/Hexp`, so any bias in observed heterozygosity passes
+through at full size — the second bullet below measures that at eight-fold — and it needs a panel,
+so it does not exist at one sample, which the caller commits to supporting. **What the substitution
+costs is the structure component of the deficit**: on an autogamous panel the two run together and
+the gap is small, while on an outbred structured panel the prior would over-predict heterozygotes.
+That gap is accepted and unmeasured; [`calling_priors.md`](calling_priors.md) §7 states it and §11's
+Q6 carries it.
+
+**Three things make them come apart, and all three are live on the tomato cohort.** Note that they do
+not all point the same way: the first is behaviour the caller's prior wants, the second and third are
+fragilities it does not.
 
 - **Population structure.** A panel that is really landraces from several regions shows a homozygote
   excess in every individual with no individual's parents being related. Homozygote excess counts it as
   inbreeding; autozygosity does not. This is the Wahlund effect, and it is what
   [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.2 rejected the ratio for.
+  **For the caller's prior this one is wanted rather than spurious**, by the argument above: the
+  prior's frequencies are pooled over that same structured panel, so the excess is real there and
+  needs correcting. It is spurious only for a consumer reading the number as a statement about an
+  accession's pedigree, which is the use §6.2 rejected it for.
 - **False heterozygotes.** Collapsed paralogs and mismapping add heterozygous sites roughly uniformly.
   Adding them at five times tomato's real rate of one per kilobase **moves the runs estimate not at
   all** — both states' heterozygote rates lift together and `F_autozygosity` reads only the gap — while the

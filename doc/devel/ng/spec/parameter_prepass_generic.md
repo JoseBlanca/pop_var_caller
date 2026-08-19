@@ -843,13 +843,20 @@ that ties the two fits together at all.
 
 ### 6.2 Decision: the runs estimator is the one a caller reads
 
-Four reasons, in increasing weight:
+Four reasons, in increasing weight — and **the first has since been retired**, which costs the
+decision nothing because it was the lightest of the four:
 
-- **It is the quantity the consumer asks for.** The genotype prior is a mixture over *whether the
-  two alleles are one ancestral copy*, which is realized autozygosity. `1 − Hobs/Hexp` measures a
-  deviation from Hardy-Weinberg proportions instead, and so absorbs population structure: a cohort
-  that is really two subpopulations looks homozygote-excessive for reasons no individual's parents
-  caused. Mark-2 warns about this and does not correct it (line 286).
+- **~~It is the quantity the consumer asks for.~~ Retired 2026-08-19: it is not.** The genotype
+  prior is a mixture over *whether the two alleles are one ancestral copy*, which reads as realized
+  autozygosity, while `1 − Hobs/Hexp` measures a deviation from Hardy-Weinberg proportions instead
+  and so absorbs population structure: a cohort that is really two subpopulations looks
+  homozygote-excessive for reasons no individual's parents caused. **But the frequencies that prior
+  mixes against are pooled over that same structured cohort, so the absorption is a correction it
+  needs rather than a contamination** — Wahlund's distortion and inbreeding's are the same algebra,
+  and [`calling_priors.md`](calling_priors.md) §7 works it through. The three reasons below still
+  decide it, and the caller accepts an under-correction it now states
+  ([`calling_priors.md`](calling_priors.md) §11, Q6). Mark-2 warns about the absorption and does not
+  correct it (line 286).
 - **It is robust to a uniform floor of false heterozygotes** (§6.1).
 - **It separates artifact from biology** — whether a sample's excess heterozygosity is uniform (an
   artifact) or segmental (a real outcross), the pathology the tomato baseline recorded and that no
