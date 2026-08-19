@@ -203,27 +203,36 @@ pub(super) fn span_of(region: GenomeRegion) -> u64 {
 /// Where one sample's next observation begins, as the merge orders them: contig, then
 /// position along it, then the sample index as the tie-break.
 ///
-/// **The field order is layout; the [`Ord`] impl is meaning.** Written in genome order —
-/// contig, then position — the `u32` contig would be followed by four bytes of padding
-/// before the `u64` position, and the key would take 24 bytes. Putting the `u64` first packs
-/// it into 16, which is what the merge compares and moves once per level of the tournament
-/// below; narrowing it alone took one 20-base region at 1,000 samples from 913 µs to 646
-/// (the review's measurement, release build).
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct HeadKey {
-    position: u64,
-    contig: u32,
-    sample: u32,
-}
+/// **One integer, not three fields, and the bit layout is the sort order.** Written in genome
+/// order as three fields — a `u32` contig, a `u64` position, a `u32` sample — the key needed
+/// either 24 bytes (contig first, four bytes of padding behind it) or a three-field
+/// lexicographic [`Ord`] over a 16-byte struct. Packed into one `u128` — contig in the top 32
+/// bits, position in the middle 64, sample in the bottom 32 — genome order *is* integer order,
+/// so a match in the tournament below is one comparison rather than up to three, on the same
+/// 16 bytes. Narrowing the three-field form from 24 bytes to 16 took one 20-base region at
+/// 1,000 samples from 913 µs to 646 (the earlier review's measurement, release build).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+struct HeadKey(u128);
 
 impl HeadKey {
     #[inline]
+    fn packed(contig: u32, position: u64, sample: u32) -> Self {
+        Self((u128::from(contig) << 96) | (u128::from(position) << 32) | u128::from(sample))
+    }
+
+    #[inline]
+    fn sample(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline]
     fn of(at: GenomePosition, sample: usize) -> Self {
-        Self {
-            position: at.position.get(),
-            contig: at.contig.get(),
-            sample: u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
-        }
+        Self::packed(
+            at.contig.get(),
+            at.position.get(),
+            u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
+        )
     }
 
     /// Past every real key: what a leaf holds once its sample's last observation is taken,
@@ -235,25 +244,11 @@ impl HeadKey {
     /// still be handed out rather than mistaken for an exhausted sample.
     #[inline]
     fn spent(sample: usize) -> Self {
-        Self {
-            position: u64::MAX,
-            contig: u32::MAX,
-            sample: u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
-        }
-    }
-}
-
-impl Ord for HeadKey {
-    #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.contig, self.position, self.sample).cmp(&(other.contig, other.position, other.sample))
-    }
-}
-
-impl PartialOrd for HeadKey {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+        Self::packed(
+            u32::MAX,
+            u64::MAX,
+            u32::try_from(sample).expect("a cohort has fewer than four billion samples"),
+        )
     }
 }
 
@@ -286,8 +281,11 @@ struct PendingHeads {
     /// internal node starts holding, so the first pass of matches fills the tree without a
     /// "no loser yet" case inside the match.
     keys: Vec<HeadKey>,
-    /// `tree[0]` is the winning leaf; `tree[1..]` are the losers of each internal match.
-    tree: Vec<u32>,
+    /// `tree[0]` is the winning key; `tree[1..]` are the losing keys of each internal match.
+    ///
+    /// **The key itself, not the leaf that holds it**, so a match is one load rather than two
+    /// dependent ones — the node, then the key it names in a second array.
+    tree: Vec<HeadKey>,
     /// Which leaf a sample sits at, [`NO_LEAF`](Self::NO_LEAF) for a sample with nothing in
     /// this walk. Indexed by the run's sample order, which is what the walk speaks.
     leaf_of_sample: Vec<u32>,
@@ -327,17 +325,10 @@ impl PendingHeads {
         }
         // The seed, below every real key: every internal node starts holding it, so the
         // first match at each node displaces it rather than needing a case of its own.
-        keys.push(HeadKey {
-            position: 0,
-            contig: 0,
-            sample: 0,
-        });
+        keys.push(HeadKey::packed(0, 0, 0));
         let mut pending = Self {
             keys,
-            tree: vec![
-                u32::try_from(leaves).expect("a cohort has fewer than four billion samples");
-                leaves
-            ],
+            tree: vec![HeadKey::packed(0, 0, 0); leaves],
             leaf_of_sample,
             leaves,
             spent_leaves: 0,
@@ -355,18 +346,17 @@ impl PendingHeads {
     /// and the sitting one are compared, the loser stays, and the winner carries on up.
     #[inline]
     fn replay_from(&mut self, leaf: usize) {
-        let mut carried = leaf;
+        let mut carried = self.keys[leaf];
         let mut node = (leaf + self.leaves) / 2;
         while node > 0 {
-            let sitting = self.tree[node] as usize;
-            if self.keys[carried] > self.keys[sitting] {
-                self.tree[node] =
-                    u32::try_from(carried).expect("a leaf index fits, it came from one");
+            let sitting = self.tree[node];
+            if carried > sitting {
+                self.tree[node] = carried;
                 carried = sitting;
             }
             node /= 2;
         }
-        self.tree[0] = u32::try_from(carried).expect("a leaf index fits, it came from one");
+        self.tree[0] = carried;
     }
 
     /// The sample whose head is earliest, ties to the lowest sample index — `None` once
@@ -376,8 +366,7 @@ impl PendingHeads {
         if self.live_leaves() == 0 {
             return None;
         }
-        let winner = *self.tree.first()? as usize;
-        Some(self.keys[winner].sample as usize)
+        Some(self.tree.first()?.sample() as usize)
     }
 
     /// How many covering samples still have an observation — what says the walk is not
