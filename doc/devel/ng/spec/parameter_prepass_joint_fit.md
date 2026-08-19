@@ -1336,7 +1336,7 @@ not being reopened for a rename. It means `F_autozygosity` everywhere.)*
 | produced by | the per-sample genome walk ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6) | this route, §5.1 |
 | what the caller's prior is handed | **this one**, for the estimation reasons below | — |
 | what the caller's prior's mixture is calibrated by | — | **this one**, and the gap is accepted |
-| the literature's name for it | `F_ROH`, the inbreeding coefficient from runs of homozygosity | `F_IS`, the within-population fixation index |
+| the literature's name for it | `F_ROH`, the inbreeding coefficient from runs of homozygosity | `F_IS` **only on an unstructured panel**; its `Hexp` is the pooled spectrum's, so under structure it is `F_IT`, the individual against the total ([`calling_priors.md`](calling_priors.md) §7) |
 
 **The caller's genotype prior mixes `F·π_i + (1−F)·π_i^ploidy`**
 ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6), and which of the two belongs

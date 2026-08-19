@@ -141,7 +141,8 @@ goes somewhere:
 P(het) = 2·E[p(1 − p)] = 2p̄(1 − p̄) − 2·Var(p)
 ```
 
-**Plug-in hands heterozygotes exactly twice the mass it takes off the two homozygotes.** This is
+**Plug-in hands heterozygotes `2·Var(p)` — the sum of what it takes off the two homozygotes, and
+twice what it takes off each.** This is
 not a tuning accident. `Var(p)` is how badly the frequency is pinned down, so the bias is
 negligible with a thousand samples and dominant with one sample at low depth — **it is largest
 precisely in the corner this caller commits to supporting.**
@@ -168,8 +169,12 @@ P(het) : P(hom-alt)  =  2·α_ref : (1 + α_alt)
 Production's plug-in path regularised its frequency estimate with `α_ref = 10`, `α_alt = 0.01`
 ([`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs),
 [`:114`](../../../../src/var_calling/posterior_engine.rs)), which gave a prior ratio of 22:1 for
-heterozygous. **Marginalize over that same Dirichlet and the ratio is 20:1** — the same wrong
-answer, computed more expensively.
+heterozygous **at the configuration that matters — one diploid sample's own two copies inside the
+estimate**, putting `p̂` near `1/12` and the Hardy–Weinberg ratio `2(1 − p̂)/p̂` near 22. *(Read off
+the pseudocounts alone, with no sample in them, `p̂` is about 1 in 10,000 and the ratio is near
+2,000:1, which is the same failure an order of magnitude further along. The 22 is the number the
+GIAB run actually met.)* **Marginalize over that same Dirichlet and the ratio is 20:1** — the same
+wrong answer, computed more expensively.
 
 The whole gain in §2.2 lives in one number: `α_ref = 1` rather than 10. That value is what the
 neutral site frequency spectrum — density proportional to `1/p`, most polymorphic sites carrying a
@@ -318,8 +323,9 @@ twice** — once at a locus, once across a panel. Under neutrality the expected 
 which `k` of `2N` sampled chromosomes carry the alternative allele is `θ/k`; draw `2N` chromosomes
 from a Dirichlet with `α_ref = 1`, `α_alt = θ` and `θ/k` is what comes out **in the limit of small
 `θ`**. The gap is the panel's own chance that a site is polymorphic, about `θ · H(2N)` with `H` the
-harmonic number: **3 in a thousand** at tomato's diversity and 52 chromosomes, rising to about **5%**
-at `θ` of 1 in 100 across two thousand chromosomes. That is close enough to treat the two as one
+harmonic number: **3 in a thousand** at `θ = 6 in 10,000` over 52 chromosomes — the diversity fitted
+on tomato1 — rising to about **8%** at `θ` of 1 in 100 across two thousand chromosomes. That is close
+enough to treat the two as one
 object and too far to call an identity, which is why §12's test builds its target by *sampling* the
 Dirichlet rather than by writing `θ/k`. So there is no choice to make between "the neutral shape" and
 "the pre-pass's measured spectrum". They are one object at two sample sizes, and the concentration is
@@ -332,6 +338,13 @@ spectrum onto the two-parameter family above: compute what a candidate `(α_ref,
 for the sample allele counts at `2N` chromosomes, and take the pair whose prediction matches the
 fitted spectrum. **That is a change of representation, not a second estimate**; nothing is fitted
 here that the pre-pass has not already fitted.
+
+**"Matches" has to name an objective, because different ones give different pairs.** Use the
+**maximum-likelihood fit of the predicted class probabilities to the fitted spectrum's class
+weights** — equivalently, minimise the Kullback–Leibler divergence from the fitted spectrum to the
+predicted one — over **all** classes including the monomorphic ones, since those are what pin
+`α_alt` against `θ` rather than leaving only its shape identified. The prediction is the family's
+**exact expected spectrum** at `2N`, computed in closed form; nothing is simulated.
 
 **The prediction must use §3.2's two-branch sampling, carrying the panel's `F`, and not independent
 chromosomes.** A panel's `2N` chromosomes are not `2N` independent draws once its individuals are
@@ -360,30 +373,43 @@ heterozygosity from the windowed histogram
 averaged. **So the shape is theoretical and the scale is measured, and the two come from different
 accumulators.**
 
-**At one sample the projection returns `(1, θ)` exactly, and no branch makes it do so.** A census
+**At one sample the projection returns `(1, θ)` exactly, and no test of the cohort size makes it do so.** A census
 site's whole content is which samples carried an allele together, and a panel of one has no such
 correspondence: no site is variable across it, so the census contributes nothing and the spectrum
 is its `θ/k` prior untouched — at that genome's own measured `θ`. **The single-sample case
 therefore rests on the per-sample windowed histogram, not on the census sites**, which is worth
 knowing when judging what a thin sample can be trusted for. At a thousand samples the census sites
-outweigh the regularizer and the panel's own spectrum sets the pair. **One formula covers both ends
-of the committed range**, which is the property §6 already has for the per-locus term and the
-reason this route was taken rather than a cohort-size branch.
+outweigh the regularizer and the panel's own spectrum sets the pair.
+
+**And in the middle the pre-pass hands over nothing at all, which this document has to answer for.**
+Below a panel-size floor the spectrum is emitted **as absent** rather than as a thin estimate
+([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4.1, §8; its Q3 puts the floor in the
+tens), so every cohort from two samples up to that floor arrives here with no spectrum — while a
+single sample arrives with one. **On absence the concentration is `(1, θ)`**: the same pair the
+one-sample case produces, for the same reason, since a spectrum too thin to emit and a panel with
+nothing to fit carry the same information about shape. That is a branch on *absence*, which the
+pre-pass forces and which the code must have; it is not a branch on cohort size, and nothing
+downstream may test `N`. **One formula covers both ends of the committed range**, and the middle is
+covered by the absent case rather than by a third rule.
 
 **What two parameters cannot hold.** A spectrum with a mode at intermediate frequency — an excess
 of alleles at middling frequency, from balancing selection or from strong population structure —
 projects onto the nearest monotone shape and the excess is lost. A bottlenecked panel's
-flatter-than-neutral spectrum *is* representable, by `α_alt` rising above `θ`. **That was expected
-to show on tomato and did not:** fitted against an independently-called VCF of 18 accessions,
-`α_alt` came out at `0.81 θ` — slightly below `θ`, not above. The mechanism stands; the guess that a
-domesticated selfer is where the family would be stretched is unsupported. The richer alternative — carrying the spectrum as a
+flatter-than-neutral spectrum *is* representable, by `α_alt` rising above `θ`. **Whether a
+domesticated selfer is where the family gets stretched is still untested.** A fit against an
+independently-called VCF of 18 accessions returned `α_alt = 0.81 θ`, slightly below `θ` rather than
+above — but an independent-chromosome projection on a *perfectly neutral* panel at `F = 0.9` returns
+about `0.83 θ` by itself, so that number is consistent with being nothing but the inbreeding bias the
+paragraph above requires the projection to remove. It says nothing about tomato either way until the
+fit is redone with two-branch sampling. The richer alternative — carrying the spectrum as a
 mixture over allele frequencies — was rejected because §6's cohort term stops being counts added
 onto one Dirichlet and becomes a posterior over mixture weights, per sample per locus, and nothing
 yet shows two parameters losing anything that moves a genotype (Q4, §11).
 
 **Trap: the census sites are themselves loci this caller genotypes.** The spectrum is fitted from a
 scattered set of sites that are later called, so each locus's starting concentration carries a
-trace of that locus's own data — the double-counting mechanism §2.2 measures at 214 sites. At the
+trace of that locus's own data — the double-counting §6 subtracts the sample's own copies to avoid.
+At the
 ten thousand census sites the pre-pass targets, any one site contributes about a ten-thousandth of
 the spectrum, which is far below anything that moves a genotype. It is written down because it is
 the same mechanism, not because it is a defect to fix.
@@ -532,8 +558,8 @@ an environment toggle with the plug-in prior still the default
 phased genotypes from an **assembly** rather than from another caller, about **72% of them
 heterozygous**, so the sample is outbred, §3.2's inbreeding branch is inert, and the comparison
 isolates the frequency prior. Re-calling the same pileups under both priors at 50, 30, 20 and 15×
-gives, at every locus both priors emitted, **the identical genotype — 0 differences out of roughly
-1,400 loci per coverage.** The only effect is that the marginalized prior withholds about **1 locus
+gives, at every locus both priors emitted, **the identical genotype — 0 differences out of the 732 to 1,679 loci
+both emitted, depending on coverage.** The only effect is that the marginalized prior withholds about **1 locus
 in 100**, and those are close to a coin flip: at 30× it drops 13 correct genotypes and 12 wrong
 ones. Report:
 [`../../reports/ssr_prior_hg002_single_sample_2026-08-18.md`](../../reports/ssr_prior_hg002_single_sample_2026-08-18.md).
@@ -568,10 +594,17 @@ negative ([`em.rs:278`](../../../../src/ssr/cohort/em.rs),
 
 **Subtracting the sample's own contribution is not a refinement, it is what makes the prior a
 prior.** Without it, a sample's own reads would arrive twice — once through the likelihood and once
-through the frequency they helped estimate — and that double counting is the mechanism behind the
-low-coverage failure of §2.2: with one sample and no subtraction, a genuinely homozygous-variant
-sample could only push the frequency estimate to a diluted value, and would then be told that
-value made it heterozygous.
+through the frequency they helped estimate. With one sample and no subtraction, a genuinely
+homozygous-variant sample could only push the frequency estimate to a diluted value, and would then
+be told that value made it heterozygous.
+
+**It is not, however, the mechanism behind §2.2's 214 sites, and this document said so twice before
+2026-08-19.** §2.3 has the counterfactual: production's plug-in ran `α_ref = 10`, and *with* the
+subtraction in place its estimate is still about 1 in 10,000, which puts the heterozygous prior far
+higher than 22:1 rather than repairing it — while at `α_ref = 1` *without* the subtraction the
+failure disappears. Double counting is neither necessary nor sufficient for that measurement; the
+starting concentration is. Subtracting the sample's own contribution is required because using a
+sample's reads twice is wrong, which needs no measurement to justify.
 
 **At one sample the cohort term is exactly zero**, and no branch is needed to make it so: the
 cohort total and the sample's own count are the same number. What remains is the starting
@@ -599,7 +632,7 @@ approximation. That trade belongs to the EM document, not here.
 **Per sample, fitted by the pre-pass, frozen before calling, never iterated by the EM.** The prior
 reads it and nothing writes it.
 
-Three things about the number that a reader will otherwise get wrong:
+Four things about the number that a reader will otherwise get wrong:
 
 - **It is genome-wide.** One value per sample, applied at every locus. A locus in a region of
   unusual ancestry gets the sample's average. Accepted, not modelled.
@@ -616,7 +649,11 @@ Three things about the number that a reader will otherwise get wrong:
   ```
 
   which is Wright's form with `F = F_ST`. So the coefficient this mixture wants is the **total**
-  deficit against the pooled panel — the literature's `F_IS` — and not autozygosity alone.
+  deficit against the pooled panel, and not autozygosity alone. **In Wright's hierarchy that is
+  `F_IT`, the individual against the total, not `F_IS`**, which is the individual against its own
+  subpopulation — a distinction with teeth here, because `F_IS` is roughly what runs of homozygosity
+  already deliver, so calling the wanted quantity `F_IS` would say the substitution below costs
+  nothing.
   **It should not be reported to a user as a pedigree statement about the accession**, and whatever
   writes it into the output owes that caveat. *(The `Var(p)` here is real variation across
   subpopulations. §2.2's `Var(p)` is uncertainty about a frequency we have not pinned down: the same
@@ -625,8 +662,11 @@ Three things about the number that a reader will otherwise get wrong:
 - **What the pre-pass supplies is `F_autozygosity`, which under-corrects, and the reason is
   estimation rather than meaning.** The two quantities carry separate names
   ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §5): `F_autozygosity` is
-  `F_ROH`, read off runs of homozygosity in the windowed accumulator, and `F_hom_excess` is `F_IS`,
-  `1 − Hobs/Hexp` against the fitted spectrum. The bullet above asks for the second and the caller is
+  `F_ROH`, read off runs of homozygosity in the windowed accumulator, and `F_hom_excess` is
+  `1 − Hobs/Hexp` against the fitted spectrum — **`F_IS` on an unstructured panel and `F_IT` the
+  moment structure exists**, since its `Hexp` comes from the pooled frequencies. That sibling's table
+  names it `F_IS` unconditionally, which is the mislabel this bullet exists to correct. The bullet
+  above asks for the second and the caller is
   handed the first, because the second is `1 − Hobs/Hexp` and so passes any bias in observed
   heterozygosity through at full size — false heterozygotes from collapsed paralogs at five times
   tomato's rate of one per kilobase inflate it eight-fold while leaving the runs estimate unmoved —
@@ -657,12 +697,15 @@ an order of magnitude wrong on data we hold, and undefined across the input rang
 commits to. That asymmetry is the justification, and it is why the choice does not turn on which
 quantity is conceptually the better match.
 
-**The bound has one leak, and it is the `F_IS ≈ F_autozygosity` step.** 100 kb windows resolve runs
-of about 300 kb and longer, so autozygosity old enough to have been broken into shorter tracts is
-invisible to the runs estimator while still suppressing heterozygosity. The honest factor is
-`1 / [(1 − F_ST)·(1 − F_old)]`. On a selfing crop `F_old` is captured, because selfing regenerates
-long tracts every generation; on an old bottlenecked outbred population it is the less bounded of
-the two terms and this document has no number for it.
+**`1/(1 − F_ST)` is a ceiling rather than an equality, and the `F_IS ≈ F_autozygosity` step leaks in
+both directions.** Downward: 100 kb windows resolve runs of about 300 kb and longer, so autozygosity
+old enough to have been broken into shorter tracts is invisible to the runs estimator while still
+suppressing heterozygosity, which makes the true factor `1 / [(1 − F_ST)·(1 − F_old)]` — worse than
+the ceiling, and unquantified here. Upward: runs of homozygosity also capture identity by descent
+generated by a subpopulation's own recent drift, which is already part of `F_ST`, so `F_autozygosity`
+can sit *above* `F_IS` and the real over-prediction falls between 1 and `1/(1 − F_ST)`. On a selfing
+crop `F_old` is captured, because selfing regenerates long tracts every generation; on an old
+bottlenecked outbred population it is the term with no number.
 - **It must be estimable without a population expectation.** The pre-pass's ratio estimator
   `F = 1 − Hobs/Hexp` needs an expected heterozygosity, which is itself computed from `F`; the
   cohort gather states plainly that feeding one into the other is circular and that the
@@ -703,7 +746,7 @@ very negative log-prior and a whole sample's row cannot become `NaN` on one impo
 allele table). No RNG, no clock, no thread-dependent iteration. The one place order matters is the
 sum of expected copies across the cohort, which must be accumulated in a fixed sample order — that
 is the EM document's contract, and it is the same requirement the merge already carries for
-byte-identical output at any worker count ([`run_streaming.md`](run_streaming.md) §12.2).
+byte-identical output at any worker count ([`run_streaming.md`](run_streaming.md) §12, item 1).
 
 **Cost and memory.** Per sample per locus: one `lgamma` per (allele, non-zero copy count) pair,
 plus one `logsumexp` for each homozygous genotype. **Nothing may allocate inside the per-sample
@@ -880,8 +923,8 @@ setting rather than replacing it. What survives:
 resolved, 2026-08-18; the cohort half is open.**
 
 **Resolved: at one sample it makes no difference.** On GIAB HG002 at 50, 30, 20 and 15×, every
-locus both priors emitted got the identical genotype — 0 differences out of roughly 1,400 loci per
-coverage — and the marginalized prior withheld about 1 locus in 100, split evenly between calls the
+locus both priors emitted got the identical genotype — 0 differences out of the 732 to 1,679
+loci both emitted, depending on coverage — and the marginalized prior withheld about 1 locus in 100, split evenly between calls the
 plug-in had right and calls it had wrong (§5.3;
 [report](../../reports/ssr_prior_hg002_single_sample_2026-08-18.md)). **The reasoning that closes
 it:** the marginalized prior's advantage on the SNP path came from replacing a reference-privileged
@@ -939,19 +982,23 @@ production already tests and ng's port should carry across:
 
 Six more are ng's own, and each pins a claim this document makes:
 
-5. **A neutral spectrum projects to `(1, θ)`.** Build the target by **sampling** `Dirichlet(1, θ)`
-   at the panel size under test, **not** by writing the counts `θ/k`: the second is the small-`θ`
-   approximation (§4.1), so it would put the test's own error at about `θ · H(2N)` — 3 in a thousand
-   at tomato's diversity — and no honest tolerance could tell that from a wiring bug. Sampled, the
-   projection must return `α_ref = 1` and `α_alt = θ` to floating-point tolerance at several panel
-   sizes.
-6. **The projection is invariant to inbreeding.** Sample one population spectrum at `F = 0`, `0.6`
-   and `0.9`; the projection must return the same pair from all three. An independent-chromosome
-   projection does not — `α_ref` falls to 0.914 and 0.860 — so this test is what holds §4.1's
-   two-branch requirement in place rather than leaving it as prose.
+5. **A neutral spectrum projects to `(1, θ)`.** Build the target as the **exact expected spectrum**
+   of `Dirichlet(1, θ)` at the panel size under test, in closed form. **Not** by writing the counts
+   `θ/k` — that is the small-`θ` approximation (§4.1), which would put the test's own error at about
+   `θ · H(2N)`, 3 in a thousand at tomato's diversity, and no honest tolerance could tell that from a
+   wiring bug. **And not by drawing sites at random either:** Monte-Carlo noise falls as one over the
+   square root of the site count, so a floating-point tolerance would need a number of sites nobody
+   can generate, and loosening the tolerance to fit destroys what the test is for. Given the exact
+   target, the projection must return `α_ref = 1` and `α_alt = θ` to floating-point tolerance at
+   several panel sizes.
+6. **The projection is invariant to inbreeding.** Build the exact expected spectrum of one population
+   frequency density at `F = 0`, `0.6` and `0.9` under §3.2's two-branch sampling; the projection
+   must return the same pair from all three. An independent-chromosome projection does not — `α_ref`
+   falls to about 0.91 and 0.86 — so this test is what holds §4.1's two-branch requirement in place
+   rather than leaving it as prose.
 7. **One sample: the projection is the neutral shape.** With `n = 1` no census site is variable
    across the panel, so the fitted spectrum is its regularizer and the pair is `(1, θ)` — the same
-   two numbers §4 sets, arrived at without a cohort-size branch anywhere in the code.
+   two numbers §4 sets, reached without any test of `n` — the only branch permitted is on the spectrum being absent.
 8. **One sample: the cohort term is exactly zero.** With `n = 1` the leave-one-out concentration
    equals the starting concentration, bit for bit, at every locus — no tolerance, no branch.
 9. **Monotone in cohort evidence.** Raising the expected copies of an allele across the cohort
