@@ -93,7 +93,7 @@ Add a `SlippageCurveConfig` carrying the shape-number grid, the minimum contribu
 which weight is used — all named `pub const`s with their source in the doc comment.
 ***Depends:*** none. ***Source:*** spec §2, §4, §7.
 
-**A2. Evaluate a curve, and hold flat outside its range.**  ☐
+**A2. Evaluate a curve, and hold flat outside its range.**  ✅
 `SlippageCurve::level_at(repeat_count) -> f64`: invert `level ^ rise_shape = intercept + slope · n`
 at `rise_shape > 0` and `exp(intercept + slope · n)` at `rise_shape = 0`, clamp the result into
 `(0, 1)`, and hold at the nearest fitted end outside the fitted range. Unit tests: a curve

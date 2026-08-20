@@ -129,8 +129,8 @@ impl FittedCell {
 
 /// How the slippage level rises with repeat count, for one slippage group at one motif period.
 ///
-/// **Held flat outside the repeat counts it was fitted over, never continued** (spec §6); the
-/// evaluation itself arrives in step A2.
+/// **Held flat outside the repeat counts it was fitted over, never continued** — see
+/// [`SlippageCurve::level_at`] and spec §6.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlippageCurve {
     /// How the level compounds; shared by every slippage group at this motif period.
@@ -152,6 +152,85 @@ pub struct SlippageCurve {
     /// are both curves, and a consumer must be able to tell them apart.
     pub cells: usize,
 }
+
+impl SlippageCurve {
+    /// The slippage level this curve gives at `repeats`.
+    ///
+    /// **Inside the repeat counts the curve was fitted over it is the fitted line, read back
+    /// through the shape number. Outside, it is held at the nearer fitted end.**
+    ///
+    /// Holding flat rather than continuing the line is the whole of spec §6, and the reason is
+    /// that continuing it produces numbers that are not probabilities: an exponential fitted on
+    /// HG002's 8-to-12 homopolymer cells says 205 at 30 repeats, where the cell at 30 repeats
+    /// fits 0.120. **Held flat is wrong in a known direction** — slippage genuinely keeps rising,
+    /// so a tract longer than anything fitted is under-stated — and [`SlippageCurve::reach`] is
+    /// what lets a consumer see it.
+    pub fn level_at(&self, repeats: u64) -> f64 {
+        assert!(
+            self.fitted_from <= self.fitted_to,
+            "a curve fitted from {} to {} repeats has no range to hold at its ends",
+            self.fitted_from,
+            self.fitted_to
+        );
+        let inside = repeats.clamp(self.fitted_from, self.fitted_to);
+        self.level_on_the_line(inside as f64)
+    }
+
+    /// Whether `repeats` sat inside the repeat counts this curve was fitted over.
+    pub fn reach(&self, repeats: u64) -> CurveReach {
+        if repeats < self.fitted_from {
+            CurveReach::BelowFitted
+        } else if repeats > self.fitted_to {
+            CurveReach::AboveFitted
+        } else {
+            CurveReach::Inside
+        }
+    }
+
+    /// The fitted line read back into a level, with no regard for the fitted range.
+    ///
+    /// **Clamped into `(0, 1)` at both ends**, because the line is fitted in a transformed space
+    /// where nothing stops it crossing either boundary: at the multiplying end the exponential
+    /// passes 1 a few repeat counts above its range, and at the adding end the line passes 0 a
+    /// few below — HG002's homopolymer line goes negative below 7.4 repeats. The clamp is not
+    /// what makes extrapolation safe; holding at the fitted ends is. It is here so that no
+    /// caller can be handed a number that is not a probability.
+    fn level_on_the_line(&self, repeats: f64) -> f64 {
+        let line = self.intercept + self.slope * repeats;
+        let level = if self.rise_shape.is_multiplying() {
+            line.exp()
+        } else {
+            // `level ^ s = line`, so `level = line ^ (1/s)`; a line at or below zero has no
+            // real root and means the level has fallen off the bottom of the family.
+            if line <= 0.0 {
+                0.0
+            } else {
+                line.powf(1.0 / self.rise_shape.get())
+            }
+        };
+        if level.is_finite() {
+            level.clamp(LEVEL_FLOOR, LEVEL_CEILING)
+        } else {
+            LEVEL_CEILING
+        }
+    }
+}
+
+/// The smallest level a curve may report.
+///
+/// **Not zero.** A level of exactly zero says a read can never misread the tract, which the
+/// emission model then treats as certainty; and the blend of spec §7 works on the logarithm,
+/// which has no value there. One read in ten million is far below anything either cohort
+/// measures — the thinnest cell fitted is 3.7 in 1,000 — so the floor cannot bind on real data
+/// and exists to keep the arithmetic total.
+pub const LEVEL_FLOOR: f64 = 1e-7;
+
+/// The largest level a curve may report.
+///
+/// **Not one.** At a level of one every read has misread, and the emission model divides by the
+/// share of reads that did not. HG002's longest homopolymer cell fits 0.120, so a curve reaching
+/// this has been asked for a repeat count far outside anything fitted.
+pub const LEVEL_CEILING: f64 = 0.999;
 
 // ---------------------------------------------------------------------
 // Where an emitted level came from
@@ -360,6 +439,192 @@ mod tests {
             LevelSource::Blend { curve_weight: 0.93 }.curve_weight(),
             0.93
         );
+    }
+
+    /// A curve built at the adding end is a straight line in the level itself, and reading it
+    /// back must return the line.
+    #[test]
+    fn the_adding_end_reads_back_as_a_straight_line_in_the_level() {
+        // level = 0.005 * repeats - 0.035, which is 0.005 at 8 repeats and 0.115 at 30.
+        let curve = SlippageCurve {
+            rise_shape: RiseShape::ADDING,
+            intercept: -0.035,
+            slope: 0.005,
+            fitted_from: 8,
+            fitted_to: 30,
+            held_out_error: 0.044,
+            cells: 23,
+        };
+        assert!((curve.level_at(8) - 0.005).abs() < 1e-12);
+        assert!((curve.level_at(20) - 0.065).abs() < 1e-12);
+        assert!((curve.level_at(30) - 0.115).abs() < 1e-12);
+    }
+
+    /// A curve built at the multiplying end multiplies by a fixed factor each repeat.
+    #[test]
+    fn the_multiplying_end_reads_back_as_a_fixed_factor_a_repeat() {
+        // log(level) = -6.5 + 0.4 * repeats, so each repeat multiplies by exp(0.4) = 1.4918.
+        let curve = SlippageCurve {
+            rise_shape: RiseShape::MULTIPLYING,
+            intercept: -6.5,
+            slope: 0.4,
+            fitted_from: 8,
+            fitted_to: 12,
+            held_out_error: 0.124,
+            cells: 5,
+        };
+        let at_eight = curve.level_at(8);
+        let at_nine = curve.level_at(9);
+        assert!(((-6.5_f64 + 0.4 * 8.0).exp() - at_eight).abs() < 1e-15);
+        assert!((at_nine / at_eight - 0.4_f64.exp()).abs() < 1e-12);
+    }
+
+    /// Beyond the repeat counts the curve saw, the level is the nearer fitted end's — never the
+    /// line continued. This is the property that stops an exponential reporting 205.
+    #[test]
+    fn outside_the_fitted_range_the_level_is_held_at_the_nearer_end() {
+        let curve = SlippageCurve {
+            rise_shape: RiseShape::MULTIPLYING,
+            intercept: -6.5,
+            slope: 0.4,
+            fitted_from: 8,
+            fitted_to: 12,
+            held_out_error: 0.124,
+            cells: 5,
+        };
+        assert_eq!(curve.level_at(7), curve.level_at(8));
+        assert_eq!(curve.level_at(1), curve.level_at(8));
+        assert_eq!(curve.level_at(13), curve.level_at(12));
+        assert_eq!(curve.level_at(150), curve.level_at(12));
+
+        // Continued rather than held, this curve reaches exp(-6.5 + 0.4*30) = 244.7 at 30
+        // repeats — the shape of the failure that made holding flat the rule — where held it
+        // stays at its 12-repeat value of 0.1827.
+        assert_eq!(curve.level_on_the_line(30.0), LEVEL_CEILING);
+        assert!((curve.level_at(30) - (-6.5_f64 + 0.4 * 12.0).exp()).abs() < 1e-15);
+        assert!((curve.level_at(30) - 0.1827).abs() < 1e-4);
+    }
+
+    /// The property every consumer of this curve relies on: a longer tract never comes back
+    /// less slippery than a shorter one. It has to hold at both ends of the shape grid and in
+    /// between, because the shape number is fitted and any rung can win.
+    #[test]
+    fn a_positive_slope_never_lets_a_longer_tract_come_back_less_slippery() {
+        for shape in SlippageCurveConfig::default().rise_shape_grid() {
+            let (low, high) = (0.004_f64, 0.12_f64);
+            let (low_t, high_t) = if shape.is_multiplying() {
+                (low.ln(), high.ln())
+            } else {
+                (low.powf(shape.get()), high.powf(shape.get()))
+            };
+            let slope = (high_t - low_t) / (30.0 - 8.0);
+            let curve = SlippageCurve {
+                rise_shape: shape,
+                intercept: low_t - slope * 8.0,
+                slope,
+                fitted_from: 8,
+                fitted_to: 30,
+                held_out_error: 0.05,
+                cells: 23,
+            };
+            let mut previous = 0.0;
+            for repeats in 1..=60 {
+                let level = curve.level_at(repeats);
+                assert!(
+                    level >= previous - 1e-15,
+                    "shape {shape} fell from {previous} to {level} at {repeats} repeats"
+                );
+                assert!((LEVEL_FLOOR..=LEVEL_CEILING).contains(&level));
+                previous = level;
+            }
+            assert!((curve.level_at(8) - low).abs() < 1e-12, "shape {shape}");
+            assert!((curve.level_at(30) - high).abs() < 1e-12, "shape {shape}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "has no range to hold at its ends")]
+    fn a_curve_whose_range_runs_backwards_says_so_rather_than_clamping() {
+        let curve = SlippageCurve {
+            rise_shape: RiseShape::ADDING,
+            intercept: 0.0,
+            slope: 0.005,
+            fitted_from: 30,
+            fitted_to: 8,
+            held_out_error: 0.044,
+            cells: 23,
+        };
+        let _ = curve.level_at(12);
+    }
+
+    #[test]
+    fn a_cell_knows_whether_it_sat_inside_the_curves_range() {
+        let curve = SlippageCurve {
+            rise_shape: RiseShape::ADDING,
+            intercept: -0.035,
+            slope: 0.005,
+            fitted_from: 8,
+            fitted_to: 30,
+            held_out_error: 0.044,
+            cells: 23,
+        };
+        assert_eq!(curve.reach(7), CurveReach::BelowFitted);
+        assert_eq!(curve.reach(8), CurveReach::Inside);
+        assert_eq!(curve.reach(30), CurveReach::Inside);
+        assert_eq!(curve.reach(31), CurveReach::AboveFitted);
+    }
+
+    /// A line fitted at the adding end goes negative below its range; the level may not.
+    #[test]
+    fn a_level_is_never_reported_outside_the_open_unit_interval() {
+        let adding = SlippageCurve {
+            rise_shape: RiseShape::ADDING,
+            intercept: -0.035,
+            slope: 0.005,
+            fitted_from: 8,
+            fitted_to: 30,
+            held_out_error: 0.044,
+            cells: 23,
+        };
+        // -0.035 + 0.005*5 = -0.010, a level a line is happy to produce and a caller cannot use.
+        assert_eq!(adding.level_on_the_line(5.0), LEVEL_FLOOR);
+        assert!(adding.level_on_the_line(1000.0) <= LEVEL_CEILING);
+
+        let multiplying = SlippageCurve {
+            rise_shape: RiseShape::MULTIPLYING,
+            intercept: -6.5,
+            slope: 0.4,
+            fitted_from: 8,
+            fitted_to: 12,
+            held_out_error: 0.124,
+            cells: 5,
+        };
+        assert_eq!(multiplying.level_on_the_line(100.0), LEVEL_CEILING);
+        assert!(multiplying.level_on_the_line(-1000.0) >= LEVEL_FLOOR);
+    }
+
+    /// A shape number strictly between the two ends inverts through a root, and the round trip
+    /// has to land back on the value the line was built from.
+    #[test]
+    fn a_shape_number_between_the_ends_round_trips_through_its_root() {
+        let shape = RiseShape::new(0.8).expect("inside the range");
+        // Build the line so that it passes exactly through 0.03 at 12 repeats and 0.06 at 25.
+        let (low, high) = (0.03_f64.powf(0.8), 0.06_f64.powf(0.8));
+        let slope = (high - low) / (25.0 - 12.0);
+        let curve = SlippageCurve {
+            rise_shape: shape,
+            intercept: low - slope * 12.0,
+            slope,
+            fitted_from: 12,
+            fitted_to: 25,
+            held_out_error: 0.038,
+            cells: 20,
+        };
+        assert!((curve.level_at(12) - 0.03).abs() < 1e-12);
+        assert!((curve.level_at(25) - 0.06).abs() < 1e-12);
+        // and it sits between the two ends: below a straight line, above an exponential.
+        let midpoint = curve.level_at(18);
+        assert!(midpoint > 0.03 && midpoint < 0.06);
     }
 
     #[test]
