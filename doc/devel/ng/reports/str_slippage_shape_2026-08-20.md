@@ -1,9 +1,19 @@
 # What shape slippage follows across repeat count — measured on two cohorts
 
-**2026-08-20.** *Programs: `examples/ng_joint_records_walk.rs`, which walks real alignments,
-fills the census and fits every (motif period, repeat count) cell; the per-cell table it now
-writes under `SSR_CELL_TABLE`. Both runs used `SSR_BORROWING_FLOOR=0`, so every cell speaks from
-its own tracts alone and nothing is smoothed before the smoothing is measured.*
+**2026-08-20, corrected the same day.** *Programs: `examples/ng_joint_records_walk.rs`, which walks
+real alignments, fills the census and fits every (motif period, repeat count) cell; the per-cell
+table it writes under `SSR_CELL_TABLE`. Every stratum speaks from its own tracts alone — nothing
+is borrowed, pooled or smoothed before the smoothing is measured.*
+
+> **⚠ CORRECTED. The first version of this report measured everything through a census that
+> recorded a read's length offset over only ±4 repeats, and that window was losing real slippage
+> at long tracts** — by a factor of **2.26 at 30-repeat homopolymers**, growing with tract length.
+> It made the rise appear to flatten above about 20 repeats when it does not, and two of the
+> report's headline claims were artefacts of it. The recording window is now ±8
+> ([`census.rs`](../../../../src/ng/parameter_estimation/joint/census.rs)), verified converged
+> against a ±12 arm that agrees within 1.8% at every repeat count. **Every number below is a ±8
+> measurement.** §7 records what the correction changed, because two of the things it overturned
+> were this report's own conclusions.
 
 This is step A of [`../impl_plan/str_slippage_across_repeat_count.md`](../impl_plan/str_slippage_across_repeat_count.md)
 and the evidence behind [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md).
@@ -44,204 +54,203 @@ the level within a cell is a property of the tracts in it.
 
 | repeats | tracts | reads crossing | slipped reads | level | shorter share | fall-off |
 |---:|---:|---:|---:|---:|---:|---:|
-| 8 | 4,194 | 798,878 | 2,967 | 0.00371 | 0.630 | 0.426 |
-| 9 | 2,608 | 522,983 | 3,520 | 0.00673 | 0.642 | 0.256 |
-| 10 | 1,883 | 384,622 | 6,331 | 0.01646 | 0.726 | 0.167 |
-| 12 | 1,337 | 281,382 | 7,874 | 0.02798 | 0.743 | 0.146 |
-| 15 | 953 | 175,436 | 8,056 | 0.04592 | 0.732 | 0.195 |
-| 20 | 373 | 54,384 | 3,671 | 0.06750 | 0.645 | 0.247 |
-| 25 | 195 | 21,831 | 2,344 | 0.10737 | 0.583 | 0.307 |
-| 30 | 68 | 6,250 | 752 | 0.12025 | 0.497 | 0.379 |
+| 8 | 4,194 | 798,878 | 3,666 | 0.00459 | 0.51 | 0.54 |
+| 10 | 1,883 | 384,622 | 6,574 | 0.01709 | — | — |
+| 13 | 1,173 | 238,751 | 8,840 | 0.03703 | 0.65 | 0.39 |
+| 16 | 783 | 136,712 | 7,916 | 0.05790 | — | — |
+| 20 | 373 | 54,384 | 4,598 | 0.08455 | — | — |
+| 25 | 195 | 21,831 | 3,241 | 0.14844 | — | — |
+| 30 | 68 | 6,250 | 1,697 | 0.27157 | 0.82 | 0.74 |
 
-*Eight of the 23 shown; the full table is the run's own `SSR_CELL_TABLE` output.*
+*Seven of the 23 shown; the shares are quoted at the ends and the middle only, since §5 reads
+their trend rather than their values.*
 
-**Tomato, homopolymers — five cells, and they reproduce the 2026-08-13 run:**
+**Tomato, homopolymers — five cells:**
 
 | repeats | tracts | reads crossing | slipped reads | level | shorter share | fall-off |
 |---:|---:|---:|---:|---:|---:|---:|
-| 8 | 2,082 | 937,558 | 1,972 | 0.00210 | 0.598 | 0.635 |
-| 9 | 887 | 363,500 | 1,037 | 0.00285 | 0.611 | 0.633 |
-| 10 | 350 | 121,244 | 478 | 0.00394 | 0.602 | 0.608 |
-| 11 | 153 | 34,904 | 232 | 0.00663 | 0.696 | 0.518 |
-| 12 | 83 | 15,977 | 163 | 0.01021 | 0.736 | 0.735 |
+| 8 | 2,082 | 937,558 | 2,338 | 0.00249 | 0.550 | 0.677 |
+| 9 | 887 | 363,500 | 1,447 | 0.00398 | 0.648 | 0.757 |
+| 10 | 350 | 121,244 | 485 | 0.00400 | 0.600 | 0.626 |
+| 11 | 153 | 34,904 | 236 | 0.00676 | 0.678 | 0.569 |
+| 12 | 83 | 15,977 | 172 | 0.01079 | 0.687 | 0.714 |
 
 **Slipped reads is `level × reads crossing`, not the count of reads sitting off the reference
-length.** The second is much larger and is mostly genuine allele length: at HG002's 30-repeat
-cell, 60 reads in 100 that cross the tract report a length other than the reference's and the fit
-attributes 12 of those 60 to slippage.
+length.** The second is much larger and at a polymorphic tract is mostly genuine allele length.
 
 ---
 
-## 3. The rise decelerates, and that is what decides the family
+## 3. The rise, and what shape fits it
 
-**On HG002 the level rises 37-fold over 8→30 repeats and the rise flattens as it goes.** Step by
-step the ratio runs 1.81, 2.45, 1.33, 1.27, 1.22, 1.20, 1.13, 1.11, 1.14, 1.09, 1.04, 1.02, 1.04,
-1.08, 1.10, 1.18, 1.08, 1.10, 0.94, 1.10, 1.14, 0.87.
+**On HG002 the level rises 59-fold over 8→30 repeats** — 4.6 reads slipping per 1,000 at 8 repeats
+to 272 at 30 — **and it does not flatten**. Step to step it is still rising 1.09 to 1.32-fold at
+the top of the range.
 
 **Every family was scored by leaving each cell out in turn, fitting the rest, and predicting the
-one left out.** Fit quality on the cells a family saw is reported beside it and decides nothing.
-Weighted by slipped reads, HG002 homopolymers, 23 cells:
+one left out.** Fit quality on the cells a family saw decides nothing. Writing `shape` for the
+number in `level ^ shape = intercept + slope · repeat count`, with 0 read as the exponential
+(each repeat multiplies the level) and 1 as a straight line (each repeat adds to it):
 
-| family | held-out median | held-out worst |
-|---|---:|---:|
-| straight line in repeat count | **4.4%** | 61% |
-| saturating exponential | **4.3%** | 92% |
-| isotonic (monotone, no shape assumed) | 11.3% | 81% |
-| power law in repeat count | 17.7% | 201% |
-| log-linear — the exponential | 22.7% | 345% |
-| GATK DRAGstr's per-base hazard | 28.6% | 511% |
-| flat (the mean) | 52.5% | 1,300% |
+| | cells | repeats | level spans | best shape | its held-out median | exponential | straight line |
+|---|---:|---|---:|---:|---:|---:|---:|
+| tomato, period 1 | 5 | 8–12 | 4.3× | **0.65** | **7.3%** | 14.7% | 26.2% |
+| HG002, period 1 | 23 | 8–30 | 59.2× | **0.35** | **7.7%** | 18.8% | 21.8% |
+| HG002, period 2 | 20 | 6–25 | 63.4× | **0.70** | **11.4%** | 15.5% | 21.9% |
+| HG002, period 3 | 4 | 6–9 | 4.7× | 1.00 | 32.0% | 88.5% | 32.0% |
+| HG002, period 4 | 7 | 6–12 | 3.0× | 1.00 | 21.3% | 28.0% | 21.3% |
 
-**The ranking does not depend on the weight.** The winner's held-out median is 5.13% unweighted,
-4.77% weighted by tracts, 4.65% by reads crossing and 4.39% by slipped reads, and the order of the
-families is identical under all four.
+**At every period with enough cells to mean anything, the fitted shape beats both ends** — and it
+lands *between* them. Periods 3 and 4 predict a held-out cell to 32% and 21%; read them as noise,
+not as answers.
 
-### 3.1 Where the winning curve misses, and by how much against the cells' own noise
+**This is the finding that fixes the family.** Neither fixed shape is right: the exponential loses
+at every period, and the straight line loses at the three that carry evidence. A family with a
+fitted shape number covers all of them, and the shape is a number the data supplies rather than a
+choice the design makes.
 
-**A held-out median hides where a family fails.** Fitted over all 23 HG002 homopolymer cells, the
-winning curve's distance from each cell, beside that cell's own sampling error
-(`1 / sqrt(slipped reads)`):
-
-| repeats | tracts | slipped reads | cell's own error | curve's distance | ratio |
-|---:|---:|---:|---:|---:|---:|
-| 8 | 4,194 | 2,967 | 1.8% | **27%** | 15× |
-| 9 | 2,608 | 3,520 | 1.7% | **55%** | 33× |
-| 10–19 | — | 4,332–8,117 | 1.1–1.5% | 0.5–4.4% | 0.5–3.9× |
-| 20–23 | — | 2,933–3,671 | 1.7–1.8% | 7.5–12.0% | 4.1–6.5× |
-| 24–30 | — | 752–2,728 | 1.9–3.6% | 1.9–10.3% | 0.7–3.7× |
-
-**The two worst cells are the two holding the most tracts**, and they sit where most homopolymer
-loci are. The miss is one-directional — the curve says 4.7 and 10.4 reads slipping per 1,000 at 8
-and 9 repeats where the cells fit 3.7 and 6.7.
-
-**No rung of the family repairs it.** At every shape number from 0.00 to 1.00 the worst residual
-falls at 8 or 9 repeats, and the winning rung is the least bad: 55% against 282% at the
-multiplying end. There is a knee at the 9→10 step — the level jumps 2.45-fold across it, the
-largest step in the sequence — that a two-parameter monotone curve cannot bend around.
-
-**At the other two periods the curve is as accurate as the cells.** Median curve distance against
-median cell error: HG002 dinucleotides 3.53% against 3.51%, tomato homopolymers 6.11% against
-4.57%. So the failure above is one period's low end, not a property of the approach.
-
-**The measuring machinery is not biased toward any of them.** Run against a table generated with
-a known exponential rise and 12% scatter, it picks the exponential (held-out median 9–11%, which
-is the scatter) and rejects the straight line at 70–88% and DRAGstr's form at 67–71%.
+**The measuring machinery is not biased toward any family.** Run against a table generated with a
+known exponential rise and 12% scatter, it picks the exponential (held-out median 9–11%, which is
+the scatter) and rejects the straight line at 70–88%.
 
 ---
 
-## 4. The two cohorts prefer opposite shapes over the same repeat counts
+## 4. Do the two cohorts agree?
 
 Restricted to 8–12 repeats — five cells each, the same window:
 
-| | levels 8→12, reads slipping per 1,000 | exponential | straight line |
-|---|---|---:|---:|
-| tomato | 2.1, 2.9, 3.9, 6.6, 10.2 | **12.4%** | 33.6% |
-| HG002 | 3.7, 6.7, 16.5, 22.0, 28.0 | 31.2% | **8.0%** |
+| | levels 8→12, reads slipping per 1,000 | best shape | exponential | straight line |
+|---|---|---:|---:|---:|
+| tomato | 2.5, 4.0, 4.0, 6.8, 10.8 | **0.65** | 14.7% | 26.2% |
+| HG002 | 4.6, 7.4, 17.1, 23.1, 30.0 | **1.00** | 26.7% | 4.4% |
 
-**So the disagreement is not that one cohort saw a wider window.** At the same repeat counts the
-human library rises faster and then bends; the tomato one compounds.
+**They do not land on the same shape, and neither is at the exponential end.** Over its full range
+HG002 fits 0.35 and tomato fits 0.65, so the two are nearer each other than either is to a fixed
+family — but on the shared window they still differ, and the levels differ by about two-fold at
+every repeat count.
 
-**What this does not establish.** The two runs differ in five things at once — library
-preparation, species, region set, read depth and cohort size — so the shape difference cannot be
-attributed to the chemistry. Testing that needs two libraries over the same loci, and the census
-cannot express it today: a read group is an index within one sample, so tomato's 63 declared
-libraries (`LB:PRJNA454805_SRR…`) all arrive as read group 0 and the run prints `1 read groups in
-1 slippage group, pooled`.
-
-### 4.1 One family covers both
-
-Fitting `level ^ rise_shape = intercept + slope · repeat count`, with `rise_shape = 0` read as
-the exponential, over 21 rungs from 0.00 to 1.00:
-
-| | cells | repeats | best `rise_shape` | its held-out median | exponential | straight line |
-|---|---:|---|---:|---:|---:|---:|
-| tomato, period 1 | 5 | 8–12 | **0.00** | 12.4% | 12.4% | 33.6% |
-| HG002, period 1 | 23 | 8–30 | **1.00** | 4.4% | 22.7% | 4.4% |
-| HG002, period 2 | 20 | 6–25 | **0.80** | **3.8%** | 18.3% | 5.9% |
-| HG002, period 3 | 4 | 6–9 | 0.00 | 31.1% | 31.1% | 53.2% |
-| HG002, period 4 | 7 | 6–12 | 1.00 | 53.3% | 54.7% | 53.3% |
-
-**At period 2 the fitted rung beats both ends** — 3.8% against 5.9% and 18.3%. Read that margin
-as "the flexible family is not worse": the rung is chosen on the same held-out score it is scored
-by.
-
-**Period 4 is noise and should be read as such.** Its best rung predicts a held-out cell to 53%,
-which is worse than any period-1 or period-2 family; seven cells at 52 to 332 tracts do not
-determine a curve.
+**What this cannot establish.** The two runs differ in five things at once — library preparation,
+species, region set, read depth and cohort size — so the difference cannot be attributed to the
+chemistry. Testing that needs two libraries over the same loci, and the census cannot express it
+today: a read group is an index within one sample, so tomato's 63 declared libraries all arrive as
+read group 0.
 
 ---
 
-## 5. The other three numbers, and why this report does not settle them
+## 5. The two shares, and what they ask of a curve
 
-**The fall-off trends on one cohort and not on the other.** Across tomato's five cells it spans
-1.42-fold and a flat mean predicts a held-out cell to within 0.023 — as well as anything else.
-Across HG002's 23 it spans **3.14-fold**, falling from 0.426 at 8 repeats to 0.146 at 12 and
-rising again to 0.379 at 30, and the flat mean is the worst of four candidates (0.062 against
-isotonic's 0.030 and a logit-linear's 0.028). **A U-shape is not what any monotone smoother
-describes**, which is why this is left open rather than answered here.
+**Read from each stratum's own fit, with nothing copied.** Scored the same way — leave a cell out,
+fit the rest, predict it — over a constant, a straight line, a logit-line and an isotonic fit:
 
-**The direction split trends in opposite directions.** Tomato's shorter share rises 0.598 → 0.736
-over 8→12 repeats. HG002's rises 0.630 → 0.743 by 13 repeats and then falls to 0.497 by 30. On
-HG002 a logit-linear fit predicts a held-out cell to 0.024 against the flat mean's 0.059, so
-there is a trend to fit; it is not the same trend in both cohorts.
+| | spans | best family | its held-out median | a flat mean |
+|---|---:|---|---:|---:|
+| tomato p1, shorter share | 1.25× | isotonic | 0.047 | 0.085 |
+| tomato p1, fall-off | 1.33× | **flat** | 0.074 | 0.074 |
+| HG002 p1, shorter share | 1.60× | isotonic | 0.033 | 0.038 |
+| HG002 p1, fall-off | 3.54× | logit-line | **0.043** | 0.122 |
+| HG002 p2, shorter share | 4.52× | logit-line | **0.060** | 0.240 |
+| HG002 p2, fall-off | 5.17× | **flat** | 0.119 | 0.119 |
+| HG002 p4, fall-off | 1.92× | logit-line | 0.176 | 0.225 |
 
-**The substitution rate rises with repeat count on HG002** — 6.33-fold across the 23 cells, from
-0.0012 to 0.0078 — where nothing in the specification expects it to depend on repeat count at all.
-Part of this is mechanical: §4.1 of the STR pre-pass spec counts a mismatch against the motif
-tiled to the read's length, so an interruption inside a long tract is charged here. It is recorded
-and not pursued.
+**Three things follow, and they are the reason the shares get a per-period family rather than one
+rule.**
+
+- **Sometimes there is a trend worth fitting and it is large.** HG002's dinucleotide direction
+  split spans 4.52-fold and a logit-line predicts a held-out cell four times better than the mean.
+- **Sometimes there is none.** Tomato's fall-off and HG002's dinucleotide fall-off are predicted
+  as well by a flat mean as by anything else, which is the honest answer for them.
+- **The trends are not the same direction at different periods.** HG002's homopolymer direction
+  split rises 0.51 → 0.82; its dinucleotide split falls to 0.61 by the middle of the range and
+  climbs to 0.97. **A single family imposed on all of them would be wrong somewhere.**
+
+**The substitution rate rises with repeat count on HG002 — 6.33-fold across the 23 cells.** Part of
+this is mechanical: the STR pre-pass counts a mismatch against the motif tiled to the read's
+length, so an interruption inside a long tract is charged here. Recorded, not pursued.
 
 ---
 
 ## 6. How often the fitted level dips — the question the specification records as unmeasured
 
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) §4.3 asks how often the
-monotonicity merge would fire when the truth is monotone. With every cell fitted independently
-and no constraint anywhere:
+monotonicity merge would fire when the truth is monotone. With every cell fitted independently and
+no constraint anywhere:
 
 | | steps between neighbouring cells | downward | deepest dip |
 |---|---:|---:|---:|
-| HG002, period 1 | 22 | 2 | 1.15-fold |
-| HG002, period 2 | 19 | 1 | 1.12-fold |
+| HG002, period 1 | 22 | 2 | 1.08-fold |
+| HG002, period 2 | 19 | **5** | 1.26-fold |
 | HG002, period 3 | 3 | 0 | — |
-| HG002, period 4 | 6 | **3** | **2.12-fold** |
+| HG002, period 4 | 6 | **3** | 1.31-fold |
 | tomato, period 1 | 4 | 0 | — |
 
-**Six downward steps in fifty, and they concentrate where the cells are thinnest** — half of
-period 4's steps, against 2 of 22 at period 1. The deepest is between cells of 88 and 104 tracts.
+**Ten downward steps in fifty, and they concentrate where the cells are thinnest** — half of period
+4's steps and a quarter of period 2's, against 2 of 22 at period 1 and none on tomato. **No dip is
+deeper than 1.31-fold**, which is what a curve fitted through all of a period's cells absorbs
+without a rule.
 
-**On the joint route the merge rule does not exist to fire.** `joint/ssr_fit.rs` has borrowing
-only; `merge_until_monotone` lives in the per-sample route
-([`ssr/mod.rs:1479`](../../../../src/ng/parameter_estimation/ssr/mod.rs#L1479)). The count above
-is what that rule *would* do if the joint route had it.
+**On the joint route the merge rule does not exist to fire.** `joint/ssr_fit.rs` never had it;
+`merge_until_monotone` lives in the per-sample route
+([`ssr/mod.rs`](../../../../src/ng/parameter_estimation/ssr/mod.rs)). The count above is what that
+rule *would* do if this route had it.
 
 ---
 
-## 7. What would change these numbers
+## 7. What the recording window changed, including two of this report's own conclusions
 
-**The census records a read's length offset over ±4 repeats only**
-([`census.rs:398`](../../../../src/ng/parameter_estimation/joint/census.rs#L398)) and folds
-everything beyond into an end bucket. The share of crossing reads sitting off the reference length
-rises from 3.5% at 8 repeats to 60% at 30, so the end buckets carry most of the evidence exactly
-where §3's curve bends. **A flattening that begins where the buckets saturate is what a recording
-artefact looks like, and this report cannot tell the two apart.** Widening that constant to 8 and
-re-walking HG002 — about an hour — is the measurement; until it is run, the fitted `rise_shape`
-values above should not be quoted as facts about chemistry.
+The census records a read's length offset over a fixed window and folds everything beyond into an
+end bucket, scored by its marginal. That marginal's justification was measured "at a recorded range
+of ±1 on a stratum whose alleles reach three repeats either side" — nothing like a 30-repeat
+homopolymer where 60 reads in 100 report a length other than the reference's.
+
+**Widening the window from ±4 to ±8 raises the measured level, and the error grows with tract
+length:**
+
+| homopolymer repeats | at ±4 | at ±8 | at ±12 |
+|---:|---:|---:|---:|
+| 10 | 16.5 | 17.1 | 17.1 |
+| 20 | 67.5 | 84.6 | 83.5 |
+| 25 | 107.4 | 148.4 | 146.1 |
+| 30 | 120.3 | 271.6 | 270.3 |
+
+*(reads slipping per 1,000)*. **±12 agrees with ±8 to within 1.8% at every repeat count**, so the
+widening has converged.
+
+**Two of this report's first conclusions were artefacts of ±4 and are withdrawn:**
+
+- **"The rise decelerates, and a straight line beats the exponential."** At ±4 the step-to-step
+  ratio fell to 1.02 by 20 repeats and the fitted shape was 1.00. At ±8 it is still rising
+  1.09–1.32 at the top and the shape is 0.35. **The flattening was the bucket, not the polymerase.**
+- **"The two cohorts prefer opposite shapes."** At ±4 tomato fitted 0.00 and HG002 1.00 — the two
+  ends. At ±8 they fit 0.65 and 0.35. They still differ; they are no longer opposite.
+
+**A third was distorted rather than reversed.** HG002's homopolymer fall-off looked **U-shaped** at
+±4 — 0.43 at 8 repeats, 0.15 at 12, back to 0.38 at 30. At ±8 it rises 0.54 → 0.74 with a dip in
+the middle a logit-line fits well. Anything designed around that U specifically should be re-read.
+
+**What the correction costs.** The offsets are a dense array a locus a read group, so exactly
+`2·(2n+1)` bytes — **18.2 at ±4 against 34.2 at ±8**, measured; a HG002 sample's census goes 4.13 MB
+to 4.61 MB. The owner accepted that on 2026-08-20. **A window scaled to the tract's own repeat
+count would be cheaper and exact** — a 6-repeat tract cannot lose more than 6 — and needs a
+variable-width record; deferred to the census design.
 
 ---
 
 ## 8. What was changed to produce this
 
-Two additions to the library and one to the walk, none of which moves a fitted number:
-
 - `StratumEvidence` gained `bases_compared` and `mismatching_bases`, filled by `gather_strata`
   from the census sections that already record them, plus `substitution_rate()` and
   `reads_off_reference_length()`.
-- The walk writes a per-cell CSV under `SSR_CELL_TABLE` — the evidence counts beside the fit —
-  and, under `SSR_CELL_TABLE_BORROWED`, fits the same cells a second time with borrowing on and
-  writes that table too, so "how far borrowing moved this cell" is a difference within one walk
-  rather than a comparison across runs.
+- The walk writes a per-cell CSV under `SSR_CELL_TABLE`, with a second arm under
+  `SSR_CELL_TABLE_NO_CURVE` that fits the same cells with no curve drawn — the parity oracle.
+- `RECORDED_OFFSET_RANGE` moved 4 → 8 (§7).
 
-**The borrowed arm has not yet been run on either cohort.** On tomato it is the expensive one:
-the perf review measures a borrowing run at 1,036.8 s against 155.5 s for the same cells fitted
-independently, and at 63 samples that extrapolates to hours.
+**Which table each number here came from.** The levels and shapes are the `_plain` arm of the ±8
+runs, where every stratum is fitted from its own tracts. The two shares are read from a run made
+**before** the share-copying rule existed, or from tomato, where no period had a stratum clearing
+the copy rule's floor and so nothing was copied — otherwise a copied share would have been read as
+a measurement.
+
+**The pooled-borrowing arm was never run and never will be**: pooling has since been deleted
+([`ssr_fit.rs`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)), on the reasoning that a
+curve through all of a period's cells is a better answer than one neighbour's, and it removed the
+run's expensive arm — the perf review measures 1,036.8 s against 155.5 s for the same cells fitted
+independently.
