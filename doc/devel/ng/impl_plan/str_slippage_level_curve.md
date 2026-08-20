@@ -219,7 +219,7 @@ copied shares. Only two refusals survive: no read crossed it, and its period has
 nor a stratum clearing the shares' floor.
 ***Depends:*** D2. ***Source:*** spec §5.1, §1.1.
 
-**D4. Measure it on both cohorts.**  ☐
+**D4. Measure it on both cohorts.**  ✅
 How many strata gained a complete parameter set, what the shares were copied across, and what the
 run now costs against the pooled arm's 1,036.8 s against 155.5 s.
 ***Depends:*** D3. ***Source:*** spec §5.1, §9.
@@ -235,13 +235,17 @@ clearing 4,000 slipped reads.** Design: spec §5.1. This replaces that rule with
 machinery applied to the two shares — a curve per period fitted from *every* stratum weighted by
 its precision, and each stratum departing from it by inverse variance.
 
-**E1. Choose each share's family, by measurement.**  ☐
+**E1. Choose each share's family, by measurement.**  ✅
 Compare a constant, logit-linear and logit-quadratic in repeat count, per period and per
 parameter, on the held-out-cell criterion, over both cohorts' ±8 cell tables. **Produces the
 answer to the research plan's C4** — a period whose held-out error is lowest at the constant has
 no trend to fit, and says so. **No code ships from this step**; its output is the report that fixes
 E2's family list.
 ***Depends:*** D4's tables. ***Source:*** spec §5.1.
+***Output:*** [`../reports/str_slippage_share_families_2026-08-20.md`](../reports/str_slippage_share_families_2026-08-20.md)
+— all three families are needed and are chosen at run time; two questions go back to the owner
+before E2 (which precision weights a stratum, and whether a curve that bends twice may be drawn
+through four strata).
 
 **E2. A share's own precision, and its curve.**  ☐
 `sqrt((1 − p) / (p · S))` on `S` slipped reads — the model the 4,000 came from, which reproduces
