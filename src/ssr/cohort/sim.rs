@@ -281,7 +281,7 @@ fn realized_locus(sl: &SimLocus) -> Locus {
     .expect("simulated locus is well-formed")
 }
 
-const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+const BASES: [u8; 4] = *b"ACGT";
 
 /// Draw a read's realized repeat-unit length given its parent allele's `units`.
 fn slip_length(rng: &mut SplitMix64, chem: &SimChemistry, units: u16) -> u16 {
