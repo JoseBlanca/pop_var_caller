@@ -786,6 +786,7 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 
     use std::collections::BTreeMap;
 
@@ -887,8 +888,10 @@ mod tests {
 
         let mut offsets = vec![OffsetCounts::default(); 2];
         offsets[0].add(0, 5);
-        offsets[0].add(-9, 2); // saturates into the end bucket
-        offsets[0].add(7, 3); // and the other end
+        // Both saturate into an end bucket at any recorded range, which is the corner this
+        // fixture is here to carry through the file and back.
+        offsets[0].add(-RECORDED_OFFSET_RANGE - 1, 2);
+        offsets[0].add(RECORDED_OFFSET_RANGE + 3, 3);
         let mut walked = WalkedBits::none_of(2);
         walked.set(0); // locus 1 is never walked, which is the state with no other field
         let tracts = SsrEvidence::from_parts(
@@ -997,8 +1000,16 @@ mod tests {
         census.with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
             let tracts = sections[0];
             assert_eq!(tracts.offsets(0).at(0), 5);
-            assert_eq!(tracts.offsets(0).at(-4), 2, "nine short saturates at four");
-            assert_eq!(tracts.offsets(0).at(4), 3, "and seven long at four");
+            assert_eq!(
+                tracts.offsets(0).at(-RECORDED_OFFSET_RANGE),
+                2,
+                "one past the short end saturates into it"
+            );
+            assert_eq!(
+                tracts.offsets(0).at(RECORDED_OFFSET_RANGE),
+                3,
+                "and three past the long end into that one"
+            );
             assert_eq!(tracts.covering_not_crossing(), 17);
             assert_eq!(tracts.bases_compared(), 60);
             assert_eq!(tracts.guard()[0].length_difference, -3);

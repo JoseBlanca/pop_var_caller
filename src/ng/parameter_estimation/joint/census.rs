@@ -387,17 +387,39 @@ impl GenericEvidence {
 
 /// How far either side of the reference tract length a read's offset is recorded.
 ///
-/// **Narrow is fine only because the end buckets are scored by their marginal**: "at least
-/// four repeats short" gets the sum over every offset it absorbs, never the probability of
-/// sitting exactly on the edge.
+/// **8, WIDENED FROM 4 ON 2026-08-20, because 4 was losing real slippage at long tracts and the
+/// end buckets' marginal did not recover it.** The marginal's own justification was measured "at
+/// a recorded range of ±1 on a stratum whose alleles reach three repeats either side", which is
+/// nothing like a 30-repeat homopolymer where 60 reads in 100 report a length other than the
+/// reference's. Measured on HG002 at ~300 reads a position, the fitted slippage level a stratum
+/// returns:
+///
+/// | homopolymer repeats | at ±4 | at ±8 | at ±12 |
+/// |---:|---:|---:|---:|
+/// | 10 | 16.5 | 17.1 | 17.1 |
+/// | 20 | 67.5 | 84.6 | 83.5 |
+/// | 25 | 107.4 | 148.4 | 146.1 |
+/// | 30 | 120.3 | 271.6 | 270.3 |
+///
+/// *(reads slipping per 1,000)*. **At 30 repeats ±4 under-measures slippage by a factor of
+/// 2.26**, and the error grows with tract length. **±12 agrees with ±8 to within 1.8% at every
+/// repeat count and under 1% at most**, so the widening has converged and 8 is where it stops.
+///
+/// **What it costs, and the owner has accepted it (2026-08-20):** the counts are a dense
+/// `[u16; 2n+1]` a locus a read group, so exactly `2·(2n+1)` bytes — **18.2 at ±4 against 34.2 at
+/// ±8**, measured. On HG002 that is 4.13 MB against 4.61 MB a sample.
+///
+/// **A window that scaled with the tract's own repeat count would be both cheaper and exact** — a
+/// 6-repeat tract cannot lose more than 6 — and is the better fix; it needs a variable-width
+/// record, which is the census's design and not this constant's. Deferred there.
 ///
 /// **Not the same constant as the span the fit may place allele mass on**, which reaches ±6.
 /// That is the load-bearing one — it is what lets an end bucket be attributed to a distant
 /// allele rather than to a far slip — and reading this width as that span is the confusion
 /// the two constants exist to prevent.
-pub const RECORDED_OFFSET_RANGE: i32 = 4;
+pub const RECORDED_OFFSET_RANGE: i32 = 8;
 
-/// Buckets, `-4 … +4` with saturating ends.
+/// Buckets, `-8 … +8` with saturating ends.
 pub const OFFSET_BUCKETS: usize = (2 * RECORDED_OFFSET_RANGE + 1) as usize;
 
 /// Spanning reads at each whole-repeat offset from the reference tract length.
@@ -2461,16 +2483,23 @@ mod tests {
 
     #[test]
     fn an_offset_past_the_recorded_range_saturates_rather_than_wrapping() {
+        // **Written against the constant, not against a width.** The recorded range moved from
+        // 4 to 8 on 2026-08-20 and this property is the same at either.
+        let past = RECORDED_OFFSET_RANGE + 3;
         let mut counts = OffsetCounts::default();
-        counts.add(7, 3);
-        counts.add(-9, 2);
+        counts.add(past, 3);
+        counts.add(-past - 1, 2);
         counts.add(0, 1);
         assert_eq!(counts.at(RECORDED_OFFSET_RANGE), 3);
         assert_eq!(counts.at(-RECORDED_OFFSET_RANGE), 2);
         assert_eq!(counts.at(0), 1);
         assert_eq!(counts.total(), 6);
         // The end bucket holds the marginal: everything at or beyond it, not the edge alone.
-        counts.add(4, 5);
+        counts.add(RECORDED_OFFSET_RANGE, 5);
+        assert_eq!(counts.at(RECORDED_OFFSET_RANGE), 8);
+        // And one inside the range is its own bucket, not the end's.
+        counts.add(RECORDED_OFFSET_RANGE - 1, 4);
+        assert_eq!(counts.at(RECORDED_OFFSET_RANGE - 1), 4);
         assert_eq!(counts.at(RECORDED_OFFSET_RANGE), 8);
     }
 
