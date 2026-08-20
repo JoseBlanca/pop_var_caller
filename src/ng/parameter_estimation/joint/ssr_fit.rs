@@ -608,29 +608,46 @@ impl Default for SsrFitConfig {
     }
 }
 
-/// How few tracts a stratum may hold and still be fitted on its own.
+/// How few tracts leave a stratum with nothing worth fitting at all.
 ///
-/// **1,000, and it is a decision about which number breaks first rather than about accuracy in
-/// general.** Measured on drawn strata at three reads a site
-/// (`doc/devel/ng/reports/str_stratum_size_sweep_2026-08-13.md`), between 1,000 tracts and 250
-/// the fall-off's spread between draws goes from 5.5% to 13.2% and the concentration's from
-/// 2.8% to 7.9%, while the slippage level's only goes from 2.5% to 3.9%. Above 1,000 every one
-/// of the five fitted numbers is within a few percent both on average and between draws.
+/// **8, lowered from 50 on 2026-08-20 because a stratum's answer no longer stands alone.** Under
+/// the curves every stratum's three numbers are its own answer blended with its motif period's
+/// curve, weighted by how precisely it holds them, so a thin stratum's noisy answer costs a
+/// consumer nothing — and refusing to fit it costs the period a contributing stratum it could
+/// have drawn its curve through.
 ///
-/// **Why not the 5,000-tract floor the same sweep names.** That floor is where a stratum
-/// carries its own numbers to within a couple of percent; borrowing is not free, because
-/// neighbouring repeat counts have genuinely different slippage, so the choice is between a
-/// stratum's own noisy answer and its neighbours' steadier but displaced one. Where those two
-/// costs cross is measured in `doc/devel/ng/reports/str_fit_on_real_records_2026-08-13.md`.
-pub const DEFAULT_BORROWING_FLOOR: usize = 1_000;
-
-/// How few tracts leave nothing worth returning even after borrowing.
+/// **8 is where a thin fit stops breaking and starts merely being noisy**, measured on drawn
+/// strata at both ends of the range this caller works over
+/// (`examples/ng_ssr_thin_stratum_gate.rs`, 30 draws a row, a truth of 2 reads slipping in 100):
 ///
-/// **50, and it is deliberately far below the borrowing floor.** A stratum this thin is one a
-/// consumer must be told has no answer rather than handed a number whose spread between draws
-/// is a third of its own size — at 50 tracts and three reads a site the twelve draws put the
-/// fall-off anywhere from 0.139 to 0.338 against a truth of 0.250.
-pub const DEFAULT_REFUSAL_FLOOR: usize = 50;
+/// | tracts | the level came back below a tenth of the truth | median level | 1 in 10 came back above |
+/// |---:|---|---:|---:|
+/// | 3 | **27%** of one deep sample's fits, 3% of a 63-sample cohort's | 0.0167, 0.0204 | 2.17×, 2.03× |
+/// | 5 | **20%**, 0% | 0.0229, 0.0212 | 2.34×, 1.81× |
+/// | **8** | **3%**, 0% | 0.0208, 0.0172 | 1.67×, 1.24× |
+/// | 12 | 0%, 0% | 0.0204, 0.0196 | 1.59×, 1.41× |
+/// | 50 | 0%, 0% | 0.0207, 0.0203 | 1.15×, 1.25× |
+///
+/// **A collapsed fit excludes itself, which is why the failure is survivable rather than
+/// dangerous.** A level that comes back at zero puts zero slipped reads behind the stratum, so it
+/// carries no weight in either share's curve and is dropped outright from the level's. What a
+/// lower floor risks is the other tail — a level fitted high is weighted high — and at 8 tracts
+/// one fit in ten comes back 1.67 times the truth against 1.15 at 50.
+///
+/// **What it reaches, on the two cohorts' real tables.** Tomato goes from 15 of its 49 populated
+/// strata carrying a full parameter set to **38**, because its dinucleotides reach four
+/// contributing strata for the first time. HG002's count does not move — its thin periods are
+/// thinner than this floor — but its trinucleotide curve is drawn through 10 strata rather than
+/// 4, and 4 is where its held-out error was 32%.
+///
+/// **Why not lower still.** At 5 tracts one fit in five collapses on a single deep sample, which
+/// is the shape HG002 has; and going to 5 or 3 buys 10 more strata on HG002 and 8 more on tomato,
+/// from periods whose curves would then rest on strata a fifth of which said nothing.
+///
+/// *Whether the climb "converged" is not the alarm the specification expected it to be*: at 400
+/// tracts on a 63-sample cohort only 83% of fits settle within their rounds, and that row's
+/// median level is 1.5% from the truth. Convergence counts rounds, not quality.
+pub const DEFAULT_REFUSAL_FLOOR: usize = 8;
 
 // ---------------------------------------------------------------------
 // Fitting one stratum
@@ -2665,6 +2682,15 @@ mod tests {
         // Both shares stay proportions, and near the truth the strata were drawn from.
         assert!(numbers.shorter_share > 0.0 && numbers.shorter_share < 1.0);
         assert!(numbers.fall_off > 0.0 && numbers.fall_off < 1.0);
+    }
+
+    /// **The refusal floor is the measured one**, and the test carries the number so that moving
+    /// it is a deliberate act rather than a typo. Below it a stratum's own fit is refused; it can
+    /// still be furnished from its period's curves.
+    #[test]
+    fn nothing_is_fitted_below_eight_tracts_by_default() {
+        assert_eq!(SsrFitConfig::default().refusal_floor, DEFAULT_REFUSAL_FLOOR);
+        assert_eq!(DEFAULT_REFUSAL_FLOOR, 8);
     }
 
     /// A stratum with no reads at all is refused rather than fitted, and it is refused by name.
