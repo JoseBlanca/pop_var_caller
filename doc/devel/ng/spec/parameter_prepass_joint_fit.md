@@ -134,8 +134,9 @@ level up.
 2. **Sum over the locus's allele frequency itself**, weighted by how common that frequency is across
    the cohort — that weighting is the **frequency density**, and it is fitted.
 
-So the free parameters are: the noise rates (per read group, and per stratum on the STR path), the
-four numbers that describe the frequency density (§2.1.2), and two numbers per sample (§5, §3.4).
+So the free parameters are: the noise rates and the contamination fraction (per read group, and the
+noise rates per stratum as well on the STR path), the four numbers that describe the frequency
+density (§2.1.2), and one number per sample (§5).
 **None of them grows with the number of loci.** A locus contributes evidence and holds no parameter
 of its own.
 
@@ -171,8 +172,8 @@ extra `F·f(1−f)`, which is not of that form, so `f` survives in the condition
 is no longer free of it. That is why the estimators which fit inbreeding from genotype likelihoods
 work with a per-site frequency rather than a per-panel count (ngsF; Vieira et al., *Genome Research*
 2013). §5 makes one inbreeding coefficient per sample a required output of this route, and §3.4 adds
-one contamination fraction per sample which needs to know **which allele** the population carries and
-not only how many copies of it there are. Neither is expressible in the count form.
+one contamination fraction per read group which needs to know **which allele** the population carries
+and not only how many copies of it there are. Neither is expressible in the count form.
 
 **What is *not* the reason, and an earlier version of this document said it was.** Nothing is thrown
 away by treating the samples as independent given `f`. The correlation between two samples at a locus
@@ -514,7 +515,7 @@ Free parameters, all cohort-level except the last:
 | clean error rate `ε_clean`, noisy error rate `ε_noisy`, noisy-locus fraction `w` | read group | 3 per read group |
 | the frequency density `π` — `p_invariant`, `p_fixed_alt`, `a`, `b` (§2.1.2) | cohort | 4 |
 | homozygote excess `F_hom_excess` | sample | 1 per sample (§5) |
-| contamination `α` | sample | 1 per sample (§3.4) |
+| contamination `α` | **read group** | 1 per read group (§3.4) |
 
 **A locus's likelihood.** The reference base is a property of the position; **which non-reference base
 segregates is not known and is summed over**, for the reason §3.1.1 gives.
@@ -724,10 +725,47 @@ histogram route cannot do any of it, having kept neither the allele nor the locu
 cohort-gather parameter before this route existed
 ([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §5, whose criterion this is).
 
-**One number per sample, fitted alongside the rest**, as a fourth block in §3.3's alternation or after
-it — the choice is the estimator's and nothing here turns on it. The evidence is the generic kept
-loci: for each sample, how much of its low-fraction alternative-read mass falls on loci the parameters fit says
-are segregating, carrying the alleles it says segregate there.
+**One number per read group, fitted alongside the rest**, as a fourth block in §3.3's alternation or
+after it — the choice is the estimator's and nothing here turns on it. The evidence is the generic
+kept loci: for each read group, how much of its low-fraction alternative-read mass falls on loci the
+parameters fit says are segregating, carrying the alleles it says segregate there.
+
+**Per read group, and this document said per sample until 2026-08-20.** What a second plant's DNA gets
+into is a *library*: it enters at library preparation, or on the sequencing machine when a
+neighbouring library hops its index into this one. So two libraries made from one plant can carry
+different amounts of it, and one number for the plant is an average that is wrong for both. The grain
+is the one [`parameter_prepass.md`](parameter_prepass.md) §1's table has always given this row, under
+its §1.1 principle that noise is chemistry; the implementation and this section had diverged from it
+(owner, 2026-08-19). It matters at about one sample in ten of a real archive: of 1,707 tomato samples
+surveyed, 157 carry more than one library, four of them 7, 16, 16 and 42
+([`read_groups.md`](read_groups.md) §1).
+
+**Only the fraction takes the new grain, and that is what makes the change cheap.** Which loci are
+markers, the allele frequency at each, every sample's coordinates on the panel's axes of variation,
+the line fitted through them, the leverage refusal of §3.4.2 and the homozygote excess are **all still
+computed from a sample's reads pooled over its libraries** — because a genotype and an ancestry belong
+to the individual, and both of its libraries carry them. **So the +0.015 that partitioning a panel
+costs (§3.4.2's table) does not apply here**: the panel is not partitioned and every frequency is still
+fitted from all of it.
+
+**Measured on drawn panels, 2026-08-20**
+([`../reports/contamination_read_group_grain_2026-08-20.md`](../reports/contamination_read_group_grain_2026-08-20.md)).
+A plant with two libraries, one carrying 6% stray reads and one clean, returns **0.0628 and 0.0008**
+per library against **0.0307 for both** at the old grain. And the accuracy follows the *plant's* depth
+rather than the library's: a library holding three reads a position returns 0.026 when it is the
+plant's only library, 0.046 when it is half of a six-read plant and 0.057 when it is a quarter of a
+twelve-read plant, against a planted 0.060 — because what limits the estimate is how well the plant's
+genotype and the panel's frequencies are known, and neither of those changes grain. A sample
+sequenced from one library gets the **identical** number at either grain, which is why no benchmark
+cohort here can tell them apart (§3.4.6).
+
+**What must travel with the number.** A fraction fitted from a library's own reads and one copied onto
+it from the whole sample are different claims, and so are *measured clean* and *nobody could measure
+it*. The estimator emits, beside each fraction, how many markers that read group had a read at, how
+many reads it had there, and which of the two it was fitted from. **A library with too little evidence
+returns a fraction near zero rather than a refusal** — the likelihood barely moves with `α` and the
+search keeps zero, which is the right default — and the counts are what tell it from a library
+measured clean.
 
 **Two exclusions are requirements of this estimator, not tuning — MEASURED 2026-08-13 on real reads**
 ([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
@@ -769,7 +807,9 @@ need, since ng has no array genotypes for anyone. At each marker, a read's base 
 intended sample's genotype with probability `1 − α` and from the contaminant's with probability `α`;
 **both genotypes are unknown and both are summed over**, the sample's against its allele frequency and
 the contaminant's against the frequency of the population it was drawn from. That is one more mixture
-layer on §3.1's likelihood, over the same records, and it fits alongside as one number per sample.
+layer on §3.1's likelihood, over the same records, and it fits alongside as one number per read
+group. `verifyBamID2` puts its fraction on the sample, as does the production caller here and as this
+estimator did until 2026-08-20; the reason to differ is in §3.4.
 
 **Two properties of that form to inherit deliberately.** The sequence-only likelihood is *symmetric*
 in `α`, so it cannot tell a 20% contaminated sample from an 80% one and the search is restricted to
@@ -1067,6 +1107,39 @@ subsample under a model; the post-hoc one uses every site and a genotype call. *
 pre-pass model is wrong somewhere**, and contamination is the only parameter here that can be
 re-measured this cheaply after the fact — which makes it worth emitting even on a run where nobody
 suspects a contaminated library.
+
+### 3.4.6 No cohort we hold can tell the two grains apart, and what to measure instead
+
+**Every sample of tomato1, tomato2 and the GIAB trio was sequenced from one library.** The same
+2,085-file archive survey that found 157 multi-library samples found that 1,550 of 1,707 carry one,
+and every benchmark sample here is among them ([`read_groups.md`](read_groups.md) §1). At one library
+a sample the two grains are handed the same reads and return the same number **by arithmetic**, so a
+benchmark run cannot show a difference and is not evidence that the change works.
+
+**It is still the right regression check, and the correct result there is no change at all** —
+anything else means the split leaked into one of the quantities that did not move grain.
+
+**The evidence that it works comes from drawn panels** with libraries that differ
+([`../../../../examples/ng_joint_contamination_control.rs`](../../../../examples/ng_joint_contamination_control.rs),
+`LIBRARIES`), which give exact truth, and the numbers are in §3.4.
+
+**What is *not* a reason to worry, and an earlier plan for this work said it was: read length.**
+[`parameter_prepass.md`](parameter_prepass.md) §5 records a read-length trap for the STR path — a
+library of 100 bp reads spans fewer long tracts than one of 250 bp, so its slippage rate is measured
+over a different mix of loci. **That mechanism has no counterpart here.** Contamination is fitted from
+ordinary positions, not from repeat tracts; every position is a position, the census gives every read
+group a depth code for the same list of them, and a library with shorter reads simply has no read at
+more of them — which the estimator already drops, per read group, before it searches.
+
+**The real per-library hazard is mappability, of which read length is only one cause.** A library
+whose reads anchor worse — shorter reads, single-ended reads, a different aligner — carries more reads
+from elsewhere in the genome, and a read from elsewhere carries an allele the sample should not have,
+which is the contamination signature. §3.4's first exclusion is the defence, and **it is computed per
+position across the whole cohort**: a position that only misbehaves for one library keeps a low
+cohort-wide probability, survives as a marker, and puts stray-looking reads into that library alone.
+So the check worth running is *a library that mismaps more than its sibling*, not *a library with
+shorter reads* — and until it is run, a fraction that stands out in exactly one library of a sample
+should be read as *either* contamination *or* worse mapping in that library.
 
 ---
 

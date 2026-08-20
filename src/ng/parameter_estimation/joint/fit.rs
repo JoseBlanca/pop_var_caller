@@ -52,7 +52,9 @@ use super::census::{
     CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
     TermsDisagreement,
 };
-use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination_over};
+use super::contamination::{
+    ContaminationConfig, SampleContaminationEstimates, fit_contamination_over,
+};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -212,8 +214,12 @@ pub struct JointFit {
     pub hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>>,
     /// Per sample, derived from the converged posteriors rather than fitted.
     pub rates: BTreeMap<String, Estimate<SampleGenotypeRates>>,
-    /// Per sample, the fraction of reads from another individual.
-    pub contamination: BTreeMap<String, ContaminationEstimate>,
+    /// **Per sample, one fraction of reads from another individual for each read group the
+    /// sample holds** — because what a second plant's DNA gets into is a library, so two
+    /// libraries of one plant can carry different amounts of it
+    /// ([`contamination`](super::contamination), 2026-08-20). A sample sequenced from one
+    /// library has one entry, and there the grain makes no difference.
+    pub contamination: BTreeMap<String, SampleContaminationEstimates>,
     /// The population's expected heterozygosity, read off the density.
     pub expected_heterozygosity: f64,
     /// **For every kept position, in position order, the probability that it is mismapped** —
@@ -1275,8 +1281,13 @@ pub fn fit_jointly(
             // rather than of the population, so the density has no business being told about them.
             // It runs here, inside the same call, so that the sections are lent once rather than
             // twice.
-            let per_sample_error: Vec<f64> = (0..lent.len())
-                .map(|s| parameters.clean[group_index[s][0]])
+            // **The error rate goes in per read group, which is the grain it was fitted at.**
+            // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
+            // group's — which was exact only because every benchmark sample has one library.
+            let error_rate: BTreeMap<ReadGroupId, f64> = groups
+                .iter()
+                .zip(&parameters.clean)
+                .map(|(group, rate)| (*group, *rate))
                 .collect();
             // **The mismapped positions are kept out of it.** A position where two stretches of
             // genome pile up on one place puts a small share of unexpected reads into *every*
@@ -1287,7 +1298,7 @@ pub fn fit_jointly(
                 lent,
                 depth_cap,
                 &config.edges,
-                &per_sample_error,
+                &error_rate,
                 &parameters.hom_excess,
                 &statistics.noisy_posterior,
                 &config.contamination,
@@ -3427,12 +3438,17 @@ mod whole_fit_tests {
         )
         .expect("one sample is a cohort of one");
         assert_eq!(fit.hom_excess["s0"].provenance, Provenance::Defaulted);
+        // One sample, one library, so one entry — and it says there is no panel rather than
+        // giving a number, which is the point.
         assert!(
             matches!(
-                fit.contamination["s0"],
-                ContaminationEstimate::NotIdentified {
-                    reason: super::super::contamination::NotIdentifiedReason::NoPanel
-                }
+                fit.contamination["s0"].as_slice(),
+                [(
+                    _,
+                    super::super::contamination::ContaminationEstimate::NotIdentified {
+                        reason: super::super::contamination::NotIdentifiedReason::NoPanel
+                    }
+                )]
             ),
             "with one sample there is no panel to be surprised by, and saying so is the point"
         );

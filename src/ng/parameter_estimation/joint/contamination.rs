@@ -4,6 +4,32 @@
 //! built: `doc/devel/ng/reports/joint_contamination_2026-08-12.md`, whose numbers this module
 //! is a port of rather than a reinvention.
 //!
+//! # What carries the number: a library, not a plant
+//!
+//! **A second plant's DNA gets in while the library is being prepared, or on the sequencing
+//! machine — so what is contaminated is a library, and the contaminating source is another
+//! plant.** Two libraries made from one plant can therefore differ, one carrying stray reads and
+//! the other none, and one number for the whole plant cannot say that. The fraction is a
+//! property of the chemistry and takes the grain everything else about the chemistry takes:
+//! **the read group** (`parameter_prepass.md` §1.1, owner 2026-08-19). It matters at about one
+//! sample in ten of a real archive: of 1,707 tomato samples surveyed, 157 carry more than one
+//! library, four of them 7, 16, 16 and 42.
+//!
+//! **Splitting the fraction does not split the panel, and that distinction is the whole cost
+//! argument.** Of the eleven quantities below, only the read counts a fraction is fitted from
+//! change grain. Which positions are markers, the allele frequency at each, every sample's place
+//! on the panel's axes of variation, the line fitted through those places, and the homozygote
+//! excess are all computed from a sample's reads pooled over its libraries, exactly as before —
+//! because a genotype and an ancestry belong to the plant, and both its libraries carry them.
+//! **So the measured penalty for estimating frequencies within groups of twelve — about 0.015 on
+//! every sample — does not apply here**: every frequency is still fitted from the whole panel
+//! (`reports/contamination_grain_decomposition_2026-08-20.md`).
+//!
+//! **What does shrink is the depth behind one fraction.** A plant whose reads are spread over
+//! `L` libraries gives each fraction about a `1/L` share of them, which moves each estimate down
+//! the depth axis rather than off it. [`ContaminationGrain`] keeps both grains in one build so
+//! the two can be compared on one drawn panel.
+//!
 //! # What contamination is, and what makes it hard
 //!
 //! A second seedling in the tube, or a neighbouring library on the same sequencing run, puts a
@@ -120,7 +146,10 @@
 
 use rayon::prelude::*;
 
+use std::collections::BTreeMap;
+
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use crate::ng::types::ReadGroupId;
 
 use super::census::{
     CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
@@ -193,6 +222,37 @@ pub struct ContaminationConfig {
     /// manufactures contamination, which is why the *clean* samples rose furthest
     /// (`reports/census_depth_resolution_2026-08-16.md` §4).
     pub leave_self_out: bool,
+    /// **Whether one fraction is fitted from each library's reads or one from all of a
+    /// plant's.** See [`ContaminationGrain`]; the default is the library.
+    pub grain: ContaminationGrain,
+}
+
+/// Whose reads one contamination fraction is fitted from.
+///
+/// **Both grains are kept in one build so they can be compared on the same drawn panel.** No
+/// cohort under `benchmarks/` can tell them apart — every sample of tomato1, tomato2 and the
+/// GIAB trio was sequenced from one library, and there the two grains are the same number by
+/// arithmetic — so the comparison has to be made on a panel drawn with libraries that differ
+/// (`examples/ng_joint_contamination_control.rs`, `LIBRARIES`).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum ContaminationGrain {
+    /// **One fraction for each read group, fitted from that read group's own reads.** The
+    /// default, and what the primary specification has always asked for: a second plant's DNA
+    /// enters at library preparation or at sequencing, so two libraries of one plant can carry
+    /// different amounts of it.
+    #[default]
+    ReadGroup,
+    /// **One fraction for each sample, fitted from all of its reads and copied onto every read
+    /// group it has.** What this module did before 2026-08-20, kept for comparison. It is exact
+    /// where the second plant went into the DNA before the libraries were split off it, and
+    /// wrong where a neighbouring library on the sequencing run hopped its index into one of
+    /// them.
+    ///
+    /// **It reproduces the earlier numbers exactly, down to the error rate it scores with**: a
+    /// sample's reads are scored at its *first* read group's error rate, which is what the joint
+    /// fit handed this module before the split
+    /// ([`fit`](super::fit)). That is one of the two things the read-group grain repairs.
+    Sample,
 }
 
 /// What a sample's own place on the panel's axes of variation is taken to be, while its
@@ -228,6 +288,7 @@ impl Default for ContaminationConfig {
             own_coordinates: OwnCoordinates::AsRead,
             integrate_over_depth_bin: true,
             leave_self_out: false,
+            grain: ContaminationGrain::ReadGroup,
         }
     }
 }
@@ -245,7 +306,13 @@ pub const MAX_LEVERAGE: f64 = 0.5;
 /// position where the population carries one allele the two-genotype mixture has nothing to
 /// separate.
 struct Marker {
-    /// Reads on the cohort's most common non-reference allele, per sample.
+    /// Reads on the cohort's most common non-reference allele, **per read group** — one entry
+    /// for each (sample, read group) the cohort holds, in [`Sections`]'s order.
+    ///
+    /// **Per read group and not per sample, because this is what a fraction is fitted from**,
+    /// and a fraction belongs to the library. The three fields below are keyed the same way.
+    /// Everything else in this struct stays per sample or per position, which is the whole
+    /// content of the 2026-08-20 change.
     alternative: Vec<u32>,
     depth: Vec<u32>,
     /// The lowest and highest depth each sample's stored code stands for.
@@ -262,15 +329,90 @@ struct Marker {
     depth_high: Vec<u32>,
     /// The panel-wide frequency, with the error rate inverted out of the read share.
     pooled: f64,
-    /// The posterior mean number of alternative copies, per sample, under a prior at `pooled`.
+    /// The posterior mean number of alternative copies, **per sample**, under a prior at
+    /// `pooled`.
     ///
     /// **A raw read fraction is far too noisy to decompose at three reads a position**; the
     /// prior is what makes it usable, and it is the same bootstrap `PCAngsd` starts from.
+    ///
+    /// **Per sample and not per read group, deliberately.** A genotype belongs to the plant, so
+    /// every read the plant produced is evidence for it whichever library prepared them.
+    /// Splitting this would split the ancestry decomposition fitted from it, and *that* is the
+    /// partitioning whose cost was measured at about 0.015 on every sample's fraction.
     dosage: Vec<f64>,
     /// How much of this position is believed to be an ordinary position rather than a
     /// mismapped one — one minus [`fit`](super::fit)'s posterior. One when the fit was never
     /// asked.
     cleanliness: f64,
+}
+
+/// The units one fraction each is fitted for, and which of a sample's sections pour their reads
+/// into each.
+///
+/// **One unit per (sample, read group), or one per sample** — the two grains differ only in
+/// which reads are added together before the search, so one gather serves both and the
+/// comparison is exact rather than approximate.
+struct Units {
+    /// Which sample each unit belongs to.
+    sample: Vec<usize>,
+    /// Which read group each unit's number is reported for. At the sample grain one unit covers
+    /// every read group the sample has, and this is the first of them.
+    group: Vec<ReadGroupId>,
+    /// Which unit each of a sample's sections pours its reads into, in the order the sections
+    /// are lent: `unit_of[sample][section]`.
+    unit_of: Vec<Vec<usize>>,
+}
+
+impl Units {
+    fn of(samples: &[SampleGenericSections<'_>], grain: ContaminationGrain) -> Self {
+        let mut units = Self {
+            sample: Vec::new(),
+            group: Vec::new(),
+            unit_of: Vec::with_capacity(samples.len()),
+        };
+        for (s, sections) in samples.iter().enumerate() {
+            let mut here = Vec::with_capacity(sections.len());
+            for (ordinal, (group, _)) in sections.iter().enumerate() {
+                let unit = match grain {
+                    ContaminationGrain::ReadGroup => {
+                        units.sample.push(s);
+                        units.group.push(*group);
+                        units.sample.len() - 1
+                    }
+                    // Every section of a sample pours into the sample's one unit, which is
+                    // opened by the first of them.
+                    ContaminationGrain::Sample if ordinal == 0 => {
+                        units.sample.push(s);
+                        units.group.push(*group);
+                        units.sample.len() - 1
+                    }
+                    ContaminationGrain::Sample => here[0],
+                };
+                here.push(unit);
+            }
+            units.unit_of.push(here);
+        }
+        units
+    }
+
+    fn len(&self) -> usize {
+        self.sample.len()
+    }
+}
+
+/// Which unit a search is for, and which plant that unit's reads came from.
+///
+/// **A pair and not two loose indices**, because the two are different numbers that are both a
+/// `usize` and both index something in the same expressions — `markers[m].alternative[unit]` is
+/// the library's reads and `markers[m].dosage[sample]` is the plant's genotype, and swapping
+/// them compiles.
+#[derive(Copy, Clone, Debug)]
+struct Unit {
+    /// Where this unit's reads sit in every [`Marker`]'s per-unit lists.
+    index: usize,
+    /// Which sample the unit belongs to, for everything the plant owns: its dosage, its
+    /// coordinates, its homozygote excess and its leverage.
+    sample: usize,
 }
 
 /// A position enters only if this many samples put a read on it.
@@ -279,8 +421,8 @@ const MIN_SAMPLES_WITH_DATA: usize = 8;
 /// …and only if the panel-wide frequency is inside this band.
 const MIN_FREQUENCY: f64 = 0.02;
 
-/// The fraction of a sample's reads that came from another individual, or the reason there is
-/// no number.
+/// The fraction of one read group's reads that came from another individual, or the reason
+/// there is no number.
 ///
 /// **An enum and not an `Option<f64>`**: *not identified* and *zero* are different answers, and
 /// a caller told "no contamination" would act on it.
@@ -292,16 +434,53 @@ pub enum ContaminationEstimate {
         /// samples is invisible to it by construction. A number above a half would not be a
         /// stronger claim but a mirror image.
         alpha: f64,
-        /// How many positions stood behind it — what says how far to trust the value.
-        markers: u64,
-        /// How much of its own fitted allele frequency this sample supplied, against the
-        /// `(components + 1) / samples` a sample pulling its fair share would.
+        /// **Whose reads this number was fitted from** — see [`ContaminationSource`]. A fraction
+        /// fitted from a library's own reads and one copied onto it from the whole plant are
+        /// different claims, and nothing downstream can tell them apart from the value.
+        source: ContaminationSource,
+        /// How many positions the whole panel varies at — the same count for every read group in
+        /// a run, and what sets the resolution the run as a whole can reach.
+        panel_markers: u64,
+        /// **How many of those positions this read group put a read on, and how many reads it
+        /// put there — the evidence this number actually rests on.**
+        ///
+        /// This is what tells a library *measured clean* from a library *nobody could measure*.
+        /// Both come back near zero, because with too little evidence the likelihood is flat and
+        /// the search settles at no contamination — which is the right default and the reason
+        /// there is no separate refusal for a thin read group. What must not be lost is that one
+        /// of them is a measurement and the other is an absence, so the counts travel beside the
+        /// value rather than being summarised away.
+        markers_with_reads: u64,
+        reads_on_markers: u64,
+        /// How much of its own fitted allele frequency this read group's **sample** supplied,
+        /// against the `(components + 1) / samples` a sample pulling its fair share would. A
+        /// property of where the plant sits on the panel's axes, so every read group of one
+        /// plant carries the same value.
         leverage: f64,
     },
     NotIdentified {
         reason: NotIdentifiedReason,
     },
 }
+
+/// Whose reads a contamination fraction was fitted from.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ContaminationSource {
+    /// Fitted from this read group's own reads, which is what the read-group grain does.
+    ThisReadGroupsReads,
+    /// Fitted from every read of the sample and copied onto this read group. What
+    /// [`ContaminationGrain::Sample`] produces, and what a sample sequenced from one library
+    /// gets under either grain — there the two are the same reads and no claim about libraries
+    /// is being made.
+    TheWholeSamplesReads,
+}
+
+/// One sample's answer: **a fraction for each read group its reads came from**, in the order the
+/// census lends that sample's sections, which is read group id ascending.
+///
+/// **A list and not one value**, because that is the change of 2026-08-20: the estimator used to
+/// return one number a sample and a sample can hold several libraries that differ.
+pub type SampleContaminationEstimates = Vec<(ReadGroupId, ContaminationEstimate)>;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum NotIdentifiedReason {
@@ -327,11 +506,12 @@ impl std::fmt::Display for NotIdentifiedReason {
     }
 }
 
-/// Every sample's contamination fraction, in the order `samples` are given.
+/// Every sample's contamination fractions — **one for each read group it holds** — with the
+/// samples in the order they are given.
 ///
-/// `error_rate` is per sample — the rate at which a read misreads a base, which the fit has
-/// already produced — and `hom_excess` how much less heterozygous each sample is than random
-/// mating in the panel predicts.
+/// `error_rate` is **per read group**: the rate at which a read from that library misreads a
+/// base, which the fit has already produced at exactly this grain. `hom_excess` is per sample,
+/// how much less heterozygous each is than random mating in the panel predicts.
 /// `noisy_posterior` is [`fit`](super::fit)'s probability, for every kept position in position
 /// order, that the position is mismapped. **An empty slice says the fit was never asked**, and
 /// then every position is treated as ordinary — which on real reads returns a floor rather
@@ -339,11 +519,11 @@ impl std::fmt::Display for NotIdentifiedReason {
 pub fn fit_contamination(
     cohort: &mut CohortCensusEvidence,
     edges: &DepthBinEdges,
-    error_rate: &[f64],
+    error_rate: &BTreeMap<ReadGroupId, f64>,
     hom_excess: &[f64],
     noisy_posterior: &[f32],
     config: &ContaminationConfig,
-) -> Result<Vec<ContaminationEstimate>, CensusError> {
+) -> Result<Vec<SampleContaminationEstimates>, CensusError> {
     // The cap the counts were thinned to. Every sample agrees on it or the cohort was refused
     // before a section was read.
     let cap = cohort
@@ -373,29 +553,47 @@ pub(super) fn fit_contamination_over(
     samples: &[SampleGenericSections<'_>],
     cap: DepthCap,
     edges: &DepthBinEdges,
-    error_rate: &[f64],
+    error_rate: &BTreeMap<ReadGroupId, f64>,
     hom_excess: &[f64],
     noisy_posterior: &[f32],
     config: &ContaminationConfig,
-) -> Vec<ContaminationEstimate> {
+) -> Vec<SampleContaminationEstimates> {
     let count = samples.len();
+    let units = Units::of(samples, config.grain);
+    let refused = |reason: NotIdentifiedReason| -> Vec<SampleContaminationEstimates> {
+        samples
+            .iter()
+            .map(|sections| {
+                sections
+                    .iter()
+                    .map(|(group, _)| (*group, ContaminationEstimate::NotIdentified { reason }))
+                    .collect()
+            })
+            .collect()
+    };
     if count < 2 {
-        return vec![
-            ContaminationEstimate::NotIdentified {
-                reason: NotIdentifiedReason::NoPanel,
-            };
-            count
-        ];
+        return refused(NotIdentifiedReason::NoPanel);
     }
-    let mean_error = error_rate.iter().sum::<f64>() / count as f64;
-    let markers = markers(samples, edges, cap, mean_error, noisy_posterior, config);
+    // **The rate used to choose the markers is one number for the whole panel**, because a
+    // marker is a property of the cohort and not of any one library. It is the mean over the
+    // read groups the panel holds; the per-library rate enters where it belongs, in the search
+    // for that library's own fraction.
+    let mean_error = if error_rate.is_empty() {
+        0.0
+    } else {
+        error_rate.values().sum::<f64>() / error_rate.len() as f64
+    };
+    let markers = markers(
+        samples,
+        &units,
+        edges,
+        cap,
+        mean_error,
+        noisy_posterior,
+        config,
+    );
     if markers.len() < 100 {
-        return vec![
-            ContaminationEstimate::NotIdentified {
-                reason: NotIdentifiedReason::TooFewMarkers,
-            };
-            count
-        ];
+        return refused(NotIdentifiedReason::TooFewMarkers);
     }
 
     let components = config.components.min(count.saturating_sub(2)).max(1);
@@ -416,14 +614,30 @@ pub(super) fn fit_contamination_over(
         })
         .collect();
 
-    (0..count)
+    // **One search per unit, and the units are independent** — a library's fraction is read off
+    // its own reads against a frequency model every unit shares, so nothing here is sequential.
+    let fitted: Vec<ContaminationEstimate> = (0..units.len())
         .into_par_iter()
-        .map(|sample| {
+        .map(|unit| {
+            let sample = units.sample[unit];
+            // **The refusal is the sample's, and it refuses every library the sample has.** How
+            // much of its own fitted frequency a sample supplies depends only on where it sits
+            // on the panel's axes, and that is a property of the plant — so a plant whose fitted
+            // frequency is mostly its own echo is unfittable in all of its libraries at once.
             if leverage[sample] > MAX_LEVERAGE {
                 return ContaminationEstimate::NotIdentified {
                     reason: NotIdentifiedReason::OwnFrequencyIsItsOwnEcho,
                 };
             }
+            let (markers_with_reads, reads_on_markers) =
+                markers
+                    .iter()
+                    .fold((0_u64, 0_u64), |(positions, reads), marker| {
+                        match marker.depth[unit] {
+                            0 => (positions, reads),
+                            depth => (positions + 1, reads + u64::from(depth)),
+                        }
+                    });
             ContaminationEstimate::Estimated {
                 alpha: fit_alpha(
                     &markers,
@@ -431,21 +645,55 @@ pub(super) fn fit_contamination_over(
                     &coordinates[sample],
                     &spread,
                     hom_excess[sample],
-                    error_rate[sample],
+                    error_rate.get(&units.group[unit]).copied().unwrap_or(0.0),
                     leverage[sample],
                     config,
-                    sample,
+                    Unit {
+                        index: unit,
+                        sample,
+                    },
                 ),
-                markers: markers.len() as u64,
+                source: if samples[sample].len() == 1 || config.grain == ContaminationGrain::Sample
+                {
+                    ContaminationSource::TheWholeSamplesReads
+                } else {
+                    ContaminationSource::ThisReadGroupsReads
+                },
+                panel_markers: markers.len() as u64,
+                markers_with_reads,
+                reads_on_markers,
                 leverage: leverage[sample],
             }
+        })
+        .collect();
+
+    // Back to one list per sample. At the sample grain several read groups name the same unit,
+    // so the one number is copied onto each of them — which is what that grain means.
+    units
+        .unit_of
+        .iter()
+        .zip(samples)
+        .map(|(here, sections)| {
+            here.iter()
+                .zip(sections)
+                .map(|(&unit, (group, _))| (*group, fitted[unit].clone()))
+                .collect()
         })
         .collect()
 }
 
-/// The positions the cohort varies at, with each sample's reads and its dosage there.
+/// The positions the cohort varies at, with each library's reads and each sample's dosage there.
+///
+/// **Two passes, because the two grains want different things.** Choosing the markers, the
+/// frequency at each and every sample's dosage are all questions about a *plant*, so the first
+/// pass pools each sample's libraries and walks every kept position. The reads one *fraction* is
+/// fitted from are per library, and only at the positions that survived — so the second pass
+/// fills those, and costs one number per library per marker rather than per library per
+/// position. On a 400,000-position run keeping 9,000 markers that is the difference between a
+/// few megabytes and a few hundred.
 fn markers(
     samples: &[SampleGenericSections<'_>],
+    units: &Units,
     edges: &DepthBinEdges,
     cap: DepthCap,
     error: f64,
@@ -482,10 +730,12 @@ fn markers(
         })
         .collect();
 
+    // **First pass: every kept position, with each plant's libraries pooled.** Only the middle
+    // of the depth range is wanted here — the two things it feeds, which positions the cohort
+    // varies at and how many copies of the allele each plant carries, each need one number. The
+    // ends of the range are per library and are gathered in the second pass.
     let mut alternative = vec![vec![0_u32; positions]; count];
     let mut depth = vec![vec![0_u32; positions]; count];
-    let mut depth_low = vec![vec![0_u32; positions]; count];
-    let mut depth_high = vec![vec![0_u32; positions]; count];
     for (s, sections) in samples.iter().enumerate() {
         for (_, group) in sections {
             for (index, code) in group.depth().iter().enumerate() {
@@ -494,13 +744,8 @@ fn markers(
                     // were thinned to the cap, and the depth code is now the position's own.
                     let range = cap.denominator_for(edges.depth_range(bin));
                     let (low, high) = (*range.start(), *range.end());
-                    // The middle of the range, for the two things that need a single number:
-                    // which positions the cohort varies at, and how many copies of the allele
-                    // each sample carries. The fraction itself sums over the range.
                     depth[s][index] =
                         depth[s][index].saturating_add(low + (high - low).div_ceil(2));
-                    depth_low[s][index] = depth_low[s][index].saturating_add(low);
-                    depth_high[s][index] = depth_high[s][index].saturating_add(high);
                 }
             }
             for observation in group.non_reference() {
@@ -512,6 +757,10 @@ fn markers(
             }
         }
     }
+
+    /// Where a position that did not become a marker points.
+    const DROPPED: u32 = u32::MAX;
+    let mut marker_at = vec![DROPPED; positions];
 
     let mut out = Vec::new();
     for index in 0..positions {
@@ -567,15 +816,52 @@ fn markers(
                 }
             })
             .collect();
+        marker_at[index] = u32::try_from(out.len()).expect("fewer markers than a u32 can index");
         out.push(Marker {
-            alternative: (0..count).map(|s| alternative[s][index]).collect(),
-            depth: (0..count).map(|s| depth[s][index]).collect(),
-            depth_low: (0..count).map(|s| depth_low[s][index]).collect(),
-            depth_high: (0..count).map(|s| depth_high[s][index]).collect(),
+            // Filled by the second pass, one entry per unit.
+            alternative: vec![0; units.len()],
+            depth: vec![0; units.len()],
+            depth_low: vec![0; units.len()],
+            depth_high: vec![0; units.len()],
             pooled,
             dosage,
             cleanliness,
         });
+    }
+
+    // **Second pass: the reads each fraction is fitted from, at the surviving markers only.**
+    // A unit's counts are added rather than assigned, because at the sample grain every library
+    // of one plant pours into the same unit — which is exactly what that grain means, and it is
+    // why one gather serves both.
+    for (s, sections) in samples.iter().enumerate() {
+        for (ordinal, (_, group)) in sections.iter().enumerate() {
+            let unit = units.unit_of[s][ordinal];
+            for (index, code) in group.depth().iter().enumerate() {
+                let marker = marker_at[index];
+                if marker == DROPPED {
+                    continue;
+                }
+                if let DepthCode::Binned(bin) = code {
+                    let range = cap.denominator_for(edges.depth_range(bin));
+                    let (low, high) = (*range.start(), *range.end());
+                    let marker = &mut out[marker as usize];
+                    marker.depth[unit] =
+                        marker.depth[unit].saturating_add(low + (high - low).div_ceil(2));
+                    marker.depth_low[unit] = marker.depth_low[unit].saturating_add(low);
+                    marker.depth_high[unit] = marker.depth_high[unit].saturating_add(high);
+                }
+            }
+            for observation in group.non_reference() {
+                let index = observation.index as usize;
+                let marker = marker_at[index];
+                if marker == DROPPED || observation.allele.code() != major[index] {
+                    continue;
+                }
+                let marker = &mut out[marker as usize];
+                marker.alternative[unit] =
+                    marker.alternative[unit].saturating_add(u32::from(observation.reads));
+            }
+        }
     }
     out
 }
@@ -756,15 +1042,22 @@ fn frequency_at(line: &[f64], coordinates: &[f64], own: Option<(f64, f64)>) -> f
     (copies / 2.0).clamp(1e-4, 1.0 - 1e-4)
 }
 
-/// One sample's contamination fraction.
+/// One library's contamination fraction — or one plant's, at the sample grain, which is the
+/// same arithmetic over reads that were added together first.
 ///
-/// **The two-genotype mixture, reading sequence only**: a read comes from this sample's own
+/// **The two-genotype mixture, reading sequence only**: a read comes from the plant's own
 /// genotype with probability `1 − α` and from the contaminant's with probability `α`, and
 /// neither genotype is known, so both are summed over.
 ///
-/// Where the sample is taken to stand while `α` is searched for is [`OwnCoordinates`], which
-/// is where the bias in the fraction lives.
-#[allow(clippy::too_many_arguments, reason = "one sample's whole problem")]
+/// **The genotype, the frequency and the coordinates are the plant's; only the reads and the
+/// error rate are the library's.** `coordinates`, `hom_excess` and `leverage` come from the
+/// sample this unit belongs to, `lines` from the whole panel, and `error` from the read group —
+/// which the joint fit has always produced at that grain and which this module took from the
+/// sample's first read group until 2026-08-20.
+///
+/// Where the plant is taken to stand while `α` is searched for is [`OwnCoordinates`], which is
+/// where the bias in the fraction lives.
+#[allow(clippy::too_many_arguments, reason = "one library's whole problem")]
 fn fit_alpha(
     markers: &[Marker],
     lines: &[Vec<f64>],
@@ -772,17 +1065,22 @@ fn fit_alpha(
     spread: &[f64],
     hom_excess: f64,
     error: f64,
-    // How much of its own fitted frequency this sample supplies, which is what is taken back
-    // out of it — see `frequency_at`.
+    // How much of its own fitted frequency this unit's sample supplies, which is what is taken
+    // back out of it — see `frequency_at`.
     leverage: f64,
     config: &ContaminationConfig,
-    sample: usize,
+    unit: Unit,
 ) -> f64 {
-    // A sample at three reads a position has no read at a good share of the markers, and a
+    // A library at three reads a position has no read at a good share of the markers, and a
     // marker it has no read at contributes the same zero to every candidate `α`. Dropping
     // them once is worth several hundred passes over the list.
+    //
+    // **This is also what makes a thin library come back clean rather than wrong.** With few
+    // markers left the score barely moves with `α`, and the check against `α = 0` at the end
+    // then keeps zero — which is the right default: no evidence should read as no contamination,
+    // and how much evidence there was travels beside the number as `markers_with_reads`.
     let covered: Vec<usize> = (0..markers.len())
-        .filter(|&m| markers[m].depth[sample] > 0)
+        .filter(|&m| markers[m].depth[unit.index] > 0)
         .collect();
     let components = coordinates.len().min(spread.len());
     let mut at = coordinates[..components].to_vec();
@@ -794,18 +1092,20 @@ fn fit_alpha(
                 let marker = &markers[m];
                 marker.cleanliness
                     * ln_marker(
-                        marker.alternative[sample],
+                        marker.alternative[unit.index],
                         if config.integrate_over_depth_bin {
-                            marker.depth_low[sample]..=marker.depth_high[sample]
+                            marker.depth_low[unit.index]..=marker.depth_high[unit.index]
                         } else {
-                            marker.depth[sample]..=marker.depth[sample]
+                            marker.depth[unit.index]..=marker.depth[unit.index]
                         },
                         frequency_at(
                             &lines[m],
                             at,
+                            // The dosage is the plant's, at every grain: it is what the plant
+                            // contributed to the frequency being corrected.
                             config
                                 .leave_self_out
-                                .then(|| (marker.dosage[sample], leverage)),
+                                .then(|| (marker.dosage[unit.sample], leverage)),
                         ),
                         marker.pooled,
                         hom_excess,
@@ -1237,13 +1537,55 @@ mod tests {
         spiked: Option<(usize, f64)>,
         seed: u64,
     ) -> Vec<SampleCensusEvidence> {
+        // One library holding every read, which is what every measurement before 2026-08-20
+        // was made on.
+        structured_panel_of_libraries(
+            samples,
+            markers,
+            depth,
+            groups,
+            fst,
+            &[DrawnLibrary {
+                depth_share: 1.0,
+                spiked,
+            }],
+            seed,
+        )
+    }
+
+    /// One library of every drawn plant.
+    #[derive(Copy, Clone)]
+    struct DrawnLibrary {
+        /// Its share of the plant's reads. **A share and not a depth**, so a plant's total is
+        /// unchanged however many libraries it was prepared into and the only thing a test
+        /// varies is how its reads are divided.
+        depth_share: f64,
+        /// Which sample a second plant's reads went into here, and what fraction of this
+        /// library's reads they are. `None` for a library nobody's stray reads reached.
+        spiked: Option<(usize, f64)>,
+    }
+
+    /// The same panel, with every plant's reads divided between several libraries.
+    ///
+    /// `libraries` gives one entry per library — see [`DrawnLibrary`].
+    fn structured_panel_of_libraries(
+        samples: usize,
+        markers: usize,
+        depth: f64,
+        groups: usize,
+        fst: f64,
+        libraries: &[DrawnLibrary],
+        seed: u64,
+    ) -> Vec<SampleCensusEvidence> {
         const ERROR: f64 = 0.002;
+        let sections = samples * libraries.len();
+        let slot = |sample: usize, library: usize| sample * libraries.len() + library;
         let mut rng = Rng(seed);
         let edges = DepthBinEdges::for_census();
-        let mut codes: Vec<PackedDepthCodes> = (0..samples)
+        let mut codes: Vec<PackedDepthCodes> = (0..sections)
             .map(|_| PackedDepthCodes::never_walked(markers))
             .collect();
-        let mut sparse: Vec<Vec<AlleleObservation>> = vec![Vec::new(); samples];
+        let mut sparse: Vec<Vec<AlleleObservation>> = vec![Vec::new(); sections];
         let group_of = |s: usize| s * groups / samples;
 
         for index in 0..markers {
@@ -1262,27 +1604,30 @@ mod tests {
                 .map(|s| rng.binomial(2, per_group[group_of(s)]))
                 .collect();
             for s in 0..samples {
-                let reads = rng.poisson(depth);
-                let mut alternative = 0;
-                for _ in 0..reads {
-                    let from = match spiked {
-                        Some((which, alpha)) if which == s && rng.uniform() < alpha => {
-                            genotypes[(rng.uniform() * samples as f64) as usize % samples]
+                for (library, settings) in libraries.iter().enumerate() {
+                    let reads = rng.poisson(depth * settings.depth_share);
+                    let mut alternative = 0;
+                    for _ in 0..reads {
+                        let from = match &settings.spiked {
+                            Some((which, alpha)) if *which == s && rng.uniform() < *alpha => {
+                                genotypes[(rng.uniform() * samples as f64) as usize % samples]
+                            }
+                            _ => genotypes[s],
+                        };
+                        if rng.uniform() < read_share(from as usize, ERROR) {
+                            alternative += 1;
                         }
-                        _ => genotypes[s],
-                    };
-                    if rng.uniform() < read_share(from as usize, ERROR) {
-                        alternative += 1;
                     }
-                }
-                codes[s].set(index, DepthCode::Binned(edges.bin_for(reads)));
-                if alternative > 0 {
-                    sparse[s].push(AlleleObservation {
-                        index: index as u32,
-                        allele: ObservedAllele::C,
-                        reads: u8::try_from(alternative)
-                            .expect("a drawn count fits the census's one-byte field"),
-                    });
+                    let here = slot(s, library);
+                    codes[here].set(index, DepthCode::Binned(edges.bin_for(reads)));
+                    if alternative > 0 {
+                        sparse[here].push(AlleleObservation {
+                            index: index as u32,
+                            allele: ObservedAllele::C,
+                            reads: u8::try_from(alternative)
+                                .expect("a drawn count fits the census's one-byte field"),
+                        });
+                    }
                 }
             }
         }
@@ -1309,18 +1654,32 @@ mod tests {
         };
         (0..samples)
             .map(|s| {
-                SampleCensusEvidence::resident(
-                    format!("s{s:02}"),
-                    terms.clone(),
-                    BTreeMap::from([(
-                        SectionKey::Generic(ReadGroupId(0)),
-                        Section::Generic(GenericEvidence::from_parts(
-                            std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
-                            std::mem::take(&mut sparse[s]),
-                        )),
-                    )]),
-                )
+                // Library `k` of every plant is read group `k`, so one error rate is fitted per
+                // library slot across the whole panel — see `ContaminationGrain`.
+                let held = (0..libraries.len())
+                    .map(|k| {
+                        let here = slot(s, k);
+                        (
+                            SectionKey::Generic(ReadGroupId(k as u32)),
+                            Section::Generic(GenericEvidence::from_parts(
+                                std::mem::replace(
+                                    &mut codes[here],
+                                    PackedDepthCodes::never_walked(0),
+                                ),
+                                std::mem::take(&mut sparse[here]),
+                            )),
+                        )
+                    })
+                    .collect();
+                SampleCensusEvidence::resident(format!("s{s:02}"), terms.clone(), held)
             })
+            .collect()
+    }
+
+    /// One error rate for each library slot the drawn panel uses.
+    fn error_rates(libraries: usize, rate: f64) -> BTreeMap<ReadGroupId, f64> {
+        (0..libraries)
+            .map(|k| (ReadGroupId(k as u32), rate))
             .collect()
     }
 
@@ -1329,14 +1688,20 @@ mod tests {
         CohortCensusEvidence::new(panel.to_vec()).expect("a drawn panel records one way")
     }
 
-    fn alphas(estimates: &[ContaminationEstimate]) -> Vec<f64> {
+    /// Every sample's first library's fraction, in sample order — what a one-library panel's
+    /// assertions are about.
+    fn alphas(estimates: &[SampleContaminationEstimates]) -> Vec<f64> {
         estimates
             .iter()
-            .map(|estimate| match estimate {
-                ContaminationEstimate::Estimated { alpha, .. } => *alpha,
-                ContaminationEstimate::NotIdentified { .. } => f64::NAN,
-            })
+            .map(|sample| alpha_of(&sample[0].1))
             .collect()
+    }
+
+    fn alpha_of(estimate: &ContaminationEstimate) -> f64 {
+        match estimate {
+            ContaminationEstimate::Estimated { alpha, .. } => *alpha,
+            ContaminationEstimate::NotIdentified { .. } => f64::NAN,
+        }
     }
 
     /// **The test that says the whole thing works, and the one a pooled frequency fails.**
@@ -1362,7 +1727,7 @@ mod tests {
                 &fit_contamination(
                     &mut as_cohort(&panel),
                     &DepthBinEdges::for_census(),
-                    &vec![0.002; samples],
+                    &error_rates(1, 0.002),
                     &vec![0.0; samples],
                     &[],
                     &ContaminationConfig {
@@ -1381,7 +1746,7 @@ mod tests {
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
             &DepthBinEdges::for_census(),
-            &vec![0.002; samples],
+            &error_rates(1, 0.002),
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
@@ -1416,7 +1781,7 @@ mod tests {
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
             &DepthBinEdges::for_census(),
-            &vec![0.002; samples],
+            &error_rates(1, 0.002),
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
@@ -1429,6 +1794,202 @@ mod tests {
         assert!(
             worst < 0.03,
             "a clean panel's worst sample came back at {worst}"
+        );
+    }
+
+    // ---- the grain: what splitting the fraction to the library does ------------------
+
+    /// **A plant sequenced from one library must get the same number at both grains, exactly.**
+    ///
+    /// This is the whole regression argument for the change: every sample of every benchmark
+    /// cohort here carries one library, so a run over them must be unchanged — and not by luck.
+    /// Marker selection, the allele frequency at each marker, every plant's place on the panel's
+    /// axes and its leverage are all computed from a plant's reads pooled over its libraries, so
+    /// with one library the two grains are handed byte-identical inputs. Anything but equality
+    /// means the split leaked into one of them.
+    #[test]
+    fn one_library_a_plant_gives_the_two_grains_the_same_number() {
+        let samples = 40;
+        let panel = structured_panel(samples, 12_000, 3.0, 4, 0.20, Some((0, 0.03)), 0x51ED2709);
+        let at = |grain| {
+            alphas(
+                &fit_contamination(
+                    &mut as_cohort(&panel),
+                    &DepthBinEdges::for_census(),
+                    &error_rates(1, 0.002),
+                    &vec![0.0; samples],
+                    &[],
+                    &ContaminationConfig {
+                        grain,
+                        ..ContaminationConfig::default()
+                    },
+                )
+                .expect("a resident census has no file to fail on"),
+            )
+        };
+        assert_eq!(
+            at(ContaminationGrain::ReadGroup),
+            at(ContaminationGrain::Sample),
+            "with one library a plant the two grains see the same reads"
+        );
+    }
+
+    /// **The finding the change exists for: one library contaminated and the other clean.**
+    ///
+    /// A plant whose DNA was prepared into two libraries, a second plant's reads in one of them
+    /// and none in the other. One number for the whole plant can only be the average of the two,
+    /// which is wrong for both — it understates the contaminated library and slanders the clean
+    /// one. The library grain has to tell them apart.
+    #[test]
+    fn a_contaminated_library_is_told_from_the_clean_one_beside_it() {
+        let samples = 30;
+        // Twenty reads a position over two libraries, so ten each — the fraction is read off
+        // a read share, and at three reads a position a library holds one or two reads at most
+        // markers and there is nothing to read a share from.
+        let panel = structured_panel_of_libraries(
+            samples,
+            8_000,
+            20.0,
+            4,
+            0.20,
+            &[
+                DrawnLibrary {
+                    depth_share: 0.5,
+                    spiked: Some((0, 0.06)),
+                },
+                DrawnLibrary {
+                    depth_share: 0.5,
+                    spiked: None,
+                },
+            ],
+            0x51ED2709,
+        );
+        let run = |grain| {
+            fit_contamination(
+                &mut as_cohort(&panel),
+                &DepthBinEdges::for_census(),
+                &error_rates(2, 0.002),
+                &vec![0.0; samples],
+                &[],
+                &ContaminationConfig {
+                    grain,
+                    ..ContaminationConfig::default()
+                },
+            )
+            .expect("a resident census has no file to fail on")
+        };
+
+        let by_library = run(ContaminationGrain::ReadGroup);
+        let (dirty, clean) = (alpha_of(&by_library[0][0].1), alpha_of(&by_library[0][1].1));
+        // The worst any library of any uncontaminated plant reached — what a threshold has to
+        // clear, and it is a property of this panel rather than a number to quote elsewhere.
+        let worst_innocent = by_library[1..]
+            .iter()
+            .flatten()
+            .map(|(_, estimate)| alpha_of(estimate))
+            .filter(|a| !a.is_nan())
+            .fold(0.0_f64, f64::max);
+
+        let by_plant = run(ContaminationGrain::Sample);
+        let (both_halves_of_the_plant, other_half) =
+            (alpha_of(&by_plant[0][0].1), alpha_of(&by_plant[0][1].1));
+        eprintln!(
+            "planted 0.060 in one library of two and nothing in the other.\n  \
+             by library: {dirty:.4} and {clean:.4}, worst uncontaminated library {worst_innocent:.4}\n  \
+             by plant:   {both_halves_of_the_plant:.4} for both"
+        );
+
+        assert_eq!(
+            both_halves_of_the_plant, other_half,
+            "the plant grain gives one number and copies it onto both libraries"
+        );
+        assert!(
+            dirty > 4.0 * worst_innocent.max(1e-4),
+            "the contaminated library came back at {dirty}, which does not stand clear of the \
+             worst uncontaminated one at {worst_innocent}"
+        );
+        assert!(
+            dirty > 3.0 * clean.max(1e-4),
+            "the two libraries of one plant came back at {dirty} and {clean}, which a threshold \
+             cannot separate"
+        );
+        assert!(
+            both_halves_of_the_plant < dirty,
+            "one number for the plant ({both_halves_of_the_plant}) has to understate the \
+             contaminated library ({dirty}), since half the plant's reads are clean"
+        );
+    }
+
+    /// **A library with almost no reads must come back clean, not wrong.** The default
+    /// assumption is that nothing is contaminated, and too little evidence should land near it
+    /// rather than somewhere confident — while the counts beside the number still say the
+    /// evidence was not there, so a reader can tell a measurement from an absence.
+    #[test]
+    fn a_library_with_almost_no_reads_reads_clean_and_says_how_little_it_saw() {
+        let samples = 30;
+        // Two libraries of every plant and nobody contaminated, one library holding a fortieth
+        // of the plant's reads: half a read a position, so it has a read at well under half the
+        // markers and two at almost none.
+        let panel = structured_panel_of_libraries(
+            samples,
+            8_000,
+            20.0,
+            4,
+            0.20,
+            &[
+                DrawnLibrary {
+                    depth_share: 0.975,
+                    spiked: None,
+                },
+                DrawnLibrary {
+                    depth_share: 0.025,
+                    spiked: None,
+                },
+            ],
+            0x0BADF00D,
+        );
+        let estimates = fit_contamination(
+            &mut as_cohort(&panel),
+            &DepthBinEdges::for_census(),
+            &error_rates(2, 0.002),
+            &vec![0.0; samples],
+            &[],
+            &ContaminationConfig::default(),
+        )
+        .expect("a resident census has no file to fail on");
+
+        let mut worst_thin = 0.0_f64;
+        let mut fewest = u64::MAX;
+        let mut most = 0_u64;
+        for sample in &estimates {
+            for (group, estimate) in sample {
+                if let ContaminationEstimate::Estimated {
+                    alpha,
+                    markers_with_reads,
+                    ..
+                } = estimate
+                {
+                    if *group == ReadGroupId(1) {
+                        worst_thin = worst_thin.max(*alpha);
+                        fewest = fewest.min(*markers_with_reads);
+                    } else {
+                        most = most.max(*markers_with_reads);
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "the thin libraries saw at fewest {fewest} markers against the full ones\' {most}, \
+             and the worst of them read {worst_thin:.4}"
+        );
+        assert!(
+            fewest * 2 < most,
+            "the thin library is not thin: {fewest} markers against {most}"
+        );
+        assert!(
+            worst_thin < 0.01,
+            "a library with almost no reads came back at {worst_thin}, which a 1% threshold \
+             would flag"
         );
     }
 

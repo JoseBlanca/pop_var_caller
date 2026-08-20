@@ -1424,8 +1424,10 @@ mod tests {
             }
             for one in &divided {
                 assert!(one.start <= one.end, "no empty region, at {bases} bases");
+                // The width of an inclusive region, which is what the `+ 1` is for.
+                let width = one.end.0 - one.start.0 + 1;
                 assert!(
-                    one.end.0 - one.start.0 + 1 <= u64::from(bases),
+                    width <= u64::from(bases),
                     "no region wider than the width asked for, at {bases} bases",
                 );
             }

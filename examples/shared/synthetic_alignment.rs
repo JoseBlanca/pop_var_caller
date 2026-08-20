@@ -146,7 +146,7 @@ impl SyntheticSample {
 /// Not a real sequence and not meant to be. Seeded rather than `rand` so the same commit
 /// gives the same contig on every run.
 fn synthetic_contig(len: usize) -> Vec<u8> {
-    const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+    const BASES: [u8; 4] = *b"ACGT";
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     (0..len)
         .map(|_| {

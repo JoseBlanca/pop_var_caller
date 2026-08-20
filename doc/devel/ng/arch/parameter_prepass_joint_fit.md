@@ -47,8 +47,10 @@ pub struct JointFit {
     /// Per sample, the departure from the Hardy–Weinberg proportions the spectrum
     /// predicts. **Not the autozygosity coefficient** (§1.4).
     pub hom_excess: BTreeMap<SampleName, Estimate<HomozygoteExcess>>,
-    /// Per sample, the fraction of reads from another individual (spec §3.4).
-    pub contamination: BTreeMap<SampleName, ContaminationEstimate>,
+    /// **Per read group**, the fraction of that library's reads that came from another
+    /// individual (spec §3.4) — a library is what a second plant's DNA gets into, so two
+    /// libraries of one sample can differ. A sample sequenced once has one entry.
+    pub contamination: BTreeMap<SampleName, Vec<(ReadGroupId, ContaminationEstimate)>>,
     /// Derived from the converged posteriors rather than fitted (spec §3.2).
     pub rates: BTreeMap<SampleName, Estimate<SampleRates>>,
     /// The STR path's four slippage numbers, per read group × stratum (spec §4).
@@ -377,7 +379,7 @@ Four blocks, alternating (spec §3.3), each of which is a call into machinery th
 | 1 | each read group's three noise numbers | a **climb**, not `fit_by_profile_scan` — see the decision below |
 | 2 | the density's four numbers | `climb_mixture_weights` for the two masses; the Beta's `a` and `b` are **not** weights and need their own climb (spec §2.1.2) |
 | 3 | each sample's `HomozygoteExcess` | this route's own, one scalar per sample, constrained to `[0, 1]` (§1.4) |
-| 4 | each sample's contamination | this route's own (spec §3.4), or after the loop |
+| 4 | each read group's contamination | this route's own (spec §3.4), or after the loop |
 
 **Blocks 2 and 3 can trade against one another** — both control how often a genotype comes out
 heterozygous, and they are separated only by *where* the variation sits, across loci for one and
