@@ -504,11 +504,16 @@ determinism for a saving nobody will measure.
    and the most informative, and it is also the one that shrinks fastest as the panel shrinks.
    *Leaning:* set a floor and emit the spectrum as absent below it, rather than emitting a noisy one.
    **Settled by:** subsampling the tomato cohort and watching where the spectrum stops being stable.
-4. **Should contamination be estimated per read group or per sample?** — OPEN. Contamination and
-   index hopping are properties of a library and a run, which argues for the read group; a sample
-   swap is a property of the sample. *Leaning:* per read group, because it matches where the error
-   rate that absorbs it is fitted ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §3). **Settled by:** whether a multi-library sample ever
-   shows one library contaminated and another clean, which needs a cohort we do not have.
+4. **Should contamination be estimated per read group or per sample?** — **SETTLED: per read
+   group** (owner, 2026-08-19; built and measured 2026-08-20). A second plant's DNA enters at library
+   preparation or on the sequencing machine, so what is contaminated is a library and two made from
+   one plant can differ; the contaminating *source* is a sample, the contaminated *thing* is a read
+   group. **The question's own "settled by" clause was wrong and is worth saying so**: it proposed
+   waiting for a multi-library sample to show one library dirty and another clean, and no cohort here
+   has a multi-library sample at all. The grain follows from how contamination happens, not from a
+   measurement, and the joint route now fits it that way
+   ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4,
+   [`../reports/contamination_read_group_grain_2026-08-20.md`](../reports/contamination_read_group_grain_2026-08-20.md)).
 
 ---
 
