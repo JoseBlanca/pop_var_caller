@@ -233,6 +233,116 @@ pub const LEVEL_FLOOR: f64 = 1e-7;
 pub const LEVEL_CEILING: f64 = 0.999;
 
 // ---------------------------------------------------------------------
+// Fitting one line, at a shape number someone else chose
+// ---------------------------------------------------------------------
+
+/// Why a set of cells produced no curve.
+///
+/// **No `Eq`**: one variant carries the slope it refused, which is a float.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoCurve {
+    /// Fewer usable cells than a line needs.
+    ///
+    /// **Two floors exist and they are different questions.** [`fit_line`] refuses below **two**,
+    /// which is arithmetic — one point does not make a line. [`choose_rise_shape`] refuses below
+    /// [`SlippageCurveConfig::min_cells_for_a_curve`], which is about whether the answer means
+    /// anything. `floor` says which one refused.
+    TooFewCells { cells: usize, floor: usize },
+    /// Every cell sits at the same repeat count, so no line through them has a slope.
+    OneRepeatCountOnly { repeats: u64 },
+    /// The best line through these cells says slippage *falls* as tracts get longer.
+    ///
+    /// **Refused rather than emitted.** Every measurement this design rests on says the level
+    /// rises with repeat count, so a falling fit is reporting the cells' noise; a consumer handed
+    /// it would give a long tract a smaller error rate than a short one (spec §9).
+    LevelWouldFall { slope: f64 },
+}
+
+/// Fit one slippage group's line through its cells, at a shape number chosen elsewhere.
+///
+/// **Weighted least squares of `level ^ rise_shape` on repeat count**, each cell weighted by its
+/// slipped reads — the count that sets how precisely that cell determines its own level. The
+/// `held_out_error` and `cells` of the returned curve are placeholders that
+/// [`choose_rise_shape`] fills; a caller that fits one line directly gets the cell count and a
+/// held-out error of zero, and must not read the second as a claim.
+///
+/// **Cells whose level is not strictly inside `(0, 1)` are dropped before fitting.** The level is
+/// bounded below by zero and a thin cell piles up against that boundary, where the multiplying
+/// end's logarithm has no value (spec §7's last note).
+pub fn fit_line(cells: &[FittedCell], rise_shape: RiseShape) -> Result<SlippageCurve, NoCurve> {
+    let usable: Vec<&FittedCell> = cells
+        .iter()
+        .filter(|cell| cell.level > 0.0 && cell.level < 1.0 && cell.slipped_reads > 0.0)
+        .collect();
+    if usable.len() < 2 {
+        return Err(NoCurve::TooFewCells {
+            cells: usable.len(),
+            floor: 2,
+        });
+    }
+
+    let transform = |level: f64| {
+        if rise_shape.is_multiplying() {
+            level.ln()
+        } else {
+            level.powf(rise_shape.get())
+        }
+    };
+
+    // Weighted means first, so the two sums below are about the centred values and cannot lose
+    // precision to a large common offset.
+    let total_weight: f64 = usable.iter().map(|cell| cell.slipped_reads).sum();
+    let mean_repeats: f64 = usable
+        .iter()
+        .map(|cell| cell.slipped_reads * cell.repeats as f64)
+        .sum::<f64>()
+        / total_weight;
+    let mean_transformed: f64 = usable
+        .iter()
+        .map(|cell| cell.slipped_reads * transform(cell.level))
+        .sum::<f64>()
+        / total_weight;
+
+    let mut covariance = 0.0;
+    let mut spread = 0.0;
+    for cell in &usable {
+        let from_mean = cell.repeats as f64 - mean_repeats;
+        covariance += cell.slipped_reads * from_mean * (transform(cell.level) - mean_transformed);
+        spread += cell.slipped_reads * from_mean * from_mean;
+    }
+    if spread <= 0.0 {
+        return Err(NoCurve::OneRepeatCountOnly {
+            repeats: usable[0].repeats,
+        });
+    }
+
+    // **Not `slope <= 0.0`.** That comparison is false for a slope that is not a number, which
+    // would let a `NaN` line through and hand every cell a `NaN` level.
+    let slope = covariance / spread;
+    if !(slope.is_finite() && slope > 0.0) {
+        return Err(NoCurve::LevelWouldFall { slope });
+    }
+
+    Ok(SlippageCurve {
+        rise_shape,
+        intercept: mean_transformed - slope * mean_repeats,
+        slope,
+        fitted_from: usable
+            .iter()
+            .map(|cell| cell.repeats)
+            .min()
+            .expect("two cells"),
+        fitted_to: usable
+            .iter()
+            .map(|cell| cell.repeats)
+            .max()
+            .expect("two cells"),
+        held_out_error: 0.0,
+        cells: usable.len(),
+    })
+}
+
+// ---------------------------------------------------------------------
 // Where an emitted level came from
 // ---------------------------------------------------------------------
 
@@ -625,6 +735,145 @@ mod tests {
         // and it sits between the two ends: below a straight line, above an exponential.
         let midpoint = curve.level_at(18);
         assert!(midpoint > 0.03 && midpoint < 0.06);
+    }
+
+    /// Cells drawn exactly on a straight line in the level are recovered at the adding end.
+    #[test]
+    fn cells_lying_on_a_straight_line_are_recovered_at_the_adding_end() {
+        let cells: Vec<FittedCell> = (8..=30)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.005 * repeats as f64 - 0.035,
+                slipped_reads: 1_000.0,
+            })
+            .collect();
+        let curve = fit_line(&cells, RiseShape::ADDING).expect("a rising line");
+        assert!((curve.slope - 0.005).abs() < 1e-12, "slope {}", curve.slope);
+        assert!((curve.intercept + 0.035).abs() < 1e-12);
+        assert_eq!((curve.fitted_from, curve.fitted_to), (8, 30));
+        assert_eq!(curve.cells, 23);
+        for cell in &cells {
+            assert!((curve.level_at(cell.repeats) - cell.level).abs() < 1e-12);
+        }
+    }
+
+    /// Cells drawn exactly on an exponential are recovered at the multiplying end.
+    #[test]
+    fn cells_lying_on_an_exponential_are_recovered_at_the_multiplying_end() {
+        let cells: Vec<FittedCell> = (8..=12)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.002 * 1.47_f64.powi(repeats as i32 - 8),
+                slipped_reads: 500.0,
+            })
+            .collect();
+        let curve = fit_line(&cells, RiseShape::MULTIPLYING).expect("a rising line");
+        assert!((curve.slope - 1.47_f64.ln()).abs() < 1e-12);
+        for cell in &cells {
+            assert!((curve.level_at(cell.repeats) / cell.level - 1.0).abs() < 1e-12);
+        }
+    }
+
+    /// A fit that says slippage falls with repeat count is refused, never emitted.
+    #[test]
+    fn a_falling_fit_is_refused_rather_than_handed_to_a_caller() {
+        let falling: Vec<FittedCell> = (8..=12)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.05 - 0.003 * repeats as f64,
+                slipped_reads: 1_000.0,
+            })
+            .collect();
+        match fit_line(&falling, RiseShape::ADDING) {
+            Err(NoCurve::LevelWouldFall { slope }) => assert!(slope < 0.0),
+            other => panic!("a falling set gave {other:?}"),
+        }
+    }
+
+    /// Every cell at one repeat count leaves no line to draw, and it is not a falling fit.
+    #[test]
+    fn cells_at_a_single_repeat_count_have_no_line_through_them() {
+        let flat = vec![
+            FittedCell {
+                repeats: 9,
+                level: 0.004,
+                slipped_reads: 500.0,
+            },
+            FittedCell {
+                repeats: 9,
+                level: 0.006,
+                slipped_reads: 500.0,
+            },
+        ];
+        assert_eq!(
+            fit_line(&flat, RiseShape::ADDING),
+            Err(NoCurve::OneRepeatCountOnly { repeats: 9 })
+        );
+    }
+
+    /// A cell whose level fitted to exactly zero has no logarithm and no evidence; it is dropped
+    /// before the fit rather than crashing it.
+    #[test]
+    fn a_cell_at_a_level_of_zero_is_dropped_before_the_fit() {
+        let mut cells: Vec<FittedCell> = (8..=12)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.002 * 1.47_f64.powi(repeats as i32 - 8),
+                slipped_reads: 500.0,
+            })
+            .collect();
+        let clean = fit_line(&cells, RiseShape::MULTIPLYING).expect("a rising line");
+        cells.push(FittedCell {
+            repeats: 13,
+            level: 0.0,
+            slipped_reads: 0.0,
+        });
+        let with_empty = fit_line(&cells, RiseShape::MULTIPLYING).expect("a rising line");
+        assert_eq!(with_empty.cells, clean.cells);
+        assert_eq!(with_empty.fitted_to, 12);
+        assert!((with_empty.slope - clean.slope).abs() < 1e-15);
+    }
+
+    /// One usable cell is not a line, and the refusal names the arithmetic floor rather than the
+    /// one that is about whether the answer means anything.
+    #[test]
+    fn one_usable_cell_is_refused_at_the_arithmetic_floor() {
+        let single = vec![FittedCell {
+            repeats: 9,
+            level: 0.004,
+            slipped_reads: 500.0,
+        }];
+        assert_eq!(
+            fit_line(&single, RiseShape::ADDING),
+            Err(NoCurve::TooFewCells { cells: 1, floor: 2 })
+        );
+    }
+
+    /// The weight is the cell's slipped reads, so a cell with a thousand times the evidence
+    /// pulls the line to itself and a near-empty cell barely moves it.
+    #[test]
+    fn a_cell_pulls_the_line_in_proportion_to_its_slipped_reads() {
+        let on_the_line: Vec<FittedCell> = (8..=30)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.005 * repeats as f64 - 0.035,
+                slipped_reads: 10_000.0,
+            })
+            .collect();
+        let mut with_an_outlier = on_the_line.clone();
+        with_an_outlier.push(FittedCell {
+            repeats: 20,
+            level: 0.5,
+            slipped_reads: 1.0,
+        });
+        let clean = fit_line(&on_the_line, RiseShape::ADDING).expect("a rising line");
+        let pulled = fit_line(&with_an_outlier, RiseShape::ADDING).expect("a rising line");
+        let moved = (pulled.level_at(20) - clean.level_at(20)).abs() / clean.level_at(20);
+        assert!(
+            moved < 0.02,
+            "one read moved the line at 20 repeats by {:.1}%",
+            moved * 100.0
+        );
     }
 
     #[test]

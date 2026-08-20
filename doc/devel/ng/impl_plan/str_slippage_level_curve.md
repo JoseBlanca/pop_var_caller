@@ -101,7 +101,7 @@ evaluated at its own fitted cells returns them; below and above the range it ret
 values; `rise_shape = 0` and `rise_shape = 1` each reproduce a hand-computed value.
 ***Depends:*** A1. ***Source:*** spec §2, §6.
 
-**A3. Fit one slippage group's line at a fixed shape number.**  ☐
+**A3. Fit one slippage group's line at a fixed shape number.**  ✅
 Weighted least squares of `level ^ rise_shape` on repeat count, with the weight the cell's slipped
 reads (`level × spanning_reads`). Reject a fit whose `slope` is not positive, returning no curve
 rather than a falling level. Unit tests: cells drawn exactly on a line at `rise_shape = 1` and
