@@ -6,9 +6,15 @@
 //! `doc/devel/ng/reports/str_slippage_shape_2026-08-20.md` §4.1. It is the step that would catch
 //! a fit that is self-consistent and wrong on data.
 //!
-//! **The two tables were produced with borrowing off** (`SSR_BORROWING_FLOOR=0`), so every cell
-//! speaks from its own tracts alone. Fitting a curve to cells that had already borrowed from
-//! their neighbours would be circular, and it would look like a triumph.
+//! **The two tables were produced with borrowing off**, so every cell speaks from its own tracts
+//! alone. Fitting a curve to cells that had already borrowed from their neighbours would be
+//! circular, and it would look like a triumph.
+//!
+//! **They are the ±8 tables, and the ±4 ones they replaced said something different.** The census
+//! records a read's length offset over a fixed window and folds the rest into an end bucket; at
+//! ±4 that under-measured the level 2.26-fold at 30-repeat homopolymers and made the rise look as
+//! though it flattened. Every number asserted below moved when the window widened — see the
+//! report's §7.
 //!
 //! Fixtures: `tests/data/slippage_cells/`. They are the raw `SSR_CELL_TABLE` output of
 //! `examples/ng_joint_records_walk.rs`, copied unchanged.
@@ -84,8 +90,12 @@ fn shape_at(cells: &BTreeMap<u8, Vec<FittedCell>>, period: u8) -> (RiseShape, f6
     (curves.rise_shape, curves.held_out_error, curves.cells)
 }
 
-/// The two cohorts prefer **opposite** shapes, and that is the finding the whole family exists
-/// for: tomato's homopolymers compound, HG002's add.
+/// The two cohorts land at **different** shape numbers, which is the finding the fitted family
+/// exists for — neither cohort's answer would serve the other.
+///
+/// **They are no longer opposite, and that correction is the recording window's.** At ±4 tomato
+/// fitted 0.00 and HG002 1.00, the two ends of the grid; at ±8 they fit 0.65 and 0.35, both well
+/// inside it.
 #[test]
 fn the_two_cohorts_return_the_shape_numbers_the_report_records() {
     let tomato = fixture("tomato_63_accessions_8mb.csv");
@@ -93,21 +103,23 @@ fn the_two_cohorts_return_the_shape_numbers_the_report_records() {
 
     let (shape, _, cells) = shape_at(&tomato, 1);
     assert_eq!(cells, 5, "tomato's homopolymer cells");
-    assert_eq!(
-        shape,
-        RiseShape::MULTIPLYING,
-        "tomato's homopolymers should compound"
+    assert!(
+        (shape.get() - 0.65).abs() < 1e-9,
+        "tomato's homopolymers should fit 0.65, got {shape}"
     );
 
     let (shape, _, cells) = shape_at(&hg002, 1);
     assert_eq!(cells, 23, "HG002's homopolymer cells");
-    assert_eq!(shape, RiseShape::ADDING, "HG002's homopolymers should add");
+    assert!(
+        (shape.get() - 0.35).abs() < 1e-9,
+        "HG002's homopolymers should fit 0.35, got {shape}"
+    );
 
     let (shape, _, cells) = shape_at(&hg002, 2);
     assert_eq!(cells, 20, "HG002's dinucleotide cells");
     assert!(
-        (shape.get() - 0.80).abs() < 1e-9,
-        "HG002's dinucleotides should land between the ends, got {shape}"
+        (shape.get() - 0.70).abs() < 1e-9,
+        "HG002's dinucleotides should fit 0.70, got {shape}"
     );
 }
 
@@ -120,11 +132,11 @@ fn the_two_cohorts_return_the_shape_numbers_the_report_records() {
 #[test]
 fn each_periods_curve_lands_where_the_report_says_it_does() {
     let expected = [
-        ("tomato_63_accessions_8mb.csv", 1_u8, 5_usize, 0.1236),
-        ("hg002_300x_tier.csv", 1, 23, 0.0439),
-        ("hg002_300x_tier.csv", 2, 20, 0.0379),
-        ("hg002_300x_tier.csv", 3, 4, 0.3110),
-        ("hg002_300x_tier.csv", 4, 7, 0.5334),
+        ("tomato_63_accessions_8mb.csv", 1_u8, 5_usize, 0.0734),
+        ("hg002_300x_tier.csv", 1, 23, 0.0774),
+        ("hg002_300x_tier.csv", 2, 20, 0.1139),
+        ("hg002_300x_tier.csv", 3, 4, 0.3199),
+        ("hg002_300x_tier.csv", 4, 7, 0.2133),
     ];
     for (name, period, want_cells, want_error) in expected {
         let (_, held_out_error, cells) = shape_at(&fixture(name), period);
@@ -139,8 +151,8 @@ fn each_periods_curve_lands_where_the_report_says_it_does() {
 }
 
 /// **The thin periods are the reason spec §11 doubts the four-cell floor.** HG002's
-/// trinucleotides clear it with exactly four cells and predict a held-out cell 7 times worse
-/// than its dinucleotides do with twenty.
+/// trinucleotides clear it with exactly four cells and predict a held-out cell to 32.0%, nearly
+/// three times worse than its dinucleotides do with twenty at 11.4%.
 #[test]
 fn a_period_at_the_cell_floor_is_far_less_certain_than_a_rich_one() {
     let hg002 = fixture("hg002_300x_tier.csv");
@@ -148,7 +160,7 @@ fn a_period_at_the_cell_floor_is_far_less_certain_than_a_rich_one() {
     assert_eq!(cells, SlippageCurveConfig::default().min_cells_for_a_curve);
     let (_, rich, _) = shape_at(&hg002, 2);
     assert!(
-        at_the_floor > rich * 5.0,
+        at_the_floor > rich * 2.5,
         "four cells gave {:.1}% and twenty gave {:.1}%",
         at_the_floor * 100.0,
         rich * 100.0

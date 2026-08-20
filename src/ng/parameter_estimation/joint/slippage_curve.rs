@@ -11,14 +11,20 @@
 //! every cell. The other three numbers are untouched and keep their per-cell fit
 //! (`doc/devel/ng/spec/str_slippage_level_curve.md` §1.2).
 //!
-//! **The family, and why it has a shape number instead of a fixed shape.** Two cohorts fitted
-//! with nothing linking their cells prefer *opposite* shapes over the same repeat counts: over
-//! 8 to 12 repeats, tomato's homopolymers are predicted best by an exponential (12.4% held-out
-//! against a straight line's 33.6%) and HG002's by a straight line (8.0% against 31.2%). And both
-//! fixed shapes produce impossible numbers a few repeat counts outside the range they saw — an
-//! exponential fitted on HG002's 8-to-12 cells says the level at 30 repeats is 205, where the cell
-//! at 30 repeats fits 0.120. So the shape is fitted rather than chosen
-//! (`doc/devel/ng/reports/str_slippage_shape_2026-08-20.md` §4).
+//! **The family, and why it has a shape number instead of a fixed shape.** No fixed shape fits
+//! both cohorts, and at three of the five periods that carry evidence neither fixed end is even
+//! the best available: over 8 to 12 repeats tomato's homopolymers fit a shape of 0.65, where the
+//! exponential predicts a held-out cell to 14.7% and the straight line to 26.2%, and over 8 to 30
+//! HG002's fit 0.35, where the two ends reach 18.8% and 21.8% against the fitted shape's 7.7%.
+//! And both fixed shapes produce impossible numbers a few repeat counts outside the range they
+//! saw — an exponential fitted on HG002's 8-to-12 cells says the level at 30 repeats is **149**,
+//! where the cell at 30 repeats fits 0.272. So the shape is fitted rather than chosen
+//! (`doc/devel/ng/reports/str_slippage_shape_2026-08-20.md` §3 and §4).
+//!
+//! **Every number in this module is measured at the census's ±8 recording window.** The ±4 window
+//! it replaced under-measured the level 2.26-fold at 30-repeat homopolymers and made the rise look
+//! as though it flattened; the design document still quotes the ±4 figures in places, and that
+//! report's §7 lists what the correction overturned.
 //!
 //! Design: `doc/devel/ng/spec/str_slippage_level_curve.md`. Build order:
 //! `doc/devel/ng/impl_plan/str_slippage_level_curve.md`.
@@ -221,8 +227,8 @@ impl SlippageCurve {
 /// **A curve fitted through cells that happen to lie exactly on it scores a held-out error of
 /// zero, and zero error is infinite weight** — it would win against any cell however well that
 /// cell is measured, and no disagreement could stand it down. That cannot happen on real data:
-/// the smallest held-out error either cohort produces is 3.79%, at HG002's twenty dinucleotide
-/// cells. One part in a thousand is thirty-eight times below anything measured, so the floor
+/// the smallest held-out error either cohort produces is 7.34%, at tomato's five homopolymer
+/// cells. One part in a thousand is seventy-three times below anything measured, so the floor
 /// cannot bind on a real fit and exists to keep a drawn or degenerate one from swamping the
 /// arithmetic.
 pub const CURVE_ERROR_FLOOR: f64 = 1e-3;
@@ -515,9 +521,10 @@ pub enum LevelSource {
     Curve,
     /// Both, weighted by how precisely each determines the level.
     ///
-    /// `curve_weight` is the share the curve carried, in `[0, 1]`. It runs about 0.93 at a cell
-    /// with 40 slipped reads behind it and about 0.06 at one with 8,000, at a curve whose
-    /// held-out error is 4.4% (spec §7).
+    /// `curve_weight` is the share the curve carried, in `[0, 1]`. It runs about 0.81 at a cell
+    /// with 40 slipped reads behind it and about 0.02 at one with 8,000, at a curve whose
+    /// held-out error is 7.7% — HG002's homopolymers at the corrected ±8 recording window
+    /// (spec §7, whose own figures are the ±4 ones).
     Blend { curve_weight: f64 },
 }
 
@@ -544,8 +551,9 @@ impl LevelSource {
 /// held-out error, and each gets weight in proportion to `1 / error²`.
 ///
 /// **This is the protection against fitting each cell's noise, and it is not a switch between
-/// two regimes.** At a curve whose held-out error is 4.4%, the curve carries about 93% of the
-/// weight at a cell with 40 slipped reads and about 6% at one with 8,000. Using the curve
+/// two regimes.** At a curve whose held-out error is 7.7% — HG002's homopolymers at the
+/// corrected ±8 recording window — the curve carries about 81% of the weight at a cell with 40
+/// slipped reads and about 2% at one with 8,000. Using the curve
 /// everywhere is this formula with the curve's weight pinned at one; using each cell's own
 /// answer is it pinned at zero.
 ///
@@ -655,10 +663,9 @@ pub enum CurveReach {
 
 /// How many rungs the shape number is searched over, spanning `[0, 1]` inclusive.
 ///
-/// **21, which is steps of 0.05.** The two cohorts' periods land at 0.00, 0.80 and 1.00, so the
-/// grid has to resolve 0.05 to distinguish period 2's answer from the adding end; nothing
-/// measured asks for finer, and each extra rung costs one weighted least-squares fit per cell per
-/// slippage group.
+/// **21, which is steps of 0.05.** The two cohorts' periods land at 0.35, 0.65, 0.70 and 1.00, so
+/// the grid has to resolve 0.05 to tell 0.65 from 0.70; nothing measured asks for finer, and each
+/// extra rung costs one weighted least-squares fit per cell per slippage group.
 pub const RISE_SHAPE_RUNGS: usize = 21;
 
 /// How few contributing cells leave a period without a curve.
@@ -666,7 +673,7 @@ pub const RISE_SHAPE_RUNGS: usize = 21;
 /// **4, and it is arithmetic rather than a measurement — the smallest count at which leaving one
 /// cell out still leaves a line and a spare.** It is soft, and spec §11 records the measurement
 /// that would settle it along with the reason to expect it is too low: HG002's period 3 has
-/// exactly four cells and its best rung predicts a held-out cell only to 31%, against 3.8% at
+/// exactly four cells and its best rung predicts a held-out cell only to 32.0%, against 11.4% at
 /// period 2's twenty.
 pub const MIN_CELLS_FOR_A_CURVE: usize = 4;
 
@@ -1279,22 +1286,28 @@ mod tests {
         assert_eq!(curves.rise_shape, RiseShape::ADDING);
     }
 
-    /// The curve HG002's homopolymers give, for the blend tests: a straight line whose held-out
-    /// error is the 4.4% spec §7 quotes.
+    /// The curve HG002's homopolymers actually give, for the blend tests.
+    ///
+    /// **Fitted through the 23 cells of `tests/data/slippage_cells/hg002_300x_tier.csv`** at the
+    /// corrected ±8 recording window, and reproduced by
+    /// `tests/slippage_curve_on_real_cells.rs`: a shape number of 0.35 over 8 to 30 repeats,
+    /// predicting a held-out cell to 7.7%.
     fn hg002_homopolymer_curve() -> SlippageCurve {
         SlippageCurve {
-            rise_shape: RiseShape::ADDING,
-            intercept: -0.035,
-            slope: 0.005,
+            rise_shape: RiseShape::new(0.35).expect("a rung of the grid"),
+            intercept: 0.054_660_48,
+            slope: 0.018_771_71,
             fitted_from: 8,
             fitted_to: 30,
-            held_out_error: 0.044,
+            held_out_error: 0.077_390,
             cells: 23,
         }
     }
 
-    /// **The two figures spec §7 quotes**, and the reason the blend is not a switch: the curve
-    /// carries most of the weight at a near-empty cell and almost none at a full one.
+    /// **The reason the blend is not a switch:** the curve carries most of the weight at a
+    /// near-empty cell and almost none at a full one. At HG002's homopolymer curve, which
+    /// predicts a held-out cell to 7.7%, that is 81% of the weight at a cell with 40 slipped
+    /// reads and 2% at one with 8,000.
     #[test]
     fn the_curve_carries_the_weight_at_a_thin_cell_and_stands_aside_at_a_full_one() {
         let curve = hg002_homopolymer_curve();
@@ -1317,29 +1330,34 @@ mod tests {
         let thin = at(40.0);
         let full = at(8_000.0);
         assert!(
-            (thin - 0.93).abs() < 0.01,
-            "at 40 slipped reads the curve carried {thin:.3}, and the spec quotes 0.93"
+            (thin - 0.81).abs() < 0.01,
+            "at 40 slipped reads the curve carried {thin:.3}, expected 0.81"
         );
         assert!(
-            (full - 0.06).abs() < 0.01,
-            "at 8,000 slipped reads the curve carried {full:.3}, and the spec quotes 0.06"
+            (full - 0.02).abs() < 0.01,
+            "at 8,000 slipped reads the curve carried {full:.3}, expected 0.02"
         );
         assert!(thin > full);
     }
 
     /// **The case that decides against using the curve everywhere.** HG002's 9-repeat
-    /// homopolymer: the cell's own 3,520 slipped reads say 6.7 reads slipping per 1,000 and the
-    /// curve says 10.4. The blend must stay near the cell, not near the curve.
+    /// homopolymer: the cell's own 3,875 slipped reads say 7.4 reads slipping per 1,000 and the
+    /// curve says 13.8. The blend must stay near the cell, not near the curve.
+    ///
+    /// **The widened recording window made this case worse, not better.** At ±4 the curve was
+    /// 55% above the cell here; at ±8 it is 87% above, and at 8 repeats 135% above. The knee
+    /// between 9 and 10 repeats that no two-parameter monotone curve can bend around is not a
+    /// recording artefact.
     #[test]
     fn a_well_measured_cell_keeps_its_answer_where_the_curve_is_wrong_about_it() {
         let curve = hg002_homopolymer_curve();
         let cell = FittedCell {
             repeats: 9,
-            level: 0.00673,
-            slipped_reads: 3_520.0,
+            level: 0.007_409_85,
+            slipped_reads: 3_875.0,
         };
         assert!(
-            (curve.level_at(9) - 0.0104).abs() < 5e-4,
+            (curve.level_at(9) - 0.01385).abs() < 5e-4,
             "the curve says {} at 9 repeats",
             curve.level_at(9)
         );
@@ -1357,11 +1375,11 @@ mod tests {
         )
         .unwrap();
 
-        // Always-curve would report 10.4 per 1,000; both blends stay within a tenth of that of
-        // the cell's own 6.73.
-        assert!((no_knee.level - 0.00712).abs() < 2e-4, "{}", no_knee.level);
+        // Always-curve would report 13.8 per 1,000; both blends stay within a tenth of that of
+        // the cell's own 7.41.
+        assert!((no_knee.level - 0.00760).abs() < 2e-4, "{}", no_knee.level);
         assert!(
-            (with_knee.level - 0.00676).abs() < 2e-4,
+            (with_knee.level - 0.00743).abs() < 2e-4,
             "{}",
             with_knee.level
         );
@@ -1499,12 +1517,12 @@ mod tests {
     }
 
     /// The grid must be able to name the answers both cohorts gave, or the fit cannot return
-    /// them: 21 rungs over `[0, 1]` are steps of 0.05, and 0.80 is one of them.
+    /// them: 21 rungs over `[0, 1]` are steps of 0.05, and 0.35, 0.65 and 0.70 are three of them.
     #[test]
     fn the_shape_grid_resolves_the_answers_both_cohorts_gave() {
         let grid = SlippageCurveConfig::default().rise_shape_grid();
         assert_eq!(grid.len(), RISE_SHAPE_RUNGS);
-        for wanted in [0.0, 0.8, 1.0] {
+        for wanted in [0.35, 0.65, 0.7, 1.0] {
             assert!(
                 grid.iter().any(|shape| (shape.get() - wanted).abs() < 1e-9),
                 "the grid cannot name {wanted}"
