@@ -94,15 +94,17 @@ blended one, or each round of smoothing fits a curve to the previous round's cur
 
 ## Two traps that have already cost time here
 
-**Every fitted number measured before 2026-08-20 was taken at a ±4 recording window and is
-distorted.** The census recorded a read's length offset over ±4 repeats and folded the rest into an
-end bucket; at 30-repeat homopolymers that under-measured the level by **2.26×**, and it made the
-rise look as though it flattened above 20 repeats when it does not. ±12 agrees with ±8 to within
-1.8%, so ±8 has converged and is now the constant. **The tables in
-[`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md) §3 and
-§4 are ±4 measurements and must not be quoted as chemistry** — that report needs correcting, which
-is worth doing early since E1 reads its cell tables. Fresh ±8 tables are in the worktree at
-`tmp/slippage_curve/hg002_d4*.csv` and `tomato_d4*.csv`.
+**The census's recording window was lying, and the report has been corrected for it.** It
+recorded a read's length offset over only ±4 repeats; at 30-repeat homopolymers that under-measured
+the level by **2.26×**, and it made the rise look as though it flattened above 20 repeats when it
+does not. The window is now ±8, converged against a ±12 arm agreeing within 1.8%.
+[`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md) has
+been remeasured throughout, and its **§7 lists what the correction overturned — read that before
+trusting any older number you find elsewhere in the docs.** The ±8 cell tables are in the worktree
+at `tmp/slippage_curve/hg002_d4*.csv`, `hg002_wide8_plain.csv` and `tomato_d4*.csv`. **For the two
+shares use `hg002_wide8_plain.csv`, not `hg002_d4_plain.csv`** — the second has shares copied from
+neighbours in it, and a copied share read as a measurement is exactly the circularity Milestone E
+exists to avoid.
 
 **`SSR_BORROWING_FLOOR` no longer exists** and the env knob is now `SSR_SHARES_FLOOR`. An earlier
 run of mine set the old variable, got zero furnished strata, and I reported that as a design gap
