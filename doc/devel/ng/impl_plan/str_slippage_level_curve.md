@@ -191,6 +191,42 @@ status protocol* in [`ai/skills/apply-code-review-fixes/SKILL.md`](../../../../a
 > **Checkpoint C: measured, documented, and the status file says where this stands. Pause for
 > review.**
 
+### Milestone D — the shares' floor, and retiring the pooled refit
+
+**Added 2026-08-20 (owner), after C1 showed the level's curve reaches no thin stratum until the
+shares do.** Design: spec §5.1. This is what makes spec §1.1's first goal — every populated
+stratum gets a level — actually arrive, and it removes the run's expensive arm on the way.
+
+**D1. The floor, the source, and the outcome a stratum gets when nothing was fitted.**  ✅
+`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000` with its derivation in the doc comment; a `SharesSource`
+recording whether the two shares are the stratum's own or the repeat count they were copied from;
+and a `StratumOutcome::Derived` for a stratum whose numbers were all supplied from elsewhere —
+carrying the slippage numbers and the provenance, and **no length spectrum, concentration or
+log-likelihood**, because nothing was fitted and a fitted-looking zero would be a lie. Types only.
+***Depends:*** B1. ***Source:*** spec §5.1, §8.
+
+**D2. Copy the shares, and stop pooling.**  ✅
+A stratum whose own slipped reads reach the floor keeps its own shares; below it, the two are
+copied from the nearest stratum at the same period that clears it, nearer repeat count first and
+the shorter tract winning a tie. `borrow_up_to_the_floor` and the pooled refit go. **Own commit,
+do not bundle** — this changes what the shares are at every thin stratum, and its failure is a
+wrong genotype rather than a panic.
+***Depends:*** D1. ***Source:*** spec §5.1.
+
+**D3. Emit a stratum that was never fitted.**  ✅
+A stratum with spanning reads but no fit of its own comes back `Derived` with a curve level and
+copied shares. Only two refusals survive: no read crossed it, and its period has neither a curve
+nor a stratum clearing the shares' floor.
+***Depends:*** D2. ***Source:*** spec §5.1, §1.1.
+
+**D4. Measure it on both cohorts.**  ☐
+How many strata gained a complete parameter set, what the shares were copied across, and what the
+run now costs against the pooled arm's 1,036.8 s against 155.5 s.
+***Depends:*** D3. ***Source:*** spec §5.1, §9.
+
+> **Checkpoint D: every populated stratum carries a level and a pair of shares, each saying where
+> it came from. Pause for review.**
+
 ---
 
 ## Verification summary

@@ -229,16 +229,11 @@ own precision. So is the repeat-count range fitted over, and how many cells stoo
   fit, or a blend of the two. The nearest-neighbour ring
   ([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) no longer
   supplies it.
-- **The direction split and the fall-off** keep today's borrowing rule **exactly as the code has
-  it**, which is not what §4.5 of [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md)
-  describes: this route pools a thin stratum's tracts with its neighbours' and **refits** the
-  pooled set ([`borrow_up_to_the_floor`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)),
-  where §4.5 asks for the two shares to be *copied* from the nearest stratum clearing a floor
-  counted in **slipped reads** (`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000`,
-  [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §4.1). **Closing that gap
-  is not this document's** — it changes what the shares are, not what the level is. Home:
-  [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5's own implementation, which has
-  never been built on this route.
+- **The direction split and the fall-off are copied from the nearest stratum that measured them
+  well** — §5.1, brought into scope by the owner on 2026-08-20. Until then this route pooled a
+  thin stratum's tracts with its neighbours' and **refitted** the pooled set against a floor
+  counted in tracts, which is not what §4.5 of
+  [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) has ever asked for.
 - **The monotonicity merge is not retired here, because it does not exist here.** The joint route
   has borrowing only; `merge_until_monotone` lives in the per-sample route
   ([`ssr/mod.rs:1479`](../../../../src/ng/parameter_estimation/ssr/mod.rs#L1479)). What the curve
@@ -250,6 +245,46 @@ linking them, **6 of 50 steps between neighbouring cells run downhill** — 2 of
 19 at period 2, 0 of 3 at period 3, and **3 of 6 at period 4**, where the deepest is a 2.12-fold
 drop between two cells of 88 and 104 tracts. On tomato's four steps, none. A curve is monotone by
 construction wherever `slope > 0`, so all six go away without a rule.
+
+### 5.1 The shares' floor, and why copying replaces the pooled refit
+
+**The level and the two shares starve at completely different rates, so one floor cannot protect
+both.** A stratum of 100,000 tracts at 5 reads each — half a million reads — at a slippage level
+of 0.091% has **455 slipped reads**. That measures the level to about 5% of itself, and the
+fall-off to about 45%: the same stratum measures one of its numbers well and another barely at
+all ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5).
+
+**So the shares get their own floor, counted in slipped reads rather than tracts.** At the values
+§3 of that document measures, holding the direction split to 6% of itself takes about **1,400**
+slipped reads and holding the fall-off to the same takes about **4,000**; the fall-off binds, and
+[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §4.1 fixes the floor at
+`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000`. *Soft, and expected to be missed by every stratum at
+the bottom of the repeat range — that is the rule working, since the alternative is a share fitted
+on five reads and reported as measured.*
+
+**Below the floor the two shares are copied from the nearest stratum at the same period that
+clears it** — nearest by repeat count, and where two are equally near, the shorter tract wins
+because there are more of them. Motif period is never crossed: the direction split runs 1.4× at
+tomato homopolymers and 4.9× at its dinucleotides, so a copy across periods would carry a
+threefold error.
+
+**Copying replaces the pooled refit outright, and that is the point.** Once the level comes from
+the curve and the shares are copied, **nothing needs a stratum's tracts pooled with its
+neighbours' at all**. What that removes is the expensive arm: the perf review measures one run at
+**1,036.8 s with pooled borrowing against 155.5 s without**
+([`perf_ng-census-joint-fit_2026-08-15.md`](../../reports/reviews/perf_ng-census-joint-fit_2026-08-15.md)
+§3), because a borrowing stratum refits about a thousand tracts where an independent one reads
+only its own.
+
+**A stratum with reads but no fit of its own is now emitted rather than refused**, which is spec
+§1.1's first goal. Its level is the curve's and its shares are copied, and **none of it was
+fitted**, so it carries no length spectrum, no concentration and no log-likelihood — there is
+nothing to put there and a fitted-looking zero would be a lie. That is a different shape from a
+stratum that was fitted, and §8 says how it is told apart.
+
+**Two refusals survive**, and both mean there is genuinely no answer: a stratum no read crossed,
+and a stratum whose period drew no curve *and* whose period has no stratum clearing the shares'
+floor.
 
 ---
 
@@ -360,6 +395,8 @@ Per cell, beside the four numbers:
 - **how much evidence stood behind the cell itself** — tracts, reads crossing, and slipped reads;
 - **where the level came from** — the cell's own fit, the curve, or a blend, and for a blend the
   share the curve carried;
+- **where the two shares came from** — the stratum's own fit, or the repeat count they were
+  copied from (§5.1);
 - **whether the cell sat inside the curve's fitted range or beyond it** (§6);
 - **the curve's own held-out error and cell count** at that period, so a consumer can tell a
   curve through 23 cells from one through four.

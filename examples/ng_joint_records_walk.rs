@@ -856,6 +856,27 @@ fn fit_the_tracts(
         write_cell_table(&path, &outcomes, &held);
     }
 
+    // **`SSR_CELL_TABLE_NO_CURVE=<path>` fits the same strata again with no curve drawn at all.**
+    // Nothing about how a stratum is fitted depends on the curve, so every cell's own level must
+    // come back identical between the two tables; a cell that moves is a defect in the plumbing
+    // rather than a consequence of the design (`str_slippage_level_curve.md` §12).
+    if let Ok(path) = std::env::var("SSR_CELL_TABLE_NO_CURVE") {
+        let plain = ssr_fit::SsrFitConfig {
+            curve: ssr_fit::SlippageCurveConfig {
+                draw_curves: false,
+                ..ssr_fit::SlippageCurveConfig::default()
+            },
+            ..config.clone()
+        };
+        let at = Instant::now();
+        let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, &plain);
+        println!(
+            "  refitted with no curve in {:.1} s",
+            at.elapsed().as_secs_f64()
+        );
+        write_cell_table(&path, &outcomes, &held);
+    }
+
     // **`SSR_CELL_TABLE_BORROWED=<path>` fits the same strata a second time with borrowing on**,
     // and writes that table beside the first. Both fits read one walk's census, so the two
     // tables differ in the borrowing rule and in nothing else — which is what makes "how far
@@ -910,6 +931,26 @@ fn fit_the_tracts(
                             fitted.tracts_fitted
                         )
                     }
+                );
+            }
+            ssr_fit::StratumOutcome::Derived(derived) => {
+                let own = held[&derived.stratum];
+                let slippage = derived
+                    .slippage
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("a derived stratum has at least one group with numbers");
+                println!(
+                    "  {:<8}{:>8}{:>10}{:>9}{:>9.4}{:>9.3}{:>9.3}{:>8}  nothing fitted here",
+                    derived.stratum.period,
+                    derived.stratum.reference_repeats,
+                    own.tracts_with_reads(),
+                    own.spanning_reads(),
+                    slippage.level,
+                    slippage.shorter_share,
+                    slippage.fall_off,
+                    "-",
                 );
             }
             ssr_fit::StratumOutcome::Refused {
@@ -1705,13 +1746,11 @@ fn write_cell_table(
     let mut out = String::from(
         "period,repeats,tracts,spanning_reads,off_reference_reads,bases_compared,\
          mismatching_bases,substitution_rate,fitted,level,shorter_share,fall_off,concentration,\
-         log_likelihood_a_tract,converged,tracts_fitted,borrowed_from\n",
+         log_likelihood_a_tract,converged,tracts_fitted,borrowed_from,level_source,curve_weight,\
+         curve_reach,curve_shape,curve_held_out_error,curve_cells\n",
     );
     for outcome in outcomes {
-        let stratum = match outcome {
-            ssr_fit::StratumOutcome::Fitted(fitted) => fitted.stratum,
-            ssr_fit::StratumOutcome::Refused { stratum, .. } => *stratum,
-        };
+        let stratum = outcome.stratum();
         let own = held[&stratum];
         let substitution = own
             .substitution_rate()
@@ -1741,10 +1780,61 @@ fn write_cell_table(
                         .join(" "),
                 )
             }
+            // **A derived stratum is fitted from the caller's point of view and from nothing
+            // else's**: it carries the three numbers a read likelihood asks for and no spectrum,
+            // concentration or log-likelihood, because nothing here was estimated.
+            ssr_fit::StratumOutcome::Derived(derived) => {
+                let slippage = derived
+                    .slippage
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("a derived stratum has at least one group with numbers");
+                format!(
+                    "derived,{:.8},{:.6},{:.6},,,,0,",
+                    slippage.level, slippage.shorter_share, slippage.fall_off,
+                )
+            }
             ssr_fit::StratumOutcome::Refused { .. } => "0,,,,,,,,".to_string(),
         };
+        // **Where the level came from, beside the level.** After the curve, a value fitted from
+        // eight thousand slipped reads and one drawn across a gap are the same number, and these
+        // six columns are what tells them apart (`str_slippage_level_curve.md` §8).
+        let provenance = match outcome {
+            ssr_fit::StratumOutcome::Refused { .. } => ",,,,,".to_string(),
+            _ => outcome
+                .level_provenance()
+                .iter()
+                .flatten()
+                .next()
+                .map(|provenance| {
+                    let (source, weight) = match provenance.source {
+                        ssr_fit::LevelSource::Cell => ("cell".to_string(), 0.0),
+                        ssr_fit::LevelSource::Curve => ("curve".to_string(), 1.0),
+                        ssr_fit::LevelSource::Blend { curve_weight } => {
+                            ("blend".to_string(), curve_weight)
+                        }
+                    };
+                    let reach = match provenance.reach {
+                        Some(ssr_fit::CurveReach::Inside) => "inside",
+                        Some(ssr_fit::CurveReach::BelowFitted) => "below",
+                        Some(ssr_fit::CurveReach::AboveFitted) => "above",
+                        None => "",
+                    };
+                    match provenance.curve {
+                        Some(curve) => format!(
+                            "{source},{weight:.6},{reach},{:.2},{:.6},{}",
+                            curve.rise_shape.get(),
+                            curve.held_out_error,
+                            curve.cells
+                        ),
+                        None => format!("{source},{weight:.6},{reach},,,"),
+                    }
+                })
+                .unwrap_or_else(|| ",,,,,".to_string()),
+        };
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{}\n",
             stratum.period,
             stratum.reference_repeats,
             own.tracts_with_reads(),
@@ -1754,6 +1844,7 @@ fn write_cell_table(
             own.mismatching_bases,
             substitution,
             fit,
+            provenance,
         ));
     }
     std::fs::write(path, out).expect("the cell table's directory exists");
