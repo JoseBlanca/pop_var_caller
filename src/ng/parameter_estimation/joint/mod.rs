@@ -18,6 +18,9 @@
 //! [`contamination`] the share of a sample's reads that came from another individual, which no
 //! per-sample route can produce at all. Each module's own docs say what it does and does not do.
 //!
+//! [`slippage_curve`] holds how the repeat-tract slippage *level* rises with repeat count, which
+//! is what lets a thin cell read a line drawn through all its neighbours instead of copying one.
+//!
 //! **The two halves of the estimator run in that order and depend on each other in one direction
 //! only**: [`ssr_fit`] takes each sample's homozygote excess from [`fit`] and gives nothing back,
 //! so a run may drop the ordinary-position records before it reads a single tract.
@@ -27,4 +30,5 @@ pub mod census_file;
 pub mod contamination;
 pub mod fit;
 pub mod loci;
+pub mod slippage_curve;
 pub mod ssr_fit;

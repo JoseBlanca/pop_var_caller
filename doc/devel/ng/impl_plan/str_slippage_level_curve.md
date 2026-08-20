@@ -86,7 +86,7 @@ architecture sibling.
 
 ### Milestone A — the curve: its type, its fit, and what consumes it
 
-**A1. The types, no logic.**  ☐
+**A1. The types, no logic.**  ✅
 `SlippageCurve` (`rise_shape`, `intercept`, `slope`, the fitted repeat-count range, the held-out
 error, the contributing-cell count) and `LevelSource` (`Cell` / `Curve` / `Blend { curve_weight }`).
 Add a `SlippageCurveConfig` carrying the shape-number grid, the minimum contributing cells, and
