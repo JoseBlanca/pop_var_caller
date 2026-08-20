@@ -138,7 +138,7 @@ sat inside the curve's fitted range; and the curve's held-out error and cell cou
 their construction only — no caller changes yet.
 ***Depends:*** A1. ***Source:*** spec §8.
 
-**B2. Blend the cell's own level with the curve's.**  ☐
+**B2. Blend the cell's own level with the curve's.**  ✅
 Inverse-variance on the log scale: the cell's relative standard error is `1 / sqrt(slipped reads)`
 and the curve's is its held-out error, with the curve's weight divided by `(gap / 2.5)²` where the
 gap in combined errors exceeds 2.5. A cell with no fit takes the curve whole; a period with no

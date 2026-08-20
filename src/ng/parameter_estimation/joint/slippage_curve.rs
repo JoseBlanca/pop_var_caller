@@ -525,6 +525,105 @@ impl LevelSource {
     }
 }
 
+/// What one cell's emitted slippage level is, once its own fit and its period's curve have both
+/// had their say.
+///
+/// **Inverse-variance on the log scale.** Both quantities are relative errors, so they combine
+/// multiplicatively: the cell's own error is `1 / sqrt(slipped reads)` and the curve's is its
+/// held-out error, and each gets weight in proportion to `1 / error²`.
+///
+/// **This is the protection against fitting each cell's noise, and it is not a switch between
+/// two regimes.** At a curve whose held-out error is 4.4%, the curve carries about 93% of the
+/// weight at a cell with 40 slipped reads and about 6% at one with 8,000. Using the curve
+/// everywhere is this formula with the curve's weight pinned at one; using each cell's own
+/// answer is it pinned at zero.
+///
+/// **Why not pin it at one.** Where the curve misses it misses systematically, and at the cells
+/// holding the most tracts: over HG002's 23 homopolymer cells the winning curve sits within 0.5
+/// to 12% of every cell from 10 repeats up and is 27% and 55% high at 8 and 9, against those
+/// cells' own errors of 1.8% and 1.7%. Always-curve would report 10.4 reads slipping per 1,000
+/// at a 9-repeat homopolymer where that cell's own 3,520 slipped reads say 6.7
+/// (`str_slippage_level_curve.md` §7.1).
+///
+/// **The knee, and it is a refinement rather than a rescue.** A disagreement far larger than
+/// either error explains is evidence about the curve, not about the cell, so beyond
+/// `disagreement_knee` combined errors the curve's weight is divided by `(gap / knee)²`. At that
+/// 9-repeat cell the gap is 9.3 combined errors, which no sampling noise produces. Without the
+/// knee the blend already emits 7.1 there rather than 10.4, because a cell with 3,520 slipped
+/// reads outweighs the curve on its own; the knee takes it to 6.8, and it is worth the one
+/// comparison because the bottom of the repeat range is what the copy-floor decision reads.
+pub fn blend_level(
+    cell: Option<FittedCell>,
+    curve: Option<&SlippageCurve>,
+    repeats: u64,
+    config: &SlippageCurveConfig,
+) -> Option<BlendedLevel> {
+    match (cell, curve) {
+        // No curve at this period: the cell keeps its own answer, exactly as today.
+        (Some(cell), None) => Some(BlendedLevel {
+            level: cell.level,
+            source: LevelSource::Cell,
+            reach: None,
+        }),
+        // No fit of the cell's own: the curve supplies the level whole. This is the case the
+        // whole change exists for — a stratum below the refusal floor used to get nothing.
+        (None, Some(curve)) => Some(BlendedLevel {
+            level: curve.level_at(repeats),
+            source: LevelSource::Curve,
+            reach: Some(curve.reach(repeats)),
+        }),
+        (Some(cell), Some(curve)) => {
+            let from_curve = curve.level_at(repeats);
+            // **A cell whose level fitted to zero has no logarithm and no evidence.** It takes
+            // the curve whole rather than dragging the blend to zero.
+            if cell.level <= 0.0 || cell.slipped_reads <= 0.0 {
+                return Some(BlendedLevel {
+                    level: from_curve,
+                    source: LevelSource::Curve,
+                    reach: Some(curve.reach(repeats)),
+                });
+            }
+            let cell_error = cell.relative_standard_error();
+            let curve_error = curve.held_out_error.max(f64::EPSILON);
+
+            let gap = (cell.level.ln() - from_curve.ln()).abs()
+                / (cell_error * cell_error + curve_error * curve_error).sqrt();
+            let trust = if gap > config.disagreement_knee {
+                let over = gap / config.disagreement_knee;
+                1.0 / (over * over)
+            } else {
+                1.0
+            };
+
+            let cell_weight = 1.0 / (cell_error * cell_error);
+            let curve_weight = trust / (curve_error * curve_error);
+            let total = cell_weight + curve_weight;
+            let share_of_curve = curve_weight / total;
+            Some(BlendedLevel {
+                level: ((1.0 - share_of_curve) * cell.level.ln()
+                    + share_of_curve * from_curve.ln())
+                .exp()
+                .clamp(LEVEL_FLOOR, LEVEL_CEILING),
+                source: LevelSource::Blend {
+                    curve_weight: share_of_curve,
+                },
+                reach: Some(curve.reach(repeats)),
+            })
+        }
+        // Neither: nothing to emit, and saying so is the difference between missing and quiet.
+        (None, None) => None,
+    }
+}
+
+/// One cell's emitted level and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlendedLevel {
+    pub level: f64,
+    pub source: LevelSource,
+    /// Whether the cell sat inside the curve's fitted range; `None` where there was no curve.
+    pub reach: Option<CurveReach>,
+}
+
 /// Whether a cell sat inside the repeat counts its curve was fitted over.
 ///
 /// **Held flat is wrong in a known direction and that is why it is recorded**: the level
@@ -1167,6 +1266,216 @@ mod tests {
         // The straight line fits these exactly, so no rung can beat it and the tie rule keeps
         // the largest that ties.
         assert_eq!(curves.rise_shape, RiseShape::ADDING);
+    }
+
+    /// The curve HG002's homopolymers give, for the blend tests: a straight line whose held-out
+    /// error is the 4.4% spec §7 quotes.
+    fn hg002_homopolymer_curve() -> SlippageCurve {
+        SlippageCurve {
+            rise_shape: RiseShape::ADDING,
+            intercept: -0.035,
+            slope: 0.005,
+            fitted_from: 8,
+            fitted_to: 30,
+            held_out_error: 0.044,
+            cells: 23,
+        }
+    }
+
+    /// **The two figures spec §7 quotes**, and the reason the blend is not a switch: the curve
+    /// carries most of the weight at a near-empty cell and almost none at a full one.
+    #[test]
+    fn the_curve_carries_the_weight_at_a_thin_cell_and_stands_aside_at_a_full_one() {
+        let curve = hg002_homopolymer_curve();
+        let at = |slipped: f64| {
+            let cell = FittedCell {
+                repeats: 20,
+                level: curve.level_at(20),
+                slipped_reads: slipped,
+            };
+            blend_level(
+                Some(cell),
+                Some(&curve),
+                20,
+                &SlippageCurveConfig::default(),
+            )
+            .expect("a cell and a curve")
+            .source
+            .curve_weight()
+        };
+        let thin = at(40.0);
+        let full = at(8_000.0);
+        assert!(
+            (thin - 0.93).abs() < 0.01,
+            "at 40 slipped reads the curve carried {thin:.3}, and the spec quotes 0.93"
+        );
+        assert!(
+            (full - 0.06).abs() < 0.01,
+            "at 8,000 slipped reads the curve carried {full:.3}, and the spec quotes 0.06"
+        );
+        assert!(thin > full);
+    }
+
+    /// **The case that decides against using the curve everywhere.** HG002's 9-repeat
+    /// homopolymer: the cell's own 3,520 slipped reads say 6.7 reads slipping per 1,000 and the
+    /// curve says 10.4. The blend must stay near the cell, not near the curve.
+    #[test]
+    fn a_well_measured_cell_keeps_its_answer_where_the_curve_is_wrong_about_it() {
+        let curve = hg002_homopolymer_curve();
+        let cell = FittedCell {
+            repeats: 9,
+            level: 0.00673,
+            slipped_reads: 3_520.0,
+        };
+        assert!(
+            (curve.level_at(9) - 0.0104).abs() < 5e-4,
+            "the curve says {} at 9 repeats",
+            curve.level_at(9)
+        );
+
+        let with_knee =
+            blend_level(Some(cell), Some(&curve), 9, &SlippageCurveConfig::default()).unwrap();
+        let no_knee = blend_level(
+            Some(cell),
+            Some(&curve),
+            9,
+            &SlippageCurveConfig {
+                disagreement_knee: f64::INFINITY,
+                ..SlippageCurveConfig::default()
+            },
+        )
+        .unwrap();
+
+        // Always-curve would report 10.4 per 1,000; both blends stay within a tenth of that of
+        // the cell's own 6.73.
+        assert!((no_knee.level - 0.00712).abs() < 2e-4, "{}", no_knee.level);
+        assert!(
+            (with_knee.level - 0.00676).abs() < 2e-4,
+            "{}",
+            with_knee.level
+        );
+        assert!(
+            with_knee.level < no_knee.level,
+            "the knee should pull further toward the cell"
+        );
+    }
+
+    /// The knee only fires on a gap no sampling noise produces; a cell sitting close to its
+    /// curve is blended as if the knee were not there.
+    #[test]
+    fn the_knee_leaves_a_cell_that_agrees_with_its_curve_alone() {
+        let curve = hg002_homopolymer_curve();
+        let cell = FittedCell {
+            repeats: 20,
+            // 3% off the curve, which at these errors is well inside the knee.
+            level: curve.level_at(20) * 1.03,
+            slipped_reads: 3_671.0,
+        };
+        let with_knee = blend_level(
+            Some(cell),
+            Some(&curve),
+            20,
+            &SlippageCurveConfig::default(),
+        )
+        .unwrap();
+        let no_knee = blend_level(
+            Some(cell),
+            Some(&curve),
+            20,
+            &SlippageCurveConfig {
+                disagreement_knee: f64::INFINITY,
+                ..SlippageCurveConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(with_knee, no_knee);
+    }
+
+    /// The three degenerate cases, none of which needs a branch at the call site.
+    #[test]
+    fn the_three_degenerate_cases_fall_out_of_the_same_formula() {
+        let curve = hg002_homopolymer_curve();
+        let cell = FittedCell {
+            repeats: 20,
+            level: 0.0675,
+            slipped_reads: 3_671.0,
+        };
+
+        // A cell with no curve keeps its own level, exactly as today.
+        let alone = blend_level(Some(cell), None, 20, &SlippageCurveConfig::default()).unwrap();
+        assert_eq!(alone.source, LevelSource::Cell);
+        assert_eq!(alone.level, cell.level);
+        assert!(alone.reach.is_none());
+
+        // A cell with no fit of its own takes the curve whole — the case this change exists for.
+        let borrowed =
+            blend_level(None, Some(&curve), 14, &SlippageCurveConfig::default()).unwrap();
+        assert_eq!(borrowed.source, LevelSource::Curve);
+        assert_eq!(borrowed.level, curve.level_at(14));
+        assert_eq!(borrowed.reach, Some(CurveReach::Inside));
+
+        // Neither is nothing, and it says so rather than emitting a zero.
+        assert!(blend_level(None, None, 14, &SlippageCurveConfig::default()).is_none());
+    }
+
+    /// A cell the fit put at exactly zero has no logarithm; it takes the curve rather than
+    /// dragging the blend to zero.
+    #[test]
+    fn a_cell_fitted_at_zero_takes_the_curve_whole() {
+        let curve = hg002_homopolymer_curve();
+        let empty = FittedCell {
+            repeats: 12,
+            level: 0.0,
+            slipped_reads: 0.0,
+        };
+        let blended = blend_level(
+            Some(empty),
+            Some(&curve),
+            12,
+            &SlippageCurveConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(blended.source, LevelSource::Curve);
+        assert_eq!(blended.level, curve.level_at(12));
+    }
+
+    /// A cell above the curve's fitted range takes a held level and is told so.
+    #[test]
+    fn a_cell_beyond_the_curves_range_is_marked_as_held() {
+        let curve = hg002_homopolymer_curve();
+        let blended = blend_level(None, Some(&curve), 45, &SlippageCurveConfig::default()).unwrap();
+        assert_eq!(blended.reach, Some(CurveReach::AboveFitted));
+        assert_eq!(blended.level, curve.level_at(30));
+    }
+
+    /// Whatever the inputs, an emitted level is a probability.
+    #[test]
+    fn an_emitted_level_is_always_a_probability() {
+        let curve = hg002_homopolymer_curve();
+        for slipped in [0.5, 1.0, 40.0, 3_500.0, 100_000.0] {
+            for level in [1e-9, 1e-4, 0.02, 0.5, 0.98] {
+                for repeats in [1_u64, 9, 20, 30, 120] {
+                    let cell = FittedCell {
+                        repeats,
+                        level,
+                        slipped_reads: slipped,
+                    };
+                    let blended = blend_level(
+                        Some(cell),
+                        Some(&curve),
+                        repeats,
+                        &SlippageCurveConfig::default(),
+                    )
+                    .expect("a cell and a curve");
+                    assert!(
+                        (LEVEL_FLOOR..=LEVEL_CEILING).contains(&blended.level),
+                        "level {level} at {repeats} repeats with {slipped} slipped reads gave {}",
+                        blended.level
+                    );
+                    assert!((0.0..=1.0).contains(&blended.source.curve_weight()));
+                }
+            }
+        }
     }
 
     #[test]
