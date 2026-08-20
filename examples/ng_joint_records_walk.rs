@@ -846,6 +846,35 @@ fn fit_the_tracts(
 
     let held: BTreeMap<_, &ssr_fit::StratumEvidence> =
         evidence.iter().map(|e| (e.stratum, e)).collect();
+
+    // **`SSR_CELL_TABLE=<path>` writes one row a stratum**, with the evidence beside the fit.
+    // The printed table below is for reading; this one is for a curve to be fitted against, and
+    // it therefore carries the three counts that set how sharply a stratum determines each of
+    // its numbers — tracts, spanning reads, and reads sitting off the reference length — which
+    // the printed table has never carried.
+    if let Ok(path) = std::env::var("SSR_CELL_TABLE") {
+        write_cell_table(&path, &outcomes, &held);
+    }
+
+    // **`SSR_CELL_TABLE_BORROWED=<path>` fits the same strata a second time with borrowing on**,
+    // and writes that table beside the first. Both fits read one walk's census, so the two
+    // tables differ in the borrowing rule and in nothing else — which is what makes "how far
+    // borrowing moved this cell" a difference rather than a comparison across runs.
+    if let Ok(path) = std::env::var("SSR_CELL_TABLE_BORROWED") {
+        let borrowed_config = ssr_fit::SsrFitConfig {
+            allele_span,
+            borrowing_floor: ssr_fit::DEFAULT_BORROWING_FLOOR,
+            ..ssr_fit::SsrFitConfig::default()
+        };
+        let at = Instant::now();
+        let borrowed = ssr_fit::fit_strata(&evidence, &homozygote_excess, &borrowed_config);
+        println!(
+            "  refitted in {:.1} s, borrowing below {} tracts",
+            at.elapsed().as_secs_f64(),
+            borrowed_config.borrowing_floor
+        );
+        write_cell_table(&path, &borrowed, &held);
+    }
     println!(
         "\n  {:<8}{:>8}{:>10}{:>9}{:>9}{:>9}{:>9}{:>8}  borrowed from",
         "motif", "repeats", "tracts", "reads", "level", "shorter", "fall-off", "conc.",
@@ -1660,4 +1689,73 @@ fn per_read_group(records: &mut SampleCensusEvidence) -> BTreeMap<String, usize>
                 .collect()
         })
         .expect(RESIDENT)
+}
+
+/// One row a stratum: the evidence the walk gathered, then the fit if there was one.
+///
+/// **The printed table is for reading and this one is for fitting a curve against**, so it
+/// carries the counts that set how sharply a stratum determines each of its numbers — tracts,
+/// reads crossing, and reads sitting off the reference length — which the printed table never
+/// carried.
+fn write_cell_table(
+    path: &str,
+    outcomes: &[ssr_fit::StratumOutcome],
+    held: &BTreeMap<ssr_fit::Stratum, &ssr_fit::StratumEvidence>,
+) {
+    let mut out = String::from(
+        "period,repeats,tracts,spanning_reads,off_reference_reads,bases_compared,\
+         mismatching_bases,substitution_rate,fitted,level,shorter_share,fall_off,concentration,\
+         log_likelihood_a_tract,converged,tracts_fitted,borrowed_from\n",
+    );
+    for outcome in outcomes {
+        let stratum = match outcome {
+            ssr_fit::StratumOutcome::Fitted(fitted) => fitted.stratum,
+            ssr_fit::StratumOutcome::Refused { stratum, .. } => *stratum,
+        };
+        let own = held[&stratum];
+        let substitution = own
+            .substitution_rate()
+            .map_or(String::new(), |rate| format!("{rate:.8}"));
+        let fit = match outcome {
+            ssr_fit::StratumOutcome::Fitted(fitted) => {
+                let slippage = fitted
+                    .slippage
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("a fitted stratum has at least one group with reads");
+                format!(
+                    "1,{:.8},{:.6},{:.6},{:.6},{:.6},{},{},{}",
+                    slippage.level,
+                    slippage.shorter_share,
+                    slippage.fall_off,
+                    fitted.concentration,
+                    fitted.log_likelihood_a_tract,
+                    u8::from(fitted.converged),
+                    fitted.tracts_fitted,
+                    fitted
+                        .borrowed
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            }
+            ssr_fit::StratumOutcome::Refused { .. } => "0,,,,,,,,".to_string(),
+        };
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{}\n",
+            stratum.period,
+            stratum.reference_repeats,
+            own.tracts_with_reads(),
+            own.spanning_reads(),
+            own.reads_off_reference_length(),
+            own.bases_compared,
+            own.mismatching_bases,
+            substitution,
+            fit,
+        ));
+    }
+    std::fs::write(path, out).expect("the cell table's directory exists");
+    println!("  cell table written to {path}");
 }

@@ -188,6 +188,13 @@ pub struct StratumEvidence {
     /// Reads whose tract differed from the reference by a non-whole number of repeat units, at
     /// tracts that stayed in. A diagnostic; nothing about slippage is estimated from them.
     pub guard_reads: u64,
+    /// Bases of tract sequence a read was compared against, over every tract and sample — the
+    /// denominator of this stratum's substitution rate.
+    pub bases_compared: u64,
+    /// Of those bases, how many the read disagreed with — the numerator of this stratum's
+    /// substitution rate. **Counted only on reads whose tract was the reference's length**,
+    /// which is where a mismatch can be read off at all (`census::TractDifference`).
+    pub mismatching_bases: u64,
 }
 
 impl StratumEvidence {
@@ -206,6 +213,39 @@ impl StratumEvidence {
             .flat_map(|(_, counts)| counts.iter())
             .map(|reads| u64::from(*reads))
             .sum()
+    }
+
+    /// Spanning reads whose tract was **not** the reference's length, over every tract and
+    /// sample.
+    ///
+    /// **This is not the count of slipped reads and must not be read as one.** A read sits off
+    /// the reference length because the polymerase slipped *or* because the chromosome it came
+    /// from genuinely carries another length, and this count cannot tell the two apart — at a
+    /// polymorphic tract most of it is the second. It is here because it is the observable that
+    /// bounds how sharply a stratum can determine its slippage numbers: a stratum with none of
+    /// these determines nothing.
+    pub fn reads_off_reference_length(&self) -> u64 {
+        self.tracts
+            .iter()
+            .flat_map(|tract| tract.samples.iter())
+            .flat_map(|sample| sample.by_group.iter())
+            .flat_map(|(_, counts)| {
+                counts
+                    .iter()
+                    .enumerate()
+                    .filter(|(bucket, _)| *bucket as i32 != self.read_span)
+            })
+            .map(|(_, reads)| u64::from(*reads))
+            .sum()
+    }
+
+    /// Mismatching bases over bases compared — the stratum's substitution rate, which is one
+    /// division and needs none of the other numbers (spec §4.2).
+    ///
+    /// `None` where no read was compared against a tract at all.
+    pub fn substitution_rate(&self) -> Option<f64> {
+        (self.bases_compared > 0)
+            .then(|| self.mismatching_bases as f64 / self.bases_compared as f64)
     }
 
     /// Which slippage groups put a read in this stratum.
@@ -231,6 +271,8 @@ impl StratumEvidence {
         out.tracts_over_guard_threshold += other.tracts_over_guard_threshold;
         out.reads_reaching_not_crossing += other.reads_reaching_not_crossing;
         out.guard_reads += other.guard_reads;
+        out.bases_compared += other.bases_compared;
+        out.mismatching_bases += other.mismatching_bases;
         out
     }
 }
@@ -1416,6 +1458,8 @@ pub fn gather_strata(
                     tracts_over_guard_threshold: 0,
                     reads_reaching_not_crossing: 0,
                     guard_reads: 0,
+                    bases_compared: 0,
+                    mismatching_bases: 0,
                 };
                 // **The reads that reached a tract and crossed none of it are counted per
                 // stratum by the writer**, so they are read once here rather than accumulated a
@@ -1424,6 +1468,13 @@ pub fn gather_strata(
                 for sample in &by_sample {
                     for (_, records) in sample.get(stratum).into_iter().flatten() {
                         evidence.reads_reaching_not_crossing += records.covering_not_crossing();
+                        // **The substitution rate's two counts are per section**, which is one
+                        // read group's tracts for one stratum — the grain the rate is fitted at
+                        // (`census::SsrEvidence::bases_compared`). A tract dropped by the guard
+                        // below still contributed to them; the rate is a property of the
+                        // sequence read, not of which tracts the slippage fit kept.
+                        evidence.bases_compared += records.bases_compared();
+                        evidence.mismatching_bases += records.differences().len() as u64;
                     }
                 }
 
@@ -1622,6 +1673,11 @@ pub mod bench_fixtures {
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
+            // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero
+            // bases compared is what `substitution_rate()` returns `None` for, which is the
+            // honest answer here rather than a fitted zero.
+            bases_compared: 0,
+            mismatching_bases: 0,
         }
     }
 
@@ -1730,6 +1786,8 @@ mod tests {
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 40,
             guard_reads: 0,
+            bases_compared: 0,
+            mismatching_bases: 0,
         };
         let outcomes = fit_strata(&[evidence], &[0.4], &SsrFitConfig::default());
         assert!(matches!(
