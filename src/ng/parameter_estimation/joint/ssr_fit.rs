@@ -346,13 +346,17 @@ pub struct LevelProvenance {
     /// there is no curve. **A level held at a fitted end is under-stated in a known direction**
     /// (`str_slippage_level_curve.md` §6).
     pub reach: Option<CurveReach>,
-    /// How many of this stratum's own reads **its own fitted level** said slipped.
+    /// How many of this stratum's own reads **its own fitted level** said slipped, and `None`
+    /// where the stratum has no level of its own because it borrowed.
     ///
     /// **The stratum's own level, not the emitted one**, because this is the evidence that stood
     /// behind the cell — it is what set how precisely the stratum could determine its own answer,
     /// and it is the weight the blend gave that answer. Computed from the emitted level it would
     /// be partly a property of the curve, which is the thing it exists to be weighed against.
-    pub slipped_reads: f64,
+    ///
+    /// **Absent is not zero.** A stratum that borrowed has reads of its own — they are in
+    /// [`StratumFit::reads_crossing`] — but no level of its own to say how many of them slipped.
+    pub slipped_reads: Option<f64>,
 }
 
 /// Why a stratum produced no fit.
@@ -609,8 +613,9 @@ fn fit_pooled(
                     source: LevelSource::Cell,
                     curve: None,
                     reach: None,
-                    slipped_reads: parameters.slippage[group].level
-                        * evidence.spanning_reads() as f64,
+                    slipped_reads: Some(
+                        parameters.slippage[group].level * evidence.spanning_reads() as f64,
+                    ),
                 })
             })
             .collect(),
@@ -775,12 +780,21 @@ pub fn fit_strata(
                 // thousand as what stands behind it.
                 mine.tracts_of_its_own = evidence.tracts_with_reads();
                 mine.reads_crossing = evidence.spanning_reads();
+                // **A stratum that borrowed has no level of its own**, so it has no count of
+                // its own reads that slipped either; what it has is a pooled answer and, once
+                // the curve is drawn, the curve's.
+                let borrowed_from_neighbours = !mine.borrowed.is_empty();
                 for (group, provenance) in mine.level_provenance.iter_mut().enumerate() {
-                    if let (Some(provenance), Some(slippage)) =
-                        (provenance.as_mut(), mine.slippage[group])
-                    {
-                        provenance.slipped_reads =
-                            slippage.level * evidence.spanning_reads() as f64;
+                    if let Some(provenance) = provenance.as_mut() {
+                        provenance.slipped_reads = (!borrowed_from_neighbours)
+                            .then(|| {
+                                mine.slippage[group]
+                                    .map(|slippage| {
+                                        slippage.level * evidence.spanning_reads() as f64
+                                    })
+                                    .unwrap_or_default()
+                            })
+                            .filter(|_| mine.slippage[group].is_some());
                     }
                 }
                 StratumOutcome::Fitted(Box::new(mine))
@@ -865,17 +879,22 @@ fn smooth_levels_across_repeat_count(outcomes: &mut [StratumOutcome], config: &S
         };
         let repeats = fit.stratum.reference_repeats;
         let reads_crossing = fit.reads_crossing as f64;
+        // **A stratum that borrowed brings no level of its own to be weighed.** Its pooled level
+        // is its neighbours' — the thing the curve replaces — so the curve supplies the level
+        // outright and the pooled fit keeps only the two shares. That is the whole of
+        // `str_slippage_level_curve.md` §5: the level stops borrowing and nothing else does.
+        let borrowed_from_neighbours = !fit.borrowed.is_empty();
         for group in 0..fit.slippage.len() {
             let Some(own) = fit.slippage[group] else {
                 continue;
             };
             let curve = period_curves.by_group.get(group).and_then(Option::as_ref);
-            let cell = FittedCell {
+            let cell = (!borrowed_from_neighbours).then_some(FittedCell {
                 repeats,
                 level: own.level,
                 slipped_reads: own.level * reads_crossing,
-            };
-            let Some(blended) = blend_level(Some(cell), curve, repeats, &config.curve) else {
+            });
+            let Some(blended) = blend_level(cell, curve, repeats, &config.curve) else {
                 continue;
             };
             if let Some(slippage) = fit.slippage[group].as_mut() {
@@ -885,7 +904,7 @@ fn smooth_levels_across_repeat_count(outcomes: &mut [StratumOutcome], config: &S
                 provenance.source = blended.source;
                 provenance.curve = curve.copied();
                 provenance.reach = blended.reach;
-                provenance.slipped_reads = own.level * reads_crossing;
+                provenance.slipped_reads = cell.map(|cell| cell.slipped_reads);
             }
         }
     }
@@ -1982,7 +2001,7 @@ mod tests {
                 source: LevelSource::Cell,
                 curve: None,
                 reach: None,
-                slipped_reads: level * reads as f64,
+                slipped_reads: Some(level * reads as f64),
             })],
         }))
     }
@@ -2108,10 +2127,57 @@ mod tests {
             "the borrower's own level must not be one of the cells behind the curve"
         );
         assert_eq!((curve.fitted_from, curve.fitted_to), (8, 20));
-        // Its level of 0.9 disagrees with the curve by far more than noise, so the knee stands
-        // the curve down and it keeps most of its own answer — the honest outcome, since a
-        // borrowed level is still a level somebody fitted.
-        assert!(level_of(last) > 0.5, "{}", level_of(last));
+        // What the borrower's own level then becomes is
+        // `a_borrowed_stratum_takes_the_curves_level_and_keeps_the_pooled_shares`; what this
+        // test owns is that its level never reached the cells the curve was drawn through.
+        assert!(
+            !cells.iter().take(13).any(|outcome| level_of(outcome) > 0.5),
+            "no contributing cell carries the borrower's level"
+        );
+    }
+
+    /// **The narrowing B4 is for: a stratum that borrowed takes the curve's level outright and
+    /// keeps the pooled fit's shares.** Its pooled level is its neighbours' — the very thing the
+    /// curve replaces — so weighing it against the curve would be weighing the curve against a
+    /// blurred copy of itself.
+    #[test]
+    fn a_borrowed_stratum_takes_the_curves_level_and_keeps_the_pooled_shares() {
+        let mut cells: Vec<StratumOutcome> = (8..=20)
+            .map(|repeats| fitted_at(1, repeats, 0.005 * repeats as f64 - 0.035, 200_000))
+            .collect();
+        // A borrower at 21 repeats, carrying a pooled level far off the line and pooled shares.
+        let mut borrower = fitted_at(1, 21, 0.9, 200_000);
+        if let StratumOutcome::Fitted(fit) = &mut borrower {
+            fit.borrowed = vec![20];
+            let slippage = fit.slippage[0].as_mut().expect("a fitted group");
+            slippage.shorter_share = 0.81;
+            slippage.fall_off = 0.42;
+            fit.level_provenance[0]
+                .as_mut()
+                .expect("a fitted group")
+                .slipped_reads = None;
+        }
+        cells.push(borrower);
+
+        let mut smoothed = cells.clone();
+        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+
+        let last = smoothed.last().expect("the borrower");
+        let StratumOutcome::Fitted(fit) = last else {
+            panic!("the borrower is fitted");
+        };
+        let curve = provenance_of(last).curve.expect("a curve stood behind it");
+
+        // The level is the curve's, whole — not a blend with the pooled 0.9.
+        assert_eq!(provenance_of(last).source, LevelSource::Curve);
+        assert_eq!(level_of(last), curve.level_at(21));
+        assert_eq!(provenance_of(last).reach, Some(CurveReach::AboveFitted));
+        assert_eq!(provenance_of(last).slipped_reads, None);
+
+        // The two shares are untouched: borrowing still supplies them.
+        let slippage = fit.slippage[0].expect("a fitted group");
+        assert_eq!(slippage.shorter_share, 0.81);
+        assert_eq!(slippage.fall_off, 0.42);
     }
 
     /// A stratum with no fit is untouched: the curve cannot give it the shares it also needs,
@@ -2226,8 +2292,19 @@ mod tests {
         assert!(provenance.curve.is_none() && provenance.reach.is_none());
         // The slipped-read count is this stratum's own reads at the emitted level, not the
         // pooled set's.
-        let expected = thin.slippage[0].expect("a fitted group").level * thin.reads_crossing as f64;
-        assert!((provenance.slipped_reads - expected).abs() < 1e-9);
+        // It borrowed, so it has no level of its own and therefore no count of its own reads
+        // that slipped — absent, not zero.
+        assert_eq!(provenance.slipped_reads, None);
+        let fat = match &outcomes[1] {
+            StratumOutcome::Fitted(fit) => fit,
+            StratumOutcome::Refused { .. } => panic!("a stratum above the floor is fitted"),
+        };
+        let its_own = fat.level_provenance[0]
+            .expect("the only group put reads here")
+            .slipped_reads
+            .expect("a stratum fitted on its own tracts has a count of its own");
+        let expected = fat.slippage[0].expect("a fitted group").level * fat.reads_crossing as f64;
+        assert!((its_own - expected).abs() < 1e-9);
 
         let StratumOutcome::Fitted(fat) = &outcomes[1] else {
             panic!("a stratum above the floor is fitted");

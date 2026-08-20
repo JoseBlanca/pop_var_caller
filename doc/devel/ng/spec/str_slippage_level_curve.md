@@ -229,9 +229,16 @@ own precision. So is the repeat-count range fitted over, and how many cells stoo
   fit, or a blend of the two. The nearest-neighbour ring
   ([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) no longer
   supplies it.
-- **The direction split and the fall-off** are still taken from the nearest cell at the same
-  period that clears the slipped-read floor, exactly as
-  [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5 specifies.
+- **The direction split and the fall-off** keep today's borrowing rule **exactly as the code has
+  it**, which is not what §4.5 of [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md)
+  describes: this route pools a thin stratum's tracts with its neighbours' and **refits** the
+  pooled set ([`borrow_up_to_the_floor`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)),
+  where §4.5 asks for the two shares to be *copied* from the nearest stratum clearing a floor
+  counted in **slipped reads** (`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000`,
+  [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §4.1). **Closing that gap
+  is not this document's** — it changes what the shares are, not what the level is. Home:
+  [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5's own implementation, which has
+  never been built on this route.
 - **The monotonicity merge is not retired here, because it does not exist here.** The joint route
   has borrowing only; `merge_until_monotone` lives in the per-sample route
   ([`ssr/mod.rs:1479`](../../../../src/ng/parameter_estimation/ssr/mod.rs#L1479)). What the curve

@@ -156,7 +156,7 @@ with the curve disabled by config, both cohorts' cell tables must come back iden
 `tests/data/slippage_cells/`.
 ***Depends:*** B2, A5. ***Source:*** spec §5.
 
-**B4. Narrow borrowing to the two shares.**  ☐
+**B4. Narrow borrowing to the two shares.**  ✅
 `borrow_up_to_the_floor`
 ([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) stops
 supplying the level and keeps supplying the direction split and the fall-off, as
