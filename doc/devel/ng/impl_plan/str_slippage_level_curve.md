@@ -227,6 +227,49 @@ run now costs against the pooled arm's 1,036.8 s against 155.5 s.
 > **Checkpoint D: every populated stratum carries a level and a pair of shares, each saying where
 > it came from. Pause for review.**
 
+### Milestone E — one treatment for all three fitted numbers
+
+**Added 2026-08-20 (owner), after D4 measured what the floor-and-copy rule delivers: 13 furnished
+strata on HG002 and none at all on tomato, because only one motif period of six has a stratum
+clearing 4,000 slipped reads.** Design: spec §5.1. This replaces that rule with the level's own
+machinery applied to the two shares — a curve per period fitted from *every* stratum weighted by
+its precision, and each stratum departing from it by inverse variance.
+
+**E1. Choose each share's family, by measurement.**  ☐
+Compare a constant, logit-linear and logit-quadratic in repeat count, per period and per
+parameter, on the held-out-cell criterion, over both cohorts' ±8 cell tables. **Produces the
+answer to the research plan's C4** — a period whose held-out error is lowest at the constant has
+no trend to fit, and says so. **No code ships from this step**; its output is the report that fixes
+E2's family list.
+***Depends:*** D4's tables. ***Source:*** spec §5.1.
+
+**E2. A share's own precision, and its curve.**  ☐
+`sqrt((1 − p) / (p · S))` on `S` slipped reads — the model the 4,000 came from, which reproduces
+the architecture's 1,400 and 4,000 to within 3%. The curve fit itself is the level's, generalised
+over the families E1 chose, on the logit scale.
+***Depends:*** E1. ***Source:*** spec §5.1.
+
+**E3. Blend each share, and retire the floor-and-copy rule.**  ☐
+The blend is §7's with the logarithm replaced by the logit. `SharesSource` becomes the same
+three-way provenance the level carries. `strata_lending_their_shares`, `copy_shares_from_a_neighbour`
+and `nearest_lender` go. **Own commit, do not bundle** — it changes both shares at every stratum.
+***Depends:*** E2. ***Source:*** spec §5.1, §7.
+
+**E4. Lower the refusal floor so thin strata contribute.**  ☐
+Fit strata far below 50 tracts so they feed their period's curves, weighted by their own
+precision. **Gated on spec §11's open question** — fit drawn strata down to a handful of tracts
+first and report how often the climb converges and how often the level returns exactly zero. If
+that measurement says the thin fits are unusable, this step does not happen and the floor stays.
+***Depends:*** E3. ***Source:*** spec §5.1, §11.
+
+**E5. Measure it on both cohorts, and retire `Derived` if nothing uses it.**  ☐
+How many strata carry each of the three numbers from their own fit, from a curve, and from a
+blend; what the run costs; and whether any stratum is still furnished-from-nothing.
+***Depends:*** E4. ***Source:*** spec §5.1, §8, §9.
+
+> **Checkpoint E: all three fitted numbers smoothed the same way, with one mechanism rather than
+> two. Pause for review.**
+
 ---
 
 ## Verification summary

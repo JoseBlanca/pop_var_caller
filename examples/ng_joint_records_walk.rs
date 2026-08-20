@@ -823,24 +823,40 @@ fn fit_the_tracts(
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(ssr_fit::ALLELE_SPAN);
-    // `SSR_BORROWING_FLOOR=0` fits every stratum on its own tracts alone, which is the arm that
-    // says what borrowing changed rather than only what it produced.
-    let borrowing_floor: usize = std::env::var("SSR_BORROWING_FLOOR")
+    // **`SSR_SHARES_FLOOR=<slipped reads>` moves the floor below which a stratum takes its
+    // direction split and fall-off from a neighbour.** Nothing pools tracts any more, so there
+    // is no borrowing floor to set: a stratum is fitted from its own tracts or from none.
+    let min_slipped_reads_to_fit_shares: f64 = std::env::var("SSR_SHARES_FLOOR")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(ssr_fit::DEFAULT_BORROWING_FLOOR);
+        .unwrap_or(ssr_fit::MIN_SLIPPED_READS_TO_FIT_SHARES);
     let config = ssr_fit::SsrFitConfig {
         allele_span,
-        borrowing_floor,
+        min_slipped_reads_to_fit_shares,
         ..ssr_fit::SsrFitConfig::default()
     };
     println!("  allele mass may sit within ±{allele_span} repeats of the reference length");
     let at = Instant::now();
     let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, &config);
+    let counted = |kind: &str| {
+        outcomes
+            .iter()
+            .filter(|outcome| match outcome {
+                ssr_fit::StratumOutcome::Fitted(_) => kind == "fitted",
+                ssr_fit::StratumOutcome::Derived(_) => kind == "derived",
+                ssr_fit::StratumOutcome::Refused { .. } => kind == "refused",
+            })
+            .count()
+    };
     println!(
-        "  fitted in {:.1} s, borrowing below {} tracts and refusing below {}",
+        "  fitted in {:.1} s: {} strata fitted from their own tracts, {} furnished from a curve \
+         and a neighbour, {} refused; shares borrowed below {:.0} slipped reads, nothing fitted \
+         below {} tracts",
         at.elapsed().as_secs_f64(),
-        config.borrowing_floor,
+        counted("fitted"),
+        counted("derived"),
+        counted("refused"),
+        config.min_slipped_reads_to_fit_shares,
         config.refusal_floor
     );
 
@@ -877,25 +893,6 @@ fn fit_the_tracts(
         write_cell_table(&path, &outcomes, &held);
     }
 
-    // **`SSR_CELL_TABLE_BORROWED=<path>` fits the same strata a second time with borrowing on**,
-    // and writes that table beside the first. Both fits read one walk's census, so the two
-    // tables differ in the borrowing rule and in nothing else — which is what makes "how far
-    // borrowing moved this cell" a difference rather than a comparison across runs.
-    if let Ok(path) = std::env::var("SSR_CELL_TABLE_BORROWED") {
-        let borrowed_config = ssr_fit::SsrFitConfig {
-            allele_span,
-            borrowing_floor: ssr_fit::DEFAULT_BORROWING_FLOOR,
-            ..ssr_fit::SsrFitConfig::default()
-        };
-        let at = Instant::now();
-        let borrowed = ssr_fit::fit_strata(&evidence, &homozygote_excess, &borrowed_config);
-        println!(
-            "  refitted in {:.1} s, borrowing below {} tracts",
-            at.elapsed().as_secs_f64(),
-            borrowed_config.borrowing_floor
-        );
-        write_cell_table(&path, &borrowed, &held);
-    }
     println!(
         "\n  {:<8}{:>8}{:>10}{:>9}{:>9}{:>9}{:>9}{:>8}  borrowed from",
         "motif", "repeats", "tracts", "reads", "level", "shorter", "fall-off", "conc.",

@@ -39,12 +39,10 @@ neighbour the borrowing rule reached first.
 
 ### 1.2 Non-goals, and what this does not do
 
-- **It does not touch the other three numbers.** The direction split, the fall-off and the
-  substitution rate keep their per-cell fit and today's borrowing rule. Whether they should be
-  smoothed too is a separate question, and the measurements point both ways — the fall-off is
-  flat across tomato's five cells and spans 3.14-fold across HG002's twenty-three
-  ([`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md)
-  §5). Its home is the research plan's step C4.
+- **It does not touch the substitution rate.** That is a division rather than a fit
+  ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.2), and whether it varies with repeat
+  count at all is the research plan's C4. *The direction split and the fall-off were out of scope
+  until 2026-08-20 and now are not: §5.1 gives all three fitted numbers the same treatment.*
 - **It does not fit the curve to the reads.** The curve is fitted to the per-cell answers — the
   two-stage route. Fitting the curve's own parameters directly against the reads is the research
   plan's D1 and is deferred with a home (§10).
@@ -246,45 +244,77 @@ linking them, **6 of 50 steps between neighbouring cells run downhill** — 2 of
 drop between two cells of 88 and 104 tracts. On tomato's four steps, none. A curve is monotone by
 construction wherever `slope > 0`, so all six go away without a rule.
 
-### 5.1 The shares' floor, and why copying replaces the pooled refit
+### 5.1 All three numbers are smoothed the same way — REVISED 2026-08-20 (owner)
 
-**The level and the two shares starve at completely different rates, so one floor cannot protect
-both.** A stratum of 100,000 tracts at 5 reads each — half a million reads — at a slippage level
-of 0.091% has **455 slipped reads**. That measures the level to about 5% of itself, and the
-fall-off to about 45%: the same stratum measures one of its numbers well and another barely at
-all ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5).
+**Every slippage number a stratum carries gets a curve across repeat count and departs from it by
+how much evidence it has.** The level, the direction split and the fall-off differ in what shape
+their curve may take and in how their own precision is computed, and in nothing else.
 
-**So the shares get their own floor, counted in slipped reads rather than tracts.** At the values
-§3 of that document measures, holding the direction split to 6% of itself takes about **1,400**
-slipped reads and holding the fall-off to the same takes about **4,000**; the fall-off binds, and
-[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §4.1 fixes the floor at
-`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000`. *Soft, and expected to be missed by every stratum at
-the bottom of the repeat range — that is the rule working, since the alternative is a share fitted
-on five reads and reported as measured.*
+**Why this replaces the floor-and-copy rule built first.** That rule was a gate with a cliff: a
+stratum either reached 4,000 slipped reads and kept its own two shares, or reached fewer and took
+one named neighbour's whole. Measured on both cohorts (§5.1.1), only *one motif period out of six*
+had any stratum clearing the floor, so 69 of HG002's strata and every one of tomato's got nothing.
+A curve fitted from every stratum, weighted, has no gate to fail.
 
-**Below the floor the two shares are copied from the nearest stratum at the same period that
-clears it** — nearest by repeat count, and where two are equally near, the shorter tract wins
-because there are more of them. Motif period is never crossed: the direction split runs 1.4× at
-tomato homopolymers and 4.9× at its dinucleotides, so a copy across periods would carry a
-threefold error.
+**The precision of a share is computable, and it is the same model the 4,000 came from.** A
+direction split is a proportion over the reads that slipped, so on `S` slipped reads its relative
+standard error is
 
-**Copying replaces the pooled refit outright, and that is the point.** Once the level comes from
-the curve and the shares are copied, **nothing needs a stratum's tracts pooled with its
-neighbours' at all**. What that removes is the expensive arm: the perf review measures one run at
-**1,036.8 s with pooled borrowing against 155.5 s without**
-([`perf_ng-census-joint-fit_2026-08-15.md`](../../reports/reviews/perf_ng-census-joint-fit_2026-08-15.md)
-§3), because a borrowing stratum refits about a thousand tracts where an independent one reads
-only its own.
+```text
+share's relative standard error  =  sqrt( (1 − p) / (p · S) )
+```
 
-**A stratum with reads but no fit of its own is now emitted rather than refused**, which is spec
-§1.1's first goal. Its level is the curve's and its shares are copied, and **none of it was
-fitted**, so it carries no length spectrum, no concentration and no log-likelihood — there is
-nothing to put there and a fitted-looking zero would be a lie. That is a different shape from a
-stratum that was fitted, and §8 says how it is told apart.
+That reproduces the architecture's own two figures: holding a split of 0.17 to 6% of itself takes
+**1,357** slipped reads where [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md)
+§4.1 says "about 1,400", and holding a fall-off of 0.065 to the same takes **3,997** where it says
+"about 4,000". **So `MIN_SLIPPED_READS_TO_FIT_SHARES` stops being a gate and becomes a description
+of where the blend hands over.**
 
-**Two refusals survive**, and both mean there is genuinely no answer: a stratum no read crossed,
-and a stratum whose period drew no curve *and* whose period has no stratum clearing the shares'
-floor.
+**The shares' curve may not be the level's family.** The level rises with repeat count and its
+family refuses a falling fit; the shares do neither. On HG002 the fall-off is **U-shaped** — 0.43
+at 8 repeats, 0.15 at 12, 0.38 at 30 — and the direction split rises to 0.74 by 13 repeats and
+falls to 0.50 by 30. **The family is chosen by the same held-out-cell criterion that chose the
+level's shape**, per period and per parameter, from: a constant (the evidence-weighted mean),
+logit-linear in repeat count, and logit-quadratic. *This is also the research plan's C4 question —
+whether each parameter should be smoothed at all — answered by measurement rather than by decree:
+a period whose held-out error is lowest at the constant is a period with no trend to fit.*
+
+**The blend is §7's, on the logit scale rather than the log.** A stratum's own share and its
+period's curve are weighted by one over their squared relative errors, with §7.2's knee standing
+the curve down where the two disagree by more than either error explains.
+
+**Thin strata contribute, weighted — which means they must be fitted at all.** Today nothing below
+50 tracts is fitted, so a thin stratum has no value to contribute. Under the blend a noisy value
+carries a weight in proportion to its noise: a 3-tract stratum with about 10 slipped reads sits
+against a well-measured stratum's 8,000, so it moves the curve by about one part in 800.
+**Lowering the refusal floor is what makes "every stratum contributes" true**, and it is a change
+to *what is fitted*, not to how — §11 records what has to be measured before it is trusted.
+
+**One rule that must not be dropped: a stratum feeds its curve only through its own fit, never a
+blended one.** Otherwise each round of smoothing fits a curve to the previous round's curve, and
+the cells stop being evidence.
+
+#### 5.1.1 What the floor-and-copy rule delivered, measured
+
+Both cohorts, at the widened ±8 recording window, with the rule as built:
+
+| | strata fitted | furnished from a neighbour | still refused |
+|---|---:|---:|---:|
+| HG002, one sample at ~300 reads | 55 | **13** | 69 |
+| tomato, 63 accessions at ~3 reads | 6 | **0** | 65 |
+
+The binding number is how many slipped reads the best-measured stratum of a period has, against
+the 4,000 a stratum needs before its shares count as its own:
+
+| best slipped reads at | period 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---:|---:|---:|---:|---:|---:|
+| HG002 | **8,840** | 2,562 | 314 | 212 | 39 | 0 |
+| tomato | 2,338 | 128 | 0 | 0 | 0 | 0 |
+
+**Only HG002's homopolymers clear it**, which is where all 13 furnished strata came from. On a
+cohort thinner than a deep single human sample the rule delivers nothing at all.
+
+---
 
 ---
 
@@ -488,7 +518,19 @@ cells that are already fitted independently. It adds no shared state to stage on
   would either be harmless or would be letting the thin periods vote.* **The measurement that
   settles it:** score a shared rung against per-period rungs on the same held-out criterion, which
   is the research plan's D2 arm.
-- **RESOLVED — which family.** One family with a fitted `rise_shape` (§2), because the two cohorts
+- **⚠ OPEN — how far may the refusal floor be lowered?** §5.1 wants every stratum to contribute to
+  its period's curves, which means fitting strata far thinner than the 50 tracts anything is
+  fitted from today. *Leaning: far — a 3-tract stratum moves a curve by about one part in 800
+  against a well-measured one — but the fit itself has never been run that thin, and a climb that
+  fails to converge or returns a level of exactly zero is a different failure from a noisy one.*
+  **The measurement that settles it:** fit drawn strata down to a handful of tracts, and report how
+  often the climb converges, how often the level comes back at zero, and what the curve does with
+  them in the weighting. **Confirm before the floor moves.**
+- **⚠ OPEN — does a share's curve need to bend twice?** §5.1 compares a constant, logit-linear and
+  logit-quadratic. HG002's fall-off is U-shaped over 8 to 30 repeats, which a quadratic can follow
+  and a line cannot; whether that U survives the widened recording window has not been checked, and
+  the ±8 tables exist to check it against. **Measure before choosing.**
+- **RESOLVED — which family for the level.** One family with a fitted `rise_shape` (§2), because the two cohorts
   prefer opposite fixed shapes over the same repeat counts and both fixed shapes produce
   impossible values outside their range.
 - **RESOLVED — the curve or the cell where they disagree, and why not the curve everywhere.** An
