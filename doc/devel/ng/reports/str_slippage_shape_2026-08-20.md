@@ -96,6 +96,33 @@ Weighted by slipped reads, HG002 homopolymers, 23 cells:
 4.77% weighted by tracts, 4.65% by reads crossing and 4.39% by slipped reads, and the order of the
 families is identical under all four.
 
+### 3.1 Where the winning curve misses, and by how much against the cells' own noise
+
+**A held-out median hides where a family fails.** Fitted over all 23 HG002 homopolymer cells, the
+winning curve's distance from each cell, beside that cell's own sampling error
+(`1 / sqrt(slipped reads)`):
+
+| repeats | tracts | slipped reads | cell's own error | curve's distance | ratio |
+|---:|---:|---:|---:|---:|---:|
+| 8 | 4,194 | 2,967 | 1.8% | **27%** | 15× |
+| 9 | 2,608 | 3,520 | 1.7% | **55%** | 33× |
+| 10–19 | — | 4,332–8,117 | 1.1–1.5% | 0.5–4.4% | 0.5–3.9× |
+| 20–23 | — | 2,933–3,671 | 1.7–1.8% | 7.5–12.0% | 4.1–6.5× |
+| 24–30 | — | 752–2,728 | 1.9–3.6% | 1.9–10.3% | 0.7–3.7× |
+
+**The two worst cells are the two holding the most tracts**, and they sit where most homopolymer
+loci are. The miss is one-directional — the curve says 4.7 and 10.4 reads slipping per 1,000 at 8
+and 9 repeats where the cells fit 3.7 and 6.7.
+
+**No rung of the family repairs it.** At every shape number from 0.00 to 1.00 the worst residual
+falls at 8 or 9 repeats, and the winning rung is the least bad: 55% against 282% at the
+multiplying end. There is a knee at the 9→10 step — the level jumps 2.45-fold across it, the
+largest step in the sequence — that a two-parameter monotone curve cannot bend around.
+
+**At the other two periods the curve is as accurate as the cells.** Median curve distance against
+median cell error: HG002 dinucleotides 3.53% against 3.51%, tomato homopolymers 6.11% against
+4.57%. So the failure above is one period's low end, not a property of the approach.
+
 **The measuring machinery is not biased toward any of them.** Run against a table generated with
 a known exponential rise and 12% scatter, it picks the exponential (held-out median 9–11%, which
 is the scatter) and rejects the straight line at 70–88% and DRAGstr's form at 67–71%.

@@ -140,11 +140,13 @@ their construction only — no caller changes yet.
 
 **B2. Blend the cell's own level with the curve's.**  ☐
 Inverse-variance on the log scale: the cell's relative standard error is `1 / sqrt(slipped reads)`
-and the curve's is its held-out error. A cell with no fit takes the curve whole; a period with no
+and the curve's is its held-out error, with the curve's weight divided by `(gap / 2.5)²` where the
+gap in combined errors exceeds 2.5. A cell with no fit takes the curve whole; a period with no
 curve keeps the cell's own level; a cell whose fitted level is zero takes the curve whole and
-never enters the logarithm. Unit tests pin the crossover — at a held-out error of 4.4% the two
-weights are equal at about 517 slipped reads — and the three degenerate cases.
-***Depends:*** B1, A2. ***Source:*** spec §7.
+never enters the logarithm. Unit tests pin the weights against the spec's two worked figures — at
+a curve error of 4.4% the curve carries 93% of the weight at 40 slipped reads and 6% at 8,000 —
+the knee standing the curve down at a gap of 9.3 combined errors, and the three degenerate cases.
+***Depends:*** B1, A2. ***Source:*** spec §7, §7.1, §7.2.
 
 **B3. `fit_strata` draws the curves and emits blended levels.**  ☐
 After every cell is fitted on its own tracts, group the fitted cells by period, run A4, and emit

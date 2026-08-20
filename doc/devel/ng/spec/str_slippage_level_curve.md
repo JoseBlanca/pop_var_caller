@@ -32,8 +32,9 @@ neighbour the borrowing rule reached first.
 2. **The shape of the rise is fitted, not chosen.** The two cohorts we have prefer opposite
    shapes at the same repeat counts (§2), so a design that hard-codes either one is wrong on
    the other.
-3. **A cell with strong evidence keeps its own answer.** The curve is help for thin cells, not a
-   replacement for measurement.
+3. **How far a cell is pulled toward the curve is set by two measured precisions, not by a
+   category.** There is no "well-measured" class of cell: the pull is the ratio of the curve's
+   error to the cell's own, and both are numbers the fit already has (§7).
 4. **A smoothed value stays distinguishable from a measured one** in what the pre-pass emits.
 
 ### 1.2 Non-goals, and what this does not do
@@ -253,13 +254,10 @@ number that is not a probability.
 
 ---
 
-## 7. Where the curve and a well-measured cell disagree
+## 7. Where the curve and a cell disagree
 
 **The emitted level is an inverse-variance blend of the cell's own fit and the curve, on the log
-scale.** A cell with 8,000 slipped reads behind it is better evidence than a line drawn through
-its neighbours; a cell with 40 is not.
-
-Both quantities are relative errors, so they combine multiplicatively:
+scale.** Both quantities are relative errors, so they combine multiplicatively:
 
 ```text
 cell's relative standard error     ≈ 1 / sqrt(slipped reads in that cell)
@@ -270,11 +268,54 @@ weight ∝ 1 / (relative standard error)²
 log(level emitted) = w_cell · log(cell's level) + w_curve · log(curve's level)
 ```
 
-**The crossover is where the two are equally precise, and it is a number rather than a
-preference:** at HG002's homopolymer curve, whose held-out error is 4.4%, the cell wins above
-about **517 slipped reads** and the curve wins below it. On that period's 23 cells, 21 sit above
-it — so the blend leaves the well-measured cells almost untouched and does its work exactly where
-the borrowing rule used to.
+**This *is* the protection against fitting each cell's noise, and it is not a switch between two
+regimes.** The curve carries **93%** of the weight at a cell with 40 slipped reads behind it and
+**6%** at one with 8,000, at HG002's homopolymer curve. Using the curve everywhere is the same
+formula with the curve's weight pinned at 1; using each cell's own answer is it pinned at 0.
+Neither end is a separate design, and neither has to be argued for separately — what has to be
+argued is why the fitted middle beats the always-curve end, which is §7.1.
+
+### 7.1 Why not use the curve everywhere
+
+**Because where the curve misses, it misses systematically and by far more than the cell's own
+noise, and it misses at the cells holding the most tracts.** Fitted over HG002's 23 homopolymer
+cells, the winning curve sits within 0.5 to 12% of every cell from 10 repeats up — but at 8 and 9
+repeats it is **27% and 55% high**, against those cells' own sampling errors of 1.8% and 1.7%.
+Those two cells hold 4,194 and 2,608 tracts, more than any other, and 8 to 9 repeats is where most
+homopolymer loci sit.
+
+**No member of the family repairs it**, so this is not a bad choice of shape number: at every rung
+from 0.00 to 1.00 the worst residual falls at 8 or 9 repeats, and the winning rung is the least
+bad of them — 55% against 282% at the multiplying end. There is a knee between 9 and 10 repeats
+that a two-parameter monotone curve cannot bend around. *That knee is also the most suspicious
+step in the sequence — the level jumps 2.45-fold across it — and §11's first open question bears
+directly on it.*
+
+**Always-curve would therefore emit 10.4 reads slipping per 1,000 at a 9-repeat homopolymer where
+that cell's own 3,520 slipped reads say 6.7.** The blend emits 7.1. That is the whole argument.
+
+**Where the curve is as good as the cells, the blend costs nothing** and says so by itself: at
+HG002's dinucleotides the curve's median distance from a cell is 3.5% against the cells' own 3.5%,
+so the weights come out near even and the emitted values sit between two answers that agree.
+
+### 7.2 One refinement: a cell may say the curve is wrong about it
+
+**A disagreement far larger than either error explains is evidence about the curve, not about the
+cell.** Scale the gap by the two errors combined:
+
+```text
+gap = |log(cell's level) − log(curve's level)| / sqrt(cell's error² + curve's error²)
+```
+
+and beyond a knee of 2.5 combined errors, divide the curve's weight by `(gap / 2.5)²`. At HG002's
+9-repeat homopolymer the gap is **9.3 combined errors**, which no sampling noise produces, and the
+curve is stood down.
+
+**This is a refinement and the spec says so rather than dressing it up:** without it the blend
+already emits 7.1 reads per 1,000 there against the cell's 6.7 — 5.8% high, not 55% — because a
+cell with 3,520 slipped reads outweighs the curve on its own. With it, 6.8. It is worth having
+because the bottom of the repeat range is what the copy-floor decision reads
+([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §5.1), and it costs one comparison.
 
 **Three cases fall out of the same formula and none needs a branch:**
 
@@ -374,9 +415,13 @@ cells that are already fitted independently. It adds no shared state to stage on
   that begins where the buckets saturate is what a recording artefact looks like.** *Leaning: the
   design is unaffected either way — `rise_shape` is fitted, so if the bend is an artefact the
   rung simply moves toward 0 — but the fitted values reported before this is settled must not be
-  quoted as chemistry.* **The measurement that settles it:** widen `RECORDED_OFFSET_RANGE` to 8,
-  re-walk HG002, and compare the fitted `rise_shape` per period. About an hour. **Confirm before
-  the numbers are published; not a blocker on the code.**
+  quoted as chemistry.* **A second reason to run it, found while settling §7.1:** the one place
+  no member of the family can follow the cells is the 9→10 step, where the level jumps 2.45-fold
+  — and that is where the recording window would first bite. If the knee is an artefact, the
+  curve may fit the whole range afterwards and §7.2's refinement stops earning its keep.
+  **The measurement that settles it:** widen `RECORDED_OFFSET_RANGE` to 8, re-walk HG002, and
+  compare the fitted `rise_shape` and the residual at 8 and 9 repeats. About an hour. **Confirm
+  before the numbers are published; not a blocker on the code.**
 - **⚠ OPEN — is four contributing cells enough to draw a curve?** §4.1's floor is arithmetic. *The
   measurement that settles it: draw cells at a known curve and at the cell counts real periods
   have, and report the held-out error against the number of contributing cells.* *Leaning: four
@@ -392,9 +437,11 @@ cells that are already fitted independently. It adds no shared state to stage on
 - **RESOLVED — which family.** One family with a fitted `rise_shape` (§2), because the two cohorts
   prefer opposite fixed shapes over the same repeat counts and both fixed shapes produce
   impossible values outside their range.
-- **RESOLVED — the curve or the cell where they disagree.** An inverse-variance blend (§7), rather
-  than a rule with a threshold, because the two precisions are both estimable and their crossover
-  then falls out rather than being chosen.
+- **RESOLVED — the curve or the cell where they disagree, and why not the curve everywhere.** An
+  inverse-variance blend (§7), rather than a rule with a threshold, because both precisions are
+  estimable and the pull then falls out rather than being chosen. Always-curve was live and lost
+  on a measurement: it would emit 10.4 reads slipping per 1,000 at HG002's 9-repeat homopolymer
+  where that cell's own 3,520 slipped reads say 6.7 (§7.1).
 - **RESOLVED — beyond the fitted range.** Held flat (§6), because a fitted `rise_shape` near 0
   extrapolates to numbers that are not probabilities.
 
