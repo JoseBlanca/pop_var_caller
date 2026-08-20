@@ -20,6 +20,8 @@
 //!
 //! [`slippage_curve`] holds how the repeat-tract slippage *level* rises with repeat count, which
 //! is what lets a thin cell read a line drawn through all its neighbours instead of copying one.
+//! [`share_curve`] does the same for the other two slippage numbers — which way a read slipped
+//! and how far — whose shapes differ from the level's and from each other.
 //!
 //! **The two halves of the estimator run in that order and depend on each other in one direction
 //! only**: [`ssr_fit`] takes each sample's homozygote excess from [`fit`] and gives nothing back,
@@ -30,5 +32,6 @@ pub mod census_file;
 pub mod contamination;
 pub mod fit;
 pub mod loci;
+pub mod share_curve;
 pub mod slippage_curve;
 pub mod ssr_fit;

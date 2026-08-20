@@ -247,11 +247,18 @@ E2's family list.
 before E2 (which precision weights a stratum, and whether a curve that bends twice may be drawn
 through four strata).
 
-**E2. A share's own precision, and its curve.**  ☐
+**E2. A share's own precision, and its curve.**  ✅
 `sqrt((1 − p) / (p · S))` on `S` slipped reads — the model the 4,000 came from, which reproduces
 the architecture's 1,400 and 4,000 to within 3%. The curve fit itself is the level's, generalised
 over the families E1 chose, on the logit scale.
 ***Depends:*** E1. ***Source:*** spec §5.1.
+***Two recorded departures, both ruled by the owner 2026-08-20.*** The weight is the inverse
+variance of the **logit**, `S · p · (1 − p)`, not of the share: the two disagree by `1/(1 − p)²`
+and the fit runs on the logit ([report](../reports/str_slippage_share_families_2026-08-20.md) §7.1
+and §9). And **a curve always comes back** — a period too thin to choose a shape gets a flat mean,
+one with nothing gets the run's other periods, and a run that fitted nothing anywhere gets a
+built-in default, each recorded in the provenance. These numbers are a prior, so answering coarsely
+beats refusing.
 
 **E3. Blend each share, and retire the floor-and-copy rule.**  ☐
 The blend is §7's with the logarithm replaced by the logit. `SharesSource` becomes the same

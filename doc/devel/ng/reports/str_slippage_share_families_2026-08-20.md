@@ -254,8 +254,8 @@ weighted fit's weight must be the inverse variance of the quantity being fitted,
 being fitted is the logit. Under the design's formula a stratum counts as best-measured when its
 share is nearest to certainty, which is a property of dividing by `p` and not of its evidence.
 
-**This is a change to the design and not an implementation choice**, so it is raised rather than
-taken.
+**RULED (owner, 2026-08-20): the logit-scale weight.** §9 records the rule as built and what it
+changes about the table above.
 
 ### 7.2 A curve that bends twice, drawn through only four strata
 
@@ -294,3 +294,50 @@ line — changes exactly one of the ten cases, and it changes it from 5.2% to 76
   stratum with no fit of its own inherits it whole.
 - **Two answers wanted before code is written:** the weight formula (§7.1) and whether a quadratic
   may be drawn through four strata (§7.2).
+
+---
+
+## 9. The rule as built, and what the approved weight changed
+
+**Settled after §7 was written**, and the numbers here — not §3's — are what the code does. Four
+decisions, one of them the owner's:
+
+- **A stratum's weight is the inverse variance of its logit**, `slipped reads × p × (1 − p)`
+  (§7.1, ruled by the owner).
+- **The held-out score is in logit units too** — the median of `|logit(predicted) −
+  logit(measured)|` over leaving each stratum out in turn. It has to be, because the blend weighs
+  a curve's error against a stratum's own, and a stratum's own is now a logit-scale error.
+- **The flat shape is the weighted mean of the logits**, not of the shares, so that all three
+  shapes are least squares on one scale.
+- **A tie goes to the simplest shape.**
+
+What each period's strata then choose, asserted in `tests/share_curve_on_real_cells.rs`:
+
+| cohort | period | fitted strata | parameter | shape | predicts a held-out stratum to |
+|---|---:|---:|---|---|---:|
+| tomato | 1 | 5 | direction split | sloping | 0.240 |
+| tomato | 1 | 5 | fall-off | flat | 0.321 |
+| HG002 | 1 | 23 | direction split | flat | 0.165 |
+| HG002 | 1 | 23 | fall-off | sloping | 0.239 |
+| HG002 | 2 | 20 | direction split | turning | 0.516 |
+| HG002 | 2 | 20 | fall-off | flat | 0.527 |
+| HG002 | 3 | 4 | direction split | turning | 0.210 |
+| HG002 | 3 | 4 | fall-off | flat | 0.813 |
+| HG002 | 4 | 7 | direction split | flat | 0.789 |
+| HG002 | 4 | 7 | fall-off | flat | 0.840 |
+
+*(logit units: 0.2 is about a tenth of the way from a share of 0.5 to one of 0.7.)*
+
+**The headline survives the change and the detail does not.** All three shapes still win somewhere,
+so none can be dropped — but under the approved weight the flat shape wins six of the ten rather
+than two, and the two that changed hands did so by a hair: HG002's homopolymer direction split and
+its dinucleotide fall-off are each within a few hundredths of a logit unit of the next shape up,
+and the tie rule keeps the simpler one. **Read a shape as this period's best available
+description, not as a fact about the chemistry.**
+
+**What a curve is worth against a stratum that has its own answer.** At HG002's homopolymers the
+median stratum holds its own direction split to 0.033 logit units where the period's curve
+predicts one to 0.165 — five times better. So a stratum with a fit of its own will keep almost all
+of its weight in the blend, and the curve's value is at the strata with no fit of their own —
+58 of HG002's 132 populated strata and 10 of tomato's 49 sit at a period that has a curve, of
+which 13 and 0 respectively get anything under the rule being retired.
