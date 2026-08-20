@@ -109,7 +109,7 @@ exactly on an exponential at `rise_shape = 0` are both recovered to within round
 deliberately falling set returns no curve.
 ***Depends:*** A2. ***Source:*** spec §4.2, §9.
 
-**A4. Choose the shape number for a period, across slippage groups.**  ☐
+**A4. Choose the shape number for a period, across slippage groups.**  ✅
 For each rung of the grid, fit every group's line (A3), then score the rung by leaving each
 contributing cell out in turn, refitting that group's line without it, and predicting it; keep
 the rung with the lowest median relative error, ties to the larger rung. Record the winning

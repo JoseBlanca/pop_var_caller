@@ -343,6 +343,151 @@ pub fn fit_line(cells: &[FittedCell], rise_shape: RiseShape) -> Result<SlippageC
 }
 
 // ---------------------------------------------------------------------
+// Choosing the shape number, across the slippage groups of one period
+// ---------------------------------------------------------------------
+
+/// One motif period's curves: one line per slippage group, all sharing a shape number.
+///
+/// **The shape number is shared and the lines are not**, because they answer different questions
+/// with different amounts of evidence behind them. A line's level and slope are where a library's
+/// own chemistry lives and a period with four cells can carry them; the curvature needs the whole
+/// span of repeat counts visible at once, and one library of a 63-accession cohort at three reads
+/// a position puts about twelve slipped reads behind a cell (spec §3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeriodCurves {
+    /// The shape number every group at this period shares.
+    pub rise_shape: RiseShape,
+    /// One curve a slippage group, indexed by group, `None` where that group had no line.
+    pub by_group: Vec<Option<SlippageCurve>>,
+    /// How far the winning shape number landed from cells it had not seen — the median relative
+    /// error over leaving each contributing cell of every group out in turn.
+    pub held_out_error: f64,
+    /// Contributing cells, over every group.
+    pub cells: usize,
+}
+
+/// Choose the shape number for one motif period, and fit every slippage group's line at it.
+///
+/// `cells_by_group` is one list of contributing cells per slippage group, indexed the way
+/// `StratumFit::slippage` is; a group with no cells contributes nothing and gets `None` back.
+///
+/// **The rung is chosen on cells it did not see.** For each rung of the grid, every group's line
+/// is fitted, then each contributing cell is left out in turn, its group's line refitted without
+/// it, and the cell predicted; the rung with the lowest median relative error wins. Fit quality
+/// on the cells a rung *did* see decides nothing — any rung can be made to fit what it saw, and
+/// the adding end has no more freedom than the multiplying one, so only held-out prediction
+/// separates them (spec §4.3).
+///
+/// **Ties go to the larger rung.** The two ends fail differently: a level that is too small
+/// under-states real slippage, where the multiplying end returns numbers above one a few repeat
+/// counts outside its range and has to be clamped.
+pub fn choose_rise_shape(
+    cells_by_group: &[Vec<FittedCell>],
+    config: &SlippageCurveConfig,
+) -> Result<PeriodCurves, NoCurve> {
+    let contributing: usize = cells_by_group.iter().map(Vec::len).sum();
+    if contributing < config.min_cells_for_a_curve {
+        return Err(NoCurve::TooFewCells {
+            cells: contributing,
+            floor: config.min_cells_for_a_curve,
+        });
+    }
+
+    let mut best: Option<(f64, PeriodCurves)> = None;
+    for rise_shape in config.rise_shape_grid() {
+        let by_group: Vec<Option<SlippageCurve>> = cells_by_group
+            .iter()
+            .map(|cells| fit_line(cells, rise_shape).ok())
+            .collect();
+        if by_group.iter().all(Option::is_none) {
+            continue;
+        }
+        let Some(held_out_error) = held_out_error_of(cells_by_group, rise_shape) else {
+            continue;
+        };
+        let fitted: usize = by_group
+            .iter()
+            .flatten()
+            .map(|curve| curve.cells)
+            .sum::<usize>();
+        let curves = PeriodCurves {
+            rise_shape,
+            by_group,
+            held_out_error,
+            cells: fitted,
+        };
+        // `<=` rather than `<`: the grid runs from the multiplying end upward, so an equal score
+        // at a later rung replaces an earlier one, which is the tie rule.
+        if best
+            .as_ref()
+            .is_none_or(|(best_error, _)| held_out_error <= *best_error)
+        {
+            best = Some((held_out_error, curves));
+        }
+    }
+
+    let Some((held_out_error, mut curves)) = best else {
+        return Err(NoCurve::LevelWouldFall { slope: f64::NAN });
+    };
+    // Every emitted curve carries the period's own held-out error and cell count, so a consumer
+    // holding one curve can weigh it without holding the period.
+    for curve in curves.by_group.iter_mut().flatten() {
+        curve.held_out_error = held_out_error;
+        curve.cells = curves.cells;
+    }
+    Ok(curves)
+}
+
+/// The median relative error of leaving each contributing cell out in turn, at one rung.
+///
+/// **The score continues the line where a deployed curve holds flat, and the difference is
+/// deliberate.** Leaving out the lowest or highest cell puts it outside what remains, so a
+/// deployed curve would predict it with its neighbour's value — which says nothing about the
+/// shape, and the end cells are exactly where a shape shows. Measured three ways on both
+/// cohorts, the chosen rung is the same at four of the five periods that can be scored; at
+/// HG002's dinucleotides, holding flat instead moves it from 0.80 to 0.70, and scoring only the
+/// cells that stay inside the range leaves 3 of tomato's 5 cells scored and moves its answer
+/// from 0.00 to 0.15. Continuing the line is the variant that keeps every cell in the score.
+///
+/// **This does not leak into what a caller reads.** [`SlippageCurve::level_at`] still holds flat;
+/// only the rung's score continues the line, and it is thrown away once the rung is picked.
+///
+/// `None` when no cell could be predicted at all — every leave-one-out fit refused, which
+/// happens when a group has two cells and dropping one leaves a point.
+fn held_out_error_of(cells_by_group: &[Vec<FittedCell>], rise_shape: RiseShape) -> Option<f64> {
+    let mut errors: Vec<f64> = Vec::new();
+    for cells in cells_by_group {
+        for held in 0..cells.len() {
+            let rest: Vec<FittedCell> = cells
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != held)
+                .map(|(_, cell)| *cell)
+                .collect();
+            let Ok(curve) = fit_line(&rest, rise_shape) else {
+                continue;
+            };
+            let target = cells[held];
+            if target.level <= 0.0 {
+                continue;
+            }
+            let predicted = curve.level_on_the_line(target.repeats as f64);
+            errors.push(((predicted - target.level) / target.level).abs());
+        }
+    }
+    if errors.is_empty() {
+        return None;
+    }
+    errors.sort_by(|left, right| left.total_cmp(right));
+    let middle = errors.len() / 2;
+    Some(if errors.len().is_multiple_of(2) {
+        (errors[middle - 1] + errors[middle]) / 2.0
+    } else {
+        errors[middle]
+    })
+}
+
+// ---------------------------------------------------------------------
 // Where an emitted level came from
 // ---------------------------------------------------------------------
 
@@ -874,6 +1019,154 @@ mod tests {
             "one read moved the line at 20 repeats by {:.1}%",
             moved * 100.0
         );
+    }
+
+    /// Cells drawn on a straight line make the grid pick the adding end, and cells drawn on an
+    /// exponential make it pick the multiplying end. Neither rung has more freedom than the
+    /// other, so only held-out prediction can separate them.
+    #[test]
+    fn the_grid_finds_the_shape_the_cells_were_drawn_with() {
+        let straight: Vec<FittedCell> = (8..=30)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.005 * repeats as f64 - 0.035,
+                slipped_reads: 5_000.0,
+            })
+            .collect();
+        let curves = choose_rise_shape(&[straight], &SlippageCurveConfig::default())
+            .expect("twenty-three cells on a line");
+        assert_eq!(curves.rise_shape, RiseShape::ADDING);
+        assert!(curves.held_out_error < 1e-6, "{}", curves.held_out_error);
+
+        let compounding: Vec<FittedCell> = (8..=30)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.002 * 1.15_f64.powi(repeats as i32 - 8),
+                slipped_reads: 5_000.0,
+            })
+            .collect();
+        let curves = choose_rise_shape(&[compounding], &SlippageCurveConfig::default())
+            .expect("twenty-three cells on an exponential");
+        assert_eq!(curves.rise_shape, RiseShape::MULTIPLYING);
+        assert!(curves.held_out_error < 1e-6, "{}", curves.held_out_error);
+    }
+
+    /// The shape number is one number for the period; the lines are one per group. Two groups
+    /// with genuinely different levels must keep their own lines and share the rung.
+    #[test]
+    fn two_groups_share_a_shape_number_and_keep_their_own_lines() {
+        let group_of = |scale: f64| -> Vec<FittedCell> {
+            (8..=30)
+                .map(|repeats| FittedCell {
+                    repeats,
+                    level: scale * (0.005 * repeats as f64 - 0.035),
+                    slipped_reads: 5_000.0,
+                })
+                .collect()
+        };
+        let curves = choose_rise_shape(
+            &[group_of(1.0), group_of(2.0)],
+            &SlippageCurveConfig::default(),
+        )
+        .expect("two groups of twenty-three cells");
+        assert_eq!(curves.rise_shape, RiseShape::ADDING);
+        let lines: Vec<SlippageCurve> = curves.by_group.iter().flatten().copied().collect();
+        assert_eq!(lines.len(), 2);
+        assert!((lines[1].slope / lines[0].slope - 2.0).abs() < 1e-9);
+        assert_eq!(curves.cells, 46);
+        // Both carry the period's own held-out error, so one curve can be weighed alone.
+        assert_eq!(lines[0].held_out_error, curves.held_out_error);
+        assert_eq!(lines[1].held_out_error, curves.held_out_error);
+    }
+
+    /// A group that put no cell in this period gets no line, and does not stop the others.
+    #[test]
+    fn a_group_with_no_cells_gets_no_line_and_does_not_block_the_period() {
+        let cells: Vec<FittedCell> = (8..=30)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.005 * repeats as f64 - 0.035,
+                slipped_reads: 5_000.0,
+            })
+            .collect();
+        let curves = choose_rise_shape(
+            &[Vec::new(), cells, Vec::new()],
+            &SlippageCurveConfig::default(),
+        )
+        .expect("one group carries the period");
+        assert!(curves.by_group[0].is_none());
+        assert!(curves.by_group[1].is_some());
+        assert!(curves.by_group[2].is_none());
+    }
+
+    /// Below the floor a period gets no curve at all, and the refusal names the floor that
+    /// turned it away rather than the arithmetic one.
+    #[test]
+    fn a_period_below_the_cell_floor_is_refused_by_that_floor() {
+        let three: Vec<FittedCell> = (8..=10)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.002 * repeats as f64,
+                slipped_reads: 500.0,
+            })
+            .collect();
+        assert_eq!(
+            choose_rise_shape(&[three], &SlippageCurveConfig::default()),
+            Err(NoCurve::TooFewCells {
+                cells: 3,
+                floor: MIN_CELLS_FOR_A_CURVE,
+            })
+        );
+    }
+
+    /// Cells whose level falls with repeat count give no curve at any rung.
+    #[test]
+    fn a_period_whose_cells_fall_gets_no_curve_at_any_rung() {
+        let falling: Vec<FittedCell> = (8..=20)
+            .map(|repeats| FittedCell {
+                repeats,
+                level: 0.15 - 0.005 * repeats as f64,
+                slipped_reads: 5_000.0,
+            })
+            .collect();
+        assert!(matches!(
+            choose_rise_shape(&[falling], &SlippageCurveConfig::default()),
+            Err(NoCurve::LevelWouldFall { .. })
+        ));
+    }
+
+    /// Where two rungs score the same, the larger wins — the two ends fail differently, and the
+    /// multiplying end is the one that returns numbers above one outside its range.
+    #[test]
+    fn an_exact_tie_between_rungs_goes_to_the_larger() {
+        // Two cells lie exactly on every rung's curve, so every rung scores zero.
+        let two_plus: Vec<FittedCell> = vec![
+            FittedCell {
+                repeats: 8,
+                level: 0.004,
+                slipped_reads: 1_000.0,
+            },
+            FittedCell {
+                repeats: 12,
+                level: 0.008,
+                slipped_reads: 1_000.0,
+            },
+            FittedCell {
+                repeats: 16,
+                level: 0.012,
+                slipped_reads: 1_000.0,
+            },
+            FittedCell {
+                repeats: 20,
+                level: 0.016,
+                slipped_reads: 1_000.0,
+            },
+        ];
+        let curves =
+            choose_rise_shape(&[two_plus], &SlippageCurveConfig::default()).expect("four cells");
+        // The straight line fits these exactly, so no rung can beat it and the tie rule keeps
+        // the largest that ties.
+        assert_eq!(curves.rise_shape, RiseShape::ADDING);
     }
 
     #[test]
