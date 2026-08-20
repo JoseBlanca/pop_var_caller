@@ -71,12 +71,15 @@ stratum weighted by its precision.
 
 **Three things the shares need that the level did not**, all in spec §5.1:
 
-1. **A family that can bend either way.** The level's family is monotone and refuses a falling
-   fit. HG002's fall-off is U-shaped — 0.43 at 8 repeats, 0.15 at 12, 0.38 at 30 — and its
-   direction split rises to 0.74 by 13 repeats then falls to 0.50 by 30. E1 chooses among a
-   constant, logit-linear and logit-quadratic **by the held-out-cell criterion**, per period and
-   per parameter. *A period whose held-out error is lowest at the constant has no trend to fit,
-   and that is also the answer to the research plan's C4.*
+1. **A family that can bend either way, and it differs by period.** The level's family is
+   monotone and refuses a falling fit; the shares do neither. Measured at ±8 from strata that
+   copied nothing (report §5): HG002's dinucleotide direction split spans **4.52-fold** and a
+   logit-line beats the mean four to one (0.060 against 0.240); its dinucleotide fall-off spans
+   5.17-fold and **nothing beats the mean**; the homopolymer split rises 0.51 → 0.82 while the
+   dinucleotide one falls then climbs. E1 chooses among a constant, logit-linear and
+   logit-quadratic **by the held-out-cell criterion**, per period and per parameter. *A period
+   whose held-out error is lowest at the constant has no trend to fit, and that is also the answer
+   to the research plan's C4.*
 2. **A share's own precision:** `sqrt((1 − p) / (p · S))` on `S` slipped reads. This reproduces the
    architecture's own two numbers — 1,357 slipped reads to hold a split of 0.17 to 6% where it
    says "about 1,400", 3,997 for a fall-off of 0.065 where it says "about 4,000" — so it is the

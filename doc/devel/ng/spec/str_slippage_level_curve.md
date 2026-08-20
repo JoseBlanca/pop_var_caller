@@ -271,11 +271,16 @@ That reproduces the architecture's own two figures: holding a split of 0.17 to 6
 of where the blend hands over.**
 
 **The shares' curve may not be the level's family.** The level rises with repeat count and its
-family refuses a falling fit; the shares do neither. On HG002 the fall-off is **U-shaped** — 0.43
-at 8 repeats, 0.15 at 12, 0.38 at 30 — and the direction split rises to 0.74 by 13 repeats and
-falls to 0.50 by 30. **The family is chosen by the same held-out-cell criterion that chose the
-level's shape**, per period and per parameter, from: a constant (the evidence-weighted mean),
-logit-linear in repeat count, and logit-quadratic. *This is also the research plan's C4 question —
+family refuses a falling fit; the shares do neither, and they do not agree with each other across
+periods. Measured at the corrected ±8 window from strata that copied nothing
+([`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md) §5):
+HG002's dinucleotide direction split spans **4.52-fold** and a logit-line predicts a held-out cell
+four times better than the mean (0.060 against 0.240); its dinucleotide fall-off spans 5.17-fold
+and **no family beats the mean**; and the two direction splits run opposite ways — homopolymers
+rise 0.51 → 0.82, dinucleotides fall to 0.61 mid-range and climb to 0.97. **A single family
+imposed on all of them would be wrong somewhere**, so it is chosen by the same held-out-cell
+criterion that chose the level's shape, per period and per parameter, from: a constant (the
+evidence-weighted mean), logit-linear in repeat count, and logit-quadratic. *This is also the research plan's C4 question —
 whether each parameter should be smoothed at all — answered by measurement rather than by decree:
 a period whose held-out error is lowest at the constant is a period with no trend to fit.*
 
