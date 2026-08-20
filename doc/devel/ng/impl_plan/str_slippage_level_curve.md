@@ -117,7 +117,7 @@ rung's held-out error on the curve. Refuse to draw a curve for a period with few
 minimum contributing cells.
 ***Depends:*** A3. ***Source:*** spec §4.1, §4.3, §4.4.
 
-**A5. The oracle fixtures, and the end-to-end test of A4 on them.**  ☐
+**A5. The oracle fixtures, and the end-to-end test of A4 on them.**  ✅
 Copy the two cell tables under `tests/data/slippage_cells/` and add a test that reads them, runs
 A4, and asserts the fitted shape number per period against the report's table — 0.00 at tomato's
 period 1, 1.00 and 0.80 at HG002's periods 1 and 2 — and that HG002's period 1 curve predicts a
