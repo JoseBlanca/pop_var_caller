@@ -145,6 +145,10 @@ impl Slippage {
 /// locus — and re-exported here, where the fit reads it, so a consumer of either module names
 /// one type.
 pub use super::census::Stratum;
+pub use super::share_curve::{
+    DEFAULT_FALL_OFF, DEFAULT_SHORTER_SHARE, FittedShare, ShareCurve, ShareCurveConfig,
+    ShareCurveSource, ShareShape, ShareSource, blend_share, share_curve_for_a_period,
+};
 pub use super::slippage_curve::{
     CurveReach, FittedCell, LevelSource, PeriodCurves, SlippageCurve, SlippageCurveConfig,
     blend_level, choose_rise_shape,
@@ -314,7 +318,7 @@ pub struct StratumFit {
     /// them.
     pub level_provenance: Vec<Option<LevelProvenance>>,
     /// Per slippage group, where that group's direction split and fall-off came from.
-    pub shares_source: Vec<Option<SharesSource>>,
+    pub shares_provenance: Vec<Option<SharesProvenance>>,
 }
 
 /// Where one slippage group's level at one stratum came from, and what stood behind it.
@@ -348,49 +352,70 @@ pub struct LevelProvenance {
     pub slipped_reads: Option<f64>,
 }
 
-/// Where a stratum's direction split and fall-off came from.
+/// Where a stratum's direction split and fall-off came from, and what stood behind them.
 ///
-/// **The level and the two shares starve at completely different rates, so they do not share a
-/// floor.** A stratum of 100,000 tracts at five reads each, at a slippage level of 0.091%, has
-/// 455 slipped reads: that measures the level to about 5% of itself and the fall-off to about
-/// 45%. The level's answer to thinness is the curve; the shares' answer is to take a
-/// neighbour's (`str_slippage_level_curve.md` §5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharesSource {
-    /// The stratum's own fit — its own slipped reads reached
-    /// [`MIN_SLIPPED_READS_TO_FIT_SHARES`].
-    Own,
-    /// Copied whole from another repeat count at the same motif period, which did.
+/// **The two shares are smoothed exactly as the level is** — each gets its period's curve, and
+/// each stratum departs from that curve by how much evidence it has
+/// (`str_slippage_level_curve.md` §5.1). What differs between the three numbers is the shape
+/// their curve may take and how their own precision is computed, and nothing else.
+///
+/// **This replaced a gate with a cliff.** A stratum used to keep its own two shares above 4,000
+/// slipped reads and take one named neighbour's whole below it. Across both cohorts one motif
+/// period of twelve ever cleared that floor, so 69 of HG002's strata and every one of tomato's
+/// got nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SharesProvenance {
+    /// How many of this stratum's own reads **its own fitted level** said slipped, and `None`
+    /// where nothing was fitted here.
     ///
-    /// **Copied, not refitted.** Pooling this stratum's tracts with that one's and refitting
-    /// would move the *level* too, and the level has a better answer.
-    CopiedFrom { reference_repeats: u64 },
+    /// **Both shares are proportions over the reads that slipped**, so this one count sets how
+    /// precisely the stratum holds either of them, and it is what the blend weighed its own
+    /// answer by. It is the stratum's own level rather than the emitted one: computed from the
+    /// emitted level it would be partly a property of the curve, which is the thing it exists to
+    /// be weighed against.
+    pub slipped_reads: Option<f64>,
+    /// Where the share of slipped reads showing a *shorter* tract came from.
+    pub shorter_share: ShareProvenance,
+    /// Where the fall-off — how much rarer a two-unit slip is than a one-unit slip — came from.
+    pub fall_off: ShareProvenance,
 }
 
-/// Fewest **slipped** reads a stratum needs before its direction split and fall-off are its own
-/// rather than a neighbour's.
-///
-/// **4,000, derived from the precision wanted rather than chosen.** At the values
-/// `parameter_prepass_ssr.md` §3 measures — a direction split of 0.17 and a fall-off of 0.065 —
-/// holding the split to 6% of itself takes about 1,400 slipped reads and holding the fall-off to
-/// the same takes about 4,000. **The fall-off binds**, which is a second argument for that
-/// document's decision to share one fall-off between the two directions.
-///
-/// **The level has no such floor and must not borrow one.** It is a proportion over *every* read
-/// rather than over the ones that moved, so the same stratum measures it to about 5% of itself
-/// where the fall-off is measured to about 45%.
-///
-/// *Soft, and expected to be missed by every stratum at the bottom of the repeat range:* at a
-/// level of 0.091% it takes about 880,000 loci at five reads each, against tomato's 1.73 million
-/// STR loci in total. **That is the rule working** — the alternative is a share fitted on five
-/// reads and reported as measured.
-pub const MIN_SLIPPED_READS_TO_FIT_SHARES: f64 = 4_000.0;
+/// Where one of the two shares came from: the stratum's own fit, its period's curve, or a blend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShareProvenance {
+    /// Which of the three, and for a blend the share the curve carried.
+    pub source: ShareSource,
+    /// The curve that supplied it, absent where this stratum's period had none. It carries its
+    /// own held-out error, how many strata stood behind it, and which rung of the fallback
+    /// ladder produced it.
+    pub curve: Option<ShareCurve>,
+    /// Whether this stratum's repeat count sat inside the curve's fitted range; `None` where
+    /// there is no curve. **A share held at a fitted end is the end stratum's answer**, not this
+    /// stratum's.
+    pub reach: Option<CurveReach>,
+}
+
+impl SharesProvenance {
+    /// The provenance a stratum's own fit starts with, before any curve is drawn.
+    fn own(slipped_reads: f64) -> Self {
+        let own = ShareProvenance {
+            source: ShareSource::Stratum,
+            curve: None,
+            reach: None,
+        };
+        Self {
+            slipped_reads: Some(slipped_reads),
+            shorter_share: own,
+            fall_off: own,
+        }
+    }
+}
 
 /// A stratum whose numbers were all supplied from elsewhere — nothing about it was fitted.
 ///
-/// **Its level is its period's curve and its two shares are a neighbour's**, which is a complete
-/// parameter set for the read likelihood and is what lets a stratum below the refusal floor be
-/// emitted at all (`str_slippage_level_curve.md` §1.1, §5.1).
+/// **All three of its slippage numbers are its period's curves**, which is a complete parameter
+/// set for the read likelihood and is what lets a stratum below the refusal floor be emitted at
+/// all (`str_slippage_level_curve.md` §1.1, §5.1).
 ///
 /// **It carries no length spectrum, no concentration and no log-likelihood**, because there was
 /// no fit to produce them. A separate shape rather than a [`StratumFit`] with those fields left
@@ -402,8 +427,9 @@ pub struct DerivedStratum {
     pub slippage: Vec<Option<Slippage>>,
     /// Where each group's level came from; always the curve, since there was no fit to blend.
     pub level_provenance: Vec<Option<LevelProvenance>>,
-    /// Where each group's two shares were copied from.
-    pub shares_source: Vec<Option<SharesSource>>,
+    /// Where each group's two shares came from; always their period's curve, since there was no
+    /// fit here to blend with it.
+    pub shares_provenance: Vec<Option<SharesProvenance>>,
     /// Tracts this stratum holds with at least one spanning read — the evidence that was too
     /// thin to fit, and which a consumer still has to be able to see.
     pub tracts_of_its_own: usize,
@@ -471,10 +497,10 @@ impl StratumOutcome {
     }
 
     /// Where each group's two shares came from — empty for a refusal.
-    pub fn shares_source(&self) -> &[Option<SharesSource>] {
+    pub fn shares_provenance(&self) -> &[Option<SharesProvenance>] {
         match self {
-            Self::Fitted(fit) => &fit.shares_source,
-            Self::Derived(derived) => &derived.shares_source,
+            Self::Fitted(fit) => &fit.shares_provenance,
+            Self::Derived(derived) => &derived.shares_provenance,
             Self::Refused { .. } => &[],
         }
     }
@@ -552,9 +578,9 @@ pub struct SsrFitConfig {
     /// A round stops the climb when it improved the mean log-likelihood a tract by less than
     /// this.
     pub stillness: f64,
-    /// Fewest **slipped** reads a stratum needs before its direction split and fall-off are its
-    /// own rather than a neighbour's; see [`MIN_SLIPPED_READS_TO_FIT_SHARES`].
-    pub min_slipped_reads_to_fit_shares: f64,
+    /// How the two **shares** are smoothed across repeat count once every stratum has its own
+    /// answer; see [`share_curve`](super::share_curve).
+    pub share_curve: ShareCurveConfig,
     /// How many tracts a stratum must reach, its borrowings included, before anything is
     /// fitted at all.
     pub refusal_floor: usize,
@@ -575,7 +601,7 @@ impl Default for SsrFitConfig {
             starting_points: StartingPoint::spanning_the_monomorphic_range(),
             max_rounds: 5,
             stillness: 1e-6,
-            min_slipped_reads_to_fit_shares: MIN_SLIPPED_READS_TO_FIT_SHARES,
+            share_curve: ShareCurveConfig::default(),
             refusal_floor: DEFAULT_REFUSAL_FLOOR,
             curve: SlippageCurveConfig::default(),
         }
@@ -712,11 +738,18 @@ fn fit_pooled(
         // receiving stratum's own counts, exactly as it replaces `stratum` and `borrowed`.
         tracts_of_its_own: evidence.tracts_with_reads(),
         reads_crossing: evidence.spanning_reads(),
-        // Every stratum starts owning its own shares; D2 replaces this where its slipped reads
-        // fall short of the floor.
-        shares_source: live_groups
+        // Every stratum starts owning its own shares, with the slipped-read count they rest on.
+        // `fit_strata` re-emits them through their period's curves.
+        shares_provenance: live_groups
             .iter()
-            .map(|live| live.then_some(SharesSource::Own))
+            .enumerate()
+            .map(|(group, live)| {
+                live.then(|| {
+                    SharesProvenance::own(
+                        parameters.slippage[group].level * evidence.spanning_reads() as f64,
+                    )
+                })
+            })
             .collect(),
         // Every level starts as the stratum's own fit. Drawing curves is step B3's; until then
         // this records the truth, which is that no curve touched it.
@@ -820,25 +853,27 @@ fn normalise(weights: &mut [f64]) {
 }
 
 // ---------------------------------------------------------------------
-// Thin strata: the curve for the level, a neighbour's shares for the rest
+// Thin strata: every slippage number from its period's curve
 // ---------------------------------------------------------------------
 
-/// Fit every stratum on its own tracts, then furnish the thin ones from elsewhere.
+/// Fit every stratum on its own tracts, then draw a curve a motif period through what they
+/// measured and re-emit every number through it.
 ///
-/// **Three things happen, in this order.** Every stratum that holds at least
-/// [`SsrFitConfig::refusal_floor`] tracts of its own is fitted from them and no others'. Then a
-/// stratum whose own slipped reads fall short of
-/// [`SsrFitConfig::min_slipped_reads_to_fit_shares`] takes its direction split and fall-off from
-/// its nearest well-measured neighbour at the same period. Then each motif period's curve is
-/// drawn through the strata that stood on their own tracts, and every level is re-emitted
-/// through it.
+/// **Three things happen, in this order.** Every stratum holding at least
+/// [`SsrFitConfig::refusal_floor`] tracts of its own is fitted from them and no others'. Then one
+/// curve a motif period is drawn for each of the three slippage numbers, through the strata that
+/// stood on their own tracts and weighted by how precisely each holds its own answer. Then every
+/// stratum's numbers are re-emitted as a blend of its own answer and its period's curve, and a
+/// stratum too thin to have been fitted at all takes the curves whole.
 ///
-/// **Nothing pools tracts any more.** Pooling was how a thin stratum got an answer at all, and
-/// the two halves of that answer now come from better places: the level from a line through
-/// every stratum of its period weighted by evidence, rather than from whichever neighbour the
-/// ring happened to reach; the shares from a neighbour that actually measured them. What it also
-/// removes is the run's expensive arm — 1,036.8 s against 155.5 s on the same cohort
-/// (`str_slippage_level_curve.md` §5.1).
+/// **All three curves are drawn before either blend runs**, so no curve is ever fitted to a
+/// number another curve emitted — the circularity `str_slippage_level_curve.md` §5.1 forbids.
+///
+/// **Nothing pools tracts and nothing copies a neighbour's shares any more.** Pooling was how a
+/// thin stratum got an answer at all, and copying was how it got its two shares; both are
+/// replaced by a curve through every stratum of the period, weighted, which reaches strata
+/// neither could. Removing pooling also removed the run's expensive arm — 1,036.8 s against
+/// 155.5 s on the same cohort (`str_slippage_level_curve.md` §5.1).
 pub fn fit_strata(
     strata: &[StratumEvidence],
     homozygote_excess: &[f64],
@@ -883,42 +918,43 @@ pub fn fit_strata(
         })
         .collect();
 
-    // **The two shares before the level**, because a stratum too thin for its own shares may
-    // still be the one a curve is drawn through, and the curve reads levels rather than shares.
-    let lenders = strata_lending_their_shares(&outcomes, config);
-    copy_shares_from_a_neighbour(&mut outcomes, &lenders, config);
-
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
-    // is untouched by this — a stratum's own fitted level is the same number whether curves are
-    // drawn or not, which is the property the parity oracle checks.
+    // is untouched by this — a stratum's own fitted numbers are the same whether curves are drawn
+    // or not, which is the property the parity oracle checks.
     if config.curve.draw_curves {
-        smooth_levels_across_repeat_count(&mut outcomes, config);
-    }
+        // **All three curves are drawn here, before either blend runs**, and both read fits that
+        // nothing has touched. Drawing a curve after the levels had been blended would fit a
+        // curve to the previous curve's output, which is the circularity
+        // `str_slippage_level_curve.md` §5.1 forbids in so many words.
+        let levels = draw_a_curve_a_period(&outcomes, config);
+        let shares = draw_share_curves_a_period(&outcomes, config);
 
-    // **Last, because it needs both**: a stratum too thin to fit anything of its own is
-    // furnished from a curve and from a neighbour rather than refused.
-    if config.curve.draw_curves {
-        derive_thin_strata(&mut outcomes, strata, &lenders, config);
+        smooth_levels_across_repeat_count(&mut outcomes, &levels, config);
+        smooth_shares_across_repeat_count(&mut outcomes, &shares, config);
+        // **Last, because it needs all three**: a stratum too thin to fit anything of its own is
+        // furnished from its period's curves rather than refused.
+        derive_thin_strata(&mut outcomes, strata, &levels, &shares);
     }
     outcomes
 }
 
 /// Turn a stratum too thin to fit anything of its own into one furnished from elsewhere.
 ///
-/// **This is what spec §1.1's first goal asks for: every populated stratum carries a level.** Its
-/// level is its period's curve and its two shares are its nearest well-measured neighbour's. Since
-/// nothing about it was estimated it comes back as a [`DerivedStratum`] — no length spectrum, no
-/// concentration, no log-likelihood — rather than as a [`StratumFit`] with those left empty.
+/// **This is what spec §1.1's first goal asks for: every populated stratum carries a level.** All
+/// three of its numbers are its period's curves. Since nothing about it was estimated it comes
+/// back as a [`DerivedStratum`] — no length spectrum, no concentration, no log-likelihood —
+/// rather than as a [`StratumFit`] with those left empty.
 ///
-/// **Two refusals survive and both mean there is genuinely no answer**: a stratum no read
-/// crossed, and one whose period has neither a curve nor a stratum lending its shares.
+/// **Two refusals survive**: a stratum no read crossed, and one whose period has no *level*
+/// curve. The second is the only floor left standing — a period needs
+/// [`SlippageCurveConfig::min_cells_for_a_curve`] strata fitted on their own tracts before a
+/// level curve is drawn at all, where the two shares always have a curve to give.
 fn derive_thin_strata(
     outcomes: &mut [StratumOutcome],
     strata: &[StratumEvidence],
-    lenders: &[(Stratum, usize, Slippage)],
-    config: &SsrFitConfig,
+    curves: &BTreeMap<u8, PeriodCurves>,
+    share_curves: &BTreeMap<(u8, usize), SharesCurves>,
 ) {
-    let curves = draw_a_curve_a_period(outcomes, config);
     let evidence_of: BTreeMap<Stratum, &StratumEvidence> = strata
         .iter()
         .map(|evidence| (evidence.stratum, evidence))
@@ -944,7 +980,7 @@ fn derive_thin_strata(
 
         let mut slippage: Vec<Option<Slippage>> = vec![None; with_reads.len()];
         let mut level_provenance: Vec<Option<LevelProvenance>> = vec![None; with_reads.len()];
-        let mut shares_source: Vec<Option<SharesSource>> = vec![None; with_reads.len()];
+        let mut shares_provenance: Vec<Option<SharesProvenance>> = vec![None; with_reads.len()];
         let mut furnished_any = false;
 
         for (group, live) in with_reads.iter().enumerate() {
@@ -955,15 +991,14 @@ fn derive_thin_strata(
                 .get(&stratum.period)
                 .and_then(|period| period.by_group.get(group))
                 .and_then(Option::as_ref);
-            let (Some(curve), Some((from, lent))) =
-                (curve, nearest_lender(lenders, stratum, group))
+            let (Some(curve), Some(shares)) = (curve, share_curves.get(&(stratum.period, group)))
             else {
                 continue;
             };
             slippage[group] = Some(Slippage {
                 level: curve.level_at(repeats),
-                shorter_share: lent.shorter_share,
-                fall_off: lent.fall_off,
+                shorter_share: shares.shorter_share.share_at(repeats),
+                fall_off: shares.fall_off.share_at(repeats),
             });
             level_provenance[group] = Some(LevelProvenance {
                 source: LevelSource::Curve,
@@ -972,8 +1007,18 @@ fn derive_thin_strata(
                 // Nothing was fitted here, so there is no level of its own to count against.
                 slipped_reads: None,
             });
-            shares_source[group] = Some(SharesSource::CopiedFrom {
-                reference_repeats: from,
+            shares_provenance[group] = Some(SharesProvenance {
+                slipped_reads: None,
+                shorter_share: ShareProvenance {
+                    source: ShareSource::Curve,
+                    curve: Some(shares.shorter_share),
+                    reach: Some(shares.shorter_share.reach(repeats)),
+                },
+                fall_off: ShareProvenance {
+                    source: ShareSource::Curve,
+                    curve: Some(shares.fall_off),
+                    reach: Some(shares.fall_off.reach(repeats)),
+                },
             });
             furnished_any = true;
         }
@@ -983,7 +1028,7 @@ fn derive_thin_strata(
                 stratum,
                 slippage,
                 level_provenance,
-                shares_source,
+                shares_provenance,
                 tracts_of_its_own: evidence.tracts_with_reads(),
                 reads_crossing: evidence.spanning_reads(),
             }));
@@ -1051,8 +1096,11 @@ fn draw_a_curve_a_period(
 /// its own output — the circularity `str_slippage_level_curve.md` §4 exists to prevent. So a run
 /// that draws curves is meant to fit stage one with borrowing off; with borrowing on, few strata
 /// contribute and the curves are correspondingly thin.
-fn smooth_levels_across_repeat_count(outcomes: &mut [StratumOutcome], config: &SsrFitConfig) {
-    let curves = draw_a_curve_a_period(outcomes, config);
+fn smooth_levels_across_repeat_count(
+    outcomes: &mut [StratumOutcome],
+    curves: &BTreeMap<u8, PeriodCurves>,
+    config: &SsrFitConfig,
+) {
     for outcome in outcomes.iter_mut() {
         let StratumOutcome::Fitted(fit) = outcome else {
             continue;
@@ -1093,105 +1141,194 @@ fn smooth_levels_across_repeat_count(outcomes: &mut [StratumOutcome], config: &S
     }
 }
 
-/// Which strata measured their own direction split and fall-off well enough to lend them.
+/// One motif period and slippage group's two share curves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SharesCurves {
+    shorter_share: ShareCurve,
+    fall_off: ShareCurve,
+}
+
+/// One curve for each share, per motif period and slippage group.
 ///
-/// A stratum lends when its **own** slipped reads reach
-/// [`SsrFitConfig::min_slipped_reads_to_fit_shares`]; a stratum that copied its shares from
-/// somewhere else never lends them on, or a single well-measured stratum would propagate down a
-/// whole period through strata that measured nothing.
-fn strata_lending_their_shares(
+/// **Only a stratum fitted from its own tracts feeds a curve**, and it feeds it with its own
+/// share and its own slipped-read count — never a blended one, or each round of smoothing would
+/// fit a curve to the previous round's curve.
+///
+/// **A curve always comes back for a period that has a populated stratum**, even one where
+/// nothing was fitted: `share_curve_for_a_period` falls back to the run's other periods and then
+/// to a built-in constant, recording which in the curve's own provenance. These numbers are a
+/// prior the read likelihood consults, so answering coarsely beats refusing.
+fn draw_share_curves_a_period(
     outcomes: &[StratumOutcome],
     config: &SsrFitConfig,
-) -> Vec<(Stratum, usize, Slippage)> {
-    outcomes
+) -> BTreeMap<(u8, usize), SharesCurves> {
+    let groups = outcomes
         .iter()
-        .filter_map(|outcome| match outcome {
-            StratumOutcome::Fitted(fit) => Some(fit),
-            _ => None,
-        })
-        .flat_map(|fit| {
-            fit.slippage
-                .iter()
-                .enumerate()
-                .filter_map(move |(group, slippage)| {
-                    let slippage = (*slippage)?;
-                    let slipped = slippage.level * fit.reads_crossing as f64;
-                    (slipped >= config.min_slipped_reads_to_fit_shares).then_some((
-                        fit.stratum,
-                        group,
-                        slippage,
-                    ))
-                })
+        .map(|outcome| outcome.slippage().len())
+        .max()
+        .unwrap_or(0);
+    if groups == 0 {
+        return BTreeMap::new();
+    }
+
+    // Every stratum's own two shares, keyed by motif period and slippage group.
+    let mut fitted: BTreeMap<(u8, usize), (Vec<FittedShare>, Vec<FittedShare>)> = BTreeMap::new();
+    for outcome in outcomes.iter() {
+        let StratumOutcome::Fitted(fit) = outcome else {
+            continue;
+        };
+        // **A stratum that read another's tracts carries another's shares**, so it consumes a
+        // curve and does not feed one. Nothing pools tracts today; the guard keeps the rule true
+        // by construction rather than by the absence of pooling.
+        if !fit.borrowed.is_empty() {
+            continue;
+        }
+        for (group, slippage) in fit.slippage.iter().enumerate() {
+            let Some(slippage) = slippage else { continue };
+            let slipped_reads = slippage.level * fit.reads_crossing as f64;
+            let repeats = fit.stratum.reference_repeats;
+            let here = fitted.entry((fit.stratum.period, group)).or_default();
+            here.0.push(FittedShare {
+                repeats,
+                share: slippage.shorter_share,
+                slipped_reads,
+            });
+            here.1.push(FittedShare {
+                repeats,
+                share: slippage.fall_off,
+                slipped_reads,
+            });
+        }
+    }
+
+    // Every period a populated stratum sits at, whether or not anything there was fitted.
+    let mut wanted: Vec<(u8, usize)> = Vec::new();
+    for outcome in outcomes.iter() {
+        if matches!(
+            outcome,
+            StratumOutcome::Refused {
+                reason: StratumRefusal::NoSpanningReads,
+                ..
+            }
+        ) {
+            continue;
+        }
+        for group in 0..groups {
+            wanted.push((outcome.stratum().period, group));
+        }
+    }
+    wanted.sort_unstable();
+    wanted.dedup();
+
+    wanted
+        .into_iter()
+        .map(|(period, group)| {
+            let empty = (Vec::new(), Vec::new());
+            let here = fitted.get(&(period, group)).unwrap_or(&empty);
+            // The same slippage group at every *other* motif period — the rung below this
+            // period's own strata, and the one the curve records as crossing periods.
+            let mut elsewhere: (Vec<FittedShare>, Vec<FittedShare>) = (Vec::new(), Vec::new());
+            for ((other_period, other_group), shares) in &fitted {
+                if *other_group == group && *other_period != period {
+                    elsewhere.0.extend_from_slice(&shares.0);
+                    elsewhere.1.extend_from_slice(&shares.1);
+                }
+            }
+            (
+                (period, group),
+                SharesCurves {
+                    shorter_share: share_curve_for_a_period(
+                        &here.0,
+                        &elsewhere.0,
+                        DEFAULT_SHORTER_SHARE,
+                        &config.share_curve,
+                    ),
+                    fall_off: share_curve_for_a_period(
+                        &here.1,
+                        &elsewhere.1,
+                        DEFAULT_FALL_OFF,
+                        &config.share_curve,
+                    ),
+                },
+            )
         })
         .collect()
 }
 
-/// Give every stratum whose own slipped reads fall short of the floor its nearest well-measured
-/// neighbour's direction split and fall-off.
+/// Re-emit every fitted stratum's two shares through its period's curves.
 ///
-/// **Copied whole, never refitted.** Pooling the two strata's tracts and refitting would move the
-/// *level* as well, and the level has a better answer than a neighbour's
-/// (`str_slippage_level_curve.md` §5.1).
+/// **Only the two shares move.** The level has already had its own curve, and the length spectrum
+/// and concentration are the stratum's own and are not touched.
 ///
-/// **Nearest by repeat count, and the shorter tract wins a tie** — there are more short tracts, so
-/// the shorter neighbour is the one more loci will be read against. **Motif period is never
-/// crossed**: the direction split runs 1.4× at tomato homopolymers and 4.9× at its dinucleotides,
-/// so a copy across periods would carry a threefold error.
-fn copy_shares_from_a_neighbour(
+/// **The weight each stratum's own answer carries is its own slipped-read count**, read from the
+/// provenance rather than recomputed from the emitted level — by this point the level has been
+/// blended, and a weight computed from it would be partly a property of the level's curve.
+fn smooth_shares_across_repeat_count(
     outcomes: &mut [StratumOutcome],
-    lenders: &[(Stratum, usize, Slippage)],
+    curves: &BTreeMap<(u8, usize), SharesCurves>,
     config: &SsrFitConfig,
 ) {
     for outcome in outcomes.iter_mut() {
         let StratumOutcome::Fitted(fit) = outcome else {
             continue;
         };
-        let here = fit.stratum;
-        let reads_crossing = fit.reads_crossing as f64;
+        let repeats = fit.stratum.reference_repeats;
+        let period = fit.stratum.period;
         for group in 0..fit.slippage.len() {
             let Some(own) = fit.slippage[group] else {
                 continue;
             };
-            if own.level * reads_crossing >= config.min_slipped_reads_to_fit_shares {
-                continue;
-            }
-            let Some((from, lent)) = nearest_lender(lenders, here, group) else {
+            let Some(shares) = curves.get(&(period, group)) else {
                 continue;
             };
+            // **A stratum that read another's tracts brings no shares of its own to weigh**, so
+            // the curve supplies them outright — the same rule the level follows.
+            let own_slipped_reads = (fit.borrowed.is_empty())
+                .then(|| {
+                    fit.shares_provenance[group].and_then(|provenance| provenance.slipped_reads)
+                })
+                .flatten();
+
+            let blend = |share: f64, curve: &ShareCurve| {
+                blend_share(
+                    own_slipped_reads.map(|slipped_reads| FittedShare {
+                        repeats,
+                        share,
+                        slipped_reads,
+                    }),
+                    Some(curve),
+                    repeats,
+                    &config.share_curve,
+                )
+            };
+            let (Some(shorter), Some(fall_off)) = (
+                blend(own.shorter_share, &shares.shorter_share),
+                blend(own.fall_off, &shares.fall_off),
+            ) else {
+                continue;
+            };
+
             if let Some(slippage) = fit.slippage[group].as_mut() {
-                slippage.shorter_share = lent.shorter_share;
-                slippage.fall_off = lent.fall_off;
+                slippage.shorter_share = shorter.share;
+                slippage.fall_off = fall_off.share;
             }
-            fit.shares_source[group] = Some(SharesSource::CopiedFrom {
-                reference_repeats: from,
-            });
+            if let Some(provenance) = fit.shares_provenance[group].as_mut() {
+                if own_slipped_reads.is_none() {
+                    provenance.slipped_reads = None;
+                }
+                provenance.shorter_share = ShareProvenance {
+                    source: shorter.source,
+                    curve: Some(shares.shorter_share),
+                    reach: shorter.reach,
+                };
+                provenance.fall_off = ShareProvenance {
+                    source: fall_off.source,
+                    curve: Some(shares.fall_off),
+                    reach: fall_off.reach,
+                };
+            }
         }
     }
-}
-
-/// The nearest repeat count at the same period, in the same slippage group, whose shares are its
-/// own — with the shorter tract winning where two are equally near.
-fn nearest_lender(
-    lenders: &[(Stratum, usize, Slippage)],
-    here: Stratum,
-    group: usize,
-) -> Option<(u64, Slippage)> {
-    lenders
-        .iter()
-        .filter(|(stratum, lending_group, _)| {
-            stratum.period == here.period
-                && *lending_group == group
-                && stratum.reference_repeats != here.reference_repeats
-        })
-        .min_by_key(|(stratum, _, _)| {
-            (
-                stratum.reference_repeats.abs_diff(here.reference_repeats),
-                // A tie goes to the shorter tract: there are more of them, so it is the one
-                // more loci will be read against.
-                stratum.reference_repeats,
-            )
-        })
-        .map(|(stratum, _, slippage)| (stratum.reference_repeats, *slippage))
 }
 
 // ---------------------------------------------------------------------
@@ -2227,8 +2364,14 @@ mod tests {
                 reach: None,
                 slipped_reads: Some(level * reads as f64),
             })],
-            shares_source: vec![Some(SharesSource::Own)],
+            shares_provenance: vec![Some(SharesProvenance::own(level * reads as f64))],
         }))
+    }
+
+    /// Draw the level's curves and re-emit every level through them, as `fit_strata` does.
+    fn smooth_levels(outcomes: &mut [StratumOutcome], config: &SsrFitConfig) {
+        let curves = draw_a_curve_a_period(outcomes, config);
+        smooth_levels_across_repeat_count(outcomes, &curves, config);
     }
 
     fn level_of(outcome: &StratumOutcome) -> f64 {
@@ -2260,7 +2403,7 @@ mod tests {
         let mut unsmoothed = cells.clone();
         let mut smoothed = cells.clone();
         let config = SsrFitConfig::default();
-        smooth_levels_across_repeat_count(&mut smoothed, &config);
+        smooth_levels(&mut smoothed, &config);
 
         // The "off" arm is the same call with the switch down; it must change nothing at all.
         let off = SsrFitConfig {
@@ -2271,7 +2414,7 @@ mod tests {
             ..SsrFitConfig::default()
         };
         if off.curve.draw_curves {
-            smooth_levels_across_repeat_count(&mut unsmoothed, &off);
+            smooth_levels(&mut unsmoothed, &off);
         }
         assert_eq!(unsmoothed, cells, "the switch down must move nothing");
 
@@ -2318,7 +2461,7 @@ mod tests {
             .map(|repeats| fitted_at(1, repeats, 0.002 * repeats as f64, 100_000))
             .collect();
         let mut smoothed = cells.clone();
-        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        smooth_levels(&mut smoothed, &SsrFitConfig::default());
         assert_eq!(smoothed, cells);
     }
 
@@ -2337,7 +2480,7 @@ mod tests {
         cells.push(borrower);
 
         let mut smoothed = cells.clone();
-        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        smooth_levels(&mut smoothed, &SsrFitConfig::default());
 
         let last = smoothed.last().expect("the borrower");
         let curve = provenance_of(last).curve.expect("a curve");
@@ -2379,7 +2522,7 @@ mod tests {
         cells.push(borrower);
 
         let mut smoothed = cells.clone();
-        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        smooth_levels(&mut smoothed, &SsrFitConfig::default());
 
         let last = smoothed.last().expect("the borrower");
         let StratumOutcome::Fitted(fit) = last else {
@@ -2399,10 +2542,11 @@ mod tests {
         assert_eq!(slippage.fall_off, 0.42);
     }
 
-    /// A stratum with no fit is untouched: the curve cannot give it the shares it also needs,
-    /// and supplying those is the borrowing rule's job.
+    /// Re-emitting the levels leaves a stratum with no fit of its own untouched. Turning it into
+    /// a stratum furnished from its period's curves is a separate step — `derive_thin_strata` —
+    /// and it needs all three curves, not the level's alone.
     #[test]
-    fn a_refused_stratum_stays_refused_until_borrowing_supplies_its_shares() {
+    fn smoothing_the_levels_leaves_a_stratum_with_no_fit_alone() {
         let mut cells: Vec<StratumOutcome> = (8..=20)
             .map(|repeats| fitted_at(1, repeats, 0.005 * repeats as f64 - 0.035, 200_000))
             .collect();
@@ -2418,15 +2562,15 @@ mod tests {
             },
         });
         let mut smoothed = cells.clone();
-        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        smooth_levels(&mut smoothed, &SsrFitConfig::default());
         assert_eq!(smoothed.last(), cells.last());
     }
 
     /// **The whole point of the change, end to end: a stratum too thin to be fitted alone comes
-    /// back with a level drawn from its period's curve and shares borrowed from its
-    /// neighbours.** Standing alone it is refused and gets nothing at all.
+    /// back with all three of its slippage numbers drawn from its period's curves.** Standing
+    /// alone it is refused and gets nothing at all.
     #[test]
-    fn a_stratum_too_thin_to_stand_alone_ends_up_with_a_curve_level_and_borrowed_shares() {
+    fn a_stratum_too_thin_to_stand_alone_ends_up_with_all_three_numbers_from_curves() {
         let spectrum = spectrum_of(3);
         // Five fat strata whose levels rise with repeat count, and one far too thin to be fitted
         // on its own tracts.
@@ -2455,10 +2599,6 @@ mod tests {
             allele_span: 1,
             max_rounds: 1,
             refusal_floor: 50,
-            // A drawn stratum of 120 tracts at 8 samples and 6 reads carries about 5,760 reads,
-            // so at these levels it slips a few hundred times — enough to lend its shares here,
-            // where the shipped floor of 4,000 is set for a genome walk.
-            min_slipped_reads_to_fit_shares: 200.0,
             starting_points: vec![StartingPoint {
                 slippage_level: 0.10,
                 concentration: 3.0,
@@ -2505,19 +2645,26 @@ mod tests {
         assert_eq!(numbers.level, curve.level_at(13));
         assert!(numbers.level > 0.0 && numbers.level < 1.0);
 
-        // Its two shares are a neighbour's, and the provenance names which.
-        let SharesSource::CopiedFrom { reference_repeats } =
-            thin.shares_source[0].expect("a furnished group")
-        else {
-            panic!("nothing here measured its own shares");
-        };
-        let lent = outcomes
-            .iter()
-            .find(|outcome| outcome.stratum().reference_repeats == reference_repeats)
-            .and_then(|outcome| outcome.slippage()[0])
-            .expect("the lender is one of the fitted strata");
-        assert_eq!(numbers.shorter_share, lent.shorter_share);
-        assert_eq!(numbers.fall_off, lent.fall_off);
+        // **Its two shares are its period's curves, the same treatment the level gets.** Nothing
+        // was fitted here, so there is no own answer to blend with and the curve is taken whole.
+        let shares = thin.shares_provenance[0].expect("a furnished group");
+        assert_eq!(shares.slipped_reads, None, "nothing was fitted here");
+        assert_eq!(shares.shorter_share.source, ShareSource::Curve);
+        assert_eq!(shares.fall_off.source, ShareSource::Curve);
+
+        let split_curve = shares.shorter_share.curve.expect("its period has a curve");
+        let fall_off_curve = shares.fall_off.curve.expect("its period has a curve");
+        assert_eq!(numbers.shorter_share, split_curve.share_at(13));
+        assert_eq!(numbers.fall_off, fall_off_curve.share_at(13));
+        assert_eq!(split_curve.source, ShareCurveSource::ThisPeriod);
+        assert_eq!(
+            split_curve.strata, 5,
+            "only the five strata fitted on their own tracts feed it"
+        );
+
+        // Both shares stay proportions, and near the truth the strata were drawn from.
+        assert!(numbers.shorter_share > 0.0 && numbers.shorter_share < 1.0);
+        assert!(numbers.fall_off > 0.0 && numbers.fall_off < 1.0);
     }
 
     /// A stratum with no reads at all is refused rather than fitted, and it is refused by name.
@@ -2547,25 +2694,26 @@ mod tests {
         ));
     }
 
-    /// **A thin stratum borrows from its nearest repeat counts and never across motif
-    /// lengths.** The borrowing is what a run has to be able to read off the answer, so it is
-    /// recorded rather than only acted on.
+    /// **Every stratum's two shares are re-emitted through its period's curves, and how far each
+    /// moves is set by its own evidence.** The rule this replaced was a gate: a stratum either
+    /// measured its own shares on 4,000 slipped reads or took one neighbour's whole.
     #[test]
-    fn a_stratum_too_thin_for_its_own_shares_copies_its_nearest_well_measured_neighbours() {
+    fn a_stratum_departs_from_its_periods_share_curve_by_how_much_evidence_it_has() {
         let spectrum = spectrum_of(3);
+        let truth = Slippage {
+            level: 0.10,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        // Five strata at one period, the last of them holding a twentieth of the others' tracts.
         let mut strata = Vec::new();
-        // Two fat strata that measure their own shares, and one between them that cannot.
-        // The thin one sits nearer to the 11-repeat lender than to the 8-repeat one.
-        for (repeats, tracts, level, seed) in [
-            (8_u64, 400_usize, 0.09, 3_u64),
-            (11, 400, 0.12, 5),
-            (10, 60, 0.11, 7),
+        for (repeats, tracts, seed) in [
+            (8_u64, 400_usize, 3_u64),
+            (9, 400, 5),
+            (10, 400, 7),
+            (11, 400, 9),
+            (12, 60, 11),
         ] {
-            let truth = Slippage {
-                level,
-                shorter_share: 0.83,
-                fall_off: 0.25,
-            };
             let mut evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, tracts, 8, 6, 1, seed);
             evidence.stratum = Stratum {
                 period: 2,
@@ -2577,56 +2725,107 @@ mod tests {
             allele_span: 1,
             max_rounds: 1,
             refusal_floor: 50,
-            // The two fat strata clear this on their own reads; the thin one does not.
-            min_slipped_reads_to_fit_shares: 1_500.0,
             starting_points: vec![StartingPoint {
                 slippage_level: 0.10,
                 concentration: 3.0,
             }],
-            curve: SlippageCurveConfig {
-                draw_curves: false,
-                ..SlippageCurveConfig::default()
-            },
             ..SsrFitConfig::default()
         };
         let outcomes = fit_strata(&strata, &vec![0.4; 8], &config);
 
-        let lender = match &outcomes[1] {
-            StratumOutcome::Fitted(fit) => fit.clone(),
-            other => panic!("the 11-repeat stratum is fitted: {other:?}"),
+        let shares_of = |index: usize| match &outcomes[index] {
+            StratumOutcome::Fitted(fit) => fit.shares_provenance[0].expect("a fitted group"),
+            other => panic!("stratum {index} is fitted: {other:?}"),
         };
-        assert_eq!(lender.shares_source[0], Some(SharesSource::Own));
 
-        let StratumOutcome::Fitted(thin) = &outcomes[2] else {
-            panic!("sixty tracts clears the refusal floor and is fitted on its own");
-        };
-        // **Its own tracts, never a pooled set's** — nothing pools any more.
-        assert_eq!(thin.tracts_of_its_own, 60);
-        assert_eq!(thin.tracts_fitted, 60);
-        assert!(thin.borrowed.is_empty());
+        // Every one of them is a blend of its own answer and its period's curve, and each says
+        // how much of the curve it took.
+        for index in 0..5 {
+            let shares = shares_of(index);
+            assert!(
+                matches!(shares.shorter_share.source, ShareSource::Blend { .. }),
+                "stratum {index} came back as {:?}",
+                shares.shorter_share.source
+            );
+            assert!(shares.slipped_reads.expect("its own fit") > 0.0);
+        }
 
-        // The two shares are the nearer lender's, copied whole.
-        assert_eq!(
-            thin.shares_source[0],
-            Some(SharesSource::CopiedFrom {
-                reference_repeats: 11
-            }),
-            "eleven repeats is nearer to ten than eight is"
+        // **The thin one takes more of the curve than the fat ones**, because it holds its own
+        // answer less precisely — and that is the whole of the rule that replaced the gate.
+        let fat = shares_of(0).shorter_share.source.curve_weight();
+        let thin = shares_of(4).shorter_share.source.curve_weight();
+        assert!(
+            thin > fat,
+            "the thin stratum took {thin:.3} of its curve and the fat one {fat:.3}"
         );
-        let copied = thin.slippage[0].expect("a fitted group");
-        let lent = lender.slippage[0].expect("a fitted group");
-        assert_eq!(copied.shorter_share, lent.shorter_share);
-        assert_eq!(copied.fall_off, lent.fall_off);
+    }
 
-        // **The level is its own**, not the lender's: only the two shares are copied.
-        assert_ne!(copied.level, lent.level);
+    /// **A stratum that read another's tracts consumes the share curves and does not feed
+    /// them**, exactly as it does for the level: its shares are the pooled set's, so letting them
+    /// into the fit would be fitting a curve to a neighbour's answer.
+    #[test]
+    fn a_stratum_that_borrowed_reads_the_share_curves_but_does_not_feed_them() {
+        let mut cells: Vec<StratumOutcome> = (8..=12)
+            .map(|repeats| fitted_at(2, repeats, 0.02 * (repeats - 6) as f64, 40_000))
+            .collect();
+        let without_it = draw_share_curves_a_period(&cells, &SsrFitConfig::default());
+
+        let mut pooled = fitted_at(2, 13, 0.16, 40_000);
+        if let StratumOutcome::Fitted(fit) = &mut pooled {
+            fit.borrowed = vec![12];
+            if let Some(slippage) = fit.slippage[0].as_mut() {
+                slippage.shorter_share = 0.05;
+                slippage.fall_off = 0.95;
+            }
+        }
+        cells.push(pooled);
+        let with_it = draw_share_curves_a_period(&cells, &SsrFitConfig::default());
         assert_eq!(
-            thin.level_provenance[0]
-                .expect("a fitted group")
-                .slipped_reads
-                .map(|slipped| slipped > 0.0),
-            Some(true),
-            "a stratum fitted on its own tracts has a slipped-read count of its own"
+            without_it.get(&(2, 0)),
+            with_it.get(&(2, 0)),
+            "a stratum that borrowed moved its period's share curves"
+        );
+
+        // And it takes the curves whole, with no own answer weighed against them.
+        let config = SsrFitConfig::default();
+        smooth_shares_across_repeat_count(&mut cells, &with_it, &config);
+        let StratumOutcome::Fitted(fit) = &cells[5] else {
+            panic!("the pooled stratum is still a fit");
+        };
+        let shares = fit.shares_provenance[0].expect("a fitted group");
+        assert_eq!(shares.shorter_share.source, ShareSource::Curve);
+        assert_eq!(shares.fall_off.source, ShareSource::Curve);
+        assert_eq!(shares.slipped_reads, None);
+    }
+
+    /// **A curve is fitted to what the strata measured, never to what a curve emitted.** Drawing
+    /// the level's curve after the levels had been blended would fit the second curve to the
+    /// first one's output; `fit_strata` draws all three before either blend runs, so the curve a
+    /// thin stratum is furnished from is the one the fitted strata's own levels give.
+    #[test]
+    fn the_curve_a_thin_stratum_reads_is_fitted_to_unblended_levels() {
+        let mut cells: Vec<StratumOutcome> = (8..=12)
+            .map(|repeats| fitted_at(2, repeats, 0.02 * (repeats - 6) as f64, 40_000))
+            .collect();
+        let before = draw_a_curve_a_period(&cells, &SsrFitConfig::default());
+
+        let config = SsrFitConfig::default();
+        let shares = draw_share_curves_a_period(&cells, &config);
+        smooth_levels_across_repeat_count(&mut cells, &before, &config);
+        smooth_shares_across_repeat_count(&mut cells, &shares, &config);
+
+        // Refitting now — which is what the code did before the three curves were hoisted out —
+        // gives a different curve, because every level it reads has already been smoothed once.
+        let after = draw_a_curve_a_period(&cells, &config);
+        let line = |curves: &BTreeMap<u8, PeriodCurves>| {
+            let period = curves.get(&2).expect("period 2 has a curve");
+            let curve = period.by_group[0].expect("the only group has a line");
+            (curve.intercept, curve.slope)
+        };
+        assert_ne!(
+            line(&before),
+            line(&after),
+            "a second round of smoothing should move the curve, or this test proves nothing"
         );
     }
 }

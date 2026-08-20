@@ -823,16 +823,11 @@ fn fit_the_tracts(
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(ssr_fit::ALLELE_SPAN);
-    // **`SSR_SHARES_FLOOR=<slipped reads>` moves the floor below which a stratum takes its
-    // direction split and fall-off from a neighbour.** Nothing pools tracts any more, so there
-    // is no borrowing floor to set: a stratum is fitted from its own tracts or from none.
-    let min_slipped_reads_to_fit_shares: f64 = std::env::var("SSR_SHARES_FLOOR")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(ssr_fit::MIN_SLIPPED_READS_TO_FIT_SHARES);
+    // **There is no shares floor to set any more.** A stratum's direction split and fall-off are
+    // its own answer blended with its period's curve, in proportion to how precisely it holds
+    // them, so there is no threshold to cross and `SSR_SHARES_FLOOR` no longer does anything.
     let config = ssr_fit::SsrFitConfig {
         allele_span,
-        min_slipped_reads_to_fit_shares,
         ..ssr_fit::SsrFitConfig::default()
     };
     println!("  allele mass may sit within ±{allele_span} repeats of the reference length");
@@ -849,14 +844,12 @@ fn fit_the_tracts(
             .count()
     };
     println!(
-        "  fitted in {:.1} s: {} strata fitted from their own tracts, {} furnished from a curve \
-         and a neighbour, {} refused; shares borrowed below {:.0} slipped reads, nothing fitted \
-         below {} tracts",
+        "  fitted in {:.1} s: {} strata fitted from their own tracts, {} furnished from their \
+         period's curves, {} refused; nothing fitted below {} tracts",
         at.elapsed().as_secs_f64(),
         counted("fitted"),
         counted("derived"),
         counted("refused"),
-        config.min_slipped_reads_to_fit_shares,
         config.refusal_floor
     );
 
@@ -1735,6 +1728,38 @@ fn per_read_group(records: &mut SampleCensusEvidence) -> BTreeMap<String, usize>
 /// carries the counts that set how sharply a stratum determines each of its numbers — tracts,
 /// reads crossing, and reads sitting off the reference length — which the printed table never
 /// carried.
+/// One share's five columns: where it came from, how much of that was the curve, and what the
+/// curve was.
+fn one_share(provenance: &ssr_fit::ShareProvenance) -> String {
+    let (source, weight) = match provenance.source {
+        ssr_fit::ShareSource::Stratum => ("stratum".to_string(), 0.0),
+        ssr_fit::ShareSource::Curve => ("curve".to_string(), 1.0),
+        ssr_fit::ShareSource::Blend { curve_weight } => ("blend".to_string(), curve_weight),
+    };
+    match provenance.curve {
+        Some(curve) => {
+            let shape = match curve.shape {
+                ssr_fit::ShareShape::Flat => "flat",
+                ssr_fit::ShareShape::Sloping => "sloping",
+                ssr_fit::ShareShape::Turning => "turning",
+            };
+            // Which rung of the fallback ladder drew it — the answer to "is any stratum still
+            // furnished from nothing?".
+            let from = match curve.source {
+                ssr_fit::ShareCurveSource::ThisPeriod => "period",
+                ssr_fit::ShareCurveSource::ThisPeriodUnscored => "period-unscored",
+                ssr_fit::ShareCurveSource::OtherPeriods => "other-periods",
+                ssr_fit::ShareCurveSource::BuiltInDefault => "default",
+            };
+            format!(
+                "{source},{weight:.6},{shape},{from},{:.6}",
+                curve.held_out_error
+            )
+        }
+        None => format!("{source},{weight:.6},,,"),
+    }
+}
+
 fn write_cell_table(
     path: &str,
     outcomes: &[ssr_fit::StratumOutcome],
@@ -1744,7 +1769,11 @@ fn write_cell_table(
         "period,repeats,tracts,spanning_reads,off_reference_reads,bases_compared,\
          mismatching_bases,substitution_rate,fitted,level,shorter_share,fall_off,concentration,\
          log_likelihood_a_tract,converged,tracts_fitted,borrowed_from,level_source,curve_weight,\
-         curve_reach,curve_shape,curve_held_out_error,curve_cells\n",
+         curve_reach,curve_shape,curve_held_out_error,curve_cells,\
+         shorter_share_source,shorter_share_curve_weight,shorter_share_shape,\
+         shorter_share_curve_from,shorter_share_curve_error,\
+         fall_off_source,fall_off_curve_weight,fall_off_shape,fall_off_curve_from,\
+         fall_off_curve_error\n",
     );
     for outcome in outcomes {
         let stratum = outcome.stratum();
@@ -1830,8 +1859,28 @@ fn write_cell_table(
                 })
                 .unwrap_or_else(|| ",,,,,".to_string()),
         };
+        // **Where each of the two shares came from, beside the share.** The direction split and
+        // the fall-off get the same treatment the level does — their period's curve, their own
+        // fit, or a blend — and these ten columns are what tells the three apart
+        // (`str_slippage_level_curve.md` §5.1, §8).
+        let shares = match outcome {
+            ssr_fit::StratumOutcome::Refused { .. } => ",,,,,,,,,".to_string(),
+            _ => outcome
+                .shares_provenance()
+                .iter()
+                .flatten()
+                .next()
+                .map(|provenance| {
+                    format!(
+                        "{},{}",
+                        one_share(&provenance.shorter_share),
+                        one_share(&provenance.fall_off)
+                    )
+                })
+                .unwrap_or_else(|| ",,,,,,,,,".to_string()),
+        };
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{}\n",
             stratum.period,
             stratum.reference_repeats,
             own.tracts_with_reads(),
@@ -1842,6 +1891,7 @@ fn write_cell_table(
             substitution,
             fit,
             provenance,
+            shares,
         ));
     }
     std::fs::write(path, out).expect("the cell table's directory exists");

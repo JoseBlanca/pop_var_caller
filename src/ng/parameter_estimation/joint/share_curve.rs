@@ -568,6 +568,131 @@ pub fn share_curve_for_a_period(
 }
 
 // ---------------------------------------------------------------------
+// Where the curve and a stratum disagree
+// ---------------------------------------------------------------------
+
+/// Where one emitted share came from.
+///
+/// **The three are one formula with the curve's weight at its two ends and in between**, so a
+/// consumer that only wants the number need not match on which end it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShareSource {
+    /// The stratum's own fit, whole. Its period had no curve at all.
+    Stratum,
+    /// The curve, whole. The stratum had no fit of its own.
+    Curve,
+    /// Both, weighted by how precisely each determines the share.
+    Blend { curve_weight: f64 },
+}
+
+impl ShareSource {
+    /// The share the curve carried, whichever variant this is — 1 for [`ShareSource::Curve`] and
+    /// 0 for [`ShareSource::Stratum`].
+    pub fn curve_weight(self) -> f64 {
+        match self {
+            Self::Stratum => 0.0,
+            Self::Curve => 1.0,
+            Self::Blend { curve_weight } => curve_weight,
+        }
+    }
+}
+
+/// One stratum's emitted share and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlendedShare {
+    pub share: f64,
+    pub source: ShareSource,
+    /// Whether the stratum sat inside the curve's fitted range; `None` where there was no curve.
+    pub reach: Option<CurveReach>,
+}
+
+/// What one stratum's emitted share is, once its own fit and its period's curve have both had
+/// their say.
+///
+/// **Inverse variance on the logit scale** — the same blend the level gets, with the logarithm
+/// replaced by the logit because a share is a proportion. The stratum's own error is
+/// [`FittedShare::logit_standard_error`] and the curve's is its held-out error, both in logit
+/// units, and each side gets weight in proportion to one over its squared error.
+///
+/// **It is not a switch between two regimes.** At HG002's homopolymer direction split, whose
+/// curve predicts a held-out stratum to 0.165 logit units, the curve carries about 80% of the
+/// weight at a stratum with 40 slipped reads behind it, half at about 160, and 2% at one with
+/// 8,000. Using the curve everywhere is this formula with its weight pinned at one; keeping each
+/// stratum's own answer is it pinned at zero.
+///
+/// **This is what replaced the floor of 4,000 slipped reads.** That floor was a gate with a
+/// cliff — a stratum either measured its own shares or took one neighbour's whole — and across
+/// both cohorts exactly one motif period of twelve ever cleared it. The hand-over it was trying
+/// to name is here instead, and it lands two orders of magnitude lower because a curve through a
+/// period's strata is a much better guess than one neighbour's value.
+///
+/// **The knee.** A disagreement far larger than either error explains is evidence about the
+/// curve, not about the stratum, so beyond `disagreement_knee` combined errors the curve's weight
+/// is divided by `(gap / knee)²`.
+///
+/// **Three cases fall out of the same formula and none needs a branch:** a stratum with no fit of
+/// its own takes the curve whole; a period with no curve leaves the stratum its own answer; and
+/// everything else is a blend with the curve's share recorded.
+pub fn blend_share(
+    stratum: Option<FittedShare>,
+    curve: Option<&ShareCurve>,
+    repeats: u64,
+    config: &ShareCurveConfig,
+) -> Option<BlendedShare> {
+    match (stratum, curve) {
+        (Some(stratum), None) => Some(BlendedShare {
+            share: stratum.bounded(),
+            source: ShareSource::Stratum,
+            reach: None,
+        }),
+        (None, Some(curve)) => Some(BlendedShare {
+            share: curve.share_at(repeats),
+            source: ShareSource::Curve,
+            reach: Some(curve.reach(repeats)),
+        }),
+        (Some(stratum), Some(curve)) => {
+            let from_curve = curve.share_at(repeats);
+            // **A stratum with nothing behind it brings no evidence to weigh**, so it takes the
+            // curve whole rather than dragging the blend toward a share nothing measured.
+            if !stratum.is_usable() {
+                return Some(BlendedShare {
+                    share: from_curve,
+                    source: ShareSource::Curve,
+                    reach: Some(curve.reach(repeats)),
+                });
+            }
+            let own_error = stratum.logit_standard_error();
+            let curve_error = curve.held_out_error.max(SHARE_CURVE_ERROR_FLOOR);
+            let curve_logit = (from_curve / (1.0 - from_curve)).ln();
+
+            let gap = (stratum.logit() - curve_logit).abs()
+                / (own_error * own_error + curve_error * curve_error).sqrt();
+            let trust = if gap > config.disagreement_knee {
+                let over = gap / config.disagreement_knee;
+                1.0 / (over * over)
+            } else {
+                1.0
+            };
+
+            let own_weight = 1.0 / (own_error * own_error);
+            let curve_weight = trust / (curve_error * curve_error);
+            let share_of_curve = curve_weight / (own_weight + curve_weight);
+            let blended_logit =
+                (1.0 - share_of_curve) * stratum.logit() + share_of_curve * curve_logit;
+            Some(BlendedShare {
+                share: (1.0 / (1.0 + (-blended_logit).exp())).clamp(SHARE_FLOOR, SHARE_CEILING),
+                source: ShareSource::Blend {
+                    curve_weight: share_of_curve,
+                },
+                reach: Some(curve.reach(repeats)),
+            })
+        }
+        // Neither: nothing to emit, and saying so is the difference between missing and quiet.
+        (None, None) => None,
+    }
+}
+
+// ---------------------------------------------------------------------
 // The knobs, and where each number comes from
 // ---------------------------------------------------------------------
 
@@ -624,6 +749,14 @@ pub const DEFAULT_SHORTER_SHARE: f64 = 0.6;
 /// the price of answering at all where nothing was measured.
 pub const DEFAULT_FALL_OFF: f64 = 0.5;
 
+/// How far a stratum may sit from its curve, in the two errors combined, before the curve is
+/// taken to be wrong about that stratum rather than the stratum unlucky.
+///
+/// **2.5 combined errors, the same knee the level's blend uses.** *A conventional outlier knee
+/// and soft*: the blend already leans on a well-measured stratum without it, since a stratum with
+/// thousands of slipped reads outweighs a curve on its own.
+pub const SHARE_DISAGREEMENT_KNEE: f64 = 2.5;
+
 /// What a run may change about how a share's curve is fitted.
 ///
 /// **The weight each stratum carries is deliberately not here.** It is the inverse variance of
@@ -634,12 +767,16 @@ pub struct ShareCurveConfig {
     /// Below this many contributing strata a period gets no chosen shape, only a flat mean; see
     /// [`MIN_STRATA_FOR_A_SHARE_CURVE`].
     pub min_strata_for_a_curve: usize,
+    /// Where a stratum's disagreement with its curve stops being bad luck; see
+    /// [`SHARE_DISAGREEMENT_KNEE`].
+    pub disagreement_knee: f64,
 }
 
 impl Default for ShareCurveConfig {
     fn default() -> Self {
         Self {
             min_strata_for_a_curve: MIN_STRATA_FOR_A_SHARE_CURVE,
+            disagreement_knee: SHARE_DISAGREEMENT_KNEE,
         }
     }
 }
@@ -1159,6 +1296,174 @@ mod tests {
     fn the_default_config_is_the_measured_constants() {
         let config = ShareCurveConfig::default();
         assert_eq!(config.min_strata_for_a_curve, MIN_STRATA_FOR_A_SHARE_CURVE);
+        assert_eq!(config.disagreement_knee, SHARE_DISAGREEMENT_KNEE);
         assert_eq!(MIN_STRATA_FOR_A_SHARE_CURVE, 4);
+    }
+
+    // -----------------------------------------------------------------
+    // The blend
+    // -----------------------------------------------------------------
+
+    /// HG002's homopolymer direction split, as the real tables give it: flat at 0.65, predicting
+    /// a held-out stratum to 0.165 logit units.
+    fn hg002_homopolymer_split_curve() -> ShareCurve {
+        ShareCurve {
+            shape: ShareShape::Flat,
+            intercept: logit(0.65),
+            slope: 0.0,
+            bend: 0.0,
+            centre: 0.0,
+            fitted_from: 8,
+            fitted_to: 30,
+            held_out_error: 0.165,
+            strata: 23,
+            source: ShareCurveSource::ThisPeriod,
+        }
+    }
+
+    /// **The blend is not a switch.** The curve carries most of the weight at a stratum with
+    /// almost nothing behind it, half at a stratum in the middle, and almost none at a full one.
+    #[test]
+    fn the_curve_carries_the_weight_at_a_thin_stratum_and_stands_aside_at_a_full_one() {
+        let curve = hg002_homopolymer_split_curve();
+        let weight_at = |slipped: f64| {
+            blend_share(
+                Some(stratum(12, 0.65, slipped)),
+                Some(&curve),
+                12,
+                &ShareCurveConfig::default(),
+            )
+            .expect("a stratum and a curve")
+            .source
+            .curve_weight()
+        };
+        assert!((weight_at(40.0) - 0.80).abs() < 0.02, "{}", weight_at(40.0));
+        assert!(
+            (weight_at(160.0) - 0.50).abs() < 0.02,
+            "{}",
+            weight_at(160.0)
+        );
+        assert!(
+            (weight_at(8_000.0) - 0.02).abs() < 0.01,
+            "{}",
+            weight_at(8_000.0)
+        );
+    }
+
+    /// **The hand-over is two orders of magnitude below the floor it replaces.** The rule being
+    /// retired gave a stratum its own shares only above 4,000 slipped reads; under the blend a
+    /// stratum with 4,000 keeps 97% of its own answer, and the two sides are even at about 160.
+    #[test]
+    fn a_stratum_at_the_old_floor_keeps_almost_all_of_its_own_answer() {
+        let curve = hg002_homopolymer_split_curve();
+        let blended = blend_share(
+            Some(stratum(12, 0.50, 4_000.0)),
+            Some(&curve),
+            12,
+            &ShareCurveConfig::default(),
+        )
+        .expect("a stratum and a curve");
+        assert!(
+            blended.source.curve_weight() < 0.05,
+            "the curve carried {}",
+            blended.source.curve_weight()
+        );
+        assert!(
+            (blended.share - 0.50).abs() < 0.01,
+            "the emitted share is {}",
+            blended.share
+        );
+    }
+
+    /// The three degenerate cases fall out of the one formula: no curve leaves the stratum its
+    /// own answer, no fit takes the curve whole, and neither gives nothing.
+    #[test]
+    fn the_three_degenerate_cases_fall_out_of_the_same_formula() {
+        let curve = hg002_homopolymer_split_curve();
+        let config = ShareCurveConfig::default();
+
+        let alone = blend_share(Some(stratum(12, 0.4, 900.0)), None, 12, &config)
+            .expect("a stratum with no curve");
+        assert_eq!(alone.source, ShareSource::Stratum);
+        assert!((alone.share - 0.4).abs() < 1e-12);
+        assert_eq!(alone.reach, None);
+
+        let furnished = blend_share(None, Some(&curve), 12, &config).expect("a curve alone");
+        assert_eq!(furnished.source, ShareSource::Curve);
+        assert!((furnished.share - 0.65).abs() < 1e-9);
+        assert_eq!(furnished.reach, Some(CurveReach::Inside));
+
+        assert!(blend_share(None, None, 12, &config).is_none());
+    }
+
+    /// **A stratum far from its curve is evidence about the curve.** Beyond the knee the curve
+    /// is stood down, and the emitted share moves toward the stratum's own answer.
+    #[test]
+    fn the_knee_stands_the_curve_down_where_a_stratum_disagrees_with_it() {
+        let curve = hg002_homopolymer_split_curve();
+        // A stratum with enough reads that 0.20 against the curve's 0.65 is no accident.
+        let far = stratum(12, 0.20, 400.0);
+        let with_knee = blend_share(Some(far), Some(&curve), 12, &ShareCurveConfig::default())
+            .expect("a stratum and a curve");
+        let no_knee = blend_share(
+            Some(far),
+            Some(&curve),
+            12,
+            &ShareCurveConfig {
+                disagreement_knee: f64::INFINITY,
+                ..ShareCurveConfig::default()
+            },
+        )
+        .expect("a stratum and a curve");
+        assert!(
+            with_knee.source.curve_weight() < no_knee.source.curve_weight(),
+            "the knee should stand the curve down: {} against {}",
+            with_knee.source.curve_weight(),
+            no_knee.source.curve_weight()
+        );
+        assert!(with_knee.share < no_knee.share);
+        assert!((with_knee.share - far.share).abs() < (no_knee.share - far.share).abs());
+    }
+
+    /// A stratum sitting close to its curve is blended as if the knee were not there.
+    #[test]
+    fn the_knee_leaves_a_stratum_that_agrees_with_its_curve_alone() {
+        let curve = hg002_homopolymer_split_curve();
+        let near = stratum(12, 0.66, 400.0);
+        let with_knee = blend_share(Some(near), Some(&curve), 12, &ShareCurveConfig::default())
+            .expect("a stratum and a curve");
+        let no_knee = blend_share(
+            Some(near),
+            Some(&curve),
+            12,
+            &ShareCurveConfig {
+                disagreement_knee: f64::INFINITY,
+                ..ShareCurveConfig::default()
+            },
+        )
+        .expect("a stratum and a curve");
+        assert_eq!(with_knee, no_knee);
+    }
+
+    /// Every blended share is a proportion, at every mixture of evidence.
+    #[test]
+    fn a_blended_share_is_always_a_proportion() {
+        let curve = hg002_homopolymer_split_curve();
+        for share in [0.0, 1e-9, 0.001, 0.5, 0.999, 1.0] {
+            for slipped in [0.0, 1.0, 100.0, 1e6] {
+                let blended = blend_share(
+                    Some(stratum(12, share, slipped)),
+                    Some(&curve),
+                    12,
+                    &ShareCurveConfig::default(),
+                )
+                .expect("a stratum and a curve");
+                assert!(
+                    (0.0..=1.0).contains(&blended.share) && blended.share.is_finite(),
+                    "share {share} on {slipped} slipped reads blended to {}",
+                    blended.share
+                );
+            }
+        }
     }
 }

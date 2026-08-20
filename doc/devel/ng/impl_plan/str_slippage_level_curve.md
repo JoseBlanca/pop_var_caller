@@ -260,11 +260,16 @@ one with nothing gets the run's other periods, and a run that fitted nothing any
 built-in default, each recorded in the provenance. These numbers are a prior, so answering coarsely
 beats refusing.
 
-**E3. Blend each share, and retire the floor-and-copy rule.**  ☐
+**E3. Blend each share, and retire the floor-and-copy rule.**  ✅
 The blend is §7's with the logarithm replaced by the logit. `SharesSource` becomes the same
 three-way provenance the level carries. `strata_lending_their_shares`, `copy_shares_from_a_neighbour`
 and `nearest_lender` go. **Own commit, do not bundle** — it changes both shares at every stratum.
 ***Depends:*** E2. ***Source:*** spec §5.1, §7.
+***A defect found while wiring it, and fixed here.*** `derive_thin_strata` drew its own copy of the
+level's curves **after** `smooth_levels_across_repeat_count` had already re-emitted every level, so
+the curve a thin stratum was furnished from was fitted to once-smoothed levels — a curve fitted to
+a curve's output, which §5.1 forbids by name. All three curves are now drawn once, before either
+blend runs.
 
 **E4. Lower the refusal floor so thin strata contribute.**  ☐
 Fit strata far below 50 tracts so they feed their period's curves, weighted by their own
