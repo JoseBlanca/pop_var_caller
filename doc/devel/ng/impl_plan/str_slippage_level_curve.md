@@ -148,7 +148,7 @@ a curve error of 4.4% the curve carries 93% of the weight at 40 slipped reads an
 the knee standing the curve down at a gap of 9.3 combined errors, and the three degenerate cases.
 ***Depends:*** B1, A2. ***Source:*** spec §7, §7.1, §7.2.
 
-**B3. `fit_strata` draws the curves and emits blended levels.**  ☐
+**B3. `fit_strata` draws the curves and emits blended levels.**  ✅
 After every cell is fitted on its own tracts, group the fitted cells by period, run A4, and emit
 each cell's level through B2. **Own commit, do not bundle** — this is the step that changes the
 number a consumer reads, and its failure is a wrong genotype rather than a panic. The oracle:

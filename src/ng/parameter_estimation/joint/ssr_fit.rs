@@ -145,7 +145,10 @@ impl Slippage {
 /// locus — and re-exported here, where the fit reads it, so a consumer of either module names
 /// one type.
 pub use super::census::Stratum;
-pub use super::slippage_curve::{CurveReach, LevelSource, SlippageCurve};
+pub use super::slippage_curve::{
+    CurveReach, FittedCell, LevelSource, PeriodCurves, SlippageCurve, SlippageCurveConfig,
+    blend_level, choose_rise_shape,
+};
 
 /// One sample's spanning reads at one tract, split by the slippage group that produced them.
 ///
@@ -343,8 +346,12 @@ pub struct LevelProvenance {
     /// there is no curve. **A level held at a fitted end is under-stated in a known direction**
     /// (`str_slippage_level_curve.md` §6).
     pub reach: Option<CurveReach>,
-    /// How many of this stratum's own reads the emitted level says slipped — the count that sets
-    /// how precisely the stratum could determine its own level.
+    /// How many of this stratum's own reads **its own fitted level** said slipped.
+    ///
+    /// **The stratum's own level, not the emitted one**, because this is the evidence that stood
+    /// behind the cell — it is what set how precisely the stratum could determine its own answer,
+    /// and it is the weight the blend gave that answer. Computed from the emitted level it would
+    /// be partly a property of the curve, which is the thing it exists to be weighed against.
     pub slipped_reads: f64,
 }
 
@@ -438,6 +445,13 @@ pub struct SsrFitConfig {
     /// How many tracts a stratum must reach, its borrowings included, before anything is
     /// fitted at all.
     pub refusal_floor: usize,
+    /// How the slippage *level* is smoothed across repeat count once every stratum has its own
+    /// answer; see [`slippage_curve`](super::slippage_curve).
+    ///
+    /// **`draw_curves: false` is the arm the parity oracle runs.** Nothing about how a stratum is
+    /// fitted depends on this, so a stratum's own level moving between the two arms is a defect
+    /// in the plumbing rather than a consequence of the design.
+    pub curve: SlippageCurveConfig,
 }
 
 impl Default for SsrFitConfig {
@@ -450,6 +464,7 @@ impl Default for SsrFitConfig {
             stillness: 1e-6,
             borrowing_floor: DEFAULT_BORROWING_FLOOR,
             refusal_floor: DEFAULT_REFUSAL_FLOOR,
+            curve: SlippageCurveConfig::default(),
         }
     }
 }
@@ -777,7 +792,103 @@ pub fn fit_strata(
             },
         });
     }
+
+    // **The curves are drawn after every stratum has its own answer, never during.** Stage one
+    // is untouched by this — a stratum's own fitted level is the same number whether curves are
+    // drawn or not, which is the property the parity oracle checks.
+    if config.curve.draw_curves {
+        smooth_levels_across_repeat_count(&mut outcomes, config);
+    }
     outcomes
+}
+
+/// Draw one curve per motif period and re-emit every stratum's level through it.
+///
+/// **Only the level moves.** The direction split, the fall-off and the length spectrum are the
+/// stratum's own and are not touched (`str_slippage_level_curve.md` §1.2).
+///
+/// **Only a stratum fitted from its own tracts feeds a curve.** A stratum that borrowed carries
+/// its neighbours' slippage already, and fitting a curve through it would be fitting a curve to
+/// its own output — the circularity `str_slippage_level_curve.md` §4 exists to prevent. So a run
+/// that draws curves is meant to fit stage one with borrowing off; with borrowing on, few strata
+/// contribute and the curves are correspondingly thin.
+fn smooth_levels_across_repeat_count(outcomes: &mut [StratumOutcome], config: &SsrFitConfig) {
+    let groups = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) => Some(fit.slippage.len()),
+            StratumOutcome::Refused { .. } => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if groups == 0 {
+        return;
+    }
+
+    // One list of contributing cells per slippage group, per motif period.
+    let mut by_period: BTreeMap<u8, Vec<Vec<FittedCell>>> = BTreeMap::new();
+    for outcome in outcomes.iter() {
+        let StratumOutcome::Fitted(fit) = outcome else {
+            continue;
+        };
+        if !fit.borrowed.is_empty() {
+            continue;
+        }
+        let cells = by_period
+            .entry(fit.stratum.period)
+            .or_insert_with(|| vec![Vec::new(); groups]);
+        for (group, slippage) in fit.slippage.iter().enumerate() {
+            let Some(slippage) = slippage else { continue };
+            cells[group].push(FittedCell {
+                repeats: fit.stratum.reference_repeats,
+                level: slippage.level,
+                slipped_reads: slippage.level * fit.reads_crossing as f64,
+            });
+        }
+    }
+
+    let curves: BTreeMap<u8, PeriodCurves> = by_period
+        .iter()
+        .filter_map(|(period, cells)| {
+            choose_rise_shape(cells, &config.curve)
+                .ok()
+                .map(|curves| (*period, curves))
+        })
+        .collect();
+
+    for outcome in outcomes.iter_mut() {
+        let StratumOutcome::Fitted(fit) = outcome else {
+            continue;
+        };
+        let Some(period_curves) = curves.get(&fit.stratum.period) else {
+            continue;
+        };
+        let repeats = fit.stratum.reference_repeats;
+        let reads_crossing = fit.reads_crossing as f64;
+        for group in 0..fit.slippage.len() {
+            let Some(own) = fit.slippage[group] else {
+                continue;
+            };
+            let curve = period_curves.by_group.get(group).and_then(Option::as_ref);
+            let cell = FittedCell {
+                repeats,
+                level: own.level,
+                slipped_reads: own.level * reads_crossing,
+            };
+            let Some(blended) = blend_level(Some(cell), curve, repeats, &config.curve) else {
+                continue;
+            };
+            if let Some(slippage) = fit.slippage[group].as_mut() {
+                slippage.level = blended.level;
+            }
+            if let Some(provenance) = fit.level_provenance[group].as_mut() {
+                provenance.source = blended.source;
+                provenance.curve = curve.copied();
+                provenance.reach = blended.reach;
+                provenance.slipped_reads = own.level * reads_crossing;
+            }
+        }
+    }
 }
 
 /// Take in neighbours of the same motif length, nearest repeat count first, until the floor is
@@ -1844,6 +1955,186 @@ mod tests {
             "concentration {} against a truth of 0.5",
             fitted.concentration
         );
+    }
+
+    /// A stratum fitted on its own tracts, built directly so the smoothing can be exercised
+    /// without paying for the climb.
+    fn fitted_at(period: u8, repeats: u64, level: f64, reads: u64) -> StratumOutcome {
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            stratum: Stratum {
+                period,
+                reference_repeats: repeats,
+            },
+            slippage: vec![Some(Slippage {
+                level,
+                shorter_share: 0.7,
+                fall_off: 0.3,
+            })],
+            length_spectrum: vec![1.0],
+            concentration: 0.6,
+            log_likelihood_a_tract: -1.0,
+            tracts_fitted: 500,
+            borrowed: Vec::new(),
+            converged: true,
+            tracts_of_its_own: 500,
+            reads_crossing: reads,
+            level_provenance: vec![Some(LevelProvenance {
+                source: LevelSource::Cell,
+                curve: None,
+                reach: None,
+                slipped_reads: level * reads as f64,
+            })],
+        }))
+    }
+
+    fn level_of(outcome: &StratumOutcome) -> f64 {
+        match outcome {
+            StratumOutcome::Fitted(fit) => fit.slippage[0].expect("a fitted group").level,
+            StratumOutcome::Refused { .. } => panic!("expected a fitted stratum"),
+        }
+    }
+
+    fn provenance_of(outcome: &StratumOutcome) -> LevelProvenance {
+        match outcome {
+            StratumOutcome::Fitted(fit) => fit.level_provenance[0].expect("a fitted group"),
+            StratumOutcome::Refused { .. } => panic!("expected a fitted stratum"),
+        }
+    }
+
+    /// **The property the whole change rests on: smoothing moves the level and nothing else.**
+    /// A stratum's direction split, fall-off, spectrum and concentration are its own answer and
+    /// must be the same number whether curves are drawn or not.
+    #[test]
+    fn smoothing_moves_the_level_and_leaves_every_other_number_alone() {
+        let cells: Vec<StratumOutcome> = (8..=20)
+            .map(|repeats| {
+                // A straight line with one cell knocked 40% off it, so smoothing has work to do.
+                let on_the_line = 0.005 * repeats as f64 - 0.035;
+                let level = if repeats == 14 {
+                    on_the_line * 0.6
+                } else {
+                    on_the_line
+                };
+                fitted_at(1, repeats, level, 200_000)
+            })
+            .collect();
+
+        let mut unsmoothed = cells.clone();
+        let mut smoothed = cells.clone();
+        let config = SsrFitConfig::default();
+        smooth_levels_across_repeat_count(&mut smoothed, &config);
+
+        // The "off" arm is the same call with the switch down; it must change nothing at all.
+        let off = SsrFitConfig {
+            curve: SlippageCurveConfig {
+                draw_curves: false,
+                ..SlippageCurveConfig::default()
+            },
+            ..SsrFitConfig::default()
+        };
+        if off.curve.draw_curves {
+            smooth_levels_across_repeat_count(&mut unsmoothed, &off);
+        }
+        assert_eq!(unsmoothed, cells, "the switch down must move nothing");
+
+        for (before, after) in cells.iter().zip(&smoothed) {
+            let (StratumOutcome::Fitted(before), StratumOutcome::Fitted(after)) = (before, after)
+            else {
+                panic!("both arms are fitted");
+            };
+            let (was, now) = (
+                before.slippage[0].expect("fitted"),
+                after.slippage[0].expect("fitted"),
+            );
+            assert_eq!(was.shorter_share, now.shorter_share);
+            assert_eq!(was.fall_off, now.fall_off);
+            assert_eq!(before.concentration, after.concentration);
+            assert_eq!(before.length_spectrum, after.length_spectrum);
+            assert_eq!(before.tracts_of_its_own, after.tracts_of_its_own);
+        }
+
+        // The knocked-down cell is pulled back toward its neighbours, and every cell records
+        // that a curve had a say.
+        let knocked = smoothed
+            .iter()
+            .find(|outcome| matches!(outcome, StratumOutcome::Fitted(fit) if fit.stratum.reference_repeats == 14))
+            .expect("the cell at fourteen repeats");
+        let on_the_line = 0.005 * 14.0 - 0.035;
+        assert!(
+            level_of(knocked) > on_the_line * 0.6,
+            "the knocked-down cell should be pulled up, not left at {}",
+            level_of(knocked)
+        );
+        let provenance = provenance_of(knocked);
+        assert!(matches!(provenance.source, LevelSource::Blend { .. }));
+        assert_eq!(provenance.reach, Some(CurveReach::Inside));
+        let curve = provenance.curve.expect("a curve stood behind it");
+        assert_eq!(curve.cells, 13);
+        assert_eq!((curve.fitted_from, curve.fitted_to), (8, 20));
+    }
+
+    /// A period with too few strata to draw a curve keeps every level exactly as fitted.
+    #[test]
+    fn a_period_below_the_cell_floor_is_left_entirely_alone() {
+        let cells: Vec<StratumOutcome> = (8..=10)
+            .map(|repeats| fitted_at(1, repeats, 0.002 * repeats as f64, 100_000))
+            .collect();
+        let mut smoothed = cells.clone();
+        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        assert_eq!(smoothed, cells);
+    }
+
+    /// **A stratum that borrowed must not feed the curve**, or the curve is fitted to its own
+    /// output. It still reads the curve — it is the borrowing this replaces.
+    #[test]
+    fn a_borrowed_stratum_reads_the_curve_but_does_not_feed_it() {
+        let mut cells: Vec<StratumOutcome> = (8..=20)
+            .map(|repeats| fitted_at(1, repeats, 0.005 * repeats as f64 - 0.035, 200_000))
+            .collect();
+        // One more stratum, wildly off the line, marked as having borrowed.
+        let mut borrower = fitted_at(1, 21, 0.9, 200_000);
+        if let StratumOutcome::Fitted(fit) = &mut borrower {
+            fit.borrowed = vec![20];
+        }
+        cells.push(borrower);
+
+        let mut smoothed = cells.clone();
+        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+
+        let last = smoothed.last().expect("the borrower");
+        let curve = provenance_of(last).curve.expect("a curve");
+        assert_eq!(
+            curve.cells, 13,
+            "the borrower's own level must not be one of the cells behind the curve"
+        );
+        assert_eq!((curve.fitted_from, curve.fitted_to), (8, 20));
+        // Its level of 0.9 disagrees with the curve by far more than noise, so the knee stands
+        // the curve down and it keeps most of its own answer — the honest outcome, since a
+        // borrowed level is still a level somebody fitted.
+        assert!(level_of(last) > 0.5, "{}", level_of(last));
+    }
+
+    /// A stratum with no fit is untouched: the curve cannot give it the shares it also needs,
+    /// and supplying those is the borrowing rule's job.
+    #[test]
+    fn a_refused_stratum_stays_refused_until_borrowing_supplies_its_shares() {
+        let mut cells: Vec<StratumOutcome> = (8..=20)
+            .map(|repeats| fitted_at(1, repeats, 0.005 * repeats as f64 - 0.035, 200_000))
+            .collect();
+        cells.push(StratumOutcome::Refused {
+            stratum: Stratum {
+                period: 1,
+                reference_repeats: 21,
+            },
+            tracts: 3,
+            reason: StratumRefusal::BelowTheFloor {
+                tracts: 3,
+                floor: 50,
+            },
+        });
+        let mut smoothed = cells.clone();
+        smooth_levels_across_repeat_count(&mut smoothed, &SsrFitConfig::default());
+        assert_eq!(smoothed.last(), cells.last());
     }
 
     /// A stratum with no reads at all is refused rather than fitted, and it is refused by name.

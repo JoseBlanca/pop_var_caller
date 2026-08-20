@@ -216,6 +216,17 @@ impl SlippageCurve {
     }
 }
 
+/// The smallest relative error a curve is credited with when it is weighed against a cell.
+///
+/// **A curve fitted through cells that happen to lie exactly on it scores a held-out error of
+/// zero, and zero error is infinite weight** — it would win against any cell however well that
+/// cell is measured, and no disagreement could stand it down. That cannot happen on real data:
+/// the smallest held-out error either cohort produces is 3.79%, at HG002's twenty dinucleotide
+/// cells. One part in a thousand is thirty-eight times below anything measured, so the floor
+/// cannot bind on a real fit and exists to keep a drawn or degenerate one from swamping the
+/// arithmetic.
+pub const CURVE_ERROR_FLOOR: f64 = 1e-3;
+
 /// The smallest level a curve may report.
 ///
 /// **Not zero.** A level of exactly zero says a read can never misread the tract, which the
@@ -584,7 +595,7 @@ pub fn blend_level(
                 });
             }
             let cell_error = cell.relative_standard_error();
-            let curve_error = curve.held_out_error.max(f64::EPSILON);
+            let curve_error = curve.held_out_error.max(CURVE_ERROR_FLOOR);
 
             let gap = (cell.level.ln() - from_curve.ln()).abs()
                 / (cell_error * cell_error + curve_error * curve_error).sqrt();
