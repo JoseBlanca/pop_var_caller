@@ -129,7 +129,7 @@ held-out cell to within 5%.
 
 ### Milestone B — wiring it into the fit, and what comes out
 
-**B1. The outcome type gains a cell that has a level and no shares.**  ☐
+**B1. The outcome type gains a cell that has a level and no shares.**  ✅
 Extend `StratumOutcome`
 ([`ssr_fit.rs:322`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L322)) so a cell
 below the refusal floor can carry a curve-derived level, and add the provenance the spec §8

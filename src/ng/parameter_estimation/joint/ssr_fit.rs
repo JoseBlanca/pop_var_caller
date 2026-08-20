@@ -145,6 +145,7 @@ impl Slippage {
 /// locus — and re-exported here, where the fit reads it, so a consumer of either module names
 /// one type.
 pub use super::census::Stratum;
+pub use super::slippage_curve::{CurveReach, LevelSource, SlippageCurve};
 
 /// One sample's spanning reads at one tract, split by the slippage group that produced them.
 ///
@@ -305,6 +306,46 @@ pub struct StratumFit {
     /// Whether the climb settled or ran out of rounds. **Running out is never reported as
     /// convergence.**
     pub converged: bool,
+    /// Tracts **this stratum itself** holds with at least one spanning read, whatever it read to
+    /// produce its answer.
+    ///
+    /// **Distinct from [`StratumFit::tracts_fitted`], and the difference is the whole point.** A
+    /// stratum with eight tracts of its own that borrowed its way to a thousand has an answer
+    /// resting on its neighbours, and a consumer told only the second number cannot see that
+    /// (`str_slippage_level_curve.md` §8).
+    pub tracts_of_its_own: usize,
+    /// Reads that crossed a whole tract of **this stratum itself**, over every sample and group.
+    pub reads_crossing: u64,
+    /// Per slippage group, where that group's emitted slippage *level* came from — `None` where
+    /// the group put no read in this stratum, matching [`StratumFit::slippage`] index for index.
+    ///
+    /// **The level is the only one of the four numbers a curve supplies.** The direction split
+    /// and the fall-off are still the cell's own or its neighbours', so this says nothing about
+    /// them.
+    pub level_provenance: Vec<Option<LevelProvenance>>,
+}
+
+/// Where one slippage group's level at one stratum came from, and what stood behind it.
+///
+/// **This replaces what `Provenance::Borrowed` used to mark.** After the level becomes a curve, a
+/// value fitted from 8,000 slipped reads and one interpolated across a gap look identical in the
+/// number alone, and the mechanism that used to distinguish them no longer sets the level
+/// (`str_slippage_level_curve.md` §8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelProvenance {
+    /// The cell's own fit, the curve, or a blend — and for a blend, the share the curve carried.
+    pub source: LevelSource,
+    /// The curve that supplied it, absent when this stratum's period had none. It carries the
+    /// curve's own held-out error and how many cells stood behind it, so a consumer can tell a
+    /// curve through twenty-three cells from one through four.
+    pub curve: Option<SlippageCurve>,
+    /// Whether this stratum's repeat count sat inside the curve's fitted range. `None` where
+    /// there is no curve. **A level held at a fitted end is under-stated in a known direction**
+    /// (`str_slippage_level_curve.md` §6).
+    pub reach: Option<CurveReach>,
+    /// How many of this stratum's own reads the emitted level says slipped — the count that sets
+    /// how precisely the stratum could determine its own level.
+    pub slipped_reads: f64,
 }
 
 /// Why a stratum produced no fit.
@@ -538,6 +579,26 @@ fn fit_pooled(
         tracts_fitted: evidence.tracts_with_reads(),
         borrowed: borrowed.to_vec(),
         converged,
+        // **What the stratum holds on its own is not knowable here.** `evidence` may already be
+        // the pooled set, so these two are placeholders that `fit_strata` replaces with the
+        // receiving stratum's own counts, exactly as it replaces `stratum` and `borrowed`.
+        tracts_of_its_own: evidence.tracts_with_reads(),
+        reads_crossing: evidence.spanning_reads(),
+        // Every level starts as the stratum's own fit. Drawing curves is step B3's; until then
+        // this records the truth, which is that no curve touched it.
+        level_provenance: live_groups
+            .iter()
+            .enumerate()
+            .map(|(group, live)| {
+                live.then(|| LevelProvenance {
+                    source: LevelSource::Cell,
+                    curve: None,
+                    reach: None,
+                    slipped_reads: parameters.slippage[group].level
+                        * evidence.spanning_reads() as f64,
+                })
+            })
+            .collect(),
     })
 }
 
@@ -694,6 +755,19 @@ pub fn fit_strata(
                 let mut mine = fit.clone();
                 mine.stratum = evidence.stratum;
                 mine.borrowed = borrowed;
+                // **The shared fit's counts are the pooled set's; this stratum's are its own.**
+                // A stratum that borrowed its way to a thousand tracts must not report a
+                // thousand as what stands behind it.
+                mine.tracts_of_its_own = evidence.tracts_with_reads();
+                mine.reads_crossing = evidence.spanning_reads();
+                for (group, provenance) in mine.level_provenance.iter_mut().enumerate() {
+                    if let (Some(provenance), Some(slippage)) =
+                        (provenance.as_mut(), mine.slippage[group])
+                    {
+                        provenance.slipped_reads =
+                            slippage.level * evidence.spanning_reads() as f64;
+                    }
+                }
                 StratumOutcome::Fitted(Box::new(mine))
             }
             None => StratumOutcome::Refused {
@@ -1844,6 +1918,25 @@ mod tests {
             "the nearest repeat count of the same motif length, and only as far as the floor"
         );
         assert_eq!(thin.tracts_fitted, 460);
+        // **What the stratum read and what stands behind it are different numbers.** The thin
+        // one read 460 tracts and holds 60; reporting only the first would hide that its answer
+        // rests on its neighbour (`str_slippage_level_curve.md` §8).
+        assert_eq!(thin.tracts_of_its_own, 60);
+        assert!(
+            thin.reads_crossing > 0,
+            "a stratum with sixty tracts of its own has reads of its own"
+        );
+        let provenance = thin.level_provenance[0].expect("the only group put reads here");
+        assert_eq!(
+            provenance.source,
+            LevelSource::Cell,
+            "no curve is drawn until step B3, so every level is still the cell's own"
+        );
+        assert!(provenance.curve.is_none() && provenance.reach.is_none());
+        // The slipped-read count is this stratum's own reads at the emitted level, not the
+        // pooled set's.
+        let expected = thin.slippage[0].expect("a fitted group").level * thin.reads_crossing as f64;
+        assert!((provenance.slipped_reads - expected).abs() < 1e-9);
 
         let StratumOutcome::Fitted(fat) = &outcomes[1] else {
             panic!("a stratum above the floor is fitted");

@@ -204,6 +204,16 @@ lowest median relative error over all left-out cells of all groups wins.**
 is too small under-weights real slippage, where the exponential end can return a number above 1
 and has to be clamped.
 
+**The score continues the line where a deployed curve holds it flat (§6), and that difference is
+deliberate — DECIDED 2026-08-20 (owner).** Leaving out the lowest or highest cell puts it outside
+what remains, so scoring it the way a deployed curve behaves would predict it with its
+neighbour's value, which says nothing about the shape — and the end cells are exactly where a
+shape shows. Measured three ways over both cohorts, the chosen rung is the same at four of the
+five periods that can be scored; holding flat instead moves HG002's dinucleotides from 0.80 to
+0.70, and scoring only the cells that stay inside the range leaves 3 of tomato's 5 cells scored
+and moves its answer from 0.00 to 0.15. **This does not reach a caller:** the score is discarded
+once the rung is picked, and what a consumer reads is held flat.
+
 ### 4.4 What the curve records about itself
 
 The held-out error the winning rung achieved is kept, because §7's blend reads it as the curve's
