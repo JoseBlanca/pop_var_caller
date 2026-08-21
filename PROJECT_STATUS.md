@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-21):** **the genotype table — which genotypes a locus's alleles
+> - **Last completed task (2026-08-21):** **the genotype table matches production value for value
+> — Milestone C complete, at Checkpoint C, and the plan is finished** (step C2 of
+> [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
+> `ng-calling-foundations`). ng's table is a port, and what a port has to prove is not that it is
+> self-consistent but that it agrees with what it was ported from — so it is compared against
+> production's own enumeration across three grids: the plan's diploid-and-tetraploid one, a wider
+> haploid-to-octoploid one, and the shapes past the cache bounds. Coefficients are compared bit for
+> bit, deliberately: reversing the summation order shifts one by four units in the last place, which
+> any ordinary tolerance would have passed. **The plan asked for this test to call production's
+> `GenotypeShape` directly and the compiler refuses** — the module holding it is private, and the
+> only way to obey the plan literally is to edit the frozen tree; the oracle is built from
+> production's `genotype_order` instead. The review found that both grids stopped exactly where the
+> cache stops, so a coefficient formula capped at ploidy 8 passed the entire suite while tilting
+> every polyploid locus's prior toward homozygotes by a factor of nine.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_c2_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_c2_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_c2_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **the genotype table — which genotypes a locus's alleles
 > make** (step C1 of [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
 > `ng-calling-foundations`). A locus's candidate alleles fix its candidate genotypes, and how many
 > copies of each allele each genotype carries, how many orderings of the genome's copies spell it,

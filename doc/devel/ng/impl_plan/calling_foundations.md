@@ -144,7 +144,7 @@ change). `view()` returns `GenotypeTableView<'_>` — the flat borrow both sibli
 `nonzero_pairs` comes along only if profiling asks. *Depends:* A1, B1. *Source:* calling_em_loop
 arch §2; calling_priors arch §3.2, spec §3.3.
 
-**C2. Parity with production.**  ☐
+**C2. Parity with production.**  ✅
 Across ploidy 2 and 4 and allele counts 1–6: genotype count, every row's allele counts in the
 same enumeration order as production, every `ln`-coefficient to floating-point equality, and the
 homozygous lookup, all against `GenotypeShape`

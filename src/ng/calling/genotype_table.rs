@@ -996,12 +996,27 @@ mod tests {
     /// comparing two of its runs with each other cannot catch a wrong value — the
     /// builder is a pure function, so it agrees with itself whatever it computes.
     /// These are the values themselves.
+    ///
+    /// **Row 1 is here because row 0 cannot fail.** At ploidy 9 over two alleles row 0
+    /// is `[9, 0]`, whose coefficient is `ln 9! − ln 9!` — zero under the right formula
+    /// and zero under a `log_factorial` capped at 8, or at 4, or at 2. Row 1 is
+    /// `[8, 1]`, worth `ln 9`, and it is the row that separates them.
     #[test]
     fn a_shape_past_the_cache_bounds_holds_the_right_values() {
         let deep = GenotypeTable::build(ploidy(9), 2);
         assert_eq!(deep.genotype_count(), 10);
-        assert_eq!(deep.genotype_allele_counts()[..2], [9, 0]);
+        assert_eq!(deep.genotype_allele_counts()[..4], [9, 0, 8, 1]);
         assert_eq!(deep.log_multinomial_coeffs()[0], 0.0);
+        // `ln 9`, to within a few units in the last place: the coefficient is summed as
+        // `ln 9! − ln 8!` rather than computed as `ln 9`, so the two agree in value and
+        // not in every bit. The exact bits are pinned against production in
+        // `genotype_table_parity`; what this row is here to catch is a coefficient off
+        // by whole nats.
+        assert!(
+            (deep.log_multinomial_coeffs()[1] - 9.0_f64.ln()).abs() < 1e-12,
+            "ploidy 9, row 1 [8, 1] should be ln 9, got {}",
+            deep.log_multinomial_coeffs()[1]
+        );
         assert_eq!(deep.homozygous_alleles()[0], Some(AlleleId(0)));
         assert_eq!(deep.homozygous_alleles()[1], None);
         assert_eq!(deep.homozygous_alleles()[9], Some(AlleleId(1)));

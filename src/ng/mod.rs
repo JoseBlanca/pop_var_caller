@@ -23,6 +23,13 @@
 //! what costs production nothing. Winning steps are ported back only after the
 //! experiments ng exists to run have decided something.
 //!
+//! **A test may read production as an oracle, and two do** — [`scanner_parity`]
+//! against `src/ssr/`, [`calling::genotype_table_parity`] against `src/var_calling/`.
+//! Both are `#[cfg(test)]`, so nothing shipped depends on production; the direction
+//! that matters is the other one, and production still depends on nothing in ng. A
+//! port's whole claim is that it agrees with what it was ported from, and only
+//! production can settle that.
+//!
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`
 //! (~5,500 lines), kept *provably* identical to its source so that ng's later,
