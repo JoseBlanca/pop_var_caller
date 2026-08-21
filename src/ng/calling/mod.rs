@@ -18,9 +18,11 @@
 //! The vocabulary that needs nothing from the sub-modules: [`CandidateAlleles`], the
 //! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
 //! counts the loop feeds back to itself; and [`LocusInference`] with
-//! [`SampleGenotypeCall`], what a locus produces. The four sub-modules — the candidate
-//! step, the likelihood, the genotype prior and the inference loop — and the shared
-//! types that borrow from them arrive with their own plans
+//! [`SampleGenotypeCall`], what a locus produces. Of the four sub-modules — the candidate
+//! step, the likelihood, the genotype prior and the inference loop — one is here:
+//! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
+//! (`doc/devel/ng/impl_plan/calling_prior.md`). The other three, and the shared types that
+//! borrow from them, arrive with their own plans
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`).
 //!
 //! Beside this file rather than inside any one sub-module: [`genotype_table`], which
@@ -40,6 +42,7 @@
 #[cfg(test)]
 mod genotype_table_parity;
 
+pub mod genotype_prior;
 pub mod genotype_table;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};

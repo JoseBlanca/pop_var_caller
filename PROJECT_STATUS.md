@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-21):** **the genotype table matches production value for value
+> - **Last completed task (2026-08-21):** **step 8 has a folder and a diversity scalar** (step A1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> `src/ng/calling/genotype_prior/` exists with the four files later milestones fill, and
+> `ExpectedHeterozygosity` — the cohort's expected heterozygosity at ordinary sites, the prior's θ —
+> joins ng's shared vocabulary. The species-range fallback a run uses when nothing could be fitted
+> **is a value of that type rather than a bare `f64`**: the review compiled the alternative, and as a
+> loose float it seeded the inbreeding coefficient, the error rate and the genotype frequencies
+> alike, in the one module the STR path imports from. Three of the review's four Majors were tests
+> that could not fail — the new scalar was missing from the sweep that pins the accept/reject
+> boundary, so a constructor accepting 1.1 and one rounding to six decimals both passed, and the
+> fallback's own test compared the constant with itself, so reading `1e-3` as a percentage or per
+> kilobase passed too. All six surviving mutations were re-run against the fixes and all six now
+> fail. Two more findings were **wrong mechanisms in prose**: a claim that production's STR path
+> substituted a SNP diversity, where it hardcodes a population-scaled constant of a different
+> quantity entirely; and a flat claim that tomato is more diverse than human, where this project's
+> own tomato fit sits below the human fallback.
+> [What was built](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **the genotype table matches production value for value
 > — Milestone C complete, at Checkpoint C, and the plan is finished** (step C2 of
 > [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
 > `ng-calling-foundations`). ng's table is a port, and what a port has to prove is not that it is
@@ -1747,6 +1766,19 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Open:**
   - **⚠ Two aggregate gates are red on `main`, in files this branch does not touch.** `cargo clippy --all-targets --all-features -- -D warnings` → 18 errors in `benches/cohort_var_calling_perf.rs`, `benches/ng_joint_fit_perf.rs`, `examples/ng_joint_contamination_harness.rs`. `cargo test --all-targets` → `benches/psp_writer_perf.rs:386` panics (`index out of bounds: the len is 3300000 but the index is 3300000`), verified pre-existing by stashing this branch's diff out. `cargo doc --no-deps --lib` is red for 17 pre-existing unresolved links. The library alone is clean on all three.
   - **Follow-up (later plans):** a named quality ceiling and a capping constructor for the step that first fills a `GQ` column ([calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md)); `CandidateAlleles`' accessor must return an `Option`/`Result` rather than indexing, since `AlleleId`'s doc promises an out-of-range id is caught when the table is read (step B2); a reverse `Phred` → `LogProb` conversion when a consumer needs one.
+
+#### Genotype prior (step 8) — the `genotype_prior/` folder, the seam, the row
+- **Status:** fixes-applied (A1). Branch `ng-calling-prior`, worktree `../pop_var_caller-calling-prior`, branched from `main` with `ng-calling-foundations` merged in (fast-forward to `1742e3d6`). Runs in parallel with `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in `src/ng/calling/mod.rs`.
+- **Plan:** [calling_prior.md](doc/devel/ng/impl_plan/calling_prior.md); **Spec:** [calling_priors.md](doc/devel/ng/spec/calling_priors.md); **Arch:** [calling_priors.md](doc/devel/ng/arch/calling_priors.md) (§2–§5 — owns every type this plan builds), [module_layout.md](doc/devel/ng/arch/module_layout.md), [ng_step_interfaces.md](doc/devel/ng/arch/ng_step_interfaces.md) (§1).
+- **Code:** [src/ng/calling/genotype_prior/](src/ng/calling/genotype_prior/) — `mod.rs` plus the four files later milestones fill (`dirichlet_multinomial.rs`, `seed_spectrum.rs`, `seed_ssr.rs`, `plug_in.rs`); [src/ng/types.rs](src/ng/types.rs) — `ExpectedHeterozygosity` (+ `SPECIES_FALLBACK`, `try_new`, `get`) and `DomainError::ExpectedHeterozygosity`. Port targets: `dirichlet_multinomial_log_priors` and `MIN_ALT_CONCENTRATION` ([genetics.rs](src/genetics.rs)), the inbreeding mixture ([posterior_engine.rs](src/var_calling/posterior_engine.rs)).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md), [A1 fixes applied](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 14 Minors, five category agents in isolated worktrees, 27 mutations run and 14 survivors. Audit trail in the gitignored `tmp/review_2026-08-21_ng-calling-prior-a1/`.
+- **A1 done (the folder and the diversity scalar):** `ExpectedHeterozygosity` is the cohort's expected heterozygosity at ordinary sites — the prior's θ — and its doc has to keep it apart from two neighbours it is easy to confuse with: the **non-reference rate**, which books the reference accession's own quirks as cohort polymorphism, and the **STR path's repeat diversity**, which is measured separately. **The species-range fallback became a value of the type rather than a bare `f64`** (`ExpectedHeterozygosity::SPECIES_FALLBACK`, following `AlleleId::REFERENCE`), because the review compiled the alternative: as a loose float it seeded `InbreedingF`, `ErrorRate` and `GenotypeFrequency` alike, in the one module the STR path imports from. **Three of the four Majors were tests that could not fail** — the new scalar was left out of the property sweep that pins the accept/reject boundary, so a constructor widened to `(-0.25..=1.25)` and one rounding to six decimals both passed; and the fallback's own test compared the constant with itself, so reading `1e-3` as a percentage (`0.1`) or per kilobase (`1.0`) passed too. **Two prose defects the review caught were mechanism errors, not wording:** the doc claimed production's STR path *substituted* a SNP diversity, where it hardcodes freebayes' population-scaled `SFS_THETA = 0.01` — a different quantity in different units; and it asserted flat that a tomato panel is more diverse than a human one, where this project's own tomato1 fit is 6 in 10,000, **below** the 1e-3 fallback.
+- **Open:**
+  - **⚑ Owner decision at Checkpoint A — three names the design documents fix.** The review wants `seed_spectrum.rs` → `seed_generic.rs` (the two seed filenames are not parallel: one names the locus class it serves, the other the input it reads) and `plug_in.rs` → `hardy_weinberg.rs` (in a Rust tree `plug_in` reads as an extension point). A third, the fallback constant's rename, is already applied because it was inseparable from the type change above, and leaves `arch/calling_priors.md` §2.1 spelling an item the code no longer has.
+  - **The fallback has no carrier and no door.** Spec §4 requires a run that lands on the species-range guess to say so in its output; the thing that will carry it, `SeedRegime::FallbackDiversity`, arrives at A2 one module down, while the constant is `pub` from `ng::types`. Nothing overrides it either. Against production ng is currently weaker on both halves — though production's own `cli_override` has no flag behind it and its `DiversitySource` has no consumer outside its tests.
+  - **Nothing converts the pre-pass's `JointFit::expected_heterozygosity` (a bare `f64`) into the newtype yet** — that crossing lands at D2 and is where the range check first meets real data. The histogram route supplies only the ingredient (each sample's observed heterozygosity); nothing computes θ's mean of `Hobs / (1 − F)` across samples.
+  - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
 
 ---
 

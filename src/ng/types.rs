@@ -434,21 +434,22 @@ impl Phred {
 const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
 
 // ---------------------------------------------------------------------
-// The parameters a caller runs on — three scalars step 4 fits (the error
-// rate, the genotype frequencies, the inbreeding coefficient) and one it
-// is handed (ploidy). Four types and not one shared `Probability`: three
-// of them are fractions in `[0, 1]`, so a single type would let an
-// inbreeding coefficient be handed to something expecting an error rate
-// and compile (`arch/parameter_prepass_generic.md` §2.1).
+// The parameters a caller runs on — four scalars step 4 fits (the error
+// rate, the genotype frequencies, the inbreeding coefficient, the expected
+// heterozygosity) and one it is handed (ploidy). Five types and not one
+// shared `Probability`: four of them are fractions in `[0, 1]`, so a single
+// type would let an inbreeding coefficient be handed to something expecting
+// an error rate and compile (`arch/parameter_prepass_generic.md` §2.1).
 //
 // They live in the shared vocabulary rather than in `parameter_estimation/`
 // because their consumers are *other* steps: the likelihood (step 7) reads
 // the error rate, the genotype prior (step 8) reads the genotype
-// frequencies and the inbreeding coefficient, and ploidy reaches both.
-// **Neither step exists yet** — defining the types here is what keeps them
-// from importing out of a sibling step's module when they arrive. They are
-// also the seed of the `genotype`/`params` split `module_layout.md`
-// principle 3 anticipates for this file.
+// frequencies, the inbreeding coefficient and the expected heterozygosity,
+// and ploidy reaches both. **Step 7 has no module yet and step 8's holds no
+// code** — defining the types here is what keeps them from importing out of a
+// sibling step's module when they arrive. They are also the seed of the
+// `genotype`/`params` split `module_layout.md` principle 3 anticipates for
+// this file.
 //
 // Each follows `MismatchFraction`'s shape: private field, checked
 // `try_new`, `.get()`. `try_new` is the **boundary** constructor — it
@@ -471,10 +472,10 @@ const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
 ///
 /// `pub(crate)` for that same reason rather than for convenience: the STR path's three
 /// slippage rates are constrained the same way
-/// (`parameter_estimation::ssr::slippage`), so **six** constructors now share this
+/// (`parameter_estimation::ssr::slippage`), so **seven** constructors now share this
 /// predicate. It is not hypothetical drift — `SiteNoise::try_new`
 /// (`parameter_estimation::generic`) already spells the range test by hand, which is the
-/// seventh probability in the crate and the one this predicate did not reach.
+/// eighth probability in the crate and the one this predicate did not reach.
 pub(crate) fn checked_probability(
     x: f64,
     reject: fn(f64) -> DomainError,
@@ -552,6 +553,88 @@ impl InbreedingF {
     }
 }
 
+/// How different two chromosomes drawn at random from the cohort are expected to be
+/// at an ordinary site — the chance they differ there, averaged over the sites this
+/// caller treats as ordinary. The genotype prior's `θ` (`spec/calling_priors.md` §4).
+/// A probability in `[0, 1]`.
+///
+/// **Differ, not "carry different bases"**: one `θ` covers substitutions and short
+/// insertions and deletions alike, because the pre-pass measures one number for both
+/// (`spec/calling_priors.md` §4.2).
+///
+/// **Not the non-reference rate**, which counts how often the cohort differs from the
+/// *reference sequence* and so books every quirk of the one accession the reference
+/// was assembled from as cohort polymorphism. The two are different numbers on any
+/// panel whose reference is not one of its own members, and a prior built from the
+/// second would claim a diversity the population does not have
+/// (`spec/calling_priors.md` §4).
+///
+/// **Ordinary sites only.** Repeat tracts mutate orders of magnitude faster, so how
+/// variable they are is a separate measurement and this value must never stand in for
+/// it (`spec/calling_priors.md` §5). Production's STR path never measured it at all: it
+/// hardcodes freebayes' default `SFS_THETA = 0.01`
+/// (`src/ssr/cohort/freebayes_emit.rs`), marked there "Fixed, not a per-run knob" — and
+/// that number is a population-scaled mutation rate, a different quantity in different
+/// units from a heterozygosity in `[0, 1]`. Not repeating that is why the two are
+/// separate types rather than one shared float.
+///
+/// Source: the pre-pass, which has two routes and today supplies this from one of them.
+/// The joint fit reads it off its fitted density (`JointFit::expected_heterozygosity`,
+/// `parameter_estimation::joint`) and runs at every cohort size down to one sample. The
+/// per-sample histogram route (`parameter_estimation::generic`) supplies the ingredient
+/// rather than the number — each sample's *observed* heterozygosity, of which `θ` is the
+/// mean of `Hobs / (1 − F)` across samples (`spec/calling_priors.md` §4) — and **nothing
+/// computes that mean yet**. Where no fit exists at all — too few sites, or no `F` for
+/// the sample — the caller falls back to [`Self::SPECIES_FALLBACK`] and must say so in
+/// its output.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct ExpectedHeterozygosity(f64);
+
+impl ExpectedHeterozygosity {
+    /// What a run assumes when nothing could be fitted: roughly human nucleotide
+    /// diversity, one difference per thousand bases.
+    ///
+    /// **The value of last resort, and a run that lands on it must say so in its
+    /// output** — a run on a species-range guess and a run on a measured diversity are
+    /// otherwise indistinguishable (`spec/calling_priors.md` §4). The thing that will
+    /// carry that is the genotype prior's `SeedRegime::FallbackDiversity`
+    /// (`arch/calling_priors.md` §2.3), and **any code path that reads this constant
+    /// owes it**. Nothing reads it yet.
+    ///
+    /// **It must be overridable, and no door exists yet.** No command-line flag or
+    /// configuration field sets it; the run configuration that will is the calling
+    /// loop's (`doc/devel/ng/impl_plan/calling_loop.md`). Until then a run on an
+    /// unusual species has no way to correct it.
+    ///
+    /// **It is a human figure, and it is not a starting point for another species.**
+    /// Which way it is wrong is not fixed: this project's own tomato panel fits *below*
+    /// it — 6 differences per 10,000 bases, against the 10 per 10,000 here
+    /// (`spec/calling_priors.md` §4.1) — while a diverse outcrosser would sit above.
+    ///
+    /// Taken from production's `DEFAULT_DIVERSITY_PRIOR`
+    /// (`src/var_calling/diversity.rs`), value and reasoning. Production is frozen and
+    /// this constant is ng's own: the two are not tied, and ng may move this one.
+    ///
+    /// **A value of the type rather than a bare `f64`**, following [`AlleleId::REFERENCE`]
+    /// — the same reason. As a loose float it constructs an [`ErrorRate`], an
+    /// [`InbreedingF`] and a [`GenotypeFrequency`] just as happily, which is the
+    /// confusion the five separate types in this section exist to prevent, and it would
+    /// be the only diversity constant in the shared vocabulary for an STR-path author to
+    /// reach for.
+    pub const SPECIES_FALLBACK: Self = Self(1e-3);
+
+    /// The only constructor. A heterozygosity that is not a probability in `[0, 1]` is
+    /// rejected rather than coerced.
+    pub fn try_new(heterozygosity: f64) -> Result<Self, DomainError> {
+        checked_probability(heterozygosity, DomainError::ExpectedHeterozygosity).map(Self)
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// How many copies of the genome an individual carries at a region — two on a
 /// diploid autosome, one on a haploid sex chromosome.
 ///
@@ -596,12 +679,11 @@ impl fmt::Display for Ploidy {
 
 /// A domain-invariant violation — the ng-wide error raised when an untrusted
 /// value falls outside a constrained newtype's range. Introduced with its
-/// first variant; later constrained types (`AlleleFreq`, `Theta`, …) add their
-/// own variants as they arrive. `#[non_exhaustive]` so matchers accept those
-/// future variants without breaking.
+/// first variant; later constrained types add their own variants as they arrive.
+/// `#[non_exhaustive]` so matchers accept those future variants without breaking.
 ///
 /// **`PartialEq` is IEEE equality on the float payloads, so an error carrying a
-/// `NaN` is not equal to itself.** A `NaN` input is exactly what the three rate
+/// `NaN` is not equal to itself.** A `NaN` input is exactly what the four rate
 /// constructors reject, so this is not a corner case: compare such a rejection with
 /// `matches!(err, Err(DomainError::ErrorRate(r)) if r.is_nan())`, never with
 /// `assert_eq!`, which fails printing two sides that render identically.
@@ -636,6 +718,19 @@ pub enum DomainError {
     /// `[0, 1]`.
     #[error("inbreeding coefficient {0} is not a finite fraction in [0, 1]")]
     InbreedingF(f64),
+    /// An [`ExpectedHeterozygosity`] was built from a value that is not a finite
+    /// probability in `[0, 1]`.
+    ///
+    /// Its own variant beside [`Self::GenotypeFrequency`], and here the two are
+    /// genuinely easy to confuse, because **ng carries a heterozygosity under each
+    /// type**. This one draws its two chromosomes from the **cohort**, so an
+    /// individual's inbreeding does not touch it; the one a [`GenotypeFrequency`]
+    /// carries (`parameter_estimation::generic`'s `observed_heterozygosity`) draws them
+    /// from **one individual**, so inbreeding drives it down — the two differ by a
+    /// factor of `(1 − F)`. A message naming the wrong one sends the reader to the
+    /// wrong fit.
+    #[error("expected heterozygosity {0} is not a finite probability in [0, 1]")]
+    ExpectedHeterozygosity(f64),
     /// A [`Ploidy`] was built from zero genome copies, which the likelihood
     /// divides by.
     #[error("ploidy {0} is not a positive number of genome copies")]
@@ -1128,9 +1223,18 @@ mod tests {
         assert!(LogProb(f64::INFINITY) > LogProb(1e300));
     }
 
-    /// The three `[0, 1]` rates accept both endpoints — a genotype frequency of
-    /// exactly zero and an inbreeding coefficient of exactly one are both real
-    /// answers, so a half-open check would reject valid data.
+    /// The four `[0, 1]` rates accept both endpoints — a genotype frequency of exactly
+    /// zero and a fully invariant cohort's expected heterozygosity of exactly zero are
+    /// real answers, so a half-open check would reject valid data.
+    ///
+    /// **`InbreedingF::try_new(1.0)` is asserted here as *today's* behaviour, not as a
+    /// property to keep.** The genotype prior needs `[0, 1)` — at `F = 1` every
+    /// heterozygote is impossible, which no estimator ever reports and no sample should
+    /// carry into the caller (`arch/calling_priors.md` §2.1) — so this line moves down to
+    /// the rejection list when `calling_prerequisites.md` Milestone A tightens the
+    /// constructor. That tightening also has to clamp the one fitted producer
+    /// (`parameter_estimation::generic`'s `runs.rs`) before it can land, which is why it
+    /// is a step of its own and not done here.
     #[test]
     fn the_constrained_rates_accept_both_endpoints() {
         assert_eq!(ErrorRate::try_new(0.0).unwrap().get(), 0.0);
@@ -1142,15 +1246,18 @@ mod tests {
 
         assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(InbreedingF::try_new(1.0).unwrap().get(), 1.0);
+
+        assert_eq!(ExpectedHeterozygosity::try_new(0.0).unwrap().get(), 0.0);
+        assert_eq!(ExpectedHeterozygosity::try_new(1.0).unwrap().get(), 1.0);
     }
 
     /// Each rate names **its own quantity** when it rejects, so a message cannot
-    /// send a reader to the wrong fit. `GenotypeFrequency` and `InbreedingF` have
-    /// their own variants; `ErrorRate` shares `DomainError::ErrorRate` with the two
-    /// emission models, which is deliberate reuse — all three mean "a per-base
-    /// error rate that is not a probability".
+    /// send a reader to the wrong fit. `GenotypeFrequency`, `InbreedingF` and
+    /// `ExpectedHeterozygosity` have their own variants; `ErrorRate` shares
+    /// `DomainError::ErrorRate` with the two emission models, which is deliberate
+    /// reuse — all three mean "a per-base error rate that is not a probability".
     ///
-    /// **Both directions, for all three.** Each range check is two comparisons, and
+    /// **Both directions, for all four.** Each range check is two comparisons, and
     /// a test that only ever crosses one of them leaves the other free to be
     /// widened: `InbreedingF` accepting `1.5` is the live hazard, since a user
     /// types that one at a shell.
@@ -1177,6 +1284,14 @@ mod tests {
             InbreedingF::try_new(1.5),
             Err(DomainError::InbreedingF(1.5))
         );
+        assert_eq!(
+            ExpectedHeterozygosity::try_new(-0.5),
+            Err(DomainError::ExpectedHeterozygosity(-0.5))
+        );
+        assert_eq!(
+            ExpectedHeterozygosity::try_new(1.5),
+            Err(DomainError::ExpectedHeterozygosity(1.5))
+        );
     }
 
     /// `NaN` and both infinities are not probabilities and none of them
@@ -1194,13 +1309,81 @@ mod tests {
     #[test]
     fn the_constrained_rates_reject_nan_and_the_infinities() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(ErrorRate::try_new(bad).is_err(), "error rate {bad}");
             assert!(
-                GenotypeFrequency::try_new(bad).is_err(),
+                matches!(ErrorRate::try_new(bad), Err(DomainError::ErrorRate(_))),
+                "error rate {bad}"
+            );
+            assert!(
+                matches!(
+                    GenotypeFrequency::try_new(bad),
+                    Err(DomainError::GenotypeFrequency(_))
+                ),
                 "genotype frequency {bad}"
             );
-            assert!(InbreedingF::try_new(bad).is_err(), "inbreeding {bad}");
+            assert!(
+                matches!(InbreedingF::try_new(bad), Err(DomainError::InbreedingF(_))),
+                "inbreeding {bad}"
+            );
+            assert!(
+                matches!(
+                    ExpectedHeterozygosity::try_new(bad),
+                    Err(DomainError::ExpectedHeterozygosity(_))
+                ),
+                "expected heterozygosity {bad}"
+            );
         }
+    }
+
+    /// The species-range fallback is **one difference per thousand bases**, and the
+    /// value is what is pinned.
+    ///
+    /// **Asserting only that it round-trips through `try_new` would pin nothing**: the
+    /// constant would sit on both sides of the comparison, so every value in `[0, 1]`
+    /// passes — including `0.1`, the slip that reads `1e-3` as a percentage, and `1.0`,
+    /// the slip that reads it per kilobase. Both were run as mutations against this
+    /// suite and both survived it. The first assertion below is what kills them.
+    ///
+    /// The second is the one the associated const needs: `SPECIES_FALLBACK` is built as
+    /// `Self(1e-3)` and so does not pass through the range check every other value of
+    /// this type does. It has to agree with the constructor, or the type has one value
+    /// its own predicate never saw.
+    #[test]
+    fn the_species_fallback_is_one_difference_per_thousand_bases() {
+        assert_eq!(ExpectedHeterozygosity::SPECIES_FALLBACK.get(), 1e-3);
+        assert_eq!(
+            ExpectedHeterozygosity::try_new(1e-3),
+            Ok(ExpectedHeterozygosity::SPECIES_FALLBACK)
+        );
+    }
+
+    /// The rejection **message** names the diversity and not a neighbouring fit, which
+    /// is the whole reason the variant is separate from `GenotypeFrequency` — ng carries
+    /// a heterozygosity under both types. Asserting the variant, as the tests above do,
+    /// leaves the rendered text free: rewording the `#[error]` attribute to say "genotype
+    /// frequency" was run as a mutation and survived the whole suite.
+    #[test]
+    fn expected_heterozygosity_rejection_names_its_own_quantity() {
+        assert_eq!(
+            ExpectedHeterozygosity::try_new(1.5)
+                .unwrap_err()
+                .to_string(),
+            "expected heterozygosity 1.5 is not a finite probability in [0, 1]"
+        );
+    }
+
+    /// `-0.0` is a probability, constructs, and comes back with the sign bit it went in
+    /// with — this type is a transparent wrapper, unlike [`Phred`], which normalises the
+    /// sign of zero on purpose so a quality of zero has one spelling.
+    ///
+    /// **Bits, not `assert_eq!`**: `-0.0 == 0.0` is true, so an accessor that quietly
+    /// took an absolute value would pass an equality assertion. It is reachable rather
+    /// than academic — the fitted density's segregating mass is a `.max(0.0)`
+    /// (`parameter_estimation::joint`), and a product with a negative zero keeps the
+    /// sign.
+    #[test]
+    fn expected_heterozygosity_carries_negative_zero_verbatim() {
+        let zero = ExpectedHeterozygosity::try_new(-0.0).unwrap().get();
+        assert_eq!(zero.to_bits(), (-0.0f64).to_bits());
     }
 
     /// Ploidy zero is the one value the type exists to make unrepresentable: the
@@ -1245,7 +1428,7 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Over the whole `f64` line: the three rates accept a value **exactly
+        /// Over the whole `f64` line: the four rates accept a value **exactly
         /// when** it is a finite number in `[0, 1]`, and an accepted value comes
         /// back bit for bit — no clamp, no round.
         ///
@@ -1264,6 +1447,7 @@ mod tests {
                 ErrorRate::try_new(x).map(ErrorRate::get),
                 GenotypeFrequency::try_new(x).map(GenotypeFrequency::get),
                 InbreedingF::try_new(x).map(InbreedingF::get),
+                ExpectedHeterozygosity::try_new(x).map(ExpectedHeterozygosity::get),
             ] {
                 proptest::prop_assert_eq!(accepted.is_ok(), is_probability, "x = {}", x);
                 if let Ok(value) = accepted {

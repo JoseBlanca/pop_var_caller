@@ -106,7 +106,7 @@ plans start on different days and still run in parallel.**
 
 ### Milestone A — scaffold + types (no logic)
 
-**A1. Scaffold `genotype_prior/` and seed `types.rs`.**  ☐
+**A1. Scaffold `genotype_prior/` and seed `types.rs`.**  ✅
 `calling/genotype_prior/mod.rs` (declares the four files) wired into `calling/mod.rs`.
 `types.rs` gains `ExpectedHeterozygosity` (constrained to `[0, 1]`, `try_new`/`get`; **the
 cohort's expected heterozygosity at ordinary sites — not the non-reference rate**, and the doc
