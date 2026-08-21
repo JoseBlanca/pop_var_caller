@@ -12,7 +12,8 @@
 //! pre-pass ([`parameter_estimation`] — the SNP/indel path, built milestone by
 //! milestone); and the calling run ([`run`] — so far the cohort merge's parameters,
 //! the first piece of the stage that turns the samples' observations into cohort
-//! observations in parallel).
+//! observations in parallel); and steps 6 to 9, the calling loop and what it drives
+//! ([`calling`] — so far the vocabulary its four sub-modules will share).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -38,6 +39,7 @@
 mod scanner_parity;
 
 pub mod alignment;
+pub mod calling;
 pub mod locus_generation;
 pub mod parameter_estimation;
 pub mod raw_chrom_reader;

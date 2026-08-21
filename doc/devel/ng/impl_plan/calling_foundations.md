@@ -110,13 +110,13 @@ A1. *Source:* calling_em_loop arch §2, §Module home.
 
 ### Milestone B — the `calling/` scaffold and its vocabulary
 
-**B1. Scaffold.**  ☐
+**B1. Scaffold.**  ✅
 `src/ng/calling/mod.rs` (declares `genotype_table`; the step sub-modules arrive with their plans)
 wired into `ng/mod.rs`. One folder for steps 6–9, per module_layout's dependency argument (keeping
 them apart forced a no-import rule). *Source:* module_layout §The tree; calling_em_loop arch
 §Module home.
 
-**B2. `CandidateAlleles` and `ExpectedAlleleCopies`.**  ☐
+**B2. `CandidateAlleles` and `ExpectedAlleleCopies`.**  ✅
 `CandidateAlleles { alleles: Vec<Box<[u8]>>, kind: LocusKind }` — REFERENCE at index 0, always
 present; owned, because a discovery round appends and the final prune shrinks (a later plan's
 behaviour, this plan's shape). `ExpectedAlleleCopies(Vec<f64>)` — parallel to the allele table;
