@@ -90,7 +90,7 @@ cache.
 
 ### Milestone A — the `types.rs` scalars
 
-**A1. `AlleleId` and `Phred`.**  ☐
+**A1. `AlleleId` and `Phred`.**  ✅
 `AlleleId(pub u16)` — index into one locus's candidate-allele table, unconstrained newtype with
 the ergonomic derives. `Phred(f32)` — constrained: validated `≥ 0` and finite via `try_new` + a
 new `DomainError` variant, conversions as **named functions** (`Phred::from_log_prob`,

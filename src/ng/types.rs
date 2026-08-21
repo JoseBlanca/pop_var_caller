@@ -281,6 +281,158 @@ impl MismatchFraction {
     }
 }
 
+/// Which allele of one locus: an index into that locus's candidate-allele
+/// table (`CandidateAlleles`, `doc/devel/ng/arch/calling_em_loop.md` §2), where
+/// index `0` is the reference allele and is always present.
+///
+/// **An id means nothing without the locus it was minted at.** Allele 1 here
+/// and allele 1 at the next locus are different pieces of sequence, exactly as
+/// a [`Position`] names no base until a [`ContigId`] is known. The type carries
+/// no locus, so an id must not outlive the table it indexes — the calling loop
+/// keeps the two together and mints the owned `Genotype` multiset, one id per
+/// genome copy, only at the end (`arch/calling_em_loop.md` §2).
+///
+/// Unconstrained — any `u16` is a legal index at the type level, and an
+/// out-of-range id is caught when the table is read — so the field is public
+/// and there is no checked constructor. `u16` and not `u32`, because a locus is
+/// pruned to a handful of candidates: production keeps 6 alleles per record by
+/// default and refuses to be configured above 16
+/// (`DEFAULT_MAX_ALLELES_PER_RECORD` and `MAX_ALLELES_PER_VAR_CAP`,
+/// `var_calling::per_group_merger`), so the ceiling here is about four thousand
+/// times the widest cap that can be asked for.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct AlleleId(pub u16);
+
+impl AlleleId {
+    /// The reference allele — index `0` of every locus's candidate table, always
+    /// present (`arch/calling_em_loop.md` §2). Named so the convention is
+    /// greppable and no consumer spells it as a bare `0`: the reference is what
+    /// every downstream branch tests against, REF against ALT in the VCF and the
+    /// homozygous-reference genotype in the prior.
+    pub const REFERENCE: Self = Self(0);
+
+    /// Whether this id names the reference allele.
+    #[inline]
+    pub fn is_reference(self) -> bool {
+        self == Self::REFERENCE
+    }
+
+    #[inline]
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// A quality on the Phred scale — `-10 log10(p)`, where `p` is the chance that
+/// the thing being scored is wrong. 20 means one call in a hundred is wrong,
+/// 30 one in a thousand, 60 one in a million.
+///
+/// **This is the scale ng writes, not the one it works in.** The internal
+/// currency is the natural logarithm ([`LogProb`]); Phred exists because VCF's
+/// `QUAL` and `GQ` columns are written on it. The two are logarithms to
+/// different bases with opposite signs, so one type for both is how a
+/// log-probability ends up added to a quality and read as a plausible wrong
+/// number instead of failing to compile. Every crossing between the two scales
+/// is a named function ([`Self::from_log_prob`]) and never a bare `as` cast,
+/// which would change the width of a number while saying nothing about its
+/// scale. (The narrowing to `f32` inside that function is a width change and
+/// nothing else — the scaling is the multiply that precedes it.)
+///
+/// Constrained, so validated: the field is private and construction goes
+/// through [`Self::try_new`]. Below zero is a probability above one, and a
+/// caller's arithmetic gone wrong. Infinite is a probability of exactly zero —
+/// which log space represents happily (`ln 0 = -∞`, the score of an impossible
+/// read line-up: see [`LogProb`]) and this scale has no number for at all. The
+/// two are **not** the same kind of event, so they do not share an error: the
+/// first is [`DomainError::Phred`], the second [`DomainError::PhredInfinite`].
+///
+/// **Neither is clamped here, because where to cap is the consumer's call.**
+/// Production caps `GQ` at
+/// [`DEFAULT_MAX_GQ_PHRED`](crate::var_calling::posterior_engine::DEFAULT_MAX_GQ_PHRED)
+/// — 99, the GATK and bcftools convention, configurable up to
+/// [`GQ_PHRED_RANGE_MAX`](crate::var_calling::posterior_engine::GQ_PHRED_RANGE_MAX)
+/// — at the point it fills the column, and pins the posterior just below one
+/// first so the infinity rarely arises. A clamp inside the type would pick a
+/// ceiling for every future consumer and hide the arithmetic that produced the
+/// value.
+///
+/// **A quality ng computed itself has no constructor here yet.**
+/// `arch/ng_step_interfaces.md` §1 allows one for that source — a `new` that
+/// `debug_assert!`s the bound and clamps only a float-epsilon overrun — and the
+/// step that first fills a `GQ` column is where it should land, rather than as a
+/// clamp written at that call site.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct Phred(f32);
+
+impl Phred {
+    /// The one check, and every constructor goes through it. A quality below
+    /// zero or a `NaN` says the caller's arithmetic went wrong; an infinite one
+    /// says the scored probability is exactly zero, which is a different event
+    /// and gets [`DomainError::PhredInfinite`]. Nothing is coerced either way.
+    ///
+    /// `NaN` needs no check of its own: no comparison with it is true, so
+    /// `quality >= 0.0` already rejects it, the way `MismatchFraction`'s range
+    /// check does.
+    ///
+    /// Zero has one spelling. `-0.0` passes `>= 0.0` — it *is* zero — but it
+    /// prints as `-0`, and [`Self::from_log_prob`] produces exactly it at
+    /// `ln 1`, since `-k * 0.0` is `-0.0`. A `QUAL` column cannot carry a minus
+    /// sign on a certainty, so the sign is normalised here, at the one door in.
+    pub fn try_new(quality: f32) -> Result<Self, DomainError> {
+        if quality == f32::INFINITY {
+            return Err(DomainError::PhredInfinite);
+        }
+        (quality >= 0.0 && quality.is_finite())
+            .then_some(Self(if quality == 0.0 { 0.0 } else { quality }))
+            .ok_or(DomainError::Phred(quality))
+    }
+
+    /// The named crossing from ng's working scale to the output one: `ln(p)` in,
+    /// `-10 log10(p)` out.
+    ///
+    /// `Err` wherever the Phred scale cannot follow the logarithm, and the two
+    /// causes are told apart by the error rather than by the caller inspecting a
+    /// float:
+    ///
+    /// - `ln(p) = -∞` — probability zero, an infinite quality.
+    ///   [`DomainError::PhredInfinite`]. Not a bug: `-∞` is inside [`LogProb`]'s
+    ///   documented domain, and a consumer's answer is to cap at its own ceiling
+    ///   and carry on.
+    /// - `ln(p) > 0` — a probability above one, so a negative quality.
+    ///   [`DomainError::Phred`], carrying the quality that was computed rather
+    ///   than the log probability handed in; divide by `10/ln(10)` to recover it.
+    ///
+    /// The scaling is done at `f64`, the width [`LogProb`] holds, and narrowed
+    /// once at the end; narrowing first would round the log probability before
+    /// scaling it. The narrowing **saturates** rather than wrapping, so a log
+    /// probability finite in `f64` but below about `-7.8e37` becomes `+∞` and is
+    /// refused as an infinite quality — the same answer `ln(p) = -∞` gets, for
+    /// the same reason: the scale has no number for it. Unreachable from real
+    /// data, and stated so the `is_finite` guard is not simplified away.
+    pub fn from_log_prob(log_p: LogProb) -> Result<Self, DomainError> {
+        Self::try_new((-PHRED_PER_NAT * log_p.get()) as f32)
+    }
+
+    #[inline]
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+/// Phred per nat — per unit of natural logarithm: `10 / ln(10)`, which is
+/// `10 log10(e)`. The whole of the [`LogProb`] → [`Phred`] conversion, written
+/// once. A log probability is negative, so the crossing negates as it scales
+/// (`-PHRED_PER_NAT * ln(p)`), which is how htslib and this repository's BAQ
+/// port both spell it.
+///
+/// **A second constant of this name exists** — `baq::probaln::PHRED_PER_NAT`,
+/// the same quantity as the four-digit literal htslib compiled, `4.343`. That
+/// one is kept at htslib's value on purpose, because the BAQ port has to
+/// reproduce htslib's numbers byte for byte; this one is the full ratio,
+/// because nothing here is reproducing another program's arithmetic. Do not
+/// unify them.
+const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
+
 // ---------------------------------------------------------------------
 // The parameters a caller runs on — three scalars step 4 fits (the error
 // rate, the genotype frequencies, the inbreeding coefficient) and one it
@@ -448,7 +600,7 @@ impl fmt::Display for Ploidy {
 /// own variants as they arrive. `#[non_exhaustive]` so matchers accept those
 /// future variants without breaking.
 ///
-/// **`PartialEq` is IEEE equality on the `f64` payloads, so an error carrying a
+/// **`PartialEq` is IEEE equality on the float payloads, so an error carrying a
 /// `NaN` is not equal to itself.** A `NaN` input is exactly what the three rate
 /// constructors reject, so this is not a corner case: compare such a rejection with
 /// `matches!(err, Err(DomainError::ErrorRate(r)) if r.is_nan())`, never with
@@ -583,6 +735,34 @@ pub enum DomainError {
         /// Of those, the ones the caller says differed.
         bases_mismatched: u32,
     },
+
+    /// A [`Phred`] was built from a negative value or a `NaN` — the caller's
+    /// arithmetic went wrong.
+    ///
+    /// **Its own variant, and the message says "quality" rather than
+    /// "probability"**, for the reason the rate variants above have one each: a
+    /// Phred is a probability re-expressed as a logarithm, so a message naming a
+    /// probability sends the reader hunting for a number between zero and one
+    /// when the number in hand is a 30 or a −4.
+    #[error("phred quality {0} is not a number at or above zero")]
+    Phred(f32),
+
+    /// A [`Phred`] was built from positive infinity — a scored probability of
+    /// exactly zero, which the Phred scale has no number for.
+    ///
+    /// **Its own variant because it is not a caller bug**, and that is the
+    /// distinction [`Self::Phred`] cannot carry. `-∞` is inside [`LogProb`]'s
+    /// documented domain — the score of an impossible read line-up, which log
+    /// space carries on purpose — so a consumer meeting this has a routine
+    /// answer: cap at its own ceiling and carry on, as production does at
+    /// `DEFAULT_MAX_GQ_PHRED`. Sharing one variant would make every such
+    /// consumer tell a routine cap from a broken sum by testing the payload's
+    /// sign and finiteness.
+    ///
+    /// No payload: the value is always `+∞`, so there is nothing to report that
+    /// the variant's own name does not already say.
+    #[error("phred quality is infinite — the scored probability is exactly zero")]
+    PhredInfinite,
 }
 
 // ---------------------------------------------------------------------
@@ -798,6 +978,18 @@ mod tests {
         assert_eq!(Bp(150).get(), 150);
         assert_eq!(Position(1).get(), 1);
         assert_eq!(ReadGroupId(7).get(), 7);
+        assert_eq!(AlleleId(0).get(), 0);
+        assert_eq!(AlleleId(u16::MAX).get(), u16::MAX);
+    }
+
+    /// Index `0` is the reference allele at every locus, and the constant is
+    /// what stops each consumer spelling that convention as a bare `0`.
+    #[test]
+    fn allele_id_zero_is_the_reference_allele() {
+        assert_eq!(AlleleId::REFERENCE.get(), 0);
+        assert!(AlleleId::REFERENCE.is_reference());
+        assert!(!AlleleId(1).is_reference());
+        assert!(!AlleleId(u16::MAX).is_reference());
     }
 
     /// `LogProb` is unconstrained: any finite logarithm round-trips, and `-∞` — the
@@ -987,6 +1179,29 @@ mod tests {
                 if let Ok(value) = accepted {
                     proptest::prop_assert_eq!(value.to_bits(), x.to_bits(), "x = {}", x);
                 }
+            }
+        }
+
+        /// Over the whole `f32` line: a [`Phred`] is accepted **exactly when**
+        /// the value is finite and at or above zero, and an accepted value comes
+        /// back **bit for bit** — the one normalisation being `-0.0`, which
+        /// becomes `+0.0` so a quality of zero has a single spelling.
+        ///
+        /// The bit-for-bit half is what the point assertions cannot do:
+        /// `assert_eq!` on floats cannot separate `+0.0` from `-0.0`, so a sign
+        /// flip on zero, a clamp or a round hides from them. The dense
+        /// `-1.0..1.0` arm is load-bearing for the same reason the rates' arm is
+        /// — sampling `f32::ANY` alone essentially never lands next to the one
+        /// boundary this type exists to defend.
+        #[test]
+        fn phred_accepts_exactly_the_finite_non_negative_values_and_round_trips(
+            q in proptest::prop_oneof![proptest::num::f32::ANY, -1.0f32..1.0f32]
+        ) {
+            let accepted = Phred::try_new(q).map(Phred::get);
+            proptest::prop_assert_eq!(accepted.is_ok(), q.is_finite() && q >= 0.0, "q = {}", q);
+            if let Ok(value) = accepted {
+                let expected = if q == 0.0 { 0.0f32 } else { q };
+                proptest::prop_assert_eq!(value.to_bits(), expected.to_bits(), "q = {}", q);
             }
         }
 
@@ -1194,5 +1409,146 @@ mod tests {
             "3",
             "no type name, no unit — the message says 'period {{period}}'"
         );
+    }
+
+    /// The boundary in both directions: a quality of exactly zero is legal — it
+    /// is `p = 1`, a call that cannot be wrong — and anything below it is not,
+    /// because a negative Phred is a probability above one. `NaN` and `-∞` go
+    /// the same way as the negative, since `quality >= 0.0` is false for both.
+    /// `+∞` is rejected too but as a different event, so it has its own variant.
+    ///
+    /// The top of the range is deliberately open: this type refuses to cap,
+    /// because where to cap a `GQ` is the consumer's decision (see the type's
+    /// doc comment), so a ceiling appearing inside `try_new` later must break a
+    /// test.
+    #[test]
+    fn phred_accepts_zero_and_rejects_everything_below_it() {
+        assert_eq!(Phred::try_new(0.0).unwrap().get(), 0.0);
+        assert_eq!(Phred::try_new(30.0).unwrap().get(), 30.0);
+        assert_eq!(Phred::try_new(f32::MAX).unwrap().get(), f32::MAX);
+        assert!(matches!(
+            Phred::try_new(-f32::EPSILON),
+            Err(DomainError::Phred(q)) if q < 0.0
+        ));
+        assert_eq!(Phred::try_new(-1.0), Err(DomainError::Phred(-1.0)));
+        // Comparison with `NaN` is never true, so the `>= 0.0` test rejects it
+        // — and `DomainError`'s `PartialEq` is IEEE equality on the payload, so
+        // this must be a `matches!` and not an `assert_eq!`.
+        assert!(matches!(
+            Phred::try_new(f32::NAN),
+            Err(DomainError::Phred(q)) if q.is_nan()
+        ));
+        assert_eq!(
+            Phred::try_new(f32::INFINITY),
+            Err(DomainError::PhredInfinite)
+        );
+        assert!(matches!(
+            Phred::try_new(f32::NEG_INFINITY),
+            Err(DomainError::Phred(q)) if q == f32::NEG_INFINITY
+        ));
+    }
+
+    /// A quality of zero has one spelling, whichever door it came in by.
+    ///
+    /// `-PHRED_PER_NAT * 0.0` is `-0.0` under IEEE, and `-0.0` passes
+    /// `>= 0.0` — it *is* zero — so nothing in the range check notices. It
+    /// matters because this type's purpose is VCF's `QUAL` and `GQ`, where a
+    /// certainty printing as `-0` is not a number those columns should carry.
+    /// `assert_eq!(.., 0.0)` cannot see this: `-0.0 == 0.0` is true.
+    #[test]
+    fn phred_zero_is_positive_zero_whichever_constructor_made_it() {
+        let from_certainty = Phred::from_log_prob(LogProb(0.0))
+            .expect("p = 1 is quality zero")
+            .get();
+        assert!(
+            from_certainty.is_sign_positive(),
+            "quality zero must be +0.0, not -0.0 (bits {:#x})",
+            from_certainty.to_bits()
+        );
+        assert_eq!(
+            format!("{from_certainty}"),
+            "0",
+            "a QUAL column cannot say -0"
+        );
+        assert!(Phred::try_new(-0.0).unwrap().get().is_sign_positive());
+    }
+
+    /// The conversion against numbers worked out by hand rather than by the
+    /// same formula: `-10 log10(p)` is 30 at one wrong call in a thousand and
+    /// 20 at one in a hundred, which is what those Phreds mean, and
+    /// `-10 log10(0.5)` is `10 log10 2` = 3.0103.
+    ///
+    /// **The two decade pairs are the ones that discriminate**, because the
+    /// `1e-4` tolerance is absolute and these values are an order of magnitude
+    /// apart: at 30 it admits a relative error of 3.3e-6 in the scale factor, at
+    /// 3.0103 ten times that. What sits outside it at 30: an implementation
+    /// using `log2` instead of `log10` returns 99.657845 where this asserts 30,
+    /// one that dropped the factor of ten returns exactly 3, and one using
+    /// `baq`'s htslib-parity `4.343` returns 30.000381. The `0.5` pair earns its
+    /// place only as the one expected value that is not a round number.
+    #[test]
+    fn phred_from_log_prob_matches_the_hand_computed_scale() {
+        let phred_of = |p: f64| Phred::from_log_prob(LogProb(p.ln())).unwrap().get();
+        assert!((phred_of(0.001) - 30.0).abs() < 1e-4, "{}", phred_of(0.001));
+        assert!((phred_of(0.01) - 20.0).abs() < 1e-4, "{}", phred_of(0.01));
+        assert!((phred_of(0.5) - 3.010_3).abs() < 1e-4, "{}", phred_of(0.5));
+    }
+
+    /// What the doc comment on [`Phred::from_log_prob`] promises about widths:
+    /// the scaling happens at `f64` and narrows once, at the end.
+    ///
+    /// Pinned at a quality of 3000 because that is where the ordering shows.
+    /// Narrowing `ln p` first and multiplying in `f32` returns 2999.9998 here,
+    /// one `f32` step low, while the three everyday qualities of the test above
+    /// (30, 20, 3.0103) come out identical either way — so without this the
+    /// invariant has no test behind it.
+    #[test]
+    fn phred_from_log_prob_keeps_full_f64_width_before_narrowing() {
+        let quality = Phred::from_log_prob(LogProb(1e-300f64.ln())).expect("a finite quality");
+        assert_eq!(
+            quality.get().to_bits(),
+            3000.0f32.to_bits(),
+            "got {} (bits {:#x})",
+            quality.get(),
+            quality.get().to_bits()
+        );
+    }
+
+    /// The three things the scale cannot hold, told apart by the error rather
+    /// than by the caller inspecting a float. `ln(1) = 0` is the one that must
+    /// NOT be an error: a call that cannot be wrong is quality zero, the low end
+    /// of the scale.
+    #[test]
+    fn phred_from_log_prob_rejects_what_the_scale_cannot_hold() {
+        // p = 1 — certainty. Quality zero, and legal.
+        assert_eq!(Phred::from_log_prob(LogProb(0.0)).unwrap().get(), 0.0);
+        // p = 0 — the score of an impossible read line-up, which `LogProb`
+        // carries deliberately. Its quality is infinite, which Phred does not
+        // hold; capping it is the consumer's decision, not this type's, and the
+        // variant is what tells that consumer this was not a broken sum.
+        assert_eq!(
+            Phred::from_log_prob(LogProb(f64::NEG_INFINITY)),
+            Err(DomainError::PhredInfinite)
+        );
+        // A log probability finite in `f64` whose scaled quality saturates
+        // `f32`. Unreachable from real data — it needs `ln p` below about
+        // -7.8e37 — and pinned so the `is_finite` guard is not simplified away.
+        assert_eq!(
+            Phred::from_log_prob(LogProb(-1e300)),
+            Err(DomainError::PhredInfinite)
+        );
+        // A positive logarithm is a probability above one — the caller's
+        // arithmetic is wrong, and the negative quality says so.
+        assert!(matches!(
+            Phred::from_log_prob(LogProb(0.1)),
+            Err(DomainError::Phred(q)) if q < 0.0
+        ));
+        // `LogProb`'s field is public and unconstrained, so a caller's
+        // `0.0 / 0.0` — an unnormalised posterior, say — arrives here as a
+        // `NaN`. It must not reach a `QUAL` column as a silently wrong record.
+        assert!(matches!(
+            Phred::from_log_prob(LogProb(f64::NAN)),
+            Err(DomainError::Phred(q)) if q.is_nan()
+        ));
     }
 }
