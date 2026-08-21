@@ -12,7 +12,10 @@
 //! copied: no tomato stratum ever cleared the copy rule's floor, and the HG002 table is the one
 //! taken before that rule existed.
 //!
-//! Fixtures: `tests/data/slippage_cells/`, at the census's corrected ±8 recording window.
+//! Fixtures: `tests/data/slippage_cells/`, at the census's corrected ±8 recording window and at
+//! the refusal floor of 50 tracts that stood when they were written; it is 8 now, so a run today
+//! fits more strata than these tables hold. See `slippage_curve_on_real_cells.rs` for why they are
+//! left as they are.
 
 use std::collections::BTreeMap;
 use std::path::Path;

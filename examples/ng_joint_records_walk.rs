@@ -826,8 +826,16 @@ fn fit_the_tracts(
     // **There is no shares floor to set any more.** A stratum's direction split and fall-off are
     // its own answer blended with its period's curve, in proportion to how precisely it holds
     // them, so there is no threshold to cross and `SSR_SHARES_FLOOR` no longer does anything.
+    // **`SSR_REFUSAL_FLOOR=<tracts>` moves the floor below which nothing is fitted at all.** It
+    // is a measurement knob: what a lower floor costs in run time, and what it reaches, is the
+    // question `str_slippage_level_curve.md`'s Milestone E asks last.
+    let refusal_floor: usize = std::env::var("SSR_REFUSAL_FLOOR")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(ssr_fit::DEFAULT_REFUSAL_FLOOR);
     let config = ssr_fit::SsrFitConfig {
         allele_span,
+        refusal_floor,
         ..ssr_fit::SsrFitConfig::default()
     };
     println!("  allele mass may sit within ±{allele_span} repeats of the reference length");

@@ -285,10 +285,16 @@ at 8 tracts and none from 12 up; on a 63-sample cohort at three reads it collaps
 *Convergence turned out to say nothing*: at 400 tracts on the cohort only 83% of climbs settle
 within their rounds, and that row's median level is 1.5% from the truth.
 
-**E5. Measure it on both cohorts, and retire `Derived` if nothing uses it.**  ☐
+**E5. Measure it on both cohorts, and retire `Derived` if nothing uses it.**  ✅
 How many strata carry each of the three numbers from their own fit, from a curve, and from a
 blend; what the run costs; and whether any stratum is still furnished-from-nothing.
 ***Depends:*** E4. ***Source:*** spec §5.1, §8, §9.
+***Measured*** in [`../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md`](../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md).
+**`Derived` stays** — 38 strata on HG002 and 22 on tomato are it — and **no stratum on either cohort
+is furnished from nothing**: every share came from its own motif period. The milestone's worth is
+not what it was expected to be: on HG002 it is a wrong parameter corrected at 31% of the repeat
+loci, and on tomato it is the curves carrying a third to a half of the weight at strata too thin to
+measure themselves.
 
 > **Checkpoint E: all three fitted numbers smoothed the same way, with one mechanism rather than
 > two. Pause for review.**

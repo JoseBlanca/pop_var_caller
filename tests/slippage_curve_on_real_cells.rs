@@ -18,6 +18,13 @@
 //!
 //! Fixtures: `tests/data/slippage_cells/`. They are the raw `SSR_CELL_TABLE` output of
 //! `examples/ng_joint_records_walk.rs`, copied unchanged.
+//!
+//! **They were produced with the refusal floor at 50 tracts, which is where it stood until
+//! 2026-08-20; it is 8 now.** So they hold fewer fitted strata than a run produces today — 55 on
+//! HG002 against 79 — and the shape numbers asserted here are the ones those 55 give. That is
+//! deliberate: every published measurement of the level's family was made on these tables, and a
+//! fixture that moved without them would leave the two disagreeing. Re-measuring the family at
+//! the lower floor is its own task.
 
 use std::collections::BTreeMap;
 use std::path::Path;
