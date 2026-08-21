@@ -98,7 +98,7 @@ never `as`), per the interfaces doc's sketch, now real. Unit tests: `Phred` boun
 directions; `from_log_prob` on a hand-computed pair. *Source:* calling_em_loop arch §Module home;
 ng_step_interfaces §1.
 
-**A2. `Genotype`.**  ☐
+**A2. `Genotype`.**  ✅
 `Genotype(Box<[AlleleId]>)` — the opaque output multiset, alleles stored sorted so equal
 genotypes compare equal; a constructor that sorts, `.alleles()` accessor. The loop's *working*
 currency is `GenotypeIdx` (Milestone C) — this type is minted only at the final pass, which is why

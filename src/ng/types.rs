@@ -939,6 +939,96 @@ impl fmt::Debug for Motif {
 // on ng's *public* surface. `module_layout.md` principle 3 already assigns shared STR domain
 // vocabulary here. `segment_criteria` re-exports it, so step 3's own callers are untouched.
 
+// ---------------------------------------------------------------------
+// The genotype — calling's output vocabulary, shared across steps
+// ---------------------------------------------------------------------
+
+/// One individual's genotype at one locus: which alleles that individual
+/// carries, one entry per copy of the genome. A **multiset** — order does not
+/// matter and repeats are the point, since carrying two copies of the same
+/// allele is what homozygous means.
+///
+/// **This is an output, not a working value.** The calling loop's currency is a
+/// row index into the locus's genotype table, because every sample at a locus is
+/// scored over the same candidate genotypes and an index is what a score array
+/// is addressed by. A `Genotype` is minted from a row only on the loop's last
+/// pass, when the locus's calls are written out, which is why this type is small
+/// and owns no arithmetic (`arch/calling_em_loop.md` §2).
+///
+/// The field is **private, and holding the alleles sorted is the reason.** Two
+/// genotypes that name the same alleles must compare equal whichever order they
+/// were built in, and the cheapest way to get that from derived `PartialEq`,
+/// `Ord` and `Hash` is to have one spelling — so [`Self::new`] sorts, and
+/// nothing else can construct one. Privacy also keeps ploidy out of the
+/// surface: diploid is simply two entries, and a polyploid region changes what
+/// the caller passes to [`Self::new`], not this type or anything that consumes
+/// it (`arch/ng_step_interfaces.md` §2).
+///
+/// **The derived [`Ord`] sorts by allele, lowest first, and then by length** —
+/// it is `Box<[AlleleId]>`'s lexicographic order over the sorted entries, so
+/// `0/0` precedes `0/1` precedes `1/1`, and at mixed ploidy a shorter genotype
+/// precedes a longer one sharing its prefix (`[0]` before `[0, 0]`). It exists
+/// to give a deterministic output order, not to rank genotypes by anything
+/// genetic.
+///
+/// **How many alleles it holds is the ploidy at that region**, read as
+/// `genotype.alleles().len()`. There is no `ploidy()` accessor: one returning a
+/// bare `u8` would hand back a number that no longer says what it counts, which
+/// is the whole reason [`Ploidy`] is a type rather than an integer — a bare `u8`
+/// ploidy is interchangeable at the type level with a bare `u8` mapping quality
+/// or base quality, and this file has three such types. One returning a
+/// [`Ploidy`] would be no better: `Ploidy` refuses zero copies, so the accessor
+/// would have to be fallible for a case [`Self::new`] already refuses outright.
+///
+/// **And no `is_homozygous()`, deliberately**, though the interfaces sketch had
+/// one. `GenotypeTable::homozygous_allele_for` is the *one* homozygous test
+/// (`arch/calling_priors.md` §3.2): nothing else may decide homozygosity, so
+/// that the rule for above diploidy has a single place to change. A second test
+/// here would be the place it silently diverges.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Genotype(Box<[AlleleId]>);
+
+impl Genotype {
+    /// The only constructor, and it **sorts** — see the type's doc comment for
+    /// why one spelling per genotype is what makes the derived `PartialEq`,
+    /// `Ord` and `Hash` mean what a reader expects. The argument is taken by
+    /// value, so no caller can observe its own vector reordered.
+    ///
+    /// # Panics
+    ///
+    /// On an empty multiset, which is not a genotype at any ploidy: [`Ploidy`]
+    /// refuses zero copies because a genome with none is not a genome, and this
+    /// type would otherwise make the same quantity legal by the back door. The
+    /// check is one comparison per sample per locus, on the last pass only, so
+    /// it is not on the loop's hot path — and what it stops is a `GT` field
+    /// naming no allele at all, written to a VCF with nothing between here and
+    /// the writer having objected.
+    ///
+    /// Takes an owned `Vec` so the sort happens in place. `into_boxed_slice`
+    /// then reuses the buffer when the vector is exactly sized and reallocates
+    /// when it is not — a caller that pushed one id per genome copy into a fresh
+    /// `Vec` pays one copy of a handful of `u16`s, which is why the signature is
+    /// chosen for clarity rather than for that. `sort_unstable` because these
+    /// are plain indices: two entries that compare equal are the same bit
+    /// pattern, so no fixture could tell a stable sort from an unstable one, and
+    /// the stable one would allocate.
+    pub fn new(mut alleles: Vec<AlleleId>) -> Self {
+        assert!(
+            !alleles.is_empty(),
+            "a genotype holds one allele per genome copy, and the smallest genome has one \
+             copy — an empty multiset is not a haploid call, it is a sample with no genome"
+        );
+        alleles.sort_unstable();
+        Self(alleles.into_boxed_slice())
+    }
+
+    /// The alleles carried, in sorted order, one entry per copy of the genome.
+    #[inline]
+    pub fn alleles(&self) -> &[AlleleId] {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1293,55 @@ mod tests {
                 let expected = if q == 0.0 { 0.0f32 } else { q };
                 proptest::prop_assert_eq!(value.to_bits(), expected.to_bits(), "q = {}", q);
             }
+        }
+
+        /// [`Genotype::new`] establishes the one spelling the type rests on: the
+        /// alleles come back **sorted**, they are the **same multiset** that went
+        /// in, and any other order of the same alleles is the same value.
+        ///
+        /// Over the whole `u16` id range and up to eight copies, because every
+        /// point test uses ids `0..=3` and at most four copies — and two wrong
+        /// sorts reproduce those fixtures exactly. One keys on a narrowed width
+        /// (`|a| a.0 as u8`) and misorders any id at or above 256; one guards the
+        /// sort with a cheap `first() > last()` test for "already sorted" and
+        /// leaves interior disorder in place from three copies up, which is a
+        /// triploid or tetraploid heterozygote counted twice in a cohort. The
+        /// dense `0..4` arm is load-bearing for the reason the rates' arm is:
+        /// sampling the full `u16` alone essentially never repeats an id, and a
+        /// repeated id is what homozygous means.
+        #[test]
+        fn a_genotype_sorts_its_alleles_and_keeps_the_multiset(
+            ids in proptest::collection::vec(
+                proptest::prop_oneof![proptest::num::u16::ANY, 0u16..4],
+                1..=8usize,
+            ),
+            rotation in 0usize..8,
+        ) {
+            let alleles: Vec<AlleleId> = ids.iter().copied().map(AlleleId).collect();
+            let genotype = Genotype::new(alleles.clone());
+
+            proptest::prop_assert!(
+                genotype.alleles().windows(2).all(|pair| pair[0] <= pair[1]),
+                "not sorted: {:?}",
+                genotype.alleles()
+            );
+
+            let mut same_multiset = alleles.clone();
+            same_multiset.sort_unstable();
+            proptest::prop_assert_eq!(
+                genotype.alleles(),
+                &same_multiset[..],
+                "an allele was dropped, added or altered"
+            );
+
+            let mut respelled = alleles.clone();
+            let copies = respelled.len();
+            respelled.rotate_left(rotation % copies);
+            proptest::prop_assert_eq!(
+                &genotype,
+                &Genotype::new(respelled),
+                "two spellings of one genotype must be one value"
+            );
         }
 
         /// Ploidy accepts **every** copy number a genome could have and rejects
@@ -1550,5 +1689,122 @@ mod tests {
             Phred::from_log_prob(LogProb(f64::NAN)),
             Err(DomainError::Phred(q)) if q.is_nan()
         ));
+    }
+
+    /// The property the whole design of this type rests on: a genotype is a
+    /// **multiset**, so the order the alleles were handed over in cannot change
+    /// what it equals.
+    ///
+    /// It matters because the calling loop mints one genotype per sample from a
+    /// table row and the caller downstream groups, compares and hashes them. If
+    /// `[1, 0]` and `[0, 1]` were different values, one heterozygote in a cohort
+    /// would count as two, and every derived `Hash` and `Ord` would disagree
+    /// with the `PartialEq` a reader assumes.
+    #[test]
+    fn a_genotypes_alleles_are_a_multiset_not_a_sequence() {
+        use std::cmp::Ordering;
+
+        let reference_first = Genotype::new(vec![AlleleId(0), AlleleId(1)]);
+        let alternate_first = Genotype::new(vec![AlleleId(1), AlleleId(0)]);
+        assert_eq!(reference_first, alternate_first);
+        // Sorted, so `alleles()` reads the same either way — which is what makes
+        // the derived `Ord` and `Hash` agree with that equality.
+        assert_eq!(reference_first.alleles(), alternate_first.alleles());
+        assert_eq!(reference_first.alleles(), [AlleleId(0), AlleleId(1)]);
+
+        // Both follow from the assertion above, since `Genotype` has one field
+        // and `PartialEq`, `Hash` and `Ord` are all derived from it. They are
+        // here to fail if that ever stops being true — a second field, or a
+        // hand-written impl of any of the three.
+        let mut distinct_genotypes = std::collections::HashSet::new();
+        distinct_genotypes.insert(reference_first.clone());
+        distinct_genotypes.insert(alternate_first.clone());
+        assert_eq!(
+            distinct_genotypes.len(),
+            1,
+            "one genotype, however it was spelled"
+        );
+        assert_eq!(reference_first.cmp(&alternate_first), Ordering::Equal);
+    }
+
+    /// A multiset, not a set: two copies of one allele is what homozygous means,
+    /// so the repeat must survive construction. A `sort` that deduplicated, or a
+    /// `HashSet` reached for because "order does not matter", would turn every
+    /// homozygote into a haploid call and nothing about the type would object.
+    #[test]
+    fn a_genotype_keeps_repeated_alleles() {
+        let homozygous_alternate = Genotype::new(vec![AlleleId(1), AlleleId(1)]);
+        assert_eq!(
+            homozygous_alternate.alleles(),
+            [AlleleId(1), AlleleId(1)],
+            "both copies are carried"
+        );
+        assert_ne!(
+            homozygous_alternate,
+            Genotype::new(vec![AlleleId(1)]),
+            "a diploid homozygote is not a haploid call"
+        );
+    }
+
+    /// How many alleles a genotype holds is the ploidy at that region. The
+    /// haploid and tetraploid cases pin that `new` neither pads nor truncates,
+    /// and that sorting works past the two entries every other point test uses.
+    ///
+    /// **"No ceiling on ploidy" is not what these two points show, and no point
+    /// fixture could show it** — that is a claim about every length, and unlike
+    /// [`Ploidy`], whose domain is a finite `u8` and so can be enumerated, a
+    /// genotype's length domain is not. The property test reaches eight copies;
+    /// past that the guarantee rests on `Box<[AlleleId]>` having no length limit
+    /// of its own, not on a test.
+    ///
+    /// The tetraploid fixture **starts and ends in order** on purpose. Written
+    /// largest-first and smallest-last it would trip any "is this already
+    /// reversed?" fast path into sorting anyway, so it would pass against a
+    /// `new` that skipped the sort whenever the first entry was not above the
+    /// last — which leaves interior disorder in place from three copies up.
+    #[test]
+    fn a_genotype_holds_one_allele_per_genome_copy() {
+        let haploid = Genotype::new(vec![AlleleId(2)]);
+        assert_eq!(haploid.alleles().len(), 1);
+
+        let tetraploid = Genotype::new(vec![AlleleId(0), AlleleId(3), AlleleId(2), AlleleId(0)]);
+        assert_eq!(tetraploid.alleles().len(), 4);
+        assert_eq!(
+            tetraploid.alleles(),
+            [AlleleId(0), AlleleId(0), AlleleId(2), AlleleId(3)]
+        );
+    }
+
+    /// An empty multiset is the one construction that is not a genotype at any
+    /// ploidy: [`Ploidy`] refuses zero copies because a genome with none is not
+    /// a genome, and `alleles().len()` **is** that ploidy. Today nothing can
+    /// reach it — the only minter expands a genotype-table row, and a row holds
+    /// exactly `ploidy` copies — which is the reason to pin it now rather than
+    /// after a row builder learns to emit a zero-length row.
+    #[test]
+    #[should_panic(expected = "one allele per genome copy")]
+    fn a_genotype_cannot_be_built_from_no_alleles_at_all() {
+        let _ = Genotype::new(vec![]);
+    }
+
+    /// Re-minting a genotype from what `alleles()` handed out gives the same
+    /// value back. `new` canonicalises, and a canonical form has to be a fixed
+    /// point: a rule that sorted and then rotated would still make the two
+    /// spellings in `a_genotypes_alleles_are_a_multiset_not_a_sequence` agree
+    /// with each other, while changing a genotype every time it was rebuilt —
+    /// which is what a caller does when it widens a diploid call, or
+    /// reconstructs a genotype read back from a VCF.
+    #[test]
+    fn a_genotype_new_is_idempotent_on_its_own_alleles() {
+        for spelling in [
+            vec![AlleleId(1), AlleleId(0)],
+            vec![AlleleId(1), AlleleId(1)],
+            vec![AlleleId(3), AlleleId(0), AlleleId(2), AlleleId(0)],
+        ] {
+            let once = Genotype::new(spelling);
+            let twice = Genotype::new(once.alleles().to_vec());
+            assert_eq!(once, twice, "canonical form must be a fixed point");
+            assert_eq!(once.alleles(), twice.alleles());
+        }
     }
 }
