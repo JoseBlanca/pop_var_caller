@@ -586,6 +586,19 @@ times as much score. The observation count emitted beside each fit
 
 ### 4.3 Borrowing and merging across strata, and what each costs
 
+> **⚠ SUPERSEDED ON THE JOINT ROUTE — 2026-08-20. Neither procedure below survives there.** A
+> stratum no longer takes a neighbour's value and no sequence of levels is merged: every one of the
+> three slippage numbers is now the stratum's own answer blended with a curve drawn through all the
+> strata of its motif period, weighted by how precisely each determines it. What replaces this
+> section is [`str_slippage_level_curve.md`](str_slippage_level_curve.md) §5.1, and what it delivered
+> is measured in
+> [`../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md`](../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md).
+>
+> **The section stands as the record of the per-sample route**, where both procedures are still what
+> the code does (`merge_until_monotone` in
+> [`ssr/mod.rs`](../../../../src/ng/parameter_estimation/ssr/mod.rs)). What the curve does to that
+> route is that route's question and has not been asked.
+
 Two procedures copied from DRAGstr, both of which **change the estimate**:
 
 1. **A stratum too thin to fit takes its neighbours' value** — adjacent repeat counts at the same
@@ -615,9 +628,20 @@ stratum that would otherwise be fitted on noise, and it is not a price to pay si
 borrowed or merged stratum carries `Provenance::Borrowed` and the strata it was fitted with
 ([`parameter_prepass.md`](parameter_prepass.md) §6).
 
-**What is not measured: how often the monotonicity constraint fires when the truth is monotone.** A
-merge triggered by sampling noise pools two strata that did not need pooling and charges both the
-cost above.
+**✅ MEASURED 2026-08-20: how often the monotonicity constraint would fire when the truth is
+monotone.** Fitting every stratum independently with nothing linking them, **10 of 50 steps between
+neighbouring strata run downhill** on HG002 — 2 of 22 at period 1, 5 of 19 at period 2, 0 of 3 at
+period 3 and 3 of 6 at period 4 — and **none at all on tomato's four steps**. **No dip is deeper
+than 1.31-fold**, against the 15 to 25% a merge costs per repeat count. The dips concentrate exactly
+where the strata are thinnest, which is what a noise-triggered merge looks like
+([`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md) §6).
+*A curve fitted through all of a period's strata absorbs a 1.31-fold dip without a rule, which is
+why the joint route needs neither the constraint nor the merge.* The paragraph below is the state of
+the question before that measurement, kept for the argument it records.
+
+**What was not measured until then: how often the monotonicity constraint fires when the truth is
+monotone.** A merge triggered by sampling noise pools two strata that did not need pooling and
+charges both the cost above.
 
 *First evidence either way, 2026-08-13, and it is one cohort at one motif length*
 ([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)
@@ -653,7 +677,11 @@ badly-fitted parameter reaches a caller.
 each read group:
 
 - **how many strata were fitted in place, how many borrowed, how many merged**, and which — the
-  merged sets by name, because a merge is a claim about two strata at once;
+  merged sets by name, because a merge is a claim about two strata at once. *On the joint route,
+  where nothing borrows or merges any more, the same requirement is met by a different set of
+  counts: how many strata carry each of their three numbers from their own fit, from their period's
+  curve, or from a blend, and for a blend what share the curve carried
+  ([`str_slippage_level_curve.md`](str_slippage_level_curve.md) §8).*
 - **how many fits disagreed across their starting points**, with the worst offender named. This is
   the diagnostic §4.2's four starts exist to produce, and the one that separates a fitted number
   from a stopped search. *"Disagreed" needs a size, and this path has no ladder to read one off* —
@@ -713,8 +741,28 @@ it is the one thing not to throw away. The provenance records the two halves sep
 level fitted here with shares from two repeat counts up is a different claim from either a fit or a
 borrow.
 
-**At the bottom of the range the shares will mostly be borrowed, and that is the design working
-rather than failing.** At a level of 0.091%, reaching 4,000 slipped reads takes about **880,000 loci
+> **⚠ SUPERSEDED ON THE JOINT ROUTE — 2026-08-20: the floor stops being a gate and becomes a
+> description of where a blend hands over.** The two shares are now their own answer averaged with
+> their period's curve, weighted by the evidence behind each, so there is no threshold to cross
+> ([`str_slippage_level_curve.md`](str_slippage_level_curve.md) §5.1).
+>
+> **The gate had to go because it almost never opened.** Across both cohorts, **one motif period out
+> of twelve** has a stratum reaching 4,000 slipped reads — HG002's homopolymers, with 8,840 — so
+> every stratum of every other period took a neighbour's shares or got none.
+>
+> **And where it did fire it was overwriting well-measured strata.** On HG002 it replaced the shares
+> of **11 of the 55 strata fitted on their own tracts, holding 8,363 of the 26,769 loci in fitted
+> strata**. The largest is the 8-repeat homopolymer stratum, 4,194 loci: its own 3,666 slipped reads
+> measure a direction split of **0.5095 to within 1.6% of itself**, and the rule reported **0.6919**
+> because 3,666 falls short of 4,000. It now emits 0.5124, its period's curve carrying 2% of the
+> weight
+> ([`../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md`](../reports/str_slippage_curves_on_both_cohorts_2026-08-21.md)).
+>
+> **The precision model behind the 1,400 and the 4,000 is unchanged and is still the right model** —
+> it is now what sets each stratum's weight in the average rather than which side of a line it falls.
+
+**At the bottom of the range the shares will mostly come from the curve rather than from the
+stratum, and that is the design working rather than failing.** At a level of 0.091%, reaching 4,000 slipped reads takes about **880,000 loci
 at 5 reads each** — against tomato's 1.73 million STR loci in total, no stratum below four repeats
 comes near it. The alternative is not a better-measured share; it is a share fitted on 5 reads and
 reported as though it were measured.
@@ -874,8 +922,9 @@ for a boundary, and the number should move if the per-stratum distribution turns
 continuous rather than the two clumps this table suggests. **Measurable now**, from the same tooling
 that produced the table, at per-stratum grain rather than in three bands.
 
-No repeat-count threshold is hardcoded: thin strata already borrow under §4.3's rule, and a stratum
-whose fit is meaningless for this other reason is now visible rather than merely averaged in.
+No repeat-count threshold is hardcoded: a thin stratum already gets its numbers from its period's
+curve on the joint route and from §4.3's borrowing rule on the per-sample one, and a stratum whose
+fit is meaningless for this other reason is now visible rather than merely averaged in.
 
 **These are also the strata §4.5 places two requirements on**, and the table above is what makes both
 necessary: at 0.091% the direction split and the fall-off have almost no reads behind them however
@@ -904,10 +953,11 @@ being argued against, not what runs.
 stutter to be worth a stratum at all — §5's 0.091% below four repeats against 2.006% at six or more.
 But the sharper test is what *kind* of difference the reads show. Below four repeats **58.5% of the
 reads that differ from the allele differ by something that is not a whole number of copies**, which
-this noise model has no way to express. A thin stratum is recoverable: it borrows from a neighbour
-and the provenance records it (§4.3). **A mis-modelled stratum is not.** It returns a confident
-slippage rate that is mostly ordinary indel wearing the wrong model, and — worse than being wrong on
-its own loci — it enters the monotonicity walk of §4.3 and can drag a neighbour into a merge with
+this noise model has no way to express. A thin stratum is recoverable: it reads its period's curve, or on the
+per-sample route borrows from a neighbour, and the provenance records which (§4.3). **A mis-modelled
+stratum is not.** It returns a confident slippage rate that is mostly ordinary indel wearing the
+wrong model, and — worse than being wrong on its own loci — on the per-sample route it enters the
+monotonicity walk of §4.3 and can drag a neighbour into a merge with
 it. So the floor goes where the guard share crosses §5's one-in-ten threshold.
 
 **Below the floor nothing is lost; it is re-described.** Those tracts go to the generic path, where
@@ -1492,9 +1542,11 @@ genotype long alleles" is a claim with no number attached to it.
    OPEN and **measurable now** (§4.2). Free costs `A(A+1)/2` numbers per stratum where the tied form
    costs `A`, which is what decides whether a thin stratum can be fitted at all. *Leaning:* free
    where the stratum can afford it, tied where it cannot, recorded as provenance either way.
-7. **How often does the monotonicity constraint fire on a truly monotone sequence?** — OPEN and
-   **measurable now**, but it needs draws rather than the exact method (§4.3): a spurious merge is
-   triggered by sampling noise, and the exact method has none.
+7. **How often does the monotonicity constraint fire on a truly monotone sequence?** — **CLOSED,
+   measured 2026-08-20** (§4.3). Fitted with nothing linking them, 10 of 50 steps between
+   neighbouring strata run downhill on HG002 and none on tomato, and no dip is deeper than
+   1.31-fold — which a curve through all of a period's strata absorbs without a rule. The joint
+   route has neither the constraint nor the merge as a result.
 8. **What does the per-locus entry cost at 300×, and what should the read cap be?** — **CLOSED.**
    The table is not where this step's memory goes: 0.43 entries a locus uncapped at 300×, 0.36 MB
    over 29,811 loci. And the cap is not a correctness limit either: the scoring rule is exactly

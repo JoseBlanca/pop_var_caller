@@ -200,7 +200,10 @@ stratification spec's decision, not this plan's. **Report the size and hand it o
 
 ## 7. Instrument and discipline
 
-- **Every fit that feeds a curve runs with borrowing and merging off.** `SSR_BORROWING_FLOOR=0`, and
+- **Every fit that feeds a curve runs with borrowing and merging off.** *Since 2026-08-20 there is
+  nothing to switch: the joint route has neither, and `SSR_BORROWING_FLOOR` is gone with them
+  ([`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md) §5.1). The principle
+  stands and is now structural rather than a run setting.* Formerly `SSR_BORROWING_FLOOR=0`, and
   the merge rule disabled the same way. Any run that does not is unusable for §4's first principle,
   and the report must say which setting produced each table.
 - **Two cohorts, not one.** Tomato (63 accessions, ~3 reads a position, a selfing crop) and

@@ -170,22 +170,31 @@ like dead code; it is what makes the borrowing arm affordable and that arm stays
 
 ### Milestone C — measure what it bought, and say so in the specifications
 
-**C1. Re-run both cohorts and report the movement per cell.**  ☐
+**C1. Re-run both cohorts and report the movement per cell.**  ✅
 One walk each, writing the cell table with the curve on and with it off. Report how far each
 cell's level moved, which cells gained a level they did not have, and the curve's held-out error
 per period. Expect the tomato run to take about 70 minutes and HG002 about 60.
 ***Depends:*** B4. ***Source:*** spec §9.
 
-**C2. Amend the specifications.**  ☐
+**C2. Amend the specifications.**  ✅
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) §4.3 (borrowing and merging
 — the level leaves it), §4.4 (what the summary over strata must now say), §4.5 (the split floor,
 now split differently), and the architecture sibling
 [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md). Point at the new spec
 rather than restating it.
 ***Depends:*** C1. ***Source:*** spec §1.2, §5, §8.
+***Done 2026-08-21, after Milestone E rather than before it***, so that one pass could record what
+E deleted as well as what C changed. §4.3 and §4.5 carry a superseded-on-the-joint-route banner and
+stand as the per-sample route's record, since that route still borrows and still merges; §4.4's
+summary gains what replaces its borrowed-and-merged counts; the architecture's steps 3 and 4 and its
+two `fitted_over` fields say the joint route does not fill them. **Its open question 7 is closed by
+measurement** — 10 of 50 steps run downhill on HG002 and none on tomato, no dip deeper than
+1.31-fold. And this document's own §2, §6, §7, §7.1 and §7.2 are remeasured at the corrected ±8
+recording window, with the figures that have not been rerun marked as ±4 rather than left to look
+current.
 
 **C3. Update `PROJECT_STATUS.md`** — the in-scope feature's block only, per the *Project
-status protocol* in [`ai/skills/apply-code-review-fixes/SKILL.md`](../../../../ai/skills/apply-code-review-fixes/SKILL.md).  ☐
+status protocol* in [`ai/skills/apply-code-review-fixes/SKILL.md`](../../../../ai/skills/apply-code-review-fixes/SKILL.md).  ✅
 ***Depends:*** C2.
 
 > **Checkpoint C: measured, documented, and the status file says where this stands. Pause for

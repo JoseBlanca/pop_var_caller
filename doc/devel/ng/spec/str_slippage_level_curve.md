@@ -61,31 +61,40 @@ neighbour the borrowing rule reached first.
 
 ## 2. What the data says, and why it fixes the family
 
-Two cohorts, both fitted with borrowing off so every cell speaks from its own tracts alone
-(`SSR_BORROWING_FLOOR=0`). Numbers and method in
+Two cohorts, both fitted so that every cell speaks from its own tracts alone — with the borrowing
+switched off when these were first run, and since 2026-08-20 because nothing borrows at all.
+Numbers and method in
 [`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md);
 what matters here is the three facts that decide the design.
 
-**First: the rise is steep at short tracts and flattens at long ones.** On HG002 — one sample at
-about 300 reads a position, 23 consecutive homopolymer cells from 8 to 30 repeats — the level
-runs from 3.7 reads slipping per 1,000 to about 120, a 37-fold rise. But the step-to-step ratio
-falls from 2.45-fold at 9→10 repeats to 1.02-fold at 19→20. Predicting each cell from the other
-22, a straight line in repeat count lands within **4.4%** of the held-out cell and an exponential
-within **22.7%**.
+> **Corrected 2026-08-20 for the census's recording window.** Every number in this section was
+> first measured at ±4 and has been remeasured at ±8; §11's first entry says what the correction
+> overturned, and one of the overturned claims was this section's own — the two cohorts no longer
+> prefer *opposite* shapes.
 
-**Second: the two cohorts prefer opposite shapes over the same repeat counts.** Restricted to
+**First: the rise is steep at short tracts and it does not flatten.** On HG002 — one sample at
+about 300 reads a position, 23 consecutive homopolymer cells from 8 to 30 repeats — the level runs
+from 4.6 reads slipping per 1,000 to 272, a **59-fold** rise, and step to step it is still rising
+1.09 to 1.32-fold at the top of the range. Predicting each cell from the other 22, the fitted
+family lands within **7.7%** of the held-out cell where a straight line reaches 21.8% and an
+exponential 18.8%.
+
+**Second: the two cohorts land on different shapes over the same repeat counts.** Restricted to
 8–12 repeats, five cells each:
 
-| | level, 8→12 repeats (reads slipping per 1,000) | held-out error, exponential | held-out error, straight line |
-|---|---|---:|---:|
-| tomato, 63 accessions at ~3 reads a position | 2.1, 2.9, 3.9, 6.6, 10.2 | **12.4%** | 33.6% |
-| HG002, one sample at ~300 reads a position | 3.7, 6.7, 16.5, 22.0, 28.0 | 31.2% | **8.0%** |
+| | level, 8→12 repeats (reads slipping per 1,000) | its best shape | held-out error, exponential | held-out error, straight line |
+|---|---|---:|---:|---:|
+| tomato, 63 accessions at ~3 reads a position | 2.5, 4.0, 4.0, 6.8, 10.8 | **0.65** | 14.7% | 26.2% |
+| HG002, one sample at ~300 reads a position | 4.6, 7.4, 17.1, 23.1, 30.0 | **1.00** | 26.7% | 4.4% |
 
-So it is not a matter of one cohort seeing a wider window. **Neither shape can be hard-coded.**
+Over its whole 8–30 range HG002 fits 0.35, so the two are nearer each other than either is to a
+fixed family — but on the shared window they still differ, and their levels differ about two-fold at
+every repeat count. So it is not a matter of one cohort seeing a wider window. **Neither shape can
+be hard-coded.**
 
 **Third: both fixed shapes fail catastrophically outside the range they saw.** An exponential
-fitted on HG002's 8–12 cells says the level at 30 repeats is **205** — as a probability — where
-the cell at 30 repeats fits 0.120. A straight line fitted over 8–30 goes **negative below 7.4
+fitted on HG002's 8–12 cells says the level at 30 repeats is **149** — as a probability — where the
+cell at 30 repeats fits 0.272. A straight line fitted over 8–30 goes **negative below 7.4
 repeats**, and the homopolymer copy floor puts real cells at 8
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §5.1.1).
 
@@ -99,15 +108,21 @@ log(level)          =  intercept + slope · n            for rise_shape = 0
 
 **`rise_shape` says how the level compounds:** at **0**, each extra repeat *multiplies* the level
 by a fixed factor; at **1**, each extra repeat *adds* a fixed amount. Fitted on a grid over
-`[0, 1]`, it lands at 0.00 on tomato's homopolymers, 1.00 on HG002's, and 0.80 on HG002's
-dinucleotides — where it beats both ends, 3.8% held-out against the straight line's 5.9% and the
-exponential's 18.3%.
+`[0, 1]`, it lands at 0.65 on tomato's homopolymers, 0.35 on HG002's, and 0.70 on HG002's
+dinucleotides — where it beats both ends, 11.4% held-out against the straight line's 21.9% and the
+exponential's 15.5%. **At every period with enough cells to mean anything the fitted shape beats
+both fixed ends and lands between them**, which is the finding that fixes the family.
 
 **`rise_shape = 1` is production's own shape.** Production fits `baseline + slope · units` and
 clamps to `[0, 1]` ([`em.rs:385`](../../../../src/ssr/cohort/em.rs#L385)), so this family nests
 what production does rather than replacing it with something unrelated.
 
 ### 2.1 Two families that were live and lost
+
+> **⚠ The four comparisons in this subsection are ±4 measurements and have not been rerun.** The
+> argument each rests on is structural — three free numbers cannot be determined from five cells,
+> and a per-base hazard is a fixed shape — so the correction is not expected to revive either
+> family; but the percentages should not be quoted until they are remeasured.
 
 - **A saturating exponential**, `ceiling · (1 − exp(−rate · (n − offset)))` — the shape the
   microsatellite mutation-rate literature settles on after finding the exponential too simple. It
@@ -181,6 +196,8 @@ sets how precisely a cell determines its level
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.5).
 
 **The choice barely matters and the measurement says so, which is why it is recorded as soft.**
+*⚠ The four figures below are ±4 measurements and have not been rerun; what they are cited for is
+that the ranking of families was identical under all four weights.*
 On HG002's 23 homopolymer cells the winning family's held-out error moves from 5.13% unweighted to
 4.77% by tracts, 4.65% by reads crossing and 4.39% by slipped reads, and the ranking of families
 is identical under all four. Slipped reads is chosen because it is the one with a reason behind
@@ -332,7 +349,7 @@ one's.
 The alternative was to extrapolate, and §2's third fact is why it lost: both fixed shapes produce
 impossible numbers a few repeat counts outside their range, and `rise_shape` being fitted does not
 protect against that — a period whose cells all sit in a narrow window will fit `rise_shape` near 0
-and the curve will explode above it, exactly as HG002's 8–12 window does at 205.
+and the curve will explode above it, exactly as HG002's 8–12 window does at 149.
 
 **Holding flat is wrong in a known direction and that is the point:** the level genuinely keeps
 rising, so a held value under-states slippage at a tract longer than anything fitted. It is
@@ -356,8 +373,8 @@ log(level emitted) = w_cell · log(cell's level) + w_curve · log(curve's level)
 ```
 
 **This *is* the protection against fitting each cell's noise, and it is not a switch between two
-regimes.** The curve carries **93%** of the weight at a cell with 40 slipped reads behind it and
-**6%** at one with 8,000, at HG002's homopolymer curve. Using the curve everywhere is the same
+regimes.** At HG002's homopolymer curve, which predicts a held-out cell to 7.7%, the curve carries
+**81%** of the weight at a cell with 40 slipped reads behind it and **2%** at one with 8,000. Using the curve everywhere is the same
 formula with the curve's weight pinned at 1; using each cell's own answer is it pinned at 0.
 Neither end is a separate design, and neither has to be argued for separately — what has to be
 argued is why the fitted middle beats the always-curve end, which is §7.1.
@@ -366,24 +383,25 @@ argued is why the fitted middle beats the always-curve end, which is §7.1.
 
 **Because where the curve misses, it misses systematically and by far more than the cell's own
 noise, and it misses at the cells holding the most tracts.** Fitted over HG002's 23 homopolymer
-cells, the winning curve sits within 0.5 to 12% of every cell from 10 repeats up — but at 8 and 9
-repeats it is **27% and 55% high**, against those cells' own sampling errors of 1.8% and 1.7%.
-Those two cells hold 4,194 and 2,608 tracts, more than any other, and 8 to 9 repeats is where most
-homopolymer loci sit.
+cells, the winning curve is **135% and 87% high at 8 and 9 repeats**, against those cells' own
+sampling errors of 1.7% and 1.6%. Those two cells hold 4,194 and 2,608 tracts, more than any other,
+and 8 to 9 repeats is where most homopolymer loci sit.
 
 **No member of the family repairs it**, so this is not a bad choice of shape number: at every rung
-from 0.00 to 1.00 the worst residual falls at 8 or 9 repeats, and the winning rung is the least
-bad of them — 55% against 282% at the multiplying end. There is a knee between 9 and 10 repeats
-that a two-parameter monotone curve cannot bend around. *That knee is also the most suspicious
-step in the sequence — the level jumps 2.45-fold across it — and §11's first open question bears
-directly on it.*
+from 0.00 to 1.00 the worst residual falls at 8 or 9 repeats, and the winning rung is the least bad
+of them. There is a knee between 9 and 10 repeats that a two-parameter monotone curve cannot bend
+around. *That knee was the most suspicious step in the sequence and §11's first entry was raised
+against it — the answer came back that the knee is in the chemistry: correcting the recording window
+made it **worse**, 87% high at 9 repeats where it had been 55%, so this subsection's argument
+strengthened rather than dissolved.*
 
-**Always-curve would therefore emit 10.4 reads slipping per 1,000 at a 9-repeat homopolymer where
-that cell's own 3,520 slipped reads say 6.7.** The blend emits 7.1. That is the whole argument.
+**Always-curve would therefore emit 13.8 reads slipping per 1,000 at a 9-repeat homopolymer where
+that cell's own 3,875 slipped reads say 7.4.** The blend emits 7.4. That is the whole argument.
 
-**Where the curve is as good as the cells, the blend costs nothing** and says so by itself: at
-HG002's dinucleotides the curve's median distance from a cell is 3.5% against the cells' own 3.5%,
-so the weights come out near even and the emitted values sit between two answers that agree.
+**Where the curve is as good as the cells, the blend costs nothing** and says so by itself: where a
+period's curve and its cells are equally precise the weights come out near even and the emitted
+values sit between two answers that agree. *⚠ The dinucleotide figures this paragraph carried — a
+curve 3.5% from its cells against cells 3.5% from themselves — were ±4 and are not restated.*
 
 ### 7.2 One refinement: a cell may say the curve is wrong about it
 
@@ -395,12 +413,12 @@ gap = |log(cell's level) − log(curve's level)| / sqrt(cell's error² + curve's
 ```
 
 and beyond a knee of 2.5 combined errors, divide the curve's weight by `(gap / 2.5)²`. At HG002's
-9-repeat homopolymer the gap is **9.3 combined errors**, which no sampling noise produces, and the
+9-repeat homopolymer the gap is **7.9 combined errors**, which no sampling noise produces, and the
 curve is stood down.
 
 **This is a refinement and the spec says so rather than dressing it up:** without it the blend
-already emits 7.1 reads per 1,000 there against the cell's 6.7 — 5.8% high, not 55% — because a
-cell with 3,520 slipped reads outweighs the curve on its own. With it, 6.8. It is worth having
+already emits 7.60 reads per 1,000 there against the cell's 7.41 — 2.6% high, not 87% — because a
+cell with 3,875 slipped reads outweighs the curve on its own. With it, 7.43. It is worth having
 because the bottom of the repeat range is what the copy-floor decision reads
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §5.1), and it costs one comparison.
 
@@ -496,21 +514,19 @@ cells that are already fitted independently. It adds no shared state to stage on
 
 ## 11. Open questions
 
-- **⚠ OPEN — is the flattening the polymerase or the census's recording window?** The census
-  records a read's length offset only over ±4 repeats and folds everything beyond into an end
-  bucket ([`census.rs:398`](../../../../src/ng/parameter_estimation/joint/census.rs#L398)). At 30
-  repeats 60 reads in 100 that cross the tract report a length other than the reference's, so the
-  end buckets carry a large share of the evidence exactly where the curve bends. **A flattening
-  that begins where the buckets saturate is what a recording artefact looks like.** *Leaning: the
-  design is unaffected either way — `rise_shape` is fitted, so if the bend is an artefact the
-  rung simply moves toward 0 — but the fitted values reported before this is settled must not be
-  quoted as chemistry.* **A second reason to run it, found while settling §7.1:** the one place
-  no member of the family can follow the cells is the 9→10 step, where the level jumps 2.45-fold
-  — and that is where the recording window would first bite. If the knee is an artefact, the
-  curve may fit the whole range afterwards and §7.2's refinement stops earning its keep.
-  **The measurement that settles it:** widen `RECORDED_OFFSET_RANGE` to 8, re-walk HG002, and
-  compare the fitted `rise_shape` and the residual at 8 and 9 repeats. About an hour. **Confirm
-  before the numbers are published; not a blocker on the code.**
+- **✅ ANSWERED 2026-08-20 — the flattening was the census's recording window, not the polymerase,
+  and the 9-to-10 knee was not.** The census recorded a read's length offset over only ±4 repeats
+  and folded everything beyond into an end bucket, which under-measured the level **2.26-fold at
+  30-repeat homopolymers**. `RECORDED_OFFSET_RANGE` is 8 now, converged against a ±12 arm agreeing
+  within 1.8%. At ±4 the step-to-step rise fell to 1.02 by 20 repeats and the fitted shape number
+  was 1.00; at ±8 the rise is still 1.09 to 1.32 at the top of the range and the shape is 0.35.
+  **The second reason the measurement was run came out the other way**: §7.1 hoped a corrected fit
+  might follow the whole range and retire §7.2's refinement, and instead the knee got worse — the
+  curve sits **87%** above the 9-repeat cell where it sat 55% above, and **135%** above the 8-repeat
+  cell where it sat 27%. The knee is in the chemistry, and §7.2 keeps earning its place.
+  **⚠ Every fitted number in §7 and §7.1 below, and in §2 and §4.2, was measured at ±4 and is
+  distorted**; [`../reports/str_slippage_shape_2026-08-20.md`](../reports/str_slippage_shape_2026-08-20.md)
+  §7 lists what the correction overturned, and its §3 and §4 tables are the corrected ones.
 - **⚠ OPEN — is four contributing cells enough to draw a curve?** §4.1's floor is arithmetic. *The
   measurement that settles it: draw cells at a known curve and at the cell counts real periods
   have, and report the held-out error against the number of contributing cells.* *Leaning: four

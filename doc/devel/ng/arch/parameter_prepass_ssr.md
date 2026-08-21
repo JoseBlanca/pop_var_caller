@@ -453,6 +453,12 @@ pub struct StratumFit {
     pub starts_tried: SmallVec<[SlippageStart; 4]>,
     /// Which strata **the level's** loci actually came from — itself where it was fitted
     /// in place, its neighbours where it borrowed, both where a merge fired (§4.2).
+    ///
+    /// **The joint route has neither borrowing nor merging and does not fill this**: its
+    /// level is its own fit blended with its period's curve, and what a consumer needs
+    /// to know instead is which of the two the number came from and in what proportion
+    /// (`LevelProvenance` in `joint/ssr_fit.rs`, spec
+    /// `str_slippage_level_curve.md` §8).
     pub fitted_over: SmallVec<[Stratum; 2]>,
     /// Which strata **the direction split and the fall-off** came from, which is not
     /// always the same answer (spec §4.5). They are measured only by the reads that
@@ -461,6 +467,11 @@ pub struct StratumFit {
     /// magnitude and still have to borrow these two. The level, being a proportion over
     /// every read rather than over the slipped ones, is unharmed by the same thinness
     /// and is kept.
+    ///
+    /// **The joint route does not fill this either.** The observation it rests on — that
+    /// the two shares starve where the level does not — is why they get their own curve
+    /// with its own weight rather than a share of the level's, and their provenance is
+    /// `SharesProvenance` beside the level's.
     pub shares_fitted_over: SmallVec<[Stratum; 2]>,
     /// Reads that showed a length other than the reference tract's. **The count that
     /// decides whether the two shares are measurable**, and the one a consumer needs in
@@ -715,6 +726,16 @@ to count against. What replaces it is `loci_without_whole_repeat_reference`, whi
 zero and is a bug report against region typing if it does not.
 
 ### 4.1 The four fits, in order
+
+> **⚠ STEPS 3 AND 4 ARE SUPERSEDED ON THE JOINT ROUTE — 2026-08-20.** Nothing borrows and nothing
+> merges there: after every stratum is fitted on its own tracts, one curve a motif period is drawn
+> for each of the three slippage numbers through the strata that measured themselves, weighted by
+> how precisely each did, and every stratum's numbers are re-emitted as its own answer blended with
+> that curve. A stratum too thin to fit at all takes the curves whole. The types are
+> `share_curve.rs` and `slippage_curve.rs` beside
+> [`ssr_fit.rs`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs); the design is
+> [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md) §5.1. **The two steps
+> below stand as the record of the per-sample route**, which still does both.
 
 1. **The substitution rate.** `bases_mismatched / bases_compared` per stratum. A division (spec
    §4.1), not a search, and it needs none of the other three.
