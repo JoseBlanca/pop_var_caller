@@ -159,14 +159,13 @@ const HOM_EXCESS: f64 = 0.4;
 /// fifteen and changes nothing about the loop being measured — the objective, its quadrature,
 /// its allele classes and its genotypes are all production's.
 #[cfg(feature = "bench-fixtures")]
-fn ssr_config(borrowing_floor: usize) -> SsrFitConfig {
+fn ssr_config() -> SsrFitConfig {
     SsrFitConfig {
         starting_points: vec![SsrStart {
             slippage_level: 0.10,
             concentration: 3.0,
         }],
         max_rounds: 1,
-        borrowing_floor,
         // **Four and not the production fifty**, because these strata are deliberately far
         // thinner than a real one: at the default every drawn stratum here would come back
         // `Refused` and the benchmark would time the refusal.
@@ -231,7 +230,7 @@ fn stratum_by_tracts(c: &mut Criterion) {
     const SAMPLES: usize = 8;
     let pool = fixed_pool();
     let excess = vec![HOM_EXCESS; SAMPLES];
-    let config = ssr_config(1);
+    let config = ssr_config();
 
     let mut group = c.benchmark_group("ng_joint_fit/stratum_by_tracts");
     group.sample_size(10);
@@ -265,7 +264,7 @@ fn stratum_by_tracts(c: &mut Criterion) {
 fn stratum_by_samples(c: &mut Criterion) {
     const TRACTS: usize = 32;
     let pool = fixed_pool();
-    let config = ssr_config(1);
+    let config = ssr_config();
 
     let mut group = c.benchmark_group("ng_joint_fit/stratum_by_samples");
     group.sample_size(10);
@@ -299,23 +298,18 @@ const STRATA: usize = 6;
 #[cfg(feature = "bench-fixtures")]
 const TRACTS_A_STRATUM: usize = 16;
 
-/// **The borrowing and dedup path, as a pair of runs that fit the same number of tracts.**
+/// **Six strata, each fitted on its own tracts.**
 ///
-/// `fit_strata` lets a stratum too thin to carry its own answer take in its neighbouring
-/// repeat counts, and then fits each *distinct pooled set* once. The two cases here differ
-/// only in the floor:
-///
-/// - `stands_alone` — the floor is 1, so each of the six strata is fitted on its own sixteen
-///   tracts: **six fits of sixteen tracts**.
-/// - `borrows_and_shares` — the floor is unreachable, so every stratum takes in all five
-///   neighbours, all six arrive at the identical pooled set, and the dedup collapses them to
-///   **one fit of ninety-six tracts** plus five clones of its answer.
-///
-/// Both fit ninety-six tracts' worth of likelihood. What separates them is everything else:
-/// six quadrature rebuilds against one — the review puts the 256-point rebuild at 21.7% of
-/// the repeat-tract fit, and it costs the same whether a stratum holds sixteen tracts or a
-/// thousand — against six clones of the pooled evidence. **On tomato 68 of 141 strata borrow**,
-/// so which way that trade falls is not an edge case.
+/// **Halved on 2026-08-21, and what went was the other half of a trade that no longer exists.**
+/// This measured two cases against each other: six fits of sixteen tracts, against one fit of
+/// ninety-six after every stratum took in its five neighbours and the dedup collapsed them. That
+/// second case priced pooling — six quadrature rebuilds against one, against six clones of the
+/// pooled evidence — and `fit_strata` stopped pooling in Milestone D of
+/// `doc/devel/ng/impl_plan/str_slippage_level_curve.md`. It has not compiled since. **What
+/// replaced pooling is a curve drawn once a motif period through the strata that measured
+/// themselves, which costs one line fit rather than a second pass over the evidence**: the same
+/// cohort went from 1,036.8 s with pooling to 155.5 s without, and 421.0 s with the curves and
+/// the lower floor of Milestone E.
 #[cfg(feature = "bench-fixtures")]
 fn strata_borrowing(c: &mut Criterion) {
     const SAMPLES: usize = 8;
@@ -338,23 +332,9 @@ fn strata_borrowing(c: &mut Criterion) {
     let mut group = c.benchmark_group("ng_joint_fit/strata");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
-    for (name, floor, borrowed_each, tracts_each) in [
-        ("stands_alone", 1_usize, 0_usize, TRACTS_A_STRATUM),
-        (
-            "borrows_and_shares",
-            usize::MAX,
-            STRATA - 1,
-            STRATA * TRACTS_A_STRATUM,
-        ),
-    ] {
-        let config = ssr_config(floor);
-        check_the_strata_took_the_route_they_were_named_for(
-            &strata,
-            &excess,
-            &config,
-            borrowed_each,
-            tracts_each,
-        );
+    for (name, tracts_each) in [("stands_alone", TRACTS_A_STRATUM)] {
+        let config = ssr_config();
+        check_the_strata_took_the_route_they_were_named_for(&strata, &excess, &config, tracts_each);
         group.bench_function(name, |b| {
             b.iter(|| {
                 pool.install(|| {
@@ -381,7 +361,6 @@ fn check_the_strata_took_the_route_they_were_named_for(
     strata: &[StratumEvidence],
     excess: &[f64],
     config: &SsrFitConfig,
-    borrowed_each: usize,
     tracts_each: usize,
 ) {
     let outcomes = fit_strata(strata, excess, config);
@@ -389,12 +368,10 @@ fn check_the_strata_took_the_route_they_were_named_for(
     for outcome in &outcomes {
         match outcome {
             StratumOutcome::Fitted(fit) => {
-                assert_eq!(
-                    fit.borrowed.len(),
-                    borrowed_each,
-                    "a stratum borrowed from {} neighbours where this case is the one that \
-                     borrows from {borrowed_each}",
-                    fit.borrowed.len()
+                assert!(
+                    fit.borrowed.is_empty(),
+                    "nothing pools tracts any more, so no stratum may report borrowing from {:?}",
+                    fit.borrowed
                 );
                 assert_eq!(
                     fit.tracts_fitted, tracts_each,
@@ -405,6 +382,10 @@ fn check_the_strata_took_the_route_they_were_named_for(
             StratumOutcome::Refused { reason, .. } => {
                 panic!("a drawn stratum was refused ({reason:?}), so nothing was timed")
             }
+            StratumOutcome::Derived(_) => panic!(
+                "a drawn stratum was furnished from its period's curves rather than fitted, so \
+                 the fit this benchmark times did not run"
+            ),
         }
     }
 }

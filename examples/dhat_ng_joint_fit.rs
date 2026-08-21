@@ -709,6 +709,11 @@ fn draw_stratum(
         tracts_over_guard_threshold: 0,
         reads_reaching_not_crossing: 0,
         guard_reads: 0,
+        // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero bases
+        // compared is what `substitution_rate()` returns `None` for, which is the honest answer
+        // here rather than a fitted zero.
+        bases_compared: 0,
+        mismatching_bases: 0,
     }
 }
 

@@ -1416,6 +1416,11 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
         tracts_over_guard_threshold: 0,
         reads_reaching_not_crossing: 0,
         guard_reads: 0,
+        // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero bases
+        // compared is what `substitution_rate()` returns `None` for, which is the honest answer
+        // here rather than a fitted zero.
+        bases_compared: 0,
+        mismatching_bases: 0,
     };
     let config = ssr_fit::SsrFitConfig {
         allele_span: span,
@@ -1477,227 +1482,18 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
 // When a thin stratum should borrow from its neighbours
 // ---------------------------------------------------------------------
 
-/// One drawn stratum in the library's shape.
-fn to_evidence(
-    data: &[Vec<ReadCounts>],
-    classes: usize,
-    period: u8,
-    reference_repeats: u64,
-) -> pop_var_caller::ng::parameter_estimation::joint::ssr_fit::StratumEvidence {
-    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit as lib;
-    lib::StratumEvidence {
-        stratum: lib::Stratum {
-            period,
-            reference_repeats,
-        },
-        tracts: data
-            .iter()
-            .map(|panel| lib::TractReads {
-                samples: panel
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, counts)| counts.iter().any(|reads| *reads > 0))
-                    .map(|(sample, counts)| lib::SampleTractReads {
-                        sample: sample as u32,
-                        by_group: vec![(0, counts.clone())],
-                    })
-                    .collect(),
-            })
-            .collect(),
-        read_span: (classes as i32 - 1) / 2,
-        groups: 1,
-        tracts_over_guard_threshold: 0,
-        reads_reaching_not_crossing: 0,
-        guard_reads: 0,
-    }
-}
-
-/// **Where borrowing starts paying**: refit a thin stratum on its own tracts and again with
-/// its two neighbouring repeat counts pooled in, and compare the total error of each.
-///
-/// The two arms fail in opposite ways and that is the whole question. A thin stratum's own
-/// answer is centred on the truth and moves a long way from draw to draw; a borrowed answer is
-/// steady and sits on its neighbours' value instead of its own, because **slippage genuinely
-/// rises with repeat count — roughly 1.3-fold a count**
-/// (`parameter_prepass_ssr.md` §4.3). So the neighbours here are drawn at 1.3 times and 1/1.3
-/// times the thin stratum's own slippage level, which is what makes the borrowed arm's
-/// displacement real rather than assumed.
-///
-/// **The statistic is the root-mean-square error against the truth**, over the draws — one
-/// number that adds the two failures together, where a mean error alone would call the noisy
-/// arm perfect and a spread alone would call the displaced arm perfect.
-/// With `at_the_edge`, both neighbours sit at **shorter** repeat counts instead of one either
-/// side — which is what a stratum at the end of the repeat-count range actually faces, and
-/// where the two displacements no longer cancel.
-fn borrowing_crossover(
-    samples: usize,
-    depth: u32,
-    only: usize,
-    classes: usize,
-    kappa: f64,
-    at_the_edge: bool,
-) {
-    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit as lib;
-
-    /// How many tracts each neighbouring repeat count brings.
-    const NEIGHBOUR_TRACTS: usize = 600;
-    /// How far apart adjacent repeat counts' slippage levels are.
-    const PER_REPEAT_COUNT: f64 = 1.3;
-
-    // Either side, or both below.
-    let (first_ratio, second_ratio, first_repeats, second_repeats) = if at_the_edge {
-        (
-            1.0 / PER_REPEAT_COUNT,
-            1.0 / (PER_REPEAT_COUNT * PER_REPEAT_COUNT),
-            9_u64,
-            8_u64,
-        )
-    } else {
-        (1.0 / PER_REPEAT_COUNT, PER_REPEAT_COUNT, 9, 11)
-    };
-
-    println!(
-        "\nWhen a thin stratum should borrow — {classes} classes, {samples} samples, {depth} \
-         reads a tract, concentration {kappa:.2}{}",
-        if at_the_edge {
-            ", at the end of the repeat-count range"
-        } else {
-            ""
-        }
-    );
-    println!(
-        "  the thin stratum's own level is 0.0800; the neighbours it can reach are drawn at \
-         {:.4} and {:.4}, and each brings {NEIGHBOUR_TRACTS} tracts",
-        0.08 * first_ratio,
-        0.08 * second_ratio,
-    );
-
-    let base = Truth::default_for(classes, samples, depth, kappa);
-    let neighbour_truth = |ratio: f64| {
-        let mut truth = base.clone();
-        truth.slippage.level = base.slippage.level * ratio;
-        truth
-    };
-    let true_values = [
-        base.slippage.level,
-        base.slippage.down_share,
-        base.slippage.fall_off,
-        base.kappa,
-        base.spectrum[classes / 2],
-    ];
-
-    let config = |floor: usize| lib::SsrFitConfig {
-        allele_span: (classes as i32 - 1) / 2,
-        borrowing_floor: floor,
-        refusal_floor: 1,
-        ..lib::SsrFitConfig::default()
-    };
-    let excess = vec![base.inbreeding; samples];
-
-    println!(
-        "\n  {:>7}{:>7}  {:>28}  {:>28}",
-        "tracts", "draws", "fitted on its own", "with its neighbours pooled in"
-    );
-    println!(
-        "  {:>7}{:>7}  {:>28}  {:>28}",
-        "", "", "mean err ± spread  (rmse)", "mean err ± spread  (rmse)"
-    );
-    // `only` picks one tract count; zero runs every one of them.
-    for (tracts, draws) in [
-        (50_usize, 8_u64),
-        (100, 8),
-        (250, 8),
-        (500, 6),
-        (1_000, 5),
-        (2_500, 4),
-    ]
-    .into_iter()
-    .filter(|(tracts, _)| only == 0 || *tracts == only)
-    {
-        let started = Instant::now();
-        let mut alone_rows: Vec<[f64; 5]> = Vec::new();
-        let mut borrowed_rows: Vec<[f64; 5]> = Vec::new();
-        for draw in 1..=draws {
-            let seed = draw * 8_191;
-            let thin = to_evidence(&base.draw(tracts, seed), classes, 2, 10);
-            let shorter = to_evidence(
-                &neighbour_truth(first_ratio).draw(NEIGHBOUR_TRACTS, seed ^ 0xA5),
-                classes,
-                2,
-                first_repeats,
-            );
-            let longer = to_evidence(
-                &neighbour_truth(second_ratio).draw(NEIGHBOUR_TRACTS, seed ^ 0x5A),
-                classes,
-                2,
-                second_repeats,
-            );
-
-            let alone = lib::fit_stratum(&thin, &excess, &config(0)).expect("reads were drawn");
-            alone_rows.push(numbers_of(&alone, classes));
-
-            let outcomes = lib::fit_strata(
-                &[thin, shorter, longer],
-                &excess,
-                &config(NEIGHBOUR_TRACTS * 2),
-            );
-            let lib::StratumOutcome::Fitted(borrowed) = &outcomes[0] else {
-                panic!("the thin stratum should have been fitted from borrowed tracts");
-            };
-            borrowed_rows.push(numbers_of(borrowed, classes));
-        }
-
-        for (number, name) in NUMBER_NAMES.iter().enumerate() {
-            let truth_value = true_values[number];
-            let cell = |rows: &[[f64; 5]]| {
-                let values: Vec<f64> = rows.iter().map(|row| row[number]).collect();
-                let summary = across(&values);
-                let squared: f64 = values
-                    .iter()
-                    .map(|v| (v - truth_value).powi(2))
-                    .sum::<f64>()
-                    / values.len() as f64;
-                format!(
-                    "{:>+7.1}% ± {:>5.1}%  ({:>5.1}%)",
-                    100.0 * (summary.mean - truth_value) / truth_value,
-                    100.0 * summary.spread / truth_value,
-                    100.0 * squared.sqrt() / truth_value,
-                )
-            };
-            println!(
-                "  {:>7}{:>7}  {name:<17}{}  {}",
-                if number == 0 {
-                    tracts.to_string()
-                } else {
-                    String::new()
-                },
-                if number == 0 {
-                    draws.to_string()
-                } else {
-                    String::new()
-                },
-                cell(&alone_rows),
-                cell(&borrowed_rows),
-            );
-        }
-        println!("          {:.0} s", started.elapsed().as_secs_f64());
-    }
-}
-
-/// The five numbers a library fit returns, in the order [`NUMBER_NAMES`] gives.
-fn numbers_of(
-    fitted: &pop_var_caller::ng::parameter_estimation::joint::ssr_fit::StratumFit,
-    classes: usize,
-) -> [f64; 5] {
-    let slippage = fitted.slippage[0].expect("the one group carries reads");
-    [
-        slippage.level,
-        slippage.shorter_share,
-        slippage.fall_off,
-        fitted.concentration,
-        fitted.length_spectrum[classes / 2],
-    ]
-}
+// **Removed 2026-08-21: the two modes here measured a rule this estimator no longer has.**
+// `borrowing_crossover` refitted a thin stratum on its own tracts and again with its two
+// neighbouring repeat counts pooled in, and priced the crossover between a noisy own answer and
+// a steady displaced one. The joint route stopped pooling tracts in Milestone D of
+// `doc/devel/ng/impl_plan/str_slippage_level_curve.md` and stopped copying a neighbour's shares
+// in Milestone E, so there is no borrowed arm left for it to fit — the modes had not compiled
+// since Milestone D landed.
+//
+// **The question it asked is still live on the per-sample route**, which still borrows and still
+// merges (`src/ng/parameter_estimation/ssr/mod.rs`); measuring it there needs a harness against
+// that estimator rather than this one. What replaced the rule on the joint route is priced in
+// `doc/devel/ng/reports/str_slippage_curves_on_both_cohorts_2026-08-21.md`.
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -1719,8 +1515,6 @@ fn main() {
             let truth = Truth::default_for(classes, samples, depth, kappa);
             library_agreement(&truth, loci, 11);
         }
-        "borrow" => borrowing_crossover(samples, depth, loci, classes, kappa, false),
-        "borrow-edge" => borrowing_crossover(samples, depth, loci, classes, kappa, true),
         "size" => stratum_size_sweep(samples, depth, loci, classes, kappa),
         "kappa" => kappa_sweep(classes, samples, depth, loci),
         "classes" => {
