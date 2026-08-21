@@ -31,7 +31,9 @@ exact and understates every heterozygous coefficient at ploidy 9 by `ln 9 = 2.19
 
 ### The Minors
 
-- **Mi1** — the two parallel tables' lengths are asserted before they are read row by row, so a
+- **Mi1** — *(superseded by §4: the two tables are now compared as whole slices against
+  production's, so their lengths are part of the comparison. As first applied:)* the two parallel
+  tables' lengths are asserted before they are read row by row, so a
   port with an extra trailing row now fails here. The per-row loops stay, because their message
   names the genotype; the length assertions are what make the loops sufficient.
 - **Mi2** — `compare_against_production` returns the **table's** genotype count rather than the
@@ -95,18 +97,31 @@ next door. The first attempt at this fix asserted exact equality and failed at
   per-thread over a pure function of its key.
 - **Amending the plan's step C2 text.** See §4.
 
-## 4. Raised, not fixed: the plan asks for something the compiler refuses
+## 4. Resolved after the review: the oracle is now production itself
 
-Step C2 says the comparison is made "against `GenotypeShape` … called directly". It cannot be:
-`posterior_engine.rs` declares `mod shape;` privately and imports `GenotypeShape`/`shape_for`
-privately, so there is no route from `src/ng/`, and the only way to satisfy the step as written is
-to widen a declaration in the frozen tree. Confirmed three times independently on this branch,
-each getting ``error[E0603]: module `shape` is private``.
+The review's open question was that step C2 asks for a comparison "against `GenotypeShape` … called
+directly", and the compiler refused — `posterior_engine.rs` declared `mod shape;` privately, so
+neither `GenotypeShape` nor `shape_for` could be named from `src/ng/`, and the only way to obey the
+step was to widen a declaration in the frozen tree.
 
-**This loop does not edit the plan's text**, only its checkboxes. The substitution and its
-justification are in the module's own doc comment, in the review, and in the implementation report
-— but the plan is what the next reader opens first, and as written it sends them either to
-re-derive the refusal or to widen `mod shape;`. Amending that sentence is the owner's call.
+**The owner authorised that edit** (2026-08-21), so the plan's step is now satisfied literally
+rather than by substitution:
+
+- `posterior_engine.rs` declares `pub(crate) mod shape;`, with a comment naming its one outside
+  reader. Nothing else in production changed.
+- The parity module's four transcriptions of `shape.rs` — its fold and its three formulas — are
+  **deleted**. `compare_against_production` reads the fields of the `GenotypeShape` the shipping
+  posterior engine itself uses.
+- The review's Mi5 disappears with them: there is no longer any transcription that could drift
+  silently from what production computes.
+
+All six mutations listed in §1 were re-run against the direct-oracle version and are still killed;
+the extra-row one is now caught by all four grids rather than one, because the coefficients and the
+homozygous lookup are compared as whole slices rather than row by row.
+
+**The rule this sets, stated in `src/ng/mod.rs` so the next reader finds it there:** ng may widen a
+production item's visibility so a parity test can see it, and may change nothing else. Anything
+that would alter what production computes is still a copy-into-ng.
 
 ## 5. Validation
 

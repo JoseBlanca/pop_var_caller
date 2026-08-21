@@ -12,128 +12,53 @@
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`, step C2;
 //! `doc/devel/ng/arch/calling_em_loop.md` §8).
 //!
-//! **This is ng's test; production is only the yardstick.** Nothing here writes to
-//! `src/var_calling/`, exactly as [`crate::ng::scanner_parity`] reads `src/ssr/` without
-//! writing to it. It is its own file rather than a block inside `genotype_table.rs`'s
-//! `mod tests` so that the one `use crate::var_calling::` in all of `src/ng/` sits in
-//! one greppable place and the table's own tests stay free of production.
+//! **The oracle is production's own artefact, built by production's own code.**
+//! `shape_for(ploidy, n_alleles)` returns the `GenotypeShape` the shipping posterior
+//! engine uses, and every field compared below is the one the engine reads. Nothing is
+//! re-derived here and nothing is transcribed, so a change to production's enumeration,
+//! its fold, or any of its three formulas makes this test fail rather than pass quietly.
 //!
-//! ## What the oracle is, and why it is not `GenotypeShape` itself
+//! **Reaching it cost one edit to the frozen tree, and it is the only one.**
+//! `posterior_engine.rs` declared `mod shape;` privately, so `GenotypeShape` and
+//! `shape_for` could not be named from `src/ng/` whatever their own `pub(crate)`
+//! visibility — a call from here failed with ``error[E0603]: module `shape` is
+//! private``. The declaration is now `pub(crate)` (owner, 2026-08-21). That is the
+//! whole change: no production behaviour moved, nothing was re-exported, and the
+//! dependency runs one way — this test reads production, production still names nothing
+//! in ng.
 //!
-//! The plan says this test calls `GenotypeShape` directly. **It cannot.**
-//! `src/var_calling/posterior_engine.rs` declares `mod shape;` — private — so neither
-//! `GenotypeShape` nor `shape_for` can be named from `src/ng/`, whatever their own
-//! visibility, and there is no re-export route either (`posterior_engine.rs:61` imports
-//! them privately). Compiling a call to `shape_for` from here fails with
-//! ``error[E0603]: module `shape` is private``, measured on this branch. The alternative
-//! would be widening that declaration, which would edit a frozen tree
-//! (`src/ng/mod.rs`: ng "does not edit … `src/var_calling/`") for a test's convenience.
+//! **This is ng's test; production is only the yardstick**, exactly as
+//! [`crate::ng::scanner_parity`] reads `src/ssr/` without writing to it. It is its own
+//! file rather than a block inside `genotype_table.rs`'s `mod tests` so that ng's only
+//! `use crate::var_calling::` sits in one greppable place and the table's own tests stay
+//! free of production.
 //!
-//! So the oracle is assembled here from two things:
-//!
-//! - **`genotype_order`** — `pub fn` in `pub mod per_group_merger`, reachable, and the
-//!   *sole* source of production's enumeration: `collect_non_decreasing` is production's
-//!   only enumeration recursion, every consumer reaches it through `genotype_order`, and
-//!   this is the one thing here that runs production's own code.
-//! - **four transcriptions** — `GenotypeShape::build`'s fold of that enumeration into
-//!   the flat count table, plus `log_factorial`, `log_multinomial_coefficient` and
-//!   `homozygous_allele`, copied from `shape.rs` including its summation order, since
-//!   the coefficients are compared with `==` and not with a tolerance.
-//!
-//! **What this gives up against calling `GenotypeShape`:** if production ever changed
-//! its fold or one of the three formulas, this test would keep passing while ng's table
-//! stopped matching production's. All four are closed forms rather than behaviour, which
-//! is why the substitution is acceptable — and the **order**, the one part that is a
-//! recursion with a comparator rather than a formula, is exactly the part compared
-//! against production's own function.
-//!
-//! **The oracle stops being production above 255 alleles.** `genotype_order` iterates
-//! `min_allele..(n_alleles as u8)`, so 256 alleles yields no genotypes at all, where the
-//! port reaches 65,536. A grid that went that wide would fail on the count assertion and
-//! read as though the port were wrong. The widest shape here is 18 alleles.
+//! **The oracle stops being production above 255 alleles.** `genotype_order`, which
+//! `GenotypeShape::build` enumerates with, iterates `min_allele..(n_alleles as u8)`, so
+//! 256 alleles yields no genotypes at all, where the port reaches 65,536. A grid that
+//! went that wide would fail on the count assertion and read as though the port were
+//! wrong. The widest shape here is 18 alleles.
 
 use std::sync::Arc;
 
 use crate::ng::calling::genotype_table::GenotypeTable;
 use crate::ng::types::{AlleleId, Ploidy};
-use crate::var_calling::per_group_merger::genotype_order;
+use crate::var_calling::posterior_engine::shape::shape_for;
 
-// ---------------------------------------------------------------------
-// The oracle: production's `shape.rs`, transcribed
-// ---------------------------------------------------------------------
-
-/// Production's fold of `genotype_order` into the flat row-major allele-count table
-/// (`src/var_calling/posterior_engine/shape.rs`, `build`).
-fn production_allele_counts(copies: u8, n_alleles: usize) -> Vec<u32> {
-    let genotypes = genotype_order(copies, n_alleles);
-    let n_genotypes = genotypes.len();
-    let mut genotype_allele_counts = vec![0_u32; n_genotypes * n_alleles];
-    for (g_idx, g) in genotypes.iter().enumerate() {
-        let row = &mut genotype_allele_counts[g_idx * n_alleles..(g_idx + 1) * n_alleles];
-        for &a in g {
-            row[a as usize] += 1;
-        }
-    }
-    genotype_allele_counts
-}
-
-/// Production's `log_factorial`, summation order included — the two are compared with
-/// `==`, so a different order shows up as a last-bit difference.
+/// Compare one shape's four quantities against production's `GenotypeShape` and return
+/// how many genotypes the **table** holds, so the caller can assert a grid's total
+/// reach. The table's own count rather than production's: the two are asserted equal one
+/// line earlier, and returning the table's makes the totals evidence about the subject.
 ///
-/// The `as` cast is production's own and is kept for transcription fidelity, not for
-/// arithmetic: every `u32` is exactly representable in an `f64`, so `f64::from(i)` — the
-/// form the port itself uses — gives the same bits.
-fn production_log_factorial(n: u32) -> f64 {
-    let mut acc = 0.0_f64;
-    for i in 2..=n {
-        acc += (i as f64).ln();
-    }
-    acc
-}
-
-/// Production's `log_multinomial_coefficient`. `u32::from(copies)` where production
-/// writes `ploidy as u32`; both are the zero-extension of the same eight bits.
-fn production_log_multinomial_coefficient(copies: u8, counts: &[u32]) -> f64 {
-    let mut log_coef = production_log_factorial(u32::from(copies));
-    for &k in counts {
-        log_coef -= production_log_factorial(k);
-    }
-    log_coef
-}
-
-/// Production's `homozygous_allele`. Production narrows the result to `u8` on the way
-/// into its own table; this keeps `usize` and the caller widens to [`AlleleId`], which
-/// no input can distinguish, since `genotype_order` cannot produce an allele index above
-/// 254.
-fn production_homozygous_allele(counts: &[u32]) -> Option<usize> {
-    let mut found: Option<usize> = None;
-    for (a, &k) in counts.iter().enumerate() {
-        if k == 0 {
-            continue;
-        }
-        match found {
-            None => found = Some(a),
-            Some(_) => return None,
-        }
-    }
-    found
-}
-
-// ---------------------------------------------------------------------
-// The comparison
-// ---------------------------------------------------------------------
-
-/// Compare one shape's four quantities against the oracle and return how many genotypes
-/// the **table** holds, so the caller can assert a grid's total reach. The table's own
-/// count rather than the oracle's: the two have just been asserted equal, and returning
-/// the table's makes the totals evidence about the subject rather than about the oracle.
-///
-/// Every comparison is exact. The coefficients use `==` rather than a tolerance
-/// deliberately: the port keeps production's summation order on purpose, so anything but
-/// bit-equality means it drifted.
+/// Every comparison is exact. The coefficients are compared by bit pattern rather than
+/// with a tolerance, deliberately: the port keeps production's summation order on
+/// purpose, so anything but bit-equality means it drifted. Reversing that order alone
+/// moves a coefficient by four units in the last place, which any ordinary tolerance
+/// would accept.
 fn compare_against_production(copies: u8, allele_count: usize) -> usize {
     let ploidy = Ploidy::try_new(copies).expect("the grids start at ploidy 1");
     let table = GenotypeTable::build(ploidy, allele_count);
+    let production = shape_for(copies, allele_count);
 
     let shape = format!("ploidy {copies} over {allele_count} alleles");
 
@@ -148,54 +73,54 @@ fn compare_against_production(copies: u8, allele_count: usize) -> usize {
     );
 
     // 1. Genotype count.
-    let expected_count = genotype_order(copies, allele_count).len();
-    assert_eq!(table.genotype_count(), expected_count, "{shape}: count");
+    assert_eq!(
+        table.genotype_count(),
+        production.n_genotypes,
+        "{shape}: count"
+    );
 
     // 2. Every row's allele counts, in production's enumeration order. Compared as one
     //    slice, so a reordering fails as loudly as a wrong count would.
-    let expected_counts = production_allele_counts(copies, allele_count);
     assert_eq!(
         table.genotype_allele_counts(),
-        expected_counts.as_slice(),
+        production.genotype_allele_counts.as_slice(),
         "{shape}: allele counts, or the order they are in"
     );
 
-    // The other two tables are read a row at a time below, for a failure message that
-    // names the genotype — so their lengths are asserted here, or a table carrying extra
-    // rows would have them go unread.
+    // 3. Every log coefficient, to floating-point equality. Compared as one slice of bit
+    //    patterns, so a table with the wrong number of rows fails here rather than
+    //    having its extra rows go unread.
+    let ours: Vec<u64> = table
+        .log_multinomial_coeffs()
+        .iter()
+        .map(|coeff| coeff.to_bits())
+        .collect();
+    let theirs: Vec<u64> = production
+        .log_multinomial_coeffs
+        .iter()
+        .map(|coeff| coeff.to_bits())
+        .collect();
     assert_eq!(
-        table.log_multinomial_coeffs().len(),
-        expected_count,
-        "{shape}: one coefficient per genotype"
-    );
-    assert_eq!(
-        table.homozygous_alleles().len(),
-        expected_count,
-        "{shape}: one homozygous entry per genotype"
+        ours,
+        theirs,
+        "{shape}: log multinomial coefficients as bit patterns, or how many of them — \
+         ours {:?}, production {:?}",
+        table.log_multinomial_coeffs(),
+        production.log_multinomial_coeffs
     );
 
-    // 3. Every log coefficient, to floating-point equality.
-    for (row, counts) in expected_counts.chunks_exact(allele_count).enumerate() {
-        let expected = production_log_multinomial_coefficient(copies, counts);
-        let got = table.log_multinomial_coeffs()[row];
-        assert_eq!(
-            got.to_bits(),
-            expected.to_bits(),
-            "{shape}: row {row} {counts:?} coefficient — got {got}, production {expected}"
-        );
-    }
-
-    // 4. The homozygous lookup.
-    for (row, counts) in expected_counts.chunks_exact(allele_count).enumerate() {
-        let expected = production_homozygous_allele(counts).map(|allele| {
-            AlleleId(u16::try_from(allele).expect("the grids stay far below 65,536 alleles"))
-        });
-        assert_eq!(
-            table.homozygous_alleles()[row],
-            expected,
-            "{shape}: row {row} {counts:?} homozygous lookup"
-        );
-    }
+    // 4. The homozygous lookup. ng names the allele with an `AlleleId`, production with
+    //    a bare `u8`; the widening is the only difference between the two tables.
+    let theirs: Vec<Option<AlleleId>> = production
+        .homozygous_allele_for
+        .iter()
+        .map(|entry| entry.map(|allele| AlleleId(u16::from(allele))))
+        .collect();
+    assert_eq!(
+        table.homozygous_alleles(),
+        theirs.as_slice(),
+        "{shape}: homozygous lookup, or how many entries it has"
+    );
 
     table.genotype_count()
 }
@@ -235,8 +160,7 @@ fn the_table_matches_production_over_the_diploid_and_tetraploid_grid() {
 /// **It stops at 8 alleles rather than the cache's 16 for cost.** These sixty-four
 /// shapes hold 24,301 genotypes; the full 8 × 16 grid holds 2,042,958, eighty-four times
 /// as many, and takes the module's tests from hundredths of a second to seconds in the
-/// debug profile `cargo test` uses — to compare the same four closed forms at wider
-/// tables.
+/// debug profile `cargo test` uses — to compare the same quantities at wider tables.
 #[test]
 fn the_table_matches_production_from_haploid_to_octoploid_up_to_eight_alleles() {
     let mut genotypes_compared = 0;

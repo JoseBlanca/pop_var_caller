@@ -30,6 +30,15 @@
 //! port's whole claim is that it agrees with what it was ported from, and only
 //! production can settle that.
 //!
+//! **One such oracle cost production one line, and it is the only edit ng has made to
+//! a frozen tree.** `posterior_engine.rs` declared `mod shape;` privately, which put
+//! `GenotypeShape` — the thing `calling::genotype_table` is a port *of* — out of reach
+//! of any test that could check the port. It is now `pub(crate)` (owner, 2026-08-21).
+//! No behaviour moved and nothing was re-exported. The rule this bends is worth stating
+//! precisely rather than quietly: **ng may widen a production item's visibility so a
+//! parity test can see it, and may change nothing else**; anything that would alter what
+//! production computes is still a copy-into-ng, not an edit.
+//!
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`
 //! (~5,500 lines), kept *provably* identical to its source so that ng's later,

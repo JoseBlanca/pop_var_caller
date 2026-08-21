@@ -27,12 +27,13 @@ Skills and agents are instructed to leave it untouched.
 > production's own enumeration across three grids: the plan's diploid-and-tetraploid one, a wider
 > haploid-to-octoploid one, and the shapes past the cache bounds. Coefficients are compared bit for
 > bit, deliberately: reversing the summation order shifts one by four units in the last place, which
-> any ordinary tolerance would have passed. **The plan asked for this test to call production's
-> `GenotypeShape` directly and the compiler refuses** — the module holding it is private, and the
-> only way to obey the plan literally is to edit the frozen tree; the oracle is built from
-> production's `genotype_order` instead. The review found that both grids stopped exactly where the
-> cache stops, so a coefficient formula capped at ploidy 8 passed the entire suite while tilting
-> every polyploid locus's prior toward homozygotes by a factor of nine.
+> any ordinary tolerance would have passed. **The oracle is production's own artefact**, and reaching
+> it cost production exactly one line: the module holding `GenotypeShape` was private, so no test
+> anywhere could see the thing ng's table is a port of, and it is now `pub(crate)` (owner-authorised,
+> 2026-08-21). The rule that sets — ng may widen a production item's visibility for a parity test and
+> may change nothing else — is recorded in `src/ng/mod.rs`. The review found that both grids stopped
+> exactly where the cache stops, so a coefficient formula capped at ploidy 8 passed the entire suite
+> while tilting every polyploid locus's prior toward homozygotes by a factor of nine.
 > [What was built](doc/devel/reports/implementations/ng_calling_foundations_c2_2026-08-21.md),
 > [the review](doc/devel/reports/reviews/ng_calling_c2_2026-08-21.md),
 > [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_c2_fixes_2026-08-21.md).

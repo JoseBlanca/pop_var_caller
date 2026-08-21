@@ -16,47 +16,44 @@ is silent: a wrong genotype index is a wrong call, not a panic.
 
 ## 2. Assumptions and deviations
 
-**The plan says this test calls `GenotypeShape` directly. It cannot, and this is the one thing the
-next reader of the plan most needs to know.** `src/var_calling/posterior_engine.rs` declares
-`mod shape;` privately, so neither `GenotypeShape` nor `shape_for` can be named from `src/ng/`
-whatever their own `pub(crate)` visibility, and `:61` imports them privately too, so there is no
-re-export route. Compiling a call gives ``error[E0603]: module `shape` is private`` — confirmed
-three times independently on this branch. The only way to satisfy the step as written is to widen
-that declaration, which would edit a frozen tree.
+**The oracle is production's own artefact, and reaching it cost production one line.** The plan
+says this test calls `GenotypeShape` directly. `posterior_engine.rs` declared `mod shape;`
+privately, so neither `GenotypeShape` nor `shape_for` could be named from `src/ng/` whatever their
+own `pub(crate)` visibility, and `:61` imports them privately too, so there was no re-export route:
+a call from ng gave ``error[E0603]: module `shape` is private``, confirmed three times
+independently. **The owner authorised widening that declaration** (2026-08-21), so it is now
+`pub(crate) mod shape;` — no behaviour moved, nothing re-exported, and the dependency runs one way.
 
-So the oracle is assembled from two things:
+That is worth stating as the rule it sets rather than as a one-off: **ng may widen a production
+item's visibility so a parity test can see it, and may change nothing else.** Anything that would
+alter what production computes is still a copy-into-ng.
 
-- **`genotype_order`** (`src/var_calling/per_group_merger.rs`), a `pub fn` in a `pub mod` and
-  reachable. It is production's *sole* enumeration source — `collect_non_decreasing` is
-  production's only enumeration recursion and every consumer, the VCF writer included, reaches it
-  through this one function. It is the one thing here that runs production's own code.
-- **Four transcriptions** — `GenotypeShape::build`'s fold of that enumeration into the flat count
-  table, plus `log_factorial`, `log_multinomial_coefficient` and `homozygous_allele`, copied from
-  `shape.rs` including its summation order.
-
-What that gives up: if production changed its fold or one of the three formulas, this test would
-keep passing while ng's table stopped matching production's. All four are closed forms rather than
-behaviour, and the **order** — the one part that is a recursion with a comparator — is exactly the
-part compared against production's live code.
+What it buys is the difference between a strong test and a weak one. The first draft of this module
+built its oracle from `genotype_order` plus four verbatim transcriptions of `shape.rs` — its fold
+and its three formulas — and its review filed the consequence: if production ever changed any of
+those four, the test would keep passing while ng's table quietly stopped matching production's.
+`shape_for` closes that gap outright. Every field compared below is the field the shipping
+posterior engine reads, and nothing is re-derived.
 
 **The grids are wider than the plan's.** The plan names ploidy 2 and 4 over alleles 1–6; that grid
 is here as its own test, and two more sit beside it (see §4). The plan's grid is a strict subset of
 the second, so its contribution is its total; it is kept because the plan names it.
 
-**`src/ng/mod.rs` gained a paragraph.** It is ng's own tree, not frozen production. The freeze
-paragraph now names the test-oracle exception and both instances of it, because this is the first
-compile-time edge from `src/ng/` to `src/var_calling/` and the rule a reader consults said nothing
-about it.
+**`src/ng/mod.rs` gained a paragraph**, naming both test oracles and the one production edit, since
+the freeze rule a reader consults said nothing about either.
 
 **One C1 test was strengthened here**, which is a change to a committed file and is recorded as
 such: see §3.
 
 ## 3. Changes made
 
-Three files:
+Five files:
 
-- **`src/ng/calling/genotype_table_parity.rs`** (new, 315 lines) — the four transcribed oracle
-  functions, `compare_against_production` (six comparisons per shape), and four tests.
+- **`src/var_calling/posterior_engine.rs`** — `mod shape;` → `pub(crate) mod shape;`, with a
+  comment saying who reads it and why. The only edit ng has made to a frozen tree.
+- **`src/ng/calling/genotype_table_parity.rs`** (new, 239 lines) —
+  `compare_against_production` (five comparisons per shape, all against `shape_for`'s result) and
+  four tests.
 - **`src/ng/calling/mod.rs`** — `#[cfg(test)] mod genotype_table_parity;` and a clause in the
   module doc saying what it is and why it is its own file.
 - **`src/ng/mod.rs`** — the test-oracle exception to the production freeze.
@@ -68,10 +65,11 @@ Three files:
 
 ## 4. Tests added
 
-Four, in `src/ng/calling/genotype_table_parity.rs`. Every shape goes through six comparisons: the
-table's own declared ploidy and width, the genotype count, the whole allele-count table as one
-slice, the two parallel tables' lengths, then every coefficient by bit pattern and every homozygous
-entry.
+Four, in `src/ng/calling/genotype_table_parity.rs`. Every shape goes through five comparisons
+against the `GenotypeShape` `shape_for` returns: the table's own declared ploidy and width, the
+genotype count, the whole allele-count table as one slice, the coefficients as one slice of bit
+patterns, and the homozygous lookup as one slice. Comparing whole slices rather than row by row is
+what makes a table with the wrong number of rows fail rather than have its extra rows go unread.
 
 | test | grid | genotypes | what it pins |
 |---|---|---|---|
@@ -106,24 +104,19 @@ failure:
 | the enumeration's outer loop reversed | `ploidy 1 over 2 alleles: allele counts, or the order they are in` |
 | the homozygous lookup never fires | `ploidy 2 over 2 alleles: row 2 [0, 2] homozygous lookup` |
 | `log_factorial` capped at 8 — silent above the cache bound | the past-the-bounds grid, **and** the strengthened C1 test |
-| one extra coefficient row appended | `ploidy 1 over 1 alleles: one coefficient per genotype` |
-| one extra homozygous entry appended | `ploidy 1 over 1 alleles: one homozygous entry per genotype` |
+| one extra coefficient row appended | all four grids: `log multinomial coefficients as bit patterns, or how many of them` |
 | the cache bound turned from `>` to `>=` | `ploidy 8 over 16 alleles is inside the cache bounds` |
 
 ## 7. And the port is exact
 
 Over ploidy 1–8 × alleles 1–16 — **128 shapes, 2,042,958 genotype rows** — one of the review's
-agents compared ng's table against `genotype_order` and a transcription of production's fold:
+agents compared ng's table against production over the whole cached region:
 enumeration order position for position, every log coefficient **bit-identical** (`to_bits()`
 equality, no tolerance), the homozygous lookup entry for entry. Zero differences. The committed
 grids are the subset that runs in the suite; that measurement is the reason nothing wider needs to.
 
 ## 8. Tradeoffs and follow-ups
 
-- **The plan's step C2 text still instructs the next reader to call `GenotypeShape` directly.** It
-  cannot be done, and the plan is a design document this loop does not edit. Raised to the owner;
-  the substitution and its justification are recorded in the module's own doc comment, in the
-  review, and here.
 - **`genotype_order` narrows its allele count with `n_alleles as u8`**
   (`src/var_calling/per_group_merger.rs`), so the oracle silently stops being production above 255
   alleles, where the port reaches 65,536. Frozen production; documented in the module header so a
