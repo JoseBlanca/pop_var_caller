@@ -35,6 +35,7 @@
 //! contaminated sample and a clean one is what this is good at; the value itself is a floor on
 //! the truth rather than an estimate of it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,7 +59,7 @@ use crate::ng::parameter_estimation::joint::census::{
     CensusWriter, CohortCensusEvidence, DepthCap, ReadCap, SampleCensusEvidence, TermsDisagreement,
 };
 use crate::ng::parameter_estimation::joint::contamination::{
-    ContaminationConfig, ContaminationEstimate, DEFAULT_COMPONENTS,
+    ContaminationConfig, ContaminationEstimate, ContaminationSource, DEFAULT_COMPONENTS,
 };
 use crate::ng::parameter_estimation::joint::fit::{JointFitConfig, JointFitError, fit_jointly};
 use crate::ng::parameter_estimation::joint::loci::{
@@ -78,6 +79,7 @@ use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegi
 use crate::ng::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
+use crate::ng::types::ReadGroupId;
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 use crate::regions::{BedError, ContigBounds};
 
@@ -278,24 +280,52 @@ pub enum EstimateContaminationCliError {
 // What comes out
 // ---------------------------------------------------------------------
 
-/// One sample's answer.
+/// What one read group is called, so a fraction reported against it can be read.
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryName {
+    /// The index into this sample's read-group table. **Minted per alignment file**, so it is
+    /// unique within a sample and not across the run — the sample name and this together are
+    /// what identify a library here.
+    #[serde(skip)]
+    pub read_group: ReadGroupId,
+    /// The `@RG ID`, as the file declares it.
+    pub id: String,
+    /// The `@RG LB`, or what was filled in for it when the file declared none.
+    pub library: String,
+}
+
+/// **One library's answer** — the fraction of *its* reads that came from another plant.
+///
+/// **A row per library and not per sample, because a library is what gets contaminated**
+/// (2026-08-20). A second plant's DNA enters at library preparation or on the sequencing
+/// machine, so two libraries made from one plant can differ, one carrying stray reads and the
+/// other none. A sample sequenced from one library has one row and nothing is lost.
 #[derive(Debug, Serialize)]
-pub struct SampleContamination {
+pub struct LibraryContamination {
     pub sample: String,
-    /// The share of this sample's reads that came from another individual, or `null` when the
+    /// The `@RG ID` and `@RG LB` this row is about.
+    pub read_group: String,
+    pub library: String,
+    /// The share of this library's reads that came from another individual, or `null` when the
     /// panel cannot answer for it. **Reads low**: see this module's header.
     pub contamination: Option<f64>,
     /// Why there is no number, when there is none.
     pub not_identified: Option<String>,
-    /// How much of its own fitted allele frequency this sample supplied. Above 0.5 there is no
-    /// estimate, because it would be a reading of the sample's own noise — and the refusal does
-    /// not carry the value, so this is `null` for a refused sample rather than the number that
-    /// refused it.
-    ///
-    /// **How many positions the estimate rests on is not here**: it is the same count for every
-    /// sample in the panel, so it is stated once, on the panel.
+    /// **Whether the number was fitted from this library's own reads or from every read the
+    /// plant produced.** A sample sequenced from one library says `the whole sample's reads`,
+    /// because there the two are the same reads and no claim about libraries is being made.
+    pub fitted_from: &'static str,
+    /// How much of its own fitted allele frequency this library's **sample** supplied. Above 0.5
+    /// there is no estimate, because it would be a reading of the sample's own noise — and the
+    /// refusal does not carry the value, so this is `null` for a refused sample rather than the
+    /// number that refused it.
     pub own_frequency_share: Option<f64>,
-    /// How many of the kept positions this sample had a read at.
+    /// **How many of the panel's varying positions this library put a read on, and how many
+    /// reads it put there.** This is what tells a library *measured clean* from a library
+    /// *nobody could measure*: both come back near zero, and only these say which is which.
+    pub markers_with_reads: Option<u64>,
+    pub reads_on_markers: Option<u64>,
+    /// How many of the kept positions the **sample** had a read at, over all of its libraries.
     pub positions_with_reads: u64,
 }
 
@@ -304,6 +334,9 @@ pub struct SampleContamination {
 #[derive(Debug, Serialize)]
 pub struct PanelSummary {
     pub samples: usize,
+    /// How many libraries the panel holds, over all its samples — the number of rows in
+    /// `samples`, and equal to `samples` unless somebody was sequenced twice.
+    pub libraries: usize,
     pub estimated: usize,
     pub not_identified: usize,
     pub markers: u64,
@@ -329,7 +362,8 @@ pub struct RunIdentity {
 pub struct ContaminationReport {
     pub run: RunIdentity,
     pub panel: PanelSummary,
-    pub samples: Vec<SampleContamination>,
+    /// **One row per library**, highest fraction first.
+    pub samples: Vec<LibraryContamination>,
 }
 
 // ---------------------------------------------------------------------
@@ -372,12 +406,12 @@ pub fn run_estimate_contamination(
     // machine with many cores that is the thing to watch, and `--threads` is what bounds it.
     let done = AtomicUsize::new(0);
     let total = args.alignments.len();
-    let cohort: Vec<SampleCensusEvidence> = args
+    let walked: Vec<(SampleCensusEvidence, Vec<LibraryName>)> = args
         .alignments
         .par_iter()
         .map(|alignment| {
             let at = Instant::now();
-            let sample = walk_one_sample(alignment, &prepared)?;
+            let (sample, names) = walk_one_sample(alignment, &prepared)?;
             // The order lines appear in is the order walks *finish*, which is not the order
             // the samples were given — so each line names its sample, and the count is how
             // many are done rather than which one this is.
@@ -387,12 +421,17 @@ pub fn run_estimate_contamination(
                 done.fetch_add(1, Ordering::Relaxed) + 1,
                 at.elapsed().as_secs_f64()
             );
-            Ok(sample)
+            Ok((sample, names))
         })
         // **Collected in the order the alignments were given**, whatever order they finished
         // in: a cohort assembled in a racing order would fit the same numbers but report them
         // against a different arrangement of samples from one run to the next.
         .collect::<Result<Vec<_>, EstimateContaminationCliError>>()?;
+    let library_names: BTreeMap<String, Vec<LibraryName>> = walked
+        .iter()
+        .map(|(sample, names)| (sample.sample.clone(), names.clone()))
+        .collect();
+    let cohort: Vec<SampleCensusEvidence> = walked.into_iter().map(|(sample, _)| sample).collect();
     eprintln!(
         "walked {total} samples in {:.0} s",
         started.elapsed().as_secs_f64()
@@ -417,7 +456,7 @@ pub fn run_estimate_contamination(
         at.elapsed().as_secs_f64()
     );
 
-    let report = assemble(args, &prepared, &fit);
+    let report = assemble(args, &prepared, &library_names, &fit);
     report_to_the_terminal(&report);
     let json = serde_json::to_string_pretty(&report).expect("a report of numbers and names");
     std::fs::write(&args.output, json + "\n").map_err(|source| {
@@ -437,16 +476,17 @@ pub fn run_estimate_contamination(
 fn report_to_the_terminal(report: &ContaminationReport) {
     let panel = &report.panel;
     eprintln!(
-        "\n{} of {} samples estimated over {} varying positions, {} not identified",
-        panel.estimated, panel.samples, panel.markers, panel.not_identified
+        "\n{} of {} libraries from {} samples estimated over {} varying positions, {} not \
+         identified",
+        panel.estimated, panel.libraries, panel.samples, panel.markers, panel.not_identified
     );
     match (panel.median, panel.highest) {
         (Some(median), Some(highest)) => eprintln!(
             "the panel's own spread: median {median:.4}, highest {highest:.4} ({})",
-            report
-                .samples
-                .first()
-                .map_or("no sample", |sample| sample.sample.as_str())
+            report.samples.first().map_or_else(
+                || "no library".to_string(),
+                |row| format!("{}, library {}", row.sample, row.library)
+            )
         ),
         _ => eprintln!("no sample could be estimated; the panel is too small or too uniform"),
     }
@@ -629,7 +669,7 @@ fn prepare(args: &EstimateContaminationArgs) -> Result<Prepared, EstimateContami
 fn walk_one_sample(
     alignment: &Path,
     prepared: &Prepared,
-) -> Result<SampleCensusEvidence, EstimateContaminationCliError> {
+) -> Result<(SampleCensusEvidence, Vec<LibraryName>), EstimateContaminationCliError> {
     let read_groups =
         build_read_groups(std::slice::from_ref(&alignment.to_path_buf())).map_err(|source| {
             EstimateContaminationCliError::ReadGroups {
@@ -730,56 +770,101 @@ fn walk_one_sample(
         })?;
         writer.add_locus(&locus);
     }
-    Ok(writer.finish())
+    // **What each read group is called, carried out beside the evidence.** The fraction is now
+    // reported per read group, and an index into a table the reader does not have is not an
+    // answer — so the library and platform names travel with it.
+    let names = sample
+        .read_groups
+        .iter()
+        .map(|id| {
+            let group = read_groups.get(*id);
+            LibraryName {
+                read_group: *id,
+                id: group.id.to_string(),
+                library: group.library.value.to_string(),
+            }
+        })
+        .collect();
+    Ok((writer.finish(), names))
 }
 
 /// Turn the fit into the file.
 fn assemble(
     args: &EstimateContaminationArgs,
     prepared: &Prepared,
+    library_names: &BTreeMap<String, Vec<LibraryName>>,
     fit: &crate::ng::parameter_estimation::joint::fit::JointFit,
 ) -> ContaminationReport {
-    let mut samples: Vec<SampleContamination> = Vec::with_capacity(fit.contamination.len());
+    let mut samples: Vec<LibraryContamination> = Vec::new();
     let mut estimated: Vec<f64> = Vec::new();
     let mut markers_seen = 0_u64;
 
-    for (name, estimate) in &fit.contamination {
+    for (name, per_read_group) in &fit.contamination {
         let positions_with_reads = fit
             .rates
             .get(name)
             .map_or(0, |rates| rates.value.positions_with_reads);
-        let row = match estimate {
-            ContaminationEstimate::Estimated {
-                alpha,
-                markers,
-                leverage,
-            } => {
-                estimated.push(*alpha);
-                markers_seen = *markers;
-                SampleContamination {
-                    sample: name.clone(),
-                    contamination: Some(*alpha),
-                    not_identified: None,
-                    own_frequency_share: Some(*leverage),
-                    positions_with_reads,
+        for (group, estimate) in per_read_group {
+            // The walk recorded what each read group is called; an id with no name behind it
+            // means the two lists disagree, and saying so beats printing a bare number.
+            let named = library_names
+                .get(name)
+                .and_then(|names| names.iter().find(|entry| entry.read_group == *group));
+            let (id, library) = named.map_or_else(
+                || (format!("read group {group}"), "unnamed".to_string()),
+                |entry| (entry.id.clone(), entry.library.clone()),
+            );
+            let row = match estimate {
+                ContaminationEstimate::Estimated {
+                    alpha,
+                    source,
+                    panel_markers,
+                    markers_with_reads,
+                    reads_on_markers,
+                    leverage,
+                } => {
+                    estimated.push(*alpha);
+                    markers_seen = *panel_markers;
+                    LibraryContamination {
+                        sample: name.clone(),
+                        read_group: id,
+                        library,
+                        contamination: Some(*alpha),
+                        not_identified: None,
+                        fitted_from: match source {
+                            ContaminationSource::ThisReadGroupsReads => "this library's reads",
+                            ContaminationSource::TheWholeSamplesReads => "the whole sample's reads",
+                        },
+                        own_frequency_share: Some(*leverage),
+                        markers_with_reads: Some(*markers_with_reads),
+                        reads_on_markers: Some(*reads_on_markers),
+                        positions_with_reads,
+                    }
                 }
-            }
-            ContaminationEstimate::NotIdentified { reason } => SampleContamination {
-                sample: name.clone(),
-                contamination: None,
-                not_identified: Some(reason.to_string()),
-                own_frequency_share: None,
-                positions_with_reads,
-            },
-        };
-        samples.push(row);
+                ContaminationEstimate::NotIdentified { reason } => LibraryContamination {
+                    sample: name.clone(),
+                    read_group: id,
+                    library,
+                    contamination: None,
+                    not_identified: Some(reason.to_string()),
+                    fitted_from: "nothing — no estimate was made",
+                    own_frequency_share: None,
+                    markers_with_reads: None,
+                    reads_on_markers: None,
+                    positions_with_reads,
+                },
+            };
+            samples.push(row);
+        }
     }
 
     estimated.sort_by(f64::total_cmp);
+    let libraries = samples.len();
     let panel = PanelSummary {
         samples: fit.contamination.len(),
+        libraries,
         estimated: estimated.len(),
-        not_identified: fit.contamination.len() - estimated.len(),
+        not_identified: libraries - estimated.len(),
         markers: markers_seen,
         median: estimated.get(estimated.len() / 2).copied(),
         highest: estimated.last().copied(),
@@ -790,7 +875,7 @@ fn assemble(
         (Some(x), Some(y)) => y.total_cmp(&x),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.sample.cmp(&b.sample),
+        (None, None) => (&a.sample, &a.read_group).cmp(&(&b.sample, &b.read_group)),
     });
 
     ContaminationReport {

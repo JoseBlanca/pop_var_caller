@@ -971,24 +971,29 @@ mod tests {
         let read = round_trip(&every_corner(), None);
         let mut census = read.census;
         let groups = census.read_groups();
-        census.with_generic(&groups, |sections| {
-            let edges = DepthBinEdges::for_census();
-            let records = sections[0];
-            assert_eq!(records.at(0).0, DepthCode::NeverWalked, "a bug");
-            assert_eq!(
-                records.at(1).0,
-                DepthCode::Binned(edges.bin_for(0)),
-                "walked and empty is data, not a bug"
-            );
-            assert_eq!(records.at(2).0, DepthCode::Binned(edges.bin_for(6)));
-            assert!(
-                records.at(2).1.is_empty(),
-                "six reads and no sparse entry means six reads on the reference base"
-            );
-            let (depth, alleles) = records.at(4);
-            assert_eq!(depth, DepthCode::Binned(edges.bin_for(300)));
-            assert_eq!(alleles.len(), 2, "a multi-allelic position keeps both");
-        });
+        census
+            .with_generic(&groups, |sections| {
+                let edges = DepthBinEdges::for_census();
+                let records = sections[0];
+                assert_eq!(records.at(0).0, DepthCode::NeverWalked, "a bug");
+                assert_eq!(
+                    records.at(1).0,
+                    DepthCode::Binned(edges.bin_for(0)),
+                    "walked and empty is data, not a bug"
+                );
+                assert_eq!(records.at(2).0, DepthCode::Binned(edges.bin_for(6)));
+                assert!(
+                    records.at(2).1.is_empty(),
+                    "six reads and no sparse entry means six reads on the reference base"
+                );
+                let (depth, alleles) = records.at(4);
+                assert_eq!(depth, DepthCode::Binned(edges.bin_for(300)));
+                assert_eq!(alleles.len(), 2, "a multi-allelic position keeps both");
+            })
+            // **Not discarded.** If lending the sections failed, the closure above would never
+            // run and every assertion in it would be skipped — a test that passes by not
+            // looking.
+            .expect("a decoded census is resident and has no file to fail on");
     }
 
     /// The tract half's own corners: the saturating end buckets, the guard, the difference and
@@ -997,32 +1002,36 @@ mod tests {
     fn a_tracts_offsets_guard_and_difference_come_back_unchanged() {
         let read = round_trip(&every_corner(), None);
         let mut census = read.census;
-        census.with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
-            let tracts = sections[0];
-            assert_eq!(tracts.offsets(0).at(0), 5);
-            assert_eq!(
-                tracts.offsets(0).at(-RECORDED_OFFSET_RANGE),
-                2,
-                "one past the short end saturates into it"
-            );
-            assert_eq!(
-                tracts.offsets(0).at(RECORDED_OFFSET_RANGE),
-                3,
-                "and three past the long end into that one"
-            );
-            assert_eq!(tracts.covering_not_crossing(), 17);
-            assert_eq!(tracts.bases_compared(), 60);
-            assert_eq!(tracts.guard()[0].length_difference, -3);
-            assert_eq!(tracts.differences()[0].read, 299);
-            assert_eq!(tracts.differences()[0].offset, 8);
-            assert_eq!(tracts.differences()[0].base, ObservedAllele::T);
-            assert_eq!(tracts.state(0), SsrLocusState::Crossed);
-            assert_eq!(
-                tracts.state(1),
-                SsrLocusState::NeverWalked,
-                "the one state every other field reads the same as walked-and-empty"
-            );
-        });
+        census
+            .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
+                let tracts = sections[0];
+                assert_eq!(tracts.offsets(0).at(0), 5);
+                assert_eq!(
+                    tracts.offsets(0).at(-RECORDED_OFFSET_RANGE),
+                    2,
+                    "one past the short end saturates into it"
+                );
+                assert_eq!(
+                    tracts.offsets(0).at(RECORDED_OFFSET_RANGE),
+                    3,
+                    "and three past the long end into that one"
+                );
+                assert_eq!(tracts.covering_not_crossing(), 17);
+                assert_eq!(tracts.bases_compared(), 60);
+                assert_eq!(tracts.guard()[0].length_difference, -3);
+                assert_eq!(tracts.differences()[0].read, 299);
+                assert_eq!(tracts.differences()[0].offset, 8);
+                assert_eq!(tracts.differences()[0].base, ObservedAllele::T);
+                assert_eq!(tracts.state(0), SsrLocusState::Crossed);
+                assert_eq!(
+                    tracts.state(1),
+                    SsrLocusState::NeverWalked,
+                    "the one state every other field reads the same as walked-and-empty"
+                );
+            })
+            // **Not discarded**, for the reason the test above gives: a lending failure would
+            // skip every assertion in the closure and the test would still pass.
+            .expect("a decoded census is resident and has no file to fail on");
     }
 
     /// The directory says where a section is without decoding one — which is what the seeking
@@ -1152,7 +1161,10 @@ mod tests {
         // every stratum, and asking for a section that was never recorded is a panic by
         // contract.
         let strata = resident.strata();
-        for group in [ReadGroupId(0)] {
+        // One read group, because `every_corner` declares one — a loop over a single value
+        // read as if the count were open, and it is not.
+        let group = ReadGroupId(0);
+        {
             let from_memory = resident
                 .with_strata(group, &strata, |sections| {
                     sections.iter().map(|s| (*s).clone()).collect::<Vec<_>>()

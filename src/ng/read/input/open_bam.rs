@@ -2682,7 +2682,10 @@ mod tests {
 
     #[test]
     fn hex_nibble_rejects_the_characters_bordering_each_valid_range() {
-        for character in [b'/', b':', b'`', b'g', b'@', b'G'] {
+        // The character on each side of `0-9`, `a-f` and `A-F`. Written as a byte string
+        // because a slice of byte literals is what `clippy::byte_char_slices` objects to; the
+        // test's name says what the six are.
+        for character in *b"/:`g@G" {
             assert_eq!(
                 hex_nibble(character),
                 None,

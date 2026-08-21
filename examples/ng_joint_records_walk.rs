@@ -589,28 +589,38 @@ fn fit_the_cohort(
     // panel's depth, marker count and structure rather than a number anyone can quote in
     // advance — so the panel's own distribution is printed beside each value.
     println!("\n  contamination — the share of a sample's reads from another plant");
-    let mut estimated: Vec<(&String, f64, f64)> = Vec::new();
+    // **One row per library, because that is what the fraction is now fitted for.** A sample
+    // sequenced once has one row and the name below is its only library.
+    let mut estimated: Vec<(String, f64, f64, u64)> = Vec::new();
     let mut refused = 0;
     let mut markers = 0;
-    for (name, estimate) in &fit.contamination {
-        match estimate {
-            ContaminationEstimate::Estimated {
-                alpha,
-                markers: count,
-                leverage,
-            } => {
-                markers = *count;
-                estimated.push((name, *alpha, *leverage));
-            }
-            ContaminationEstimate::NotIdentified { reason } => {
-                println!("    {name:<24} not identified — {reason}");
-                refused += 1;
+    let mut libraries = 0;
+    for (name, per_read_group) in &fit.contamination {
+        for (group, estimate) in per_read_group {
+            libraries += 1;
+            let row = format!("{name}/{group}");
+            match estimate {
+                ContaminationEstimate::Estimated {
+                    alpha,
+                    panel_markers,
+                    markers_with_reads,
+                    leverage,
+                    ..
+                } => {
+                    markers = *panel_markers;
+                    estimated.push((row, *alpha, *leverage, *markers_with_reads));
+                }
+                ContaminationEstimate::NotIdentified { reason } => {
+                    println!("    {row:<24} not identified — {reason}");
+                    refused += 1;
+                }
             }
         }
     }
     estimated.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("no NaN"));
     println!(
-        "    {} of {} samples estimated over {markers} varying positions, {refused} refused",
+        "    {} of {libraries} libraries from {} samples estimated over {markers} varying \
+         positions, {refused} refused",
         estimated.len(),
         fit.contamination.len()
     );
@@ -618,8 +628,11 @@ fn fit_the_cohort(
         let values: Vec<f64> = estimated.iter().map(|e| e.1).collect();
         let median = values[values.len() / 2];
         println!("    the panel's own spread: median {median:.4}, and these are the highest");
-        for (name, alpha, leverage) in estimated.iter().take(8) {
-            println!("      {name:<24}{alpha:>8.4}   supplies {leverage:.3} of its own frequency");
+        for (row, alpha, leverage, with_reads) in estimated.iter().take(8) {
+            println!(
+                "      {row:<24}{alpha:>8.4}   from {with_reads} of those positions, supplies \
+                 {leverage:.3} of its own frequency"
+            );
         }
     }
 
@@ -635,9 +648,12 @@ fn fit_the_cohort(
         "\n  {condemned} of {} positions are more likely mismapped than not",
         fit.noisy_posterior.len()
     );
-    let group = *cohort.read_groups().first().expect("a read group");
-    let error: Vec<f64> = (0..cohort.len())
-        .map(|_| fit.noise[&group].value.clean)
+    // **One rate per read group, which is the grain the fit produced them at** and the grain
+    // the fraction is now fitted at.
+    let error: std::collections::BTreeMap<_, _> = cohort
+        .read_groups()
+        .iter()
+        .map(|group| (*group, fit.noise[group].value.clean))
         .collect();
     let excess: Vec<f64> = cohort
         .sample_names()
@@ -671,7 +687,8 @@ fn fit_the_cohort(
             .expect("a resident census has no file to fail on");
             let mut values: Vec<f64> = estimates
                 .iter()
-                .filter_map(|estimate| match estimate {
+                .flatten()
+                .filter_map(|(_, estimate)| match estimate {
                     ContaminationEstimate::Estimated { alpha, .. } => Some(*alpha),
                     ContaminationEstimate::NotIdentified { .. } => None,
                 })
@@ -682,8 +699,9 @@ fn fit_the_cohort(
             }
             let markers = estimates
                 .iter()
-                .find_map(|estimate| match estimate {
-                    ContaminationEstimate::Estimated { markers, .. } => Some(*markers),
+                .flatten()
+                .find_map(|(_, estimate)| match estimate {
+                    ContaminationEstimate::Estimated { panel_markers, .. } => Some(*panel_markers),
                     ContaminationEstimate::NotIdentified { .. } => None,
                 })
                 .unwrap_or(0);

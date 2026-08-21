@@ -2332,7 +2332,7 @@ mod tests {
             allele_span: 1,
             ..SsrFitConfig::default()
         };
-        let fitted = fit_stratum(&evidence, &vec![0.4; 20], &config).expect("reads were drawn");
+        let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
         let slippage = fitted.slippage[0].expect("the one group has reads");
 
         assert!(
@@ -2623,7 +2623,7 @@ mod tests {
             ..SsrFitConfig::default()
         };
 
-        let outcomes = fit_strata(&strata, &vec![0.4; 8], &base);
+        let outcomes = fit_strata(&strata, &[0.4; 8], &base);
 
         // The five that clear the refusal floor are fitted from their own tracts and no others'.
         for outcome in outcomes.iter().take(5) {
@@ -2757,7 +2757,7 @@ mod tests {
             }],
             ..SsrFitConfig::default()
         };
-        let outcomes = fit_strata(&strata, &vec![0.4; 8], &config);
+        let outcomes = fit_strata(&strata, &[0.4; 8], &config);
 
         let shares_of = |index: usize| match &outcomes[index] {
             StratumOutcome::Fitted(fit) => fit.shares_provenance[0].expect("a fitted group"),

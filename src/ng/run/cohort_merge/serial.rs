@@ -1151,7 +1151,7 @@ mod tests {
         let layouts = three_samples_over_six_hundred_bases();
         let (dotted, deleting, inside) = (&layouts[0], &layouts[1], &layouts[2]);
         let analysed = [region(1, 600)];
-        let per_sample: [&[SampleLocusObservations]; 3] = [&dotted, &deleting, &inside];
+        let per_sample: [&[SampleLocusObservations]; 3] = [dotted, deleting, inside];
 
         for bases in [1, 3, 20, 47, 600] {
             let merged = the_outcome_both_drivers_agree_on(

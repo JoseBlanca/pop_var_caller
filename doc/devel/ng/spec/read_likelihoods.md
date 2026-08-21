@@ -258,7 +258,7 @@ differently in the two cases:
 | what an observation is | the projected allele sequence over the locus span | the tract sequence the read showed |
 | `Lr(o \| a)` | the read is right with probability `1 − ε`, and wrong with probability `ε`, shared out over what a wrong read could show (§3.5) | how likely a slip of this size is, times how well the letters match once the candidate is stretched to the read's length (§4.2, §4.3) |
 | `ε` from | the read's own quality, rescaled to the read group's fitted rate (§3.2) | the fitted substitution rate for this read group and stratum ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §1.1) |
-| `λ` from | the sample's contamination fraction, or zero (§3.6) | a fixed outlier weight (§4.5) |
+| `λ` from | this read group's contamination fraction, or zero (§3.6) | a fixed outlier weight (§4.5) |
 | `U(o)` | the contaminating population's frequency for this allele's class | uniform over what could have been seen (§4.5) |
 | what the third term carries | contamination | reads no allele explains, **and** contamination — three components, §4.5.1 |
 
@@ -618,34 +618,52 @@ and two libraries of one sample can carry different amounts of it, so it takes t
 finer than per sample, not a departure from it: the earlier ruling that contamination is a property
 of the sample rather than of the locus (§3.6 below) is about a different axis and both hold.)*
 
-**The estimator exists, is measured, and is off — and it does not produce the grain ruled above.**
-ng fits a contamination fraction inside the joint route
+**The estimator produces that grain, and did not until 2026-08-20.** ng fits a contamination fraction
+inside the joint route
 ([`joint/contamination.rs`](../../../../src/ng/parameter_estimation/joint/contamination.rs), wired
-into that fit, with two measurement reports behind it and an `estimate-contamination` subcommand that
-hands the same estimator to somebody comparing methods). Its own module doc says where it stands:
-*"It is built, it is off, and the numbers are on that field."* **It gives one number per sample**, and
-so does [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.1; only
-[`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §5's route defers an estimator at all,
-and that is the other of the two routes §4.1 there is comparing.
+into that fit, with an `estimate-contamination` subcommand that hands the same estimator to somebody
+comparing methods). It is still off by default. **It gave one number per sample and now gives one per
+read group**, as do [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.1 and §3.4;
+only [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §5's route defers an estimator at
+all, and that is the other of the two routes §4.1 there is comparing.
 
-**So the ruling and the implementation disagree, and the disagreement is not clerical.** The
-estimator identifies a contaminant by **ancestry** — each sample's coordinates in a principal-
-component space, from which its own expected allele frequencies are predicted — and ancestry is a
-property of the individual, not of the library. Splitting one sample's reads by read group and
-fitting each separately would hand every fit less data, and that document's own measurement says what
-too little data does here: partitioning a panel *manufactures* contamination, adding about 0.015 to
-every sample's estimate.
+**So this section no longer records an approximation.** It used to say: *a per-sample estimate is
+applied to every read group of that sample* — exact where a second seedling was in the tube before
+the libraries were split off it, wrong where a neighbouring library on the run hopped its index into
+one of them. Both causes are real, only the second can make two libraries of one plant differ, and
+only the read-group grain can express it. The fraction this document consumes is now fitted at the
+grain it consumes.
 
-**Both grains name a real mechanism, which is why this needs settling rather than picking.** A second
-seedling in the tube contaminates the DNA, so every library made from it carries the same fraction —
-per sample. A neighbouring library on the same run hops indices into this one — per read group, and
-two libraries of one sample can differ. The module doc names both causes and the estimator measures
-the first.
+**An objection this section used to make was wrong, and is kept here so nobody makes it again.** It
+argued that splitting a sample's reads by read group *"would hand every fit less data"*, citing the
+measured cost of partitioning a panel — about **+0.015** on every sample's fraction, enough to put 41
+to 47 of 50 clean samples over a 1% threshold. **That measurement is about splitting the *panel* to
+estimate allele *frequencies* from a twelfth of it, and nothing in this change splits the panel.**
+Ancestry belongs to the individual, so each sample's coordinates and its fitted frequency are still
+computed from all of its reads and from every sample in the cohort; the only thing that takes the
+finer grain is the read count one fraction is fitted from
+([`../reports/contamination_grain_decomposition_2026-08-20.md`](../reports/contamination_grain_decomposition_2026-08-20.md)
+decomposes it parameter by parameter, with the code behind each row).
 
-**What this document does until it is settled:** it consumes a fraction per read group, as ruled, and
-**a per-sample estimate is applied to every read group of that sample**. That is exact where the
-contamination is in the DNA and wrong where it is index hopping, and it is recorded here rather than
-hidden because the run's output must say which grain produced the number it used.
+**And the split costs less than the depth it appears to give away**
+([`../reports/contamination_read_group_grain_2026-08-20.md`](../reports/contamination_read_group_grain_2026-08-20.md)).
+A plant with two libraries, one carrying 6% stray reads and one clean, returns **0.0628 and 0.0008**
+per library against **0.0307 for both** at the old grain. And a library holding three reads a position
+returns 0.026 when it is the plant's only library, 0.046 when it is half of a six-read plant and 0.057
+when it is a quarter of a twelve-read plant, against a planted 0.060 — the same reads in the library
+being measured each time. What limits the estimate is how well the plant's genotype and the panel's
+frequencies are known, and neither of those changes grain. **A plant sequenced from one library
+returns the identical number at either grain**, which is every sample of every benchmark cohort here.
+
+**What this document must not lose.** `c` below can now be four different things and a consumer cannot
+act on them alike: fitted from that read group's own reads; fitted from every read of the plant and
+copied onto it, which is what a plant with one library gets and what the sample grain gives; or a
+number near zero because **nothing could be measured**, which is not the same claim as *measured
+clean*. The parameters carry, beside each fraction, how many markers that read group had a read at,
+how many reads it had there, and which of the first two it was. **A library with too little evidence
+returns a fraction near zero rather than a refusal** — the likelihood barely moves with `c` and the
+search keeps zero, which is the right default for a value this term multiplies — and those counts are
+what tell it from a library that was measured and found clean.
 
 That is §2.1's third term with a real `U`:
 
@@ -687,11 +705,13 @@ is rare and not where it is common.
 **Decision: on by default, wherever the parameters fit emits a contamination fraction above its own
 floor.** The estimator that produces it is built and currently switched off (§3.6 above), so what
 this decides is what the caller does with the number once that estimator is turned on; where no
-fraction is emitted, `c` is zero and the formula is §3.3's at every locus. *An earlier version of this section said off by default, "exactly as production has it",
+fraction is emitted, `c` is zero and the formula is §3.3's at every locus. **A read group whose
+fraction rests on almost no evidence also arrives near zero** rather than as a refusal (§3.6), so the
+gate is on the value and the evidence counts beside it, never on the value alone. *An earlier version of this section said off by default, "exactly as production has it",
 which was a habit rather than an argument.* Three reasons to switch it on. The fraction is one of the parameters fit's named
 outputs, and an output the caller declines to consume is one that should not have been produced. The failure it prevents — a contaminated sample called
 heterozygous for its contaminant's allele — is a genotype error we know how to avoid. And it is free
-where it is not needed: a sample the pre-pass puts at or below its floor gets `c = 0` and the
+where it is not needed: a read group the pre-pass puts at or below its floor gets `c = 0` and the
 formula above *is* §3.3, so a clean cohort is untouched by the default.
 
 **The one direction to watch is an overestimated fraction**, which suppresses real heterozygotes by
