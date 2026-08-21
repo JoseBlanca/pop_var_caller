@@ -1,0 +1,336 @@
+# ng read likelihoods (step 7) — implementation plan
+
+**Status:** draft, 2026-08-21. The build order for **step 7 whole**: the
+`calling/likelihood/` module — the evidence views, the SNP/indel closed form with its
+contamination mixture and partial-read rule, the stutter distribution's three recorded changes,
+the STR emission seam with Model A and the censored term, and the STR row with its three-term
+mixture. Design is settled in [`read_likelihoods.md`](../spec/read_likelihoods.md) (spec) and
+[`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §1–§4 (types & interfaces). This
+plan turns that design into build order; it is **not** a place for new design — the open
+questions (Q1, Q7) are the spec's, and neither blocks a step below.
+
+*(One plan, not a per-path split: the shared milestones (A) are small and the two paths land as
+disjoint milestone runs (B–D generic, E–H STR), so a reader can execute one path's run without
+the other. If execution proves the file unwieldy, split it exactly as
+[`parameter_prepass_generic.md`](parameter_prepass_generic.md) /
+[`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) are split — the milestone boundaries below
+are the cut line.)*
+
+**Where this sits.** Six plans build calling:
+[`calling_prerequisites`](calling_prerequisites.md) ∥
+[`calling_foundations`](calling_foundations.md) → [`calling_prior`](calling_prior.md) ∥
+`calling_read_likelihoods` → [`calling_loop`](calling_loop.md) →
+[`calling_bakeoffs`](calling_bakeoffs.md). **This plan needs prerequisites items 1–5** — the
+merge's read-group axis and kept partials are what the generic evidence views read; the
+calibration accumulator, the contamination class frequencies and the `StratumFits` gather are
+what its parameter views consume. The prior plan needs none of that, which is why it starts
+earlier; the two still run in parallel once this one starts.
+
+---
+
+## Scope
+
+**In:** `src/ng/calling/likelihood/` — `mod.rs` (evidence views, the row contract, the parameter
+tiers, shared floors, scratch shapes), `generic.rs` (the SNP/indel closed form + contamination
+mixture + the partial rule), `ssr.rs` (the STR row), `ssr_emission.rs` (`SsrEmissionModel`,
+`StutterSubstitutionEmission`, `ClassicEmissionOracle`); the three recorded changes to
+[`alignment/stutter.rs`](../../../../src/ng/alignment/stutter.rs) (ng code, not frozen
+production); the two doc repointings spec §7 asks for.
+
+**Out (later plans or upstream):**
+
+- **When rows are built, cached and reused; the `Lg` table; context assembly per locus** — the
+  loop's ([`calling_loop.md`](calling_loop.md)).
+- **The change measurements** — the dropped coefficient, the STR contamination on/off sweep, the
+  STR-vs-generic zero-slippage comparison, the per-locus re-fit study (spec §12 items 14–19).
+  All need genotypes end-to-end; recorded in [`calling_bakeoffs.md`](calling_bakeoffs.md)'s
+  out-of-scope as unscheduled measurement runs.
+- **`q_sum_other`'s producer.** The pooled leftover the formula keeps is created by candidate
+  *selection*, which has no spec — "whoever specifies selection owes the pool"
+  ([`calling_em_loop.md`](../spec/calling_em_loop.md) §4). The row takes it as an input
+  (`unmatched_q_sum`); tests supply it from fixtures; **no producer is invented here.**
+- **A part-repeat estimator, untying the one-step shares, the purity adjustment, per-base STR
+  qualities, an overdispersion device** — deferred with homes (spec §10).
+
+## Principles (how the order was chosen)
+
+- **Types first, then implementation**, within every milestone (project rule).
+- **The algorithmic heart before the plumbing.** Each path's scoring mathematics is built and
+  proven against an oracle on hand-built evidence before anything touches the merge's real
+  output; the generic path's run (B–D) is ordered plain form → mixture → partials so each step's
+  oracle is the previous step.
+- **Reuse over rewrite.** The closed form's shape, the mixture, the placement enumeration, the
+  model seam and the comparator are **ports** (spec §9's map); the stutter distribution is
+  **reused from `alignment/stutter.rs`**, renamed — one built implementation with two consumers,
+  never a second spelling. The substitution comparison is **composed** from `FlatEmission`
+  ([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)), never re-implemented.
+  HipSTR's GPL tree is **not a source to implement from**; the operative source is spec §4.2's
+  own full statement of the distribution (the licence rule, spec §4.2).
+- **Verify against ground truth.** The generic row against production's
+  `standard_log_likelihood`
+  ([`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs)) with the two
+  recorded changes reconciled term-by-term; the STR emission against `ClassicEmissionOracle` —
+  an independent implementation, ported test-only exactly as production keeps it.
+- **Isolate the silent steps.** The `m(a, g)` divisor, an inverted one-step share, the
+  aggregation identity and the outlier spread's cohort independence all fail as quietly-wrong
+  genotypes; each lands as its own commit with its oracle named, marked below.
+- **Container builds.** All `cargo` via `./scripts/dev.sh`; a native host build at completion.
+
+## Preconditions (already in place)
+
+- **Foundations merged:** `GenotypeTableView`, `CandidateAlleles`, `AlleleId`
+  ([`calling_foundations.md`](calling_foundations.md)).
+- **Prerequisites merged, items 1–5** ([`calling_prerequisites.md`](calling_prerequisites.md)):
+  the `(allele, read group)` support rows and kept partials (Milestones B–C there), the
+  calibration accumulator (D), the contamination class frequencies (E), the `StratumFits` gather
+  (F).
+- The STR evidence needs no merge work: `SequenceObservation`
+  ([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
+  `(bases, witness, read_group)`; `complete_observations()`
+  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) stays the only unguarded access.
+- The pieces to reuse or port: `StutterModel`/`StutterRates`/`probability`
+  ([`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs),
+  [`:82`](../../../../src/ng/alignment/stutter.rs),
+  [`:300`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
+  ([`:63`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
+  ([`:67`](../../../../src/ng/alignment/stutter.rs)); production's seam and comparator
+  ([`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs),
+  [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)); the placement enumeration
+  ([`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs)); `MIN_BASE_ERROR`
+  ([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)).
+
+## Worktree, branch, merge
+
+- **Worktree** `../pop_var_caller-calling-read-likelihoods`, **branch**
+  `ng-calling-read-likelihoods`, from `main` **after both phase-1 branches
+  (`ng-calling-foundations`, `ng-calling-prerequisites`) have merged**.
+- **Runs in parallel with** `ng-calling-prior`. Conflict surface: `src/ng/calling/mod.rs` — one
+  `pub mod likelihood;` line plus re-exports, placed alphabetically. This branch adds nothing to
+  `types.rs`; its floors are named constants in `likelihood/mod.rs` and the stutter edits stay in
+  `alignment/stutter.rs`, which no other calling branch touches.
+- **Merge order back: the prior merges first, this branch second**, resolving any adjacent-line
+  `mod.rs` conflict. The loop plan branches only after both are in.
+
+---
+
+## The steps
+
+### Milestone A — module scaffold + the shared vocabulary (types, no logic)
+
+**A1. Scaffold + evidence views.**  ☐
+`calling/likelihood/mod.rs` wired into `calling/mod.rs`. `GenericSampleEvidence`
+(`supported: &[GenericObservation]`, `unmatched_q_sum`, `partials`) and `GenericObservation`
+(`allele`, `read_group`, `num_reads`, `q_sum`) as **views over the merge's rows** — one entry per
+`(allele, read group)`, which prerequisites Milestone B made real; `PartialObservation` over
+Milestone C's kept rows, bases + witnessed run intact. `SsrSampleEvidence` — a slice of
+`SequenceObservation` plus the locus's `SsrDetail`
+([`locus_generation/mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)). *Source:* arch
+§2.1, §2.2; spec §1.4, §2.3.
+
+**A2. Parameter views, floors, contract.**  ☐
+`ReadGroupCalibration { scale, provenance }` (scale 1.0 + `Defaulted` where no rate was emitted —
+visible, never silent) and `ContaminationView` (fraction, the three allele-class frequencies,
+`markers_with_reads`, `reads_at_markers` — "measured clean" vs "unmeasurable" told apart by the
+counts). Import `MIN_BASE_ERROR = 1e-12` and the geometric clamps as named constants with their
+reasons. The row contract in `mod.rs`'s docs: pure function, fills caller scratch, empty evidence
+row = all zeros (the prior decides, no branch), mis-shaped input = assertion held in release
+([`per_group_merger.rs:1963`](../../../../src/var_calling/per_group_merger.rs) is the precedent).
+Scratch shells `GenericRowScratch`, `SsrRowScratch<S>`. *Depends:* A1. *Source:* arch §1.1, §2.3;
+spec §3.2, §3.6, §8.
+
+> **Checkpoint A:** the vocabulary compiles; the tier table (frozen / per-call / invisible) is
+> documented on the types that enforce it. Pause for review.
+
+### Milestone B — the SNP/indel closed form
+
+**B1. `error_spread_divisors` — `m(a, g)`.**  ☐
+`3.0` where the observation differs from every allele the genotype carries by a substitution at
+exactly one position, `1.0` otherwise — a property of the allele pair, computed once per
+`(allele, genotype)` over the projected sequences the merge unified. **Own commit, do not
+bundle** — a wrong divisor is `log 3` (4.8 Phred) per wrong read in the wrong direction, and
+nothing crashes; the oracle is a hand-built fixture per class (one-substitution, multi-position,
+indel). *Depends:* A2. *Source:* spec §3.5; arch §3.
+
+**B2. `genotype_log_likelihood_row`, plain form.**  ☐
+Spec §3.3 exactly, with an empty contamination slice: explained reads charged `n·log(k_a/P)`;
+unexplained charged `q_sum + n·(log scale − log m)`; `unmatched_q_sum` added as the
+genotype-independent constant (kept for emission). Tests: **the aggregation identity, bit for
+bit** — the likelihood from a list of individual reads and from their merged aggregate agree with
+no round trip through probability space (spec §12 test 9 — the test that would have caught the
+geometric-mean substitution, and the reason the formula has this shape); order independence
+(test 8); empty row = zeros; a hand-computed biallelic diploid case. **The production
+differential:** on the same inputs, ng's row plus the multinomial coefficient (computed in the
+test in closed form) minus the `÷3` effect equals `standard_log_likelihood`
+([`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs)) to
+floating-point tolerance — every difference attributed to the two recorded changes (spec §3.4,
+§3.5), none unexplained. **Own commit, do not bundle.** *Depends:* B1. *Source:* spec §3.3; arch
+§3.
+
+> **Checkpoint B:** the closed form matches production term-for-term once the two recorded
+> changes are reconciled, and aggregation is exact. Pause for review.
+
+### Milestone C — the generic contamination mixture
+
+**C1. The mixture, no `c = 0` branch.**  ☐
+Spec §3.6: `n_o · log[(1 − c)·own(o|g) + c·q(o)]`, evaluated in probability space with one
+logarithm, `q(o)` read from the class frequencies prerequisites Milestone E emitted. **There is
+no `c == 0` branch** — the two forms agree to a few ulp and the tolerance is a named test
+constant (spec §12 test 11); the test also fails the moment anyone reintroduces production's
+extra `(1 − ε)` factor or its allele-count divisor into `own`. A second test hand-computes one
+contaminated case (`c = 0.03`, contaminant frequency 1 in 1,000). *Depends:* B2. *Source:* spec
+§3.6; arch §3.
+
+### Milestone D — partial observations on the generic path
+
+**D1. The compatibility rule.**  ☐
+An allele is compatible with a partial when its projection **restricted to the witnessed run**
+equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the genotype's
+compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly aggregable
+by construction (the witnessed run is part of the observation's identity). Tests: a partial
+compatible with both of a diploid heterozygote's alleles contributes 1 — no information,
+correctly; the no-compatible error charge; verdicts identical for pooled reads. *Depends:* B2;
+prerequisites C. *Source:* spec §5.3; arch §3.
+
+> **Checkpoint C/D:** the generic path is complete — plain, contaminated, and censored evidence
+> all scored, each against a hand-computed or production oracle. Pause for review.
+
+### Milestone E — the stutter distribution's three changes (`alignment/stutter.rs`)
+
+The distribution is **reused, not duplicated**; the file already records the follow-ups its port
+deferred. All three changes are in ng code.
+
+**E1. Rename to the spec's vocabulary.**  ☐
+`StutterRates`/`StutterModel` fields renamed — `whole_repeat_longer_share`,
+`part_repeat_one_step_share`, … — with HipSTR's names kept in doc comments for whoever ports
+alongside; *in frame / out of frame* is banned vocabulary (spec §1.3) and the fields currently
+carry it (`in_up`, `out_geom`). Mechanical; existing tests green unchanged. Alongside, the two
+doc repointings spec §7 records: [`alignment.md`](../spec/alignment.md) §5.2 repointed at the
+spec's §4.2 as the distribution's owner, its *in frame / out of frame* wording moved to §1.3's.
+*Source:* spec §1.3, §4.2, §7; arch §4.2.
+
+**E2. Two named cutoffs + the reported truncation.**  ☐
+`MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base pairs) replace the
+single `MAX_SLIP` ([`stutter.rs:63`](../../../../src/ng/alignment/stutter.rs)) — both inherited
+from production's provisional 10 and declared inherited. The mass the cutoffs discard is
+**computed and reported per candidate** (feeds `SsrScoringContext.truncated_mass_lost`). Test:
+the reported loss equals one minus the truncated sum, to floating-point tolerance, across
+candidate lengths, periods, and one-step shares over the clamped range — **the test pins that
+the loss is computed and surfaced, not that it is small** (spec §12 test 5; its size runs from
+2 in a million to 2 in a thousand). **Own commit, do not bundle** — an unreported loss compares
+candidates on different scales silently. *Depends:* E1. *Source:* spec §4.2; arch §4.2.
+
+**E3. `stutter_rates_for(&Slippage)` + the sums-to-one tripwire.**  ☐
+Seven shares from the fit's three numbers, the placeholders named as placeholders:
+`PART_REPEAT_SHARE_OF_WHOLE = 0.05` (production's `OUT_FRAME_REL`) and the two one-step shares
+tied to one value — both awaiting an owner (spec §10). Test: **the distribution sums to one**
+over the full untruncated support, periods 1–6, direction splits symmetric to 5:1 (spec §12
+test 4 — the test that catches a one-step share read as its complement, a mis-set same-length
+share, and an off-by-one re-indexing, all three silent). **Own commit, do not bundle.**
+*Depends:* E1. *Source:* spec §4.2; arch §4.2.
+
+> **Checkpoint E:** the distribution carries the spec's names, two cutoffs, a reported loss, and
+> a proven total. Pause for review.
+
+### Milestone F — the STR emission seam
+
+**F1. The seam types.**  ☐
+`ssr_emission.rs`: `SsrScoringContext` (the tier-two seam — every number arrives per call, none
+read from global state; carries `stutter`, `substitution_rate` — the fitted per-stratum rate,
+**never the SNP ε and never `q_sum`**, spec's closed Q6 — `truncated_mass_lost`,
+`weakest_provenance`), `SsrCandidate` (bases + the repeat count that keys the stratum lookup —
+the **candidate's** stratum, not the reference's, so contexts are per
+`(read group, candidate)` and never hoisted out of the candidate loop), and the
+`SsrEmissionModel` trait with `emission` and `censored_emission`. *Depends:* A2. *Source:* arch
+§4.1; spec §4.3, §4.4.
+
+**F2. `StutterSubstitutionEmission` — Model A.**  ☐
+The stutter factor (E's distribution, via the reused `StutterModel`) times the substitution
+factor — **composed** from `FlatEmission`
+([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)) under the fitted rate,
+over sequences the stutter factor has already made equal-length. Placement enumeration ported
+with production's split, stated: whole-repeat slips enumerate placements with equal weight,
+part-repeat changes resize at the tract's end in a single placement. Unreachable slips score
+zero. Tests: the three ported property tests — same-length dominance (spec §12 test 1),
+direction and size ordered as fitted (test 2), a whole repeat beats a stray base **under the
+corrected condition** (test 3 — the product comparison, stated so it survives the shares being
+untied). *Depends:* F1, E3. *Source:* spec §4.2, §4.3; arch §4.1.
+
+**F3. `ClassicEmissionOracle` + the cross-model check.**  ☐
+Model B ported **test-only**, exactly as production keeps it
+([`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)) — an independent
+implementation worth more as an oracle than as an alternative. Test: A and B agree on genotype
+*ordering* over a fixture grid of (observation, candidate) pairs at matched parameters — the
+independent-implementation check behind the whole path. *Depends:* F2. *Source:* spec §9; arch
+§4.1.
+
+> **Checkpoint F:** the seam holds two models, the default proven against the independent one.
+> Pause for review.
+
+### Milestone G — the censored term
+
+**G1. `censored_emission`.**  ☐
+Spec §5.2: the factorised form on pure candidates — the letter match on the witnessed prefix
+times the closed-form tail `P(length ≥ ℓ | a)`, both geometric tails capped at E2's cutoffs —
+and the exact sum over reachable stretchings on interrupted candidates. Tests: **the complement
+identity** — `P(≥ ℓ) + P(< ℓ)` equals the truncated distribution's own total (one minus E2's
+reported loss), **not 1** (spec §12 test 12); where the constraint admits exactly one length
+change, censored equals complete **bit for bit**; **a partial never out-discriminates a
+complete observation** on a stated parameter set (test 13). *Depends:* F2, E2. *Source:* spec
+§5.2; arch §4.1.
+
+### Milestone H — the STR row
+
+**H1. The row, cache, and two-term mixture.**  ☐
+`ssr.rs`: `genotype_log_likelihood_row<Model>` — emissions cached per
+`(observation, candidate)` and reused across genotypes (**the cost is
+`observations × candidates`, not `× genotypes`; that is the design, not an optimisation**);
+complete and partial observations routed to `emission` / `censored_emission` by `ReadWitness`
+through the guard iterator; the copy-weighted mixture with the outlier term,
+`DEFAULT_OUTLIER_WEIGHT = 0.01` inherited and declared inherited. Tests: the junk term cancels
+bit-for-bit for a read nothing explains (spec §12 test 6); ploidy generality with the corrected
+between-ness claims (test 7 — pin both the matching case and the split case); order independence
+(test 8); an instrumented count pinning one row build at `observations × candidates` emission
+calls. *Depends:* F2, G1. *Source:* spec §2.1, §4.5, §8; arch §4.1.
+
+**H2. The per-locus outlier spread + STR contamination.**  ☐
+`reachable_length_count` computed from the candidate set and the cutoffs alone — **no cohort in
+it**, the decided repair of production's cohort-wide `D`
+([`em.rs:393`](../../../../src/ssr/cohort/em.rs)); and the three-term form
+`(1 − λ − c)·copy-mixture + λ·uniform + c·seed(o)` with `SsrContamination` (`None` ⇒ the
+two-term form), the seed's length distribution handed in from the prior's
+`seed_length_distribution` ([`calling_prior.md`](calling_prior.md) E2). Tests: **the per-sample
+property** — adding an unrelated sample's observations to the locus's cohort changes this
+sample's row by zero bits; the `c = 0` ulp identity on this path too (the same named tolerance
+as C1). **Own commit, do not bundle** — the cohort-dependent floor was a silent tenfold
+difference between one sample and a panel; the zero-bit test is the oracle. *Depends:* H1;
+prior plan E2. *Source:* spec §4.5, §4.5.1; arch §4.1.
+
+> **Checkpoint H:** both rows are complete, pure, and proven; the loop plan can consume them.
+> **Step 7 is complete as a set of pure functions.** Pause for review.
+
+---
+
+## Verification summary
+
+| milestone | proven by |
+|---|---|
+| A | type-level compilation as the sibling plans' import surface; contract documented |
+| B | **bitwise aggregation identity**; **production differential** — `standard_log_likelihood` reconciled term-by-term through the two recorded changes |
+| C | the ulp-tolerance `c = 0` identity (named constant); a hand-computed contaminated case |
+| D | hand-built compatibility fixtures — no-information, error-charge, pooled-verdict |
+| E | existing stutter tests green through the rename; the reported-loss identity; the sums-to-one tripwire |
+| F | the three ported property tests; **`ClassicEmissionOracle`** cross-model agreement |
+| G | the complement-vs-truncated-total identity; the single-length bitwise case; the never-out-discriminates bound |
+| H | junk-cancellation bit-for-bit; ploidy properties; the emission-call count; **the zero-bit cohort-independence test** |
+
+## Out of scope (next plans)
+
+- **Building contexts per locus from `StratumFits`, the `Lg` table, and row reuse across
+  passes** — [`calling_loop.md`](calling_loop.md).
+- **The change measurements** (spec §12 items 14–19: the coefficient, both end-to-end
+  regressions, STR contamination on/off, zero-slippage path comparison, per-locus re-fit) — need
+  genotypes; recorded in [`calling_bakeoffs.md`](calling_bakeoffs.md)'s out-of-scope with this
+  plan named as the producer of the seams they measure.
+- **`q_sum_other`'s producer** — candidate selection's, once that spec exists (see Scope).
+- **The deferred items with homes** — per-read mismapping mixture, overdispersion, per-base STR
+  rate, part-repeat estimator, purity adjustment, longer-than-read alleles (spec §10).

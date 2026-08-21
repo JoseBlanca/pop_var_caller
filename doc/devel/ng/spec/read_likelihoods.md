@@ -1274,7 +1274,7 @@ for it at one and not the other is treating one number as two. The weaker half o
 the seed, not the fraction, and the paragraph above bounds what a wrong seed can cost.
 
 **Built behind the model seam all the same**, so the measurement can be run against a build with it
-off. §12's item 16 is that measurement and open question 7 (§11) says what would switch it off.
+off. §12's item 17 is that measurement and open question 7 (§11) says what would switch it off.
 
 ### 4.6 Two alleles of the same length
 
@@ -1361,7 +1361,7 @@ genotypes still do not, the difference is in the models rather than in the numbe
   about accuracy and not about agreement** — the two paths should call *correctly* at the same rate,
   not identically.
 
-**Open question 8 (§11) carries it, and §12's item 17 is the measurement.**
+**Open question 8 (§11) carries it, and §12's item 18 is the measurement.**
 
 ---
 
@@ -1482,11 +1482,23 @@ gains at exactly the loci where reads run out: long deletions and wide overlappi
 
 ### 5.4 Where partial reads exist at all, and what that means for the merge
 
-**Two separate things get confused here and only one of them is a cross-document question**, so they
-are separated first. **Scoring partial reads at a locus the merge already built** needs nothing from
-any other component: the evidence is there, §5.2 and §5.3 say what to do with it, and it is pure
-gain. **Letting partial reads rescue a locus the merge would otherwise discard** is a change to the
-merge's own rule, and §5.4.2 concludes it should not be made on the generic path.
+**Two separate things get confused here**, so they are separated first. **Scoring partial reads at a
+locus the merge already built** is what §5.2 and §5.3 specify. **Letting partial reads rescue a locus
+the merge would otherwise discard** is a change to the merge's own rule, and §5.4.2 concludes it
+should not be made on the generic path.
+
+**Correction, 2026-08-21: an earlier version of this section said the first of those "needs nothing
+from any other component: the evidence is there". It is not there.** The merge's collation drops
+every observation whose witness is not `Complete` before projecting it onto an allele
+([`cohort_merge/build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)), and its projection
+panics rather than pad one ([`:323`](../../../../src/ng/run/cohort_merge/build.rs)). So a cohort
+observation as built carries no partial reads at all, and §5.2 and §5.3 have nothing to read.
+**This is a second requirement on the merge, alongside the read-group one of §2.3, and §7's table
+carries it:** a partial observation must survive collation, keyed by the stretch it witnessed, and
+projected over that stretch rather than the whole locus span. It changes no locus's existence — that
+is §5.4.2's separate question, still answered *no* — only what evidence a built locus hands on.
+**Where it bites hardest is the repeat path**, where §5.4.1's bottom row shows over half the reads at
+a 60-base tract are partial and an allele longer than a read can only ever be witnessed partially.
 
 #### 5.4.1 A read is partial only where the locus is wide on the reference
 
@@ -1640,7 +1652,7 @@ framing made it sound.
 
 **The hypothesis to test, stated so it can be wrong** (owner): most loci will land close to their
 stratum's fitted values, and a minority will sit a long way off — and it is that minority the
-adaptation exists for. **The measurement is §12's item 18**, on the two benchmarks the STR path
+adaptation exists for. **The measurement is §12's item 19**, on the two benchmarks the STR path
 already has: HG002's tandem-repeat benchmark, where the truth is an assembly rather than another
 caller, and tomato's recurrence-based standard
 ([`silver_standard.py`](../../../../benchmarks/ssr_tomato1/scripts/silver_standard.py)), where the
@@ -1694,7 +1706,7 @@ say the same thing.**
 | comparing two equal-length sequences under one flat error rate | [`alignment.md`](alignment.md) §5.1 | **composes** it as §4.3's factor |
 | the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 sets it out because a candidate aligner there would consume it, and states it is not an alignment algorithm. **That section should be repointed here**, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, **and its *in frame* / *out of frame* wording moved to §1.3's**; neither edit is made here |
 | every parameter | [`parameter_prepass.md`](parameter_prepass.md) and its two path siblings | reads them frozen; **fits nothing** |
-| the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and places **one** requirement on it: keep read group in the identity (§2.3). An earlier draft placed a second — change which loci get built so partial reads can rescue one — and §5.4.2 withdraws it |
+| the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and places **two** requirements on it: **keep read group in the identity** (§2.3), and **let a partial observation survive collation**, keyed and projected over the stretch it witnessed, because the built merge discards it and §5 has nothing to score without it (§5.4, corrected 2026-08-21). Neither changes which loci get built — an earlier draft asked for that third change and §5.4.2 withdrew it |
 | which alleles are candidates | candidate generation, [`ng_proposal.md`](ng_proposal.md) step 6 | scores what it is handed |
 | the genotype prior | [`calling_priors.md`](calling_priors.md) | added to this in log space by the third document |
 | when this is called, with which candidates, and how the results are combined | the EM loop document | defines the function only |
@@ -1886,7 +1898,7 @@ centred on this cohort's modal repeat count, so a contaminant from elsewhere is 
 the mode, the direction in which this term hurts rather than helps. **Leaning: keep it on, and switch it off only
 on evidence of harm** — contamination is a property of the sample rather than of the marker, so
 correcting for it at ordinary sites and not at repeat tracts would treat one number as two.
-**Settled by:** §12's item 16, in that order — the simulated panel first, because it is runnable
+**Settled by:** §12's item 17, in that order — the simulated panel first, because it is runnable
 today and gives exact truth, and the planted GIAB mixture second, because it needs reads we do not
 hold.
 
@@ -1895,7 +1907,7 @@ hold.
 path charges a read's error per base and the other per read — 33 Phred apart at two mismatches over a
 20-base tract, and 61 at three. *Leaning: it should hold, and if it does not the per-base/per-read
 split is where to look first*, because it is structural, it is the only one of the four whose size is
-already known, and it is the one that grows with tract length. **Settled by:** §12's item 17.
+already known, and it is the one that grows with tract length. **Settled by:** §12's item 18.
 **Consequence if it fails:** the copy floors stop being a tuning choice about which loci are worth
 the compute and become a correctness boundary, which is a much stronger claim than anything
 [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §5.1 makes for them.
@@ -1977,15 +1989,15 @@ production already tests and ng's port should carry across
 
 **The change measurements, which are not tests but must be run before adoption.**
 
-13. **The dropped multinomial coefficient.** Compute both forms over the same merged records and
+14. **The dropped multinomial coefficient.** Compute both forms over the same merged records and
     report which genotypes move and by how much, on GIAB HG002 at 5× and at full depth. §3.4 argues
     from arithmetic; this is what turns the argument into a number. **A change to §3.3 that does not
     move anything on this bench has not been tested by anything that matters.**
-14. **The end-to-end regression, SNP/indel path.** GIAB single-sample genotype accuracy at true
+15. **The end-to-end regression, SNP/indel path.** GIAB single-sample genotype accuracy at true
     variants, and the count of true homozygous-variant sites called heterozygous — the same two
     numbers [`calling_priors.md`](calling_priors.md) §12 uses, so the prior's effect and the
     likelihood's are read off one bench and can be attributed apart.
-15. **The end-to-end regression, STR path.** The GIAB HG002 tandem-repeat bundle, scored on genotype
+16. **The end-to-end regression, STR path.** The GIAB HG002 tandem-repeat bundle, scored on genotype
     accuracy given detection (`benchmarks/ssr_hg002/src/prior_genotype_accuracy.py`). **It is a
     regression guard, not a discriminating test**: production's STR caller reaches 64% of
     truth-variant loci at 50× and 28% at 15×, and the loci it reaches are the well-covered ones where
@@ -1993,7 +2005,7 @@ production already tests and ng's port should carry across
     genotyping and it will not say whether this model is the right one at low depth. That gap is the
     state of the evidence, not an oversight.
 
-16. **Does contamination at a repeat tract earn its place?** Two rungs, and the first is runnable
+17. **Does contamination at a repeat tract earn its place?** Two rungs, and the first is runnable
     today. **Simulated:** the generator that chose Model A already builds a cohort with known
     genotypes ([`sim.rs`](../../../../src/ssr/cohort/sim.rs)); add a contaminating individual at a
     known fraction and score genotype concordance and calibration with §4.5.1 on and off, sweeping
@@ -2008,7 +2020,7 @@ production already tests and ng's port should carry across
     at a fraction the pre-pass would flag, or any movement at all at a fraction of zero, where
     §12's item 11 says there must be none.
 
-17. **Does the STR path lose anything at a tract that does not slip?** Take the loci whose fitted
+18. **Does the STR path lose anything at a tract that does not slip?** Take the loci whose fitted
     slippage level is at or near zero — short tracts, and any stratum the parameters fit puts below a
     named threshold — and call them **both ways**: down the STR path, and down the SNP/indel path by
     treating the tract as an ordinary stretch of genome. **Score each against truth rather than
@@ -2019,7 +2031,7 @@ production already tests and ng's port should carry across
     their reads differ at — §4.8 predicts the gap is concentrated where a read differs at two bases
     or more.
 
-18. **Do the stutter parameters want to be fitted per locus?** Fit them per locus and compare against
+19. **Do the stutter parameters want to be fitted per locus?** Fit them per locus and compare against
     the frozen per-stratum values, on both STR benchmarks and at several depths.
     **First, the distribution of the disagreement** — for every locus with enough reads to fit,
     how far its own fitted values sit from its stratum's. The hypothesis is that most land close and

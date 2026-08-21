@@ -66,7 +66,7 @@ src/ng/
 │                       rates of variation — estimated from the data before calling, and
 │                       emitted as ModelParams. Named for what it owns, not for when it
 │                       runs: "pre-pass" says only that something else comes after, and
-│                       "prior" would both collide with genotype_prior/ below and overstate
+│                       "prior" would both collide with calling/genotype_prior/ below and overstate
 │                       the output, half of which is noise-model terms rather than priors.
 │                       SampleSummarizer + CohortEstimator. Specs ../spec/parameter_prepass*.md;
 │                       arch parameter_prepass_generic.md (which owns the shared fitting/
@@ -80,10 +80,28 @@ src/ng/
 │                          locus's own allele frequency. loci.rs (which positions), census.rs
 │                          (what is recorded there), fit.rs and ssr_fit.rs (the two halves of
 │                          the estimator), contamination.rs. Arch parameter_prepass_joint_*.md.
-├── allele_candidates/ – step 6  CandidateGenerator + impls (rung_ladder [STR], assembly [generic])
-├── likelihood/       – step 7  ReadLikelihood + impls (stutter models, pair-HMM)
-├── genotype_prior/   – step 8  GenotypePrior + impls (flat, dirichlet, sfs, marginalized)
-├── inference/        – step 9  GenotypeModel + impls (ml_grid, em_af, joint)
+├── calling/          – steps 6–9, one folder because they are one question: which alleles,
+│                       how probable are the reads under each genotype, how likely is each
+│                       genotype before the reads, and what comes out. Principle 1's rule (b)
+│                       — the loop *drives* the other three and they share the allele table,
+│                       the genotype indexing and the per-locus scratch, so siblings at the
+│                       top of ng/ would have forced a no-import rule between them. Steps 10
+│                       and 11 are NOT here: phasing and locus filtering read calling's
+│                       output rather than taking part in it. Specs ../spec/calling_*.md and
+│                       ../spec/read_likelihoods.md; arch calling_priors.md,
+│                       read_likelihoods.md, calling_em_loop.md.
+│                        · mod.rs           – the vocabulary the four share: CandidateAlleles,
+│                          GenotypeTable + AlleleId + GenotypeIdx + Genotype, ExpectedAlleleCopies,
+│                          CallingScratch, LocusEvidence, FrozenParameters, LocusInference
+│                        · allele_candidates/ – step 6: selection from the merge's table
+│                          (flat cap + bar [generic], rung ladder [STR]). No spec yet — both
+│                          calling specs record that gap
+│                        · likelihood/      – step 7: the Lg row. One seam only, the STR
+│                          emission (SsrEmissionModel); the SNP/indel row is a function
+│                        · genotype_prior/  – step 8: GenotypePriorModel + the marginalized
+│                          default and the plug-in comparator
+│                        · inference/       – step 9: LocusGenotyper (summarise-and-condition
+│                          [default] / whole-cohort assignment scoring) × JointAssignmentPrior
 ├── phasing/          – step 10 (physical / SNP-based)
 ├── locus_filter/     – step 11  the locus-level filters (add more as needed):
 │                        · hidden_dup.rs  – ArtifactFilter (11a: paralog / hidden-duplication)
@@ -97,16 +115,16 @@ src/ng/
 ```
 
 (Steps 5 — STR read-class / spanning — and the read-class machinery live inside
-`allele_candidates/` or `locus_generation/ssr.rs`; see *Open items*.)
+`calling/allele_candidates/` or `locus_generation/ssr.rs`; see *Open items*.)
 
 ## Organizing principles
 
 **1. One module per pipeline step — trait, impls, and tests together.** This is the
 load-bearing rule. Each step folder holds its trait *and* every competing implementation
 *and* their tests, so a step's alternatives sit **side by side**. That is exactly what
-the bake-off needs — "swap `allele_candidates::assembly` for `allele_candidates::rung_ladder`,
+the bake-off needs — "swap `calling::allele_candidates::assembly` for `::rung_ladder`,
 hold the rest, re-measure." It also satisfies the naming rule ([naming.md](../../../../ai/skills/rust-code-review/code_review/naming.md)):
-modules are named for the **concept** they own (`allele_candidates`, `likelihood`, `genotype_prior`),
+modules are named for the **concept** they own (`calling`, `allele_candidates`, `genotype_prior`),
 never for a layer or pattern (`models`, `services`, `common`, `utils`). *One step may host
 sub-modules when the spec frames it as one step with several questions* — `locus_filter/`
 (step 11) holds `hidden_dup` (artifact) and `emission` (emit decision) side by side, each
@@ -122,8 +140,19 @@ type and reference accessor, so they live together in one `read/` module rather 
 two sibling folders. This bends "one folder per step" while keeping its intent: step 2's
 `ReadPreparer` implementations still sit side by side within `read/`.
 
+**Steps 6–9 are rule (b)'s second and larger case, and the test that decided it was a
+dependency, not a feeling.** As four sibling folders at the top of `src/ng/`, the three
+calling arch docs each had to state that the prior and the likelihood must never import
+from `inference/`, and the shared types had to cross as flat slices partly to enforce it —
+a constraint the tree imposed rather than the design. Under one `calling/` folder the
+shared vocabulary sits in `calling/mod.rs` and every sub-module imports downward, so the
+rule disappears. **The generalisation worth carrying: when keeping steps apart forces you
+to write a no-import rule between them, they are one folder.** (The flat slices stay, for
+their own reasons — the no-allocation contract, and `genetics.rs:127`'s deliberate
+avoidance of a back-reference into its caller.)
+
 **2. STR-ness is not a separate subtree.** An STR candidate generator is just
-`allele_candidates/rung_ladder.rs` sitting next to the generic `allele_candidates/assembly.rs`, just
+`calling/allele_candidates/rung_ladder.rs` sitting next to the generic `assembly.rs`, just
 as `locus_generation/ssr.rs` sits next to `locus_generation/pileup/`; the region's kind decides which runs. We do **not**
 split the pipeline into
 `ssr/` vs `generic/` — that would scatter each step's variants across two trees and make
@@ -157,7 +186,7 @@ Every step folder follows the same shape — the trait in `mod.rs`, one file per
 implementation, tests beside the code:
 
 ```
-allele_candidates/
+calling/allele_candidates/
 ├── mod.rs          – the CandidateGenerator trait + re-exports of the impls
 ├── rung_ladder.rs  – the STR repeat-length implementation  (+ #[cfg(test)] tests)
 ├── assembly.rs     – the generic local-assembly implementation (+ tests)
@@ -247,7 +276,7 @@ serialization when memory forces it or when the evidence types stop churning.
 ## Open items
 
 - **Where step 5 (STR read-class / spanning) lives** — it is STR-only and feeds candidate
-  generation; likely a submodule of `allele_candidates/` or of `locus_generation/ssr.rs`, not its own
+  generation; likely a submodule of `calling/allele_candidates/` or of `locus_generation/ssr.rs`, not its own
   top-level step folder. Decide when the STR path is built.
 - **How much of the production `pileup/walker/` lifts** into an in-memory context, versus a
   lean rewrite that calls its decompose/active-set core. Decide when `locus_generation/pileup/` is

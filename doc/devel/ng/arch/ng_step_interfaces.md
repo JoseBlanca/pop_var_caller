@@ -196,6 +196,9 @@ pub enum LocusKind {
 }
 
 /// The candidate allele set at a locus (step 6). REF is always present at `ref_idx`.
+// RENAMED `CandidateAlleles` and homed in `calling/mod.rs` (`../arch/calling_em_loop.md` §2),
+// because the loop appends to it during discovery and prunes it at the end. Its `kind` routes
+// both the row builder and the prior's seed.
 pub struct AlleleCandidates {
     pub alleles: Vec<Allele>,        // sequence-resolved
     pub ref_idx: AlleleId,
@@ -213,11 +216,18 @@ impl Genotype {
     pub fn is_homozygous(&self) -> bool { self.0.iter().all(|a| *a == self.0[0]) }
 }
 
-/// Per-sample genotype log-likelihoods at a locus (step 7 → step 9). The single
-/// read-level quantity every prior/posterior/emission model consumes (spec's `Lg`).
+/// SUPERSEDED by the three calling arch docs, which split this in two. One sample's
+/// values are a **row**, computed by `calling/likelihood/` and never owned by it
+/// (`../arch/read_likelihoods.md` §1.1); the `samples × genotypes` **table** that holds
+/// every row is a field of the loop's `CallingScratch` (`../arch/calling_em_loop.md` §2),
+/// so it is allocated once per worker rather than per locus. The sketch below also
+/// carried the genotypes themselves beside the values; the real shape indexes a shared
+/// `GenotypeTable` (`calling/genotype_table.rs`) instead, because every sample at a locus
+/// enumerates the same genotypes and re-listing them per sample is what the table exists
+/// to avoid.
 pub struct GenotypeLikelihoods {
-    pub genotypes: Vec<Genotype>,    // the enumerated genotypes over the candidates (diploid v1)
-    pub log_lik: Vec<LogProb>,       // parallel to `genotypes`, per sample handled by caller
+    pub genotypes: Vec<Genotype>,
+    pub log_lik: Vec<LogProb>,
 }
 
 /// A called genotype for one sample at one locus.
@@ -373,39 +383,56 @@ pub trait CandidateGenerator {
 *Impls to bench:* assembly haplotypes, the repeat-length rung ladder, observed
 sequences + iterative stutter/flank discovery.
 
-### Step 7 — read likelihood (exists: `ReadLikelihoodModel`)
+### Step 7 — read likelihood — SUPERSEDED by [`../arch/read_likelihoods.md`](read_likelihoods.md) §1.2
+
+The sketch below is wrong twice over. **There are no reads at this point in the pipeline** — the
+evidence is a distinct observation with a count and summed moments, so `LocusRead` (itself retired,
+§6) cannot be the unit. **And a per-allele scalar cannot compose the formula**: the mixture puts a
+logarithm around a sum over alleles, so the call must return a whole genotype **row**. The only
+swappable surface is the STR emission (`SsrEmissionModel`); the SNP/indel row is a function with no
+trait.
 ```rust
+// superseded — kept to show what was wrong
 pub trait ReadLikelihood {
-    /// P(read | allele), in log space, given the frozen error/stutter model.
     fn read_log_lik(&self, read: &LocusRead, allele: &Allele,
                     params: &ModelParams) -> LogProb;
 }
 ```
-Contamination enters here as a mixture over the source distribution (spec's choice),
-not as a separate pass. The STR stutter model is the swappable part.
 
-### Step 8 — genotype prior
+### Step 8 — genotype prior — SUPERSEDED by [`../arch/calling_priors.md`](calling_priors.md) §3.3
+
+Wrong in both directions. **Input:** the prior is built from a **concentration** — the run's seed
+plus the other samples' expected allele copies, the sample's own subtracted — not from a frequency
+vector, which cannot carry how much conviction stands behind it. **Output:** a whole row from flat
+arrays, not one genotype at a time, which would re-derive the per-allele `lgamma` baseline on every
+call. The seam is `GenotypePriorModel`, with the marginalized prior as default and the plug-in one
+as its comparator. **`AlleleFreq` loses its only calling-side consumer** — nothing in the three
+calling docs takes a frequency vector, so it is not minted for them.
 ```rust
+// superseded — kept to show what was wrong
 pub trait GenotypePrior {
-    /// log P(genotype) given the cohort frequency estimate and the sample's F.
     fn genotype_log_prior(&self, genotype: &Genotype, freq: &[AlleleFreq],
                           f: InbreedingF) -> LogProb;
 }
 ```
-*Impls to bench (the spec's ladder):* flat, fixed-het Dirichlet, SFS/Ewens
-integration, marginalised leave-one-out cohort prior.
 
-### Step 9 — posterior / inference (exists: `GenotypeEmModel`)
+### Step 9 — posterior / inference — SUPERSEDED by [`../arch/calling_em_loop.md`](calling_em_loop.md) §3
+
+The loop is **three nested levels** — allele discovery, slippage re-fit, frequencies — with the
+outer two off by default. So neither argument below can arrive prebuilt: the loop rebuilds the
+likelihood table itself per slippage round and appends columns per discovery round, and each
+sample's prior is built per pass from the loop's own expected copies, so there is no
+locus-constant prior object to pass. The genotyper takes **evidence and frozen parameters** and
+drives the two sibling functions. Two seams, not one: `LocusGenotyper` (how the cohort is handled)
+× `JointAssignmentPrior` (which joint prior), with enumeration a configuration so the exhaustive
+oracle and the search are one scorer.
 ```rust
+// superseded — kept to show what was wrong
 pub trait GenotypeModel {
-    /// Run inference over a locus' per-sample likelihoods + prior, returning the
-    /// per-sample calls and the site-level frequency posterior.
     fn infer(&self, lik: &[GenotypeLikelihoods], prior: &dyn GenotypePrior,
              f: &[InbreedingF]) -> LocusInference;
 }
 ```
-*Impls to bench:* ML grid (GangSTR), per-sample-GL→EM-AF (GATK/ours),
-full joint cohort marginalisation (freebayes).
 
 ### Step 11 — site filtering (two traits, two questions)
 ```rust
@@ -451,10 +478,20 @@ pub struct CallerRecipe {
     pub rough_caller: Box<dyn Caller>,
     pub summarizer:   Box<dyn SampleSummarizer>,   // per-sample -> .psp
     pub cohort_estimator: Box<dyn CohortEstimator>, // cohort gather -> ModelParams
-    pub candidates:   Box<dyn CandidateGenerator>,
-    pub likelihood:   Box<dyn ReadLikelihood>,
-    pub prior:        Box<dyn GenotypePrior>,
-    pub model:        Box<dyn GenotypeModel>,
+    // Steps 6–9 now live in one `calling/` module (module_layout.md) and their seams are
+    // the three calling arch docs'. The four fields below are what those docs pin:
+    pub candidates:   Box<dyn CandidateGenerator>,   // step 6 — still unspecced; only its
+                                                     //   output type (`CandidateAlleles`) is fixed
+    pub ssr_emission: Box<dyn SsrEmissionModel>,     // step 7 — the ONLY swappable surface here;
+                                                     //   the SNP/indel row is a function, and the
+                                                     //   re-estimable stutter parameters arrive per
+                                                     //   call, not as a recipe field
+    pub prior:        Box<dyn GenotypePriorModel>,   // step 8 — marginalized (default) / plug-in
+    pub genotyper:    Box<dyn LocusGenotyper>,       // step 9 — summarise-and-condition (default)
+                                                     //   / whole-cohort assignment scoring
+    pub joint_prior:  Box<dyn JointAssignmentPrior>, // step 9's second axis, used by the second
+                                                     //   genotyper only: cohort Dirichlet-multinomial
+                                                     //   or arrangement × Ewens
     pub artifact:     Box<dyn ArtifactFilter>,
     pub emission:     Box<dyn EmissionModel>,
     pub representation: Box<dyn AlleleRepresentation>,
@@ -539,10 +576,10 @@ were not freshly re-read.
 | `RefSeq` + `RawRefSeq` (traits) | `ChromRefFetcher` + `MultiChromRefFetcher` + `RepositoryRefFetcher` + `StreamingChromRefFetcher` + `ManualEvictChromRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | **consolidate** into `RefSeq` (universal canonical fetch) + the `RawRefSeq` capability + an inherent `evict_before` (no silent no-ops); reuse the fetcher impls behind them. Spec: [`../spec/ref_seq.md`](../spec/ref_seq.md) |
 | `MappedRead` | `MappedRead` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | reuse as-is (the step-2 input) |
 | `LocusRead` (prepared-read output) | — (name retired) | **generic path only:** read preparation produces production's `PreparedRead`, reused as-is (may want hoisting out of `pileup/walker/`). There is **no STR counterpart** — the STR path has no read preparation; its per-read alignment produces a locus *observation* (`ObservedSequence` in `locus_generation_ssr.md`), not a prepared read. The old `SsrTractObs` path-owned type is gone with the retired STR read-prep spec |
-| `AlleleCandidates` | `CandidateSet` ([ssr/cohort/candidate_set.rs](../../../../src/ssr/cohort/candidate_set.rs)) | rename |
+| `AlleleCandidates` | **renamed 2026-08-21 to `CandidateAlleles`** and homed in `calling/mod.rs` ([`calling_em_loop.md`](calling_em_loop.md) §2) — the loop owns it because a discovery round appends to it and the final prune shrinks it. Production's `CandidateSet` ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)) is the STR-side reuse target | rename; port the rung ladder when the STR path comes through the merge |
 | `SampleSummary` | ≈ the `.psp` `SampleSummary` ([sample_summary/](../../../../src/sample_summary/)) | reuse / align |
-| `ModelParams` | ≈ the SSR chemistry param set ([ssr/cohort/param_estimation.rs](../../../../src/ssr/cohort/param_estimation.rs)) + per-individual `F` | assemble from both levels |
-| `Genotype` | ≈ SNP/STR genotype reprs | replace with the ploidy-agnostic multiset |
+| `ModelParams` | **resolved 2026-08-21** — the successor is `FrozenParameters` ([`calling_em_loop.md`](calling_em_loop.md) §2): a borrow gathering the pre-pass's outputs (`ReadGroupCalibration`, `ContaminationView`, per-sample `InbreedingF`, `SpectrumSeed`, the `(read group, stratum)` slippage lookup) | assemble once per run; never written during calling |
+| `Genotype` | **resolved 2026-08-21** — a pair, not one type: `GenotypeIdx` (a row of the shared `GenotypeTable`, the loop's working currency) and the owned `Genotype` multiset, minted only at output ([`calling_em_loop.md`](calling_em_loop.md) §2). The table ports production's `GenotypeShape` ([`posterior_engine/shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs)) | port the shape; mint the multiset at the final pass |
 | `ReadLikelihoodModel` | ([ssr/cohort/read_model/](../../../../src/ssr/cohort/read_model/)) | **exists** — build on it (step 7) |
 | `GenotypeEmModel` | ([var_calling/posterior_engine.rs](../../../../src/var_calling/posterior_engine.rs)) | **exists** — build on it (step 9; the crate-level `genotype_em/` hoist is still pending) |
 
