@@ -123,7 +123,7 @@ behaviour, this plan's shape). `ExpectedAlleleCopies(Vec<f64>)` — parallel to 
 fractional, never a call. Doc comments carry both contracts. Tests: reference-at-zero invariant.
 *Depends:* B1, A1. *Source:* calling_em_loop arch §2; spec §1.3.
 
-**B3. `LocusInference` and `SampleGenotypeCall`.**  ☐
+**B3. `LocusInference` and `SampleGenotypeCall`.**  ✅
 The outcome type as the arch writes it: region, final alleles, per-sample calls in run order,
 `cohort_expected_copies`, `converged` (false = capped, **emitted, never dropped**), `passes`,
 `weakest_provenance`, `seed_diversity_unreachable`. Plain data, no logic; the loop plan fills it.
