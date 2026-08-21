@@ -134,7 +134,7 @@ The outcome type as the arch writes it: region, final alleles, per-sample calls 
 
 ### Milestone C — `genotype_table.rs`, the `GenotypeShape` port
 
-**C1. `GenotypeTable` + `GenotypeIdx` + the flat views.**  ☐
+**C1. `GenotypeTable` + `GenotypeIdx` + the flat views.**  ✅
 The port: per-`(ploidy, allele count)` genotype indexing built once and cached
 (`build(ploidy, allele_count) -> Arc<Self>`), holding `genotype_allele_counts`
 (`n_genotypes × n_alleles`, row-major), `log_multinomial_coeffs` (`ln C(ploidy; counts)` per

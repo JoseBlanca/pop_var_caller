@@ -19,7 +19,23 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-21):** **calling has its vocabulary — Milestones A and B
+> - **Last completed task (2026-08-21):** **the genotype table — which genotypes a locus's alleles
+> make** (step C1 of [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
+> `ng-calling-foundations`). A locus's candidate alleles fix its candidate genotypes, and how many
+> copies of each allele each genotype carries, how many orderings of the genome's copies spell it,
+> and whether every copy is the same allele are all fixed by two numbers — the ploidy and the
+> allele count — so they are computed once per pair and shared. The order the genotypes come out in
+> is the order `PL` is written in, which is why a defect there would mislabel every likelihood and
+> crash nothing. The review found two such silent defects the submitted tests could not see: the
+> order was pinned only at two shapes, so swapping two rows at ploidy 3 or above passed everything;
+> and one plausible slip in the cache's index would have handed a diploid locus a haploid locus's
+> genotypes. Both now have tests that were checked by re-running the mutation they were written for.
+> Separately, the port was proved exact against production over 128 shapes and 2,042,958 genotype
+> rows, coefficients bit for bit.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_c1_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_c1_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_c1_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **calling has its vocabulary — Milestones A and B
 > complete, at Checkpoint B**, on branch `ng-calling-foundations`
 > ([plan](doc/devel/ng/impl_plan/calling_foundations.md)). The last piece is what a locus
 > produces: the alleles it settled on, one call per sample, and four things a consumer cannot

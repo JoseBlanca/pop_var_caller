@@ -23,8 +23,19 @@
 //! types that borrow from them arrive with their own plans
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`).
 //!
+//! Beside this file rather than inside any one sub-module: [`genotype_table`], which
+//! says which genotypes a locus's alleles make and holds the three flat tables the
+//! genotype prior and the read likelihood both read them from. It sits here for the
+//! same reason the types above do — two of the four sub-modules consume it, so it
+//! belongs one level above them — and its three types are re-exported here, so that
+//! all of calling's shared vocabulary is named at one depth.
+//!
 //! The scalars other steps also name — `AlleleId`, `Phred`, `Genotype` — are not here
 //! but in [`crate::ng::types`], with the rest of ng's shared vocabulary.
+
+pub mod genotype_table;
+
+pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;
