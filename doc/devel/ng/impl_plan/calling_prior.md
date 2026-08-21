@@ -115,7 +115,7 @@ comment says so) and `DEFAULT_SPECIES_DIVERSITY_FALLBACK = 1e-3` (port of
 its "weakly informative, overridable, must be visible in output" reasoning). *Source:* arch §2.1;
 spec §4.
 
-**A2. The local types and the seam.**  ☐
+**A2. The local types and the seam.**  ✅
 In `mod.rs`: `Concentration` (borrow of caller scratch; invariant — every entry
 `≥ MIN_ALT_CONCENTRATION`, length = allele count, checked in debug), `SeedRegime`
 (`FittedSpectrum` / `NeutralShape` / `FallbackDiversity` — **a branch on absence, never on cohort
