@@ -55,21 +55,25 @@
 //!   drawing this sample's few allele copies from those frequencies. Because it *averages
 //!   over* the unknown frequencies rather than fixing them at one estimate —
 //!   marginalizing — it is the default here (plan steps B1–B2).
-//! - [`seed_spectrum`] — the SNP/indel starting point, read off the pre-pass's fitted
-//!   frequency spectrum (plan step D).
+//! - [`seed_generic`] — the SNP/indel starting point, read off the pre-pass's fitted frequency
+//!   spectrum (plan step D). *Generic* is the crate's word for the non-STR path, as in
+//!   `parameter_estimation::generic`, so it pairs with [`seed_ssr`] on the same axis.
 //! - [`seed_ssr`] — the STR starting point: mass falling off geometrically from the
 //!   cohort's modal repeat count, totalling what the cohort's measured repeat diversity
 //!   implies (plan step E). **STR** in prose, `ssr` in module paths, as everywhere in ng.
-//! - [`plug_in`] — the comparator: Hardy–Weinberg at a single estimated frequency, kept
-//!   only so the change the marginalized prior makes stays measurable (plan step F).
+//! - [`hardy_weinberg`] — the comparator: Hardy–Weinberg at a single estimated frequency,
+//!   plugged in as though it were the truth, kept only so the change the marginalized prior
+//!   makes stays measurable (plan step F). Named for the distribution, like its sibling
+//!   [`dirichlet_multinomial`]; the plug-in character survives in the type it holds,
+//!   `PlugInWrightPrior`.
 //!
 //! Build order and step contracts: `doc/devel/ng/impl_plan/calling_prior.md`. The design
 //! and every why: `doc/devel/ng/spec/calling_priors.md`; the types and this seam:
 //! `doc/devel/ng/arch/calling_priors.md`.
 
 pub mod dirichlet_multinomial;
-pub mod plug_in;
-pub mod seed_spectrum;
+pub mod hardy_weinberg;
+pub mod seed_generic;
 pub mod seed_ssr;
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
@@ -79,8 +83,8 @@ use crate::ng::types::InbreedingF;
 /// that **nothing else in this folder can build one without the check**.
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is
-/// visible to a module's *descendants*, and `dirichlet_multinomial`, `plug_in`,
-/// `seed_spectrum` and `seed_ssr` are all descendants of `genotype_prior` — so with these
+/// visible to a module's *descendants*, and `dirichlet_multinomial`, `hardy_weinberg`,
+/// `seed_generic` and `seed_ssr` are all descendants of `genotype_prior` — so with these
 /// types declared directly in `genotype_prior`, a struct literal in any of those four files
 /// compiles and skips the constructor entirely. Verified: a probe in
 /// `dirichlet_multinomial.rs` built a `PriorRow` field by field, compiled, and ran. Those four

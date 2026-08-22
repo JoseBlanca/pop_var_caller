@@ -28,8 +28,8 @@ plans start on different days and still run in parallel.**
 
 **In:** `src/ng/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
 `Concentration`, `sample_concentration`), `dirichlet_multinomial.rs` (the ported primitive +
-`MarginalizedDirichletPrior`), `seed_spectrum.rs` (`project_spectrum_seed`, `seed_for_locus`),
-`seed_ssr.rs` (`ssr_seed`, `seed_length_distribution`), `plug_in.rs` (`PlugInWrightPrior`);
+`MarginalizedDirichletPrior`), `seed_generic.rs` (`project_spectrum_seed`, `seed_for_locus`),
+`seed_ssr.rs` (`ssr_seed`, `seed_length_distribution`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
 `types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK`.
 
 **Out (later plans or upstream):**

@@ -1,5 +1,5 @@
-//! The comparator: Hardy–Weinberg at one estimated allele frequency, substituted in as
-//! though it were the truth.
+//! The comparator: Hardy–Weinberg at one estimated allele frequency, plugged in as though it
+//! were the truth.
 //!
 //! **Empty until plan step F** (`doc/devel/ng/impl_plan/calling_prior.md`). It is the route
 //! this caller does *not* take, kept behind the same seam only so the change the default

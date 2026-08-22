@@ -42,8 +42,8 @@ no-import rule between them). A folder of its own because the step has a real ba
 src/ng/calling/genotype_prior/
 ├── mod.rs                   – GenotypePriorModel trait, Concentration, the per-sample builder
 ├── dirichlet_multinomial.rs – the ported log-prior primitive + MarginalizedDirichletPrior
-├── plug_in.rs               – PlugInWrightPrior, the comparator impl
-├── seed_spectrum.rs         – SNP/indel starting point: the spectrum projection (spec §4.1)
+├── hardy_weinberg.rs        – PlugInWrightPrior, the comparator impl
+├── seed_generic.rs          – SNP/indel starting point: the spectrum projection (spec §4.1)
 └── seed_ssr.rs              – STR starting point: geometric shape, total from gene diversity (spec §5.1)
 ```
 
@@ -88,12 +88,22 @@ this module's.
 /// histogram route's mean); fallback DEFAULT_SPECIES_DIVERSITY_FALLBACK below.
 pub struct ExpectedHeterozygosity(f64);   // try_new / get
 
-/// Species-range fallback for a run with no fitted diversity, ~human nucleotide
-/// diversity. Weakly informative, overridable; a run on it must say so in its output
-/// (spec §4). Port of production's DEFAULT_DIVERSITY_PRIOR
-/// (src/var_calling/diversity.rs:78).
-pub const DEFAULT_SPECIES_DIVERSITY_FALLBACK: f64 = 1e-3;   // unitless heterozygosity
+impl ExpectedHeterozygosity {
+    /// Species-range fallback for a run with no fitted diversity, ~human nucleotide
+    /// diversity. Weakly informative, overridable; a run on it must say so in its output
+    /// (spec §4). Port of production's DEFAULT_DIVERSITY_PRIOR
+    /// (src/var_calling/diversity.rs:78).
+    pub const SPECIES_FALLBACK: Self = Self(1e-3);   // unitless heterozygosity
+}
 ```
+
+**A value of the type, not a free `f64` — decided at implementation, 2026-08-21.** As a loose
+float the constant constructs an `ErrorRate`, an `InbreedingF` and a `GenotypeFrequency` just as
+happily, because `1e-3` is a legal value of each — which is the confusion the four separate
+`[0, 1]` scalars in `types.rs` exist to prevent, and it would be the only *diversity* constant in
+the shared vocabulary for an STR-path author to reach for. Precedent in the same file:
+`AlleleId::REFERENCE`. Report:
+[`ng_calling_prior_a1_fixes_2026-08-21.md`](../../reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
 
 `InbreedingF` already exists ([`types.rs:388`](../../../../src/ng/types.rs)) **but its constructor
 accepts `1.0` and the spec requires `[0, 1)`** — the ceiling is a property of the type, not of one
@@ -126,6 +136,14 @@ drives the mixture function on a raw value through a test-only path, not through
 /// Invariant: every entry ≥ MIN_ALT_CONCENTRATION; length == allele count.
 pub struct Concentration<'a>(&'a [f64]);   // borrow of scratch, checked in debug
 ```
+
+**It, `PriorRow` (§3.2) and `SpectrumSeed` (§2.3) live in a private `mod checked` inside
+`genotype_prior/mod.rs`, re-exported — decided at implementation, 2026-08-21, and the nesting is
+load-bearing.** A private field is visible to a module's *descendants*, and the four sub-modules
+here are descendants: with these types declared directly in `genotype_prior`, a struct literal in
+`dirichlet_multinomial.rs` builds one field by field and skips the constructor. Measured — it
+compiled and ran. One level of nesting makes those four siblings instead, and the literal fails
+with `error[E0451]`.
 
 ### 2.3 The seed — per run (SNP/indel) or per locus (STR), with its provenance
 
@@ -177,16 +195,25 @@ pub fn sample_concentration(
 /// constant. Flat views (counts, coefficients, homozygous lookup) come from the
 /// loop's GenotypeTable (calling_em_loop.md §2); taking them flat is what keeps this
 /// module free of a back-reference into inference/ (spec §9).
+/// The six buffers one row call reads and writes, with every shape check already run —
+/// `new` is the only constructor and it runs them, so no implementation is reachable
+/// with mis-matched buffers. Borrow-only: nothing allocates.
+pub struct PriorRow<'a> { /* private */ }
+
+impl<'a> PriorRow<'a> {
+    pub fn new(
+        concentration: Concentration<'a>,           // α'_s, parallel to the allele table
+        genotype_allele_counts: &'a [u32],          // n_genotypes × n_alleles, row-major
+        log_multinomial_coeffs: &'a [f64],          // ln C(ploidy; counts), per genotype
+        homozygous_allele_for: &'a [Option<AlleleId>], // the ONE homozygous test (spec §3.3)
+        per_allele_scratch: &'a mut [f64],          // working space, one entry per allele
+        out: &'a mut [LogProb],
+    ) -> Self;
+    // + by-value accessors for the four views, and scratch_and_out(&mut self)
+}
+
 pub trait GenotypePriorModel {
-    fn genotype_log_priors(
-        &self,
-        concentration: &[f64],                     // α'_s, parallel to the allele table
-        genotype_allele_counts: &[u32],            // n_genotypes × n_alleles, row-major
-        log_multinomial_coeffs: &[f64],            // ln C(ploidy; counts), per genotype
-        homozygous_allele_for: &[Option<AlleleId>],// the ONE homozygous test (spec §3.3)
-        inbreeding: InbreedingF,
-        out: &mut [LogProb],
-    );
+    fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF);
 }
 
 /// Default: §3.1's Dirichlet-multinomial with §3.2's two-branch inbreeding mixture
@@ -198,6 +225,18 @@ pub struct MarginalizedDirichletPrior;
 /// production differential — never a shipping default.
 pub struct PlugInWrightPrior;
 ```
+
+**A checked bundle rather than eight flat parameters — decided at implementation, 2026-08-21,
+owner-authorised 2026-08-22.** The sketch this replaces passed the six buffers directly and put
+the shape checks in a helper the trait's prose asked every implementation to call. Three
+independent review agents reached the same conclusion: those are one defect, because a trait
+cannot require that a method body opens with a particular call — measured, deleting the call left
+every test passing. **The contract is unchanged** and that is what §7's decision is about: the
+same six caller-owned buffers, nothing allocated, the same flat views, no back-reference into the
+loop. **The per-allele scratch is the one genuinely new argument** — spec §8 requires scratch
+"sized by allele count and genotype count", and without it the ported primitive allocates a `Vec`
+of `lgamma(α_a)` per call. At a diploid six-allele locus (21 genotypes, 36 non-zero allele slots)
+keeping it costs 42 `lgamma` calls per sample per pass against 72.
 
 **Contract.** Same inputs → bit-identical rows at any thread count. The homozygous branch reads
 `homozygous_allele_for` and nothing else decides homozygosity — that lookup is the “one function”
@@ -340,8 +379,9 @@ Every row read on 2026-08-21.
   isolates it.
 - `OPEN:` the policy at `DiversityUnreachable` (spec Q2) — the outcome type is settled, the
   consumer's choice among the three candidate answers is not; provisional behaviour in §5.
-- Impl-time confirmations: the concrete `FittedSpectrum` type from the pre-pass cohort gather; the
-  exact scratch slot sizes shared with `CallingScratch`.
+- Impl-time confirmations: the concrete `FittedSpectrum` type from the pre-pass cohort gather.
+  **The scratch slot the row function needs is settled: one `f64` per allele**, which is what the
+  ported primitive hoists (`lgamma(α_a)`, one per allele); `CallingScratch` owns it.
 
 ## Test & bench shape
 
