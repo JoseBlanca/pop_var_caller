@@ -426,7 +426,7 @@ mod checked {
                         )
                     );
                     debug_assert!(
-                        copies.iter().all(|c| !c.is_nan() || true),
+                        copies.iter().all(|c| c.is_finite() && *c >= 0.0),
                         concat!(
                             "the ",
                             $whose,
@@ -683,7 +683,7 @@ pub fn fill_sample_concentration(
         .zip(own_copies.get())
         .enumerate()
     {
-        let leave_one_out = (cohort_a - own_a) * 0.5;
+        let leave_one_out = cohort_a - own_a;
         debug_assert!(
             leave_one_out > COUNT_PATH_DESYNC_THRESHOLD,
             "the cohort's expected copies of allele {allele} came out materially below this \
