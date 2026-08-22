@@ -176,17 +176,38 @@ pub struct SpectrumSeed {
 ### 3.1 The per-sample concentration (general — both paths, identical)
 
 ```rust
+/// The two copy-count arrays, each checked when it is built. They borrow; they own
+/// nothing, so wrapping the loop's buffers costs no allocation.
+pub struct CohortAlleleCopies<'a>(/* private */);
+pub struct SampleAlleleCopies<'a>(/* private */);
+
 /// α'_s(a) = seed(a) + max(0, cohort expected copies of a − this sample's own).
 /// The max(0,·) guards float noise only (spec §6). Fills `out`; allocates nothing.
-/// At one sample the two slices are equal and out == seed, bit for bit — no branch
+/// At one sample the two arrays are equal and out == seed, bit for bit — no branch
 /// (spec §6; pinned by test 8 of spec §12).
-pub fn sample_concentration(
+pub fn fill_sample_concentration(
     seed: &[f64],
-    cohort_expected_copies: &[f64],   // the loop's ExpectedAlleleCopies, as a slice
-    own_expected_copies: &[f64],
+    cohort_copies: CohortAlleleCopies<'_>,   // wraps the loop's ExpectedAlleleCopies
+    own_copies: SampleAlleleCopies<'_>,
     out: &mut [f64],
 );
 ```
+
+**Two changes from the sketch, decided at implementation and owner-authorised 2026-08-22.**
+
+**The two copy-count arguments are checked types, not bare slices**, for the reason §3.2's checked
+bundle exists: the compiler could not otherwise tell them apart. They are the same shape and the
+same unit, their difference is the whole of the leave-one-out term, and **passed the wrong way
+round the function returns the bare seed at every allele** — the cohort's evidence gone, nothing
+raised in release, and the debug guard blind to it at one sample where the two arrays are equal by
+construction. Measured on the flat-slice version; with the types it is `error[E0308]`. The types
+also carry a debug check that the entries are finite and non-negative, which the flat version had
+nowhere: `f64::max` returns the other operand on a `NaN`, so a `NaN` copy count silently became a
+zero difference and left the allele carrying nothing but its seed.
+
+**`fill_sample_concentration`, not `sample_concentration`** — it fills a caller buffer and returns
+nothing, as the module's three other buffer-fillers do, and *sample* reads as a verb in a
+statistics context.
 
 ### 3.2 The row — the step-8 seam (the marginalized/plug-in bake-off)
 

@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> - **Last completed task (2026-08-22):** **the prediction the spectrum fit will search is exact —
+> and it is paid once per search step, not once per run** (step D1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> Given a candidate pair of concentrations, this says what fraction of sites a panel would show
+> carrying the alternative allele on exactly `j` of its chromosomes — the shape the pre-pass
+> measures on real data. **The formula held against three independent oracles**, the closest
+> agreeing to 9.4e-15, and its loop bounds are exactly the legitimate range at all 35,301 cases
+> checked. **What the review found was cost and coverage.** The step's own report had called the
+> sum "paid once per run"; it is the objective the next step searches, so a fit pays it about a
+> hundred times over. Tabulating the log-factorials and skipping branch splits below `1e-300`
+> bought 15-fold — one prediction is now 241 µs at 63 individuals and 354 ms at 800 — but it is
+> still cubic, so **a fit is about a minute at 800 samples and hours by several thousand.
+> Whether the projection can run at the top of the committed range is step D2's question**, and it
+> can answer it by binning the classes or capping the panel it projects at, without this function
+> changing. Also found: neither release-held value check had a test, and with them removed a
+> negative concentration returns a spectrum that looks like a spectrum; concentrations past about
+> `1e9` stop summing to one while staying finite, on an axis the fit searches; and **both exact
+> tests sat at the ends of the inbreeding range**, so deleting the doubling — a different model —
+> passed three of them. Two oracles now cover the middle.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d1_2026-08-22.md).
+> **One correction owed to the design documents:** `arch/calling_priors.md` §4 and this plan's step
+> D2 line both say the independent-chromosome bias is 9–14% at tomato's fitted `F`; spec §4.1 puts
+> it at 12–14% there, 8.6% being the `F = 0.6` figure.
+> - **Previously (2026-08-22):** **two arrays of the same shape and the same unit, whose
 > difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
 > way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is
