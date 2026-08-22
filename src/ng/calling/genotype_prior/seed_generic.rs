@@ -7,12 +7,16 @@
 //! just, and *how much* larger is fitted rather than fixed
 //! (`doc/devel/ng/spec/calling_priors.md` §4.1).
 //!
-//! **This file holds the prediction; the fit that uses it is plan step D2.** Given a candidate
-//! pair, [`fill_expected_spectrum`] says what a panel's allele counts would look like. The fit
-//! then searches for the pair whose prediction matches the spectrum the pre-pass measured.
+//! **Two functions and the view between them.** [`fill_expected_spectrum`] says what a panel's
+//! allele counts would look like if a candidate pair were the truth; [`project_spectrum_seed`]
+//! takes the pre-pass's measured spectrum as a [`FittedSpectrum`], searches for the pair whose
+//! prediction matches it, and hands back the run's seed.
 
-use crate::genetics::lgamma;
-use crate::ng::types::InbreedingF;
+use crate::genetics::{PROBABILITY_FLOOR, lgamma};
+use crate::ng::parameter_estimation::fitting::multistart::SearchPrecision;
+use crate::ng::types::{ExpectedHeterozygosity, InbreedingF};
+
+use super::{SeedRegime, SpectrumSeed};
 
 /// The largest concentration — chromosomes' worth of prior belief — this projection will predict a
 /// spectrum for.
@@ -188,9 +192,10 @@ pub fn fill_expected_spectrum(
     let log_pair_constant = lgamma(concentration_total) - lgamma(alpha_alt) - lgamma(alpha_ref);
     // `ln k!` for every count this call can reach, filled once. The sum asks for binomial
     // coefficients with heavily repeated arguments, and reading them from here rather than calling
-    // `lgamma` three times apiece is bit-identical and several times faster. It is the one
-    // allocation in this file, and it is per fit rather than per sample per pass — the
-    // no-allocation rule of spec §8 governs the row, not the seed.
+    // `lgamma` three times apiece is bit-identical and several times faster. This and the branch
+    // splits below are allocated per *prediction*, of which a fit runs several hundred — about
+    // 150 kB a time at 3,200 individuals. Spec §8's no-allocation rule governs the prior's row,
+    // which the calling loop runs once per sample per pass; this runs once per run.
     let log_factorial: Vec<f64> = (0..=2 * n + 1).map(|k| lgamma(k as f64 + 1.0)).collect();
     let log_binomial = |top: usize, chosen: usize| {
         log_factorial[top] - log_factorial[chosen] - log_factorial[top - chosen]
@@ -305,6 +310,719 @@ fn log_branch_split(
     )
 }
 
+/// The largest panel this projection will fit a pair to.
+///
+/// **A time bound, not a modelling one.** One prediction grows about as `N^2.45` and a fit runs
+/// several hundred of them: 12.7 minutes at 3,200 individuals, so 10,000 would be about two
+/// hours and 100,000 about a fortnight, with nothing on the way saying the run had stopped being
+/// a run. Ten thousand diploid individuals is three times the several thousand this caller
+/// commits to (`CLAUDE.md`, *What this caller has to work on*), so a panel that trips this is
+/// asking for something the cost table does not cover, and should be told rather than left
+/// waiting.
+const MAX_PROJECTION_INDIVIDUALS: u32 = 10_000;
+
+/// How far the pre-pass's class weights may sit from summing to one before they stop being a
+/// spectrum. Wide enough for an accumulation over a few thousand classes, far too narrow to admit
+/// counts that were never normalised.
+const SPECTRUM_NORMALISATION_TOLERANCE: f64 = 1e-9;
+
+/// The reference allele's concentration on a neutral panel — where the fit lands rather than a
+/// number anyone chose, and the `1/p` density written as a Dirichlet
+/// (`doc/devel/ng/spec/calling_priors.md` §4). It is what holds the heterozygote to
+/// homozygous-alternative prior ratio near 2:1, so raising it is the §2.3 trap.
+const NEUTRAL_ALPHA_REF: f64 = 1.0;
+
+/// The lowest and highest **total** concentration the fit will consider, in chromosomes —
+/// `α_ref + α_alt`, which is how much conviction the prior carries about the frequency.
+///
+/// The neutral panel's answer is just above 1, and the range is three decades either side.
+/// Bounds and not merely starting points, because the search line-searches the whole range on
+/// each axis.
+const CONCENTRATION_TOTAL_SEARCH_RANGE: (f64, f64) = (1e-3, 1e3);
+
+/// The lowest and highest **ratio** `α_alt / α_ref` the fit will consider — the odds the prior
+/// gives the alternative allele, which for small values is the expected frequency itself.
+///
+/// The bottom is where polymorphism stops being visible to any panel: at a ratio of `1e-9` the
+/// share of segregating sites is about `α_alt · H(2N)`, roughly 8 sites in a thousand million
+/// over a thousand chromosomes, so nothing below it can be told from a fully invariant cohort.
+/// The top is four decades above the most diverse panel anyone would call — a `θ` of 1 in 100 is
+/// already ten times human diversity.
+const CONCENTRATION_RATIO_SEARCH_RANGE: (f64, f64) = (1e-9, 1e2);
+
+/// Where each start begins, as `(total concentration, α_alt / α_ref)`.
+///
+/// **Every start differs from every other on both axes**, which is not decoration: the sibling
+/// path's inbreeding fit returned a confident zero from five starts that disagreed about the
+/// headline number while sharing one guess at a nuisance axis (`fitting/multistart.rs`). The four
+/// cover 3.3 of the total's 6 decades and 7 of the ratio's 11, rather than clustering near the
+/// neutral pair, so a search that only ever returns its own starting neighbourhood is visible as
+/// disagreement.
+const SEARCH_STARTS: [(f64, f64); 4] = [(0.02, 1e-7), (0.3, 1e-5), (3.0, 1e-2), (40.0, 1.0)];
+
+/// The three directions each sweep line-searches along, in the search's own log coordinates —
+/// **one for each of the three quantities the two parametrisations name between them.**
+///
+/// Writing `t = ln(α_ref + α_alt)` and `r = ln(α_alt / α_ref)`, the identities are
+/// `ln α_ref = t − ln(1 + e^r)` and `ln α_alt = t + r − ln(1 + e^r)`. While the ratio is small
+/// the last term is negligible, so:
+///
+/// ```text
+///   [1,  0]        the total concentration, α_ref and α_alt moving together
+///   [0,  1]        α_alt alone — α_ref is unchanged
+///   [√½, −√½]      α_ref alone — α_alt is unchanged
+/// ```
+///
+/// So this sweeps the axes of *both* parametrisations, which is what [`fit_pair`] needs and what
+/// neither pair of coordinates gives on its own.
+///
+/// **The fourth direction a rotation suggests, `[√½, √½]`, was tried and removed.** It is not a
+/// coordinate of either parametrisation — along it `ln α_alt` moves twice as fast as
+/// `ln α_ref` — and it does harm rather than nothing: on a spectrum with all its mass at
+/// intermediate frequency, which is the shape spec §4.1 says two parameters cannot hold, the
+/// sweep including it ended at `α_ref = 3.59` where the best point in the box is 498, a
+/// log-likelihood of −3.410 against −2.232. It also cost up to 314 predictions a fit.
+const SEARCH_DIRECTIONS: [[f64; 2]; 3] = [
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [
+        std::f64::consts::FRAC_1_SQRT_2,
+        -std::f64::consts::FRAC_1_SQRT_2,
+    ],
+];
+
+/// Which kind of variant a run's seed is for.
+///
+/// **Both classes are handed the same diversity today, and the argument exists so that stops
+/// being true without touching a call site** (`doc/devel/ng/spec/calling_priors.md` §4.2, Q1).
+/// Production ran different pseudocounts for the two — `0.01` against `0.00125`, an 8:1 ratio
+/// inherited from another tool and never measured here — while ng's pre-pass measures one
+/// heterozygosity for both, because it sums a windowed histogram that does not separate
+/// substitutions from short insertions and deletions. Splitting the prior before the estimate is
+/// split would mean inventing the ratio.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum VariantClass {
+    /// One base carried in place of another — a single-nucleotide polymorphism.
+    Substitution,
+    /// A short insertion or deletion.
+    InsertionOrDeletion,
+}
+
+/// The pre-pass's fitted spectrum, in a wrapper whose invariants a struct literal cannot skip.
+///
+/// **The nesting is load-bearing, and it is the same device `mod.rs` uses**: a private field is
+/// visible to a module's *descendants*, so a type declared directly in `seed_generic` could be
+/// built field by field — skipping both checks — from anywhere in this file, its test modules
+/// included. One level of nesting makes those siblings instead, and the literal fails with
+/// `error[E0451]`.
+mod checked {
+    use super::{MAX_PROJECTION_INDIVIDUALS, SPECTRUM_NORMALISATION_TOLERANCE};
+
+    /// **What the pre-pass measured about how allele frequencies are spread across the panel**,
+    /// held as a borrow of whatever the cohort gather emits.
+    ///
+    /// One weight per allele-count class — what share of sites carry the alternative allele on no
+    /// chromosome, on exactly one, on exactly two, and so on to every chromosome of the panel.
+    /// `2N + 1` of them for `N` diploid individuals, summing to one
+    /// (`doc/devel/ng/spec/parameter_prepass_cohort.md` §4.1).
+    ///
+    /// **A view rather than a type of its own**, because the pre-pass's cohort gather is not
+    /// built yet: when it lands it will own the weights, and this borrows them.
+    ///
+    /// **It is not
+    /// [`FrequencyDensity`](crate::ng::parameter_estimation::joint::fit::FrequencyDensity), which
+    /// is a different object.** That is four numbers describing how the *population's* allele
+    /// frequency is distributed — two point masses and a Beta over what segregates. This is a
+    /// spread over a *panel's* allele counts. The projection matches class weights, so class
+    /// weights are what it takes.
+    ///
+    /// The two numbers beside the weights are how the run says which information produced its
+    /// seed: how many sites' worth of pseudo-counts held the estimate at the neutral shape, and
+    /// how many census sites actually came out variable. Two runs that used different information
+    /// are otherwise indistinguishable in what they emit
+    /// (`doc/devel/ng/spec/calling_priors.md` §4.1).
+    #[derive(Copy, Clone, Debug)]
+    pub struct FittedSpectrum<'a> {
+        class_weights: &'a [f64],
+        regularizer_site_weight: f64,
+        variable_census_sites: f64,
+    }
+
+    impl<'a> FittedSpectrum<'a> {
+        /// Wrap the pre-pass's weights, refusing a shape that is not a spectrum.
+        ///
+        /// **The class count fixes the panel size**, `2N + 1` for `N` diploid individuals, so an
+        /// even count is refused rather than rounded: nothing else in this module knows how many
+        /// individuals the spectrum was fitted at, and a panel size taken from a second argument
+        /// is a second place for it to be wrong.
+        ///
+        /// The weights are checked to be a distribution — non-negative, summing to one within
+        /// [`SPECTRUM_NORMALISATION_TOLERANCE`] — because the projection's objective is a
+        /// log-likelihood against them, and weights that are not a distribution score every
+        /// candidate wrongly by an amount that varies with the candidate.
+        pub fn new(
+            class_weights: &'a [f64],
+            regularizer_site_weight: f64,
+            variable_census_sites: f64,
+        ) -> Self {
+            assert!(
+                class_weights.len() >= 3
+                    && class_weights.len() % 2 == 1
+                    && class_weights.len() <= 2 * MAX_PROJECTION_INDIVIDUALS as usize + 1,
+                "a panel of N diploid individuals has 2N + 1 allele-count classes, so the count \
+                 is odd, at least 3, and at most {} for the {MAX_PROJECTION_INDIVIDUALS} \
+                 individuals this projection will fit; got {}",
+                2 * MAX_PROJECTION_INDIVIDUALS as usize + 1,
+                class_weights.len()
+            );
+            // The two halves are checked apart because they fail differently and a caller who
+            // trips one learns nothing from the other's number: weights of `[-0.1, 0.6, 0.5]`
+            // total exactly 1.
+            if let Some((class, weight)) = class_weights
+                .iter()
+                .enumerate()
+                .find(|(_, weight)| weight.is_nan() || **weight < 0.0)
+            {
+                panic!(
+                    "a class weight is the share of sites in that allele-count class, so it \
+                     cannot be negative or NaN: class {class} holds {weight}"
+                );
+            }
+            let total: f64 = class_weights.iter().sum();
+            assert!(
+                (total - 1.0).abs() <= SPECTRUM_NORMALISATION_TOLERANCE,
+                "the class weights must sum to 1 within {SPECTRUM_NORMALISATION_TOLERANCE:e} — \
+                 the projection's objective is a log-likelihood against them, so raw counts score \
+                 every candidate wrongly by an amount that varies with the candidate; got a total \
+                 of {total}"
+            );
+            assert!(
+                regularizer_site_weight.is_finite() && regularizer_site_weight >= 0.0,
+                "how many sites' worth of pseudo-counts held the spectrum at the neutral shape \
+                 must be finite and non-negative, got {regularizer_site_weight}"
+            );
+            assert!(
+                variable_census_sites.is_finite() && variable_census_sites >= 0.0,
+                "the count of variable census sites is non-negative, got {variable_census_sites}"
+            );
+            Self {
+                class_weights,
+                regularizer_site_weight,
+                variable_census_sites,
+            }
+        }
+
+        /// The share of sites in each allele-count class, class 0 first.
+        #[inline]
+        pub fn class_weights(&self) -> &'a [f64] {
+            self.class_weights
+        }
+
+        /// How many sites' worth of pseudo-counts held the estimate at the neutral shape.
+        #[inline]
+        pub fn regularizer_site_weight(&self) -> f64 {
+            self.regularizer_site_weight
+        }
+
+        /// How many census sites came out variable across the panel.
+        #[inline]
+        pub fn variable_census_sites(&self) -> f64 {
+            self.variable_census_sites
+        }
+
+        /// How many diploid individuals the spectrum was fitted at, read off the class count.
+        #[inline]
+        pub fn individuals(&self) -> u32 {
+            // The constructor's ceiling puts this far inside a `u32`.
+            ((self.class_weights.len() - 1) / 2) as u32
+        }
+    }
+}
+
+pub use checked::FittedSpectrum;
+
+/// **Read the run's two starting numbers off the pre-pass's fitted spectrum**: the reference
+/// allele's concentration and the total shared out across whatever alternative alleles a locus
+/// turns out to carry.
+///
+/// ## What it does
+///
+/// The neutral `1/p` density and the neutral frequency spectrum are the same statement written
+/// twice — once at a locus, once across a panel. So the pre-pass's spectrum and this module's
+/// concentration pair describe one object at two sample sizes, and getting the pair from the
+/// spectrum is **a change of representation rather than a second estimate**: nothing is fitted
+/// here that the pre-pass has not already fitted
+/// (`doc/devel/ng/spec/calling_priors.md` §4.1).
+///
+/// The fit takes the pair whose predicted spectrum is most likely to have produced the fitted
+/// one — equivalently, the pair closest to it in Kullback–Leibler divergence — **over every
+/// allele-count class including the monomorphic one**. The monomorphic class is not a
+/// throwaway: it is what pins the alternative concentration against the diversity rather than
+/// leaving only the shape of the fall-off identified.
+///
+/// **The prediction carries the panel's inbreeding** ([`fill_expected_spectrum`]), because a
+/// panel's chromosomes are not independent draws once its individuals are inbred. Treating them
+/// as independent biases the reference concentration down with a fixed sign — 8.6% at `F = 0.6`,
+/// 12.1% at 0.8 and 14.0% at 0.9, on a panel of 26 individuals at tomato's diversity, measured in
+/// [`projection_tests::the_projection_returns_one_pair_at_every_inbreeding_coefficient`].
+///
+/// ## The three regimes, and none of them is a branch on cohort size
+///
+/// - **A spectrum arrived** — fit it, and report the regularizer beside the answer. **A spectrum
+///   makes the diversity moot**: it carries its own scale, so `diversity` is not read and the
+///   fallback cannot be reported here.
+/// - **No spectrum** — the pair is the neutral `(1, θ)` at the diversity the pre-pass *did* fit.
+///   The pre-pass emits the spectrum as absent below a panel-size floor rather than as a thin
+///   estimate, so a cohort of five arrives here without one while a single sample arrives with
+///   one. A spectrum too thin to emit and a panel with nothing to fit carry the same information
+///   about shape.
+/// - **No spectrum and no diversity either** — the same neutral pair at the species-range
+///   fallback, and the run must say so.
+///
+/// **Nothing here tests how many samples the cohort holds.** The one branch is on what the
+/// pre-pass had.
+///
+/// ## Cost
+///
+/// One prediction is the expensive step and a fit runs **399 of them, once per run** — the same
+/// count at every panel size and every inbreeding coefficient measured, because what the search
+/// costs is set by how finely it resolves each direction and not by the panel. The count is
+/// asserted in [`projection_tests::a_fit_costs_at_most_450_predictions`]; the wall clock is 3.8 s
+/// at 400 individuals, 22 s at 800, 2.2 minutes at 1,600 and **11.8 minutes at 3,200**, measured
+/// in [`projection_tests::the_cost_of_one_fit_by_panel_size`].
+///
+/// The search resolves each concentration to about 1% of itself, which is
+/// [`SearchPrecision::fast`]'s reasoning applied here: a concentration shifted by 1% moves a call
+/// far less than one more read would, so resolving it further would be spending time on digits no
+/// genotype registers.
+pub fn project_spectrum_seed(
+    spectrum: Option<FittedSpectrum<'_>>,
+    diversity: Option<ExpectedHeterozygosity>,
+    panel_inbreeding: InbreedingF,
+    class: VariantClass,
+) -> SpectrumSeed {
+    // Both classes take the same diversity today; the argument is Q1's seam and is deliberately
+    // unread until the pre-pass measures the two separately (spec §4.2).
+    let _ = class;
+
+    let Some(spectrum) = spectrum else {
+        return match diversity {
+            Some(theta) => {
+                SpectrumSeed::new(NEUTRAL_ALPHA_REF, theta.get(), SeedRegime::NeutralShape)
+            }
+            None => SpectrumSeed::new(
+                NEUTRAL_ALPHA_REF,
+                ExpectedHeterozygosity::SPECIES_FALLBACK.get(),
+                SeedRegime::FallbackDiversity,
+            ),
+        };
+    };
+
+    let fit = fit_pair(&spectrum, panel_inbreeding, SearchPrecision::fast());
+    SpectrumSeed::new(
+        fit.alpha_ref,
+        fit.alpha_alt,
+        SeedRegime::FittedSpectrum {
+            regularizer_site_weight: spectrum.regularizer_site_weight(),
+            // **This is the panel-wide comparison, and spec §4.1 is explicit that a panel-wide
+            // ratio is the wrong number to quote as reassurance** — on the panel it measures, the
+            // aggregate was 3,100 to 1 while the thinnest class held two sites and was outweighed
+            // only 39 to 1. The per-class ratio is the pre-pass's to emit beside its spectrum
+            // (arch §4); this module carries the aggregate through and claims nothing more.
+            census_sites_outweigh_regularizer: spectrum.variable_census_sites()
+                > spectrum.regularizer_site_weight(),
+        },
+    )
+}
+
+/// What the fit returned: the pair, what it scored, and what it cost.
+///
+/// **Whether the search settled or ran out of sweeps is deliberately not here.** This surface has
+/// no concavity proof, unlike the climb the sibling driver wraps, so running out is a data
+/// condition rather than a defect, and what protects the answer is that the best point evaluated
+/// is the one returned ([`sweep_from`]).
+///
+/// **The last two are read only by this module's tests**, which is what the attribute says: the
+/// score is how [`projection_tests::the_winning_score_is_the_spectrums_own_entropy`] checks the
+/// fit found the maximum, and the count is what
+/// [`projection_tests::a_fit_costs_at_most_600_predictions`] holds. Carried on the fit rather
+/// than recomputed, because neither is derivable from the pair afterwards.
+#[derive(Copy, Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct ProjectionFit {
+    alpha_ref: f64,
+    alpha_alt: f64,
+    /// What the winning pair scored under [`spectrum_log_likelihood`]: the negative
+    /// Kullback–Leibler divergence from the fitted spectrum to the predicted one, **plus** the
+    /// fitted spectrum's own entropy — a constant that does not move with the candidate pair, so
+    /// the maximum of this is the minimum of that divergence. On a spectrum the two-parameter
+    /// family can reproduce exactly, the winning score is therefore that entropy.
+    log_likelihood: f64,
+    /// How many predictions the whole fit cost — 399 everywhere measured — and **half of what a
+    /// fit costs rather than the whole of it**. A prediction *inside a fit* averages 1.78 s at
+    /// 3,200 individuals, against the 0.96 s
+    /// `doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md` measures **at the neutral
+    /// pair**, because the search spends most of its predictions away from that pair where the
+    /// branch-tail trim drops fewer splits. So one fit there is 11.8 minutes measured, against
+    /// the 6.4 the count and that report alone would predict.
+    predictions: usize,
+}
+
+/// Fit the concentration pair to a spectrum: line searches along four directions from several
+/// starts, on the log scale of the total concentration and of the ratio between the two.
+///
+/// **On log scales because a concentration spans decades** — the same argument
+/// [`SearchableNoise`](crate::ng::parameter_estimation::fitting::multistart::SearchableNoise)
+/// makes for a slippage level: a step is then a fixed *fraction* of the value, and the search
+/// cannot walk out of the positive range whatever step it takes.
+///
+/// **Three directions and not two, because the surface is a ridge and which way it runs depends
+/// on the panel size.** Searching `ln α_ref` and `ln α_alt` separately finds the answer at 26 and
+/// 63 individuals and fails at one, returning about 0.24 to 0.84 where the answer is 1 depending
+/// on the box searched, with the starts spread thousands-fold. Searching the total and the ratio
+/// separately does the opposite: 7 parts in ten million high at one individual, 1.3% high at 63.
+/// The two parametrisations are a 45° rotation of each other in log space, and between them they
+/// name three quantities — the total, `α_ref` alone and `α_alt` alone — which is what
+/// [`SEARCH_DIRECTIONS`] sweeps. Neither panel size is then a special case, and **nothing here
+/// tests how many individuals there are**; the third direction costs the same at every size.
+///
+/// **This is not `fit_by_multistart`, and the reason is cost rather than taste.** That driver
+/// scores one *cell* at a time through
+/// [`NoiseModel::append_genotype_likelihoods`](crate::ng::parameter_estimation::fitting::NoiseModel::append_genotype_likelihoods),
+/// which takes `&self` and so cannot cache; the natural cell here is one allele-count class, and
+/// every class would rebuild the whole spectrum. At 3,200 individuals that is 6,401 predictions
+/// where one is needed — about 1.7 hours per candidate against 0.96 seconds. It also has no
+/// notion of a diagonal direction, which the paragraph above needs. The search's *shape* is that
+/// driver's, and so is [`SearchPrecision`]; the driver itself does not fit.
+fn fit_pair(
+    spectrum: &FittedSpectrum<'_>,
+    panel_inbreeding: InbreedingF,
+    precision: SearchPrecision,
+) -> ProjectionFit {
+    let mut scorer = SpectrumScorer::new(spectrum, panel_inbreeding);
+
+    // **Every start gets one sweep, and only the best-scoring one is then swept to convergence.**
+    // A sweep line-searches all four directions over the whole box, so one of them already looks
+    // everywhere along each direction; what the other starts are for is a *second* optimum
+    // elsewhere on the surface, and one sweep each is what would find it. Sweeping all four to
+    // convergence costs about 2.7 times as many predictions and, on every spectrum measured in
+    // this module's tests, reaches the same pair to within 1%.
+    let mut best = ScoredPoint {
+        point: [SEARCH_STARTS[0].0.ln(), SEARCH_STARTS[0].1.ln()],
+        log_likelihood: f64::NEG_INFINITY,
+    };
+    for (from_total, from_ratio) in SEARCH_STARTS {
+        let start = ScoredPoint {
+            point: [from_total.ln(), from_ratio.ln()],
+            log_likelihood: f64::NEG_INFINITY,
+        };
+        let (swept, _) = sweep_once(start, precision, &mut |point| scorer.score(point));
+        best = best.max_by_score(swept);
+    }
+
+    let best = sweep_from(best, precision, &mut |point| scorer.score(point));
+
+    let (alpha_ref, alpha_alt) = concentrations_at(best.point);
+    ProjectionFit {
+        alpha_ref,
+        alpha_alt,
+        log_likelihood: best.log_likelihood,
+        predictions: scorer.predictions,
+    }
+}
+
+/// The objective, with the buffer it predicts into and the count of how often it has been asked.
+/// One per fit.
+///
+/// **One value rather than four arguments threaded through every closure**, because all four are
+/// the same thing — state that outlives a single candidate — and the alternative is the same
+/// six-argument call written out at each of the search's two entry points.
+struct SpectrumScorer<'a> {
+    spectrum: &'a FittedSpectrum<'a>,
+    panel_inbreeding: InbreedingF,
+    /// Refilled once per candidate rather than allocated there: a fit runs several hundred
+    /// candidates and this is the only thing it builds.
+    predicted: Vec<f64>,
+    predictions: usize,
+}
+
+impl<'a> SpectrumScorer<'a> {
+    fn new(spectrum: &'a FittedSpectrum<'a>, panel_inbreeding: InbreedingF) -> Self {
+        Self {
+            spectrum,
+            panel_inbreeding,
+            predicted: vec![0.0; spectrum.class_weights().len()],
+            predictions: 0,
+        }
+    }
+
+    /// One candidate pair's score: predict the spectrum it implies and read the objective off it.
+    fn score(&mut self, point: [f64; 2]) -> f64 {
+        self.predictions += 1;
+        let (alpha_ref, alpha_alt) = concentrations_at(point);
+        fill_expected_spectrum(
+            alpha_ref,
+            alpha_alt,
+            self.spectrum.individuals(),
+            self.panel_inbreeding,
+            &mut self.predicted,
+        );
+        spectrum_log_likelihood(self.spectrum.class_weights(), &self.predicted)
+    }
+}
+
+/// A point and what it scored, so the two never come apart on the way back.
+#[derive(Copy, Clone, Debug)]
+struct ScoredPoint {
+    point: [f64; 2],
+    log_likelihood: f64,
+}
+
+impl ScoredPoint {
+    /// Whichever of the two scored higher, this one on a tie.
+    fn max_by_score(self, other: ScoredPoint) -> ScoredPoint {
+        if self.log_likelihood >= other.log_likelihood {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+/// Sweep the four directions from one point until nothing moves further than the resolution asked
+/// for, or the sweeps run out. Returns the best point any sweep reached, not merely the last.
+///
+/// **Running out is not asserted against.** This surface has no concavity proof, unlike the climb
+/// the sibling driver wraps, so a capped search is a data condition; what protects the answer is
+/// that the best point evaluated is the one returned.
+fn sweep_from(
+    from: ScoredPoint,
+    precision: SearchPrecision,
+    score: &mut impl FnMut([f64; 2]) -> f64,
+) -> ScoredPoint {
+    let mut best = from;
+    for _ in 0..precision.max_sweeps {
+        let (swept, furthest_move) = sweep_once(best, precision, score);
+        best = swept;
+        if furthest_move < precision.tolerance {
+            break;
+        }
+    }
+    best
+}
+
+/// One sweep: a line search along each of the three directions in turn. Returns where it ended
+/// and what that scored, and how far the furthest of the three searches moved.
+///
+/// **A sweep cannot end below where it began**, because no line search in it can — see
+/// [`line_search`].
+fn sweep_once(
+    from: ScoredPoint,
+    precision: SearchPrecision,
+    score: &mut impl FnMut([f64; 2]) -> f64,
+) -> (ScoredPoint, f64) {
+    let mut current = from;
+    let mut furthest_move: f64 = 0.0;
+    for direction in SEARCH_DIRECTIONS {
+        let (reached, moved) = line_search(current, direction, precision, score);
+        current = reached;
+        furthest_move = furthest_move.max(moved);
+    }
+    (current, furthest_move)
+}
+
+/// Golden-section along one direction, over the whole part of the search box that lies on that
+/// line. Returns where it ended and what that scored, and how far it moved — **the same order as
+/// [`sweep_once`]**, because two `f64`s that mean different things are what the next author
+/// copies the wrong way round.
+///
+/// **It never returns a point worse than the one it started from.** The bracket's midpoint is
+/// where the search stopped, not necessarily the best thing it saw: on a line that is not
+/// unimodal, or simply at the resolution's own edge, it can sit below the start. Measured on the
+/// exact neutral spectrum at 26 individuals, 5 of 80 line searches ended below their start (worst
+/// 6.3e-9 nats) and on a flat spectrum 31 of 80 (worst 1.1e-6). Keeping the better of the two
+/// costs no prediction, because both scores are already in hand.
+///
+/// **Golden section keeps one of its two interior evaluations at every step**, so a bracket costs
+/// one prediction per step rather than two.
+fn line_search(
+    from: ScoredPoint,
+    direction: [f64; 2],
+    precision: SearchPrecision,
+    score: &mut impl FnMut([f64; 2]) -> f64,
+) -> (ScoredPoint, f64) {
+    let inverse_phi = 0.5 * (5f64.sqrt() - 1.0);
+    let (mut low, mut high) = bounds_along(from.point, direction);
+    let at = |t: f64| {
+        [
+            from.point[0] + t * direction[0],
+            from.point[1] + t * direction[1],
+        ]
+    };
+
+    let mut left = high - inverse_phi * (high - low);
+    let mut right = low + inverse_phi * (high - low);
+    let mut at_left = score(at(left));
+    let mut at_right = score(at(right));
+    for _ in 0..precision.max_axis_steps {
+        if at_left > at_right {
+            high = right;
+            right = left;
+            at_right = at_left;
+            left = high - inverse_phi * (high - low);
+            at_left = score(at(left));
+        } else {
+            low = left;
+            left = right;
+            at_left = at_right;
+            right = low + inverse_phi * (high - low);
+            at_right = score(at(right));
+        }
+        if (high - low) < precision.tolerance {
+            break;
+        }
+    }
+    let stopped_at = 0.5 * (low + high);
+    let point = at(stopped_at);
+    let reached = ScoredPoint {
+        point,
+        log_likelihood: score(point),
+    };
+    if reached.log_likelihood > from.log_likelihood {
+        (reached, stopped_at.abs())
+    } else {
+        (from, 0.0)
+    }
+}
+
+/// How far a point may travel along a direction before it leaves the search box, either way.
+///
+/// **The box is the two ranges above**, and a diagonal leaves it through whichever side comes
+/// first, so both ends are the tightest of the per-axis limits.
+fn bounds_along(from: [f64; 2], direction: [f64; 2]) -> (f64, f64) {
+    let box_bounds = [
+        (
+            CONCENTRATION_TOTAL_SEARCH_RANGE.0.ln(),
+            CONCENTRATION_TOTAL_SEARCH_RANGE.1.ln(),
+        ),
+        (
+            CONCENTRATION_RATIO_SEARCH_RANGE.0.ln(),
+            CONCENTRATION_RATIO_SEARCH_RANGE.1.ln(),
+        ),
+    ];
+    let mut low = f64::NEG_INFINITY;
+    let mut high = f64::INFINITY;
+    for axis in 0..2 {
+        if direction[axis] == 0.0 {
+            continue;
+        }
+        let to_low = (box_bounds[axis].0 - from[axis]) / direction[axis];
+        let to_high = (box_bounds[axis].1 - from[axis]) / direction[axis];
+        low = low.max(to_low.min(to_high));
+        high = high.min(to_low.max(to_high));
+    }
+    (low, high)
+}
+
+/// The two concentrations a search point stands for, `(α_ref, α_alt)`. A point is
+/// `[ln(α_ref + α_alt), ln(α_alt / α_ref)]` — the log of the total and the log of the ratio.
+///
+/// **The search runs on the total and the ratio rather than on the two concentrations directly,
+/// and at one individual that is the difference between finding the answer and not.** In
+/// `(ln α_ref, ln α_alt)` both axes move both of the things the spectrum is actually sensitive
+/// to — how often the alternative allele is expected, and how tightly that is believed — so the
+/// surface is a long curved ridge and a coordinate search walks along it a step at a time.
+/// Measured at one individual and tomato's diversity, the search in those coordinates returned
+/// `α_ref = 0.844` where the answer is 1, with the four starts spread 3,206-fold; in these it
+/// returns 1 to nine decimal places with the starts agreeing to 1.000000. At 26 individuals the
+/// old coordinates worked, so the failure is specific to the panel size where the spectrum has
+/// three classes and almost all the weight is in one of them.
+#[inline]
+fn concentrations_at(point: [f64; 2]) -> (f64, f64) {
+    let total = point[0].exp();
+    // `α_alt / (α_ref + α_alt)` from the log odds. The logistic rather than `r / (1 + r)` because
+    // it stays exact where the ratio is enormous: at `ln r = 745` the naive form's `1 + r`
+    // overflows and this returns a share of exactly 1, so `α_ref` would come out at 0.0 and
+    // `fill_expected_spectrum` would refuse it. Unreachable while [`bounds_along`] holds — the
+    // box stops at `ln r = ln 1e2` — and it is the sort of thing a widened bound would find.
+    let alternative_share = 1.0 / (1.0 + (-point[1]).exp());
+    (total * (1.0 - alternative_share), total * alternative_share)
+}
+
+/// How likely the fitted spectrum's class weights are under a predicted spectrum:
+/// `Σ_k w_k · ln q_k`.
+///
+/// **This is the maximum-likelihood objective spec §4.1 names, and it is the negative
+/// Kullback–Leibler divergence up to a constant** — the fitted spectrum's own entropy, which does
+/// not move with the candidate pair, so maximising one minimises the other.
+///
+/// **A class the fitted spectrum gives no weight contributes nothing**, and is skipped rather
+/// than multiplied: `0 × ln 0` is a `NaN`, and predicted zeros are ordinary here — at full
+/// inbreeding every odd class is exactly zero.
+///
+/// **A class the fitted spectrum does give weight to and the candidate predicts at zero is
+/// floored rather than allowed to reach `−∞`** ([`PROBABILITY_FLOOR`], the rule spec §8 sets for
+/// every logarithm in this module). Two reasons, and neither is tidiness:
+///
+/// - **`−∞` is not an ordering.** A candidate that predicts `1e-320` for an occupied class and
+///   one that predicts exactly zero are equally impossible, but the search has to prefer the
+///   first to walk towards anything. Golden section compares `−∞ > −∞` as false and then walks to
+///   one end of the line blind. That region is not hypothetical: on the exact neutral spectrum at
+///   `F = 0.8`, none of 441 points across the search box scores `−∞` at 150 individuals, 17 do at
+///   400, and 28 of 225 do at 1,600 — one point in eight in the middle of the committed cohort
+///   range.
+/// - **A spectrum no candidate can produce would otherwise have no answer at all.** At `F = 1`
+///   every odd class is exactly zero, so a spectrum carrying any weight in an odd class scores
+///   `−∞` at *every* pair — measured, 441 of 441 grid points — and the fit would return whichever
+///   point it happened to start from. `InbreedingF` still admits `1.0` today; the `[0, 1)`
+///   tightening spec §7 requires is another plan's (`calling_prerequisites.md` Milestone A).
+///
+/// **What the floor does not do is say so.** The pair that comes back is the closest the
+/// two-parameter family can reach, and nothing on [`SpectrumSeed`] distinguishes that from a fit
+/// that matched. That is the same complaint spec §12 test 11 makes about the STR seed's
+/// unreachable diversity, and it is recorded as open at the end of this step.
+fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
+    assert_eq!(
+        class_weights.len(),
+        predicted.len(),
+        "the objective runs over every allele-count class, and `zip` on a short prediction would \
+         silently drop the top classes rather than fail"
+    );
+    let mut total = 0.0;
+    for (weight, prediction) in class_weights.iter().zip(predicted) {
+        if *weight > 0.0 {
+            total += weight * prediction.max(PROBABILITY_FLOOR).ln();
+        }
+    }
+    total
+}
+
+/// The exact expected spectrum of a concentration pair — **every projection target in this
+/// module's tests is built by this, and never by writing `θ/k`, and never by drawing sites**.
+///
+/// `θ/k` is the small-diversity approximation, and its own error is 0.272% at tomato's diversity
+/// over 52 chromosomes and 4.4% at a `θ` of 1 in 100
+/// ([`tests::the_neutral_shape_appears_in_the_small_diversity_limit`]) — larger than the effect
+/// these tests measure, so a wiring bug and the approximation would be indistinguishable. Drawing
+/// sites fails differently: Monte-Carlo noise falls as one over the square root of the site count,
+/// so a floating-point tolerance would need more sites than anyone can generate
+/// (`doc/devel/ng/spec/calling_priors.md` §12 test 5).
+///
+/// The buffer starts as `NaN` so a class the sum never writes shows up as one rather than as a
+/// plausible zero.
+#[cfg(test)]
+fn exact_spectrum(alpha_ref: f64, alpha_alt: f64, individuals: u32, inbreeding: f64) -> Vec<f64> {
+    let mut out = vec![f64::NAN; 2 * individuals as usize + 1];
+    fill_expected_spectrum(
+        alpha_ref,
+        alpha_alt,
+        individuals,
+        InbreedingF::try_new(inbreeding).unwrap(),
+        &mut out,
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,17 +1033,9 @@ mod tests {
         lgamma(n as f64 + 1.0) - lgamma(k as f64 + 1.0) - lgamma((n - k) as f64 + 1.0)
     }
 
-    fn spectrum(alpha_ref: f64, alpha_alt: f64, individuals: u32, inbreeding: f64) -> Vec<f64> {
-        let mut out = vec![f64::NAN; 2 * individuals as usize + 1];
-        fill_expected_spectrum(
-            alpha_ref,
-            alpha_alt,
-            individuals,
-            InbreedingF::try_new(inbreeding).unwrap(),
-            &mut out,
-        );
-        out
-    }
+    /// The file's one builder of an exact expected spectrum, named for what these tests read it
+    /// as. Why it is never `θ/k` and never sampled is on [`exact_spectrum`].
+    use super::exact_spectrum as spectrum;
 
     /// **Every site falls in exactly one class, so the classes sum to one** — across panel sizes,
     /// diversities and inbreeding coefficients.
@@ -944,6 +1654,580 @@ mod tests {
         assert!(
             emptiest > 1e-30,
             "the emptiest class holds {emptiest}, which is a row the walk failed to fill"
+        );
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn project(weights: &[f64], inbreeding: f64) -> SpectrumSeed {
+        project_spectrum_seed(
+            Some(FittedSpectrum::new(weights, 10.0, 3_000.0)),
+            Some(ExpectedHeterozygosity::try_new(1e-3).unwrap()),
+            InbreedingF::try_new(inbreeding).unwrap(),
+            VariantClass::Substitution,
+        )
+    }
+
+    /// **A neutral panel projects to `(1, θ)`** — spec §12 test 5, and the reason the whole step
+    /// exists: the seed the caller starts from must be the one the pre-pass's spectrum implies,
+    /// not a number anybody chose.
+    ///
+    /// The target is the exact expected spectrum of `(1, θ)` at each panel size, so the answer is
+    /// known to the last bit and what is being tested is the search. Measured worst departure
+    /// across every combination below: **0.25% on `α_ref` and 0.31% on `α_alt`**, both at 5
+    /// individuals, against a search that resolves each concentration to about 1% of itself
+    /// ([`SearchPrecision::fast`]). Asked for a thousand times finer resolution the same search
+    /// returns both to within **2 parts in 100,000**, more than a hundred times closer, which is
+    /// what says the residue above is the resolution and not a bias — that is the second half of
+    /// this test.
+    ///
+    /// **Panel sizes from one individual to 150, diversities from 1 in 10,000 to 1 in 100.** One
+    /// individual is the low end of the committed cohort range and the hardest case here: its
+    /// spectrum has three classes, of which one holds 999 parts in a thousand.
+    #[test]
+    fn a_neutral_panel_projects_to_one_and_theta() {
+        let mut worst_alpha_ref: f64 = 0.0;
+        let mut worst_alpha_alt: f64 = 0.0;
+        let mut worst_at = (0u32, 0.0f64, 0.0f64);
+        let mut worst_fine_alpha_ref: f64 = 0.0;
+        let mut worst_fine_alpha_alt: f64 = 0.0;
+        for individuals in [1, 2, 5, 26, 63, 150] {
+            for theta in [1e-4, 6e-4, 1e-2] {
+                for inbreeding in [0.0, 0.6] {
+                    let weights = exact_spectrum(1.0, theta, individuals, inbreeding);
+                    let seed = project(&weights, inbreeding);
+                    let off_ref = (seed.alpha_ref() - 1.0).abs();
+                    let off_alt = (seed.alpha_alt_total() / theta - 1.0).abs();
+                    if off_ref.max(off_alt) > worst_alpha_ref.max(worst_alpha_alt) {
+                        worst_at = (individuals, theta, inbreeding);
+                    }
+                    worst_alpha_ref = worst_alpha_ref.max(off_ref);
+                    worst_alpha_alt = worst_alpha_alt.max(off_alt);
+                }
+            }
+        }
+        // The finer search costs about three times as much per fit, so it runs at both ends of
+        // the panel-size range and the middle rather than over the whole grid: what it is here
+        // to say is that the residue above shrinks with the resolution asked for, and that shows
+        // wherever it is measured.
+        for individuals in [1, 26, 150] {
+            for inbreeding in [0.0, 0.6] {
+                let theta = 6e-4;
+                let weights = exact_spectrum(1.0, theta, individuals, inbreeding);
+                let sharp = fit_pair(
+                    &FittedSpectrum::new(&weights, 10.0, 3_000.0),
+                    InbreedingF::try_new(inbreeding).unwrap(),
+                    SearchPrecision::fine(),
+                );
+                worst_fine_alpha_ref = worst_fine_alpha_ref.max((sharp.alpha_ref - 1.0).abs());
+                worst_fine_alpha_alt =
+                    worst_fine_alpha_alt.max((sharp.alpha_alt / theta - 1.0).abs());
+            }
+        }
+        assert!(
+            worst_alpha_ref < 1e-2 && worst_alpha_alt < 1e-2,
+            "the pair must come back inside the 1% the shipped search resolves; worst was \
+             {worst_alpha_ref:.2e} on α_ref and {worst_alpha_alt:.2e} on α_alt, at {} \
+             individuals, θ = {}, F = {}",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2
+        );
+        assert!(
+            worst_fine_alpha_ref < 5e-5 && worst_fine_alpha_alt < 5e-5,
+            "asked for a thousand times finer resolution the same search must reach (1, θ) far \
+             closer — otherwise the residue above is a bias, not the resolution; \
+             worst was {worst_fine_alpha_ref:.2e} on α_ref and {worst_fine_alpha_alt:.2e} on α_alt"
+        );
+    }
+
+    /// **On a spectrum the family can reproduce exactly, the winning score is the spectrum's own
+    /// entropy** — because the objective is that entropy minus the Kullback–Leibler divergence to
+    /// the prediction, and at the true pair the divergence is zero.
+    ///
+    /// This is the only test that reads the score the fit carries back, and it is what makes that
+    /// number a check rather than a value nobody looks at.
+    #[test]
+    fn the_winning_score_is_the_spectrums_own_entropy() {
+        for individuals in [1u32, 26] {
+            let weights = exact_spectrum(1.0, 6e-4, individuals, 0.6);
+            let entropy: f64 = weights
+                .iter()
+                .filter(|weight| **weight > 0.0)
+                .map(|weight| weight * weight.ln())
+                .sum();
+            let fit = fit_pair(
+                &FittedSpectrum::new(&weights, 10.0, 3_000.0),
+                InbreedingF::try_new(0.6).unwrap(),
+                SearchPrecision::fine(),
+            );
+            assert!(
+                (fit.log_likelihood - entropy).abs() < 1e-9,
+                "at {individuals} individuals the fit scored {} where the spectrum's own entropy \
+                 is {entropy}",
+                fit.log_likelihood
+            );
+        }
+    }
+
+    /// **One density projects to one pair whatever the panel's inbreeding** — spec §12 test 6,
+    /// and the test that holds §4.1's two-branch requirement in place rather than leaving it as
+    /// prose.
+    ///
+    /// A panel's `2N` chromosomes are not `2N` independent draws once its individuals are inbred.
+    /// Predicting as though they were biases the reference concentration **down**, with a fixed
+    /// sign, and this measures how far on a panel of 26 individuals at tomato's diversity:
+    ///
+    /// ```text
+    ///   F                       0        0.6      0.8      0.9
+    ///   two-branch  α_ref     1.0000   1.0000   1.0000   1.0000
+    ///   independent α_ref     1.0000   0.9144   0.8793   0.8599
+    ///                            —     8.6% low  12.1%    14.0%
+    ///   independent α_alt     1.000 θ  0.893 θ  0.848 θ  0.824 θ
+    /// ```
+    ///
+    /// **The `F = 0` column is the comparison's zero**: there the two predictions are the same
+    /// model, so a difference between the rows would mean the arms are not being run on one
+    /// density.
+    ///
+    /// **The last row is why spec §4.1's tomato remark is not evidence of anything yet.** A fit
+    /// against an independently-called VCF of 18 accessions returned `α_alt = 0.81 θ` and was
+    /// read as a hint that a domesticated selfer stretches the two-parameter family. A perfectly
+    /// neutral panel run through an independent-chromosome projection returns 0.824 θ at
+    /// `F = 0.9` by itself, so that number is consistent with being nothing but this bias.
+    #[test]
+    fn the_projection_returns_one_pair_at_every_inbreeding_coefficient() {
+        let theta = 6e-4;
+        let mut two_branch = Vec::new();
+        let mut independent = Vec::new();
+        for inbreeding in [0.0, 0.6, 0.8, 0.9] {
+            let weights = exact_spectrum(1.0, theta, 26, inbreeding);
+            let spectrum = FittedSpectrum::new(&weights, 10.0, 3_000.0);
+            two_branch.push(fit_pair(
+                &spectrum,
+                InbreedingF::try_new(inbreeding).unwrap(),
+                SearchPrecision::fine(),
+            ));
+            independent.push(fit_pair(
+                &spectrum,
+                InbreedingF::try_new(0.0).unwrap(),
+                SearchPrecision::fine(),
+            ));
+        }
+
+        for (fit, inbreeding) in two_branch.iter().zip([0.0, 0.6, 0.8, 0.9]) {
+            assert!(
+                (fit.alpha_ref - 1.0).abs() < 1e-5 && (fit.alpha_alt / theta - 1.0).abs() < 1e-5,
+                "carrying the panel's F, one density must give one pair at every F; at \
+                 F = {inbreeding} it gave ({}, {})",
+                fit.alpha_ref,
+                fit.alpha_alt
+            );
+        }
+
+        for ((fit, expected), inbreeding) in independent
+            .iter()
+            .zip([1.0, 0.9144, 0.8793, 0.8599])
+            .zip([0.0, 0.6, 0.8, 0.9])
+        {
+            assert!(
+                (fit.alpha_ref - expected).abs() < 5e-4,
+                "an independent-chromosome projection must still return its own biased answer — \
+                 if this moves, the two-branch numbers above are being compared against \
+                 something else; at F = {inbreeding} expected {expected}, got {}",
+                fit.alpha_ref
+            );
+        }
+        assert!(
+            (independent[3].alpha_alt / theta - 0.8235).abs() < 5e-4,
+            "the alternative concentration's own bias at F = 0.9 is 0.824 θ, got {} θ",
+            independent[3].alpha_alt / theta
+        );
+    }
+
+    /// **One individual projects to the neutral pair, reached without any test of the cohort
+    /// size** — spec §12 test 7.
+    ///
+    /// With one sample no census site is variable across the panel, so the pre-pass's spectrum is
+    /// its own regularizer at that genome's measured diversity, and projecting it returns the two
+    /// numbers §4 sets. The only branch this function has is on the spectrum being **absent**;
+    /// nothing here reads a sample count.
+    ///
+    /// It is also the case the search finds hardest, and it is what put the search on the total
+    /// and the ratio rather than on the two concentrations: in the latter it returned
+    /// `α_ref = 0.844` here (see [`concentration_pair`]).
+    #[test]
+    fn at_one_individual_the_projection_is_still_the_neutral_pair() {
+        let theta = 6e-4;
+        for inbreeding in [0.0, 0.9] {
+            let weights = exact_spectrum(1.0, theta, 1, inbreeding);
+            assert_eq!(
+                weights.len(),
+                3,
+                "one individual has three allele-count classes"
+            );
+            let seed = project(&weights, inbreeding);
+            assert!(
+                (seed.alpha_ref() - 1.0).abs() < 5e-3
+                    && (seed.alpha_alt_total() / theta - 1.0).abs() < 5e-3,
+                "at F = {inbreeding} one individual must still project to (1, θ); got ({}, {})",
+                seed.alpha_ref(),
+                seed.alpha_alt_total()
+            );
+        }
+    }
+
+    /// **No spectrum: the pair is the neutral `(1, θ)` at the diversity the pre-pass did fit** —
+    /// exactly, with no arithmetic in between, and the regime says where it came from.
+    ///
+    /// The pre-pass emits the spectrum as *absent* below a panel-size floor rather than as a thin
+    /// estimate, so a cohort of five arrives here without one while a single sample arrives with
+    /// one. **A branch on absence, never on cohort size.**
+    #[test]
+    fn an_absent_spectrum_is_the_neutral_pair_at_the_fitted_diversity() {
+        let theta = ExpectedHeterozygosity::try_new(6e-4).unwrap();
+        let seed = project_spectrum_seed(
+            None,
+            Some(theta),
+            InbreedingF::try_new(0.85).unwrap(),
+            VariantClass::Substitution,
+        );
+        assert_eq!(seed.alpha_ref(), 1.0);
+        assert_eq!(seed.alpha_alt_total(), 6e-4);
+        assert_eq!(seed.regime(), SeedRegime::NeutralShape);
+    }
+
+    /// **No fitted diversity either: the species-range fallback, and the run must say so.** Two
+    /// runs that used different information are otherwise indistinguishable in what they emit.
+    #[test]
+    fn no_fitted_diversity_falls_back_to_the_species_value_and_says_so() {
+        let seed = project_spectrum_seed(
+            None,
+            None,
+            InbreedingF::try_new(0.0).unwrap(),
+            VariantClass::InsertionOrDeletion,
+        );
+        assert_eq!(seed.alpha_ref(), 1.0);
+        assert_eq!(
+            seed.alpha_alt_total(),
+            ExpectedHeterozygosity::SPECIES_FALLBACK.get()
+        );
+        assert_eq!(seed.regime(), SeedRegime::FallbackDiversity);
+    }
+
+    /// **How strongly the estimate was held toward the neutral shape travels with the seed**, and
+    /// so does whether the real sites outweighed that hold. A run whose spectrum was mostly its
+    /// own prior and one whose spectrum was measured are otherwise indistinguishable in what they
+    /// emit (spec §4.1).
+    #[test]
+    fn the_regularizer_weight_and_whether_the_census_sites_outweighed_it_travel_with_the_seed() {
+        let weights = exact_spectrum(1.0, 6e-4, 5, 0.0);
+        for (regularizer, variable_sites, expected_data_won) in
+            [(10.0, 3_000.0, true), (10_000.0, 3_000.0, false)]
+        {
+            let seed = project_spectrum_seed(
+                Some(FittedSpectrum::new(&weights, regularizer, variable_sites)),
+                Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+                InbreedingF::try_new(0.0).unwrap(),
+                VariantClass::Substitution,
+            );
+            assert_eq!(
+                seed.regime(),
+                SeedRegime::FittedSpectrum {
+                    regularizer_site_weight: regularizer,
+                    census_sites_outweigh_regularizer: expected_data_won,
+                }
+            );
+        }
+    }
+
+    /// **Both variant classes get the same seed today, and the argument is there so that can stop
+    /// being true without touching a call site** (spec §4.2, Q1). The pre-pass measures one
+    /// heterozygosity for substitutions and short indels together, so splitting the prior before
+    /// the estimate is split would mean inventing the ratio.
+    #[test]
+    fn both_variant_classes_get_the_same_seed_today() {
+        let weights = exact_spectrum(1.0, 6e-4, 5, 0.0);
+        let seed_of = |class| {
+            project_spectrum_seed(
+                Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
+                Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+                InbreedingF::try_new(0.0).unwrap(),
+                class,
+            )
+        };
+        assert_eq!(
+            seed_of(VariantClass::Substitution),
+            seed_of(VariantClass::InsertionOrDeletion)
+        );
+    }
+
+    /// **Every start reaches the same pair when each is swept to its own convergence.**
+    ///
+    /// Only the best-scoring start is swept to convergence in the shipped path, so this is what
+    /// says that saving is safe rather than a search that stopped early in a place the other
+    /// starts would have left. Measured, `α_ref` across the four starts: identical to 15 digits
+    /// at one individual and at 63, and 1.0039 apart at 26 — inside the 1% the search resolves.
+    ///
+    /// **A spread near one is evidence of nothing on its own**, because a line search over the
+    /// whole box overwrites a start's own value before reading it (`fitting/multistart.rs`); it
+    /// is paired here with [`a_neutral_panel_projects_to_one_and_theta`], which scores the point
+    /// against an answer that is known.
+    #[test]
+    fn every_start_reaches_the_same_pair_within_one_percent() {
+        for (individuals, inbreeding) in [(1u32, 0.9), (26, 0.6), (63, 0.85)] {
+            let weights = exact_spectrum(1.0, 6e-4, individuals, inbreeding);
+            let spectrum = FittedSpectrum::new(&weights, 10.0, 3_000.0);
+            let panel_inbreeding = InbreedingF::try_new(inbreeding).unwrap();
+            let mut scorer = SpectrumScorer::new(&spectrum, panel_inbreeding);
+            let reached: Vec<f64> = SEARCH_STARTS
+                .iter()
+                .map(|(total, ratio)| {
+                    let start = ScoredPoint {
+                        point: [total.ln(), ratio.ln()],
+                        log_likelihood: f64::NEG_INFINITY,
+                    };
+                    let best = sweep_from(start, SearchPrecision::fast(), &mut |point| {
+                        scorer.score(point)
+                    });
+                    concentrations_at(best.point).0
+                })
+                .collect();
+            let highest = reached.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let lowest = reached.iter().copied().fold(f64::INFINITY, f64::min);
+            assert!(
+                highest / lowest < 1.01,
+                "at {individuals} individuals and F = {inbreeding} the starts reached {reached:?}"
+            );
+        }
+    }
+
+    /// **The objective is maximised by the truth and by nothing else** — Gibbs' inequality, which
+    /// is what makes "maximum likelihood of the class weights" and "closest in Kullback–Leibler
+    /// divergence" the same instruction (spec §4.1).
+    ///
+    /// An independent check of the objective rather than of the search: it uses no spectrum at
+    /// all, only distributions built here.
+    #[test]
+    fn the_objective_is_maximised_by_the_truth() {
+        let truth = [0.7, 0.2, 0.06, 0.03, 0.01];
+        let at_truth = spectrum_log_likelihood(&truth, &truth);
+        for candidate in [
+            [0.69, 0.21, 0.06, 0.03, 0.01],
+            [0.2, 0.2, 0.2, 0.2, 0.2],
+            [0.7, 0.2, 0.05, 0.04, 0.01],
+            [0.999, 0.0005, 0.0002, 0.0002, 0.0001],
+        ] {
+            assert!(
+                spectrum_log_likelihood(&truth, &candidate) < at_truth,
+                "no candidate may score above the truth; {candidate:?} did"
+            );
+        }
+    }
+
+    /// **A class the fitted spectrum gives no weight contributes nothing, and one it does give
+    /// weight to that the candidate predicts at zero is floored rather than sent to `−∞`.**
+    ///
+    /// Both halves are ordinary here rather than edge cases: at full inbreeding every odd class
+    /// is exactly zero. The first would be `0 × ln 0`, a `NaN`, which compares false against
+    /// every score and so would make a candidate invisible to the search rather than rejected.
+    ///
+    /// The second is the property that lets the search move: an impossible candidate must score
+    /// **below every possible one and still be ordered against other impossible ones**, so that a
+    /// line crossing a region where the prediction underflows still tells the search which way to
+    /// go. `−∞` gives no such ordering, and there are spectra on which every candidate is
+    /// impossible — see [`spectrum_log_likelihood`].
+    #[test]
+    fn an_impossible_class_is_floored_rather_than_sent_to_negative_infinity() {
+        assert_eq!(
+            spectrum_log_likelihood(&[0.5, 0.0, 0.5], &[0.5, 0.0, 0.5]),
+            2.0 * 0.5 * 0.5f64.ln(),
+            "a class with no weight must be skipped, not multiplied into a NaN"
+        );
+
+        let impossible = spectrum_log_likelihood(&[0.5, 0.5, 0.0], &[0.5, 0.0, 0.5]);
+        assert_eq!(
+            impossible,
+            0.5 * 0.5f64.ln() + 0.5 * PROBABILITY_FLOOR.ln(),
+            "a candidate that cannot have produced an occupied class pays the floor for it"
+        );
+        assert!(
+            impossible.is_finite(),
+            "the score has to be finite for the search to compare it against anything"
+        );
+        assert!(
+            impossible < spectrum_log_likelihood(&[0.5, 0.5, 0.0], &[0.5, 1e-200, 0.5]),
+            "an impossible candidate must rank below one that merely makes the class very \
+             unlikely, or the search cannot walk out of the region"
+        );
+        assert!(
+            spectrum_log_likelihood(&[0.5, 0.5, 0.0], &[0.5, 0.5, 0.0]) > impossible,
+            "and below the candidate that matches"
+        );
+    }
+
+    /// **An even class count is refused.** `2N + 1` classes is odd; an even count would silently
+    /// become a panel one individual smaller, and every class would then be read off by one.
+    #[test]
+    #[should_panic(expected = "allele-count classes")]
+    fn an_even_class_count_is_refused() {
+        let _ = FittedSpectrum::new(&[0.5, 0.3, 0.15, 0.05], 10.0, 3_000.0);
+    }
+
+    /// **A panel of no individuals is refused**, which an odd count of one otherwise passes for.
+    /// Measured with the lower bound removed: a single-class spectrum returns `α_ref = 996.87`,
+    /// which is the top corner of the search box and not a fit at all.
+    #[test]
+    #[should_panic(expected = "at least 3")]
+    fn a_spectrum_with_one_class_is_refused() {
+        let _ = FittedSpectrum::new(&[1.0], 10.0, 3_000.0);
+    }
+
+    /// **A panel past what the projection will fit in a sensible time is refused rather than
+    /// started.** At 10,000 individuals a fit is already about two hours; nothing on the way would
+    /// say the run had stopped being a run.
+    #[test]
+    #[should_panic(expected = "at most 20001")]
+    fn a_panel_past_the_projections_range_is_refused() {
+        let weights = vec![0.0; 2 * MAX_PROJECTION_INDIVIDUALS as usize + 3];
+        let mut weights = weights;
+        weights[0] = 1.0;
+        let _ = FittedSpectrum::new(&weights, 10.0, 3_000.0);
+    }
+
+    /// **A negative class weight is refused even when the weights still sum to one.** The
+    /// objective skips a class on `weight > 0.0`, so the negative one would simply drop out and
+    /// the fit would run against more than a unit of probability. Measured with the check
+    /// removed, `[1.5, -0.5, 0.0]` returns `(1.005e-3, 1.008e-12)` — the box's bottom corner,
+    /// reported as a fit.
+    #[test]
+    #[should_panic(expected = "cannot be negative or NaN")]
+    fn a_negative_class_weight_is_refused_even_when_the_total_is_one() {
+        let _ = FittedSpectrum::new(&[1.5, -0.5, 0.0], 10.0, 3_000.0);
+    }
+
+    /// **A regularizer weight that is not a count of sites is refused.** It travels onto the run's
+    /// output through [`SeedRegime::FittedSpectrum`], and a `NaN` there is worse than an error:
+    /// `NaN > x` is false, so the seed would also report that the prior dominated, which is the
+    /// reassuring answer.
+    #[test]
+    #[should_panic(expected = "sites' worth of pseudo-counts")]
+    fn a_regularizer_weight_that_is_not_a_count_of_sites_is_refused() {
+        let _ = FittedSpectrum::new(&[0.9, 0.05, 0.05], f64::NAN, 3_000.0);
+    }
+
+    /// **A variable-site count that is not a count is refused**, for the same reason: it is the
+    /// other half of the comparison the seed reports.
+    #[test]
+    #[should_panic(expected = "count of variable census sites")]
+    fn a_variable_site_count_that_is_not_a_count_is_refused() {
+        let _ = FittedSpectrum::new(&[0.9, 0.05, 0.05], 10.0, -1.0);
+    }
+
+    /// **A fully inbred panel whose spectrum holds heterozygotes still returns a pair.**
+    ///
+    /// At `F = 1` the prediction puts exactly zero in every odd allele-count class, so a spectrum
+    /// carrying any weight in one of them cannot have come from any pair in this family — 441 of
+    /// 441 points across the search box, measured. Before the floor of
+    /// [`spectrum_log_likelihood`] every candidate scored `−∞`, no start could beat the sentinel
+    /// the search began from, and the run died three frames later complaining that a
+    /// concentration was `NaN`.
+    ///
+    /// `InbreedingF` still admits `1.0`; the `[0, 1)` tightening spec §7 requires belongs to
+    /// `calling_prerequisites.md` Milestone A. **What this pins is that the fit survives it**, not
+    /// that the answer means anything — see [`spectrum_log_likelihood`] on what is still missing.
+    #[test]
+    fn a_fully_inbred_panel_whose_spectrum_holds_heterozygotes_still_returns_a_pair() {
+        let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
+        let seed = project_spectrum_seed(
+            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
+            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+            InbreedingF::try_new(1.0).unwrap(),
+            VariantClass::Substitution,
+        );
+        assert!(
+            seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite(),
+            "got ({}, {})",
+            seed.alpha_ref(),
+            seed.alpha_alt_total()
+        );
+    }
+
+    /// **Weights that are not a distribution are refused.** The objective is a log-likelihood
+    /// against them, so unnormalised counts score every candidate wrongly by an amount that
+    /// varies with the candidate — a fit that returns an answer rather than an error.
+    #[test]
+    #[should_panic(expected = "must sum to 1 within")]
+    fn weights_that_are_not_a_distribution_are_refused() {
+        let _ = FittedSpectrum::new(&[500.0, 300.0, 200.0], 10.0, 3_000.0);
+    }
+
+    /// **What a fit costs, by panel size** — the number that says whether the projection runs at
+    /// the top of the committed cohort range.
+    ///
+    /// Run with `cargo test --release --lib -- --ignored the_cost_of_one_fit`. Measured:
+    ///
+    /// ```text
+    ///   individuals    400     800    1,600    3,200
+    ///   one fit       3.8 s    22 s   2.2 min  11.8 min
+    ///   predictions    399     399     399      399
+    /// ```
+    ///
+    /// About `N^2.5`, which is the `N^2.45` one prediction costs plus a constant factor rather
+    /// than a power. **The count is printed here and asserted in
+    /// [`a_fit_costs_at_most_450_predictions`]**, which runs at panel sizes small enough for the
+    /// ordinary test suite; this one exists for the wall clock, which does depend on the machine.
+    /// A prediction **inside a fit** averages 1.78 s at 3,200 individuals — not the 0.96 s
+    /// `doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md` measures at the neutral
+    /// pair, which the search leaves after its first few steps.
+    #[test]
+    #[ignore]
+    fn the_cost_of_one_fit_by_panel_size() {
+        for individuals in [400u32, 800, 1_600, 3_200] {
+            let weights = exact_spectrum(1.0, 6e-4, individuals, 0.8);
+            let started = std::time::Instant::now();
+            let fit = fit_pair(
+                &FittedSpectrum::new(&weights, 10.0, 3_000.0),
+                InbreedingF::try_new(0.8).unwrap(),
+                SearchPrecision::fast(),
+            );
+            println!(
+                "{individuals} individuals: {:?} for {} predictions, α_ref = {:.6}, α_alt = {:.6e}",
+                started.elapsed(),
+                fit.predictions,
+                fit.alpha_ref,
+                fit.alpha_alt
+            );
+        }
+    }
+
+    /// **The fit's cost in predictions is flat in the panel size** — 399 at every size and every
+    /// inbreeding coefficient measured, here and in [`the_cost_of_one_fit_by_panel_size`] —
+    /// which is what lets the wall clock at any size be read off one in-fit per-prediction
+    /// measurement. Held here so that a change to the search that makes it cost more has to say
+    /// so: adding one more start takes it to 532, adding back the fourth sweep direction takes
+    /// it past 600.
+    #[test]
+    fn a_fit_costs_at_most_450_predictions() {
+        let mut most = 0;
+        for individuals in [1u32, 5, 26, 63, 150] {
+            for inbreeding in [0.0, 0.6, 0.9] {
+                let weights = exact_spectrum(1.0, 6e-4, individuals, inbreeding);
+                let fit = fit_pair(
+                    &FittedSpectrum::new(&weights, 10.0, 3_000.0),
+                    InbreedingF::try_new(inbreeding).unwrap(),
+                    SearchPrecision::fast(),
+                );
+                most = most.max(fit.predictions);
+            }
+        }
+        assert!(
+            most <= 450,
+            "a fit took {most} predictions; at 3,200 individuals a fit is 11.8 minutes measured, \
+             so this is the whole run's projection budget"
         );
     }
 }

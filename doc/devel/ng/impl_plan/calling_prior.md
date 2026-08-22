@@ -184,7 +184,7 @@ projection's objective, and to build the tests' targets. Closed form; nothing si
 Property test: the class probabilities sum to 1 across `N`, `θ`, `F` grids. *Depends:* B2 (the
 two-branch sampling is the mixture's). *Source:* spec §4.1; arch §4.
 
-**D2. `project_spectrum_seed`.**  ☐
+**D2. `project_spectrum_seed`.**  ✅
 Maximum-likelihood fit of D1's predicted class probabilities to the fitted spectrum's class
 weights, over **all** classes including monomorphic, via
 [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) — a

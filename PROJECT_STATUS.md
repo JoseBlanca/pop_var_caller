@@ -19,7 +19,35 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **the prediction the spectrum fit will search is exact —
+> - **Last completed task (2026-08-22):** **the run's two starting numbers, read off the panel's
+> own frequency spectrum — and a fully inbred panel used to abort the run** (step D2 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> The pre-pass measures, across the sites that vary, how many of the panel's chromosomes carry the
+> alternative allele. This turns that into the two numbers the genotype prior starts every locus
+> from, by asking which pair of concentrations would have produced that shape — **a change of
+> representation, not a second estimate**. On a neutral panel it returns `(1, θ)` to within 0.25%
+> at every panel size from one individual to 150, and to 2 parts in 100,000 when asked for finer
+> resolution, which is what says that residue is the search's step and not a bias. **Carrying the
+> panel's inbreeding is the whole of step D:** predicting as though the chromosomes were
+> independent draws returns `α_ref = 0.914` at `F = 0.6`, `0.879` at 0.8 and `0.860` at 0.9, where
+> the answer is 1. **The one thing that was not obvious** is that the surface is a ridge whose
+> direction depends on the panel size, so the search sweeps three directions — the total, `α_ref`
+> alone and `α_alt` alone — because the two obvious parametrisations each fail at one end of the
+> cohort range. **What the review found was a blocker and four unguarded checks.** At `F = 1` every
+> odd allele-count class is exactly zero, so a spectrum holding any heterozygote scored minus
+> infinity at every candidate and the run died complaining that a concentration was `NaN`;
+> `InbreedingF` still admits 1.0, since the `[0, 1)` tightening belongs to the prerequisites plan.
+> Flooring the logarithm fixes it and also fixes a blind region that exists at ordinary inbreeding
+> — 28 of 225 points across the search box at 1,600 individuals. Also found: a line search could
+> end below where it started, on 31 of 80 searches on a flat spectrum, while the doc claimed the
+> best point was kept; and four guards whose removal left the suite green while returning
+> plausible answers.
+> **A fit is 11.8 minutes at 3,200 individuals, against the 2.6 predicted** — 399 predictions
+> rather than the 160 assumed, each averaging 1.78 s inside a fit against 0.96 s at the neutral
+> pair. **Still open, and it reaches past this step:** a fit that could not match the spectrum, or
+> whose best pair lies outside the search box, is emitted as though it had matched.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d2_2026-08-22.md).
+> - **Previously (2026-08-22):** **the prediction the spectrum fit will search is exact —
 > and it is paid once per search step, not once per run** (step D1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Given a candidate pair of concentrations, this says what fraction of sites a panel would show
@@ -42,7 +70,7 @@ Skills and agents are instructed to leave it untouched.
 > **One correction owed to the design documents:** `arch/calling_priors.md` §4 and this plan's step
 > D2 line both say the independent-chromosome bias is 9–14% at tomato's fitted `F`; spec §4.1 puts
 > it at 12–14% there, 8.6% being the `F = 0.6` figure.
-> - **Previously (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> - **Earlier (2026-08-22):** **two arrays of the same shape and the same unit, whose
 > difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
 > way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is
