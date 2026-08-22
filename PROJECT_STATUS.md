@@ -19,21 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **the inbreeding coefficient was doing about half the
-> work it should, in production as well as in the port** (step B2 of
-> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
-> **implemented, not yet reviewed**). The mixture adds two branches — with probability `F` a
-> sample's two copies are one ancestral copy counted twice, otherwise they are independent draws —
-> and the two have to be on the same scale. They were not: the spec drops a genotype-independent
-> term from the Dirichlet-multinomial row because it cancels when the row is rescaled, which is
-> true of a row alone and false once a second branch is mixed in. At the concentration the caller
-> ships, one sample at tomato1's fitted diversity, that made a heterozygote about **1.8 times** as
-> likely as the model says at `F = 0.8` — roughly 2.6 Phred, in the direction the caller is already
-> weakest. **Production has the same defect and it is live**, hidden only because its default
-> coefficient is zero, where the branch short-circuits away. Corrected in ng at the owner's
-> direction. What found it was the Wright oracle the plan asked for, the only check that exercises
-> both branches at once.
-> [What was built](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md).
+> - **Last completed task (2026-08-22):** **on a cohort, production's fitted inbreeding coefficient
+> is very nearly inert — and the port that found it had to be reviewed before that was believable**
+> (step B2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone B complete, at Checkpoint B**). The mixture has two branches —
+> with probability `F` a sample's two copies are one ancestral copy counted twice, otherwise they
+> are independent draws — and the two have to be on the same scale. They were not: the spec drops a
+> genotype-independent term from the Dirichlet-multinomial row because it cancels when the row is
+> rescaled, which is true of a row alone and false once a second branch is mixed in. **The step
+> reported that as making a heterozygote about 1.8 times too likely; the review measured it across
+> cohort sizes and that is the mildest corner.** The inflation goes as the square of the
+> concentration total, and production feeds the mixture the leave-one-out concentration, which grows
+> with the cohort: at one sample the coefficient still does 90% of its work, at fifty samples 3.6%,
+> at a thousand 0.09%. **Production has the defect and it is live** — its default coefficient is
+> zero, where the branch short-circuits away, but the pipeline also passes the per-sample
+> coefficients the diversity estimator fitted. Corrected in ng at the owner's direction.
+> **The review's own finding was the mirror image:** the mathematics survived five agents
+> attacking it, and what did not survive was the testing — nothing in the suite reached the seam's
+> only implementation, so an implementation that dropped the coefficient entirely left the module
+> green while making a heterozygote 39 times too likely.
+> [What was built](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md),
+> [the review](doc/devel/reports/reviews/ng_calling_prior_b2_2026-08-22.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_b2_fixes_2026-08-22.md).
+> **One question is the owner's:** a genotype the prior rules out is written as `−∞`, where four
+> design documents ask for the probability floor — and the comparator arriving at step F1 floors,
+> so the two implementations behind one seam would differ by convention as well as by model.
 > - **Previously (2026-08-22):** **the Dirichlet-multinomial primitive is ported, and a
 > port needs two oracles** (step B1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md),
 > branch `ng-calling-prior`). One re-derives every value from rising factorials with no `lgamma` at

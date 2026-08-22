@@ -72,11 +72,11 @@
 //! `doc/devel/ng/arch/calling_priors.md`.
 
 pub mod dirichlet_multinomial;
-
-pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub mod hardy_weinberg;
 pub mod seed_generic;
 pub mod seed_ssr;
+
+pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
@@ -280,6 +280,33 @@ mod checked {
                 "a homozygous lookup names an allele the concentration does not cover \
                  ({allele_count} alleles): {homozygous_allele_for:?}"
             );
+            // The premise [`Self::ploidy`] rests on, checked rather than assumed. A genotype
+            // table's rows all sum to the ploidy, but `genotype_allele_counts` arrives as a bare
+            // slice with no tie to any table, and until B2 nothing read its *values*. Now the
+            // inbreeding mixture adds `lgamma(Σα + m) − lgamma(Σα)` to one branch only, so a wrong
+            // `m` is not a shared constant the row can carry — it re-weights the mixture. Measured
+            // on a diploid biallelic table whose first row was edited to `[6, 0]`: the
+            // homozygous-reference entry moved 5.89 nats, with nothing raised in either profile.
+            let ploidy: u32 = genotype_allele_counts[..allele_count].iter().sum();
+            // Held in release, because a zero here does not corrupt the row loudly: it makes the
+            // correction `lgamma(Σα) − lgamma(Σα)`, which is zero, so the mixture silently reverts
+            // to the unscaled one this step exists to fix. `Ploidy` refuses zero outright, and so
+            // does this.
+            assert!(
+                ploidy > 0,
+                "every genotype carries at least one copy of the genome, so the first genotype's \
+                 counts cannot sum to zero: {:?} over {allele_count} alleles",
+                &genotype_allele_counts[..allele_count]
+            );
+            // Debug-only, like every other check on the *values* in these buffers: it is O(rows)
+            // and a disagreement mis-weights a prior rather than mis-shaping any output.
+            debug_assert!(
+                genotype_allele_counts
+                    .chunks_exact(allele_count)
+                    .all(|counts| counts.iter().sum::<u32>() == ploidy),
+                "every genotype's copy counts must sum to the same ploidy ({ploidy} from the first \
+                 genotype); they do not: {genotype_allele_counts:?} over {allele_count} alleles"
+            );
             Self {
                 concentration,
                 genotype_allele_counts,
@@ -306,8 +333,13 @@ mod checked {
         ///
         /// Read off the first genotype's copy counts rather than carried as a field: every
         /// genotype's counts sum to the ploidy — that is what makes a genotype a genotype — so
-        /// the first row is as good as a stored number and cannot disagree with the table it
-        /// came from. The row is never empty, which [`Self::new`] holds in release.
+        /// the first row is as good as a stored number.
+        ///
+        /// **That premise is checked, not assumed.** The counts arrive as a bare slice with no tie
+        /// to any genotype table, so [`Self::new`] refuses a first row summing to zero in release
+        /// and, in debug, a table whose genotypes disagree on the total. Without those, a mis-built
+        /// count array would re-weight the inbreeding mixture — the correction it feeds sits on one
+        /// branch only — and nothing would be raised.
         #[inline]
         pub fn ploidy(&self) -> u32 {
             self.genotype_allele_counts[..self.concentration.allele_count()]
@@ -471,6 +503,18 @@ pub enum SeedRegime {
 /// normalised log-probabilities. The genotype-independent term of the exact
 /// Dirichlet-multinomial is dropped because it cancels when the loop rescales the row, so an
 /// entry may be positive and the row does not sum to anything in particular (spec §3.1).
+///
+/// **An entry may be `f64::NEG_INFINITY`, and at least one entry is always finite.** A genotype
+/// the prior rules out entirely — every heterozygote at `F = 1` — is written as `−∞` rather than
+/// floored, which after the loop rescales the row is a weight of exactly zero. **This is the one
+/// place the implementation and the design documents disagree**, and it is unresolved: spec §8,
+/// spec §12 test 3 and arch §1.1 all say such a genotype should carry
+/// [`PROBABILITY_FLOOR`](crate::genetics::PROBABILITY_FLOOR) instead, while production's own
+/// mixture — the thing this is a port of — produces `−∞` exactly as this does. It matters for more
+/// than tidiness: the comparator arriving at plan step F1 is ported from
+/// `wright_genotype_log_priors`, which *does* floor, so until this is settled the two
+/// implementations behind this seam would differ by convention as well as by model. **Whichever
+/// way it is settled, it is settled here, in the contract, not in one implementation's tests.**
 ///
 /// **Same inputs, bit-identical rows, at any thread count.** No RNG, no clock, no
 /// thread-dependent iteration order.
@@ -940,5 +984,56 @@ mod tests {
     #[should_panic(expected = "alternative concentration total must be finite and non-negative")]
     fn a_seed_with_a_negative_alternative_total_is_refused() {
         let _ = SpectrumSeed::new(1.0, -1e-3, SeedRegime::NeutralShape);
+    }
+
+    /// **A first genotype whose copies sum to zero is refused in release, not only in debug.**
+    ///
+    /// It is the one mis-shaped count array that fails quietly: [`PriorRow::ploidy`] returns 0, the
+    /// inbreeding mixture's correction becomes `lgamma(Σα) − lgamma(Σα)` — exactly zero — and the
+    /// mixture silently reverts to the unscaled one that made an inbred sample's heterozygote up to
+    /// 3,600 times too likely. `Ploidy` refuses zero outright and so does this.
+    #[test]
+    #[should_panic(expected = "cannot sum to zero")]
+    fn a_first_genotype_carrying_no_copies_is_refused() {
+        let table = table_for(2, 2);
+        let view = table.view();
+        let mut zeroed = view.genotype_allele_counts().to_vec();
+        zeroed[0] = 0;
+        zeroed[1] = 0;
+        let mut scratch = [0.0; 2];
+        let mut out = [LogProb(0.0); 3];
+        bundle_with(
+            view.log_multinomial_coeffs(),
+            view.homozygous_alleles(),
+            &zeroed,
+            &mut scratch,
+            &mut out,
+        );
+    }
+
+    /// **Genotypes that disagree on how many copies they carry are refused in debug.**
+    ///
+    /// Debug rather than release because it is O(genotypes) and because a disagreement mis-weights
+    /// a prior rather than mis-shaping any output — the line this module draws for every check on
+    /// the *values* in these buffers. Measured on a diploid biallelic table whose first row was
+    /// edited to `[6, 0]`: the homozygous-reference log-prior moved 5.89 nats and nothing was
+    /// raised before this check existed.
+    #[test]
+    #[should_panic(expected = "must sum to the same ploidy")]
+    #[cfg(debug_assertions)]
+    fn genotypes_that_disagree_on_the_copy_count_are_refused_in_debug() {
+        let table = table_for(2, 2);
+        let view = table.view();
+        let mut disagreeing = view.genotype_allele_counts().to_vec();
+        disagreeing[0] = 6;
+        let mut scratch = [0.0; 2];
+        let mut out = [LogProb(0.0); 3];
+        bundle_with(
+            view.log_multinomial_coeffs(),
+            view.homozygous_alleles(),
+            &disagreeing,
+            &mut scratch,
+            &mut out,
+        );
     }
 }

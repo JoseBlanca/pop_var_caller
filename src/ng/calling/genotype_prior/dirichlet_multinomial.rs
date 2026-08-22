@@ -161,42 +161,88 @@ fn one_genotypes_log_prior(
 /// probability, so mixing the two directly inflates the random-mating branch by `Σα(Σα + 1)` at
 /// diploidy and the inbreeding coefficient does a fraction of the work it should.
 ///
-/// **Measured at the concentration this caller ships.** One sample at tomato1's fitted diversity
-/// of 6 in 10,000, biallelic diploid: without the correction the heterozygote-to-hom-alt prior
-/// ratio is 0.400 at `F = 0.8` where the model says 0.222, and 0.200 at `F = 0.9` against 0.105
-/// — a heterozygote made about 1.8 times as likely as it should be, in the direction this caller
-/// is already weakest. With it, the row matches the Wright formulas to one part in a million in
-/// the concentrated limit, which is the test below.
+/// **Measured, biallelic diploid, at tomato1's fitted diversity of 6 in 10,000.** Read the
+/// heterozygote-to-homozygous-alternative prior ratio, which is what the coefficient is for. An
+/// outbred sample sits at 2:1; the more inbred the sample, the further below that it should fall.
+///
+/// ```text
+///                     outbred    what the model says    what the uncorrected
+///                     (F = 0)    at F = 0.8             mixture gives at F = 0.8
+///   1 sample             2.00           0.222                    0.400
+///   50 samples         188.7            0.493                  181.8
+///   1,000 samples     1818              0.499                 1816.5
+/// ```
+///
+/// At **one sample** the uncorrected mixture makes a heterozygote 1.80 times as likely as it
+/// should be (1.90 at `F = 0.9`) — the ratio still travels 90% of the way from the outbred value
+/// to the right one. **At cohort scale it barely moves at all**: 50 samples leave it 3.6% of the
+/// way and 1,000 samples 0.09%, so an inbreeding coefficient of 0.8 buys almost nothing. The
+/// reason is that the concentration this function is handed is the leave-one-out one (spec §6), so
+/// `Σα` grows with the cohort and the inflation factor `Σα(Σα + 1)` grows with its square.
+///
+/// With the correction the row matches Wright's formulas to **1.9e-5** in the concentrated limit,
+/// inside the `1e-4` the test below allows.
 ///
 /// **Production has the defect and it is live rather than latent.** Its engine mixes the same
-/// two scales (`posterior_engine.rs`), and its own default inbreeding coefficient is `0`, where
-/// the branch short-circuits away and nothing shows — but its pipeline passes the cohort's
-/// *fitted* coefficient, so any run on an inbred panel meets it. ng corrects it deliberately
-/// (owner, 2026-08-22); this is the one place the port departs from what it was ported from, and
-/// spec §3.1's "the constant cancels" needs the qualification that it cancels in a row and not
-/// in a mixture.
+/// two scales (`posterior_engine.rs`), and its own *default* inbreeding coefficient is `0`, where
+/// the branch short-circuits away and nothing shows — but the pipeline also hands the engine the
+/// per-sample coefficients the diversity estimator **fitted**, as overrides, and those are not
+/// zero on an inbred panel (`var_calling/pipeline.rs`, `with_fixation_index_overrides`). ng
+/// corrects it deliberately (owner, 2026-08-22); this is the one place the port departs from what
+/// it was ported from, and spec §3.1's "the constant cancels" needs the qualification that it
+/// cancels in a row and not in a mixture.
+///
+/// ## Where this term stops being computable
+///
+/// `lgamma(Σα + m) − lgamma(Σα)` subtracts two nearly equal numbers of order `Σα·ln Σα`, so it
+/// loses precision as `Σα` grows. Measured as the row's departure from one unit of probability,
+/// biallelic, ploidy 2 and 8, `F` up to 0.95: **1.5e-11 at `Σα = 7.2e3`** — about 3,600 diploid
+/// samples, past the top of the committed cohort range — rising to 9.1e-11 at 1.2e5, **1.1e-9 at
+/// 1.2e6** and 2.8e-7 at 1.2e8. Nothing in the caller's range is affected; the figure at 1.2e6 is
+/// worth knowing because [`the_concentrated_limit_matches_the_wright_formulas`] drives `Σα` there
+/// deliberately, which is why the normalisation identity is not also run at that total.
 ///
 /// **The correction is added to the identical-by-descent branch rather than subtracted from the
 /// other**, which is the same mixture up to the shared constant a row is allowed to carry, and
 /// leaves an outbred sample's row bit-identical to the primitive's.
 ///
 /// A port of the mixture in `src/var_calling/posterior_engine.rs`, in its two-branch form.
+///
+/// **Derives `Debug` like every other public type in this module**, so a `&dyn GenotypePriorModel`
+/// can be printed: the seam exists to compare two priors, and a result that cannot name which one
+/// produced it is not auditable after the fact (spec §2.2).
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct MarginalizedDirichletPrior;
 
 impl GenotypePriorModel for MarginalizedDirichletPrior {
     fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF) {
-        fill_marginalized_log_priors(row, inbreeding.get());
+        fill_inbreeding_mixture_log_priors(row, inbreeding.get());
     }
 }
 
 /// The mixture on a bare coefficient rather than on the newtype.
 ///
 /// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model and not a
-/// case the caller meets: production's estimator clamps at 0.99, and ng's newtype is to be tightened
-/// to `[0, 1)` by the prerequisites plan, so nothing will be able to hand the trait a 1. The limit
-/// is still worth pinning — at `F = 1` every heterozygote becomes impossible, and the two
+/// case the caller is meant to meet: production's estimator clamps at 0.99, and ng's newtype is to
+/// be tightened to `[0, 1)` by the prerequisites plan. **That tightening has not happened** —
+/// [`InbreedingF::try_new(1.0)`](crate::ng::types::InbreedingF::try_new) returns `Ok` today — so
+/// `F = 1` is reachable through the trait as well, and both spellings are pinned by tests. The
+/// limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the two
 /// homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
-fn fill_marginalized_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
+///
+/// **This is not a test-only path**, whatever its reason for existing: the trait implementation
+/// above routes every caller through it, which is why the coefficient is checked here rather than
+/// left to the newtype. The check is `debug_assert!`, which is where this module puts every *value*
+/// check (`Concentration::new`); the structural checks that guard silent truncation are the ones
+/// held in release.
+fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
+    debug_assert!(
+        (0.0..=1.0).contains(&inbreeding),
+        "the inbreeding coefficient must be a fraction in [0, 1]; got {inbreeding}. A value \
+         outside it — or a NaN — makes the whole row NaN rather than failing, and a negative one \
+         poisons only the homozygotes, which normalises to a plausible wrong answer"
+    );
+
     fill_random_mating_log_priors(row);
 
     let concentration = row.concentration().get();
@@ -209,25 +255,29 @@ fn fill_marginalized_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     // back — on this branch rather than taken off the other, so that at `F = 0` the row is the
     // primitive's bit for bit and nothing downstream of an outbred sample shifts. See the
     // function's doc for why dropping it is safe in a row and not in a mixture.
-    let scale_of_the_random_branch =
+    let shared_normalising_term =
         lgamma(concentration_total + f64::from(row.ploidy())) - lgamma(concentration_total);
-    // `ln(0)` is `−∞` and that is the wanted value in both directions: at `F = 0` the
-    // identical-by-descent branch is impossible, at `F = 1` the independent-draws branch is.
-    let log_inbreeding = inbreeding.ln();
-    let log_outbreeding = (1.0 - inbreeding).ln();
+    // The two mixture weights. `ln(0)` is `−∞` and that is the wanted value in both directions: at
+    // `F = 0` the identical-by-descent branch is impossible, at `F = 1` the independent-draws
+    // branch is.
+    let log_weight_identical_by_descent = inbreeding.ln();
+    let log_weight_independent_draws = (1.0 - inbreeding).ln();
 
     let (_, out) = row.scratch_and_out();
+    // `zip` would truncate to the shorter of the two, which is the silent failure this module's
+    // own doc names as the worst available here — `PriorRow::new` holds their equality in release
+    // so it cannot happen.
     for (slot, homozygous) in out.iter_mut().zip(homozygous_allele_for) {
-        let independent_draws = log_outbreeding + slot.get();
+        let independent_draws = log_weight_independent_draws + slot.get();
         *slot = LogProb(match homozygous {
             // The homozygous test is this lookup and nothing else — no comparison of the copy
             // counts anywhere in this function. That is what gives the above-diploidy question one
             // place to change (spec §3.3).
             Some(allele) => {
-                let identical_by_descent = log_inbreeding
+                let identical_by_descent = log_weight_identical_by_descent
                     + concentration[usize::from(allele.0)].ln()
                     - log_concentration_total
-                    + scale_of_the_random_branch;
+                    + shared_normalising_term;
                 log_sum_exp_2(independent_draws, identical_by_descent)
             }
             None => independent_draws,
@@ -237,11 +287,25 @@ fn fill_marginalized_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 
 /// `ln(e^a + e^b)`, shifted by the larger so neither exponential overflows.
 ///
-/// **Both short-circuits are load-bearing rather than defensive.** At `F = 0` the
-/// identical-by-descent branch is `−∞` on every homozygous genotype and at `F = 1` the
-/// independent-draws branch is `−∞` on every genotype, so these are the ordinary cases and not
-/// edge ones — and without the first, `−∞ − −∞` would make every row `NaN`. Ported from the same
-/// engine as the mixture.
+/// **The two `−∞` short-circuits are a saving and a floor — not a correctness guard on any row
+/// this caller can produce.** An earlier version of this comment claimed otherwise and was wrong;
+/// it is recorded here because the claim reads as load-bearing and is cheap to believe. Measured:
+/// delete either short-circuit, or both, and every entry of every fixture in this module is
+/// bit-identical. The general path already returns the finite argument exactly when the other is
+/// `−∞`, because `a.max(b)` picks the finite one and `ln(1 + 0)` is `0`.
+///
+/// What they do buy is two things:
+///
+/// - **A pair of `−∞` arguments returns `−∞` rather than `NaN`.** `−∞ − −∞` is the only route to a
+///   `NaN` here and it needs *both* branches impossible at once — `F = 0` and `F = 1` together, or
+///   a concentration entry of zero, which [`Concentration::new`](super::Concentration) refuses.
+/// - **A saving on the ordinary case.** At `F = 0` the identical-by-descent branch is `−∞` on every
+///   homozygous genotype, so the *second* short-circuit fires there and skips two `exp` and a `ln`
+///   per homozygote; at `F = 1` the independent-draws branch is `−∞` everywhere and the *first*
+///   fires. (Which guard covers which end is easy to get backwards — the first tests `a`, the
+///   independent-draws argument.)
+///
+/// Ported from the same engine as the mixture, whose own comment gives the saving as the reason.
 #[inline]
 fn log_sum_exp_2(a: f64, b: f64) -> f64 {
     if a == f64::NEG_INFINITY {
@@ -580,7 +644,7 @@ mod tests {
             &mut scratch,
             &mut out,
         );
-        fill_marginalized_log_priors(&mut row, inbreeding);
+        fill_inbreeding_mixture_log_priors(&mut row, inbreeding);
         out
     }
 
@@ -634,6 +698,18 @@ mod tests {
     /// is biallelic-diploid by construction, so without this one a correction that hard-coded the
     /// ploidy at 2 passes the whole module — measured, it did. It is also what would catch the
     /// correction being dropped again.
+    ///
+    /// **The reference entry runs to 6,001, and that is the other load-bearing part.** What the
+    /// mixture is handed is the leave-one-out concentration (spec §6) — near 1 at one sample and
+    /// near 2,000 at a thousand diploid ones — and at 1.0 alone a `Σα` that hard-codes the
+    /// reference entry is indistinguishable from the true one. Measured: such an implementation
+    /// leaves this identity at 4.0e-15 with the reference pinned at 1.0, and misses by 0.95 once
+    /// it reaches 6,001. This is the same narrowing that B1's parity grid was widened to fix.
+    ///
+    /// Worst error over the whole grid on the correct code is **1.5e-11**, against the `1e-9`
+    /// budget. The budget is not widened for the large totals because the term's own precision is
+    /// what sets it: past `Σα` of about a million the identity would need a looser one (see
+    /// [`fill_inbreeding_mixture_log_priors`]), and no cohort in range reaches that.
     #[test]
     fn the_mixed_row_is_a_probability_distribution_once_its_shared_constant_is_removed() {
         for (copies, allele_count) in [
@@ -649,19 +725,27 @@ mod tests {
         ] {
             for inbreeding in [0.0, 0.25, 0.8, 0.95] {
                 for alternative_total in [1e-3, 1e-2, 0.5] {
-                    let concentration = concentration_of(allele_count, 1.0, alternative_total);
-                    let total: f64 = concentration.iter().sum();
-                    let shared_constant = crate::genetics::lgamma(total + f64::from(copies))
-                        - crate::genetics::lgamma(total);
-                    let row =
-                        mixed_row_for(copies, allele_count, 1.0, alternative_total, inbreeding);
-                    let mass: f64 = row.iter().map(|p| (p.get() - shared_constant).exp()).sum();
-                    assert!(
-                        (mass - 1.0).abs() < 1e-9,
-                        "ploidy {copies}, {allele_count} alleles, F {inbreeding}, alternative \
-                         total {alternative_total}: the row carries {mass} rather than one unit \
-                         of probability"
-                    );
+                    for reference in [1.0, 201.0, 2001.0, 6001.0] {
+                        let concentration =
+                            concentration_of(allele_count, reference, alternative_total);
+                        let total: f64 = concentration.iter().sum();
+                        let shared_constant = crate::genetics::lgamma(total + f64::from(copies))
+                            - crate::genetics::lgamma(total);
+                        let row = mixed_row_for(
+                            copies,
+                            allele_count,
+                            reference,
+                            alternative_total,
+                            inbreeding,
+                        );
+                        let mass: f64 = row.iter().map(|p| (p.get() - shared_constant).exp()).sum();
+                        assert!(
+                            (mass - 1.0).abs() < 1e-9,
+                            "ploidy {copies}, {allele_count} alleles, F {inbreeding}, reference \
+                             {reference}, alternative total {alternative_total}: the row carries \
+                             {mass} rather than one unit of probability"
+                        );
+                    }
                 }
             }
         }
@@ -717,9 +801,17 @@ mod tests {
     /// approached** — which is what makes the oracle a check rather than a coincidence.
     ///
     /// The Dirichlet-multinomial reaches Wright's formulas only as `Σα → ∞`; at a finite total the
-    /// gap is of order `1/Σα`. Measured here across four decades of total: each tenfold rise in the
+    /// gap is of order `1/Σα`. Measured at four totals a decade apart: each tenfold rise in the
     /// concentration shrinks the disagreement by about tenfold, so a tolerance that passed at
     /// `Σα = 1e6` for the wrong reason would not narrow with it.
+    ///
+    /// **The first total carries an assertion too**, which it did not when the accumulator started
+    /// at `f64::INFINITY` — three of the four comparisons were real and the first was
+    /// `gap < INFINITY`. It is seeded instead with a measured bound: the four gaps are 1.10e-2,
+    /// 1.11e-3, 1.11e-4 and 1.11e-5, and 1e-1 puts the first threshold at 2e-2, comfortably above
+    /// the 1.10e-2 the correct code produces and far below the **7.98e-1** the uncorrected mixture
+    /// produces there — so the seed is what makes the dropped correction fail on the first
+    /// iteration rather than the second.
     #[test]
     fn the_wright_agreement_closes_as_the_concentration_grows() {
         let frequency = 0.2;
@@ -728,17 +820,26 @@ mod tests {
             crate::genetics::wright_genotype_log_priors(frequency, inbreeding);
         let wright_het_over_hom_ref = heterozygote - hom_reference;
 
-        let mut previous_gap = f64::INFINITY;
+        // Seeded with a measured bound rather than `f64::INFINITY`, so the first total carries an
+        // assertion too. See this test's doc for the four gaps and why 1e-1 is the seed.
+        let mut previous_gap = 1e-1;
+        let mut budget_is_a_seed = true;
         for total in [1e2, 1e3, 1e4, 1e5] {
             let alternative = total * frequency;
             let row = mixed_row_for(2, 2, total - alternative, alternative, inbreeding);
             let gap = ((row[1].get() - row[0].get()) - wright_het_over_hom_ref).abs();
+            let comparand = if budget_is_a_seed {
+                "the seeded bound"
+            } else {
+                "the gap at a tenth the concentration"
+            };
             assert!(
                 gap < previous_gap / 5.0,
-                "at Σα {total} the gap to Wright was {gap}, not appreciably below the {previous_gap} \
-                 at a tenth the concentration — the limit is not being approached"
+                "at Σα {total} the gap to Wright was {gap}, not a fifth of {previous_gap} \
+                 ({comparand}) — the limit is not being approached"
             );
             previous_gap = gap;
+            budget_is_a_seed = false;
         }
     }
 
@@ -806,7 +907,7 @@ mod tests {
             &mut scratch,
             &mut lied_to,
         );
-        fill_marginalized_log_priors(&mut row, inbreeding);
+        fill_inbreeding_mixture_log_priors(&mut row, inbreeding);
 
         let (random_mating, _) = row_for(2, 2, 1.0, 1e-2);
         let log_outbreeding = (1.0 - inbreeding).ln();
@@ -858,5 +959,238 @@ mod tests {
             previous < 0.2,
             "at F = 0.95 the het:hom-alt ratio should be far under 2:1, got {previous}"
         );
+    }
+
+    /// Run the mixture **through the seam**, exactly as every caller outside this file will.
+    fn seam_row_for(
+        copies: u8,
+        allele_count: usize,
+        reference: f64,
+        alternative_total: f64,
+        inbreeding: InbreedingF,
+    ) -> Vec<LogProb> {
+        let table = GenotypeTable::build(Ploidy::try_new(copies).unwrap(), allele_count);
+        let view = table.view();
+        let concentration = concentration_of(allele_count, reference, alternative_total);
+        let mut scratch = vec![0.0; allele_count];
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut row = PriorRow::new(
+            Concentration::new(&concentration),
+            view.genotype_allele_counts(),
+            view.log_multinomial_coeffs(),
+            view.homozygous_alleles(),
+            &mut scratch,
+            &mut out,
+        );
+        MarginalizedDirichletPrior.fill_genotype_log_priors(&mut row, inbreeding);
+        out
+    }
+
+    /// **The trait implementation is the only thing outside this file can reach, and every other
+    /// test here drives the private function instead** — so this is what ties the two together.
+    ///
+    /// The three lines of the implementation are where the coefficient could be dropped, clamped or
+    /// inverted, and none of it is visible to a test that calls the mixture directly. Measured: an
+    /// implementation that ignored the coefficient and called the random-mating primitive left the
+    /// whole module green while moving the het:hom-alt ratio at `F = 0.95` from 0.051 to 1.980 —
+    /// 39-fold, about 16 on the Phred scale.
+    ///
+    /// Bit equality against the bare-coefficient spelling, so the two cannot drift apart, plus one
+    /// assertion that the coefficient reached the mixture at all.
+    #[test]
+    fn the_seam_and_the_bare_coefficient_agree_and_both_carry_the_inbreeding_coefficient() {
+        for (copies, allele_count) in [(1_u8, 2_usize), (2, 2), (2, 4), (4, 3)] {
+            for inbreeding in [0.0, 0.2, 0.8, 0.95] {
+                let through_the_seam = seam_row_for(
+                    copies,
+                    allele_count,
+                    1.0,
+                    1e-2,
+                    InbreedingF::try_new(inbreeding).unwrap(),
+                );
+                let directly = mixed_row_for(copies, allele_count, 1.0, 1e-2, inbreeding);
+                for (genotype, (seam, direct)) in through_the_seam.iter().zip(&directly).enumerate()
+                {
+                    assert_eq!(
+                        seam.get().to_bits(),
+                        direct.get().to_bits(),
+                        "ploidy {copies}, {allele_count} alleles, F {inbreeding}, genotype \
+                         {genotype}: the seam wrote {} and the bare coefficient {}",
+                        seam.get(),
+                        direct.get()
+                    );
+                }
+            }
+        }
+
+        // And the coefficient is not merely passed but used: at a biallelic diploid locus an
+        // implementation that dropped it would leave the outbred 2:1 ratio in place.
+        let inbred = seam_row_for(2, 2, 1.0, 1e-2, InbreedingF::try_new(0.95).unwrap());
+        let ratio = (inbred[1].get() - inbred[2].get()).exp();
+        assert!(
+            ratio < 0.1,
+            "at F = 0.95 the het:hom-alt ratio through the seam should be far under 2:1, got \
+             {ratio}"
+        );
+    }
+
+    /// **The full-inbreeding limit on the path a caller actually takes.**
+    ///
+    /// [`at_full_inbreeding_only_the_homozygotes_survive_and_they_stand_at_the_concentration_ratio`]
+    /// drives the bare coefficient because [`InbreedingF`] is *to be* tightened to `[0, 1)`. It has
+    /// not been — measured, `InbreedingF::try_new(1.0)` returns `Ok` on this commit — so the limit
+    /// is reachable through the seam today and is pinned there too.
+    ///
+    /// **When the tightening lands this constructor stops returning `Ok`**, and that is the signal
+    /// to move this test to the largest coefficient the newtype then accepts rather than to delete
+    /// it.
+    #[test]
+    fn the_seam_rules_out_heterozygotes_at_the_greatest_coefficient_the_newtype_accepts() {
+        let one = InbreedingF::try_new(1.0)
+            .expect("InbreedingF still accepts 1.0; tighten this test when it stops");
+        for alternative_total in [1e-3, 1e-2, 0.25] {
+            let row = seam_row_for(2, 2, 1.0, alternative_total, one);
+            assert_eq!(
+                row[1].get(),
+                f64::NEG_INFINITY,
+                "the heterozygote must be impossible at F = 1, got {}",
+                row[1].get()
+            );
+            assert!(
+                row[0].get().is_finite() && row[2].get().is_finite(),
+                "both homozygotes must stay finite: {:?}",
+                row.iter().map(|p| p.get()).collect::<Vec<_>>()
+            );
+            let ratio = (row[0].get() - row[2].get()).exp();
+            assert!(
+                (ratio - 1.0 / alternative_total).abs() / (1.0 / alternative_total) < 1e-12,
+                "hom-ref : hom-alt was {ratio}, not the concentration ratio {}",
+                1.0 / alternative_total
+            );
+        }
+    }
+
+    /// **The `−∞` guards, pinned directly**, because no row fixture can fail on them.
+    ///
+    /// Measured: delete either guard, or both, and every entry of every row in this module is
+    /// bit-identical — the unguarded path computes `a + ln(1 + 0)`, which is `a` exactly. What the
+    /// guards genuinely decide is the both-`−∞` pair, which without them is `−∞ − −∞` and so a
+    /// `NaN`. That pair means both branches of the mixture are impossible, and the answer to it is
+    /// an impossible genotype, not a missing number.
+    #[test]
+    fn log_sum_exp_2_returns_the_finite_argument_when_the_other_is_impossible() {
+        assert_eq!(log_sum_exp_2(f64::NEG_INFINITY, -3.5), -3.5);
+        assert_eq!(log_sum_exp_2(-3.5, f64::NEG_INFINITY), -3.5);
+        assert_eq!(
+            log_sum_exp_2(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            f64::NEG_INFINITY,
+            "two impossible branches make an impossible genotype, not a NaN"
+        );
+        // The ordinary case is still the log-sum-exp: ln(e^0 + e^0) = ln 2.
+        assert!((log_sum_exp_2(0.0, 0.0) - std::f64::consts::LN_2).abs() < 1e-15);
+        // And the shift by the larger argument is what keeps it finite when one side is far away:
+        // without it `exp(-800)` underflows to zero and `exp(800)` overflows to infinity.
+        assert!((log_sum_exp_2(-800.0, -800.0) - (-800.0 + std::f64::consts::LN_2)).abs() < 1e-12);
+    }
+
+    /// **At haploidy the coefficient can do nothing, and every entry goes through the mixture.**
+    ///
+    /// One copy is one draw, so "the copies are one ancestral copy counted twice" and "the copies
+    /// are independent draws" are the same statement, and the mixture must return the random-mating
+    /// row whatever `F` is. Every haploid genotype is homozygous, which makes this the only test
+    /// where the identical-by-descent branch fires on *every* genotype — a stronger check on the
+    /// two branches being on one scale than the row adding to one, because they have to coincide
+    /// entry by entry rather than in total.
+    ///
+    /// A tolerance rather than bit equality: measured, `F = 0.95` moves an entry by about 1.4e-17,
+    /// the rounding of adding two logarithms that cancel.
+    #[test]
+    fn a_haploid_row_is_unmoved_by_the_inbreeding_coefficient() {
+        for allele_count in [1_usize, 2, 3, 6] {
+            for alternative_total in [1e-4, 1e-2, 0.5] {
+                let (random_mating, _) = row_for(1, allele_count, 1.0, alternative_total);
+                for inbreeding in [0.0, 0.25, 0.8, 0.95] {
+                    let mixed = mixed_row_for(1, allele_count, 1.0, alternative_total, inbreeding);
+                    for (genotype, (mixed, random)) in mixed.iter().zip(&random_mating).enumerate()
+                    {
+                        assert!(
+                            (mixed.get() - random.get()).abs() < 1e-12,
+                            "{allele_count} alleles, alternative total {alternative_total}, F \
+                             {inbreeding}, genotype {genotype}: haploid mixture {} against \
+                             random-mating {}",
+                            mixed.get(),
+                            random.get()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A locus with one allele has one genotype and `α_0 / Σα = 1`, so both branches say the same
+    /// thing** — the row is the primitive's whatever `F` is.
+    ///
+    /// The degenerate case of the correction being exactly right, at every ploidy, and a shape the
+    /// other mixture tests reach only at `F = 0`. A tolerance rather than bit equality: measured,
+    /// `F = 0.95` moves it by one unit in the last place.
+    #[test]
+    fn a_monomorphic_locus_is_unmoved_by_the_inbreeding_coefficient() {
+        for copies in [1_u8, 2, 4, 8] {
+            let (random_mating, _) = row_for(copies, 1, 1.0, 0.0);
+            assert_eq!(random_mating.len(), 1);
+            for inbreeding in [0.0, 0.5, 0.95, 1.0] {
+                let mixed = mixed_row_for(copies, 1, 1.0, 0.0, inbreeding);
+                assert!(
+                    (mixed[0].get() - random_mating[0].get()).abs() < 1e-12,
+                    "ploidy {copies}, F {inbreeding}: a monomorphic locus moved from {} to {}",
+                    random_mating[0].get(),
+                    mixed[0].get()
+                );
+            }
+        }
+    }
+
+    /// **`ploidy()` reads one genotype's copy counts rather than a stored number**, so this pins
+    /// both halves of that: that the slice it reads is exactly one genotype wide at every shape —
+    /// including the one-allele table, where over-reaching would run off the end of a one-row
+    /// table — and that the premise it rests on holds, every genotype summing to the same count.
+    ///
+    /// The mixture adds `lgamma(Σα + m) − lgamma(Σα)` to one branch only, so a wrong `m` is not a
+    /// shared constant: it re-weights the mixture.
+    #[test]
+    fn ploidy_returns_the_copy_count_every_genotype_sums_to() {
+        for copies in [1_u8, 2, 3, 4, 6, 8] {
+            for allele_count in [1_usize, 2, 3, 6] {
+                let table = GenotypeTable::build(Ploidy::try_new(copies).unwrap(), allele_count);
+                let view = table.view();
+                let concentration = concentration_of(allele_count, 1.0, 1e-2);
+                let mut scratch = vec![0.0; allele_count];
+                let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+                let row = PriorRow::new(
+                    Concentration::new(&concentration),
+                    view.genotype_allele_counts(),
+                    view.log_multinomial_coeffs(),
+                    view.homozygous_alleles(),
+                    &mut scratch,
+                    &mut out,
+                );
+                assert_eq!(
+                    row.ploidy(),
+                    u32::from(copies),
+                    "ploidy {copies}, {allele_count} alleles"
+                );
+                for (genotype, copies_of) in view
+                    .genotype_allele_counts()
+                    .chunks_exact(allele_count)
+                    .enumerate()
+                {
+                    assert_eq!(
+                        copies_of.iter().sum::<u32>(),
+                        u32::from(copies),
+                        "ploidy {copies}, {allele_count} alleles, genotype {genotype}"
+                    );
+                }
+            }
+        }
     }
 }
