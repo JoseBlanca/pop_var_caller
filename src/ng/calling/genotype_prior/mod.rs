@@ -72,6 +72,8 @@
 //! `doc/devel/ng/arch/calling_priors.md`.
 
 pub mod dirichlet_multinomial;
+
+pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub mod hardy_weinberg;
 pub mod seed_generic;
 pub mod seed_ssr;
@@ -298,6 +300,19 @@ mod checked {
         #[inline]
         pub fn genotype_count(&self) -> usize {
             self.log_multinomial_coeffs.len()
+        }
+
+        /// How many copies of the genome the sample has at this locus.
+        ///
+        /// Read off the first genotype's copy counts rather than carried as a field: every
+        /// genotype's counts sum to the ploidy — that is what makes a genotype a genotype — so
+        /// the first row is as good as a stored number and cannot disagree with the table it
+        /// came from. The row is never empty, which [`Self::new`] holds in release.
+        #[inline]
+        pub fn ploidy(&self) -> u32 {
+            self.genotype_allele_counts[..self.concentration.allele_count()]
+                .iter()
+                .sum()
         }
 
         /// Copies of each allele per genotype, `genotype_count × allele_count`, row-major.

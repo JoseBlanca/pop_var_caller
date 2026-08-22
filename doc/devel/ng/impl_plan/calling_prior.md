@@ -139,7 +139,7 @@ independent implementation, not golden values, so it keeps checking after consta
 §12 test 4). Keep production's release-mode structural assertions (a short coefficient array
 silently truncates the iteration otherwise). *Source:* spec §3.1, §8, §9; arch §6.
 
-**B2. `MarginalizedDirichletPrior` — the two-branch inbreeding mixture.**  ☐
+**B2. `MarginalizedDirichletPrior` — the two-branch inbreeding mixture.**  ✅ *(review owed)*
 §3.2's mixture over the primitive: `logsumexp` on rows where `homozygous_allele_for` names an
 allele, `log(1 − F)` alone elsewhere. **The homozygous test is the table's precomputed lookup,
 consumed — never an inline comparison** (the one function the above-diploidy spec will change).
