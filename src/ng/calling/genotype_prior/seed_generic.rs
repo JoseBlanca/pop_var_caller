@@ -27,8 +27,24 @@ use crate::ng::types::InbreedingF;
 /// the several thousand this caller commits to, and the total is within 2e-11 of one there.
 pub const MAX_PROJECTION_CONCENTRATION: f64 = 1e6;
 
+/// How far below the most likely one a branch split's probability may fall before it is dropped
+/// from the sum.
+///
+/// **Not an approximation in the usual sense: the error has a bound rather than an estimate.** For
+/// a fixed number of inbred individuals the classes are themselves a distribution summing to one,
+/// so dropping that split moves no class by more than its own probability, and the whole spectrum
+/// by no more than the dropped tail.
+///
+/// **Measured against the term-by-term sum, at tomato's fitted diversity and `F = 0.8`, this value
+/// costs nothing at all**: the worst class-by-class disagreement is 4e-13 at 800 and 1,600
+/// individuals and 1e-12 at 3,200, which is the same disagreement the untrimmed recurrence has —
+/// floating-point accumulation, not the trim. Loosening it does start to cost, and in proportion:
+/// `1e-8` gives 1e-9 and `1e-6` gives 1e-7. It buys 3 to 4-fold over not trimming at all
+/// (`examples/ng_spectrum_projection_cost.rs`).
+const BRANCH_TAIL_TOLERANCE: f64 = 1e-18;
+
 /// A branch split whose probability is below this cannot move any class by more than itself, so it
-/// is skipped rather than summed. See [`fill_expected_spectrum`]'s cost section.
+/// is skipped whatever [`BRANCH_TAIL_TOLERANCE`] says — it is below what a `f64` total can carry.
 const NEGLIGIBLE_BRANCH_WEIGHT: f64 = 1e-300;
 
 /// Fill `out` with **what fraction of sites carry the alternative allele on exactly `j` of a
@@ -51,8 +67,8 @@ const NEGLIGIBLE_BRANCH_WEIGHT: f64 = 1e-300;
 ///
 /// **Nothing is simulated.** The whole calculation is a finite sum of Beta-function ratios and
 /// binomial coefficients — no draws, no quadrature — so the same inputs give the same answer to
-/// the last bit at any panel size. The one departure from exactness is the skip described under
-/// cost, whose whole effect is bounded below `1e-300` per class.
+/// the last bit at any panel size. The one departure from exactness is the branch-tail trim
+/// described under cost, whose error is bounded and, at the tolerance shipped, not measurable.
 ///
 /// **That is what lets step D2's tests state a target rather than only a tolerance** (spec §12
 /// tests 5–7): a neutral panel's spectrum can be written down and the fit asked to return `(1, θ)`
@@ -86,24 +102,35 @@ const NEGLIGIBLE_BRANCH_WEIGHT: f64 = 1e-300;
 /// they would cancel catastrophically against a total that must come out at one. These do not
 /// cancel at all.
 ///
-/// ## What it costs, and where that bites
+/// ## What it costs
 ///
-/// About `N³/3` terms, and it grows like it: measured in release at `F = 0.8`, one prediction takes
-/// **241 µs at 63 individuals, 5.8 ms at 200, 43 ms at 400 and 354 ms at 800** — a factor of 8.2
-/// across the last doubling, so an exponent of 3.03. The `cost` test in this module prints them.
+/// **Paid once per *fit*, not once per run**: this function is the objective step D2 searches, so a
+/// multistart fit evaluates it on the order of a hundred times. Measured in release at tomato's
+/// fitted diversity and `F = 0.8`, one prediction:
 ///
-/// **It is paid once per *fit*, not once per run, and that is the difference that matters.** This
-/// function is the objective step D2 searches, so a multistart fit evaluates it on the order of a
-/// hundred times: about a minute at 800 individuals, and hours by several thousand. **Whether the
-/// projection can be run at the top of the committed cohort range is therefore step D2's question,
-/// not this one's**, and it has room to answer it — the fit could bin the classes, or cap the panel
-/// it projects at, without this function changing.
+/// ```text
+///   samples      400     800    1600    3200
+///   this        5.8ms  29.9ms   179ms   960ms
+///   term-by-term 43.8ms  340ms   2.1s   12.1s
+/// ```
 ///
-/// Two things already keep the constant down. The log-factorials are tabulated once per call
-/// rather than recomputed from `lgamma` at every term. And **branch splits too rare to matter are
-/// skipped**: the classes for a fixed `M` are themselves a distribution summing to one, so such a
-/// split can move no class by more than its own probability, which the skip holds below `1e-300`.
-/// Together they are worth about 15-fold — the same two panel sizes took 3.7 ms and 6.6 s before.
+/// About `N^2.45`, against `N^2.95` for the straight term-by-term sum — so a fit at the top of the
+/// committed cohort range is minutes rather than half an hour. Three things buy that, and none of
+/// them changes the model:
+///
+/// - the log-factorials are tabulated once per call rather than rebuilt from `lgamma` per term;
+/// - each term is written as **a beta-binomial weight times a hypergeometric one**, both genuine
+///   probabilities, so the hypergeometric can be stepped by an exact ratio instead of exponentiated
+///   — one exponential per `(split, draw count)` pair rather than one per term;
+/// - branch splits far out in their own tail are dropped, at [`BRANCH_TAIL_TOLERANCE`], whose
+///   error is bounded rather than estimated.
+///
+/// **The hypergeometric walk starts at its mode and goes out both ways, and that is not a
+/// refinement.** Started at the low end, the first weight underflows to zero long before the ones
+/// at the mode become small, and since the walk is multiplicative the whole row then vanishes.
+/// Measured at 1,600 individuals when it was written that way: one class came back 5.7e-16 against
+/// its true 6.1e-7, and the spectrum lost 3 parts in 10,000 of its mass — with every entry still
+/// finite and non-negative, so nothing downstream could have told.
 ///
 /// ## Preconditions and edges
 ///
@@ -159,27 +186,36 @@ pub fn fill_expected_spectrum(
     let f = inbreeding.get();
     let concentration_total = alpha_ref + alpha_alt;
     let log_pair_constant = lgamma(concentration_total) - lgamma(alpha_alt) - lgamma(alpha_ref);
-    // `ln k!` for every count this call can reach, filled once. The inner sum asks for binomial
-    // coefficients about `N³/3` times with heavily repeated arguments, and reading them from here
-    // rather than calling `lgamma` three times apiece is bit-identical and several times faster.
-    // It is the one allocation in this file, and it is per fit rather than per sample per pass —
-    // the no-allocation rule of spec §8 governs the row, not the seed.
+    // `ln k!` for every count this call can reach, filled once. The sum asks for binomial
+    // coefficients with heavily repeated arguments, and reading them from here rather than calling
+    // `lgamma` three times apiece is bit-identical and several times faster. It is the one
+    // allocation in this file, and it is per fit rather than per sample per pass — the
+    // no-allocation rule of spec §8 governs the row, not the seed.
     let log_factorial: Vec<f64> = (0..=2 * n + 1).map(|k| lgamma(k as f64 + 1.0)).collect();
     let log_binomial = |top: usize, chosen: usize| {
         log_factorial[top] - log_factorial[chosen] - log_factorial[top - chosen]
     };
 
-    for identical_by_descent in 0..=n {
-        let Some(log_branch_weight) = log_branch_split(n, identical_by_descent, f) else {
+    // How likely each split of the panel into inbred and outbred individuals is, and the likeliest
+    // of them — the tail is measured against that rather than against zero.
+    let splits: Vec<Option<f64>> = (0..=n)
+        .map(|identical_by_descent| log_branch_split(n, identical_by_descent, f))
+        .collect();
+    let tail_floor = splits
+        .iter()
+        .flatten()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+        + BRANCH_TAIL_TOLERANCE.ln();
+
+    for (identical_by_descent, split) in splits.iter().enumerate() {
+        let Some(log_branch_weight) = *split else {
             continue;
         };
-        // A branch split this improbable contributes at most its own weight to any one class,
-        // because the classes it spreads over are themselves a distribution summing to one. So
-        // dropping it moves every class by less than `NEGLIGIBLE_BRANCH_WEIGHT` and the whole
-        // spectrum by less than `N` times it — below anything a `f64` total can carry.
-        if log_branch_weight < NEGLIGIBLE_BRANCH_WEIGHT.ln() {
+        if log_branch_weight < tail_floor || log_branch_weight < NEGLIGIBLE_BRANCH_WEIGHT.ln() {
             continue;
         }
+        let branch_weight = log_branch_weight.exp();
         // The panel's distinct chromosomes: one for each identical-by-descent individual, two for
         // each of the others.
         let distinct = 2 * n - identical_by_descent;
@@ -187,21 +223,55 @@ pub fn fill_expected_spectrum(
         let log_draw_constant = log_pair_constant - lgamma(concentration_total + distinct as f64);
 
         for alternative_draws in 0..=distinct {
-            let log_frequency_weight = lgamma(alpha_alt + alternative_draws as f64)
+            // How likely it is that exactly this many of the distinct chromosomes carry the
+            // alternative allele — a beta-binomial weight, and a probability in its own right.
+            let draw_weight = (log_binomial(distinct, alternative_draws)
+                + lgamma(alpha_alt + alternative_draws as f64)
                 + lgamma(alpha_ref + (distinct - alternative_draws) as f64)
-                + log_draw_constant;
+                + log_draw_constant)
+                .exp();
+            if draw_weight == 0.0 {
+                continue;
+            }
 
-            // How many of the duplicated chromosomes are among the alternative draws. Each one
-            // contributes a second copy, so it moves the class up by one.
-            let doubled_lowest = alternative_draws.saturating_sub(single_chromosomes);
-            let doubled_highest = identical_by_descent.min(alternative_draws);
-            for doubled in doubled_lowest..=doubled_highest {
-                let class = alternative_draws + doubled;
-                out[class] += (log_branch_weight
-                    + log_binomial(identical_by_descent, doubled)
-                    + log_binomial(single_chromosomes, alternative_draws - doubled)
-                    + log_frequency_weight)
-                    .exp();
+            // How many of the duplicated chromosomes are among those draws. Each one contributes a
+            // second copy, so it moves the class up by one. Given the draw count this is a
+            // hypergeometric weight, walked out from its mode by an exact ratio — see the cost
+            // section for why the mode and not the low end.
+            let lowest = alternative_draws.saturating_sub(single_chromosomes);
+            let highest = identical_by_descent.min(alternative_draws);
+            let mode = (((alternative_draws + 1) * (identical_by_descent + 1)) / (distinct + 2))
+                .clamp(lowest, highest);
+            let at_mode = (log_binomial(identical_by_descent, mode)
+                + log_binomial(single_chromosomes, alternative_draws - mode)
+                - log_binomial(distinct, alternative_draws))
+            .exp();
+            let scale = branch_weight * draw_weight;
+            out[alternative_draws + mode] += scale * at_mode;
+
+            let step_up = |doubled: usize| {
+                let rise =
+                    ((identical_by_descent - doubled) * (alternative_draws - doubled)) as f64;
+                let fall = ((doubled + 1)
+                    * ((single_chromosomes + doubled + 1) - alternative_draws))
+                    as f64;
+                rise / fall
+            };
+            let mut climbing = at_mode;
+            for doubled in mode..highest {
+                climbing *= step_up(doubled);
+                if climbing == 0.0 {
+                    break;
+                }
+                out[alternative_draws + doubled + 1] += scale * climbing;
+            }
+            let mut falling = at_mode;
+            for doubled in (lowest..mode).rev() {
+                falling /= step_up(doubled);
+                if falling == 0.0 {
+                    break;
+                }
+                out[alternative_draws + doubled] += scale * falling;
             }
         }
     }
@@ -762,5 +832,118 @@ mod tests {
             );
             assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-9);
         }
+    }
+
+    /// The same sum, written the slow obvious way: **one exponential per term, nothing stepped and
+    /// nothing skipped**.
+    ///
+    /// This is what the shipped function computed before it was made fast, and it is kept because
+    /// it is the version whose agreement with three outside oracles was established — enumeration,
+    /// quadrature and a generating function. Every term is built independently from logarithms, so
+    /// a term that underflows was genuinely negligible; nothing here can lose a whole row the way
+    /// a multiplicative walk can.
+    fn term_by_term_spectrum(
+        alpha_ref: f64,
+        alpha_alt: f64,
+        individuals: u32,
+        inbreeding: f64,
+    ) -> Vec<f64> {
+        let n = individuals as usize;
+        let mut out = vec![0.0; 2 * n + 1];
+        if alpha_alt == 0.0 {
+            out[0] = 1.0;
+            return out;
+        }
+        let concentration_total = alpha_ref + alpha_alt;
+        let log_pair_constant = lgamma(concentration_total) - lgamma(alpha_alt) - lgamma(alpha_ref);
+        for identical_by_descent in 0..=n {
+            let Some(log_branch_weight) = log_branch_split(n, identical_by_descent, inbreeding)
+            else {
+                continue;
+            };
+            let distinct = 2 * n - identical_by_descent;
+            let singles = distinct - identical_by_descent;
+            let log_draw_constant =
+                log_pair_constant - lgamma(concentration_total + distinct as f64);
+            for alternative_draws in 0..=distinct {
+                let log_frequency_weight = lgamma(alpha_alt + alternative_draws as f64)
+                    + lgamma(alpha_ref + (distinct - alternative_draws) as f64)
+                    + log_draw_constant;
+                let lowest = alternative_draws.saturating_sub(singles);
+                let highest = identical_by_descent.min(alternative_draws);
+                for doubled in lowest..=highest {
+                    out[alternative_draws + doubled] += (log_branch_weight
+                        + log_binomial(identical_by_descent, doubled)
+                        + log_binomial(singles, alternative_draws - doubled)
+                        + log_frequency_weight)
+                        .exp();
+                }
+            }
+        }
+        out
+    }
+
+    /// **The fast sum and the slow obvious one agree class by class**, over panel sizes, both
+    /// concentrations and the whole inbreeding range.
+    ///
+    /// The shipped function steps its innermost factor by a ratio, tabulates its factorials and
+    /// drops branch splits far out in their own tail. None of that changes the model, and this is
+    /// where that claim is checked rather than asserted. Measured worst disagreement on this grid
+    /// is 2.5e-14 relative.
+    ///
+    /// **Panel sizes stop at 120 because the slow sum is cubic and this runs in debug.** The sizes
+    /// where the difference between the two actually bites are covered by the release-only test
+    /// below and by `examples/ng_spectrum_projection_cost.rs`.
+    #[test]
+    fn the_fast_sum_matches_the_term_by_term_sum() {
+        let mut worst = 0.0_f64;
+        for individuals in [1_u32, 2, 5, 26, 63, 120] {
+            for (alpha_ref, alpha_alt) in [(1.0, 6e-4), (1.0, 1e-2), (0.5, 0.5), (3.0, 2.0)] {
+                for inbreeding in [0.0, 1e-6, 0.25, 0.8, 0.999, 1.0] {
+                    let fast = spectrum(alpha_ref, alpha_alt, individuals, inbreeding);
+                    let slow = term_by_term_spectrum(alpha_ref, alpha_alt, individuals, inbreeding);
+                    for (class, (a, b)) in fast.iter().zip(&slow).enumerate() {
+                        let gap = if *b > 0.0 { (a - b).abs() / b } else { a.abs() };
+                        worst = worst.max(gap);
+                        assert!(
+                            gap < 1e-11,
+                            "{individuals} individuals, α ({alpha_ref}, {alpha_alt}), F \
+                             {inbreeding}, class {class}: fast {a}, term-by-term {b}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(worst < 1e-12, "worst disagreement was {worst}");
+    }
+
+    /// **A panel large enough that the hypergeometric walk's low end underflows.**
+    ///
+    /// The walk is multiplicative, so a first weight of zero makes the whole row zero. Started at
+    /// the low end rather than the mode, that is what happens above about a thousand individuals —
+    /// measured at 1,600, one class came back 5.7e-16 against its true 6.1e-7 and the spectrum lost
+    /// 3 parts in 10,000 of its mass, with every entry still finite and non-negative.
+    ///
+    /// Ignored by default because a panel that large costs seconds in a debug build; run it with
+    /// `cargo test --release --lib -- --ignored --nocapture seed_generic::tests::the_hypergeometric`.
+    #[test]
+    #[ignore = "needs a panel of 1,600; run explicitly in release"]
+    fn the_hypergeometric_walk_survives_a_panel_that_underflows_its_low_end() {
+        let out = spectrum(1.0, 6e-4, 1600, 0.8);
+        let mass: f64 = out.iter().sum();
+        assert!(
+            (mass - 1.0).abs() < 1e-9,
+            "the classes carry {mass}; a row lost to underflow shows here first"
+        );
+        // Every class a panel this size can reach carries something: the walk reaching zero early
+        // is what empties one.
+        let emptiest = out[..=2 * 1600]
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            emptiest > 1e-30,
+            "the emptiest class holds {emptiest}, which is a row the walk failed to fill"
+        );
     }
 }

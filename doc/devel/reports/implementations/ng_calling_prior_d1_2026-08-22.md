@@ -194,7 +194,34 @@ copy afterwards — by content, not by a summary count:
 | the reference-concentration check removed | survived both profiles | **killed** — 2 tests |
 | the negligible-branch skip widened to `1e-3` | — (added by the fix) | **killed** — 5 tests |
 
-## 7. Validation
+## 7. The projection was then made fast, at no measurable cost
+
+*Added 2026-08-22, at the owner's direction to solve the scaling before building D2.*
+
+Three ways of computing the same sum were built and compared —
+[the report](../../ng/reports/spectrum_projection_cost_2026-08-22.md),
+[the harness](../../../../examples/ng_spectrum_projection_cost.rs). The shipped function now writes
+each term as a beta-binomial weight times a hypergeometric one, steps the second by an exact ratio
+rather than exponentiating it, and drops branch splits below `1e-18` of the likeliest one.
+
+| samples | before | after | worst class error |
+|---|---|---|---|
+| 400 | 43.8 ms | **5.8 ms** | 2e-13 |
+| 800 | 339.6 ms | **29.9 ms** | 4e-13 |
+| 1,600 | 2.1 s | **179.4 ms** | 4e-13 |
+| 3,200 | 12.1 s | **960.3 ms** | 1e-12 |
+
+`N^2.95` becomes `N^2.45`, so a fit at 3,200 samples is 2.6 minutes rather than 32 — **the whole
+committed cohort range is now a once-per-run cost, and D2 can be built as spec §4.1 writes it**,
+over every class including the monomorphic one. The accuracy figures are the same disagreement the
+*untrimmed* version has with the term-by-term sum: floating-point accumulation, not the trim.
+
+The term-by-term sum is kept in the test module as the oracle the fast one is checked against, and
+two defects the change introduced are recorded in the report — a multiplicative walk that must
+start at its mode or lose whole rows above about a thousand samples, and a `usize` subtraction that
+release was wrapping while debug refused it.
+
+## 8. Validation
 
 | command | exit | result |
 |---|---|---|

@@ -174,9 +174,10 @@ into its prior and nothing crashes; tests 8 and 9 are the oracle, green before a
 
 ### Milestone D — the SNP/indel seed: the projection
 
-**D1. The exact expected spectrum, in closed form.**  ✅ *(shipped as `fill_expected_spectrum`.
-Its cost is per objective evaluation rather than per run — about a minute per fit at 800
-individuals and hours by several thousand — which is D2's to answer; see the step's report.)*
+**D1. The exact expected spectrum, in closed form.**  ✅ *(shipped as `fill_expected_spectrum`,
+then made about 12× faster at no measurable cost — `N^2.45` rather than `N^2.95`, so a fit is 2.6
+minutes at 3,200 samples rather than 32. **D2 can therefore be built as spec §4.1 writes it**, over
+every class. See the step's report and `doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md`.)*
 The function that predicts a candidate `(α_ref, α_alt)`'s allele-count class probabilities at
 `2N` chromosomes under **§3.2's two-branch sampling at the panel's `F`** — used twice: inside the
 projection's objective, and to build the tests' targets. Closed form; nothing simulated.
