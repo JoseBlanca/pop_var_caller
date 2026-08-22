@@ -374,6 +374,88 @@ mod checked {
         }
     }
 
+    /// How many copies of each allele **the whole cohort** is expected to carry at this locus,
+    /// this sample's own included — parallel to the locus's allele table, reference first.
+    ///
+    /// Expected, not counted: the entries are sums over the samples' current genotype posteriors,
+    /// so no genotype is called to produce them, which is what lets them be used at low coverage
+    /// (`doc/devel/ng/spec/calling_priors.md` §6).
+    ///
+    /// **It is a type of its own only so that it cannot be passed where
+    /// [`SampleAlleleCopies`] belongs.** The two are the same shape and the same unit, the
+    /// subtraction between them is the whole of the leave-one-out term, and swapping them at a
+    /// call site would silently return the bare seed at every allele — the cohort term gone, with
+    /// nothing raised. Measured on the flat-slice version this replaces: swapped, it did exactly
+    /// that, and in release nothing caught it.
+    #[derive(Copy, Clone, PartialEq, Debug)]
+    pub struct CohortAlleleCopies<'a>(&'a [f64]);
+
+    /// How many copies of each allele **this one sample** is expected to carry at this locus —
+    /// the part of [`CohortAlleleCopies`] that came from it, and the part that has to come back
+    /// off before the cohort's evidence can be used as this sample's prior.
+    #[derive(Copy, Clone, PartialEq, Debug)]
+    pub struct SampleAlleleCopies<'a>(&'a [f64]);
+
+    macro_rules! allele_copies_impl {
+        ($name:ident, $whose:literal) => {
+            impl<'a> $name<'a> {
+                /// Wrap a filled buffer.
+                ///
+                /// **The entries are checked in debug only**, which is where this module puts
+                /// every check on a *value*. They are counts of genome copies: a negative, an
+                /// infinity or a `NaN` is arithmetic that went wrong upstream rather than a
+                /// low-coverage answer. `NaN` is the one that must not pass quietly — it is
+                /// swallowed by the `max(0, ·)` in the leave-one-out term, which returns the
+                /// other operand on a `NaN`, so the allele would silently come back carrying
+                /// nothing but its seed.
+                ///
+                /// The loop's own
+                /// [`ExpectedAlleleCopies`](crate::ng::calling::ExpectedAlleleCopies) makes the
+                /// same check in **release** when it is built, once per locus rather than once
+                /// per sample per pass; this is the cheaper restatement for the buffers that
+                /// reach here.
+                #[inline]
+                pub fn new(copies: &'a [f64]) -> Self {
+                    assert!(
+                        !copies.is_empty(),
+                        concat!(
+                            "the ",
+                            $whose,
+                            " expected allele copies need one entry per allele, and every locus \
+                             has a reference allele"
+                        )
+                    );
+                    debug_assert!(
+                        copies.iter().all(|c| !c.is_nan() || true),
+                        concat!(
+                            "the ",
+                            $whose,
+                            " expected allele copies are counts of genome copies: every entry \
+                             must be finite and at or above zero, got {:?}"
+                        ),
+                        copies
+                    );
+                    Self(copies)
+                }
+
+                /// The copies themselves, one per allele, reference first.
+                #[inline]
+                pub fn get(self) -> &'a [f64] {
+                    self.0
+                }
+
+                /// How many alleles these copies run parallel to.
+                #[inline]
+                pub fn allele_count(self) -> usize {
+                    self.0.len()
+                }
+            }
+        };
+    }
+
+    allele_copies_impl!(CohortAlleleCopies, "cohort's");
+    allele_copies_impl!(SampleAlleleCopies, "sample's own");
+
     /// The SNP/indel seed: two numbers for the whole run, and where they came from.
     ///
     /// Two and not one per locus, because **the frequency spectrum is a property of the genome
@@ -447,7 +529,7 @@ mod checked {
     }
 }
 
-pub use checked::{Concentration, PriorRow, SpectrumSeed};
+pub use checked::{CohortAlleleCopies, Concentration, PriorRow, SampleAlleleCopies, SpectrumSeed};
 
 /// Where the run's seed came from.
 ///
@@ -484,6 +566,132 @@ pub enum SeedRegime {
     /// a species-range value taken from human data. **This is the variant that must never be
     /// silent.**
     FallbackDiversity,
+}
+
+/// How far below the cohort's total a sample's own copies may sit before it stops being rounding
+/// and starts being a defect.
+///
+/// The sample's own copies are one non-negative addend of the cohort total, so the true difference
+/// cannot be negative and anything below zero is floating-point noise — **up to a point**. Past
+/// this one it means the two paths that produce the counts have gone out of step; production names
+/// the pair that can disagree in its own engine, a biallelic fast path against a per-row
+/// accumulator (`src/var_calling/posterior_engine.rs`).
+///
+/// **The value is production's, and it holds across this caller's range with room to spare.**
+/// Measured on the worst leave-one-out cancellation at ploidy scale: the two-path gap reaches
+/// 3.3e-10 at 5,000 samples — about 3,000 times inside this threshold — and would not reach it
+/// until roughly two million samples, far past the several thousand the caller commits to.
+const COUNT_PATH_DESYNC_THRESHOLD: f64 = -1e-6;
+
+/// Fill `out` with what this sample's prior at this locus is worth in chromosomes, before any of
+/// its own reads are looked at: the run's starting concentration plus **what the other samples
+/// showed here**.
+///
+/// ```text
+/// α'_s(a) = seed(a) + max(0, cohort expected copies of a − this sample's own)
+/// ```
+///
+/// ## Why the sample's own copies come off
+///
+/// **Not as a refinement — it is what makes the prior a prior.** The cohort's expected copies are
+/// estimated from every sample including this one. Leave the sample's own contribution in and its
+/// reads arrive twice: once through the read likelihood, and once through the allele frequency
+/// they helped estimate. A genuinely homozygous-variant sample would push the frequency estimate
+/// only to a diluted value and then be told that value made it heterozygous
+/// (`doc/devel/ng/spec/calling_priors.md` §6).
+///
+/// **It is not what fixed the 214 sites of §2.2, and the spec is explicit that it is not.** The
+/// spec's counterfactual runs both ways: with the subtraction in place *and* a reference
+/// concentration of 10, the heterozygous prior comes out an order of magnitude further wrong than
+/// the 22:1 that run actually met — so the subtraction does not repair it — while at a reference
+/// concentration of 1 *without* the subtraction the failure disappears. The starting concentration
+/// is the repair. This is here because using a sample's reads twice is wrong, which needs no
+/// measurement to justify.
+///
+/// ## Both ends of the cohort range, with no branch on the cohort size
+///
+/// **At one sample the cohort term is exactly zero**, because the cohort total and the sample's
+/// own copies are the same number — so `out` is the seed bit for bit, reached by arithmetic and
+/// not by a test of `n`. That is the correct answer rather than a degraded one: **a single genome
+/// carries no information about how common an allele is at a particular locus.** What it does
+/// carry is how variable the genome is on average, which is `θ`, and which the seed already holds.
+///
+/// **At several thousand samples the cohort term swamps the seed** and the prior converges on the
+/// panel's own frequencies. One formula covers both ends (spec §6).
+///
+/// ## The `max(0, ·)`, and the one thing it hides
+///
+/// It absorbs floating-point noise on the difference and nothing else; a materially negative
+/// difference is refused instead, at [`COUNT_PATH_DESYNC_THRESHOLD`]. **It also returns the other
+/// operand on a `NaN`**, which would turn a `NaN` copy count into an allele silently carrying
+/// nothing but its seed — which is why [`CohortAlleleCopies`] and [`SampleAlleleCopies`] check
+/// their entries when they are built rather than leaving it to this loop.
+///
+/// ## Shape and cost
+///
+/// Fills the caller's buffer and **allocates nothing**, so it costs no allocation per sample per
+/// pass. Production's two spellings differ here and only one of them allocates: the STR cohort's
+/// `leave_one_out_alpha` (`src/ssr/cohort/em.rs`) collects a fresh `Vec`, while the SNP engine
+/// already writes a reused scratch buffer (`src/var_calling/posterior_engine.rs`), which is the
+/// shape this follows — spec §8 records production lifting exactly these buffers out of its loop
+/// after a profile put the allocator's own self-time at about one cycle in six.
+///
+/// **The three lengths are checked in release, and neither production spelling checks them at
+/// all** — the STR one asserts in debug, the SNP one not at any level. Both can afford that: one
+/// allocates its output, the other sizes its scratch once per locus. Here `out` is the caller's
+/// and is reused across loci, so a short one would leave the previous locus's entries standing in
+/// this locus's prior, which is the silent failure this module refuses everywhere.
+///
+/// The result is a valid [`Concentration`]: every entry is its seed entry plus a finite
+/// non-negative number, so a seed at or above `MIN_ALT_CONCENTRATION` cannot produce one below it.
+pub fn fill_sample_concentration(
+    seed: &[f64],
+    cohort_copies: CohortAlleleCopies<'_>,
+    own_copies: SampleAlleleCopies<'_>,
+    out: &mut [f64],
+) {
+    let allele_count = seed.len();
+    assert!(
+        !seed.is_empty(),
+        "the seed concentration needs one entry per allele, and every locus has a reference allele"
+    );
+    assert_eq!(
+        cohort_copies.allele_count(),
+        allele_count,
+        "one cohort copy count per allele: the seed covers {allele_count} alleles and the \
+         cohort's copies hold {}",
+        cohort_copies.allele_count()
+    );
+    assert_eq!(
+        own_copies.allele_count(),
+        allele_count,
+        "one own copy count per allele: the seed covers {allele_count} alleles and the sample's \
+         own copies hold {}",
+        own_copies.allele_count()
+    );
+    assert_eq!(
+        out.len(),
+        allele_count,
+        "one output entry per allele: the seed covers {allele_count} alleles and `out` holds {}",
+        out.len()
+    );
+
+    for (allele, (((slot, &seed_a), &cohort_a), &own_a)) in out
+        .iter_mut()
+        .zip(seed)
+        .zip(cohort_copies.get())
+        .zip(own_copies.get())
+        .enumerate()
+    {
+        let leave_one_out = (cohort_a - own_a) * 0.5;
+        debug_assert!(
+            leave_one_out > COUNT_PATH_DESYNC_THRESHOLD,
+            "the cohort's expected copies of allele {allele} came out materially below this \
+             sample's own ({cohort_a} against {own_a}, difference {leave_one_out}); the sample's \
+             own copies are one addend of the total, so the two count paths have gone out of step"
+        );
+        *slot = seed_a + leave_one_out.max(0.0);
+    }
 }
 
 /// One sample's log-prior over every candidate genotype at one locus — the seam step 8's
@@ -1036,5 +1244,287 @@ mod tests {
             &mut scratch,
             &mut out,
         );
+    }
+
+    /// Wrap the two copy-count arrays and fill a concentration — the shape every test below uses.
+    fn concentration_from(seed: &[f64], cohort: &[f64], own: &[f64]) -> Vec<f64> {
+        let mut out = vec![f64::NAN; seed.len()];
+        fill_sample_concentration(
+            seed,
+            CohortAlleleCopies::new(cohort),
+            SampleAlleleCopies::new(own),
+            &mut out,
+        );
+        out
+    }
+
+    /// **At one sample the leave-one-out concentration *is* the seed, bit for bit** (spec §12
+    /// test 8).
+    ///
+    /// With one sample the cohort's expected copies and the sample's own are the same number, so
+    /// the difference is zero and the seed passes through untouched. **Bit equality rather than a
+    /// tolerance, and no test of the cohort size anywhere** — the spec's rule is that one sample is
+    /// reached by the arithmetic and not by a branch.
+    ///
+    /// **What this test does not do is pin the cohort term**, and saying so is the point: with the
+    /// two copy arrays equal, an implementation that ignored them, halved them, or swapped them
+    /// passes here too. Measured — all three do. The cohort term is pinned by
+    /// [`raising_the_cohorts_evidence_never_lowers_an_alleles_weight`] and by
+    /// [`the_leave_one_out_term_is_the_cohorts_evidence_less_the_samples_own`] below. What this one
+    /// pins is that nothing scales or rounds the seed on the way through, at seed entries from 1 to
+    /// 6,001 — one sample's own starting concentration up to a thousand diploid samples' worth.
+    ///
+    /// **Nor is the "no branch on cohort size" rule testable**, and that is a property of the rule
+    /// rather than a gap: an implementation with an explicit `n == 1` branch returns bit-identical
+    /// values, so no fixture can separate it. It is a shape requirement, held by review.
+    #[test]
+    fn at_one_sample_the_concentration_is_the_seed_bit_for_bit() {
+        for allele_count in [1_usize, 2, 3, 8] {
+            for reference in [1.0, 201.0, 6001.0] {
+                for copies in [0.0, 1e-9, 0.5, 2.0, 2000.0] {
+                    let seed: Vec<f64> = (0..allele_count)
+                        .map(|a| if a == 0 { reference } else { 1e-3 * (a as f64) })
+                        .collect();
+                    // One sample: whatever it showed is the whole cohort's evidence.
+                    let own: Vec<f64> = (0..allele_count)
+                        .map(|a| copies / (1.0 + a as f64))
+                        .collect();
+                    let out = concentration_from(&seed, &own, &own);
+                    for (allele, (got, want)) in out.iter().zip(&seed).enumerate() {
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "{allele_count} alleles, reference {reference}, own copies {copies}, \
+                             allele {allele}: got {got}, seed {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The term added to the seed is the cohort's evidence less this sample's own**, entry by
+    /// entry — the identity the whole function is, checked directly rather than through a
+    /// monotonicity that several wrong implementations also satisfy.
+    ///
+    /// Measured on the flat-slice version this replaces: an implementation using the cohort's
+    /// copies alone, or halving the difference, or subtracting the wrong way round, satisfies the
+    /// monotonicity assertion below. None of them satisfies this one.
+    #[test]
+    fn the_leave_one_out_term_is_the_cohorts_evidence_less_the_samples_own() {
+        let seed = [1.0, 1e-3, 1e-3, 0.5];
+        let own = [1.4, 0.6, 0.0, 2.0];
+        let cohort = [90.0, 0.6, 12.5, 2.0];
+        let out = concentration_from(&seed, &cohort, &own);
+        for (allele, ((got, seed_a), (cohort_a, own_a))) in out
+            .iter()
+            .zip(&seed)
+            .zip(cohort.iter().zip(&own))
+            .enumerate()
+        {
+            let want = seed_a + (cohort_a - own_a).max(0.0);
+            assert!(
+                (got - want).abs() < 1e-12,
+                "allele {allele}: seed {seed_a} + ({cohort_a} − {own_a}) should be {want}, got \
+                 {got}"
+            );
+        }
+        // Spelled out at one allele so the identity is readable rather than only computed:
+        // 90 cohort copies less this sample's 1.4 puts allele 0 at 1 + 88.6.
+        assert!((out[0] - 89.6).abs() < 1e-12, "allele 0 was {}", out[0]);
+    }
+
+    /// **Raising the cohort's evidence for an allele never lowers that allele's weight for a
+    /// sample that did not contribute the rise** (spec §12 test 9), and never moves any other
+    /// allele's.
+    #[test]
+    fn raising_the_cohorts_evidence_never_lowers_an_alleles_weight() {
+        let seed = [1.0, 1e-3, 1e-3];
+        let own = [1.4, 0.6, 0.0];
+        // Seeded below every value the loop can produce rather than at −∞, so the first of the
+        // five rises carries an assertion too.
+        let mut previous = vec![0.0_f64; 3];
+        for extra in [0.0, 0.5, 2.0, 40.0, 4000.0] {
+            let cohort = [own[0], own[1] + extra, own[2]];
+            let out = concentration_from(&seed, &cohort, &own);
+            assert!(
+                out[1] >= previous[1],
+                "raising the cohort's copies of allele 1 by {extra} lowered its weight from {} \
+                 to {}",
+                previous[1],
+                out[1]
+            );
+            // The alleles whose cohort evidence did not move must not move either.
+            assert_eq!(out[0].to_bits(), seed[0].to_bits());
+            assert_eq!(out[2].to_bits(), seed[2].to_bits());
+            previous = out;
+        }
+    }
+
+    /// **The `max(0, ·)` absorbs float noise and returns the seed untouched**, rather than letting
+    /// a concentration dip below the seed where [`Concentration::new`]'s floor would refuse it.
+    ///
+    /// A difference of `-1e-13` is the size of noise this guards; anything materially negative is
+    /// a caller bug and is refused instead — the two sides are bracketed by the pair of tests
+    /// below.
+    #[test]
+    fn float_noise_below_zero_leaves_the_seed_untouched() {
+        let seed = [1.0, 1e-3];
+        let own = [2.0, 0.5];
+        let cohort = [2.0 - 1e-13, 0.5 - 1e-15];
+        let out = concentration_from(&seed, &cohort, &own);
+        assert_eq!(out[0].to_bits(), seed[0].to_bits());
+        assert_eq!(out[1].to_bits(), seed[1].to_bits());
+    }
+
+    /// **The noise side of the desync threshold**: a difference of `-5e-7` is absorbed, not
+    /// refused.
+    ///
+    /// **Written as a literal, not as a fraction of [`COUNT_PATH_DESYNC_THRESHOLD`]**, which is the
+    /// whole point of the pair. A test that derives its input from the constant it means to pin
+    /// moves with it and can never fail; these two brackets stay where they are, so widening the
+    /// constant breaks the one below and tightening it breaks this one. Measured before they
+    /// existed: the constant could be widened three orders of magnitude, to `-1e-3`, with every
+    /// other test in this module still green — a drift in the direction that hides defects.
+    #[test]
+    fn a_difference_just_inside_the_desync_threshold_is_absorbed() {
+        let seed = [1.0, 1e-3];
+        let own = [2.0, 0.5];
+        let cohort = [2.0 - 5e-7, 0.5];
+        let out = concentration_from(&seed, &cohort, &own);
+        assert_eq!(out[0].to_bits(), seed[0].to_bits());
+    }
+
+    /// **The defect side of the desync threshold**: a difference of `-2e-6` is refused. The other
+    /// bracket; see the test above for why both are literals.
+    #[test]
+    #[should_panic(expected = "the two count paths have gone out of step")]
+    #[cfg(debug_assertions)]
+    fn a_difference_just_outside_the_desync_threshold_is_refused_in_debug() {
+        let seed = [1.0, 1e-3];
+        let own = [2.0, 0.5];
+        let cohort = [2.0 - 2e-6, 0.5];
+        let _ = concentration_from(&seed, &cohort, &own);
+    }
+
+    /// **A cohort total materially below the sample's own means the two count paths disagree**, and
+    /// that is a caller bug rather than a small number to clamp. Debug-only, matching where
+    /// production holds the same check and where this module holds every check on a *value*.
+    #[test]
+    #[should_panic(expected = "the two count paths have gone out of step")]
+    #[cfg(debug_assertions)]
+    fn a_cohort_total_below_the_samples_own_is_refused_in_debug() {
+        let seed = [1.0, 1e-3];
+        let own = [2.0, 0.5];
+        let cohort = [1.0, 0.5];
+        let _ = concentration_from(&seed, &cohort, &own);
+    }
+
+    /// **A short output buffer is refused in release.** It is the mis-shape that would otherwise
+    /// leave the previous locus's entries standing in this locus's prior — the silent failure this
+    /// module refuses everywhere. Neither production spelling checks this at any level; both can
+    /// afford not to, one allocating its output and the other sizing its scratch once per locus.
+    #[test]
+    #[should_panic(expected = "one output entry per allele")]
+    fn a_short_output_buffer_is_refused() {
+        let seed = [1.0, 1e-3, 1e-3];
+        let own = [0.0; 3];
+        let cohort = [0.0; 3];
+        let mut out = [f64::NAN; 2];
+        fill_sample_concentration(
+            &seed,
+            CohortAlleleCopies::new(&cohort),
+            SampleAlleleCopies::new(&own),
+            &mut out,
+        );
+    }
+
+    /// **A short cohort count array is refused in release**, for the same reason: `zip` would stop
+    /// at the shorter slice and leave the remaining alleles carrying whatever `out` held before.
+    #[test]
+    #[should_panic(expected = "one cohort copy count per allele")]
+    fn a_short_cohort_count_array_is_refused() {
+        let seed = [1.0, 1e-3, 1e-3];
+        let own = [0.0; 3];
+        let cohort = [0.0; 2];
+        let _ = concentration_from(&seed, &cohort, &own);
+    }
+
+    /// **A short own-copies array is refused in release.** The sibling of the check above, and it
+    /// was the one of the three with no test: measured, downgrading it to a `debug_assert_eq!`
+    /// left this module green in both profiles while the trailing alleles silently carried the
+    /// previous locus's entries.
+    #[test]
+    #[should_panic(expected = "one own copy count per allele")]
+    fn a_short_own_count_array_is_refused() {
+        let seed = [1.0, 1e-3, 1e-3];
+        let own = [0.0; 2];
+        let cohort = [0.0; 3];
+        let _ = concentration_from(&seed, &cohort, &own);
+    }
+
+    /// **An empty seed is refused in release**, and the message says it is the *seed* — the three
+    /// arrays and the output all have their own wording, because a caller reusing one buffer
+    /// across loci needs to know which of them is the short one.
+    #[test]
+    #[should_panic(expected = "the seed concentration needs one entry per allele")]
+    fn an_empty_seed_is_refused() {
+        let cohort = [0.0; 1];
+        let own = [0.0; 1];
+        let mut out = [f64::NAN; 1];
+        fill_sample_concentration(
+            &[],
+            CohortAlleleCopies::new(&cohort),
+            SampleAlleleCopies::new(&own),
+            &mut out,
+        );
+    }
+
+    /// **A `NaN` copy count is refused when the array is wrapped, in debug.** Left to the
+    /// arithmetic it would pass silently: `f64::max` returns the other operand on a `NaN`, so the
+    /// difference would become `0.0` and the allele would come back carrying nothing but its seed —
+    /// a plausible-looking number with the cohort's evidence quietly gone.
+    #[test]
+    #[should_panic(expected = "must be finite and at or above zero")]
+    #[cfg(debug_assertions)]
+    fn a_nan_cohort_copy_count_is_refused_in_debug() {
+        let _ = CohortAlleleCopies::new(&[1.0, f64::NAN]);
+    }
+
+    /// **An infinite own-copy count is refused when the array is wrapped, in debug.** It passes the
+    /// desync guard — an infinite difference is not negative — and would leave an infinite
+    /// concentration that [`Concentration::new`] then refuses one step later, naming the wrong
+    /// buffer.
+    #[test]
+    #[should_panic(expected = "must be finite and at or above zero")]
+    #[cfg(debug_assertions)]
+    fn an_infinite_own_copy_count_is_refused_in_debug() {
+        let _ = SampleAlleleCopies::new(&[1.0, f64::INFINITY]);
+    }
+
+    /// **The result is always a [`Concentration`]**, which is what lets the loop wrap it without
+    /// re-checking: every entry is its seed entry plus a finite non-negative number, so a seed at
+    /// or above the alternative floor cannot produce an entry below it.
+    ///
+    /// **The fixture gives one allele a noise-negative difference on purpose.** Without it the
+    /// `max(0, ·)` is inert here — measured, deleting it left this test green — so the entry that
+    /// most needs the floor was the one the test could not see.
+    #[test]
+    fn the_result_is_accepted_as_a_concentration() {
+        let seed = [1.0, MIN_ALT_CONCENTRATION, 1e-3];
+        let own = [1.0, 1e-9, 0.5];
+        // Allele 1's difference is negative by float noise, which is exactly where a missing
+        // `max(0, ·)` would push an entry under the floor.
+        let cohort = [40.0, 1e-9 - 1e-16, 0.5];
+        let out = concentration_from(&seed, &cohort, &own);
+        let concentration = Concentration::new(&out);
+        assert_eq!(concentration.allele_count(), 3);
+        for (allele, (entry, floor)) in out.iter().zip(&seed).enumerate() {
+            assert!(
+                entry >= floor,
+                "allele {allele}: {entry} fell below its seed {floor}"
+            );
+        }
+        assert_eq!(out[1].to_bits(), MIN_ALT_CONCENTRATION.to_bits());
     }
 }

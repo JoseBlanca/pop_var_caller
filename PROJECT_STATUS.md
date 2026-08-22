@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **on a cohort, production's fitted inbreeding coefficient
+> - **Last completed task (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
+> way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is
+> the run's starting point plus what the **other** samples showed there, so this sample's own
+> expected allele copies come off the cohort's total — otherwise its reads arrive twice, once
+> through the read likelihood and once through the frequency they helped estimate. The arithmetic
+> ports exactly: bit-identical to both of production's spellings over 20,000 random cases, and at
+> one sample the output is the starting point bit for bit, checked from the smallest subnormal to
+> the largest float. **What the review found was the signature.** Four bare slices meant the
+> compiler could not tell the cohort's copies from the sample's own, and swapping them returned the
+> bare starting point at every allele — the cohort's evidence gone, nothing raised in release. Two
+> borrowing types make that `error[E0308]`, and they carry the value check that a `NaN` copy count
+> was otherwise slipping past, since `max` returns the other operand on a `NaN`. **Also corrected:
+> three claims the first draft made about production, two of them caught independently by two
+> agents** — its SNP engine does not allocate per sample per pass, and its STR spelling has no
+> negative-difference check at all.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_c1_2026-08-22.md).
+> **Two departures owed to `arch/calling_priors.md` §3.1:** the function is `fill_sample_concentration`,
+> matching the folder's three other buffer-fillers, and it takes the two checked types rather than
+> slices.
+> - **Previously (2026-08-22):** **on a cohort, production's fitted inbreeding coefficient
 > is very nearly inert — and the port that found it had to be reviewed before that was believable**
 > (step B2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone B complete, at Checkpoint B**). The mixture has two branches —

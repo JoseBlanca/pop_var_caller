@@ -156,7 +156,9 @@ dominance (`α × 10⁶` at fixed ratio), the row converges to
 
 ### Milestone C — the per-sample concentration
 
-**C1. `sample_concentration`.**  ☐
+**C1. `sample_concentration`.**  ✅ *(shipped as `fill_sample_concentration`, taking two checked
+copy-count types rather than bare slices — both departures recorded in the step's report and owed
+to arch §3.1)*
 `α'_s(a) = seed(a) + max(0, cohort − own)` filling caller scratch — the port of
 `leave_one_out_alpha` ([`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin
 [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs), identical
