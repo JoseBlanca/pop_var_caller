@@ -21,7 +21,7 @@ that were measurably wrong.
 | B1 | the seam's only implementation is reached by no test | **Applied** |
 | M1 | every mixture fixture but two pins the reference concentration at 1.0 | **Applied** |
 | M2 | a guard documented as load-bearing that no test can defend; a mutation wrongly recorded as killed | **Applied** |
-| M3 | `−∞` reaches the caller, against four design documents | **Ask — the owner's, raised at Checkpoint B.** Contract documented meanwhile |
+| M3 | `−∞` reaches the caller, against four design documents | **Applied** — owner ruled at Checkpoint B: floor it |
 | M4 | the mixture checks nothing about the coefficient | **Applied** |
 | M5 | `ploidy()`'s premise is checked nowhere | **Applied** |
 | M6 | the production account: wrong line, size understated | **Applied** (report only) |
@@ -134,22 +134,47 @@ after it, through `with_fixation_index_overrides`.
   commit would make the behaviour-relevant parts harder to read. **Recorded for whoever next
   touches the module's tests.**
 
-## 6. The one thing that is the owner's — M3
+## 6. M3, and the ruling — the floor goes in
 
-**A genotype the prior rules out is written as `−∞`, and four design documents say it should carry
-the probability floor.** Spec §8, spec §12 test 3, arch §1.1 and this plan's own step B2 line all
-say floor; the code writes `−∞` and its test asserts it. **Production's mixture also writes `−∞`**
-(`safe_ln` returns `NEG_INFINITY`), so ng matches what it ports — what the four documents describe
-is `wright_genotype_log_priors`, whose floor is baked in and whose only shipping caller is the
-paralog filter.
+**A genotype the prior rules out was written as `−∞`, and four design documents asked for the
+probability floor.** Spec §8, spec §12 test 3, arch §1.1 and this plan's own step B2 line all say
+floor. **Production's mixture writes `−∞`** (`safe_ln` returns `NEG_INFINITY`), so ng matched what
+it ports — what the four documents describe is `wright_genotype_log_priors`, whose floor is baked in
+and whose only shipping caller is the paralog filter.
 
-It is not cosmetic, and the reason is F1: `PlugInWrightPrior` is ported from that Wright function,
-so it will floor. Two implementations behind one seam would then differ by convention as well as by
-model, and the whole point of the seam is to attribute a difference in genotypes to the model.
+**Owner's ruling, 2026-08-22: floor it.** The reason it is not cosmetic is step F1:
+`PlugInWrightPrior` is ported from that Wright function and will floor. Two implementations behind
+one seam would otherwise differ by convention as well as by model, and the seam exists to attribute
+a genotype difference to the model.
 
-Applied meanwhile: **the trait's contract now states what implementations do and that the question
-is open**, so a second implementer meets it there rather than in one implementation's test doc. The
-ruling is raised at Checkpoint B.
+**The floor is asymmetric, on purpose.** `1 − F` is floored; `F` is not.
+
+- `1 − F` can reach a **row entry**: at `F = 1` it is a heterozygote's only branch, so an unfloored
+  `ln 0` writes `−∞` into the output. Floored, the entry is about −694.7 and every entry of the row
+  is finite.
+- `F`'s own `ln 0` at `F = 0` never reaches a row entry — it makes the identical-by-descent branch
+  impossible, and `log_sum_exp_2`'s second short-circuit returns the other branch exactly. Flooring
+  it too would send **every outbred sample** down the general path, paying two `exp` and a `ln` per
+  homozygous genotype to move nothing. Measured: flooring both leaves the outbred row bit-identical,
+  so the cost would buy literally zero change.
+
+**The outbred row is untouched by the floor**, which is what makes this safe: zero bits of
+difference across 72 combinations of ploidy, allele count, diversity and reference concentration.
+The floor sits 300 orders of magnitude below anything the row carries. At `F = 1` the two
+homozygotes keep their concentration ratio to 4 parts in 10¹⁶.
+
+**Correction to this report's first draft**, which recommended *against* flooring on the grounds
+that it would break the bit-exact outbred test. Measured: it does not. That claim was reasoned
+rather than run, and it was wrong.
+
+**Also corrected: `F` can be exactly 1 today.** The two `F = 1` tests are not testing an
+unreachable edge — `InbreedingF::try_new(1.0)` returns `Ok` on this commit, so the shipping seam
+admits it. Once the prerequisites plan tightens the newtype to `[0, 1)`, the largest coefficient it
+can carry is `1 − 2⁻⁵³`, where `1 − F` is about `1.1e-16` and the floor never bites — at which point
+the floor becomes a guard for the bare-coefficient function, which admits `1` by design so the limit
+stays testable.
+
+The trait's contract now states the rule for **every** implementation rather than describing one.
 
 ## 7. Mutations re-run after the fixes
 
@@ -163,6 +188,7 @@ Every one applied against the fixed tree, in the container, and every one now di
 | the scale correction dropped | killed by 3 tests | **killed** by 4, and the closing test now fails on its first total rather than its second |
 | the ploidy hard-coded at 2 | killed by 1 test | **killed** by 3, including at haploid and monomorphic shapes |
 | the identical-by-descent branch always reads allele 0 | killed by 3 | **killed** by 4 |
+| the floor on `1 − F` removed | — (added by the M3 ruling) | **killed** — both `F = 1` tests |
 
 The two new `PriorRow::new` checks were confirmed to fire in the profile each claims: a zero-summing
 first row is refused in debug **and** release; disagreeing rows are refused in debug and not in

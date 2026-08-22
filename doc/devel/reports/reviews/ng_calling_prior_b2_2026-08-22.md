@@ -56,12 +56,13 @@ errors+defaults 6/2/1; the naming agent compiled every rename it proposed instea
 
 ### 4. Open questions and assumptions
 
-1. **Should a genotype the prior rules out carry `−∞` or the probability floor?** The code writes
+1. **Should a genotype the prior rules out carry `−∞` or the probability floor?** The code wrote
    `−∞`; spec §8, spec §12 test 3, arch §1.1 and this plan's own step B2 line all say floor.
-   Production's mixture writes `−∞` too, so the code matches what it ports and the four documents
+   Production's mixture writes `−∞` too, so the code matched what it ports and the four documents
    describe `wright_genotype_log_priors` rather than the engine. It is not cosmetic: the comparator
    at step F1 is ported from that Wright function, which floors, so the two implementations behind
-   one seam would differ by convention as well as by model. **Owner's ruling.** Affects **M3**.
+   one seam would differ by convention as well as by model. **Resolved by the owner, 2026-08-22:
+   floor it**, on `1 − F` only. Affects **M3**.
 2. **Is `PriorRow::ploidy` right to return a bare `u32`** where `GenotypeTable` and
    `GenotypeTableView` both return the checked `Ploidy` newtype? Two agents split on it — the
    newtype compiles and passes but adds two `expect` paths to an accessor on a per-sample

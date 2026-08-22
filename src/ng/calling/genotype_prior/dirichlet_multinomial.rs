@@ -6,7 +6,7 @@
 //! branch for two copies that are the same one counted twice, is the inbreeding mixture that
 //! plan step B2 wraps around it (`doc/devel/ng/spec/calling_priors.md` §3.2).
 
-use crate::genetics::lgamma;
+use crate::genetics::{PROBABILITY_FLOOR, lgamma};
 use crate::ng::calling::genotype_prior::{GenotypePriorModel, PriorRow};
 use crate::ng::types::{InbreedingF, LogProb};
 
@@ -257,11 +257,21 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     // function's doc for why dropping it is safe in a row and not in a mixture.
     let shared_normalising_term =
         lgamma(concentration_total + f64::from(row.ploidy())) - lgamma(concentration_total);
-    // The two mixture weights. `ln(0)` is `−∞` and that is the wanted value in both directions: at
-    // `F = 0` the identical-by-descent branch is impossible, at `F = 1` the independent-draws
-    // branch is.
+    // The two mixture weights, and they are floored differently on purpose.
+    //
+    // `1 − F` is floored because it is the one that can reach a *row entry*: at `F = 1` every
+    // heterozygote's only branch is this one, so an unfloored `ln(0)` would write `−∞` into the
+    // output. Spec §8 and arch §1.1 both say a genotype the prior rules out carries a finite, very
+    // negative log-prior rather than `−∞`, and the comparator arriving at plan step F1 is ported
+    // from `wright_genotype_log_priors`, which floors internally — so this is also what keeps the
+    // two implementations behind the seam on one convention.
+    //
+    // `F` is *not* floored, because its `ln(0)` at `F = 0` never reaches a row entry: it makes the
+    // identical-by-descent branch impossible, and `log_sum_exp_2` returns the other branch exactly.
+    // Flooring it would replace that short-circuit with two `exp` and a `ln` per homozygous
+    // genotype on every outbred sample — the ordinary case — to move nothing.
     let log_weight_identical_by_descent = inbreeding.ln();
-    let log_weight_independent_draws = (1.0 - inbreeding).ln();
+    let log_weight_independent_draws = (1.0 - inbreeding).max(PROBABILITY_FLOOR).ln();
 
     let (_, out) = row.scratch_and_out();
     // `zip` would truncate to the shorter of the two, which is the silent failure this module's
@@ -296,14 +306,15 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 ///
 /// What they do buy is two things:
 ///
+/// - **A saving on the ordinary case, and it is the second guard that provides it.** At `F = 0` the
+///   identical-by-descent branch is `−∞` on every homozygous genotype, so the guard on `b` fires
+///   and skips two `exp` and a `ln` per homozygote. **This is why the mixture floors `1 − F` and
+///   not `F`**: flooring both would put every outbred sample down the general path to move nothing.
 /// - **A pair of `−∞` arguments returns `−∞` rather than `NaN`.** `−∞ − −∞` is the only route to a
-///   `NaN` here and it needs *both* branches impossible at once — `F = 0` and `F = 1` together, or
-///   a concentration entry of zero, which [`Concentration::new`](super::Concentration) refuses.
-/// - **A saving on the ordinary case.** At `F = 0` the identical-by-descent branch is `−∞` on every
-///   homozygous genotype, so the *second* short-circuit fires there and skips two `exp` and a `ln`
-///   per homozygote; at `F = 1` the independent-draws branch is `−∞` everywhere and the *first*
-///   fires. (Which guard covers which end is easy to get backwards — the first tests `a`, the
-///   independent-draws argument.)
+///   `NaN` here. Since the mixture floors `1 − F`, argument `a` is now never `−∞`, so the first
+///   guard cannot fire from any coefficient and the pair needs a concentration entry of zero, which
+///   [`Concentration::new`](super::Concentration) refuses. The guard stays because this is a shared
+///   helper and the next caller may not floor.
 ///
 /// Ported from the same engine as the mixture, whose own comment gives the saving as the reason.
 #[inline]
@@ -849,21 +860,24 @@ mod tests {
     ///
     /// **The estimator never delivers this**, so it tests the mathematics at its edge rather than a
     /// case the caller meets: production clamps its inbreeding estimate at 0.99, and ng's newtype is
-    /// to be tightened to `[0, 1)`. That is why it drives the bare-coefficient path — after the
-    /// tightening, no `InbreedingF` will be able to carry a 1.
+    /// *to be* tightened to `[0, 1)`. **It has not been** — `InbreedingF::try_new(1.0)` returns `Ok`
+    /// today, which is why the sibling test drives the same limit through the seam as well. Once the
+    /// tightening lands, the largest coefficient the type can carry is `1 − 2⁻⁵³`, where `1 − F` is
+    /// about `1.1e-16` and the floor below never bites; this path keeps the limit reachable, because
+    /// the bare-coefficient function admits `1` by design.
     ///
-    /// The heterozygote lands at `−∞` rather than at a probability floor: `log(1 − 1)` is `−∞`, and
-    /// nothing in this module floors a log-prior. After the loop rescales the row that is a weight
-    /// of exactly zero, which is the wanted answer — an impossible genotype, not a very unlikely
-    /// one.
+    /// **The heterozygote lands at the probability floor, not at `−∞`** (spec §8, arch §1.1, owner
+    /// 2026-08-22). `log(1 − 1)` is `ln 0`, and the mixture floors the weight at
+    /// [`PROBABILITY_FLOOR`] first, so the entry is about `−691` plus the genotype's own
+    /// random-mating value — finite, and 300 orders of magnitude below anything a read can move.
+    /// Asserted as a bound rather than an exact number so the concentration may vary.
     #[test]
     fn at_full_inbreeding_only_the_homozygotes_survive_and_they_stand_at_the_concentration_ratio() {
         for alternative_total in [1e-3, 1e-2, 0.25] {
             let row = mixed_row_for(2, 2, 1.0, alternative_total, 1.0);
-            assert_eq!(
-                row[1].get(),
-                f64::NEG_INFINITY,
-                "the heterozygote must be impossible at F = 1, got {}",
+            assert!(
+                row[1].get().is_finite() && row[1].get() < -600.0,
+                "the heterozygote must be impossible at F = 1 but finite, got {}",
                 row[1].get()
             );
             let ratio = (row[0].get() - row[2].get()).exp();
@@ -1050,15 +1064,21 @@ mod tests {
             .expect("InbreedingF still accepts 1.0; tighten this test when it stops");
         for alternative_total in [1e-3, 1e-2, 0.25] {
             let row = seam_row_for(2, 2, 1.0, alternative_total, one);
-            assert_eq!(
-                row[1].get(),
-                f64::NEG_INFINITY,
-                "the heterozygote must be impossible at F = 1, got {}",
+            assert!(
+                row[1].get().is_finite() && row[1].get() < -600.0,
+                "the heterozygote must be impossible at F = 1 but finite, got {}",
                 row[1].get()
             );
             assert!(
                 row[0].get().is_finite() && row[2].get().is_finite(),
                 "both homozygotes must stay finite: {:?}",
+                row.iter().map(|p| p.get()).collect::<Vec<_>>()
+            );
+            // Every entry finite is the property the floor exists for: a row the normaliser can
+            // subtract a maximum from without producing a NaN, whatever the coefficient.
+            assert!(
+                row.iter().all(|p| p.get().is_finite()),
+                "no entry may be −∞ once the weight is floored: {:?}",
                 row.iter().map(|p| p.get()).collect::<Vec<_>>()
             );
             let ratio = (row[0].get() - row[2].get()).exp();

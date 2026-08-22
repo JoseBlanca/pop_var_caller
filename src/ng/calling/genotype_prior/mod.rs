@@ -504,17 +504,18 @@ pub enum SeedRegime {
 /// Dirichlet-multinomial is dropped because it cancels when the loop rescales the row, so an
 /// entry may be positive and the row does not sum to anything in particular (spec §3.1).
 ///
-/// **An entry may be `f64::NEG_INFINITY`, and at least one entry is always finite.** A genotype
-/// the prior rules out entirely — every heterozygote at `F = 1` — is written as `−∞` rather than
-/// floored, which after the loop rescales the row is a weight of exactly zero. **This is the one
-/// place the implementation and the design documents disagree**, and it is unresolved: spec §8,
-/// spec §12 test 3 and arch §1.1 all say such a genotype should carry
-/// [`PROBABILITY_FLOOR`](crate::genetics::PROBABILITY_FLOOR) instead, while production's own
-/// mixture — the thing this is a port of — produces `−∞` exactly as this does. It matters for more
-/// than tidiness: the comparator arriving at plan step F1 is ported from
-/// `wright_genotype_log_priors`, which *does* floor, so until this is settled the two
-/// implementations behind this seam would differ by convention as well as by model. **Whichever
-/// way it is settled, it is settled here, in the contract, not in one implementation's tests.**
+/// **Every entry is finite. A genotype the prior rules out carries a very negative number, never
+/// `−∞`** — the probability is floored at [`PROBABILITY_FLOOR`](crate::genetics::PROBABILITY_FLOOR)
+/// before the logarithm, so it lands near `−691` and the row always has a maximum the loop can
+/// subtract (spec §8, arch §1.1).
+///
+/// **This is a rule for every implementation, which is why it is here and not in one
+/// implementation's tests.** Production's own mixture writes `−∞` at this point, so the default
+/// implementation departs from what it ports; the comparator arriving at plan step F1 is instead
+/// ported from `wright_genotype_log_priors`, which already floors. Two priors are compared behind
+/// this seam to attribute a difference in genotypes to the *model*, and that only works if they
+/// agree on this. The floor changes no call either way — moving a genotype off it would take read
+/// evidence worth about 3,000 Phred (owner, 2026-08-22).
 ///
 /// **Same inputs, bit-identical rows, at any thread count.** No RNG, no clock, no
 /// thread-dependent iteration order.

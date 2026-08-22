@@ -41,9 +41,13 @@ Skills and agents are instructed to leave it untouched.
 > [What was built](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md),
 > [the review](doc/devel/reports/reviews/ng_calling_prior_b2_2026-08-22.md),
 > [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_b2_fixes_2026-08-22.md).
-> **One question is the owner's:** a genotype the prior rules out is written as `−∞`, where four
-> design documents ask for the probability floor — and the comparator arriving at step F1 floors,
-> so the two implementations behind one seam would differ by convention as well as by model.
+> **One question went to the owner and is settled:** a genotype the prior rules out now carries the
+> probability floor rather than `−∞`, so every entry of every row is finite. It changes no call —
+> moving a genotype off the floor would take read evidence worth about 3,000 Phred — and it is what
+> keeps the comparator arriving at step F1 on one convention with this prior, since that one is
+> ported from a function that already floors. The floor is on `1 − F` only: `F`'s own `ln 0` at an
+> outbred sample never reaches a row entry, and flooring it too would send every outbred sample down
+> the slow path to move nothing.
 > - **Previously (2026-08-22):** **the Dirichlet-multinomial primitive is ported, and a
 > port needs two oracles** (step B1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md),
 > branch `ng-calling-prior`). One re-derives every value from rising factorials with no `lgamma` at
