@@ -129,8 +129,8 @@ assertion, structural ones held in release. *Source:* arch §2.2, §2.3, §3.2, 
 
 ### Milestone B — the row: primitive + mixture (the decision, pure)
 
-**B1. Port the primitive.**  ☐
-`dirichlet_multinomial.rs`: `dirichlet_multinomial_log_priors` ported as-is from
+**B1. Port the primitive.**  ✅
+`dirichlet_multinomial.rs`: `fill_random_mating_log_priors` — `dirichlet_multinomial_log_priors` ported as-is from
 [`genetics.rs:127`](../../../../src/genetics.rs) with one change — fill a caller slice instead of
 returning `Vec` (the no-alloc contract, spec §8). Import `PROBABILITY_FLOOR` and
 `MIN_ALT_CONCENTRATION` with their reasons. Carry the **independent parity oracle** across:
