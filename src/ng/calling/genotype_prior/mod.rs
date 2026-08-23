@@ -77,6 +77,9 @@ pub mod seed_generic;
 pub mod seed_ssr;
 
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
+pub use seed_generic::{
+    FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
+};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;

@@ -7,12 +7,13 @@
 //! just, and *how much* larger is fitted rather than fixed
 //! (`doc/devel/ng/spec/calling_priors.md` §4.1).
 //!
-//! **Two functions and the view between them.** [`fill_expected_spectrum`] says what a panel's
+//! **Three functions and the view between them.** [`fill_expected_spectrum`] says what a panel's
 //! allele counts would look like if a candidate pair were the truth; [`project_spectrum_seed`]
 //! takes the pre-pass's measured spectrum as a [`FittedSpectrum`], searches for the pair whose
-//! prediction matches it, and hands back the run's seed.
+//! prediction matches it, and hands back the run's seed; [`fill_locus_concentration`] spreads
+//! that one pair over each locus's own alleles.
 
-use crate::genetics::{PROBABILITY_FLOOR, lgamma};
+use crate::genetics::{MIN_ALT_CONCENTRATION, PROBABILITY_FLOOR, lgamma};
 use crate::ng::parameter_estimation::fitting::multistart::SearchPrecision;
 use crate::ng::types::{ExpectedHeterozygosity, InbreedingF};
 
@@ -995,6 +996,116 @@ fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
         }
     }
     total
+}
+
+/// **Spread the run's two numbers over one locus's alleles** — the reference allele's
+/// concentration first, then the alternative total shared out evenly across however many
+/// alternative alleles this locus turns out to carry.
+///
+/// ```text
+///   out[0]    = α_ref,       floored at MIN_ALT_CONCENTRATION
+///   out[1..]  = α_alt_total / (number of alternative alleles),
+///                            floored at MIN_ALT_CONCENTRATION
+/// ```
+///
+/// **`allele_count` and `out` are checked against each other, and that is the whole reason the
+/// count is an argument at all.** `out` is a slice of scratch the calling loop owns and reuses, so
+/// its length is a slicing decision rather than a property of the locus: a locus of three alleles
+/// handed an eight-wide buffer at its full length gives every alternative `θ/7` where it should
+/// have `θ/2` — 3.5 times too little prior mass on every non-reference genotype, about 5.4 phred,
+/// with every value still looking like a value. A buffer *shorter* than the locus is worse: the
+/// entries past its end keep the previous locus's concentrations, and every length check
+/// downstream still passes.
+///
+/// **The check is only load-bearing if the two arguments come from different expressions** —
+/// `candidate_alleles.len()` for the count against the buffer the worker sliced. Written
+/// `fill_locus_concentration(seed, class, n, &mut buffer[..n])` it proves nothing, and no type in
+/// this module can tell the difference. It is what `arch/calling_priors.md` §4 asks for, and it
+/// costs one integer compare per locus.
+///
+/// **Sharing the total out rather than giving each allele the whole of it keeps a site's total
+/// polymorphism independent of how many alleles it happens to carry** — a triallelic site is not
+/// twice as polymorphic as a biallelic one merely for holding a third allele
+/// (`doc/devel/ng/spec/calling_priors.md` §4). That is the shape of production's
+/// `alpha_from_diversity` ([`genetics.rs`](crate::genetics::alpha_from_diversity)), ported with
+/// the fitted pair as input instead of `α_ref = 1` and `α_alt = θ` hard-coded, and filling a
+/// caller's buffer instead of returning a fresh `Vec` per locus.
+///
+/// **The floor is what keeps a rare allele recoverable.** A cohort with no polymorphism at all
+/// has an alternative total of zero, and a concentration of exactly zero puts `lgamma(0)` in the
+/// prior's row. [`MIN_ALT_CONCENTRATION`] sits at `1e-12`, nine orders of magnitude below the
+/// diversities this caller has actually been fitted at — 6 in 10,000 on the tomato panel, 1 in
+/// 1,000 on human — so it never perturbs a real estimate.
+///
+/// `α_ref` is floored by the same constant, and **no fit can make that bind**: the search box
+/// bottoms out near `α_ref = 1e-5` — a total of at least `1e-3` against a ratio of at most `1e2`
+/// ([`CONCENTRATION_TOTAL_SEARCH_RANGE`], [`CONCENTRATION_RATIO_SEARCH_RANGE`]) — ten million
+/// times the floor. It is there because [`SpectrumSeed::new`] admits any strictly positive
+/// reference concentration, so a seed built by hand can sit below it, and
+/// [`Concentration`](super::Concentration)'s invariant is that **every** entry clears the floor,
+/// not only the alternatives. Production never had to check it: its `α_ref` was the constant 1.
+///
+/// **A monomorphic locus is an answer, not an error**: a buffer of length one gets the reference
+/// concentration and nothing else, which is what `alpha_from_diversity` does with a
+/// single-allele shape.
+///
+/// ## The variant class is an argument and is not read
+///
+/// Both classes take the same seed today, for the reason [`VariantClass`] gives.
+///
+/// **What this argument cannot absorb is the split itself**, and that is worth being plain about.
+/// The diversity arrives *inside* `seed`, so a run that fits two of them fits two seeds and its
+/// caller has already chosen between them before reaching here. The seam that would absorb a
+/// two-class pre-pass without a signature change is [`project_spectrum_seed`], which carries the
+/// same argument one step earlier. What this one buys is that the *shape* of the call does not
+/// change when that happens (`doc/devel/ng/spec/calling_priors.md` Q1, and the plan's D3 line).
+/// **Which of the two ends owns the split is not settled by any document** — applying it at both
+/// would apply production's 8:1 ratio twice.
+///
+/// **One class for the locus, and a locus that mixes them is Q1's to settle.** Production keyed
+/// its pseudocount on each *alternative allele* — `0.01` for a substitution against `0.00125` for
+/// an indel ([`DEFAULT_SNP_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_SNP_ALT_PSEUDOCOUNT),
+/// [`DEFAULT_INDEL_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_INDEL_ALT_PSEUDOCOUNT))
+/// — and a generic locus can carry one of each, since
+/// [`LocusKind::Generic`](crate::ng::locus_generation::LocusKind) covers both. Taking one class
+/// forecloses nothing: an alternative allele's class is readable from the locus's own
+/// [`CandidateAlleles`](crate::ng::calling::CandidateAlleles), which hold the bases, so the day
+/// Q1 splits the estimate this function can read them without a new array threaded in from the
+/// loop.
+pub fn fill_locus_concentration(
+    seed: SpectrumSeed,
+    class: VariantClass,
+    allele_count: usize,
+    out: &mut [f64],
+) {
+    // Both classes take the same seed today; the split is `project_spectrum_seed`'s to absorb
+    // (spec §4.2, Q1).
+    let _ = class;
+
+    assert!(
+        allele_count > 0,
+        "every locus has a reference allele, so its concentration has at least one entry — the \
+         caller has lost track of which locus it is on"
+    );
+    assert_eq!(
+        out.len(),
+        allele_count,
+        "the buffer must cover the locus's alleles exactly: a longer one shares the alternative \
+         concentration out too thinly and a shorter one leaves the previous locus's entries \
+         behind, and both look like answers"
+    );
+    out[0] = seed.alpha_ref().max(MIN_ALT_CONCENTRATION);
+
+    let alternative_allele_count = allele_count - 1;
+    if alternative_allele_count == 0 {
+        // A monomorphic locus. Written out because it is a case worth naming, not because the
+        // arithmetic needs it: `out[1..]` is empty here, so the fill below would write nothing
+        // whatever the division produced.
+        return;
+    }
+    let per_alternative_allele =
+        (seed.alpha_alt_total() / alternative_allele_count as f64).max(MIN_ALT_CONCENTRATION);
+    out[1..].fill(per_alternative_allele);
 }
 
 /// The exact expected spectrum of a concentration pair — **every projection target in this
@@ -2228,6 +2339,178 @@ mod projection_tests {
             most <= 450,
             "a fit took {most} predictions; at 3,200 individuals a fit is 11.8 minutes measured, \
              so this is the whole run's projection budget"
+        );
+    }
+}
+
+#[cfg(test)]
+mod locus_concentration_tests {
+    use super::*;
+    use crate::ng::calling::genotype_prior::Concentration;
+
+    fn neutral_seed(theta: f64) -> SpectrumSeed {
+        SpectrumSeed::new(1.0, theta, SeedRegime::NeutralShape)
+    }
+
+    fn locus_concentration(seed: SpectrumSeed, allele_count: usize) -> Vec<f64> {
+        let mut out = vec![f64::NAN; allele_count];
+        fill_locus_concentration(seed, VariantClass::Substitution, allele_count, &mut out);
+        out
+    }
+
+    /// **A locus carries the same total polymorphism however many alleles it has** — the property
+    /// spec §4 gives as the reason for sharing the total out rather than repeating it.
+    ///
+    /// Without it a site is more polymorphic for having been given a third allele to consider,
+    /// which is a statement about the candidate generator rather than about the genome.
+    ///
+    /// Held across four allele counts and three diversities. **The bound is relative rather than
+    /// absolute**, because the total is not: `SpectrumSeed` admits anything finite and the fit's
+    /// own box reaches 1e3, where an absolute `1e-15` would fail on a legal answer — the sum's
+    /// worst-case rounding over 9 alternatives at a total of 1e3 is 1.1e-13. At the diversities
+    /// in this loop the relative form is four orders *tighter* than `1e-15` would have been, and
+    /// measured, all twelve cells come back exactly 0.0.
+    #[test]
+    fn a_locus_carries_the_same_total_polymorphism_however_many_alleles_it_has() {
+        for theta in [1e-4, 6e-4, 1e-2] {
+            let seed = neutral_seed(theta);
+            for allele_count in [2, 3, 4, 6] {
+                let out = locus_concentration(seed, allele_count);
+                let alternative_total: f64 = out[1..].iter().sum();
+                assert!(
+                    (alternative_total - theta).abs() <= 8.0 * f64::EPSILON * theta,
+                    "{allele_count} alleles at θ = {theta} carry {alternative_total} of \
+                     alternative concentration between them"
+                );
+                assert_eq!(
+                    out[0], 1.0,
+                    "{allele_count} alleles at θ = {theta}: the reference entry should be the \
+                     run's α_ref of 1.0, got {}",
+                    out[0]
+                );
+            }
+        }
+    }
+
+    /// **The reference allele takes the first entry**, because the concentration is read in the
+    /// same order as the locus's candidate alleles and entry 0 is the reference's
+    /// (`doc/devel/ng/spec/calling_priors.md` §4). Reversing the two would leave every genotype
+    /// row believing the reference is the rare allele.
+    #[test]
+    fn the_reference_allele_takes_the_first_entry() {
+        let out = locus_concentration(SpectrumSeed::new(1.0, 6e-4, SeedRegime::NeutralShape), 3);
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], 3e-4);
+        assert_eq!(out[2], 3e-4);
+    }
+
+    /// **A locus with no alternative allele gets only the reference** — an answer rather than an
+    /// error, and what `alpha_from_diversity` does with a single-allele shape.
+    #[test]
+    fn a_locus_with_no_alternative_allele_gets_only_the_reference() {
+        assert_eq!(locus_concentration(neutral_seed(6e-4), 1), vec![1.0]);
+    }
+
+    /// **A cohort with no polymorphism still clears the floor**, so the prior's row never reaches
+    /// `lgamma(0)` and a rare allele stays recoverable rather than falling into a zero it can
+    /// never leave.
+    ///
+    /// The floor cannot perturb a real estimate: at a `θ` of 1 in 10,000 shared between two
+    /// alternatives each gets 5e-5, which is 50 million times `MIN_ALT_CONCENTRATION`.
+    #[test]
+    fn a_cohort_with_no_polymorphism_still_clears_the_floor() {
+        let out = locus_concentration(SpectrumSeed::new(1.0, 0.0, SeedRegime::NeutralShape), 3);
+        assert_eq!(out[1], MIN_ALT_CONCENTRATION);
+        assert_eq!(out[2], MIN_ALT_CONCENTRATION);
+        let real = locus_concentration(neutral_seed(1e-4), 3);
+        assert!(real[1] > 1e7 * MIN_ALT_CONCENTRATION);
+    }
+
+    /// **Every entry clears the floor [`Concentration`] requires**, the reference's included —
+    /// which production never had to check, because its `α_ref` was the constant 1 and only the
+    /// alternatives could reach zero.
+    ///
+    /// **The check is written out here rather than left to `Concentration::new`**, whose
+    /// per-entry test is a `debug_assert!` and so is compiled out of the `--release` runs this
+    /// suite is gated on (`Cargo.toml` sets no `debug-assertions` on `[profile.release]`).
+    /// Constructing the type as well keeps the two in step if the invariant moves.
+    ///
+    /// The `1e-30` seed here is hand-built: no fit can produce one, since the search box bottoms
+    /// out near `α_ref = 1e-5`. What it guards is that
+    /// [`SpectrumSeed::new`] admits any strictly positive reference concentration.
+    #[test]
+    fn every_entry_clears_the_floor_the_concentration_type_requires() {
+        for seed in [
+            SpectrumSeed::new(1.0, 6e-4, SeedRegime::NeutralShape),
+            SpectrumSeed::new(1e-30, 0.0, SeedRegime::NeutralShape),
+            SpectrumSeed::new(500.0, 500.0, SeedRegime::NeutralShape),
+        ] {
+            let out = locus_concentration(seed, 4);
+            assert!(
+                out.iter()
+                    .all(|a| a.is_finite() && *a >= MIN_ALT_CONCENTRATION),
+                "a seed of ({}, {}) gave {out:?}, which Concentration refuses",
+                seed.alpha_ref(),
+                seed.alpha_alt_total()
+            );
+            let _ = Concentration::new(&out);
+        }
+    }
+
+    /// **Both variant classes get the same concentration today**, which is what makes the
+    /// argument a seam rather than a behaviour — see [`fill_locus_concentration`] for which end
+    /// of the pipeline would absorb a split.
+    #[test]
+    fn both_variant_classes_get_the_same_concentration_today() {
+        let seed = neutral_seed(6e-4);
+        let mut substitution = vec![f64::NAN; 3];
+        let mut indel = vec![f64::NAN; 3];
+        fill_locus_concentration(seed, VariantClass::Substitution, 3, &mut substitution);
+        fill_locus_concentration(seed, VariantClass::InsertionOrDeletion, 3, &mut indel);
+        assert_eq!(substitution, indel);
+    }
+
+    /// **A locus with no alleles is refused.** Every locus has a reference allele, so a count of
+    /// zero is a caller that has lost track of which locus it is on. Without the assertion the
+    /// write to `out[0]` panics anyway, on an index — the assertion is what makes the panic name
+    /// the mistake rather than the line.
+    #[test]
+    #[should_panic(expected = "lost track of which locus")]
+    fn a_locus_with_no_alleles_is_refused() {
+        fill_locus_concentration(neutral_seed(6e-4), VariantClass::Substitution, 0, &mut []);
+    }
+
+    /// **A buffer that does not cover the locus's alleles exactly is refused, both ways.**
+    ///
+    /// This is the mistake the calling loop is most likely to make, because `out` is a slice of a
+    /// scratch buffer it owns and reuses: handing over the whole buffer rather than the locus's
+    /// prefix. Measured with the check removed, a 3-allele locus in an 8-wide buffer at tomato's
+    /// fitted `θ` of 6 in 10,000 gives each alternative 8.571e-5 instead of 3.0e-4 — 3.5 times
+    /// too little, about 5.4 phred off every non-reference genotype, with every value still
+    /// looking like a value. Too short is worse: the entries past the buffer's end keep the
+    /// previous locus's concentrations, and every length check downstream passes.
+    #[test]
+    #[should_panic(expected = "cover the locus's alleles exactly")]
+    fn a_buffer_longer_than_the_locus_is_refused() {
+        let mut worker_buffer = vec![f64::NAN; 8];
+        fill_locus_concentration(
+            neutral_seed(6e-4),
+            VariantClass::Substitution,
+            3,
+            &mut worker_buffer,
+        );
+    }
+
+    /// The other half of the pair above — see it for what a short buffer costs.
+    #[test]
+    #[should_panic(expected = "cover the locus's alleles exactly")]
+    fn a_buffer_shorter_than_the_locus_is_refused() {
+        let mut too_short = vec![f64::NAN; 2];
+        fill_locus_concentration(
+            neutral_seed(6e-4),
+            VariantClass::Substitution,
+            3,
+            &mut too_short,
         );
     }
 }

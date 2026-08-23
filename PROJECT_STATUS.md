@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **the run's two starting numbers, read off the panel's
+> - **Last completed task (2026-08-22):** **the run's two numbers spread over one locus's
+> alleles — and an argument I removed that the review put back** (step D3 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
+> **Milestone D complete, at Checkpoint D**). The reference allele's concentration goes in first
+> and the alternative total is shared out evenly across however many alternative alleles the locus
+> carries, so that **a triallelic site is not twice as polymorphic as a biallelic one merely for
+> holding a third allele**. A port of production's `alpha_from_diversity` with the fitted pair as
+> input instead of `α_ref = 1` and `α_alt = θ` hard-coded, filling the caller's buffer instead of
+> returning a fresh one per locus. **The one thing worth reading is why the buffer's length is
+> checked against a separate count.** I dropped that count on the argument step D2 used for the
+> panel size — the buffer's length already is the allele count, so a second argument is a second
+> place to disagree. That analogy is false: D2's weights *are* the data, while this buffer is
+> scratch the calling loop slices. Measured with the check absent, a locus of three alleles handed
+> an eight-wide buffer gives every alternative allele 3.5 times too little prior mass — about 5.4
+> phred off every non-reference genotype — and a shorter buffer silently keeps the previous
+> locus's numbers. **Three open items reach past this step**, all raised for the milestone review:
+> a fit that could not match the spectrum is emitted as though it had; skipping the seed call
+> entirely is caught by nothing, and reaches the prior's row as `NaN`; and no document says which
+> end of the pipeline owns a SNP-versus-indel split, while a locus can carry one of each and no
+> code in ng can tell them apart.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_d3_2026-08-22.md).
+> - **Previously (2026-08-22):** **the run's two starting numbers, read off the panel's
 > own frequency spectrum — and a fully inbred panel used to abort the run** (step D2 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > The pre-pass measures, across the sites that vary, how many of the panel's chromosomes carry the
@@ -47,7 +68,7 @@ Skills and agents are instructed to leave it untouched.
 > pair. **Still open, and it reaches past this step:** a fit that could not match the spectrum, or
 > whose best pair lies outside the search box, is emitted as though it had matched.
 > [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d2_2026-08-22.md).
-> - **Previously (2026-08-22):** **the prediction the spectrum fit will search is exact —
+> - **Earlier (2026-08-22):** **the prediction the spectrum fit will search is exact —
 > and it is paid once per search step, not once per run** (step D1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Given a candidate pair of concentrations, this says what fraction of sites a panel would show
@@ -70,7 +91,7 @@ Skills and agents are instructed to leave it untouched.
 > **One correction owed to the design documents:** `arch/calling_priors.md` §4 and this plan's step
 > D2 line both say the independent-chromosome bias is 9–14% at tomato's fitted `F`; spec §4.1 puts
 > it at 12–14% there, 8.6% being the `F = 0.6` figure.
-> - **Earlier (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> - **Before that (2026-08-22):** **two arrays of the same shape and the same unit, whose
 > difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
 > way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is

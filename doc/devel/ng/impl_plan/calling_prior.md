@@ -200,7 +200,7 @@ branch is on the spectrum being absent (test 7). **Own commit, do not bundle** �
 biased by independent-chromosome sampling is 9–14% off on `α_ref` at tomato's `F` and nothing
 crashes; tests 5–7 are the oracle. *Depends:* D1. *Source:* spec §4.1; arch §4.
 
-**D3. `seed_for_locus`.**  ☐
+**D3. `seed_for_locus`.**  ✅ *(shipped as `fill_locus_concentration`)*
 Expand the run's pair onto one locus's table: `α_ref` first, the ALT total split evenly across
 the locus's alternative alleles, floored at `MIN_ALT_CONCENTRATION` — the shape of
 `alpha_from_diversity` ([`genetics.rs:214`](../../../../src/genetics.rs)) with the pair as input
