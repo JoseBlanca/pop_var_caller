@@ -105,14 +105,12 @@ now, since a reader comparing the two numbers otherwise finds a mismatch with no
 
 ## 5. Follow-ups
 
-- **A capped sample and a sample genuinely fitted at `0.99` are the same number to every
-  consumer, and nothing records which it was.** `Estimate::provenance` is still `FittedHere` and
-  `RunsModelFit` has no flag. On a crop panel of inbred lines this is not the rare case — it is
-  most of the panel — so a reader cannot tell a cohort whose coefficients were fitted from one
-  whose coefficients were flattened onto the ceiling. **Recommended: a `bool` on `RunsModelFit`
-  beside `undecided_windows`**, not a `Provenance` variant, since the value really was fitted
-  here. Raised at Checkpoint A rather than taken, because it adds a field to a type the plan did
-  not put in scope.
+- ~~**A capped sample and a sample genuinely fitted at `0.99` are the same number to every
+  consumer, and nothing records which it was.**~~ **Taken at Checkpoint A, on the owner's
+  approval, in the commit after this one.** `RunsModelFit` gains `coefficient_was_capped`
+  beside `undecided_windows` — a field rather than a `Provenance` variant, since the value
+  really was fitted here and what changed is that the estimator declined to report the whole of
+  what it found.
 
 - **The joint route's second estimator will hit this too.** `HomozygoteExcess`
   ([`joint/fit.rs:157`](../../../../src/ng/parameter_estimation/joint/fit.rs)) accepts the closed

@@ -162,6 +162,21 @@ pub struct RunsModelFit {
     /// the chain by definition. A genome with unmappable stretches has a non-zero count for
     /// that reason alone.
     pub undecided_windows: u32,
+
+    /// **The emitted coefficient is [`MAX_FITTED_INBREEDING`] and the fit found more.**
+    ///
+    /// Without this, a sample capped down from 0.9997 and a sample genuinely fitted at 0.9900
+    /// are the same number to every consumer, and on a panel of inbred lines that is most of
+    /// the panel rather than an edge: under self-fertilisation `F = 1 − 2⁻ᵗ` passes the cap at
+    /// the seventh generation. A reader checking a cohort's coefficients needs to know which of
+    /// them the estimator measured and which it flattened onto the ceiling.
+    ///
+    /// **Not a provenance state.** The value really was fitted here
+    /// ([`Provenance::FittedHere`](super::super::Provenance)); what changed is that the
+    /// estimator declined to report the whole of what it found. [`starts_tried`](Self::starts_tried)
+    /// keeps the uncapped values, so this says *that* the cap fired and the starts say by how
+    /// much.
+    pub coefficient_was_capped: bool,
 }
 
 /// How many Baum–Welch passes one starting point is allowed.
@@ -649,11 +664,12 @@ pub fn fit_inbreeding(
         // one number a consumer uses to decide whether a small `F` means anything.
         resolution: resolution_at(chain.windows_holding_sites),
         undecided_windows: best.undecided_windows,
+        coefficient_was_capped: inbreeding.was_capped,
     };
 
     Ok((
         Estimate {
-            value: inbreeding,
+            value: inbreeding.coefficient,
             provenance: Provenance::FittedHere,
             observations: chain.covered_positions_total(),
         },
@@ -684,6 +700,15 @@ pub fn fit_inbreeding(
 /// job, and it is done here rather than at the newtype so a second estimator with a different
 /// ceiling is free to have one.
 const MAX_FITTED_INBREEDING: f64 = 0.99;
+
+/// The fitted occupancy as the prior takes it, and whether the cap moved it.
+///
+/// **Both come from one call on purpose.** Deriving `was_capped` at the call site instead would
+/// be a second comparison against the same constant, free to drift from the one that acts.
+struct CappedOccupancy {
+    coefficient: InbreedingF,
+    was_capped: bool,
+}
 
 /// The fitted occupancy as the prior takes it — capped at [`MAX_FITTED_INBREEDING`].
 ///
@@ -722,9 +747,16 @@ const MAX_FITTED_INBREEDING: f64 = 0.99;
 /// it, and the `expect` fires. That is our own arithmetic broken, which is the case the `expect`
 /// convention in this file exists for. **`f64::min` would be the shorter spelling and is silently
 /// wrong**: it ignores `NaN`, so a broken fit would arrive as a confident `0.99`.
-fn capped_inbreeding(occupancy: f64) -> InbreedingF {
-    InbreedingF::try_new(occupancy.clamp(0.0, MAX_FITTED_INBREEDING))
-        .expect("a coverage-weighted posterior occupancy, capped below one, is a fraction")
+fn capped_inbreeding(occupancy: f64) -> CappedOccupancy {
+    let capped = occupancy.clamp(0.0, MAX_FITTED_INBREEDING);
+    CappedOccupancy {
+        coefficient: InbreedingF::try_new(capped)
+            .expect("a coverage-weighted posterior occupancy, capped below one, is a fraction"),
+        // **Not `capped != occupancy`**, which is also true at the lower bound and true of a
+        // `NaN` that never gets this far. The question a reader asks of the emitted number is
+        // whether the ceiling is why it says what it says.
+        was_capped: occupancy > MAX_FITTED_INBREEDING,
+    }
 }
 
 /// A per-**window** transition probability as a per-**base** one.
@@ -1337,9 +1369,19 @@ mod tests {
     /// 160 and nothing could (`spec/calling_priors.md` §7).
     #[test]
     fn the_cap_holds_at_and_above_the_ceiling_and_costs_twenty_phred() {
-        assert_eq!(capped_inbreeding(1.0).get(), 0.99);
-        assert_eq!(capped_inbreeding(0.995).get(), 0.99);
-        assert_eq!(capped_inbreeding(-1e-9).get(), 0.0);
+        for occupancy in [1.0, 0.995] {
+            let capped = capped_inbreeding(occupancy);
+            assert_eq!(capped.coefficient.get(), 0.99, "occupancy {occupancy}");
+            assert!(capped.was_capped, "occupancy {occupancy}");
+        }
+        // The lower bound is a different repair and is not what `was_capped` reports.
+        let floored = capped_inbreeding(-1e-9);
+        assert_eq!(floored.coefficient.get(), 0.0);
+        assert!(!floored.was_capped);
+        // Exactly at the cap is not capped: nothing was withheld.
+        let at_the_cap = capped_inbreeding(MAX_FITTED_INBREEDING);
+        assert_eq!(at_the_cap.coefficient.get(), 0.99);
+        assert!(!at_the_cap.was_capped);
 
         let capped_phred = -10.0 * (1.0 - MAX_FITTED_INBREEDING).log10();
         assert!((capped_phred - 20.0).abs() < 1e-9, "{capped_phred}");
@@ -1377,11 +1419,13 @@ mod tests {
     #[test]
     fn a_fit_below_the_cap_is_carried_verbatim() {
         for occupancy in [0.0, 1e-12, 0.2634, 0.5, 0.9, MAX_FITTED_INBREEDING] {
+            let capped = capped_inbreeding(occupancy);
             assert_eq!(
-                capped_inbreeding(occupancy).get().to_bits(),
+                capped.coefficient.get().to_bits(),
                 occupancy.to_bits(),
                 "occupancy {occupancy}"
             );
+            assert!(!capped.was_capped, "occupancy {occupancy}");
         }
     }
 
@@ -1462,6 +1506,7 @@ mod tests {
             ]),
             resolution: 0.01,
             undecided_windows: 0,
+            coefficient_was_capped: false,
         };
 
         assert_eq!(fit.best_start().map(|s| s.inbreeding), Some(0.2634));
@@ -2092,6 +2137,11 @@ mod tests {
             MAX_FITTED_INBREEDING,
             "the fit found {found} and the emitted coefficient is {}",
             estimate.value.get()
+        );
+        // Without this a reader cannot tell this sample from one genuinely fitted at 0.99.
+        assert!(
+            fit.coefficient_was_capped,
+            "the fit reached {found} and the emitted coefficient does not say it was capped"
         );
     }
 
