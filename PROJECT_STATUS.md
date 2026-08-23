@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-22):** **the run's two numbers spread over one locus's
+> - **Last completed task (2026-08-23):** **the three decisions taken at the end of Milestone D,
+> and the measurement the owner asked for** (branch `ng-calling-prior`). **A fit that could not
+> match the panel's allele counts now says so** rather than handing back the closest pair as
+> though it had matched — two ways that happens, a panel at complete inbreeding whose counts still
+> hold heterozygotes, and one whose alleles sit mostly at middling frequency, which two numbers
+> cannot describe. **Skipping the call that fills a locus's starting numbers no longer compiles**:
+> it hands back the checked type, where before a buffer of zeros passed every check and reached
+> the prior's row as `NaN`, and the locus was emitted as unconverged with nothing saying why.
+> **The SNP-versus-indel split, if it ever happens, belongs to the per-locus expansion** — the fit
+> reads the shape of variation off the panel's counts, which the pre-pass does not separate by
+> class, so a class-specific scale belongs where the run's total is shared out; the fit no longer
+> takes the argument.
+> **And the measurement: at cohort scale the starting numbers barely notice a wrong inbreeding
+> coefficient.** On 26 individuals at tomato's diversity, getting `F` wrong by 0.10 moves the
+> reference number by 2.4% and the prior odds on a heterozygote by 2.3%; at 63 individuals, 1.6%.
+> **The exposure is at one sample and it is not in the fit** — there the same coefficient builds
+> the distribution and reads it back, so the errors cancel, and what survives is the diversity
+> itself: at `F = 0.85` only 15 alternative copies in 100 sit in heterozygotes, so `θ` is measured
+> through that channel and multiplied by 6.7, and an error of 0.05 in `F` moves it by a third.
+> **Conclusion: report it, do not repair it** — a single genome carries no other signal, and the
+> obvious alternative is the non-reference rate the spec rejects.
+> [The measurement](doc/devel/ng/reports/inbreeding_sensitivity_of_the_seed_2026-08-23.md).
+> - **Previously (2026-08-22):** **the run's two numbers spread over one locus's
 > alleles — and an argument I removed that the review put back** (step D3 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
 > **Milestone D complete, at Checkpoint D**). The reference allele's concentration goes in first
@@ -40,7 +62,7 @@ Skills and agents are instructed to leave it untouched.
 > end of the pipeline owns a SNP-versus-indel split, while a locus can carry one of each and no
 > code in ng can tell them apart.
 > [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_d3_2026-08-22.md).
-> - **Previously (2026-08-22):** **the run's two starting numbers, read off the panel's
+> - **Earlier (2026-08-22):** **the run's two starting numbers, read off the panel's
 > own frequency spectrum — and a fully inbred panel used to abort the run** (step D2 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > The pre-pass measures, across the sites that vary, how many of the panel's chromosomes carry the
@@ -68,7 +90,7 @@ Skills and agents are instructed to leave it untouched.
 > pair. **Still open, and it reaches past this step:** a fit that could not match the spectrum, or
 > whose best pair lies outside the search box, is emitted as though it had matched.
 > [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d2_2026-08-22.md).
-> - **Earlier (2026-08-22):** **the prediction the spectrum fit will search is exact —
+> - **Before that (2026-08-22):** **the prediction the spectrum fit will search is exact —
 > and it is paid once per search step, not once per run** (step D1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Given a candidate pair of concentrations, this says what fraction of sites a panel would show
@@ -91,7 +113,7 @@ Skills and agents are instructed to leave it untouched.
 > **One correction owed to the design documents:** `arch/calling_priors.md` §4 and this plan's step
 > D2 line both say the independent-chromosome bias is 9–14% at tomato's fitted `F`; spec §4.1 puts
 > it at 12–14% there, 8.6% being the `F = 0.6` figure.
-> - **Before that (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> - **And before that (2026-08-22):** **two arrays of the same shape and the same unit, whose
 > difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
 > way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is

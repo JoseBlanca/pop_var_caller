@@ -17,7 +17,7 @@ use crate::genetics::{MIN_ALT_CONCENTRATION, PROBABILITY_FLOOR, lgamma};
 use crate::ng::parameter_estimation::fitting::multistart::SearchPrecision;
 use crate::ng::types::{ExpectedHeterozygosity, InbreedingF};
 
-use super::{SeedRegime, SpectrumSeed};
+use super::{Concentration, SeedRegime, SpectrumMatch, SpectrumSeed};
 
 /// The largest concentration — chromosomes' worth of prior belief — this projection will predict a
 /// spectrum for.
@@ -583,6 +583,16 @@ pub use checked::FittedSpectrum;
 /// **Nothing here tests how many samples the cohort holds.** The one branch is on what the
 /// pre-pass had.
 ///
+/// ## It takes no variant class, and that is a decision rather than an omission
+///
+/// The design keeps the door open to giving substitutions and short insertions or deletions
+/// different diversities (spec §4.2, Q1). **The end that will apply that split is
+/// [`fill_locus_concentration`], not this one** — settled by the owner, 2026-08-22. This function
+/// reads the *shape* of variation off the panel's own allele counts, which the pre-pass fits
+/// without separating the two classes; a class-specific *scale* belongs where the run's total is
+/// shared out over a locus's alleles, and that is the only end able to describe a site carrying
+/// one alternative of each kind. Carrying the argument at both ends would apply the ratio twice.
+///
 /// ## Cost
 ///
 /// One prediction is the expensive step and a fit runs **399 of them, once per run** — the same
@@ -600,12 +610,7 @@ pub fn project_spectrum_seed(
     spectrum: Option<FittedSpectrum<'_>>,
     diversity: Option<ExpectedHeterozygosity>,
     panel_inbreeding: InbreedingF,
-    class: VariantClass,
 ) -> SpectrumSeed {
-    // Both classes take the same diversity today; the argument is Q1's seam and is deliberately
-    // unread until the pre-pass measures the two separately (spec §4.2).
-    let _ = class;
-
     let Some(spectrum) = spectrum else {
         return match diversity {
             Some(theta) => {
@@ -632,6 +637,7 @@ pub fn project_spectrum_seed(
             // (arch §4); this module carries the aggregate through and claims nothing more.
             census_sites_outweigh_regularizer: spectrum.variable_census_sites()
                 > spectrum.regularizer_site_weight(),
+            spectrum_match: fit.spectrum_match,
         },
     )
 }
@@ -667,6 +673,8 @@ struct ProjectionFit {
     /// branch-tail trim drops fewer splits. So one fit there is 11.8 minutes measured, against
     /// the 6.4 the count and that report alone would predict.
     predictions: usize,
+    /// Whether the winning pair reproduces the spectrum or is the closest the family reaches.
+    spectrum_match: SpectrumMatch,
 }
 
 /// Fit the concentration pair to a spectrum: line searches along four directions from several
@@ -724,11 +732,13 @@ fn fit_pair(
     let best = sweep_from(best, precision, &mut |point| scorer.score(point));
 
     let (alpha_ref, alpha_alt) = concentrations_at(best.point);
+    let spectrum_match = scorer.match_at(best.point, precision.tolerance);
     ProjectionFit {
         alpha_ref,
         alpha_alt,
         log_likelihood: best.log_likelihood,
         predictions: scorer.predictions,
+        spectrum_match,
     }
 }
 
@@ -754,6 +764,58 @@ impl<'a> SpectrumScorer<'a> {
             panel_inbreeding,
             predicted: vec![0.0; spectrum.class_weights().len()],
             predictions: 0,
+        }
+    }
+
+    /// **Whether the winning pair reproduces the measured spectrum**, run once when the search is
+    /// over rather than at every candidate — one more prediction against the fit's 399.
+    ///
+    /// Two things make a pair a compromise rather than an answer, checked in that order because
+    /// the first is the more informative:
+    ///
+    /// - **it predicts effectively nothing for a class the measurement gives real weight to**, so
+    ///   no pair in the family can have produced this spectrum. The comparison is against
+    ///   [`PROBABILITY_FLOOR`], which is what the objective charged the pair for that class;
+    /// - **it sits on the edge of the range searched**, so a better pair may lie outside it.
+    ///   "On the edge" means within the resolution the search was asked for, because a line
+    ///   search stops at its bracket's midpoint and cannot land exactly on a bound.
+    fn match_at(&mut self, point: [f64; 2], tolerance: f64) -> SpectrumMatch {
+        let (alpha_ref, alpha_alt) = concentrations_at(point);
+        fill_expected_spectrum(
+            alpha_ref,
+            alpha_alt,
+            self.spectrum.individuals(),
+            self.panel_inbreeding,
+            &mut self.predicted,
+        );
+        self.predictions += 1;
+        let cannot_produce = self
+            .spectrum
+            .class_weights()
+            .iter()
+            .zip(&self.predicted)
+            .any(|(weight, prediction)| *weight > 0.0 && *prediction < PROBABILITY_FLOOR);
+        if cannot_produce {
+            return SpectrumMatch::Unreproducible;
+        }
+        let at_limit = [
+            (
+                point[0],
+                CONCENTRATION_TOTAL_SEARCH_RANGE.0.ln(),
+                CONCENTRATION_TOTAL_SEARCH_RANGE.1.ln(),
+            ),
+            (
+                point[1],
+                CONCENTRATION_RATIO_SEARCH_RANGE.0.ln(),
+                CONCENTRATION_RATIO_SEARCH_RANGE.1.ln(),
+            ),
+        ]
+        .iter()
+        .any(|(at, low, high)| (at - low).abs() <= tolerance || (high - at).abs() <= tolerance);
+        if at_limit {
+            SpectrumMatch::AtSearchLimit
+        } else {
+            SpectrumMatch::Reproduced
         }
     }
 
@@ -1049,20 +1111,37 @@ fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
 /// concentration and nothing else, which is what `alpha_from_diversity` does with a
 /// single-allele shape.
 ///
+/// ## Why it hands back a [`Concentration`] rather than only filling the buffer
+///
+/// **So that forgetting to call it stops compiling.**
+/// [`fill_sample_concentration`](super::fill_sample_concentration) takes the seed as a
+/// `Concentration`, and the only ways to get one are this function and
+/// [`Concentration::new`](super::Concentration::new) — so a calling loop that skipped this step
+/// and passed its raw buffer no longer type-checks.
+///
+/// It was a bare slice, and the omission was caught by nothing. A buffer of zeros is the right
+/// length and its entries are legal floats, so every check downstream passes; the row then
+/// reaches `lgamma(0)` and comes back `[NaN, −inf, NaN]`, which is what the
+/// [`GenotypePriorModel`](super::GenotypePriorModel) contract forbids by name. Downstream the
+/// locus runs to its pass cap and is emitted as unconverged with nothing saying why. **Every
+/// mistake about the buffer's shape was caught in release; the omission was caught nowhere**, and
+/// `Concentration`'s own per-entry check cannot close it — that one is a `debug_assert!` and
+/// release builds compile it out.
+///
 /// ## The variant class is an argument and is not read
 ///
 /// Both classes take the same seed today, for the reason [`VariantClass`] gives.
 ///
-/// **What this argument cannot absorb is the split itself**, and that is worth being plain about.
-/// The diversity arrives *inside* `seed`, so a run that fits two of them fits two seeds and its
-/// caller has already chosen between them before reaching here. The seam that would absorb a
-/// two-class pre-pass without a signature change is [`project_spectrum_seed`], which carries the
-/// same argument one step earlier. What this one buys is that the *shape* of the call does not
-/// change when that happens (`doc/devel/ng/spec/calling_priors.md` Q1, and the plan's D3 line).
-/// **Which of the two ends owns the split is not settled by any document** — applying it at both
-/// would apply production's 8:1 ratio twice.
+/// **This is the end that will apply the split when it happens** — settled by the owner,
+/// 2026-08-22, and [`project_spectrum_seed`] no longer takes the argument because of it. That
+/// function reads the *shape* of variation off the panel's allele counts, which the pre-pass fits
+/// without separating the two classes; a class-specific *scale* belongs here, where the run's
+/// total is shared out. When the pre-pass measures two diversities, [`SpectrumSeed`] carries both
+/// totals and this function picks between them — the run still holds one seed, which is what the
+/// calling loop's frozen parameters already assume. Carrying the argument at both ends would
+/// apply the ratio twice.
 ///
-/// **One class for the locus, and a locus that mixes them is Q1's to settle.** Production keyed
+/// **One class for the locus, and a locus that mixes them is still Q1's to settle.** Production
 /// its pseudocount on each *alternative allele* — `0.01` for a substitution against `0.00125` for
 /// an indel ([`DEFAULT_SNP_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_SNP_ALT_PSEUDOCOUNT),
 /// [`DEFAULT_INDEL_ALT_PSEUDOCOUNT`](crate::var_calling::posterior_engine::DEFAULT_INDEL_ALT_PSEUDOCOUNT))
@@ -1072,12 +1151,12 @@ fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
 /// [`CandidateAlleles`](crate::ng::calling::CandidateAlleles), which hold the bases, so the day
 /// Q1 splits the estimate this function can read them without a new array threaded in from the
 /// loop.
-pub fn fill_locus_concentration(
+pub fn fill_locus_concentration<'a>(
     seed: SpectrumSeed,
     class: VariantClass,
     allele_count: usize,
-    out: &mut [f64],
-) {
+    out: &'a mut [f64],
+) -> Concentration<'a> {
     // Both classes take the same seed today; the split is `project_spectrum_seed`'s to absorb
     // (spec §4.2, Q1).
     let _ = class;
@@ -1097,15 +1176,14 @@ pub fn fill_locus_concentration(
     out[0] = seed.alpha_ref().max(MIN_ALT_CONCENTRATION);
 
     let alternative_allele_count = allele_count - 1;
-    if alternative_allele_count == 0 {
-        // A monomorphic locus. Written out because it is a case worth naming, not because the
-        // arithmetic needs it: `out[1..]` is empty here, so the fill below would write nothing
-        // whatever the division produced.
-        return;
+    if alternative_allele_count > 0 {
+        // A monomorphic locus takes neither branch: `out[1..]` is empty there, so this fill would
+        // write nothing whatever the division produced. The condition is here to name the case.
+        let per_alternative_allele =
+            (seed.alpha_alt_total() / alternative_allele_count as f64).max(MIN_ALT_CONCENTRATION);
+        out[1..].fill(per_alternative_allele);
     }
-    let per_alternative_allele =
-        (seed.alpha_alt_total() / alternative_allele_count as f64).max(MIN_ALT_CONCENTRATION);
-    out[1..].fill(per_alternative_allele);
+    Concentration::new(out)
 }
 
 /// The exact expected spectrum of a concentration pair — **every projection target in this
@@ -1778,7 +1856,6 @@ mod projection_tests {
             Some(FittedSpectrum::new(weights, 10.0, 3_000.0)),
             Some(ExpectedHeterozygosity::try_new(1e-3).unwrap()),
             InbreedingF::try_new(inbreeding).unwrap(),
-            VariantClass::Substitution,
         )
     }
 
@@ -2000,12 +2077,7 @@ mod projection_tests {
     #[test]
     fn an_absent_spectrum_is_the_neutral_pair_at_the_fitted_diversity() {
         let theta = ExpectedHeterozygosity::try_new(6e-4).unwrap();
-        let seed = project_spectrum_seed(
-            None,
-            Some(theta),
-            InbreedingF::try_new(0.85).unwrap(),
-            VariantClass::Substitution,
-        );
+        let seed = project_spectrum_seed(None, Some(theta), InbreedingF::try_new(0.85).unwrap());
         assert_eq!(seed.alpha_ref(), 1.0);
         assert_eq!(seed.alpha_alt_total(), 6e-4);
         assert_eq!(seed.regime(), SeedRegime::NeutralShape);
@@ -2015,12 +2087,7 @@ mod projection_tests {
     /// runs that used different information are otherwise indistinguishable in what they emit.
     #[test]
     fn no_fitted_diversity_falls_back_to_the_species_value_and_says_so() {
-        let seed = project_spectrum_seed(
-            None,
-            None,
-            InbreedingF::try_new(0.0).unwrap(),
-            VariantClass::InsertionOrDeletion,
-        );
+        let seed = project_spectrum_seed(None, None, InbreedingF::try_new(0.0).unwrap());
         assert_eq!(seed.alpha_ref(), 1.0);
         assert_eq!(
             seed.alpha_alt_total(),
@@ -2043,37 +2110,16 @@ mod projection_tests {
                 Some(FittedSpectrum::new(&weights, regularizer, variable_sites)),
                 Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
                 InbreedingF::try_new(0.0).unwrap(),
-                VariantClass::Substitution,
             );
             assert_eq!(
                 seed.regime(),
                 SeedRegime::FittedSpectrum {
                     regularizer_site_weight: regularizer,
                     census_sites_outweigh_regularizer: expected_data_won,
+                    spectrum_match: SpectrumMatch::Reproduced,
                 }
             );
         }
-    }
-
-    /// **Both variant classes get the same seed today, and the argument is there so that can stop
-    /// being true without touching a call site** (spec §4.2, Q1). The pre-pass measures one
-    /// heterozygosity for substitutions and short indels together, so splitting the prior before
-    /// the estimate is split would mean inventing the ratio.
-    #[test]
-    fn both_variant_classes_get_the_same_seed_today() {
-        let weights = exact_spectrum(1.0, 6e-4, 5, 0.0);
-        let seed_of = |class| {
-            project_spectrum_seed(
-                Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-                Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-                InbreedingF::try_new(0.0).unwrap(),
-                class,
-            )
-        };
-        assert_eq!(
-            seed_of(VariantClass::Substitution),
-            seed_of(VariantClass::InsertionOrDeletion)
-        );
     }
 
     /// **Every start reaches the same pair when each is swept to its own convergence.**
@@ -2114,6 +2160,83 @@ mod projection_tests {
                 "at {individuals} individuals and F = {inbreeding} the starts reached {reached:?}"
             );
         }
+    }
+
+    /// **A spectrum the family can reproduce comes back marked as reproduced**, which is the
+    /// baseline the two markers below are worth anything against.
+    #[test]
+    fn a_spectrum_the_family_can_reproduce_says_so() {
+        for (individuals, inbreeding) in [(1u32, 0.0), (26, 0.6), (63, 0.9)] {
+            let weights = exact_spectrum(1.0, 6e-4, individuals, inbreeding);
+            let seed = project(&weights, inbreeding);
+            assert_eq!(
+                seed.regime(),
+                SeedRegime::FittedSpectrum {
+                    regularizer_site_weight: 10.0,
+                    census_sites_outweigh_regularizer: true,
+                    spectrum_match: SpectrumMatch::Reproduced,
+                },
+                "at {individuals} individuals and F = {inbreeding}"
+            );
+        }
+    }
+
+    /// **A spectrum no pair can produce says so instead of returning a pair that looks fitted.**
+    ///
+    /// At an inbreeding coefficient of 1 the model puts exactly nothing on an odd number of
+    /// chromosomes carrying the allele — every individual's two copies are one copy counted
+    /// twice — so a measured spectrum holding any heterozygote cannot have come from any pair.
+    /// Measured before this marker existed: all 441 points across the search box scored the same,
+    /// and the run returned whichever one it happened to reach.
+    #[test]
+    fn a_spectrum_no_pair_can_produce_is_marked_rather_than_answered() {
+        let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
+        let seed = project_spectrum_seed(
+            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
+            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+            InbreedingF::try_new(1.0).unwrap(),
+        );
+        assert!(
+            matches!(
+                seed.regime(),
+                SeedRegime::FittedSpectrum {
+                    spectrum_match: SpectrumMatch::Unreproducible,
+                    ..
+                }
+            ),
+            "got {:?}",
+            seed.regime()
+        );
+        assert!(seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite());
+    }
+
+    /// **A fit that stopped on the edge of the range searched says so**, because a better pair
+    /// may lie outside it and a boundary is not a summit.
+    ///
+    /// A fully invariant cohort reaches this legitimately and is the cheapest way to show it: its
+    /// answer is an alternative concentration of zero, which the search cannot express — the
+    /// ratio between the two concentrations floors at `1e-9`. What comes back is that floor, and
+    /// without the marker it would read as a fitted answer.
+    #[test]
+    fn a_fit_that_stopped_at_the_edge_of_its_range_says_so() {
+        let mut weights = vec![0.0; 53];
+        weights[0] = 1.0;
+        let seed = project_spectrum_seed(
+            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
+            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+            InbreedingF::try_new(0.0).unwrap(),
+        );
+        assert!(
+            matches!(
+                seed.regime(),
+                SeedRegime::FittedSpectrum {
+                    spectrum_match: SpectrumMatch::AtSearchLimit,
+                    ..
+                }
+            ),
+            "got {:?}",
+            seed.regime()
+        );
     }
 
     /// **The objective is maximised by the truth and by nothing else** — Gibbs' inequality, which
@@ -2257,7 +2380,6 @@ mod projection_tests {
             Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
             Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
             InbreedingF::try_new(1.0).unwrap(),
-            VariantClass::Substitution,
         );
         assert!(
             seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite(),

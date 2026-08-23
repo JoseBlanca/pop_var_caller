@@ -927,6 +927,15 @@ rate at matched recall on GIAB, where the truth set distinguishes the classes. *
 code** only in the sense that the concentration function must take the class as an argument even
 if both classes pass the same value — otherwise splitting later touches every call site.
 
+**Which function that is, settled 2026-08-23: the per-locus expansion, not the projection.** The
+projection reads the *shape* of variation off the panel's allele counts, which the pre-pass fits
+without separating the two classes; a class-specific *scale* belongs where the run's total is
+shared out over a locus's alleles. When the estimate splits, the run holds one seed carrying both
+totals and the per-locus expansion picks between them; carrying the argument at both ends would
+apply the ratio twice. **What is still open under this question is a locus carrying one
+alternative of each kind** — a substitution and a short indel at one position, which one class per
+locus cannot express and which nothing in the caller can currently tell apart.
+
 **Q2 — reopened 2026-08-19, and it is now a question about the shape rather than the total.** As
 posed it asked whether the STR total concentration is the pre-pass's STR gene diversity. It is not,
 in those words: gene diversity is a probability and a concentration is a count of chromosomes, and

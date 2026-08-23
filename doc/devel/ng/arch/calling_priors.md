@@ -157,7 +157,15 @@ pub enum SeedRegime {
     /// panel-wide ratio is the wrong number to quote as reassurance — the tail is where
     /// the regularizer binds. The per-class ratio is the pre-pass's to emit beside its
     /// spectrum (§4); this carries the aggregate and claims nothing more.
-    FittedSpectrum { regularizer_site_weight: f64, data_dominated: bool },
+    /// `spectrum_match` says whether the pair reproduces what was measured or is only the
+    /// closest the two-parameter family reaches — decided by the owner at Checkpoint D,
+    /// 2026-08-22, because a run on a compromised starting point and one that matched were
+    /// otherwise identical in the output.
+    FittedSpectrum {
+        regularizer_site_weight: f64,
+        data_dominated: bool,
+        spectrum_match: SpectrumMatch,
+    },
     /// No spectrum emitted (absent below the panel-size floor, or one sample):
     /// the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE, never on cohort
     /// size (spec §4.1).
@@ -166,8 +174,25 @@ pub enum SeedRegime {
     FallbackDiversity,
 }
 
-/// The SNP/indel seed: two numbers for the whole run (per variant class — Q1 keeps the
-/// class argument even while both classes pass the same θ, spec §4.2).
+/// Whether the fit's pair reproduces the measured spectrum. Two ways it cannot, and neither is
+/// exotic: a panel whose alleles sit mostly at middling frequency (the shape spec §4.1 names as
+/// the one two parameters cannot hold), and a panel at F = 1, where the model puts no weight on
+/// an odd number of chromosomes carrying the allele so any measured heterozygote is impossible.
+/// REPORTED, never returned as though it had matched — the rule spec §12 test 11 sets for the
+/// STR seed, applied here.
+pub enum SpectrumMatch {
+    Reproduced,
+    /// No pair can produce this spectrum; detected by the winning pair predicting effectively
+    /// nothing for a class the measurement gives real weight to.
+    Unreproducible,
+    /// The best pair sits on the edge of the range searched, so a better one may lie outside it.
+    /// A fully invariant cohort reaches this legitimately.
+    AtSearchLimit,
+}
+
+/// The SNP/indel seed: two numbers for the whole run. When Q1 splits the estimate by
+/// variant class this carries both alternative totals and `fill_locus_concentration`
+/// picks between them, so the run still holds one seed (spec §4.2, Q1).
 pub struct SpectrumSeed {
     pub alpha_ref: f64,            // 1.0 on a neutral panel — the fit's landing point, not a knob
     pub alpha_alt_total: f64,      // θ on a neutral panel; shared across the ALT alleles per locus
@@ -295,8 +320,7 @@ pub fn project_spectrum_seed(
     diversity: Option<ExpectedHeterozygosity>, // None → FallbackDiversity; the regime is
                                          // derived here rather than asserted by a caller
     panel_inbreeding: InbreedingF,
-    class: VariantClass,                 // Substitution | InsertionOrDeletion — Q1's argument
-) -> SpectrumSeed;
+) -> SpectrumSeed;                       // no VariantClass: the split lands one step later
 
 /// Expand the run's two numbers over one locus's alleles: α_ref first, the ALT total
 /// split evenly across the locus's alternative alleles, floored (spec §4). Port of
@@ -328,11 +352,17 @@ sweeps three: the total concentration, `α_ref` alone and `α_alt` alone. What i
 driver's *shape* and its `SearchPrecision`. A fit is 399 predictions and 11.8 minutes at 3,200
 individuals, once per run.
 
-**Which end owns a SNP-versus-indel split is `OPEN:`** (spec Q1). The class is an argument to both
-functions above and read by neither; when the pre-pass measures two diversities it fits two seeds,
-so applying the split at both ends would apply the ratio twice. A generic locus can also carry a
-substitution alternative and an indel alternative at once, which one class per locus cannot
-express — the classes are derivable from `CandidateAlleles`, which hold the bases.
+**Which end owns a SNP-versus-indel split — settled by the owner, 2026-08-23: the per-locus
+expansion.** `project_spectrum_seed` reads the *shape* of variation off the panel's allele counts,
+which the pre-pass fits without separating the two classes; a class-specific *scale* belongs where
+the run's total is shared out over a locus's alleles. So the class argument sits on
+`fill_locus_concentration` alone, and when the pre-pass measures two diversities `SpectrumSeed`
+carries both totals — the run still holds one seed, which is what the calling loop's frozen
+parameters assume.
+
+**Still `OPEN:` (spec Q3's sibling under Q1): a locus carrying one alternative of each kind.** One
+class per locus cannot express it. The classes are derivable from `CandidateAlleles`, which hold
+the bases, so the change lands in one function when Q1 is settled.
 
 Census-site exclusion on depth, the regularizer sweep, and the per-class reporting are the
 **pre-pass's** obligations (spec §4.1's traps); this module only carries `SeedRegime` through to
@@ -435,7 +465,9 @@ Every row read on 2026-08-21.
   consumer's choice among the three candidate answers is not; provisional behaviour in §5.
 - ~~Impl-time confirmation: the concrete `FittedSpectrum` type from the pre-pass cohort gather.~~
   **Settled 2026-08-22 at step D2** — a borrowed view over the class weights; see §4.
-- `OPEN:` which end of the SNP/indel path owns a class split (spec Q1) — §4.
+- ~~`OPEN:` which end of the SNP/indel path owns a class split (spec Q1).~~ **Settled 2026-08-23:
+  the per-locus expansion — §4.** What remains open under Q1 is a locus carrying one alternative
+  of each kind.
   **The scratch slot the row function needs is settled: one `f64` per allele**, which is what the
   ported primitive hoists (`lgamma(α_a)`, one per allele); `CallingScratch` owns it.
 

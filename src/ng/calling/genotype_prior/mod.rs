@@ -554,9 +554,15 @@ pub enum SeedRegime {
     /// ratio**: on the panel spec §4.1 measures, the aggregate was 3,100 to 1 while the
     /// thinnest class held two sites and was outweighed only 39 to 1, and the tail is where
     /// the regularizer binds.
+    ///
+    /// `spectrum_match` says whether the two numbers actually reproduce what was measured or
+    /// are the closest the family could reach. **A run that used a compromised starting point
+    /// and one that matched must not look the same in the output**, which is the complaint this
+    /// whole enum exists to answer.
     FittedSpectrum {
         regularizer_site_weight: f64,
         census_sites_outweigh_regularizer: bool,
+        spectrum_match: SpectrumMatch,
     },
     /// No spectrum was emitted, so the pair is the neutral `(1, θ)` at the heterozygosity the
     /// pre-pass **did** fit. A spectrum too thin to emit and a panel with nothing to fit
@@ -569,6 +575,36 @@ pub enum SeedRegime {
     /// a species-range value taken from human data. **This is the variant that must never be
     /// silent.**
     FallbackDiversity,
+}
+
+/// Whether the two numbers the fit returned reproduce the spectrum it was given, or are only the
+/// closest the two-parameter family could reach.
+///
+/// **The fit always returns a pair, and sometimes no pair is right.** Two ways that happens, and
+/// neither is exotic:
+///
+/// - a panel whose alleles sit mostly at middling frequency — the shape
+///   `doc/devel/ng/spec/calling_priors.md` §4.1 names as the one two parameters cannot hold;
+/// - a panel at an inbreeding coefficient of exactly 1, where the model puts no weight at all on
+///   an odd number of chromosomes carrying the allele, so a measured spectrum holding any
+///   heterozygote cannot have come from any pair.
+///
+/// **Reported rather than hidden**, for the reason spec §12 test 11 gives about the repeat-tract
+/// seed: what a builder must not do is return the closest it can reach as though it had met the
+/// target.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SpectrumMatch {
+    /// The pair reproduces the measured spectrum, to the resolution the fit was asked for.
+    Reproduced,
+    /// **No pair of concentrations can produce the measured spectrum**, so what came back is the
+    /// closest the family reaches. Detected by the winning pair predicting effectively nothing
+    /// for a class the measurement gives real weight to.
+    Unreproducible,
+    /// **The best pair sits on the edge of the range the fit searches**, so a better one may lie
+    /// outside it and what came back is a boundary rather than a summit. A fully invariant
+    /// cohort reaches this legitimately: its answer is an alternative concentration of zero, and
+    /// the search floors the ratio at `1e-9`.
+    AtSearchLimit,
 }
 
 /// How far below the cohort's total a sample's own copies may sit before it stops being rounding
@@ -647,17 +683,21 @@ const COUNT_PATH_DESYNC_THRESHOLD: f64 = -1e-6;
 ///
 /// The result is a valid [`Concentration`]: every entry is its seed entry plus a finite
 /// non-negative number, so a seed at or above `MIN_ALT_CONCENTRATION` cannot produce one below it.
+///
+/// **The seed arrives as a [`Concentration`] and not as a bare slice, and that is the one thing
+/// here a caller cannot get wrong by omission.** The only ways to obtain one are
+/// [`fill_locus_concentration`] and [`Concentration::new`], so a loop that forgot to fill the
+/// locus's seed and passed its scratch buffer straight in no longer compiles. It used to: a
+/// buffer of zeros is the right length and its entries are legal floats, so every check on this
+/// path passed and the prior's row came back `[NaN, −inf, NaN]`. `Concentration`'s own per-entry
+/// check cannot close that, because it is a `debug_assert!` and release compiles it out.
 pub fn fill_sample_concentration(
-    seed: &[f64],
+    seed: Concentration<'_>,
     cohort_copies: CohortAlleleCopies<'_>,
     own_copies: SampleAlleleCopies<'_>,
     out: &mut [f64],
 ) {
-    let allele_count = seed.len();
-    assert!(
-        !seed.is_empty(),
-        "the seed concentration needs one entry per allele, and every locus has a reference allele"
-    );
+    let allele_count = seed.allele_count();
     assert_eq!(
         cohort_copies.allele_count(),
         allele_count,
@@ -681,7 +721,7 @@ pub fn fill_sample_concentration(
 
     for (allele, (((slot, &seed_a), &cohort_a), &own_a)) in out
         .iter_mut()
-        .zip(seed)
+        .zip(seed.get())
         .zip(cohort_copies.get())
         .zip(own_copies.get())
         .enumerate()
@@ -1157,6 +1197,7 @@ mod tests {
             SeedRegime::FittedSpectrum {
                 regularizer_site_weight: 10.0,
                 census_sites_outweigh_regularizer: true,
+                spectrum_match: SpectrumMatch::Reproduced,
             },
         );
         assert_eq!(fitted_seed.alpha_ref(), 1.0);
@@ -1253,7 +1294,7 @@ mod tests {
     fn concentration_from(seed: &[f64], cohort: &[f64], own: &[f64]) -> Vec<f64> {
         let mut out = vec![f64::NAN; seed.len()];
         fill_sample_concentration(
-            seed,
+            Concentration::new(seed),
             CohortAlleleCopies::new(cohort),
             SampleAlleleCopies::new(own),
             &mut out,
@@ -1435,7 +1476,7 @@ mod tests {
         let cohort = [0.0; 3];
         let mut out = [f64::NAN; 2];
         fill_sample_concentration(
-            &seed,
+            Concentration::new(&seed),
             CohortAlleleCopies::new(&cohort),
             SampleAlleleCopies::new(&own),
             &mut out,
@@ -1466,17 +1507,19 @@ mod tests {
         let _ = concentration_from(&seed, &cohort, &own);
     }
 
-    /// **An empty seed is refused in release**, and the message says it is the *seed* — the three
-    /// arrays and the output all have their own wording, because a caller reusing one buffer
-    /// across loci needs to know which of them is the short one.
+    /// **An empty seed is refused in release, and the refusal has moved into the type.** It used
+    /// to be this function's own check; the seed now arrives as a [`Concentration`], which cannot
+    /// be built empty, so the refusal fires one frame earlier and covers every caller rather than
+    /// this one. The other three arrays keep their own wording, because a caller reusing one
+    /// buffer across loci needs to know which of them is the short one.
     #[test]
-    #[should_panic(expected = "the seed concentration needs one entry per allele")]
+    #[should_panic(expected = "a concentration needs one entry per allele")]
     fn an_empty_seed_is_refused() {
         let cohort = [0.0; 1];
         let own = [0.0; 1];
         let mut out = [f64::NAN; 1];
         fill_sample_concentration(
-            &[],
+            Concentration::new(&[]),
             CohortAlleleCopies::new(&cohort),
             SampleAlleleCopies::new(&own),
             &mut out,
