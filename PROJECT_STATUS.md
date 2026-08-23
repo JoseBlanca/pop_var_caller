@@ -19,7 +19,23 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the shape both consumers read, and the support it is
+> - **Last completed task (2026-08-23):** **the fit now reports how far its answer is, instead of
+> claiming it matched** (fix-forward on `0b019e0d`, branch `ng-calling-prior`). Before starting a
+> run, the caller reads two starting numbers off the panel's own allele-frequency spectrum, and
+> carries a marker saying whether those two numbers reproduce what was measured. **Nothing
+> compared them.** The marker said *reproduced* whenever the search finished inside its range and
+> no allele-count class came back at exactly zero — neither of which measures how close the answer
+> is. On a panel of 26 individuals whose alleles sit at two middling frequencies, the fitted pair
+> and the measurement share 4 parts in 100 of their mass, and the marker said they matched.
+> **It now reports the distance and names no threshold**, because nobody has measured how far off
+> the pair has to be before a genotype moves. The distance is free: the fit's objective is already
+> the measurement's own entropy minus it, so a fit costs the same 399 predictions it did before
+> the marker existed. Reference values from the tests: 1.1e-9 where the two-parameter family can
+> hold the shape, 0.481 and 3.153 on two shapes it cannot.
+> **Found only because the owner had that commit folded into the milestone's review** — it was
+> the one batch on this branch that had never been through the fan-out.
+> [What was wrong and what replaced it](doc/devel/reports/implementations/ng_calling_prior_spectrum_match_fix_2026-08-23.md).
+> - **Previously (2026-08-23):** **the shape both consumers read, and the support it is
 > not** (step E2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone E complete, at Checkpoint E**). The prior's belief about which
 > repeat lengths are common at a tract is now exported once, so the genotype prior and the read
@@ -33,7 +49,7 @@ Skills and agents are instructed to leave it untouched.
 > the prior's to settle, so the export is named for what it actually holds and all three are
 > recorded, with their sizes, where the likelihood work will meet them.
 > [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_e2_2026-08-23.md).
-> - **Previously (2026-08-23):** **the repeat-tract starting point, and the panel it
+> - **Earlier (2026-08-23):** **the repeat-tract starting point, and the panel it
 > refuses at every locus** (step E1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Before any read is looked at, a repeat tract's genotype prior starts from mass falling off
@@ -53,7 +69,7 @@ Skills and agents are instructed to leave it untouched.
 > answered for ten refusals in ten, not one in ten — recorded in the spec, and the reason this
 > step is worth a look before Milestone F.
 > [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_e1_2026-08-23.md).
-> - **Earlier (2026-08-23):** **the three decisions taken at the end of Milestone D,
+> - **Before that (2026-08-23):** **the three decisions taken at the end of Milestone D,
 > and the measurement the owner asked for** (branch `ng-calling-prior`). **A fit that could not
 > match the panel's allele counts now says so** rather than handing back the closest pair as
 > though it had matched — two ways that happens, a panel at complete inbreeding whose counts still

@@ -665,8 +665,11 @@ struct ProjectionFit {
     /// the maximum of this is the minimum of that divergence. On a spectrum the two-parameter
     /// family can reproduce exactly, the winning score is therefore that entropy.
     log_likelihood: f64,
-    /// How many predictions the whole fit cost — 399 everywhere measured — and **half of what a
-    /// fit costs rather than the whole of it**. A prediction *inside a fit* averages 1.78 s at
+    /// How many predictions the whole fit cost — 399 everywhere measured, and 399 still now that
+    /// the fit reports how far its answer is from the measurement, because that distance is read
+    /// off the winning score rather than predicted again
+    /// ([`SpectrumMatch::divergence_nats`](crate::ng::calling::genotype_prior::SpectrumMatch::divergence_nats)).
+    /// It is **half of what a fit costs rather than the whole of it**. A prediction *inside a fit* averages 1.78 s at
     /// 3,200 individuals, against the 0.96 s
     /// `doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md` measures **at the neutral
     /// pair**, because the search spends most of its predictions away from that pair where the
@@ -732,7 +735,17 @@ fn fit_pair(
     let best = sweep_from(best, precision, &mut |point| scorer.score(point));
 
     let (alpha_ref, alpha_alt) = concentrations_at(best.point);
-    let spectrum_match = scorer.match_at(best.point, precision.tolerance);
+    // **The divergence costs no prediction.** The objective is the measurement's own entropy
+    // minus the divergence from it, so the winning score already carries the distance — see
+    // `SpectrumMatch::divergence_nats`. It cannot be negative by Gibbs' inequality; the floor is
+    // against float rounding on an exact fit, where the two terms cancel to a few units in the
+    // last place of a number near zero.
+    let divergence_nats =
+        (spectrum_entropy(spectrum.class_weights()) - best.log_likelihood).max(0.0);
+    let spectrum_match = SpectrumMatch::new(
+        divergence_nats,
+        at_search_limit(best.point, precision.tolerance),
+    );
     ProjectionFit {
         alpha_ref,
         alpha_alt,
@@ -740,6 +753,44 @@ fn fit_pair(
         predictions: scorer.predictions,
         spectrum_match,
     }
+}
+
+/// The measured spectrum's own entropy, `Σ w ln w` — **the largest value
+/// [`spectrum_log_likelihood`] can take**, reached when the prediction equals the measurement.
+///
+/// It skips the same zero-weight classes the objective skips, so subtracting one from the other
+/// leaves exactly the divergence and no residue from a class only one of them looked at.
+fn spectrum_entropy(class_weights: &[f64]) -> f64 {
+    class_weights
+        .iter()
+        .filter(|weight| **weight > 0.0)
+        .map(|weight| weight * weight.ln())
+        .sum()
+}
+
+/// **Whether the winning pair sits on the edge of the range searched**, so a better one may lie
+/// outside it and what came back is a boundary rather than a summit.
+///
+/// "On the edge" means within the resolution the search was asked for, because a line search
+/// stops at its bracket's midpoint and cannot land exactly on a bound.
+///
+/// **It predicts nothing**, so it is free: both bounds are known before the fit starts and the
+/// winning point is two numbers.
+fn at_search_limit(point: [f64; 2], tolerance: f64) -> bool {
+    [
+        (
+            point[0],
+            CONCENTRATION_TOTAL_SEARCH_RANGE.0.ln(),
+            CONCENTRATION_TOTAL_SEARCH_RANGE.1.ln(),
+        ),
+        (
+            point[1],
+            CONCENTRATION_RATIO_SEARCH_RANGE.0.ln(),
+            CONCENTRATION_RATIO_SEARCH_RANGE.1.ln(),
+        ),
+    ]
+    .iter()
+    .any(|(at, low, high)| (at - low).abs() <= tolerance || (high - at).abs() <= tolerance)
 }
 
 /// The objective, with the buffer it predicts into and the count of how often it has been asked.
@@ -764,58 +815,6 @@ impl<'a> SpectrumScorer<'a> {
             panel_inbreeding,
             predicted: vec![0.0; spectrum.class_weights().len()],
             predictions: 0,
-        }
-    }
-
-    /// **Whether the winning pair reproduces the measured spectrum**, run once when the search is
-    /// over rather than at every candidate — one more prediction against the fit's 399.
-    ///
-    /// Two things make a pair a compromise rather than an answer, checked in that order because
-    /// the first is the more informative:
-    ///
-    /// - **it predicts effectively nothing for a class the measurement gives real weight to**, so
-    ///   no pair in the family can have produced this spectrum. The comparison is against
-    ///   [`PROBABILITY_FLOOR`], which is what the objective charged the pair for that class;
-    /// - **it sits on the edge of the range searched**, so a better pair may lie outside it.
-    ///   "On the edge" means within the resolution the search was asked for, because a line
-    ///   search stops at its bracket's midpoint and cannot land exactly on a bound.
-    fn match_at(&mut self, point: [f64; 2], tolerance: f64) -> SpectrumMatch {
-        let (alpha_ref, alpha_alt) = concentrations_at(point);
-        fill_expected_spectrum(
-            alpha_ref,
-            alpha_alt,
-            self.spectrum.individuals(),
-            self.panel_inbreeding,
-            &mut self.predicted,
-        );
-        self.predictions += 1;
-        let cannot_produce = self
-            .spectrum
-            .class_weights()
-            .iter()
-            .zip(&self.predicted)
-            .any(|(weight, prediction)| *weight > 0.0 && *prediction < PROBABILITY_FLOOR);
-        if cannot_produce {
-            return SpectrumMatch::Unreproducible;
-        }
-        let at_limit = [
-            (
-                point[0],
-                CONCENTRATION_TOTAL_SEARCH_RANGE.0.ln(),
-                CONCENTRATION_TOTAL_SEARCH_RANGE.1.ln(),
-            ),
-            (
-                point[1],
-                CONCENTRATION_RATIO_SEARCH_RANGE.0.ln(),
-                CONCENTRATION_RATIO_SEARCH_RANGE.1.ln(),
-            ),
-        ]
-        .iter()
-        .any(|(at, low, high)| (at - low).abs() <= tolerance || (high - at).abs() <= tolerance);
-        if at_limit {
-            SpectrumMatch::AtSearchLimit
-        } else {
-            SpectrumMatch::Reproduced
         }
     }
 
@@ -1151,14 +1150,17 @@ fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
 /// [`CandidateAlleles`](crate::ng::calling::CandidateAlleles), which hold the bases, so the day
 /// Q1 splits the estimate this function can read them without a new array threaded in from the
 /// loop.
+#[must_use]
 pub fn fill_locus_concentration<'a>(
     seed: SpectrumSeed,
     class: VariantClass,
     allele_count: usize,
     out: &'a mut [f64],
 ) -> Concentration<'a> {
-    // Both classes take the same seed today; the split is `project_spectrum_seed`'s to absorb
-    // (spec §4.2, Q1).
+    // Both classes take the same seed today. **This is the end that will apply the split when it
+    // happens** — the projection reads the shape of variation off allele counts the pre-pass does
+    // not separate by class, so a class-specific scale belongs here (spec §4.2, Q1, settled
+    // 2026-08-22).
     let _ = class;
 
     assert!(
@@ -1177,8 +1179,9 @@ pub fn fill_locus_concentration<'a>(
 
     let alternative_allele_count = allele_count - 1;
     if alternative_allele_count > 0 {
-        // A monomorphic locus takes neither branch: `out[1..]` is empty there, so this fill would
-        // write nothing whatever the division produced. The condition is here to name the case.
+        // A monomorphic locus does not enter this branch: `out[1..]` is empty there, so the fill
+        // would write nothing whatever the division produced. The condition is here to name the
+        // case rather than to guard the fill.
         let per_alternative_allele =
             (seed.alpha_alt_total() / alternative_allele_count as f64).max(MIN_ALT_CONCENTRATION);
         out[1..].fill(per_alternative_allele);
@@ -2111,14 +2114,16 @@ mod projection_tests {
                 Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
                 InbreedingF::try_new(0.0).unwrap(),
             );
-            assert_eq!(
-                seed.regime(),
-                SeedRegime::FittedSpectrum {
-                    regularizer_site_weight: regularizer,
-                    census_sites_outweigh_regularizer: expected_data_won,
-                    spectrum_match: SpectrumMatch::Reproduced,
-                }
-            );
+            let SeedRegime::FittedSpectrum {
+                regularizer_site_weight,
+                census_sites_outweigh_regularizer,
+                ..
+            } = seed.regime()
+            else {
+                panic!("a spectrum was supplied, so the regime is a fitted one");
+            };
+            assert_eq!(regularizer_site_weight, regularizer);
+            assert_eq!(census_sites_outweigh_regularizer, expected_data_won);
         }
     }
 
@@ -2162,23 +2167,70 @@ mod projection_tests {
         }
     }
 
-    /// **A spectrum the family can reproduce comes back marked as reproduced**, which is the
-    /// baseline the two markers below are worth anything against.
+    /// **A spectrum the family can hold comes back at a divergence of effectively zero**, which
+    /// is the baseline the two measurements below are worth anything against.
+    ///
+    /// The targets are built by [`fill_expected_spectrum`] from a concentration pair, so the
+    /// family can reproduce them exactly and the only distance left is what the search's 1%
+    /// resolution leaves behind. Measured worst over the three panels: **1.1e-9 nats**, which is
+    /// eight orders of magnitude below the 0.481 nats the smaller of the two shapes the family
+    /// cannot hold reaches.
     #[test]
-    fn a_spectrum_the_family_can_reproduce_says_so() {
+    fn a_spectrum_the_family_can_hold_scores_at_effectively_zero_divergence() {
+        let mut worst = 0.0_f64;
         for (individuals, inbreeding) in [(1u32, 0.0), (26, 0.6), (63, 0.9)] {
             let weights = exact_spectrum(1.0, 6e-4, individuals, inbreeding);
             let seed = project(&weights, inbreeding);
-            assert_eq!(
-                seed.regime(),
-                SeedRegime::FittedSpectrum {
-                    regularizer_site_weight: 10.0,
-                    census_sites_outweigh_regularizer: true,
-                    spectrum_match: SpectrumMatch::Reproduced,
-                },
-                "at {individuals} individuals and F = {inbreeding}"
+            let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
+                panic!("a spectrum was supplied, so the regime is a fitted one");
+            };
+            assert!(
+                !spectrum_match.at_search_limit(),
+                "at {individuals} individuals and F = {inbreeding} the fit ran out of range"
             );
+            worst = worst.max(spectrum_match.divergence_nats());
         }
+        assert!(worst < 2e-9, "worst divergence {worst:e} nats");
+    }
+
+    /// **A shape the two-parameter family cannot hold comes back far from the measurement**, and
+    /// this is the test the marker it replaced could not pass.
+    ///
+    /// Spec §4.1 names the shape: a panel whose alleles sit mostly at *middling* frequency. The
+    /// old marker looked only at whether the search finished inside its range and whether any
+    /// class came back at exactly zero, so it called both of these a reproduction. The distances
+    /// say otherwise — and the second panel's prediction shares 4 parts in 100 of its mass with
+    /// the measurement.
+    #[test]
+    fn a_spectrum_the_family_cannot_hold_scores_far_from_it() {
+        // Five classes, weight piled on the two interior ones. n = 2 individuals.
+        let bimodal_small = [0.05, 0.45, 0.00, 0.45, 0.05];
+        let small = divergence_of(&bimodal_small, 0.0);
+        assert!((0.4..0.6).contains(&small), "{small} nats");
+
+        // 26 individuals, all the weight at two middling frequencies.
+        let mut bimodal = vec![0.0; 53];
+        bimodal[13] = 0.5;
+        bimodal[39] = 0.5;
+        let wide = divergence_of(&bimodal, 0.0);
+        assert!((3.0..3.3).contains(&wide), "{wide} nats");
+
+        // Both are orders above the family-can-hold baseline, which is the whole point: the
+        // marker this replaced reported all four cases identically.
+        assert!(wide > small, "{wide} against {small}");
+    }
+
+    /// The divergence a spectrum projects to, in nats.
+    fn divergence_of(class_weights: &[f64], inbreeding: f64) -> f64 {
+        let seed = project_spectrum_seed(
+            Some(FittedSpectrum::new(class_weights, 10.0, 3_000.0)),
+            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+            InbreedingF::try_new(inbreeding).unwrap(),
+        );
+        let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
+            panic!("a spectrum was supplied, so the regime is a fitted one");
+        };
+        spectrum_match.divergence_nats()
     }
 
     /// **A spectrum no pair can produce says so instead of returning a pair that looks fitted.**
@@ -2196,16 +2248,16 @@ mod projection_tests {
             Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
             InbreedingF::try_new(1.0).unwrap(),
         );
+        let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
+            panic!("a spectrum was supplied, so the regime is a fitted one");
+        };
+        // The model can put nothing on an odd class, so the objective charges the pair
+        // `ln(PROBABILITY_FLOOR)` there and the divergence is enormous — 55 nats against the
+        // 3e-10 a shape the family can hold reaches.
         assert!(
-            matches!(
-                seed.regime(),
-                SeedRegime::FittedSpectrum {
-                    spectrum_match: SpectrumMatch::Unreproducible,
-                    ..
-                }
-            ),
-            "got {:?}",
-            seed.regime()
+            spectrum_match.divergence_nats() > 10.0,
+            "{} nats",
+            spectrum_match.divergence_nats()
         );
         assert!(seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite());
     }
@@ -2226,16 +2278,16 @@ mod projection_tests {
             Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
             InbreedingF::try_new(0.0).unwrap(),
         );
+        let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
+            panic!("a spectrum was supplied, so the regime is a fitted one");
+        };
+        assert!(spectrum_match.at_search_limit(), "got {:?}", seed.regime());
+        // **And it says so while predicting the measurement well**, which is why the two facts
+        // are carried separately: a pair pinned against a bound is not thereby a bad pair.
         assert!(
-            matches!(
-                seed.regime(),
-                SeedRegime::FittedSpectrum {
-                    spectrum_match: SpectrumMatch::AtSearchLimit,
-                    ..
-                }
-            ),
-            "got {:?}",
-            seed.regime()
+            spectrum_match.divergence_nats() < 2e-9,
+            "{} nats",
+            spectrum_match.divergence_nats()
         );
     }
 
@@ -2476,7 +2528,7 @@ mod locus_concentration_tests {
 
     fn locus_concentration(seed: SpectrumSeed, allele_count: usize) -> Vec<f64> {
         let mut out = vec![f64::NAN; allele_count];
-        fill_locus_concentration(seed, VariantClass::Substitution, allele_count, &mut out);
+        let _ = fill_locus_concentration(seed, VariantClass::Substitution, allele_count, &mut out);
         out
     }
 
@@ -2587,8 +2639,8 @@ mod locus_concentration_tests {
         let seed = neutral_seed(6e-4);
         let mut substitution = vec![f64::NAN; 3];
         let mut indel = vec![f64::NAN; 3];
-        fill_locus_concentration(seed, VariantClass::Substitution, 3, &mut substitution);
-        fill_locus_concentration(seed, VariantClass::InsertionOrDeletion, 3, &mut indel);
+        let _ = fill_locus_concentration(seed, VariantClass::Substitution, 3, &mut substitution);
+        let _ = fill_locus_concentration(seed, VariantClass::InsertionOrDeletion, 3, &mut indel);
         assert_eq!(substitution, indel);
     }
 
@@ -2599,7 +2651,8 @@ mod locus_concentration_tests {
     #[test]
     #[should_panic(expected = "lost track of which locus")]
     fn a_locus_with_no_alleles_is_refused() {
-        fill_locus_concentration(neutral_seed(6e-4), VariantClass::Substitution, 0, &mut []);
+        let _ =
+            fill_locus_concentration(neutral_seed(6e-4), VariantClass::Substitution, 0, &mut []);
     }
 
     /// **A buffer that does not cover the locus's alleles exactly is refused, both ways.**
@@ -2615,7 +2668,7 @@ mod locus_concentration_tests {
     #[should_panic(expected = "cover the locus's alleles exactly")]
     fn a_buffer_longer_than_the_locus_is_refused() {
         let mut worker_buffer = vec![f64::NAN; 8];
-        fill_locus_concentration(
+        let _ = fill_locus_concentration(
             neutral_seed(6e-4),
             VariantClass::Substitution,
             3,
@@ -2628,7 +2681,7 @@ mod locus_concentration_tests {
     #[should_panic(expected = "cover the locus's alleles exactly")]
     fn a_buffer_shorter_than_the_locus_is_refused() {
         let mut too_short = vec![f64::NAN; 2];
-        fill_locus_concentration(
+        let _ = fill_locus_concentration(
             neutral_seed(6e-4),
             VariantClass::Substitution,
             3,

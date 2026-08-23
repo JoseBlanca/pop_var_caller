@@ -568,10 +568,10 @@ pub enum SeedRegime {
     /// thinnest class held two sites and was outweighed only 39 to 1, and the tail is where
     /// the regularizer binds.
     ///
-    /// `spectrum_match` says whether the two numbers actually reproduce what was measured or
-    /// are the closest the family could reach. **A run that used a compromised starting point
-    /// and one that matched must not look the same in the output**, which is the complaint this
-    /// whole enum exists to answer.
+    /// `spectrum_match` says **how far** the two numbers are from what was measured, and whether
+    /// the search ran out of range before it got there. **A run that used a compromised starting
+    /// point and one that matched must not look the same in the output**, which is the complaint
+    /// this whole enum exists to answer.
     FittedSpectrum {
         regularizer_site_weight: f64,
         census_sites_outweigh_regularizer: bool,
@@ -590,34 +590,74 @@ pub enum SeedRegime {
     FallbackDiversity,
 }
 
-/// Whether the two numbers the fit returned reproduce the spectrum it was given, or are only the
-/// closest the two-parameter family could reach.
+/// **How far the two numbers the fit returned are from the spectrum it was given**, and whether
+/// the search ran out of range before it got there.
 ///
-/// **The fit always returns a pair, and sometimes no pair is right.** Two ways that happens, and
-/// neither is exotic:
+/// **The fit always returns a pair, and sometimes no pair is close.** The two-parameter family
+/// cannot hold every shape — `doc/devel/ng/spec/calling_priors.md` §4.1 names a panel whose
+/// alleles sit mostly at middling frequency as one it cannot — so a run that used a compromised
+/// starting point and one that matched must not look the same in the output. That is what this
+/// carries, and it is the complaint [`SeedRegime`] exists to answer.
 ///
-/// - a panel whose alleles sit mostly at middling frequency — the shape
-///   `doc/devel/ng/spec/calling_priors.md` §4.1 names as the one two parameters cannot hold;
-/// - a panel at an inbreeding coefficient of exactly 1, where the model puts no weight at all on
-///   an odd number of chromosomes carrying the allele, so a measured spectrum holding any
-///   heterozygote cannot have come from any pair.
-///
-/// **Reported rather than hidden**, for the reason spec §12 test 11 gives about the repeat-tract
-/// seed: what a builder must not do is return the closest it can reach as though it had met the
-/// target.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum SpectrumMatch {
-    /// The pair reproduces the measured spectrum, to the resolution the fit was asked for.
-    Reproduced,
-    /// **No pair of concentrations can produce the measured spectrum**, so what came back is the
-    /// closest the family reaches. Detected by the winning pair predicting effectively nothing
-    /// for a class the measurement gives real weight to.
-    Unreproducible,
+/// **It reports a distance rather than a verdict, and that is deliberate.** Nobody has measured
+/// how far off the starting pair has to be before a genotype moves, so this names no threshold
+/// and calls nothing a failure; whoever reads a run's output decides what is too far. An earlier
+/// version did classify, and it classified without looking: it reported *reproduced* whenever the
+/// search finished inside its range and no allele-count class came back at exactly zero, so a
+/// fitted pair sharing 4 parts in 100 of its mass with the measurement was reported as a match
+/// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SpectrumMatch {
+    divergence_nats: f64,
+    at_search_limit: bool,
+}
+
+impl SpectrumMatch {
+    /// Build the report. Only the fit does this.
+    pub(super) fn new(divergence_nats: f64, at_search_limit: bool) -> Self {
+        debug_assert!(
+            divergence_nats.is_finite() && divergence_nats >= 0.0,
+            "the divergence is a distance and cannot be negative, got {divergence_nats}"
+        );
+        Self {
+            divergence_nats,
+            at_search_limit,
+        }
+    }
+
+    /// **How much information is lost by describing the measured spectrum with the fitted pair
+    /// instead of itself** — the Kullback–Leibler divergence of the measurement from the fitted
+    /// pair's prediction, in nats. **Zero means the family reproduced the measurement exactly.**
+    ///
+    /// It is free to compute. The fit's objective is already the measurement's own entropy minus
+    /// this quantity, so subtracting the winning score from that entropy gives it with no extra
+    /// prediction — which is why the fit costs the same 399 predictions it did before this was
+    /// reported.
+    ///
+    /// **A rough scale, so the number means something before anyone has calibrated it.** One nat
+    /// is a factor of `e` in likelihood, so a divergence of 0.01 nats is a pair that would
+    /// misprice the average site's allele-count class by about one per cent — invisible against a
+    /// single read. A divergence above about 1 nat means the prediction and the measurement
+    /// disagree about where most of the panel's variable sites sit. The spectra measured in this
+    /// module's own tests land at 1.1e-9 nats when the family can hold the shape, and at 0.481
+    /// and 3.153 nats on two it cannot
+    /// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
+    #[inline]
+    pub fn divergence_nats(self) -> f64 {
+        self.divergence_nats
+    }
+
     /// **The best pair sits on the edge of the range the fit searches**, so a better one may lie
-    /// outside it and what came back is a boundary rather than a summit. A fully invariant
-    /// cohort reaches this legitimately: its answer is an alternative concentration of zero, and
-    /// the search floors the ratio at `1e-9`.
-    AtSearchLimit,
+    /// outside it and what came back is a boundary rather than a summit.
+    ///
+    /// Not derivable from the divergence, which is why it is carried separately: a pair pinned
+    /// against a bound can still predict the measurement well. **A fully invariant cohort reaches
+    /// this legitimately** — its answer is an alternative concentration of zero, and the search
+    /// floors the ratio at `1e-9`.
+    #[inline]
+    pub fn at_search_limit(self) -> bool {
+        self.at_search_limit
+    }
 }
 
 /// How far below the cohort's total a sample's own copies may sit before it stops being rounding
@@ -973,6 +1013,14 @@ mod tests {
     /// A locus always has a reference allele, so an empty concentration is a wiring bug and
     /// not a thin locus. Refused in **release** as well as debug, because the allele count it
     /// reports is what every shape check below measures against.
+    ///
+    /// **This is where the empty-seed refusal lives now, and it is the only place it can be
+    /// tested.** [`fill_sample_concentration`] used to make the check itself and had a test of
+    /// its own; since the seed arrives as a [`Concentration`], `Concentration::new(&[])` panics
+    /// while the argument is being evaluated and that function is never entered. The old test
+    /// therefore exercised this line under a name that described a call it did not make, so it
+    /// was deleted rather than left as a duplicate. The other three arrays keep their own
+    /// wording, because a caller reusing one buffer across loci needs to know which is short.
     #[test]
     #[should_panic(expected = "every locus has a reference allele")]
     fn an_empty_concentration_is_refused() {
@@ -1210,7 +1258,7 @@ mod tests {
             SeedRegime::FittedSpectrum {
                 regularizer_site_weight: 10.0,
                 census_sites_outweigh_regularizer: true,
-                spectrum_match: SpectrumMatch::Reproduced,
+                spectrum_match: SpectrumMatch::new(0.0, false),
             },
         );
         assert_eq!(fitted_seed.alpha_ref(), 1.0);
@@ -1518,25 +1566,6 @@ mod tests {
         let own = [0.0; 2];
         let cohort = [0.0; 3];
         let _ = concentration_from(&seed, &cohort, &own);
-    }
-
-    /// **An empty seed is refused in release, and the refusal has moved into the type.** It used
-    /// to be this function's own check; the seed now arrives as a [`Concentration`], which cannot
-    /// be built empty, so the refusal fires one frame earlier and covers every caller rather than
-    /// this one. The other three arrays keep their own wording, because a caller reusing one
-    /// buffer across loci needs to know which of them is the short one.
-    #[test]
-    #[should_panic(expected = "a concentration needs one entry per allele")]
-    fn an_empty_seed_is_refused() {
-        let cohort = [0.0; 1];
-        let own = [0.0; 1];
-        let mut out = [f64::NAN; 1];
-        fill_sample_concentration(
-            Concentration::new(&[]),
-            CohortAlleleCopies::new(&cohort),
-            SampleAlleleCopies::new(&own),
-            &mut out,
-        );
     }
 
     /// **A `NaN` copy count is refused when the array is wrapped, in debug.** Left to the

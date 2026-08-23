@@ -157,8 +157,8 @@ pub enum SeedRegime {
     /// panel-wide ratio is the wrong number to quote as reassurance — the tail is where
     /// the regularizer binds. The per-class ratio is the pre-pass's to emit beside its
     /// spectrum (§4); this carries the aggregate and claims nothing more.
-    /// `spectrum_match` says whether the pair reproduces what was measured or is only the
-    /// closest the two-parameter family reaches — decided by the owner at Checkpoint D,
+    /// `spectrum_match` says HOW FAR the pair is from what was measured, and whether the
+    /// search ran out of range before it got there — decided by the owner at Checkpoint D,
     /// 2026-08-22, because a run on a compromised starting point and one that matched were
     /// otherwise identical in the output.
     FittedSpectrum {
@@ -174,20 +174,21 @@ pub enum SeedRegime {
     FallbackDiversity,
 }
 
-/// Whether the fit's pair reproduces the measured spectrum. Two ways it cannot, and neither is
-/// exotic: a panel whose alleles sit mostly at middling frequency (the shape spec §4.1 names as
-/// the one two parameters cannot hold), and a panel at F = 1, where the model puts no weight on
-/// an odd number of chromosomes carrying the allele so any measured heterozygote is impossible.
-/// REPORTED, never returned as though it had matched — the rule spec §12 test 11 sets for the
-/// STR seed, applied here.
-pub enum SpectrumMatch {
-    Reproduced,
-    /// No pair can produce this spectrum; detected by the winning pair predicting effectively
-    /// nothing for a class the measurement gives real weight to.
-    Unreproducible,
-    /// The best pair sits on the edge of the range searched, so a better one may lie outside it.
-    /// A fully invariant cohort reaches this legitimately.
-    AtSearchLimit,
+/// How far the fit's pair is from the measured spectrum. REPORTED, never returned as though it
+/// had matched — the rule spec §12 test 11 sets for the STR seed, applied here.
+pub struct SpectrumMatch { divergence_nats: f64, at_search_limit: bool }   // both by accessor
+
+impl SpectrumMatch {
+    /// The Kullback-Leibler divergence of the measurement from the fitted pair's prediction,
+    /// in nats. ZERO means the family reproduced the measurement exactly. Free: the fit's
+    /// objective is already the measurement's own entropy minus this, so it is the winning
+    /// score subtracted from that entropy and costs no prediction.
+    fn divergence_nats(self) -> f64;
+    /// The pair sits on the edge of the range searched, so a better one may lie outside it.
+    /// Carried separately because it is not derivable from the divergence — a pair pinned
+    /// against a bound can still predict the measurement well, and a fully invariant cohort
+    /// reaches this legitimately.
+    fn at_search_limit(self) -> bool;
 }
 
 /// The SNP/indel seed: two numbers for the whole run. When Q1 splits the estimate by
@@ -412,6 +413,19 @@ the code alone.**
   free-standing `DEFAULT_G0_FALLBACK_DECAY`: as a loose `f64` it is exactly as constructible into
   a stutter one-step share as into this, which is the trap the rename was for. Its doc carries
   that trap verbatim.
+**A distance and not a verdict — revised 2026-08-23, after review.** The first version of
+`SpectrumMatch` was an enum whose `Reproduced` variant claimed something it never checked: it was
+set whenever the search finished inside its range and no allele-count class came back at exactly
+zero, neither of which measures how close the answer is. Measured on a panel of 26 individuals
+whose alleles sit at two middling frequencies, the fitted pair and the measurement shared **4
+parts in 100** of their mass and the marker said they matched. It now reports the distance, in
+nats, and names no threshold: nobody has measured how far off the pair has to be before a genotype
+moves, so classifying was the part that had to go rather than the checking. Reference values from
+the module's own tests: **1.1e-9 nats** where the family can hold the shape, **0.481** and
+**3.153** on two it cannot. The `F = 1` case that the old `Unreproducible` variant caught now
+appears as a divergence above 10 nats, because the objective charges the impossible classes
+`ln(PROBABILITY_FLOOR)`.
+
 - **The refusal withholds the concentration where `SpectrumMatch` marks a returned value**, and
   the difference is deliberate. The spectrum fit runs **once per run** and the run cannot start
   without a seed, so withholding would leave the caller nothing to do but invent one; a marker on
