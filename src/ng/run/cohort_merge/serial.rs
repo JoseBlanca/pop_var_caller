@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(substituting.reads_composed_across_records, 3);
         assert_eq!(substituting.reads_removed_as_evidence, 0);
         assert_eq!(
-            substituting.support_for(1).num_reads,
+            substituting.pooled_support_for(1).num_reads,
             3,
             "three reads showed the substitution across the whole locus",
         );
@@ -526,7 +526,7 @@ mod tests {
             })
             .fold(f64::NEG_INFINITY, f64::max);
         assert_eq!(
-            substituting.support_for(1).q_sum,
+            substituting.pooled_support_for(1).q_sum,
             weakest_of_its_records * 3.0,
             "each read takes the weakest of the six positions it was seen at",
         );
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(deleting.sample, 1);
         assert_eq!(deleting.reads_composed_across_records, 0);
         assert_eq!(
-            deleting.support_for(2),
+            deleting.pooled_support_for(2),
             crate::ng::run::cohort_merge::build::AlleleSupport {
                 num_reads: minted.num_obs,
                 num_fwd: minted.num_fwd,
@@ -555,12 +555,12 @@ mod tests {
         );
 
         assert_eq!(
-            substituting.support_for(0),
+            substituting.pooled_support_for(0),
             crate::ng::run::cohort_merge::build::AlleleSupport::default(),
             "neither sample's reads showed the reference over the whole locus",
         );
         assert_eq!(
-            deleting.support_for(0),
+            deleting.pooled_support_for(0),
             crate::ng::run::cohort_merge::build::AlleleSupport::default(),
         );
     }

@@ -37,7 +37,7 @@ use ahash::AHashMap;
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
-use crate::ng::types::{GenomePosition, GenomeRegion};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 /// The byte a gathered reference position starts as, so that a position no member
@@ -235,7 +235,7 @@ impl LocusReferenceBases {
     ///
     /// **This is also the reference allele**: it is what a sample whose reads all matched
     /// the reference projects to, so the table of alleles the next step builds has it
-    /// among them without a special case (spec §4.2). Pinned by
+    /// among them without a special case (`doc/devel/ng/spec/cohort_merge.md` §4.2). Pinned by
     /// `a_member_that_matched_the_reference_projects_to_the_locus_reference`.
     pub fn bases(&self) -> &[u8] {
         &self.bases
@@ -396,7 +396,7 @@ impl<'a> MemberPlacement<'a> {
 pub const REFERENCE_ALLELE: usize = 0;
 
 /// The distinct alleles the samples showed over one cohort locus, the reference among
-/// them — one table, against which every sample's support is expressed (spec §4.2).
+/// them — one table, against which every sample's support is expressed (`doc/devel/ng/spec/cohort_merge.md` §4.2).
 ///
 /// **Two sequences that come out as the same bytes are the same allele, wherever they came
 /// from.** That is the whole of unification, and it is what makes a cohort observation the
@@ -499,8 +499,14 @@ impl AlleleTable {
     /// support can be accumulated as its alleles are derived; the alternative the
     /// [`index_of`](Self::index_of) doc describes — deriving again and looking the bytes up
     /// — would compose every read's allele a second time, which is the expensive half of
-    /// this module. A sample's tally is grown as new alleles appear and padded to the
-    /// table's width at the end, so the vectors are parallel however late an allele joins.
+    /// this module. A sample's tally gains an entry the first time one of its reads reaches a
+    /// `(allele, read group)` pair, and is sorted into ascending pair order at the end.
+    ///
+    /// **The rows are not parallel to the allele table and have not been since Checkpoint B**
+    /// — a pair the sample showed no reads for has no row, and since B1 one allele can have
+    /// several. `doc/devel/ng/arch/cohort_merge.md` §4 still sketches this as
+    /// `per_allele: Vec<SequenceObservation>`, "parallel to `CohortObservation::alleles`",
+    /// which is the shape this is not; the divergence is deliberate and recorded there.
     fn assemble(locus: &ClosedLocus<'_>) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
@@ -517,7 +523,7 @@ impl AlleleTable {
         // One tally, refilled per sample rather than allocated per sample — the preference
         // the scratch beside it exists for. It cannot live *in* that scratch: the derivation
         // holds it mutably for the length of the call while the callback writes this.
-        let mut tally: Vec<AlleleSupportTally> = Vec::new();
+        let mut tally: Vec<AlleleGroupTally> = Vec::new();
 
         for sample_members in &locus.members {
             let records = sample_members.observations;
@@ -531,14 +537,43 @@ impl AlleleTable {
                 &mut scratch,
                 |bases, backing| {
                     let allele = alleles.intern(bases);
-                    if tally.len() <= allele {
-                        tally.resize(allele + 1, AlleleSupportTally::default());
-                    }
+                    let read_group = backing.read_group();
+                    // **A scan, not an index, and it is what the read-group axis costs.** The
+                    // tally used to be indexed by allele and a pair cannot index a `Vec`. A
+                    // map cleared per sample would reuse its table just as this does, so the
+                    // reason is not allocation: it is that at an ordinary locus this holds one
+                    // or two entries — one per allele the sample showed, times its read
+                    // groups, and 157 of 1,707 samples in a surveyed tomato archive have more
+                    // than one group (`doc/devel/ng/spec/read_groups.md` §1). Hashing a pair
+                    // costs more than looking at two of them.
+                    //
+                    // **Where it would stop being free is a deep sample whose reads compose
+                    // many distinct alleles**, because this callback fires once per read on
+                    // the multi-record branch: 300 reads each reaching a different allele is
+                    // 45,000 comparisons where the old index was 300 lookups. Unmeasured, and
+                    // the fix if it ever matters is a sorted insert rather than a map.
+                    let entry = match tally
+                        .iter()
+                        .position(|held| held.allele == allele && held.read_group == read_group)
+                    {
+                        Some(at) => at,
+                        None => {
+                            tally.push(AlleleGroupTally {
+                                allele,
+                                read_group,
+                                tally: AlleleSupportTally::default(),
+                            });
+                            tally.len() - 1
+                        }
+                    };
                     match backing {
-                        AlleleBacking::OneSequence(sequence) => tally[allele].add_whole(sequence),
+                        AlleleBacking::OneSequence(sequence) => {
+                            tally[entry].tally.add_whole(sequence);
+                        }
                         AlleleBacking::OneRead { records, sightings } => {
                             composed_across_records = composed_across_records.saturating_add(1);
-                            tally[allele]
+                            tally[entry]
+                                .tally
                                 .add_one_reads_share(share_of_one_read(sample, records, sightings));
                         }
                     }
@@ -546,19 +581,27 @@ impl AlleleTable {
             );
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
 
+            // **Ascending `(allele, read group)`, sorted once per sample.** The tally is filled
+            // in the order the derivation emits alleles, which is neither. Unstable is enough:
+            // the key is unique, one entry per pair by construction.
+            tally.sort_unstable_by_key(|held| (held.allele, held.read_group));
+
             per_sample.push(SampleSupport {
                 sample,
-                // **Only the alleles this sample showed.** A tally entry is reached only by
-                // a sequence or by a read, and both add at least one read, so an untouched
-                // entry is an allele some *other* sample introduced — and it needs no row
-                // here, since asking about it answers no reads either way.
+                // **Only the pairs this sample showed** — and this filter used to be
+                // load-bearing and is now a belt. The tally was a vector resized to the
+                // table's width, so it held a zero row for every allele some *other* sample
+                // introduced. Keyed by the pair it is pushed to on demand, and an entry exists
+                // only because a sequence or a read reached it, both of which add at least one
+                // read. Nothing reachable is filtered out; what it guards is a future path
+                // that creates an entry without filling it.
                 supported: tally
                     .iter()
-                    .enumerate()
-                    .filter(|(_, tally)| tally.num_reads > 0)
-                    .map(|(allele, tally)| SupportedAllele {
-                        allele,
-                        support: tally.finish(),
+                    .filter(|held| held.tally.num_reads > 0)
+                    .map(|held| SupportedAllele {
+                        allele: held.allele,
+                        read_group: held.read_group,
+                        support: held.tally.finish(),
                     })
                     .collect(),
                 reads_without_observation: records.iter().fold(0u32, |total, record| {
@@ -815,12 +858,12 @@ fn no_locus_can_begin_in(
 pub struct CohortObservation {
     /// The locus span, first position to furthest reach.
     pub region: GenomeRegion,
-    /// The distinct alleles, the reference at [`REFERENCE_ALLELE`] (spec §4.2).
+    /// The distinct alleles, the reference at [`REFERENCE_ALLELE`] (`doc/devel/ng/spec/cohort_merge.md` §4.2).
     pub alleles: Vec<Box<[u8]>>,
     /// The covering samples, in ascending sample order — **only** the covering ones.
     ///
     /// **A sample with no coverage over the span has no entry**, which is a different fact
-    /// from an entry whose support is all reference and stays one (spec §4.2). The
+    /// from an entry whose support is all reference and stays one (`doc/devel/ng/spec/cohort_merge.md` §4.2). The
     /// architecture's sketch says "indexed by the run's sample order", which reads two ways;
     /// this is the reading that keeps the distinction structural rather than resting on a
     /// zeroed row, and it is the shape the walk hands over
@@ -858,20 +901,33 @@ impl CohortObservation {
 pub struct SampleSupport {
     /// Which sample — its index in the run's sample order, as the walk named it.
     pub sample: usize,
-    /// **The alleles this sample's reads showed, and only those**, in ascending allele order
-    /// (the owner's ruling at Checkpoint B). An allele it did not show has no entry, which
-    /// [`support_for`](Self::support_for) reads as no reads and no sums — the same answer a
-    /// zeroed row would give, without a row per sample per allele.
+    /// **What this sample's reads showed, one row per `(allele, read group)`**, in ascending
+    /// `(allele, read group)` order. A pair it showed no reads for has no entry, which
+    /// [`pooled_support_for`](Self::pooled_support_for) reads as no reads and no sums — the
+    /// same answer a zeroed row would give, without a row per sample per allele per group.
     ///
-    /// **What that saves is proportional to how much of the table each sample missed.** A
-    /// row for every allele costs samples × alleles entries of 32 bytes whatever the cohort
-    /// showed; this costs one entry per allele a sample actually showed, which at an ordinary
-    /// locus of two or three alleles is one or two per sample.
+    /// **The read-group axis all but spent what the sparse shape was saving, and that is worth
+    /// stating rather than leaving the old sentence standing.** A row was 40 bytes and is now 48
+    /// — the support is 32, the allele index 8, the group 4 and the padding 4 — where a dense
+    /// record would hold a bare 32-byte support per cell. So a sample showing 2 of a locus's 3
+    /// alleles from one library costs 96 bytes either way, and one showing 2 of 2 costs 96
+    /// against a dense 64. **What still pays is the cohort-wide case the shape was chosen for**:
+    /// a dense record is samples × alleles × *groups* cells whatever anyone showed, and it is the
+    /// third factor that makes it unaffordable — a panel where one sample in eleven carries a
+    /// second library (`doc/devel/ng/spec/read_groups.md` §1 — 157 of 1,707 samples in a
+    /// surveyed tomato archive carry more than one) would pay for every sample the widest
+    /// sample's groups.
     ///
     /// **Support is never merged across alleles**, because a genotype likelihood needs them
-    /// apart (spec §4.2). It *is* merged within one: where two of the sample's own
-    /// observations reached the same allele — the same bases from two read groups, or two
-    /// records' worth of one read — their reads and their sums are added.
+    /// apart (`doc/devel/ng/spec/cohort_merge.md` §4.2), **and never across read groups**, because the likelihood pools an
+    /// observation's reads into one term only if every one of them would get the same number
+    /// — and two reads of the same bases from two lanes have different error rates
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3). It *is* merged within one pair: where two of the
+    /// sample's own observations reached the same allele from the same group — two records'
+    /// worth of one read, say — their reads and their sums are added.
+    ///
+    /// **A sample with one read group has exactly today's shape**, which is most samples of
+    /// most runs, so the axis costs them nothing.
     pub supported: Vec<SupportedAllele>,
     /// Reads that covered one of this sample's records here and produced no observation at
     /// all — carried through from the members, not re-derived (arch §4).
@@ -893,28 +949,48 @@ pub struct SampleSupport {
 }
 
 impl SampleSupport {
-    /// What this sample's reads lend `allele` — **nothing, where it showed that allele no
-    /// reads**, which is the answer a zeroed row would have given.
+    /// What this sample's reads lend `allele` **added up over its read groups** — nothing,
+    /// where it showed that allele no reads, which is the answer a zeroed row would have
+    /// given.
     ///
-    /// A scan, not an index, because [`supported`](Self::supported) holds only the alleles
-    /// the sample showed: at an ordinary locus that is one or two entries, and it is bounded
-    /// by how many alleles the whole cohort showed.
-    pub fn support_for(&self, allele: usize) -> AlleleSupport {
+    /// **A read likelihood must not use this.** Pooling an allele's reads across groups is
+    /// exactly what `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids: the reads of one term have to
+    /// share an error rate, and two lanes do not. Iterate [`supported`](Self::supported)
+    /// instead, which is why the pooling is in this method's name. What it is for is the
+    /// questions that really are about the sample rather than about one library — how much
+    /// depth the allele has here, and the fixtures that ask it.
+    ///
+    /// A scan, not an index, because [`supported`](Self::supported) holds only the pairs the
+    /// sample showed: at an ordinary locus that is one or two entries, and it is bounded by
+    /// how many alleles the whole cohort showed times how many groups this sample has.
+    pub fn pooled_support_for(&self, allele: usize) -> AlleleSupport {
         self.supported
             .iter()
-            .find(|supported| supported.allele == allele)
-            .map(|supported| supported.support)
-            .unwrap_or_default()
+            .filter(|supported| supported.allele == allele)
+            .fold(AlleleSupport::default(), |total, supported| {
+                total.added_to(supported.support)
+            })
     }
 }
 
-/// One allele of the locus, and what one sample's reads lend it.
+/// One allele of the locus **as one of the sample's read groups showed it**, and what those
+/// reads lend it.
+///
+/// **The read group is part of the row's identity, not a label on it.** A sample whose reads
+/// for one allele came from two lanes has two rows here, and nothing downstream may add them:
+/// a read likelihood folds an observation's reads into one term only when every one of them
+/// would get the same number, and the two lanes' error rates differ
+/// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SupportedAllele {
     /// Which allele — an index into [`CohortObservation::alleles`].
     pub allele: usize,
-    /// What this sample's reads lend it. Never zero: an allele a sample showed no reads for
-    /// has no entry at all.
+    /// Which of the sample's read groups showed it — one `@RG`, i.e. one lane. Carried from
+    /// [`SequenceObservation::read_group`], which keeps the groups apart at the mint for the
+    /// same reason.
+    pub read_group: ReadGroupId,
+    /// What this sample's reads **from that group** lend it. Never zero: a pair a sample
+    /// showed no reads for has no entry at all.
     pub support: AlleleSupport,
 }
 
@@ -952,23 +1028,30 @@ pub struct SupportedAllele {
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
 ///   locus's width — 50 bases at the default bound.
 ///
-/// Rounded once per allele rather than per read, so the counts stay as close to whole reads
-/// as the division allows.
+/// Rounded once per row rather than per read, so the counts stay as close to whole reads as the
+/// division allows. **Per row means per `(allele, read group)` since B1, and that is a change
+/// of grain, not only of wording**: two lanes' shares of one divided read are now rounded
+/// separately, so adding the rows back can differ by up to half a read per lane from what a
+/// single row would have held. The row is what a model reads, and a row has to be whole reads
+/// to be usable on its own; [`SampleSupport::pooled_support_for`] is where the difference
+/// shows, and `tests::a_divided_read_is_rounded_once_per_read_group_not_once_per_allele` pins it
+/// at one forward read. (Named rather than linked: a `#[cfg(test)]` item does not exist in a doc
+/// build, so a link to one is an unresolved link.)
 ///
-/// **One row per allele pools the read groups, and the STR path will want them apart again**
-/// (the owner, at Checkpoint C). A sample's reads at one allele may come from several read
-/// groups, and `SequenceObservation` keeps them apart deliberately — "a per-chemistry model
-/// needs the allele × group cross **with its quality moments**"
-/// ([`locus_generation/mod.rs`](../../locus_generation/mod.rs)). **Stutter is fitted per read
-/// group**, so an STR locus called from a pooled row would be scored against a stutter rate
-/// that belongs to no group in particular.
+/// **This row is one allele of one read group, not one allele of the sample** — see
+/// [`SupportedAllele`], which carries the group. It was one row per allele until the calling
+/// prerequisites split it (`doc/devel/ng/impl_plan/calling_prerequisites.md`, Milestone B step
+/// B1), and the reason for splitting turned out to be general rather
+/// than the STR path's alone: a read likelihood folds an observation's reads into one term only
+/// when every one of them would get the same number, and reads from two lanes have different
+/// error rates (`doc/devel/ng/spec/read_likelihoods.md` §2.3). Stutter, fitted per read group, is the same
+/// argument on the repeat path — a locus called from a pooled row would be scored against a
+/// rate belonging to no group in particular. The mint says the same thing from its own side:
+/// "a per-chemistry model needs the allele × group cross **with its quality moments**"
+/// ([`SequenceObservation::read_group`](crate::ng::locus_generation::SequenceObservation)), a
+/// per-group count beside one merged row giving the first and losing the second.
 ///
-/// It is pooled here anyway, for now, and deliberately: the architecture's own sketch pools
-/// them (arch §4, `per_allele: Vec<SequenceObservation>`, one entry per allele), nothing in
-/// the generic path needs the cross, and the shape that restores it is one row per
-/// `(allele, read group)`, which folds to this one — so the step that needs it can add it
-/// without unpicking anything. **Whoever brings the STR path through this merge owes that
-/// change.**
+/// A sample with one read group has one row per allele, exactly as before.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AlleleSupport {
     /// How many of the sample's reads showed this allele. **Exact** — every read is named,
@@ -995,6 +1078,24 @@ pub struct AlleleSupport {
     pub placed_left: u32,
 }
 
+impl AlleleSupport {
+    /// Two rows added together — **the read-group fold, and the only place it happens**.
+    ///
+    /// Every field is additive, so this is exact wherever the rows themselves are.
+    /// [`SampleSupport::pooled_support_for`] is its one caller, and its doc says why a read
+    /// likelihood must not be a second one.
+    fn added_to(self, other: Self) -> Self {
+        Self {
+            num_reads: self.num_reads.saturating_add(other.num_reads),
+            num_fwd: self.num_fwd.saturating_add(other.num_fwd),
+            q_sum: self.q_sum + other.q_sum,
+            mapq_sum: self.mapq_sum.saturating_add(other.mapq_sum),
+            mapq_sum_sq: self.mapq_sum_sq.saturating_add(other.mapq_sum_sq),
+            placed_left: self.placed_left.saturating_add(other.placed_left),
+        }
+    }
+}
+
 /// One sample's support as it is accumulated, before the divided sums are rounded.
 ///
 /// The four count-like sums are gathered as `f64` because a read's share of them is a
@@ -1004,6 +1105,19 @@ pub struct AlleleSupport {
 struct AlleleSupportTally {
     num_reads: u32,
     sums: SupportSums,
+}
+
+/// One `(allele, read group)` pair being accumulated, and what it has accumulated.
+///
+/// **The key travels with the tally rather than being the index into it**, because a pair
+/// cannot index a `Vec`. What the scratch buffer keeps is the allocation, not the addressing:
+/// it is cleared and refilled per sample, and found by scanning, which at an ordinary locus
+/// means looking at one or two entries.
+#[derive(Debug, Clone, Copy)]
+struct AlleleGroupTally {
+    allele: usize,
+    read_group: ReadGroupId,
+    tally: AlleleSupportTally,
 }
 
 impl AlleleSupportTally {
@@ -1474,6 +1588,28 @@ enum AlleleBacking<'a> {
     },
 }
 
+impl AlleleBacking<'_> {
+    /// Which of the sample's read groups this evidence came from — the axis
+    /// [`SupportedAllele`] keys on.
+    ///
+    /// **A read has one read group, so a read seen at several of the sample's records has one
+    /// too.** The group belongs to the library the fragment was prepared in, not to where it
+    /// landed, so every sighting of one read names the same one and the first is the answer.
+    /// B2 asserts that they agree; here it is read off the first because there is nothing else
+    /// it could be.
+    fn read_group(&self) -> ReadGroupId {
+        match self {
+            Self::OneSequence(sequence) => sequence.read_group,
+            Self::OneRead { records, sightings } => {
+                let first = sightings
+                    .first()
+                    .expect("a read's sightings are one group of a chunk_by and never empty");
+                records[first.record as usize].observations[first.sequence as usize].read_group
+            }
+        }
+    }
+}
+
 /// How far `member_region` starts into `locus_region`, in bases.
 ///
 /// **Were the subtraction open-coded at each use**, a member starting before the locus
@@ -1696,7 +1832,7 @@ mod tests {
 
     /// **A member that matched the reference projects to the reference allele itself** —
     /// what `bases()` claims, and what lets the next step's allele table hold the
-    /// reference without a special case (spec §4.2). At a non-zero offset, so a prefix or
+    /// reference without a special case (`doc/devel/ng/spec/cohort_merge.md` §4.2). At a non-zero offset, so a prefix or
     /// suffix off by one would show.
     #[test]
     fn a_member_that_matched_the_reference_projects_to_the_locus_reference() {
@@ -1964,7 +2100,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Unification into one allele table (spec §4.2), and the owner's ruling of
+    // Unification into one allele table (`doc/devel/ng/spec/cohort_merge.md` §4.2), and the owner's ruling of
     // 2026-08-17 on what a sample showed when a locus spans several of its records.
     // ---------------------------------------------------------------
 
@@ -2708,7 +2844,7 @@ mod tests {
         assert_eq!(support.sample, 0);
         assert_eq!(support.reads_composed_across_records, 0, "nothing divided");
         assert_eq!(
-            support.support_for(REFERENCE_ALLELE),
+            support.pooled_support_for(REFERENCE_ALLELE),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 1,
@@ -2725,7 +2861,7 @@ mod tests {
             .position(|allele| &**allele == b"ACTTA")
             .expect("the SNP is in the table");
         assert_eq!(
-            support.support_for(snp),
+            support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 4,
                 num_fwd: 3,
@@ -2737,11 +2873,299 @@ mod tests {
         );
     }
 
-    /// **Two of a sample's own observations that reach the same allele are summed** (spec
-    /// §4.2), and support is **never** merged across alleles. The same bases from two read
-    /// groups are two observations and one allele.
+    /// **The same allele from two lanes is two rows, and the numbers are split exactly as the
+    /// reads were.**
+    ///
+    /// The mint already keeps read groups apart — `SequenceObservation` keys on the group — so
+    /// two lanes showing the same bases arrive as two observations of one record. They used to
+    /// land in one row here. Pooling them is what `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids: a
+    /// read likelihood folds an observation's reads into one term only when every one of them
+    /// would get the same number, and the two lanes have different error rates.
+    ///
+    /// **On this fixture nothing is lost or invented by the split** — the two rows' reads and
+    /// sums add back to what one pooled row held, which is what
+    /// [`pooled_support_for`](SampleSupport::pooled_support_for) is asserted against here.
+    /// **That is a property of this fixture and not of the merge**: every count here is added
+    /// whole, because the sample has one record. Where a read is divided across records the
+    /// four count-like sums are rounded per row, so two rows can round to one read more or less
+    /// than the single row would have — see
+    /// [`a_divided_read_is_rounded_once_per_read_group_not_once_per_allele`].
     #[test]
-    fn support_is_summed_within_an_allele_and_never_across_them() {
+    fn one_allele_from_two_read_groups_is_two_rows_holding_the_mints_own_numbers() {
+        let two_lanes = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                SequenceObservation {
+                    read_group: ReadGroupId(2),
+                    ..shown_by(b"T", &[7, 9], -6.0, 1, 120, 7_200, 1)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"T", &[11, 13, 15], -9.0, 2, 150, 7_500, 0)
+                },
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_lanes, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let snp = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACTTA")
+            .expect("the SNP is in the table");
+
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == snp)
+            .collect();
+        assert_eq!(rows.len(), 2, "one row per lane: {:?}", support.supported);
+        // Ascending by read group, so the lane that was emitted second comes first.
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[1].read_group, ReadGroupId(2));
+        assert_eq!(
+            rows[0].support,
+            AlleleSupport {
+                num_reads: 3,
+                num_fwd: 2,
+                q_sum: -9.0,
+                mapq_sum: 150,
+                mapq_sum_sq: 7_500,
+                placed_left: 0,
+            },
+        );
+        assert_eq!(
+            rows[1].support,
+            AlleleSupport {
+                num_reads: 2,
+                num_fwd: 1,
+                q_sum: -6.0,
+                mapq_sum: 120,
+                mapq_sum_sq: 7_200,
+                placed_left: 1,
+            },
+        );
+        assert_eq!(
+            support.pooled_support_for(snp),
+            AlleleSupport {
+                num_reads: 5,
+                num_fwd: 3,
+                q_sum: -15.0,
+                mapq_sum: 270,
+                mapq_sum_sq: 14_700,
+                placed_left: 1,
+            },
+            "the two rows add back to the one row this used to be",
+        );
+    }
+
+    /// **A read composed across records lands in its own lane's row**, which is the only test of
+    /// [`AlleleBacking::read_group`]'s multi-record arm — the two tests either side of this one
+    /// build a single record and take the other branch entirely.
+    ///
+    /// **And the rounding grain moved with the axis, which is what the second half asserts.**
+    /// The four count-like sums of a divided read are fractions until the row is finished, and
+    /// finishing rounds them. That used to happen once per allele and now happens once per
+    /// `(allele, read group)`, so each lane can round its share up or down on its own: here two
+    /// lanes each hold half a forward read, and each half rounds up, so the sample's rows total
+    /// two forward reads where one row would have held one. **Neither answer is wrong** — a row
+    /// has to be whole reads to be usable on its own — but the total is no longer what a single
+    /// row would have carried, and a reader adding the rows back must know it.
+    #[test]
+    fn a_divided_read_is_rounded_once_per_read_group_not_once_per_allele() {
+        // Two records; reads 7, 9 and 11 all show `A` then `C`, so each composes the same
+        // allele across both. Reads 7 and 9 are lane 1, read 11 is lane 2.
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![
+                    SequenceObservation {
+                        read_group: ReadGroupId(1),
+                        ..shown_by(b"A", &[7, 9], -4.0, 1, 120, 7_200, 0)
+                    },
+                    SequenceObservation {
+                        read_group: ReadGroupId(2),
+                        ..shown_by(b"A", &[11], -2.0, 1, 60, 3_600, 0)
+                    },
+                ],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![
+                    SequenceObservation {
+                        read_group: ReadGroupId(1),
+                        ..shown_by(b"C", &[7, 9], -1.0, 0, 100, 5_000, 0)
+                    },
+                    SequenceObservation {
+                        read_group: ReadGroupId(2),
+                        ..shown_by(b"C", &[11], -0.5, 0, 50, 2_500, 0)
+                    },
+                ],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATC")
+            .expect("the composed allele");
+        assert_eq!(
+            support.reads_composed_across_records, 3,
+            "every read divided"
+        );
+
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == compound)
+            .collect();
+        assert_eq!(rows.len(), 2, "one row per lane: {:?}", support.supported);
+        // **The read group came from the sightings, not from a default.** Reading it off the
+        // wrong observation would put both reads in one lane.
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[0].support.num_reads, 2);
+        assert_eq!(rows[1].read_group, ReadGroupId(2));
+        assert_eq!(rows[1].support.num_reads, 1);
+
+        // Each lane's forward share is exactly half a read, and each row rounds it to one.
+        assert_eq!(rows[0].support.num_fwd, 1, "lane 1: two reads, one forward");
+        assert_eq!(rows[1].support.num_fwd, 1, "lane 2: one read, one forward");
+        assert_eq!(
+            support.pooled_support_for(compound).num_fwd,
+            2,
+            "the rows total two forward reads; one pooled row would have rounded once",
+        );
+        assert_eq!(
+            support.pooled_support_for(compound).num_reads,
+            3,
+            "the read count is exact either way — every read is named",
+        );
+    }
+
+    /// **A one-read-group sample's rows are in ascending allele order**, and until B1 that was
+    /// free: the tally was a vector indexed by allele, so nothing could put it out of order.
+    /// It is now a sort that can be deleted, and this is the only test that would notice —
+    /// every other one-group fixture happens to emit its alleles in ascending order anyway.
+    ///
+    /// This one does not: the record shows the alternative first, so the reference is interned
+    /// second and the emission order is allele 1 then allele 0.
+    #[test]
+    fn a_one_read_group_samples_rows_are_in_ascending_allele_order() {
+        let alternative_first = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7], -1.0, 0, 10, 100, 0),
+                shown_by(b"G", &[9], -2.0, 0, 20, 400, 0),
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&alternative_first, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let alleles: Vec<_> = support.supported.iter().map(|row| row.allele).collect();
+
+        // The premise, asserted rather than assumed: the alternative was emitted first, so an
+        // unsorted tally would hold it first.
+        assert_eq!(
+            observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == b"ACTTA"),
+            Some(1),
+            "the alternative is interned after the reference",
+        );
+        assert_eq!(alleles, vec![0, 1], "ascending allele order: {alleles:?}");
+        assert!(
+            support
+                .supported
+                .iter()
+                .all(|row| row.read_group == ReadGroupId(0)),
+            "one group, and every row says which: {:?}",
+            support.supported,
+        );
+    }
+
+    /// **The rows are in ascending `(allele, read group)` order**, which is the contract
+    /// [`SampleSupport::supported`] states and the order a consumer walking the pair may rely
+    /// on. The tally is filled in the order the derivation emits alleles, which is neither, so
+    /// this pins the sort rather than an accident of the fixture.
+    #[test]
+    fn the_rows_are_ordered_by_allele_then_read_group() {
+        let mixed = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                SequenceObservation {
+                    read_group: ReadGroupId(5),
+                    ..shown_by(b"T", &[7], -1.0, 0, 10, 100, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(3),
+                    ..shown_by(b"G", &[9], -2.0, 0, 20, 400, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"T", &[11], -3.0, 0, 30, 900, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(4),
+                    ..shown_by(b"G", &[13], -4.0, 0, 40, 1_600, 0)
+                },
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&mixed, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let keys: Vec<_> = observed.per_sample[0]
+            .supported
+            .iter()
+            .map(|row| (row.allele, row.read_group))
+            .collect();
+
+        // **Spelled out rather than compared against a sorted copy of itself**, which would be
+        // true of any order the code happened to produce and would show a reader nothing. The
+        // fixture emits `(1, 5), (0, 3), (1, 1), (0, 4)`; this is what the sort must make of it.
+        let reference = REFERENCE_ALLELE;
+        let snp = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACTTA")
+            .expect("the SNP is in the table");
+        assert_eq!(
+            keys,
+            vec![
+                (reference, ReadGroupId(3)),
+                (reference, ReadGroupId(4)),
+                (snp, ReadGroupId(1)),
+                (snp, ReadGroupId(5)),
+            ],
+        );
+    }
+
+    /// **Support is never merged across alleles** (`doc/devel/ng/spec/cohort_merge.md` §4.2),
+    /// and since B1 it is never merged across read groups either
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    ///
+    /// **This test said the opposite until B1**, and it is the only pre-existing merge test
+    /// with more than one read group in it: the same bases from two groups were "two
+    /// observations and one allele", and their reads and sums were added. They are now two rows.
+    /// It is kept — with what it asserts corrected — rather than replaced, because the second
+    /// half of its claim is unchanged and worth keeping beside the first: a *different* allele
+    /// is still never mixed in, whatever group it came from.
+    #[test]
+    fn support_is_merged_within_an_allele_and_a_read_group_and_across_neither() {
         let two_groups = [record_of(
             region(12, 12),
             b"G",
@@ -2767,8 +3191,23 @@ mod tests {
                 .expect("in the table")
         };
 
+        // **The two groups stay apart**, which is what B1 changed: two rows, each holding its
+        // own group's reads, where this used to be one row holding both.
+        let snp = allele_of(b"ACTTA");
+        let snp_rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == snp)
+            .collect();
+        assert_eq!(snp_rows.len(), 2, "{:?}", support.supported);
+        assert_eq!(snp_rows[0].read_group, ReadGroupId(0));
+        assert_eq!(snp_rows[0].support.num_reads, 2);
+        assert_eq!(snp_rows[0].support.q_sum, -4.0);
+        assert_eq!(snp_rows[1].read_group, ReadGroupId(1));
+        assert_eq!(snp_rows[1].support.num_reads, 1);
+        assert_eq!(snp_rows[1].support.q_sum, -1.0);
         assert_eq!(
-            support.support_for(allele_of(b"ACTTA")),
+            support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 2,
@@ -2777,10 +3216,10 @@ mod tests {
                 mapq_sum_sq: 9_700,
                 placed_left: 1,
             },
-            "the two read groups' reads and sums added",
+            "and adding the two rows back gives what the one row used to hold",
         );
         assert_eq!(
-            support.support_for(allele_of(b"ACATA")),
+            support.pooled_support_for(allele_of(b"ACATA")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2836,7 +3275,7 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            support.support_for(compound),
+            support.pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2916,7 +3355,7 @@ mod tests {
         let split = &observed.per_sample[0];
 
         assert_eq!(
-            split.support_for(allele_of(b"ACATC")),
+            split.pooled_support_for(allele_of(b"ACATC")),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 2,
@@ -2928,7 +3367,7 @@ mod tests {
             "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
         );
         assert_eq!(
-            split.support_for(allele_of(b"ACTTC")),
+            split.pooled_support_for(allele_of(b"ACTTC")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2952,7 +3391,9 @@ mod tests {
         );
         assert_eq!(with_a_removal.reads_composed_across_records, 1);
         assert_eq!(
-            with_a_removal.support_for(allele_of(b"AGGAA")).num_reads,
+            with_a_removal
+                .pooled_support_for(allele_of(b"AGGAA"))
+                .num_reads,
             1,
             "read 21 composed across both records",
         );
@@ -2993,7 +3434,7 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            observed.per_sample[0].support_for(compound).q_sum,
+            observed.per_sample[0].pooled_support_for(compound).q_sum,
             -1.0,
             "the weaker of −6.0 and −1.0, not the better",
         );
@@ -3115,7 +3556,7 @@ mod tests {
             .expect("the three reads' allele");
 
         assert_eq!(
-            observed.per_sample[0].support_for(compound),
+            observed.per_sample[0].pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 1,
@@ -3129,7 +3570,7 @@ mod tests {
     }
 
     /// **A sample that did not cover the locus has no entry**, which is a different fact
-    /// from an entry whose support is all reference (spec §4.2). Sample 1 here covers
+    /// from an entry whose support is all reference (`doc/devel/ng/spec/cohort_merge.md` §4.2). Sample 1 here covers
     /// nothing, and the walk is what leaves it out — so the entries name their samples
     /// rather than sitting at their index.
     #[test]
@@ -3193,12 +3634,12 @@ mod tests {
             .position(|allele| &**allele == b"ACATA")
             .expect("sample 1's allele");
         assert_eq!(
-            observed.per_sample[0].support_for(late),
+            observed.per_sample[0].pooled_support_for(late),
             AlleleSupport::default(),
             "an allele this sample never showed answers nothing at all",
         );
         assert_eq!(
-            observed.per_sample[1].support_for(late).num_reads,
+            observed.per_sample[1].pooled_support_for(late).num_reads,
             3,
             "and the sample that did show it answers its reads",
         );

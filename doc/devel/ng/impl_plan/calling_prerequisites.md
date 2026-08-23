@@ -146,7 +146,7 @@ have different error rates and must not be pooled ([`read_likelihoods.md`](../sp
 §2.3). The merge's own doc already books the change as owed
 ([`build.rs:958`](../../../../src/ng/run/cohort_merge/build.rs)).
 
-**B1. The type change.**  ☐
+**B1. The type change.**  ✅
 `SupportedAllele` ([`build.rs:913`](../../../../src/ng/run/cohort_merge/build.rs)) gains the
 read group: one row per `(allele, read group)`, rows in ascending `(allele, read group)` order —
 the shape that folds to today's where a sample has one group. `ReadGroupId` is already on
