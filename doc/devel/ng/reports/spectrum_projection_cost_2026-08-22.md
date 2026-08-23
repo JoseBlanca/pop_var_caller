@@ -41,6 +41,14 @@ projection is aimed at and the one where the branch sum is widest. One predictio
 **Growth falls from `N^2.95` to `N^2.45`.** In fit terms, at about 160 objective evaluations: 3,200
 samples goes from 32 minutes to **2.6 minutes**, 1,600 from 5.6 minutes to 29 seconds.
 
+> **Corrected 2026-08-22, when the fit was built (step D2).** Both numbers in that sentence were
+> assumptions and both were low. A fit runs **399** predictions, not 160, and a prediction
+> **inside a fit** averages 1.78 s at 3,200 individuals against the 0.96 s measured here at the
+> neutral pair — the search spends most of its predictions away from that pair, where the
+> branch-tail trim drops fewer splits. Measured end to end: 3.8 s at 400 individuals, 22 s at 800,
+> 2.2 minutes at 1,600 and **11.8 minutes at 3,200**. The per-prediction table below is unchanged
+> and still correct for what it measures.
+
 ## What the accuracy costs, and why the answer is "nothing"
 
 **At `1e-18` the trim is not measurable.** The worst class-by-class disagreement with the

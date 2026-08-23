@@ -153,6 +153,10 @@ with `error[E0451]`.
 /// indistinguishable (spec §4, §4.1).
 pub enum SeedRegime {
     /// Read off the pre-pass's fitted spectrum by the §4.1 projection.
+    /// `data_dominated` is the PANEL-WIDE comparison, and spec §4.1 is explicit that a
+    /// panel-wide ratio is the wrong number to quote as reassurance — the tail is where
+    /// the regularizer binds. The per-class ratio is the pre-pass's to emit beside its
+    /// spectrum (§4); this carries the aggregate and claims nothing more.
     FittedSpectrum { regularizer_site_weight: f64, data_dominated: bool },
     /// No spectrum emitted (absent below the panel-size floor, or one sample):
     /// the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE, never on cohort
@@ -283,27 +287,56 @@ The seed comes from the pre-pass's fitted spectrum, projected onto `(α_ref, α_
 /// Project the fitted spectrum onto the two-parameter family — maximum-likelihood fit
 /// of predicted class probabilities to the fitted spectrum's class weights, over ALL
 /// classes including monomorphic, predicting with §3.2's two-branch sampling at the
-/// panel's F (independent chromosomes bias α_ref down 9–14% at tomato's F; spec §4.1).
+/// panel's F. Independent chromosomes bias α_ref down 8.6% at F = 0.6, 12.1% at 0.8 and
+/// 14.0% at 0.9, measured on 26 individuals at tomato's diversity (spec §4.1).
 /// A change of representation, not a second estimate. `None` spectrum → NeutralShape.
 pub fn project_spectrum_seed(
-    spectrum: Option<&FittedSpectrum>,   // absent below the pre-pass's panel-size floor
-    diversity: ExpectedHeterozygosity,
+    spectrum: Option<FittedSpectrum<'_>>, // absent below the pre-pass's panel-size floor
+    diversity: Option<ExpectedHeterozygosity>, // None → FallbackDiversity; the regime is
+                                         // derived here rather than asserted by a caller
     panel_inbreeding: InbreedingF,
-    chromosomes: u32,                    // 2N of the panel the spectrum was fitted at
     class: VariantClass,                 // Substitution | InsertionOrDeletion — Q1's argument
 ) -> SpectrumSeed;
 
-/// Expand the run's two numbers to one locus's table: α_ref first, the ALT total split
-/// evenly across the locus's alternative alleles, floored (spec §4). Port of
+/// Expand the run's two numbers over one locus's alleles: α_ref first, the ALT total
+/// split evenly across the locus's alternative alleles, floored (spec §4). Port of
 /// alpha_from_diversity (genetics.rs:214) with the pair as input instead of hard-coded.
-pub fn seed_for_locus(seed: &SpectrumSeed, allele_count: usize, out: &mut [f64]);
+/// Named for what it does, like the module's other two fillers.
+pub fn fill_locus_concentration(
+    seed: SpectrumSeed,                  // Copy, 24 bytes — by value, like its accessors
+    class: VariantClass,                 // Q1's argument here too; see below
+    allele_count: usize,                 // checked against out.len(): `out` is scratch the
+    out: &mut [f64],                     // loop slices, so its length is a slicing decision
+);
 ```
 
-The projection's optimiser reuses the pre-pass's fitting machinery
-([`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs)) — a
-two-parameter fit needs nothing new. Census-site exclusion on depth, the regularizer sweep, and
-the per-class reporting are the **pre-pass's** obligations (spec §4.1's traps); this module only
-carries `SeedRegime` through to the output.
+**The panel size is not an argument to the projection**: `2N + 1` class weights already fix `N`,
+and a second argument is a second place for it to disagree. `FittedSpectrum` is a **borrowed view
+over the class weights** plus the regularizer's weight and the variable-site count — decided at
+implementation, 2026-08-22, and the answer to §8's open item. Neither `FrequencyDensity`
+([`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs)) nor a gather wrapper is
+it: the first is a density over the *population's* allele frequency, and the projection matches a
+*panel's* allele counts.
+
+**The projection's optimiser is not `fit_by_multistart`, and that is a measurement.** That driver
+scores one cell at a time through `NoiseModel::append_genotype_likelihoods`, which takes `&self`
+and so cannot cache; the natural cell here is one allele-count class, and every class would
+rebuild the whole spectrum — 6,401 predictions where one is needed at 3,200 individuals, about 1.7
+hours per candidate against 0.96 seconds. It also has no notion of a search direction that is not
+an axis, and this surface is a ridge whose direction depends on the panel size, so the search
+sweeps three: the total concentration, `α_ref` alone and `α_alt` alone. What is reused is the
+driver's *shape* and its `SearchPrecision`. A fit is 399 predictions and 11.8 minutes at 3,200
+individuals, once per run.
+
+**Which end owns a SNP-versus-indel split is `OPEN:`** (spec Q1). The class is an argument to both
+functions above and read by neither; when the pre-pass measures two diversities it fits two seeds,
+so applying the split at both ends would apply the ratio twice. A generic locus can also carry a
+substitution alternative and an indel alternative at once, which one class per locus cannot
+express — the classes are derivable from `CandidateAlleles`, which hold the bases.
+
+Census-site exclusion on depth, the regularizer sweep, and the per-class reporting are the
+**pre-pass's** obligations (spec §4.1's traps); this module only carries `SeedRegime` through to
+the output.
 
 ## 5. The STR path
 
@@ -400,7 +433,9 @@ Every row read on 2026-08-21.
   isolates it.
 - `OPEN:` the policy at `DiversityUnreachable` (spec Q2) — the outcome type is settled, the
   consumer's choice among the three candidate answers is not; provisional behaviour in §5.
-- Impl-time confirmations: the concrete `FittedSpectrum` type from the pre-pass cohort gather.
+- ~~Impl-time confirmation: the concrete `FittedSpectrum` type from the pre-pass cohort gather.~~
+  **Settled 2026-08-22 at step D2** — a borrowed view over the class weights; see §4.
+- `OPEN:` which end of the SNP/indel path owns a class split (spec Q1) — §4.
   **The scratch slot the row function needs is settled: one `f64` per allele**, which is what the
   ported primitive hoists (`lgamma(α_a)`, one per allele); `CallingScratch` owns it.
 

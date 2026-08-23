@@ -205,11 +205,19 @@ log P_random(g) = log C(m; k)  +  Σ_a [ lgamma(α_a + k_a) − lgamma(α_a) ]
 genotype. A zero count contributes exactly zero to the sum, so the cost is one `lgamma` pair per
 allele the genotype actually carries.
 
-The genotype-independent term `lgamma(Σα + m) − lgamma(Σα)` is **omitted**: it is the same for
-every genotype, so it cancels when the caller normalises. The values are therefore log-priors up
-to a shared additive constant, which is what a softmax consumes. Production's primitive
-([`genetics.rs:127`](../../../../src/genetics.rs)) takes flat arrays and returns exactly this, and
-ng ports it unchanged (§9).
+The genotype-independent term `lgamma(Σα + m) − lgamma(Σα)` is **omitted** from the expression
+above: it is the same for every genotype, so it cancels when the caller normalises. The values are
+therefore log-priors up to a shared additive constant, which is what a softmax consumes.
+Production's primitive ([`genetics.rs:127`](../../../../src/genetics.rs)) takes flat arrays and
+returns exactly this, and ng ports it unchanged (§9).
+
+**The constant cancels in a row and it does not cancel in a mixture, and that distinction is the
+one thing in this section that has already cost a defect.** §3.2 combines this term with a second
+branch whose value, `α_a / Σα`, is a true probability. Adding a constant to one summand of a
+`logsumexp` and not the other changes the answer, so **the random-mating branch has to be put back
+on the probability scale before the two are mixed** — §3.2 says how, and what it costs not to.
+Production does not, and its own defence is that its default inbreeding coefficient is zero, where
+the second branch is not there to be mixed.
 
 ### 3.2 The inbreeding branch
 
@@ -235,7 +243,24 @@ and for any genotype that is not homozygous, only the first branch exists:
 log P(g) = log(1 − F) + log P_random(g)
 ```
 
-This is production's mixture, from
+**`log P_random(g)` here is the whole probability, including the `lgamma(Σα + m) − lgamma(Σα)`
+term §3.1 drops.** The second branch is a true probability; mixing an unnormalised first branch
+against it inflates the random-mating side by `Σα(Σα + 1)` at diploidy, and the inbreeding
+coefficient then does a fraction of the work it should. **Measured, biallelic diploid at tomato's
+fitted diversity of 6 in 10,000, reading the heterozygote to homozygous-alternative prior ratio at
+`F = 0.8`:** the model says 0.222 at one sample and the uncorrected mixture gives 0.400 — it
+travels 90% of the way from the outbred 2:1 to the right answer. **At cohort scale it barely moves
+at all**, because the concentration handed in is the leave-one-out one (§6) so `Σα` grows with the
+cohort and the inflation grows with its square: 50 samples reach 3.6% of the way and 1,000 samples
+0.09%, so an inbreeding coefficient of 0.8 buys almost nothing.
+
+**Production has this defect and it is live rather than latent.** Its engine mixes the two scales,
+and its default coefficient of zero hides it — but the pipeline also hands the engine the
+per-sample coefficients the diversity estimator *fitted*, as overrides, and those are not zero on
+an inbred panel. **ng corrects it deliberately (owner, 2026-08-22), and it is the one place the
+port departs from what it was ported from.**
+
+This is otherwise production's mixture, from
 [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) and
 [`:3217`](../../../../src/var_calling/posterior_engine.rs), and the STR side's port of it
 ([`ssr/cohort/em.rs:290`](../../../../src/ssr/cohort/em.rs)).
@@ -326,8 +351,9 @@ from a Dirichlet with `α_ref = 1`, `α_alt = θ` and `θ/k` is what comes out *
 harmonic number: **3 in a thousand** at `θ = 6 in 10,000` over 52 chromosomes — the diversity fitted
 on tomato1 — rising to about **8%** at `θ` of 1 in 100 across two thousand chromosomes. That is close
 enough to treat the two as one
-object and too far to call an identity, which is why §12's test builds its target by *sampling* the
-Dirichlet rather than by writing `θ/k`. So there is no choice to make between "the neutral shape" and
+object and too far to call an identity, which is why §12's test builds its target as the family's
+**exact expected spectrum, computed in closed form**, rather than by writing `θ/k` — and not by
+sampling either, for the reason test 5 gives. So there is no choice to make between "the neutral shape" and
 "the pre-pass's measured spectrum". They are one object at two sample sizes, and the concentration is
 read off the spectrum rather than fixed.
 
@@ -373,7 +399,7 @@ heterozygosity from the windowed histogram
 averaged. **So the shape is theoretical and the scale is measured, and the two come from different
 accumulators.**
 
-**At one sample the projection returns `(1, θ)` exactly, and no test of the cohort size makes it do so.** A census
+**At one sample the projection returns `(1, θ)`, and no test of the cohort size makes it do so.** A census
 site's whole content is which samples carried an allele together, and a panel of one has no such
 correspondence: no site is variable across it, so the census contributes nothing and the spectrum
 is its `θ/k` prior untouched — at that genome's own measured `θ`. **The single-sample case
@@ -1031,10 +1057,15 @@ Seven more are ng's own, and each pins a claim this document makes:
    `θ/k` — that is the small-`θ` approximation (§4.1), which would put the test's own error at about
    `θ · H(2N)`, 3 in a thousand at tomato's diversity, and no honest tolerance could tell that from a
    wiring bug. **And not by drawing sites at random either:** Monte-Carlo noise falls as one over the
-   square root of the site count, so a floating-point tolerance would need a number of sites nobody
-   can generate, and loosening the tolerance to fit destroys what the test is for. Given the exact
-   target, the projection must return `α_ref = 1` and `α_alt = θ` to floating-point tolerance at
-   several panel sizes.
+   square root of the site count, so no tolerance a fit could be held to would need a number of sites
+   anybody can generate, and loosening it to fit destroys what the test is for.
+
+   **What the projection must return is the pair to within the resolution the search was asked
+   for, and closer when it is asked for more** — the second half is what separates a resolution
+   from a bias, and floating-point equality is not available from any bounded search. Measured on
+   the shipped one, over six panel sizes from one individual to 150, three diversities and two
+   inbreeding coefficients: 0.25% on `α_ref` and 0.31% on `α_alt` at the shipped 1% resolution, and
+   2 parts in 100,000 at a thousand-fold finer.
 6. **The projection is invariant to inbreeding.** Build the exact expected spectrum of one population
    frequency density at `F = 0`, `0.6` and `0.9` under §3.2's two-branch sampling; the projection
    must return the same pair from all three. An independent-chromosome projection does not — `α_ref`

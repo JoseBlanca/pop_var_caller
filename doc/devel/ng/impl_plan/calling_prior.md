@@ -55,8 +55,11 @@ plans start on different days and still run in parallel.**
   built against closed-form targets before anything composes them.
 - **Reuse over rewrite.** The primitive, the floors, the mixture, the leave-one-out arithmetic
   and the STR shape are **ports** — arch §6's reconciliation table is the map, and no formula is
-  re-derived. The projection is the one genuinely new function, and its optimiser reuses
-  [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs).
+  re-derived. The projection is the one genuinely new function. *Its optimiser was expected to
+  reuse [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs);
+  at D2 that driver turned out to cost 6,401 predictions per candidate at 3,200 individuals, since
+  it scores one cell at a time and cannot cache. Its shape and its `SearchPrecision` are reused;
+  the driver is not (arch §4).*
 - **Verify against ground truth.** The primitive against the rising-factorial oracle
   (`pochhammer_ln` / `dm_log_prior_oracle`,
   [`genetics.rs:240`](../../../../src/genetics.rs)); the mixture against the Wright biallelic
@@ -175,9 +178,12 @@ into its prior and nothing crashes; tests 8 and 9 are the oracle, green before a
 ### Milestone D — the SNP/indel seed: the projection
 
 **D1. The exact expected spectrum, in closed form.**  ✅ *(shipped as `fill_expected_spectrum`,
-then made about 12× faster at no measurable cost — `N^2.45` rather than `N^2.95`, so a fit is 2.6
-minutes at 3,200 samples rather than 32. **D2 can therefore be built as spec §4.1 writes it**, over
-every class. See the step's report and `doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md`.)*
+then made about 12× faster at no measurable cost — `N^2.45` rather than `N^2.95`. **D2 can
+therefore be built as spec §4.1 writes it**, over every class. See the step's report and
+`doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md`. *A fit turned out to cost 11.8
+minutes at 3,200 samples rather than the 2.6 that report predicts: 399 predictions against the 160
+it assumes, each averaging 1.78 s inside a fit against 0.96 s at the neutral pair, where the
+branch-tail trim drops more splits (measured at D2).*)*
 The function that predicts a candidate `(α_ref, α_alt)`'s allele-count class probabilities at
 `2N` chromosomes under **§3.2's two-branch sampling at the panel's `F`** — used twice: inside the
 projection's objective, and to build the tests' targets. Closed form; nothing simulated.
@@ -197,8 +203,8 @@ closed form**: a neutral spectrum projects to `(1, θ)` at several panel sizes (
 independent-chromosome projection returns `α_ref ≈ 0.91 / 0.86` (test 6, the test that holds the
 two-branch requirement in place); at `n = 1` the pair is `(1, θ)` with no test of `n` — the only
 branch is on the spectrum being absent (test 7). **Own commit, do not bundle** — a projection
-biased by independent-chromosome sampling is 9–14% off on `α_ref` at tomato's `F` and nothing
-crashes; tests 5–7 are the oracle. *Depends:* D1. *Source:* spec §4.1; arch §4.
+biased by independent-chromosome sampling is 12–14% off on `α_ref` at tomato's fitted `F` of 0.8
+to 0.9 (8.6% as far down as `F = 0.6`) and nothing crashes; tests 5–7 are the oracle. *Depends:* D1. *Source:* spec §4.1; arch §4.
 
 **D3. `seed_for_locus`.**  ✅ *(shipped as `fill_locus_concentration`)*
 Expand the run's pair onto one locus's table: `α_ref` first, the ALT total split evenly across
