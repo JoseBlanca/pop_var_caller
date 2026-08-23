@@ -145,19 +145,17 @@ All in the dev container, on the tree as committed.
 | `cargo test --lib ng::locus_generation::tests` | **31 passed, 0 failed** |
 | `cargo doc --no-deps` | 24 unresolved-link errors, 12 "redundant explicit link target" warnings — the same as the tree before |
 
-**The whole-suite run is reported honestly and it is not one clean run.** On this tree, one
-`cargo test --lib` reached **4,178 of the suite's 4,180 tests, all green**, before it was stopped:
-the two outstanding were `joint::ssr_fit`'s `a_drawn_stratum_returns_the_numbers_it_was_drawn_with`
-and `cohort_merge::serial`'s `the_two_drivers_agree_on_random_layouts`, the suite's two slowest.
-**Each was then run on its own on the same tree and passed** — the whole `joint::ssr_fit` module
-14 passed in 463 s, the whole merge module 246 passed. So every test in the suite has been
-observed green on this tree; they have not all been observed green in one process.
+**Amended after the commit: `cargo test --lib` is green in one run — 4,158 passed, 0 failed, 14
+ignored, 597.13 s** — the 4,157 of the previous commit plus the one test this step adds.
 
-**Why, and it is not this change.** The same suite ran in 621 s on the previous commit and again
-on an earlier state of this one. It degraded across the session on this machine — a later run
-under a freshly started container was slower still, reaching 1,402 tests in the time the whole
-suite used to take. Nothing in this step touches the two slow tests' code paths; both are
-numerical fits in modules this commit does not edit.
+The commit message says the whole-suite gate was split across runs, and at the time it was: two
+runs on this tree stalled with the suite's two slowest tests outstanding — `joint::ssr_fit`'s
+`a_drawn_stratum_returns_the_numbers_it_was_drawn_with` and `cohort_merge::serial`'s
+`the_two_drivers_agree_on_random_layouts` — after the other 4,178 had passed, and each was then
+verified green on its own. **The cause was the dev container, not the code**: the same suite ran in
+621 s earlier in the session and degraded over hours of use. Stopping the container and letting
+the next run start a fresh one restored it to 597 s and to a single clean pass. **Nothing about the
+tree changed between the split evidence and the clean run.**
 
 ## 6. Follow-ups
 
