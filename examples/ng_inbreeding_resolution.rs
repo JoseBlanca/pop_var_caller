@@ -692,8 +692,8 @@ fn main() {
     let _ = writeln!(
         report,
         "\n{} grid points × {SEEDS} seeds × 3 questions, plus {} run shapes × {} evidence \
-         levels × {SEEDS} seeds in §4; `InbreedingF` accepts [0, 1] and every fitted value \
-         above was inside it.",
+         levels × {SEEDS} seeds in §4. `InbreedingF` accepts [0, 1); the fitted values \
+         reported above are raw and never pass through it.",
         grid().len(),
         section_4_runs().len(),
         section_4_shapes().len()

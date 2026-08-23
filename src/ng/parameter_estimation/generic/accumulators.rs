@@ -1026,7 +1026,7 @@ mod tests {
     #[test]
     fn a_supplied_inbreeding_coefficient_collapses_the_windowed_table() {
         let edges = ladder();
-        let supplied = InbreedingF::try_new(0.3).expect("a coefficient in [0, 1]");
+        let supplied = InbreedingF::try_new(0.3).expect("a coefficient in [0, 1)");
         let mut with_supplied_f = GenericAccumulators::new(
             Arc::clone(&edges),
             &[group(0)],

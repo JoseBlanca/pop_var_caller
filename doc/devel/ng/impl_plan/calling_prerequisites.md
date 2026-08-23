@@ -116,7 +116,7 @@ The ceiling is a property of the type, not of one estimator
 ([`calling_priors.md`](../spec/calling_priors.md) §7). The arch names the three-part blast radius
 ([`../arch/calling_priors.md`](../arch/calling_priors.md) §2.1), and each part is a step.
 
-**A1. The half-open check.**  ☐
+**A1. The half-open check.**  ✅
 `InbreedingF::try_new` rejects `1.0`: its own `[0, 1)` range test with a new `DomainError` variant
 that says so, **not** a change to the shared `checked_probability`
 ([`types.rs:326`](../../../../src/ng/types.rs)), which the other fraction newtypes share and which

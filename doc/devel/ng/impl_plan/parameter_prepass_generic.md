@@ -167,7 +167,9 @@ rule fits neither side of that split, and all three A4 reviewers judged its own 
 `try_new` returning `DomainError`, and `.get()`, copying `MismatchFraction`'s shape
 ([`types.rs:243`](../../../../src/ng/types.rs)). Four types and not one shared `Probability`:
 they are all fractions in `[0, 1]`, so one type would let an inbreeding coefficient be handed
-to something expecting an error rate and compile. `Ploidy` rejects zero, because the
+to something expecting an error rate and compile. (`InbreedingF` was later tightened to
+`[0, 1)` — [`calling_prerequisites.md`](calling_prerequisites.md) A1; the argument for four
+types is unaffected.) `Ploidy` rejects zero, because the
 likelihood divides by it. Unit tests: boundary values accepted, out-of-range rejected, `Ploidy
 = 0` rejected. *Source:* arch §2.1.
 

@@ -148,8 +148,12 @@ cluster [`module_layout.md`](module_layout.md) anticipates splitting `types.rs` 
 grouping them together now so that split has its seed.
 
 ```rust
-/// Three constrained rates, one type each — **not one shared `Probability`**. They are
-/// all fractions in `[0, 1]`, so a single type would let an inbreeding coefficient be
+/// Three constrained rates, one type each — **not one shared `Probability`**. All three are
+/// fractions — the error rate and the genotype frequency closed at `[0, 1]`, the inbreeding
+/// coefficient half-open at `[0, 1)` because `F = 1` rules heterozygotes out
+/// (`spec/calling_priors.md` §7) — and no range tells them apart in a way a compiler could
+/// use, so a single type would let an
+/// inbreeding coefficient be
 /// handed to something expecting an error rate and compile. `types.rs` already plans this
 /// split: `DomainError`'s doc names `AlleleFreq`, `InbreedingF` and `Theta` as the
 /// variants to come, and `DomainError::ErrorRate(f64)` is already there.
@@ -160,9 +164,10 @@ pub struct ErrorRate(f64);            // per-base, per read group — DomainErro
 pub struct GenotypeFrequency(f64);    // how common one genotype is: π_hom_ref/π_het/π_hom_alt
 pub struct InbreedingF(f64);          // the name types.rs already anticipates
 
-/// `try_new` is the **boundary** constructor: it rejects a value outside `[0, 1]` rather
-/// than coercing it, for values arriving from outside the program — the inbreeding
+/// `try_new` is the **boundary** constructor: it rejects a value outside the type's range
+/// rather than coercing it, for values arriving from outside the program — the inbreeding
 /// coefficient a user may supply on the command line is the one such path here (spec §6.4).
+/// For `InbreedingF` that range is `[0, 1)`, so exactly `1` is rejected too.
 ///
 /// The fits construct through the same door and `.expect()`, because a frequency off the
 /// simplex or a rate outside `[0, 1]` means our own arithmetic is broken, and there is
