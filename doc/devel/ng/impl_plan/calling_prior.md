@@ -29,8 +29,10 @@ plans start on different days and still run in parallel.**
 **In:** `src/ng/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
 `Concentration`, `sample_concentration`), `dirichlet_multinomial.rs` (the ported primitive +
 `MarginalizedDirichletPrior`), `seed_generic.rs` (`project_spectrum_seed`, `seed_for_locus`),
-`seed_ssr.rs` (`ssr_seed`, `seed_length_distribution`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
-`types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK`.
+`seed_ssr.rs` (`fill_ssr_seed`, `fill_seed_shape`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
+`types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK` — and, at E1,
+`RepeatGeneDiversity` and `SeedDecayPerRepeat`, the two repeat-tract scalars arch §5 sketched as
+bare `f64`.
 
 **Out (later plans or upstream):**
 
@@ -219,11 +221,14 @@ total polymorphism as a biallelic one. *Depends:* D2. *Source:* spec §4; arch �
 
 ### Milestone E — the STR seed
 
-**E1. `ssr_seed` — the shape ported, the total new.**  ☐
+**E1. `ssr_seed` — the shape ported, the total new.**  ✅ *(shipped as `fill_ssr_seed`, with the
+two scalars as checked types in `ng/types.rs` and the fallback decay as
+`SeedDecayPerRepeat::FALLBACK`; the refusal withholds the concentration rather than marking a
+returned one — all three recorded in arch §5 and the step's report)*
 Geometric decay from the cohort's modal repeat count (shape of `g0_pseudocounts`,
 [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs), floored so a far
 allele stays recoverable), scaled so the prior's own implied gene diversity equals the measured
-`D`: `Σα = D / (1 − c − D)`, `c` the shape's Simpson index. `DEFAULT_G0_FALLBACK_DECAY = 0.5`
+`D`: `Σα = D / (1 − c − D)`, `c` the shape's Simpson index. `SeedDecayPerRepeat::FALLBACK = 0.5`
 imported and **renamed for what it decays** (the genotype prior's pseudocount decay — not the
 stutter one-step share; the sibling spec's §4.2 trap). Where `D ≥ 1 − c`, return
 `SsrSeedOutcome::DiversityUnreachable { measured, ceiling }` — **reported, never silently

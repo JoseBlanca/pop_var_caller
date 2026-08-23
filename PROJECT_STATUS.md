@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the three decisions taken at the end of Milestone D,
+> - **Last completed task (2026-08-23):** **the repeat-tract starting point, and the panel it
+> refuses at every locus** (step E1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> Before any read is looked at, a repeat tract's genotype prior starts from mass falling off
+> geometrically from the cohort's commonest length, totalling what the panel's measured repeat
+> diversity implies. **The shape is production's, ported; the total is new, and it is new because
+> production's number is in the wrong units.** Gene diversity is a probability — the chance two
+> copies drawn at random carry different lengths — while the prior's total is a count of
+> chromosomes, and equating them makes the prior assert a median 0.40 of what was measured on
+> 1,236 tomato repeat tracts, tenth percentile 0.22.
+> **What the review turned up is where the design stops working.** A tract's own shape can only
+> imply so much diversity — at most 0.44 if the panel showed two lengths there, 0.63 at three,
+> and 0.81 however many — so a panel measuring above that has no total at all and the seed refuses
+> rather than rescaling. On tomato that is one tract in ten. **On a single outbred human genome it
+> is every tract**: one diploid sample shows at most three lengths, and the measurement it returns
+> is that genome's own repeat diversity, about 0.72 on the GIAB benchmark where 72 tandem repeats
+> in 100 are heterozygous. So the open question about what to do with a refused tract has to be
+> answered for ten refusals in ten, not one in ten — recorded in the spec, and the reason this
+> step is worth a look before Milestone F.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_e1_2026-08-23.md).
+> - **Previously (2026-08-23):** **the three decisions taken at the end of Milestone D,
 > and the measurement the owner asked for** (branch `ng-calling-prior`). **A fit that could not
 > match the panel's allele counts now says so** rather than handing back the closest pair as
 > though it had matched — two ways that happens, a panel at complete inbreeding whose counts still
@@ -41,7 +61,7 @@ Skills and agents are instructed to leave it untouched.
 > **Conclusion: report it, do not repair it** — a single genome carries no other signal, and the
 > obvious alternative is the non-reference rate the spec rejects.
 > [The measurement](doc/devel/ng/reports/inbreeding_sensitivity_of_the_seed_2026-08-23.md).
-> - **Previously (2026-08-22):** **the run's two numbers spread over one locus's
+> - **Earlier (2026-08-22):** **the run's two numbers spread over one locus's
 > alleles — and an argument I removed that the review put back** (step D3 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
 > **Milestone D complete, at Checkpoint D**). The reference allele's concentration goes in first

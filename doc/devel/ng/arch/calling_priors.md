@@ -377,28 +377,55 @@ side already has:
 /// The STR seed: geometric decay from the cohort's modal repeat count (the shape,
 /// production's G₀), scaled so the prior's own implied gene diversity equals the
 /// measured D:  Σα = D / (1 − c − D),  c the shape's Simpson index (spec §5.1).
-pub fn ssr_seed(
+pub fn fill_ssr_seed<'a>(
     candidate_repeat_counts: &[u32],     // parallel to the locus's CandidateAlleles
     modal_repeat_count: u32,             // the cohort's mode at this locus
-    decay: f64,                          // fitted per group of loci; fallback DEFAULT_G0_FALLBACK_DECAY
-    gene_diversity: f64,                 // D, the pre-pass's STR diversity — never the SNP θ
-    out: &mut [f64],
-) -> SsrSeedOutcome;
+    decay: SeedDecayPerRepeat,           // fitted per group of loci; fallback ::FALLBACK
+    gene_diversity: RepeatGeneDiversity, // the pre-pass's STR diversity — never the SNP θ
+    out: &'a mut [f64],
+) -> SsrSeedOutcome<'a>;
 
-pub enum SsrSeedOutcome {
-    Seeded,
+#[must_use]
+pub enum SsrSeedOutcome<'a> {
+    Seeded(Concentration<'a>),
     /// D ≥ 1 − c: no total reproduces the measurement — the geometry cannot hold it.
-    /// REPORTED, never silently rescaled (spec §5.1, test 11). Until Q2 settles the
-    /// policy, the loop uses the ceiling total and this marker travels onto the locus's
-    /// output through the provenance channel (read_likelihoods.md §8).
-    DiversityUnreachable { measured: f64, ceiling: f64 },
+    /// REPORTED, never silently rescaled (spec §5.1, test 11). No Concentration comes
+    /// back; what does is the buffer holding the normalised shape, so a caller with a
+    /// policy for these loci scales it in place and wraps the result itself. Until Q2
+    /// settles that policy the loop's provisional one is a ceiling total, and this
+    /// marker travels onto the locus's output through the provenance channel
+    /// (read_likelihoods.md §1.4).
+    DiversityUnreachable { measured: f64, ceiling: f64, shape: &'a mut [f64] },
 }
-
-/// Coded fallback decay for a period with no fitted value — the genotype prior's
-/// pseudocount decay, NOT the stutter one-step share (spec sibling §4.2's trap).
-/// Source: production's DEFAULT_G0_FALLBACK_P (ssr/cohort/param_estimation.rs:167).
-pub const DEFAULT_G0_FALLBACK_DECAY: f64 = 0.5;   // unitless, per repeat unit of offset
 ```
+
+**Two departures from the sketch above, both shipped at E1 and both recorded here rather than in
+the code alone.**
+
+- **The two scalars are checked types in `ng/types.rs`, not bare `f64`** — `RepeatGeneDiversity`
+  and `SeedDecayPerRepeat`, beside `ExpectedHeterozygosity`, with `try_new` returning
+  `DomainError` like every other measured scalar the caller consumes. They are the pre-pass's
+  outputs, so a degenerate fit returning a `NaN` is a run to refuse with a message rather than a
+  process to abort — which is why they are *not* in `genotype_prior`'s `checked` module with its
+  panicking constructors. The coded fallback decay is `SeedDecayPerRepeat::FALLBACK`, an
+  associated constant following `ExpectedHeterozygosity::SPECIES_FALLBACK`, rather than a
+  free-standing `DEFAULT_G0_FALLBACK_DECAY`: as a loose `f64` it is exactly as constructible into
+  a stutter one-step share as into this, which is the trap the rename was for. Its doc carries
+  that trap verbatim.
+- **The refusal withholds the concentration where `SpectrumMatch` marks a returned value**, and
+  the difference is deliberate. The spectrum fit runs **once per run** and the run cannot start
+  without a seed, so withholding would leave the caller nothing to do but invent one; a marker on
+  a returned value is the right shape there. The STR refusal is **per locus** and the loop can
+  pick a policy for that locus and carry on, so withholding costs nothing and stops a caller
+  falling into a buffer it was never handed. Neither shape makes the mistake unrepresentable —
+  `Concentration::new` is public and has to be, because the provisional ceiling-total policy needs
+  it.
+
+**One case the rule above does not cover: a locus with one candidate length.** Its shape has a
+Simpson index of exactly 1 and therefore a ceiling of 0, so `D ≥ 1 − c` would refuse every
+monomorphic tract whatever the measurement, including a measurement of zero. E1 seeds it at
+`ALPHA_REF` instead: one length is one genotype, whose prior probability is 1 at any positive
+concentration, so no total can be wrong there.
 
 **Two alleles on one rung** (spec §5.2): v1 gives each same-length spelling the rung's full
 weight — production's behaviour — because the division needs the interrupted-repeat work to say
@@ -407,7 +434,8 @@ the change lands in one function.
 
 **One export the likelihood composes** (its §4.5.1 contamination stand-in): the seed shape
 normalised to a distribution over tract lengths —
-`pub fn seed_length_distribution(candidate_repeat_counts, modal, decay, out: &mut [f64])`.
+`pub fn seed_length_distribution(candidate_repeat_counts, modal, decay, out: &mut [f64])` —
+shipped at E2 as `fill_seed_shape`'s public spelling, matching this module's `fill_*` naming.
 Computed once per locus by the loop and handed into the STR scoring context
 ([`read_likelihoods.md`](read_likelihoods.md) §4); defined here so the prior's shape has one
 spelling.
@@ -423,8 +451,8 @@ Every row read on 2026-08-21.
 | `seed_for_locus` | `alpha_from_diversity`, [`genetics.rs:214`](../../../../src/genetics.rs); `ALPHA_REF` [`:179`](../../../../src/genetics.rs) | **shape ported, source not** — the pair comes from the projection; `(1, θ)` is where a neutral panel lands |
 | the inbreeding mixture | [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) (`fill_log_prior_per_g_homogeneous`), STR port [`em.rs:290`](../../../../src/ssr/cohort/em.rs) | port as §3.2's two-branch form, inside `MarginalizedDirichletPrior` |
 | `sample_concentration` | `leave_one_out_alpha`, [`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin at [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs) | port (identical arithmetic in both) |
-| `ssr_seed` shape | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
-| `DEFAULT_G0_FALLBACK_DECAY` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, renamed for what it decays |
+| `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
+| `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, **retyped** and renamed for what it decays |
 | `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, [`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs) | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
 | `project_spectrum_seed` | — (production never fitted a spectrum) | **new**; optimiser reuses [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) |
 | `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |

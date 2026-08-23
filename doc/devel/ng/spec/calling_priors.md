@@ -532,6 +532,9 @@ total:  the weights are scaled so that the prior's own implied gene diversity eq
 
               Σ α  =  D / (1 − c − D),        c = Σ_j (weight_j / Σ weights)²
 
+        c is the shape's Simpson index: the chance that two copies drawn from the
+        shape alone land on the same repeat count
+
         and not Σ α = D, which is a different quantity in different units
 ```
 
@@ -556,7 +559,7 @@ job it was fitted for.
 **Setting `Σα` to `D` itself would be a units error, and it was in this document until
 2026-08-19.** Gene diversity is a probability — the chance two copies drawn at random carry
 different lengths — while a concentration is a count of chromosomes (§1). What a Dirichlet with
-total `A` and shape index `c` actually implies is `A(1 − c)/(A + 1)`, so `A = D` asserts
+total `A` and Simpson index `c` actually implies is `A(1 − c)/(A + 1)`, so `A = D` asserts
 `D(1 − c)/(D + 1)`, which is always less than `D`. **Measured on 1,236 polymorphic tomato STR
 loci** at the coded fallback decay of `0.5`: the median locus carries `D = 0.087` and the prior
 would assert `0.030` — a paired median ratio of **0.40**, tenth percentile 0.22. The total that
@@ -575,6 +578,28 @@ separation of the two questions does not resolve it. **Both figures are, if anyt
 the measured `D` comes from called genotypes at about 3 reads a position on a panel whose apparent
 `F_IS` is 0.82, and low-depth calling in a selfer books ambiguous sites as homozygous, which
 understates allele diversity. Open (Q2, §11).
+
+**One locus the rule does not reach: a tract with a single candidate length.** Its shape has a
+Simpson index of exactly 1 and therefore a ceiling of 0, so `D ≥ 1 − c` would refuse every
+monomorphic tract whatever the measurement, including a measurement of zero. There is nothing to
+refuse — one length is one genotype, whose prior probability is 1 at any positive concentration —
+so the builder seeds it at one chromosome and the rule starts at two candidate lengths.
+
+**The one-in-ten figure is a tomato figure, and at the other end of the cohort range the refusal
+is the rule rather than the exception.** A single diploid sample shows at most three lengths at a
+tract, and the most those shapes can imply at the fallback decay is `0.444` at two lengths and
+`0.625` at three — while the pre-pass, which fits this quantity at every cohort size down to one
+([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3), returns that genome's own
+repeat diversity, about `0.72` on the GIAB HG002 benchmark where 72 tandem repeats in 100 are
+heterozygous (§5.3). **So one outbred genome is refused at every tract**, and no decay rescues it:
+the ceiling saturates at `1 − 5/27 = 0.815` at the fallback decay however many lengths a tract
+carries. Whatever Q2 settles has to work at ten refusals in ten, not only at one in ten.
+
+**And a second spelling of one length raises the ceiling**, which gives Q3 a size: an interrupted
+repeat sitting on an occupied rung flattens the shape, so a two-length tract's ceiling goes from
+`0.444` to `0.625` merely for the cohort having shown the interruption. Whether a locus is refused
+therefore depends on how many spellings of one length the panel happened to carry, not only on how
+much prior mass it collects (§5.2).
 
 **Separating the two questions is still what makes the STR prior defensible:** the pre-pass
 measures how variable repeat tracts are in this panel, and the geometry says where that variability
@@ -944,9 +969,13 @@ mapping that fixes it, `Σα = D/(1 − c − D)`, and that part is settled.
 
 **What is open is the locus the geometry cannot hold at any total.** The prior's implied diversity
 is bounded by `1 − c`, and on 1,236 polymorphic tomato loci **119 — about one in ten — measure at or
-above that bound** at the coded fallback decay, 242 at `0.3` and 49 at `0.7`. Three candidate
-answers, none measured: fit the decay against gene diversity as well as against stutter, so the
-shape has to be able to hold what the panel shows; carry a floor of prior mass on the alleles the
+above that bound** at the coded fallback decay, 242 at `0.3` and 49 at `0.7`. **At one outbred
+sample it is every locus** (§5.1), so the candidate answers below have to be judged at ten in ten
+and not only at one in ten — which rules out any of them that is affordable only because it is
+rare.
+
+Three candidate answers, none measured: fit the decay against gene diversity as well as against
+stutter, so the shape has to be able to hold what the panel shows; carry a floor of prior mass on the alleles the
 geometry starves, which is the `G₀` floor doing a second job; or let the seed refuse such loci to
 the reads entirely, which is honest and gives up the regulariser exactly where the locus is most
 polymorphic. *Leaning: none — the choice needs the number of affected loci on a second panel, since
@@ -1093,8 +1122,11 @@ Seven more are ng's own, and each pins a claim this document makes:
     records; a test written that way passes on a prior asserting two-fifths of the measurement.
 11. **A locus the geometry cannot hold is refused, not silently rescaled.** Where the measured `D` is
     at or above `1 − c` no total reproduces it, so the seed builder must say so — one locus in ten on
-    tomato at the fallback decay (§5.1). What it does instead is Q2's to settle; what it must not do
-    is return the closest total it can reach as though it had met the target.
+    tomato at the fallback decay, and **every locus on one outbred genome** (§5.1). What it does
+    instead is Q2's to settle; what it must not do is return the closest total it can reach as though
+    it had met the target. **The rule starts at two candidate lengths:** a single-length tract has a
+    ceiling of exactly 0 and would be refused at any measurement, and there is nothing there to
+    refuse.
 
 **The end-to-end check, and the definition of done for the manager:** the GIAB single-sample 5×
 regression of §2.2 — genotype accuracy at true variants and the count of true homozygous-variant

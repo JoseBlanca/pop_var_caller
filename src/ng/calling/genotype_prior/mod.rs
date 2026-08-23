@@ -80,12 +80,21 @@ pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use seed_generic::{
     FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
 };
+pub use seed_ssr::{SsrSeedOutcome, fill_ssr_seed};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
 
-/// The three types whose invariants are checked at construction, in a module of their own so
+/// The five types whose invariants are checked at construction, in a module of their own so
 /// that **nothing else in this folder can build one without the check**.
+///
+/// The scalars this folder introduced — [`RepeatGeneDiversity`](crate::ng::types::RepeatGeneDiversity)
+/// and [`SeedDecayPerRepeat`](crate::ng::types::SeedDecayPerRepeat) — are **not** here. They
+/// are the parameter pre-pass's outputs, like every other measured scalar the caller consumes,
+/// so they live in [`crate::ng::types`] beside
+/// [`ExpectedHeterozygosity`](crate::ng::types::ExpectedHeterozygosity) and reject with a
+/// `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the caller
+/// should refuse with a message, not abort.
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is
 /// visible to a module's *descendants*, and `dirichlet_multinomial`, `hardy_weinberg`,

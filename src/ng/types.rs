@@ -635,6 +635,115 @@ impl ExpectedHeterozygosity {
     }
 }
 
+/// The chance that two repeat-tract copies drawn at random from the cohort carry
+/// different numbers of repeats — Nei's gene diversity, measured on repeat tracts.
+///
+/// **The same question as [`ExpectedHeterozygosity`], asked of a different site class,
+/// and it is a type of its own so the two cannot be swapped.** Repeat tracts mutate
+/// orders of magnitude faster than bases do, so the two numbers are not the same size
+/// and neither substitutes for the other; the pre-pass is required to emit them
+/// separately precisely so a consumer cannot confuse them
+/// (`doc/devel/ng/spec/calling_priors.md` §5,
+/// `doc/devel/ng/spec/parameter_prepass_cohort.md` §3). Today's production STR path is
+/// what happens when they are not separated: it takes a fixed `SFS_THETA = 0.01`
+/// (`src/ssr/cohort/freebayes_emit.rs`), freebayes' SNP-scale default, commented
+/// *"Fixed, not a per-run knob"* — a constant standing in for a quantity nobody
+/// measured. As bare floats, that substitution compiles.
+///
+/// **A gene diversity and not a heterozygosity, because a tract is multi-allelic by
+/// length.** "How often do two copies differ" is still the right question; the
+/// two-allele arithmetic is not. Like [`ExpectedHeterozygosity`] it is a cohort
+/// quantity, so an individual's inbreeding does not enter it — the pre-pass divides the
+/// observed rate by `(1 − F)` before it gets here.
+///
+/// **Fitted at every cohort size down to one.** With a single genome it is that
+/// genome's own observed rate over its `(1 − F)`; one diploid genome carries two copies
+/// of every tract, and how often those two differ is exactly what this asks. So unlike
+/// a frequency spectrum it never comes back absent for want of a panel.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct RepeatGeneDiversity(f64);
+
+impl RepeatGeneDiversity {
+    /// The only constructor. A value that is not a probability in `[0, 1]` is rejected
+    /// rather than coerced.
+    ///
+    /// **The whole of `[0, 1]` is accepted**, even though the genotype prior's seed can
+    /// only reproduce a value strictly below the shape it builds over a locus's
+    /// candidate lengths. A measurement that shape cannot hold is a real measurement and
+    /// a real refusal, reported with both numbers by the seed builder
+    /// (`ng::calling::genotype_prior::SsrSeedOutcome`) — so a range check here would
+    /// catch it in the wrong place and without the numbers that explain it.
+    pub fn try_new(diversity: f64) -> Result<Self, DomainError> {
+        checked_probability(diversity, DomainError::RepeatGeneDiversity).map(Self)
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// The factor by which the genotype prior's starting mass falls for each repeat unit a
+/// candidate length sits away from the cohort's modal length — production's `G₀` decay
+/// `p` (`src/ssr/cohort/param_estimation.rs`), retyped.
+///
+/// **Two fractions in this caller are indexed by repeat units and they are not the same
+/// quantity.** This one is a *ratio between prior weights*: a tract one repeat further
+/// from the mode starts with this much less of the prior's mass. The stutter model's
+/// `whole_repeat_one_step_share` is a *share of slips*: of the reads whose copying error
+/// moved them by whole repeat units, the fraction that moved by exactly one
+/// (`doc/devel/ng/spec/read_likelihoods.md` §4.2). They live within a screen of each
+/// other in a scoring context and a bare `f64` accepts either, which is the confusion
+/// `doc/devel/ng/arch/calling_priors.md` §5 asks this type to prevent. **And the stutter
+/// model's geometric parameters are success probabilities rather than decays** — its own
+/// constructor documents that trap (`src/ng/alignment/stutter.rs`), where the mass falls
+/// by `1 − p` per step rather than by `p` — so the two are not even the same kind of
+/// number.
+///
+/// Fitted per group of loci by the parameter pre-pass, against how spread a variable
+/// tract's alleles are. Where a group is too thin to fit one, the run takes
+/// [`Self::FALLBACK`].
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct SeedDecayPerRepeat(f64);
+
+impl SeedDecayPerRepeat {
+    /// The coded decay for a group of loci the pre-pass could not fit — production's
+    /// `DEFAULT_G0_FALLBACK_P` (`src/ssr/cohort/param_estimation.rs`), value and
+    /// reasoning.
+    ///
+    /// **It is the decay every figure in `doc/devel/ng/spec/calling_priors.md` §5.1 is
+    /// quoted at**, including the one repeat tract in ten whose measured diversity the
+    /// prior's shape cannot hold — which becomes 242 tracts in 1,236 at a decay of `0.3`
+    /// and 49 at `0.7`. Those counts are facts about this value, not about the method.
+    ///
+    /// **A value of the type rather than a free-standing constant**, following
+    /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`] and [`AlleleId::REFERENCE`], for the
+    /// same reason: as a loose `f64` it is exactly as constructible into a stutter
+    /// one-step share as into this.
+    pub const FALLBACK: Self = Self(0.5);
+
+    /// The only constructor. A decay outside `(0, 1]` is rejected rather than coerced.
+    ///
+    /// **Zero is refused and one is allowed.** At zero every candidate but the mode
+    /// itself would carry only the shape's floor, so the shape would stop being a
+    /// geometry and become a spike — and it is not a value any fit returns, since
+    /// production clamps its own no steeper than `0.1`. At one the shape is flat: every
+    /// candidate length equally likely before the reads, which is a coherent belief for
+    /// a group of tracts nobody has a spread for.
+    pub fn try_new(decay: f64) -> Result<Self, DomainError> {
+        if decay.is_finite() && decay > 0.0 && decay <= 1.0 {
+            Ok(Self(decay))
+        } else {
+            Err(DomainError::SeedDecayPerRepeat(decay))
+        }
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// How many copies of the genome an individual carries at a region — two on a
 /// diploid autosome, one on a haploid sex chromosome.
 ///
@@ -731,6 +840,24 @@ pub enum DomainError {
     /// wrong fit.
     #[error("expected heterozygosity {0} is not a finite probability in [0, 1]")]
     ExpectedHeterozygosity(f64),
+    /// A [`RepeatGeneDiversity`] was built from a value that is not a finite
+    /// probability in `[0, 1]`.
+    ///
+    /// **Its own variant beside [`Self::ExpectedHeterozygosity`], and the pair is the
+    /// point.** Both are "how often do two copies drawn from the cohort differ", and
+    /// they are measured on different site classes and come out orders of magnitude
+    /// apart — bases mutate slowly, repeat tracts fast. A message naming the wrong one
+    /// sends the reader to the wrong half of the pre-pass.
+    #[error("repeat gene diversity {0} is not a finite probability in [0, 1]")]
+    RepeatGeneDiversity(f64),
+    /// A [`SeedDecayPerRepeat`] was built from a value that is not a finite fraction in
+    /// `(0, 1]`.
+    ///
+    /// **Zero is refused as well as negatives**, which is why this cannot share
+    /// [`Self::ErrorRate`]'s range: at a decay of zero every candidate length but the
+    /// cohort's mode falls to the floor and the shape stops being a geometry.
+    #[error("seed decay per repeat {0} is not a finite fraction in (0, 1]")]
+    SeedDecayPerRepeat(f64),
     /// A [`Ploidy`] was built from zero genome copies, which the likelihood
     /// divides by.
     #[error("ploidy {0} is not a positive number of genome copies")]
