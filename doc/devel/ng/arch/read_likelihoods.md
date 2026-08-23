@@ -122,7 +122,17 @@ pub struct GenericObservation {
 }
 ```
 
-**Reconciliation note — the requirement this placed on the merge has been met.** The built
+**Reconciliation note — `partials` now exists on the merge's own row, owned rather than
+borrowed** (`calling_prerequisites.md` C1, 2026-08-23). `SampleSupport` carries
+`partials: Vec<PartialObservation>` — the witnessed positions **in the cohort locus's
+coordinates**, the bases as the mint recorded them, the read group, a read count and a quality
+sum. The sketch above types it `PartialObservation<'a>`; it cannot borrow, because the
+observations the bases come from live in the `ObservationCache` and the organiser drops that
+ground once a locus is released (`arch/cohort_merge.md` §4) while the built locus is still in the
+caller's hands. So the view's `&'a [PartialObservation]` borrows the merge's owned rows and there
+is one type rather than two. **The field is empty until C2 routes partials into it.**
+
+**Reconciliation note — the read-group requirement this placed on the merge has been met.** The built
 `SampleSupport`/`AlleleSupport`
 ([`cohort_merge/build.rs`](../../../../src/ng/run/cohort_merge/build.rs)) pooled read groups into
 one row per allele, and its own doc booked the split as owed to whoever brought the STR path

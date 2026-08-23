@@ -36,7 +36,9 @@ use ahash::AHashMap;
 
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::{MaxCohortLocusSpan, MinAltReads};
-use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
+use crate::ng::locus_generation::{
+    ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
+};
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pileup_record::ChainId;
 
@@ -588,6 +590,10 @@ impl AlleleTable {
 
             per_sample.push(SampleSupport {
                 sample,
+                // **Empty until C2**, which is what the merge does today rather than a
+                // placeholder: every non-`Complete` observation is dropped before an allele is
+                // derived, so there are no partials to carry yet.
+                partials: Vec::new(),
                 // **Only the pairs this sample showed** — and this filter used to be
                 // load-bearing and is now a belt. The tally was a vector resized to the
                 // table's width, so it held a zero row for every allele some *other* sample
@@ -929,6 +935,45 @@ pub struct SampleSupport {
     /// **A sample with one read group has exactly today's shape**, which is most samples of
     /// most runs, so the axis costs them nothing.
     pub supported: Vec<SupportedAllele>,
+    /// **What this sample's reads showed of only *part* of the locus** — one entry per
+    /// `(record, sequence, read group)` whose reads ran out inside it.
+    ///
+    /// **Ascending `(witnessed stretch, read group, bases)`, and all three parts of that key are
+    /// needed.** Two entries can share a stretch — a substitution witnessed partially is exactly
+    /// that — so a stretch alone does not order them, and `doc/devel/ng/spec/read_likelihoods.md`
+    /// §8 makes the order a determinism requirement rather than a tidiness one: the sum over
+    /// observations must run in a fixed order. The sibling field states its own key the same way
+    /// and `tests::the_rows_are_ordered_by_allele_then_read_group` pins it; **C2 owes this one
+    /// the same test.**
+    ///
+    /// **Kept apart from [`supported`](Self::supported) rather than folded into it**, because a
+    /// partial read does not say what the sample carries, it says the sample carries *at least*
+    /// this, and the two claims cannot share a row: padding a partial's bases out to the locus
+    /// span and interning them would put an allele in the table that no molecule carried, and it
+    /// would read as a *short* allele, which is the one direction the model must not be biased
+    /// in (`doc/devel/ng/spec/read_likelihoods.md` §5.1).
+    ///
+    /// **Empty until C2 fills it**, which is today's behaviour written down rather than a new
+    /// one: the derivation drops every observation whose witness is not
+    /// [`Complete`](ReadWitness::Complete), so a cohort locus as built carries no partial reads
+    /// at all and the censored term of `read_likelihoods.md` §5 has nothing to read
+    /// (§5.4, corrected 2026-08-21).
+    ///
+    /// **It changes no locus's existence, and C2 must not either.** Whether a locus is built at
+    /// all is decided from complete observations only — the filter is
+    /// [`SampleLocusObservations::non_reference_and_compared_reads`], which skips every
+    /// non-`Complete` observation before counting, and it lives in the locus generator rather
+    /// than here.
+    ///
+    /// **That rule is settled for the generic path and explicitly *not* settled for repeat
+    /// tracts.** §5.4.2 answers *no* under the heading "the merge's rule stays as it is **on the
+    /// generic path**", and then says the opposite for tracts: a sample carrying an allele too
+    /// long for a read to span shows no complete observation at all, so the filter reads it as
+    /// *nothing varied here*, and "one line of the rule has to change for that to mean what it
+    /// says, and only on this path". This row is on both paths — a locus of either kind that
+    /// passes the verdict is assembled here — so the tract half is owed to whoever brings the
+    /// STR path through the merge, and is out of this plan's scope.
+    pub partials: Vec<PartialObservation>,
     /// Reads that covered one of this sample's records here and produced no observation at
     /// all — carried through from the members, not re-derived (arch §4).
     ///
@@ -992,6 +1037,91 @@ pub struct SupportedAllele {
     /// What this sample's reads **from that group** lend it. Never zero: a pair a sample
     /// showed no reads for has no entry at all.
     pub support: AlleleSupport,
+}
+
+/// **What one sample's reads showed of part of the locus, and nothing outside that part.**
+///
+/// A read that entered the locus and ran off its own end shows a prefix or a suffix of what the
+/// sample carries — or, since the generic fold began minting witnesses with holes, a stretch
+/// with a gap in the middle. It does not say what the sample carries; it says the sample carries
+/// **at least** this, over the positions it saw
+/// (`doc/devel/ng/spec/read_likelihoods.md` §5.1, whose "prefix or suffix" predates the hole). Scoring it is the calling step's
+/// — a censored term, less discriminating than a complete observation of the same bases, never
+/// differently biased (§5.2 at a repeat tract, §5.3 at an ordinary locus). Carrying it is this
+/// module's, and until now the merge threw it away.
+///
+/// **Where these exist at all is decided by how wide the locus is on the reference**, and it is
+/// not intuition: a single-base substitution has none, an insertion has none — its reference
+/// span is its anchor base however long the inserted sequence — and a deletion has them, carrying
+/// the reference allele preferentially, because a read carrying the deletion crosses every
+/// deleted position without spending a read base. The class this is really for is the repeat
+/// tract, where over half the overlapping reads are partial at a 60-base tract and **an allele
+/// longer than a read can only ever be witnessed partially** (§5.4.1).
+///
+/// **One entry is one `(record, sequence, read group)`, not one allele**, and that is the point:
+/// there is no allele. A partial's bases cannot be compared against a whole-span allele — that
+/// comparison would report a read agreeing with the reference over everything it saw as
+/// non-reference — so what a candidate is scored against is the allele's projection *restricted
+/// to the positions the read witnessed* (§5.3), and both halves of that restriction are here.
+///
+/// **Named as the architecture names it** (`doc/devel/ng/arch/read_likelihoods.md` §2.1,
+/// `GenericSampleEvidence::partials`), and owned where that sketch had a borrow: the calling
+/// view can hold `&[PartialObservation]`, so there is one type rather than two.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialObservation {
+    /// **Which locus positions the read witnessed, in the cohort locus's own coordinates** —
+    /// zero at the locus's first position, whatever record inside it the observation came from.
+    /// The axis is in the name because it is not in the type: this is the same
+    /// [`WitnessedLocusPositions`] the mint puts on [`ReadWitness::Partial`], where the runs are
+    /// measured against the *record*. A newtype would close that off and is the right move when
+    /// a second consumer appears; with one writer and no reader it would be a type minted for
+    /// nobody.
+    ///
+    /// The mint measures a witness against the *record* it belongs to
+    /// ([`SampleLocusObservations::locus_len`]), and a cohort locus can hold several of one
+    /// sample's records and start before any of them, so the runs are shifted onto the locus
+    /// when the row is built. **A consumer indexing an allele's projection with an unshifted run
+    /// would read the wrong bases and nothing would say so.**
+    ///
+    /// A set of runs rather than one offset and one length: the generic fold mints witnesses
+    /// with holes in them, and two numbers can only describe a hole by swallowing it
+    /// ([`ReadWitness::Partial`]).
+    pub witnessed_in_locus: WitnessedLocusPositions,
+    /// Which of the sample's read groups these reads came from — the same axis
+    /// [`SupportedAllele`] keys on, and for the same reason: a censored term pools an
+    /// observation's reads only if every one of them would get the same number
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    pub read_group: ReadGroupId,
+    /// The bases these reads showed, exactly as the mint recorded them — **allele content, in
+    /// read coordinates**, which is not the axis [`witnessed_in_locus`](Self::witnessed_in_locus) is on.
+    ///
+    /// **The two lengths differ by the net indel the read carried over the stretch, so equality
+    /// does not license indexing one with the other.** A read carrying a two-base insertion and
+    /// a two-base deletion inside the witnessed stretch comes back with as many bases as
+    /// positions and is not a positional match for any of them.
+    pub bases: Box<[u8]>,
+    /// How many of the sample's reads showed exactly this — the same stretch, the same bases,
+    /// the same read group, which is what makes them one term.
+    ///
+    /// **Never zero, kept so by whoever builds the row rather than by this type** — the fields
+    /// are public and there is no constructor, exactly as [`SupportedAllele`]'s are, where the
+    /// same rule is executed as a filter at the moment the rows are made.
+    pub num_reads: u32,
+    /// Σ `ln P(error)` over those reads — the mint's own sum, not divided, because a partial is
+    /// not composed across records and so has nothing to apportion.
+    ///
+    /// **This and `num_reads` are the whole of what a partial carries, where a complete row
+    /// carries six numbers**, and the plan asks for exactly these two. What the other four are
+    /// for is worth knowing before anything consumes this: strand bias, the mapping-quality
+    /// multi-mapper test and the read-position-bias term all read them, so at a repeat tract —
+    /// where half the overlapping reads are partial at 50 reference bases and four in five at
+    /// 100 (spec §5.4.1) — those filters would see the complete reads only. Adding them later
+    /// means reopening whatever routes partials in.
+    ///
+    /// **That, and the ascending order the field on [`SampleSupport`] promises, are conventions
+    /// C2 has to establish**: nothing builds one of these yet, so neither is a property the type
+    /// carries.
+    pub q_sum: f64,
 }
 
 /// What one sample's reads lend one allele.
@@ -4259,6 +4389,72 @@ mod tests {
             alleles_of(&table),
             vec![&b"ACGTA"[..], b"ACTTA", b"A"],
             "the partial's `A` would have been a fourth allele",
+        );
+    }
+
+    /// **A sample whose reads ran out inside the locus reaches the built locus with nothing to
+    /// show for it**, which is what this step writes down rather than changes.
+    ///
+    /// The row that will carry such a read exists as of C1 and is always empty: the derivation
+    /// drops every observation whose witness is not `Complete` before an allele is derived, so
+    /// the censored term of `doc/devel/ng/spec/read_likelihoods.md` §5 has nothing to read.
+    /// **C2 inverts the first assertion and must leave the second standing** — a partial's bases
+    /// must never become an allele of the table.
+    ///
+    /// **The second assertion is also this test's premise check**, and it must not be trimmed as
+    /// a duplicate: it is what stops the test passing on a fixture where nothing was partial in
+    /// the first place. Turning the fixture's witness to `Complete` makes the partial's `ACATA`
+    /// a fourth allele and this assertion is the one that says so.
+    ///
+    /// The fixture is `a_partial_sequence_contributes_no_allele`'s, deliberately: that test
+    /// checks the allele table alone, and this one runs the same locus through the whole
+    /// assembly, which is the only way to see the rows. **Both samples here hold one record, so
+    /// it is the single-record branch that is exercised**; the multi-record branch's own drop is
+    /// pinned by `a_read_partial_at_one_record_is_removed_as_evidence`.
+    #[test]
+    fn a_partial_observation_reaches_no_row_and_no_allele_yet() {
+        let mut with_a_partial = member(region(12, 12), b"G", b"T");
+        with_a_partial.observations.push(SequenceObservation {
+            read_witness: ReadWitness::from_left(1, with_a_partial.locus_len())
+                .expect("a one-base run inside a one-base record"),
+            ..sequence(b"A")
+        });
+        let members = [with_a_partial];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        // **The premise, asserted rather than assumed.** Without this the whole test passes on a
+        // fixture holding no partial at all, and an absence proves nothing about a world where
+        // nothing was ever present.
+        assert_eq!(
+            members[0]
+                .observations
+                .iter()
+                .filter(|observed| observed.read_witness != ReadWitness::Complete)
+                .count(),
+            1,
+            "the sample must hold exactly the one partial this test is about",
+        );
+
+        let observed = CohortObservation::over(&locus);
+
+        assert!(
+            observed
+                .per_sample
+                .iter()
+                .all(|sample| sample.partials.is_empty()),
+            "C2 is what fills these: {:?}",
+            observed.per_sample,
+        );
+        assert_eq!(
+            observed
+                .alleles
+                .iter()
+                .map(|allele| allele.to_vec())
+                .collect::<Vec<_>>(),
+            vec![b"ACGTA".to_vec(), b"ACTTA".to_vec(), b"A".to_vec()],
+            "the reference, the substitution and the deletion — the partial's `A` would have \
+             been a fourth",
         );
     }
 
