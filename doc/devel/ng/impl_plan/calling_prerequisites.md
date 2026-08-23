@@ -154,7 +154,7 @@ the shape that folds to today's where a sample has one group. `ReadGroupId` is a
 Compile-driven follow-through on every consumer of `supported`. *Source:* read_likelihoods spec
 §2.3; arch §2.1.
 
-**B2. Attribution stops at the boundary.**  ☐
+**B2. Attribution stops at the boundary.**  ✅
 The collation that today merges a sample's observations "where two of its own observations reached
 the same allele" now merges only within one read group; the divided-read paths
 (`AlleleSupportTally`) key their tallies by `(allele, read group)`. Tests: a two-read-group fixture

@@ -554,6 +554,20 @@ message said "a gap stalled the ordered drain" when no gap had. Each variant now
 what happened, and the two with a stall carry `first_stalled` — the index an operator can map
 to a building region and to a builder, which a bare count cannot.
 
+**Owed to this enum when observations are decoded from a psp file rather than built in
+memory** (2026-08-23, added while the merge's read-group axis landed). Two release-level
+assertions in `build.rs` are about the *content* of the observations, not about whoever hands
+the work out, so each becomes a variant at that step: an observation carrying reads and no
+chain id, so the reads that showed it cannot be placed across the locus; and **one read sighted
+in two read groups by one sample**, which says the thing being composed is not one read of one
+library. The second is the sharper case, because it can be reached by a **well-formed BAM**: a
+fragment's two mates are collapsed onto one chain id on their name alone, while the read group
+is resolved per SAM record, so mates carrying different `@RG` records — or two libraries reusing
+a read name in a merged file — produce it with nothing defective anywhere. Under this section's
+own line that is a fact about the data, so it should be counted rather than aborted, and the
+better repair is upstream: carry the read group on the pending mate and refuse a mismatched
+second mate where the chain id is handed out.
+
 **What stays a panic rather than joining this enum:** a region submitted twice, and one
 submitted after it was released. Both are bugs in whoever hands the regions out rather than
 facts about the data, and both are caught mid-flight, where the release order is already wrong

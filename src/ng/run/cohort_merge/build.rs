@@ -537,7 +537,7 @@ impl AlleleTable {
                 &mut scratch,
                 |bases, backing| {
                     let allele = alleles.intern(bases);
-                    let read_group = backing.read_group();
+                    let read_group = backing.read_group(sample);
                     // **A scan, not an index, and it is what the read-group axis costs.** The
                     // tally used to be indexed by allele and a pair cannot index a `Vec`. A
                     // map cleared per sample would reuse its table just as this does, so the
@@ -1593,18 +1593,109 @@ impl AlleleBacking<'_> {
     /// [`SupportedAllele`] keys on.
     ///
     /// **A read has one read group, so a read seen at several of the sample's records has one
-    /// too.** The group belongs to the library the fragment was prepared in, not to where it
-    /// landed, so every sighting of one read names the same one and the first is the answer.
-    /// B2 asserts that they agree; here it is read off the first because there is nothing else
-    /// it could be.
-    fn read_group(&self) -> ReadGroupId {
+    /// too.** The group belongs to the library the fragment was prepared in, and the mint
+    /// stamps it from the read rather than from where the read landed
+    /// (`read_group: active.read.read_group`, `locus_generation/pileup/open_record.rs`), so
+    /// every sighting of one read names the same one and any of them is the answer. This reads
+    /// the first and checks the rest against it. `sample` is carried only so that a refusal can
+    /// name it: a chain id is comparable within one sample and means nothing without it
+    /// ([`ReadSighting::read`]).
+    ///
+    /// # What a disagreement means, and there are two ways to reach it
+    ///
+    /// Two sightings of one read naming two groups says the thing being composed here is not
+    /// one read of one library.
+    ///
+    /// **One way is a defect: the mint gave two reads the same chain id**, so the bases being
+    /// composed belong to no fragment. This catches only the half of that defect where the two
+    /// reads' sightings tile the sample's records exactly one apiece — where they overlap at a
+    /// record, [`alleles_of_sample`] has already removed the read for showing two things
+    /// there, and counted it in [`SampleSupport::reads_removed_as_evidence`].
+    ///
+    /// **The other needs no defect at all, and it is a property of the input.** A fragment's
+    /// two mates are collapsed onto one chain id **on their name alone**
+    /// (`pending_mates`, `locus_generation/pileup/chain_id_allocator.rs`), while the read group
+    /// is resolved from each SAM record's own `RG` tag
+    /// ([`resolve_read_group`](crate::ng::read::input::read_groups::ReadGroupResolution)), and
+    /// nothing requires a fragment's two mates to carry the same one. So a file whose mates
+    /// disagree about their `@RG` reaches this arm legally — needing only that the two mates
+    /// fall in one cohort locus at different records without overlapping — and so does a
+    /// merged file in which two libraries reuse a read name.
+    ///
+    /// **The same input has a worse form this cannot see**, and it is upstream: where such a
+    /// fragment's two mates *overlap* and agree, the walk sums their base quality and gives it
+    /// to one of them (`resolve_mate_overlap_at_pos`, `locus_generation/pileup/genome_walk.rs`),
+    /// which stamps one library's quality with the other's group in a single observation. One
+    /// sighting, nothing here to compare. Both forms have one repair and it is not this check:
+    /// carry the read group on the pending mate and refuse a mismatched second mate where the
+    /// chain id is handed out.
+    ///
+    /// # Why it is refused rather than resolved
+    ///
+    /// Picking a group files a read under a library that produced none of it, which is the
+    /// pooling `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids, and it is silent: the
+    /// group is half the tally's key, so the read's whole share — its count, its strand and all
+    /// four quality sums — lands in another library's row, or makes a row for a library that
+    /// showed nothing here.
+    ///
+    /// Release-level, like the chain-id check in [`alleles_of_sample`] a few lines above, and
+    /// one comparison per sighting after the first. A read that reaches here was sighted at
+    /// exactly one sequence of **every** one of the sample's records — [`alleles_of_sample`]
+    /// removes any read that was not — so the comparisons are the sample's record count less
+    /// one. **That count is not small.** The generic mint writes a record at every covered
+    /// position, so a sample can hold as many records inside a locus as the locus is wide —
+    /// six inside a six-base locus, in `serial.rs`'s own minted fixture — bounded by
+    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 50 by default. What keeps it free is
+    /// the company it keeps rather than the comparison being cheap: the same locus already
+    /// sorts every sighting and composes and divides every read across every record.
+    ///
+    /// **This arm is reached at all only where a locus holds two or more of one sample's
+    /// records**, which is the indel and wide-locus path; a one-record sample takes
+    /// [`OneSequence`](Self::OneSequence) and consults no read.
+    ///
+    /// **What this does not cover is the other arm**, where the same invariant holds by
+    /// construction and cannot be checked. Every read behind one [`SequenceObservation`] shares
+    /// its read group because the group is part of the key the mint buckets on
+    /// (`open_record.rs`, `ssr.rs`); by the time the merge sees the observation there is one
+    /// group and a list of chain ids, and the per-read groups are gone. A psp file corrupted
+    /// that way is undetectable here.
+    ///
+    /// **A panic is the wrong shape for the mate case and is owed a repair.** The release
+    /// profile aborts (`panic = "abort"`), so a header the user wrote can end a whole run —
+    /// where `arch/cohort_merge.md` §5 puts a fact about the data on the counted-error side and
+    /// keeps panics for bugs in whoever hands the work out. It is left as a panic here because
+    /// this module has no `RunError` to raise yet, and the conversion is owed together with the
+    /// chain-id check's (§5). Until then, a refusal here means *look at the file's `@RG`
+    /// records first*.
+    fn read_group(&self, sample: usize) -> ReadGroupId {
         match self {
             Self::OneSequence(sequence) => sequence.read_group,
             Self::OneRead { records, sightings } => {
-                let first = sightings
-                    .first()
+                let group_at = |sighting: &ReadSighting| {
+                    records[sighting.record as usize].observations[sighting.sequence as usize]
+                        .read_group
+                };
+                let (first, rest) = sightings
+                    .split_first()
                     .expect("a read's sightings are one group of a chunk_by and never empty");
-                records[first.record as usize].observations[first.sequence as usize].read_group
+                let group = group_at(first);
+                for sighting in rest {
+                    let seen = group_at(sighting);
+                    // Each group is named beside the record it was read at, in that order, so
+                    // the two cannot be paired the wrong way round by a reader.
+                    assert!(
+                        seen == group,
+                        "sample index {sample}: read {} is in read group {} at {} and read \
+                         group {} at {}, and a read has one read group — look at the file's \
+                         @RG records, then at whether two reads share a chain id",
+                        sighting.read,
+                        group.get(),
+                        records[first.record as usize].region,
+                        seen.get(),
+                        records[sighting.record as usize].region,
+                    );
+                }
+                group
             }
         }
     }
@@ -3049,6 +3140,180 @@ mod tests {
             3,
             "the read count is exact either way — every read is named",
         );
+    }
+
+    /// Three records of one sample, all naming read 7, with read 7's sighting at record
+    /// `odd_lane_at` stamped with a second read group and the other two with the first.
+    ///
+    /// **A sample cannot really be in this state** — the group belongs to the library the
+    /// fragment was prepared in, so one read has one group wherever it is sighted. Building it
+    /// by hand is the only way to reach the check that says so, and the parameter exists
+    /// because the check has to look at every sighting after the first, not just one of them.
+    fn three_records_with_a_second_lane_at(odd_lane_at: usize) -> [SampleLocusObservations; 3] {
+        let lane_of = |record: usize| {
+            if record == odd_lane_at {
+                ReadGroupId(2)
+            } else {
+                ReadGroupId(1)
+            }
+        };
+        [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![SequenceObservation {
+                    read_group: lane_of(0),
+                    ..shown_by(b"A", &[7], -4.0, 1, 120, 7_200, 0)
+                }],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![SequenceObservation {
+                    read_group: lane_of(1),
+                    ..shown_by(b"C", &[7], -1.0, 0, 100, 5_000, 0)
+                }],
+            ),
+            record_of(
+                region(16, 16),
+                b"T",
+                vec![SequenceObservation {
+                    read_group: lane_of(2),
+                    ..shown_by(b"G", &[7], -2.0, 1, 80, 3_200, 0)
+                }],
+            ),
+        ]
+    }
+
+    /// Two records of one sample, both naming read 7, its sighting at the second stamped with
+    /// a second read group.
+    ///
+    /// **Two records is the smallest multi-record sample there is, and the three-record
+    /// fixture above cannot stand in for it**: a check that compared every sighting against
+    /// the *second* rather than the first would still find the disagreement at three records
+    /// and would compare the lone sighting with itself at two, passing everything.
+    fn two_records_with_a_second_lane() -> [SampleLocusObservations; 2] {
+        [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"A", &[7], -4.0, 1, 120, 7_200, 0)
+                }],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![SequenceObservation {
+                    read_group: ReadGroupId(2),
+                    ..shown_by(b"C", &[7], -1.0, 0, 100, 5_000, 0)
+                }],
+            ),
+        ]
+    }
+
+    /// **A read cannot be in two read groups, and the merge refuses rather than picking one.**
+    /// Which library a read belongs to is half the key its evidence is filed under, so a wrong
+    /// answer moves the read's whole share into another library's row
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3) — there is nothing to fall back to.
+    ///
+    /// **The expected text is the whole message, deliberately.** Each read group has to be
+    /// named beside the record it was read at, and nothing but an assertion pins which record
+    /// the message blames: reading the group off the *last* sighting instead of the first
+    /// leaves the returned value identical and only changes this line.
+    #[test]
+    #[should_panic(
+        expected = "sample index 0: read 7 is in read group 1 at contig 0:12-12 and read group \
+                    2 at contig 0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_a_sample_with_two_records() {
+        let records = two_records_with_a_second_lane();
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same refusal where the sample has three records and the disagreement is at the
+    /// **middle** one. Its twin below puts it at the last, because a check that looked at only
+    /// one sighting after the first would pass whichever of the two it happened to look at.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 1 at contig 0:12-12 and read group 2 at contig \
+                    0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_middle_of_three_records() {
+        let records = three_records_with_a_second_lane_at(1);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same refusal where the odd read group is at the sample's **first** record — the one
+    /// the other two sightings are compared against.
+    ///
+    /// **Without this the baseline itself is unpinned.** Taking the group off the last sighting
+    /// instead of the first, and keeping the comparison, passes both tests below: at a
+    /// disagreement anywhere after the first record the check still fires, and at a
+    /// disagreement *at* the first record it quietly files the read under the group its other
+    /// sightings carry. Here that would be group 1, and read 7 belongs to neither library
+    /// alone.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 2 at contig 0:12-12 and read group 1 at contig \
+                    0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_first_of_three_records() {
+        let records = three_records_with_a_second_lane_at(0);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same disagreement at the sample's **last** record — see the test above for why both
+    /// positions are pinned. The blamed regions differ from that test's, which is what says the
+    /// message names the record the disagreement is actually at.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 1 at contig 0:12-12 and read group 2 at contig \
+                    0:16-16"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_last_of_three_records() {
+        let records = three_records_with_a_second_lane_at(2);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// **The same three-record sample with one read group throughout is built without
+    /// complaint**, which is what makes the refusals above evidence about the disagreement
+    /// rather than about the fixture. `usize::MAX` is no record, so every sighting names
+    /// group 1.
+    #[test]
+    fn a_read_sighted_three_times_in_one_read_group_is_one_row() {
+        let records = three_records_with_a_second_lane_at(usize::MAX);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATCCG")
+            .expect("the composed allele");
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == compound)
+            .collect();
+        assert_eq!(rows.len(), 1, "one lane, one row: {:?}", support.supported);
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[0].support.num_reads, 1);
     }
 
     /// **A one-read-group sample's rows are in ascending allele order**, and until B1 that was
