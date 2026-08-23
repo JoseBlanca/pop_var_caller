@@ -189,6 +189,47 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-23 — a benchmark number with no direction, and credited to the wrong caller
+
+Reporting a finished milestone, a reply justified keeping a comparator with:
+
+> ❌ "on the human benchmark trio at 5×, that difference was genotype accuracy of 83.6% against
+> 94.6%" … "the comparison that showed 83.6% genotype accuracy against 94.6% on the human trio at
+> 5×"
+>
+> Owner: *"You're writting is terrible, so I don't understand. Which is better and which is worse?
+> How come you already have genotypes if we haven't implemented the genotype calling. What are you
+> talking about."*
+
+> ✅ "94.6% is the good number, 83.6% the bad one — two settings of one switch on the same data,
+> and higher is better. What is scored: at positions where the truth set says there is a real
+> variant and the caller emitted one too, how often it got the genotype right — one copy of the
+> variant versus two. **And the genotypes are not ng's.** They are the existing caller's
+> (`src/var_calling/`), from a July run that swapped its prior and re-ran the human benchmark. ng
+> cannot call anything yet."
+
+Three failures, and the second is new:
+
+1. **A two-sided number with no side named.** "83.6% against 94.6%" leaves the reader to work out
+   which arm is which and which direction is good. This is the 2026-08-14 switch rule
+   (*name the switch, name the one quantity it moves, give both settings in the same units and the
+   same direction*) broken again, and this time it was broken while **citing** that entry's own
+   fix elsewhere in the same session. **The rule is not "give both numbers" — it is "say which one
+   you want".**
+2. **A measurement was credited to the thing being built.** The reply said "the comparison
+   showed …" in a paragraph about ng, when the run was on the *production* caller, in July, before
+   this module existed. The owner's question — *how come you already have genotypes* — is the
+   reader correctly refusing to accept a number that could not exist. **New rule: a measurement
+   quoted from another system or another date carries its owner and its date every time it is
+   used, not once when it is introduced.** In a project that is rewriting a working caller, "the
+   caller" is ambiguous by construction, and a benchmark figure is exactly where the ambiguity
+   does damage.
+3. **It was compressed because it had been written correctly before.** The full statement — whose
+   caller, what was scored, which direction — is in the module's own documentation and in the
+   commit message. The chat version kept the digits and dropped everything that made them mean
+   something. **Prose that is fine in its own document is not thereby fine in a reply** — the same
+   failure as 2026-08-12, in a fresh form: not carried over unchanged, but carried over *shortened*.
+
 ### 2026-08-14 — a whole explanation hung on a project word used to mean something else
 
 Asked to explain a defect, a reply opened by naming the wrong actor and never said which

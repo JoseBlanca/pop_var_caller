@@ -124,6 +124,27 @@ Message: `<type>(<scope>): <step-id> — <step title>` — e.g.
 If validation cannot be made green without a design decision → **stop-and-ask** (do not commit
 red, and do not weaken the checks to pass).
 
+**Read the diff you are about to commit, line by line, and re-run the step's own tests on that
+exact tree.** A green suite is evidence about the tree that was *compiled*, not about the tree in
+`git add`'s hands, and the two come apart whenever anything edits files between them. Mutation
+testing is the common way: it writes a deliberate defect, runs the tests, and copies a backup
+back — and a restore that does not land leaves the defect in the tree with a green log already
+written.
+
+Measured, on step C1 of one plan in this repo: **two injected mutations reached a commit whose
+message quoted a full-suite pass.** The suite really had passed — its log names all three affected
+tests as `ok`, twelve minutes before the commit — and the mutations arrived on disk after it
+finished. The check that missed them was `git diff --stat`, because a one-line edit *inside* an
+already-added block does not move the insertion count. Two habits close it, and both are cheap:
+
+- **`git diff HEAD -- <paths>` and read the `+`/`-` lines**, never the summary. Line counts cannot
+  see a changed line.
+- **Re-run the module-scoped tests as the last thing before `git add`.** Seconds, against the
+  minutes the full suite costs, and it is the only run whose tree is the one being committed.
+
+If a defect is found in an already-pushed or already-recorded commit, **fix it forward in its own
+commit** and say plainly what happened — do not amend history to make the record tidy.
+
 ### Then
 Mark the step **done** in the plan doc (flip its `☐` to `✅`), and move to the next step.
 

@@ -205,11 +205,19 @@ log P_random(g) = log C(m; k)  +  Σ_a [ lgamma(α_a + k_a) − lgamma(α_a) ]
 genotype. A zero count contributes exactly zero to the sum, so the cost is one `lgamma` pair per
 allele the genotype actually carries.
 
-The genotype-independent term `lgamma(Σα + m) − lgamma(Σα)` is **omitted**: it is the same for
-every genotype, so it cancels when the caller normalises. The values are therefore log-priors up
-to a shared additive constant, which is what a softmax consumes. Production's primitive
-([`genetics.rs:127`](../../../../src/genetics.rs)) takes flat arrays and returns exactly this, and
-ng ports it unchanged (§9).
+The genotype-independent term `lgamma(Σα + m) − lgamma(Σα)` is **omitted** from the expression
+above: it is the same for every genotype, so it cancels when the caller normalises. The values are
+therefore log-priors up to a shared additive constant, which is what a softmax consumes.
+Production's primitive ([`genetics.rs:127`](../../../../src/genetics.rs)) takes flat arrays and
+returns exactly this, and ng ports it unchanged (§9).
+
+**The constant cancels in a row and it does not cancel in a mixture, and that distinction is the
+one thing in this section that has already cost a defect.** §3.2 combines this term with a second
+branch whose value, `α_a / Σα`, is a true probability. Adding a constant to one summand of a
+`logsumexp` and not the other changes the answer, so **the random-mating branch has to be put back
+on the probability scale before the two are mixed** — §3.2 says how, and what it costs not to.
+Production does not, and its own defence is that its default inbreeding coefficient is zero, where
+the second branch is not there to be mixed.
 
 ### 3.2 The inbreeding branch
 
@@ -235,7 +243,24 @@ and for any genotype that is not homozygous, only the first branch exists:
 log P(g) = log(1 − F) + log P_random(g)
 ```
 
-This is production's mixture, from
+**`log P_random(g)` here is the whole probability, including the `lgamma(Σα + m) − lgamma(Σα)`
+term §3.1 drops.** The second branch is a true probability; mixing an unnormalised first branch
+against it inflates the random-mating side by `Σα(Σα + 1)` at diploidy, and the inbreeding
+coefficient then does a fraction of the work it should. **Measured, biallelic diploid at tomato's
+fitted diversity of 6 in 10,000, reading the heterozygote to homozygous-alternative prior ratio at
+`F = 0.8`:** the model says 0.222 at one sample and the uncorrected mixture gives 0.400 — it
+travels 90% of the way from the outbred 2:1 to the right answer. **At cohort scale it barely moves
+at all**, because the concentration handed in is the leave-one-out one (§6) so `Σα` grows with the
+cohort and the inflation grows with its square: 50 samples reach 3.6% of the way and 1,000 samples
+0.09%, so an inbreeding coefficient of 0.8 buys almost nothing.
+
+**Production has this defect and it is live rather than latent.** Its engine mixes the two scales,
+and its default coefficient of zero hides it — but the pipeline also hands the engine the
+per-sample coefficients the diversity estimator *fitted*, as overrides, and those are not zero on
+an inbred panel. **ng corrects it deliberately (owner, 2026-08-22), and it is the one place the
+port departs from what it was ported from.**
+
+This is otherwise production's mixture, from
 [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) and
 [`:3217`](../../../../src/var_calling/posterior_engine.rs), and the STR side's port of it
 ([`ssr/cohort/em.rs:290`](../../../../src/ssr/cohort/em.rs)).
@@ -326,8 +351,9 @@ from a Dirichlet with `α_ref = 1`, `α_alt = θ` and `θ/k` is what comes out *
 harmonic number: **3 in a thousand** at `θ = 6 in 10,000` over 52 chromosomes — the diversity fitted
 on tomato1 — rising to about **8%** at `θ` of 1 in 100 across two thousand chromosomes. That is close
 enough to treat the two as one
-object and too far to call an identity, which is why §12's test builds its target by *sampling* the
-Dirichlet rather than by writing `θ/k`. So there is no choice to make between "the neutral shape" and
+object and too far to call an identity, which is why §12's test builds its target as the family's
+**exact expected spectrum, computed in closed form**, rather than by writing `θ/k` — and not by
+sampling either, for the reason test 5 gives. So there is no choice to make between "the neutral shape" and
 "the pre-pass's measured spectrum". They are one object at two sample sizes, and the concentration is
 read off the spectrum rather than fixed.
 
@@ -373,7 +399,7 @@ heterozygosity from the windowed histogram
 averaged. **So the shape is theoretical and the scale is measured, and the two come from different
 accumulators.**
 
-**At one sample the projection returns `(1, θ)` exactly, and no test of the cohort size makes it do so.** A census
+**At one sample the projection returns `(1, θ)`, and no test of the cohort size makes it do so.** A census
 site's whole content is which samples carried an allele together, and a panel of one has no such
 correspondence: no site is variable across it, so the census contributes nothing and the spectrum
 is its `θ/k` prior untouched — at that genome's own measured `θ`. **The single-sample case
@@ -506,6 +532,9 @@ total:  the weights are scaled so that the prior's own implied gene diversity eq
 
               Σ α  =  D / (1 − c − D),        c = Σ_j (weight_j / Σ weights)²
 
+        c is the shape's Simpson index: the chance that two copies drawn from the
+        shape alone land on the same repeat count
+
         and not Σ α = D, which is a different quantity in different units
 ```
 
@@ -530,7 +559,7 @@ job it was fitted for.
 **Setting `Σα` to `D` itself would be a units error, and it was in this document until
 2026-08-19.** Gene diversity is a probability — the chance two copies drawn at random carry
 different lengths — while a concentration is a count of chromosomes (§1). What a Dirichlet with
-total `A` and shape index `c` actually implies is `A(1 − c)/(A + 1)`, so `A = D` asserts
+total `A` and Simpson index `c` actually implies is `A(1 − c)/(A + 1)`, so `A = D` asserts
 `D(1 − c)/(D + 1)`, which is always less than `D`. **Measured on 1,236 polymorphic tomato STR
 loci** at the coded fallback decay of `0.5`: the median locus carries `D = 0.087` and the prior
 would assert `0.030` — a paired median ratio of **0.40**, tenth percentile 0.22. The total that
@@ -549,6 +578,28 @@ separation of the two questions does not resolve it. **Both figures are, if anyt
 the measured `D` comes from called genotypes at about 3 reads a position on a panel whose apparent
 `F_IS` is 0.82, and low-depth calling in a selfer books ambiguous sites as homozygous, which
 understates allele diversity. Open (Q2, §11).
+
+**One locus the rule does not reach: a tract with a single candidate length.** Its shape has a
+Simpson index of exactly 1 and therefore a ceiling of 0, so `D ≥ 1 − c` would refuse every
+monomorphic tract whatever the measurement, including a measurement of zero. There is nothing to
+refuse — one length is one genotype, whose prior probability is 1 at any positive concentration —
+so the builder seeds it at one chromosome and the rule starts at two candidate lengths.
+
+**The one-in-ten figure is a tomato figure, and at the other end of the cohort range the refusal
+is the rule rather than the exception.** A single diploid sample shows at most three lengths at a
+tract, and the most those shapes can imply at the fallback decay is `0.444` at two lengths and
+`0.625` at three — while the pre-pass, which fits this quantity at every cohort size down to one
+([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3), returns that genome's own
+repeat diversity, about `0.72` on the GIAB HG002 benchmark where 72 tandem repeats in 100 are
+heterozygous (§5.3). **So one outbred genome is refused at every tract**, and no decay rescues it:
+the ceiling saturates at `1 − 5/27 = 0.815` at the fallback decay however many lengths a tract
+carries. Whatever Q2 settles has to work at ten refusals in ten, not only at one in ten.
+
+**And a second spelling of one length raises the ceiling**, which gives Q3 a size: an interrupted
+repeat sitting on an occupied rung flattens the shape, so a two-length tract's ceiling goes from
+`0.444` to `0.625` merely for the cohort having shown the interruption. Whether a locus is refused
+therefore depends on how many spellings of one length the panel happened to carry, not only on how
+much prior mass it collects (§5.2).
 
 **Separating the two questions is still what makes the STR prior defensible:** the pre-pass
 measures how variable repeat tracts are in this panel, and the geometry says where that variability
@@ -901,6 +952,15 @@ rate at matched recall on GIAB, where the truth set distinguishes the classes. *
 code** only in the sense that the concentration function must take the class as an argument even
 if both classes pass the same value — otherwise splitting later touches every call site.
 
+**Which function that is, settled 2026-08-23: the per-locus expansion, not the projection.** The
+projection reads the *shape* of variation off the panel's allele counts, which the pre-pass fits
+without separating the two classes; a class-specific *scale* belongs where the run's total is
+shared out over a locus's alleles. When the estimate splits, the run holds one seed carrying both
+totals and the per-locus expansion picks between them; carrying the argument at both ends would
+apply the ratio twice. **What is still open under this question is a locus carrying one
+alternative of each kind** — a substitution and a short indel at one position, which one class per
+locus cannot express and which nothing in the caller can currently tell apart.
+
 **Q2 — reopened 2026-08-19, and it is now a question about the shape rather than the total.** As
 posed it asked whether the STR total concentration is the pre-pass's STR gene diversity. It is not,
 in those words: gene diversity is a probability and a concentration is a count of chromosomes, and
@@ -909,9 +969,13 @@ mapping that fixes it, `Σα = D/(1 − c − D)`, and that part is settled.
 
 **What is open is the locus the geometry cannot hold at any total.** The prior's implied diversity
 is bounded by `1 − c`, and on 1,236 polymorphic tomato loci **119 — about one in ten — measure at or
-above that bound** at the coded fallback decay, 242 at `0.3` and 49 at `0.7`. Three candidate
-answers, none measured: fit the decay against gene diversity as well as against stutter, so the
-shape has to be able to hold what the panel shows; carry a floor of prior mass on the alleles the
+above that bound** at the coded fallback decay, 242 at `0.3` and 49 at `0.7`. **At one outbred
+sample it is every locus** (§5.1), so the candidate answers below have to be judged at ten in ten
+and not only at one in ten — which rules out any of them that is affordable only because it is
+rare.
+
+Three candidate answers, none measured: fit the decay against gene diversity as well as against
+stutter, so the shape has to be able to hold what the panel shows; carry a floor of prior mass on the alleles the
 geometry starves, which is the `G₀` floor doing a second job; or let the seed refuse such loci to
 the reads entirely, which is honest and gives up the regulariser exactly where the locus is most
 polymorphic. *Leaning: none — the choice needs the number of affected loci on a second panel, since
@@ -1031,10 +1095,15 @@ Seven more are ng's own, and each pins a claim this document makes:
    `θ/k` — that is the small-`θ` approximation (§4.1), which would put the test's own error at about
    `θ · H(2N)`, 3 in a thousand at tomato's diversity, and no honest tolerance could tell that from a
    wiring bug. **And not by drawing sites at random either:** Monte-Carlo noise falls as one over the
-   square root of the site count, so a floating-point tolerance would need a number of sites nobody
-   can generate, and loosening the tolerance to fit destroys what the test is for. Given the exact
-   target, the projection must return `α_ref = 1` and `α_alt = θ` to floating-point tolerance at
-   several panel sizes.
+   square root of the site count, so no tolerance a fit could be held to would need a number of sites
+   anybody can generate, and loosening it to fit destroys what the test is for.
+
+   **What the projection must return is the pair to within the resolution the search was asked
+   for, and closer when it is asked for more** — the second half is what separates a resolution
+   from a bias, and floating-point equality is not available from any bounded search. Measured on
+   the shipped one, over six panel sizes from one individual to 150, three diversities and two
+   inbreeding coefficients: 0.25% on `α_ref` and 0.31% on `α_alt` at the shipped 1% resolution, and
+   2 parts in 100,000 at a thousand-fold finer.
 6. **The projection is invariant to inbreeding.** Build the exact expected spectrum of one population
    frequency density at `F = 0`, `0.6` and `0.9` under §3.2's two-branch sampling; the projection
    must return the same pair from all three. An independent-chromosome projection does not — `α_ref`
@@ -1053,8 +1122,11 @@ Seven more are ng's own, and each pins a claim this document makes:
     records; a test written that way passes on a prior asserting two-fifths of the measurement.
 11. **A locus the geometry cannot hold is refused, not silently rescaled.** Where the measured `D` is
     at or above `1 − c` no total reproduces it, so the seed builder must say so — one locus in ten on
-    tomato at the fallback decay (§5.1). What it does instead is Q2's to settle; what it must not do
-    is return the closest total it can reach as though it had met the target.
+    tomato at the fallback decay, and **every locus on one outbred genome** (§5.1). What it does
+    instead is Q2's to settle; what it must not do is return the closest total it can reach as though
+    it had met the target. **The rule starts at two candidate lengths:** a single-length tract has a
+    ceiling of exactly 0 and would be refused at any measurement, and there is nothing there to
+    refuse.
 
 **The end-to-end check, and the definition of done for the manager:** the GIAB single-sample 5×
 regression of §2.2 — genotype accuracy at true variants and the count of true homozygous-variant

@@ -90,7 +90,7 @@ cache.
 
 ### Milestone A — the `types.rs` scalars
 
-**A1. `AlleleId` and `Phred`.**  ☐
+**A1. `AlleleId` and `Phred`.**  ✅
 `AlleleId(pub u16)` — index into one locus's candidate-allele table, unconstrained newtype with
 the ergonomic derives. `Phred(f32)` — constrained: validated `≥ 0` and finite via `try_new` + a
 new `DomainError` variant, conversions as **named functions** (`Phred::from_log_prob`,
@@ -98,7 +98,7 @@ never `as`), per the interfaces doc's sketch, now real. Unit tests: `Phred` boun
 directions; `from_log_prob` on a hand-computed pair. *Source:* calling_em_loop arch §Module home;
 ng_step_interfaces §1.
 
-**A2. `Genotype`.**  ☐
+**A2. `Genotype`.**  ✅
 `Genotype(Box<[AlleleId]>)` — the opaque output multiset, alleles stored sorted so equal
 genotypes compare equal; a constructor that sorts, `.alleles()` accessor. The loop's *working*
 currency is `GenotypeIdx` (Milestone C) — this type is minted only at the final pass, which is why
@@ -110,20 +110,20 @@ A1. *Source:* calling_em_loop arch §2, §Module home.
 
 ### Milestone B — the `calling/` scaffold and its vocabulary
 
-**B1. Scaffold.**  ☐
+**B1. Scaffold.**  ✅
 `src/ng/calling/mod.rs` (declares `genotype_table`; the step sub-modules arrive with their plans)
 wired into `ng/mod.rs`. One folder for steps 6–9, per module_layout's dependency argument (keeping
 them apart forced a no-import rule). *Source:* module_layout §The tree; calling_em_loop arch
 §Module home.
 
-**B2. `CandidateAlleles` and `ExpectedAlleleCopies`.**  ☐
+**B2. `CandidateAlleles` and `ExpectedAlleleCopies`.**  ✅
 `CandidateAlleles { alleles: Vec<Box<[u8]>>, kind: LocusKind }` — REFERENCE at index 0, always
 present; owned, because a discovery round appends and the final prune shrinks (a later plan's
 behaviour, this plan's shape). `ExpectedAlleleCopies(Vec<f64>)` — parallel to the allele table;
 fractional, never a call. Doc comments carry both contracts. Tests: reference-at-zero invariant.
 *Depends:* B1, A1. *Source:* calling_em_loop arch §2; spec §1.3.
 
-**B3. `LocusInference` and `SampleGenotypeCall`.**  ☐
+**B3. `LocusInference` and `SampleGenotypeCall`.**  ✅
 The outcome type as the arch writes it: region, final alleles, per-sample calls in run order,
 `cohort_expected_copies`, `converged` (false = capped, **emitted, never dropped**), `passes`,
 `weakest_provenance`, `seed_diversity_unreachable`. Plain data, no logic; the loop plan fills it.
@@ -134,7 +134,7 @@ The outcome type as the arch writes it: region, final alleles, per-sample calls 
 
 ### Milestone C — `genotype_table.rs`, the `GenotypeShape` port
 
-**C1. `GenotypeTable` + `GenotypeIdx` + the flat views.**  ☐
+**C1. `GenotypeTable` + `GenotypeIdx` + the flat views.**  ✅
 The port: per-`(ploidy, allele count)` genotype indexing built once and cached
 (`build(ploidy, allele_count) -> Arc<Self>`), holding `genotype_allele_counts`
 (`n_genotypes × n_alleles`, row-major), `log_multinomial_coeffs` (`ln C(ploidy; counts)` per
@@ -144,7 +144,7 @@ change). `view()` returns `GenotypeTableView<'_>` — the flat borrow both sibli
 `nonzero_pairs` comes along only if profiling asks. *Depends:* A1, B1. *Source:* calling_em_loop
 arch §2; calling_priors arch §3.2, spec §3.3.
 
-**C2. Parity with production.**  ☐
+**C2. Parity with production.**  ✅
 Across ploidy 2 and 4 and allele counts 1–6: genotype count, every row's allele counts in the
 same enumeration order as production, every `ln`-coefficient to floating-point equality, and the
 homozygous lookup, all against `GenotypeShape`

@@ -18,6 +18,18 @@
 - **Regression tests** exist for every doc-comment invariant, every previously-fixed bug, and every `unsafe` safety condition. The test would fail if the invariant were violated.
 - **Test names** describe the behavior under test and the expected outcome (`parse_returns_error_on_empty_input`, not `test_parse_2`). The name alone communicates the bug on a CI failure.
 
+## Restoring a mutation is part of running it
+
+**A mutation that is not provably reverted is a defect you introduced.** Verify the revert by
+**content** — `git diff HEAD -- <paths>` and read the `+`/`-` lines — never by a summary count: a
+mutation usually edits one line *inside* code the diff already counts as added, so `--stat` is
+identical before and after. Scripts that mutate in a loop are where this bites, because the log
+they print is written before the last restore has landed.
+
+Measured in this repo: two mutations from a verification script survived into a commit whose
+message quoted a full-suite pass. The suite had genuinely passed on the clean tree minutes
+earlier; the restores reached disk afterwards, and `--stat` could not see them.
+
 ## Mutation testing: prove the mutant differs before recording a survivor
 
 You are in your own worktree so that you can change the code and re-run, which finds what reading does not. **But a mutation that does not change behaviour is not evidence of coverage.** Before recording a survivor, show the mutated code takes a different path on at least one fixture — print from both arms, assert the two answers differ, or diff the outputs. Then say which.

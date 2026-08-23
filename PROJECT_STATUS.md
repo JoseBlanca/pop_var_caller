@@ -19,7 +19,364 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-20):** **contamination moves from the plant to the library**, on branch `ng-contamination-grain`. A second plant's DNA enters at library preparation or on the sequencing machine, so two libraries of one plant can differ and one number for the plant is an average wrong for both; the estimator now fits one fraction per read group, with both grains in one build. Only the read counts change grain — the frequency model, the ancestry coordinates and the refusal all still see a plant's reads pooled — so the +0.015 that partitioning a panel costs does not apply, and a plant with two libraries at 6% and 0% returns **0.0628 and 0.0008** against **0.0307 for both** at the old grain. A plant with one library returns the identical number either way, which is every sample of every benchmark here. [What splits](doc/devel/ng/reports/contamination_grain_decomposition_2026-08-20.md), [the grain and its cost](doc/devel/ng/reports/contamination_read_group_grain_2026-08-20.md). Two lint commits came with it: `clippy` had been red on `main` since the toolchain moved to 1.97, and two census-file tests were discarding the `Result` that runs their assertions.
+> - **Last completed task (2026-08-23):** **the comparator, and the arm nothing could name**
+> (step F1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone F complete, at Checkpoint F — step 8 is now a complete set of
+> pure functions**). The caller can now build its genotype prior two ways behind one seam: the
+> default, which averages the genotype probability over every allele frequency the evidence finds
+> plausible, and the comparator, which picks the single most likely frequency and evaluates there.
+> The second is the route this caller does not take, kept only so the difference stays measurable
+> — on the human benchmark trio at 5×, that difference was genotype accuracy of 83.6% against
+> 94.6%.
+> **The review found that nothing tested the seam the way a run would use it.** Every test named
+> the comparator through its own file, so re-exporting the default under the comparator's name — a
+> one-line edit — left all 132 tests passing while a run comparing the two got the same prior
+> twice and reported that they agree. That is the one failure the comparator exists to prevent,
+> and the number that would have vanished is a factor of 834 on the homozygote.
+> **And a promise made three steps ago had never been kept:** the seam was supposed to let a run
+> record which of the two priors produced a row, deferred to this step with a stand-in that never
+> compiled. It does now.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_f1_2026-08-23.md).
+> - **Previously (2026-08-23):** **the fit now reports how far its answer is, instead of
+> claiming it matched** (fix-forward on `0b019e0d`, branch `ng-calling-prior`). Before starting a
+> run, the caller reads two starting numbers off the panel's own allele-frequency spectrum, and
+> carries a marker saying whether those two numbers reproduce what was measured. **Nothing
+> compared them.** The marker said *reproduced* whenever the search finished inside its range and
+> no allele-count class came back at exactly zero — neither of which measures how close the answer
+> is. On a panel of 26 individuals whose alleles sit at two middling frequencies, the fitted pair
+> and the measurement share 4 parts in 100 of their mass, and the marker said they matched.
+> **It now reports the distance and names no threshold**, because nobody has measured how far off
+> the pair has to be before a genotype moves. The distance is free: the fit's objective is already
+> the measurement's own entropy minus it, so a fit costs the same 399 predictions it did before
+> the marker existed. Reference values from the tests: 1.1e-9 where the two-parameter family can
+> hold the shape, 0.481 and 3.153 on two shapes it cannot.
+> **Found only because the owner had that commit folded into the milestone's review** — it was
+> the one batch on this branch that had never been through the fan-out.
+> [What was wrong and what replaced it](doc/devel/reports/implementations/ng_calling_prior_spectrum_match_fix_2026-08-23.md).
+> - **Earlier (2026-08-23):** **the shape both consumers read, and the support it is
+> not** (step E2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone E complete, at Checkpoint E**). The prior's belief about which
+> repeat lengths are common at a tract is now exported once, so the genotype prior and the read
+> likelihood's contamination term cannot drift apart.
+> **The review found that the export answers a different question from the one its consumer
+> asks.** It gives one number per candidate allele; the contamination term needs one per observed
+> read length, and the two part company in three places — two candidates spelling the same length
+> each take that length's full share, so the length arrives with 0.8 of the mass where the
+> geometry says 0.667; a read at a length the candidate prune dropped has no entry at all; and a
+> read that runs off the end of a tract has no length, only a lower bound. None of the three is
+> the prior's to settle, so the export is named for what it actually holds and all three are
+> recorded, with their sizes, where the likelihood work will meet them.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_e2_2026-08-23.md).
+> - **Before that (2026-08-23):** **the repeat-tract starting point, and the panel it
+> refuses at every locus** (step E1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> Before any read is looked at, a repeat tract's genotype prior starts from mass falling off
+> geometrically from the cohort's commonest length, totalling what the panel's measured repeat
+> diversity implies. **The shape is production's, ported; the total is new, and it is new because
+> production's number is in the wrong units.** Gene diversity is a probability — the chance two
+> copies drawn at random carry different lengths — while the prior's total is a count of
+> chromosomes, and equating them makes the prior assert a median 0.40 of what was measured on
+> 1,236 tomato repeat tracts, tenth percentile 0.22.
+> **What the review turned up is where the design stops working.** A tract's own shape can only
+> imply so much diversity — at most 0.44 if the panel showed two lengths there, 0.63 at three,
+> and 0.81 however many — so a panel measuring above that has no total at all and the seed refuses
+> rather than rescaling. On tomato that is one tract in ten. **On a single outbred human genome it
+> is every tract**: one diploid sample shows at most three lengths, and the measurement it returns
+> is that genome's own repeat diversity, about 0.72 on the GIAB benchmark where 72 tandem repeats
+> in 100 are heterozygous. So the open question about what to do with a refused tract has to be
+> answered for ten refusals in ten, not one in ten — recorded in the spec, and the reason this
+> step is worth a look before Milestone F.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_e1_2026-08-23.md).
+> - **Before that (2026-08-23):** **the three decisions taken at the end of Milestone D,
+> and the measurement the owner asked for** (branch `ng-calling-prior`). **A fit that could not
+> match the panel's allele counts now says so** rather than handing back the closest pair as
+> though it had matched — two ways that happens, a panel at complete inbreeding whose counts still
+> hold heterozygotes, and one whose alleles sit mostly at middling frequency, which two numbers
+> cannot describe. **Skipping the call that fills a locus's starting numbers no longer compiles**:
+> it hands back the checked type, where before a buffer of zeros passed every check and reached
+> the prior's row as `NaN`, and the locus was emitted as unconverged with nothing saying why.
+> **The SNP-versus-indel split, if it ever happens, belongs to the per-locus expansion** — the fit
+> reads the shape of variation off the panel's counts, which the pre-pass does not separate by
+> class, so a class-specific scale belongs where the run's total is shared out; the fit no longer
+> takes the argument.
+> **And the measurement: at cohort scale the starting numbers barely notice a wrong inbreeding
+> coefficient.** On 26 individuals at tomato's diversity, getting `F` wrong by 0.10 moves the
+> reference number by 2.4% and the prior odds on a heterozygote by 2.3%; at 63 individuals, 1.6%.
+> **The exposure is at one sample and it is not in the fit** — there the same coefficient builds
+> the distribution and reads it back, so the errors cancel, and what survives is the diversity
+> itself: at `F = 0.85` only 15 alternative copies in 100 sit in heterozygotes, so `θ` is measured
+> through that channel and multiplied by 6.7, and an error of 0.05 in `F` moves it by a third.
+> **Conclusion: report it, do not repair it** — a single genome carries no other signal, and the
+> obvious alternative is the non-reference rate the spec rejects.
+> [The measurement](doc/devel/ng/reports/inbreeding_sensitivity_of_the_seed_2026-08-23.md).
+> - **Before that (2026-08-22):** **the run's two numbers spread over one locus's
+> alleles — and an argument I removed that the review put back** (step D3 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
+> **Milestone D complete, at Checkpoint D**). The reference allele's concentration goes in first
+> and the alternative total is shared out evenly across however many alternative alleles the locus
+> carries, so that **a triallelic site is not twice as polymorphic as a biallelic one merely for
+> holding a third allele**. A port of production's `alpha_from_diversity` with the fitted pair as
+> input instead of `α_ref = 1` and `α_alt = θ` hard-coded, filling the caller's buffer instead of
+> returning a fresh one per locus. **The one thing worth reading is why the buffer's length is
+> checked against a separate count.** I dropped that count on the argument step D2 used for the
+> panel size — the buffer's length already is the allele count, so a second argument is a second
+> place to disagree. That analogy is false: D2's weights *are* the data, while this buffer is
+> scratch the calling loop slices. Measured with the check absent, a locus of three alleles handed
+> an eight-wide buffer gives every alternative allele 3.5 times too little prior mass — about 5.4
+> phred off every non-reference genotype — and a shorter buffer silently keeps the previous
+> locus's numbers. **Three open items reach past this step**, all raised for the milestone review:
+> a fit that could not match the spectrum is emitted as though it had; skipping the seed call
+> entirely is caught by nothing, and reaches the prior's row as `NaN`; and no document says which
+> end of the pipeline owns a SNP-versus-indel split, while a locus can carry one of each and no
+> code in ng can tell them apart.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_d3_2026-08-22.md).
+> - **Earlier (2026-08-22):** **the run's two starting numbers, read off the panel's
+> own frequency spectrum — and a fully inbred panel used to abort the run** (step D2 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> The pre-pass measures, across the sites that vary, how many of the panel's chromosomes carry the
+> alternative allele. This turns that into the two numbers the genotype prior starts every locus
+> from, by asking which pair of concentrations would have produced that shape — **a change of
+> representation, not a second estimate**. On a neutral panel it returns `(1, θ)` to within 0.25%
+> at every panel size from one individual to 150, and to 2 parts in 100,000 when asked for finer
+> resolution, which is what says that residue is the search's step and not a bias. **Carrying the
+> panel's inbreeding is the whole of step D:** predicting as though the chromosomes were
+> independent draws returns `α_ref = 0.914` at `F = 0.6`, `0.879` at 0.8 and `0.860` at 0.9, where
+> the answer is 1. **The one thing that was not obvious** is that the surface is a ridge whose
+> direction depends on the panel size, so the search sweeps three directions — the total, `α_ref`
+> alone and `α_alt` alone — because the two obvious parametrisations each fail at one end of the
+> cohort range. **What the review found was a blocker and four unguarded checks.** At `F = 1` every
+> odd allele-count class is exactly zero, so a spectrum holding any heterozygote scored minus
+> infinity at every candidate and the run died complaining that a concentration was `NaN`;
+> `InbreedingF` still admits 1.0, since the `[0, 1)` tightening belongs to the prerequisites plan.
+> Flooring the logarithm fixes it and also fixes a blind region that exists at ordinary inbreeding
+> — 28 of 225 points across the search box at 1,600 individuals. Also found: a line search could
+> end below where it started, on 31 of 80 searches on a flat spectrum, while the doc claimed the
+> best point was kept; and four guards whose removal left the suite green while returning
+> plausible answers.
+> **A fit is 11.8 minutes at 3,200 individuals, against the 2.6 predicted** — 399 predictions
+> rather than the 160 assumed, each averaging 1.78 s inside a fit against 0.96 s at the neutral
+> pair. **Still open, and it reaches past this step:** a fit that could not match the spectrum, or
+> whose best pair lies outside the search box, is emitted as though it had matched.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d2_2026-08-22.md).
+> - **Before that (2026-08-22):** **the prediction the spectrum fit will search is exact —
+> and it is paid once per search step, not once per run** (step D1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> Given a candidate pair of concentrations, this says what fraction of sites a panel would show
+> carrying the alternative allele on exactly `j` of its chromosomes — the shape the pre-pass
+> measures on real data. **The formula held against three independent oracles**, the closest
+> agreeing to 9.4e-15, and its loop bounds are exactly the legitimate range at all 35,301 cases
+> checked. **What the review found was cost and coverage.** The step's own report had called the
+> sum "paid once per run"; it is the objective the next step searches, so a fit pays it about a
+> hundred times over. Tabulating the log-factorials and skipping branch splits below `1e-300`
+> bought 15-fold — one prediction is now 241 µs at 63 individuals and 354 ms at 800 — but it is
+> still cubic, so **a fit is about a minute at 800 samples and hours by several thousand.
+> Whether the projection can run at the top of the committed range is step D2's question**, and it
+> can answer it by binning the classes or capping the panel it projects at, without this function
+> changing. Also found: neither release-held value check had a test, and with them removed a
+> negative concentration returns a spectrum that looks like a spectrum; concentrations past about
+> `1e9` stop summing to one while staying finite, on an axis the fit searches; and **both exact
+> tests sat at the ends of the inbreeding range**, so deleting the doubling — a different model —
+> passed three of them. Two oracles now cover the middle.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_d1_2026-08-22.md).
+> **One correction owed to the design documents:** `arch/calling_priors.md` §4 and this plan's step
+> D2 line both say the independent-chromosome bias is 9–14% at tomato's fitted `F`; spec §4.1 puts
+> it at 12–14% there, 8.6% being the `F = 0.6` figure.
+> - **And before that (2026-08-22):** **two arrays of the same shape and the same unit, whose
+> difference is the whole of the calculation — and nothing stopped a caller passing them the wrong
+> way round** (step C1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone C complete, at Checkpoint C**). Each sample's prior at a locus is
+> the run's starting point plus what the **other** samples showed there, so this sample's own
+> expected allele copies come off the cohort's total — otherwise its reads arrive twice, once
+> through the read likelihood and once through the frequency they helped estimate. The arithmetic
+> ports exactly: bit-identical to both of production's spellings over 20,000 random cases, and at
+> one sample the output is the starting point bit for bit, checked from the smallest subnormal to
+> the largest float. **What the review found was the signature.** Four bare slices meant the
+> compiler could not tell the cohort's copies from the sample's own, and swapping them returned the
+> bare starting point at every allele — the cohort's evidence gone, nothing raised in release. Two
+> borrowing types make that `error[E0308]`, and they carry the value check that a `NaN` copy count
+> was otherwise slipping past, since `max` returns the other operand on a `NaN`. **Also corrected:
+> three claims the first draft made about production, two of them caught independently by two
+> agents** — its SNP engine does not allocate per sample per pass, and its STR spelling has no
+> negative-difference check at all.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_c1_2026-08-22.md).
+> **Two departures owed to `arch/calling_priors.md` §3.1:** the function is `fill_sample_concentration`,
+> matching the folder's three other buffer-fillers, and it takes the two checked types rather than
+> slices.
+> - **Previously (2026-08-22):** **on a cohort, production's fitted inbreeding coefficient
+> is very nearly inert — and the port that found it had to be reviewed before that was believable**
+> (step B2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone B complete, at Checkpoint B**). The mixture has two branches —
+> with probability `F` a sample's two copies are one ancestral copy counted twice, otherwise they
+> are independent draws — and the two have to be on the same scale. They were not: the spec drops a
+> genotype-independent term from the Dirichlet-multinomial row because it cancels when the row is
+> rescaled, which is true of a row alone and false once a second branch is mixed in. **The step
+> reported that as making a heterozygote about 1.8 times too likely; the review measured it across
+> cohort sizes and that is the mildest corner.** The inflation goes as the square of the
+> concentration total, and production feeds the mixture the leave-one-out concentration, which grows
+> with the cohort: at one sample the coefficient still does 90% of its work, at fifty samples 3.6%,
+> at a thousand 0.09%. **Production has the defect and it is live** — its default coefficient is
+> zero, where the branch short-circuits away, but the pipeline also passes the per-sample
+> coefficients the diversity estimator fitted. Corrected in ng at the owner's direction.
+> **The review's own finding was the mirror image:** the mathematics survived five agents
+> attacking it, and what did not survive was the testing — nothing in the suite reached the seam's
+> only implementation, so an implementation that dropped the coefficient entirely left the module
+> green while making a heterozygote 39 times too likely.
+> [What was built](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md),
+> [the review](doc/devel/reports/reviews/ng_calling_prior_b2_2026-08-22.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_b2_fixes_2026-08-22.md).
+> **One question went to the owner and is settled:** a genotype the prior rules out now carries the
+> probability floor rather than `−∞`, so every entry of every row is finite. It changes no call —
+> moving a genotype off the floor would take read evidence worth about 3,000 Phred — and it is what
+> keeps the comparator arriving at step F1 on one convention with this prior, since that one is
+> ported from a function that already floors. The floor is on `1 − F` only: `F`'s own `ln 0` at an
+> outbred sample never reaches a row entry, and flooring it too would send every outbred sample down
+> the slow path to move nothing.
+> - **Previously (2026-08-22):** **the Dirichlet-multinomial primitive is ported, and a
+> port needs two oracles** (step B1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md),
+> branch `ng-calling-prior`). One re-derives every value from rising factorials with no `lgamma` at
+> all and checks the mathematics; bit-for-bit equality against production checks that the arithmetic
+> is *performed the same way*. Two mutations die only to the second — removing the zero-count skip,
+> and re-associating the fold — each moving a row by one unit in the last place. That skip turns out
+> not to be a saving but a requirement: the fold associates as `(acc + lgamma(α + k)) − lgamma(α)`,
+> so a skipped allele's two large, nearly equal logarithms would enter and leave the accumulator with
+> a rounding in between. **The review's Blocker was that every fixture ran at a reference
+> concentration of 1** — the leave-one-out concentration of one sample at a biallelic site, where the
+> real input reaches 2,000 at a thousand diploid samples. Three wrong implementations passed the
+> whole module, moving a row by 9.9 nats and getting 57 of 78 genotypes wrong at twelve alleles; the
+> parity grid now runs to 6,001 and twelve alleles. **And production has two spellings of this
+> mathematics that disagree by an ulp** — the shared primitive has one shipping caller, the STR
+> cohort's EM, while the SNP/indel engine runs its own copy, and the design's headline GIAB
+> measurement came from that one.
+> [What was built](doc/devel/reports/implementations/ng_calling_prior_b1_2026-08-22.md),
+> [the review](doc/devel/reports/reviews/ng_calling_prior_b1_2026-08-22.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_b1_fixes_2026-08-22.md).
+> - **Previously (2026-08-21):** **the genotype prior's seam takes one checked bundle, not
+> eight parameters — Milestone A complete, at Checkpoint A** (steps A1 and A2 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`). Step 8
+> now has its folder, the diversity the SNP/indel side starts from, and the seam its two competing
+> answers will sit behind. **Three of the five review agents found the same defect independently
+> and each compiled the same fix**: the eight-argument row function and the shape checks no
+> implementation could be forced to call were one fact seen from two sides, so the checks are now a
+> constructor and there is no other way to build the argument. **Their version of that fix did not
+> work, and re-running their own claim is what showed it** — a private field is visible to a
+> module's descendants, and the four files that will hold every implementation are descendants, so
+> a probe built the bundle field by field and ran green; one level of nesting makes them siblings
+> and the same probe now fails to compile. Two gates were added because the review showed the
+> standard ones blind here: `cargo clippy --lib` never type-checks a test module, and no run
+> anyone does can fail on an assertion demoted out of release builds.
+> [A1](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md) ·
+> [A1 review](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md) ·
+> [A1 fixes](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md) ·
+> [A2](doc/devel/reports/implementations/ng_calling_prior_a2_2026-08-21.md) ·
+> [A2 review](doc/devel/reports/reviews/ng_calling_prior_a2_2026-08-21.md) ·
+> [A2 fixes](doc/devel/reports/implementations/ng_calling_prior_a2_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **step 8 has a folder and a diversity scalar** (step A1 of
+> [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
+> `src/ng/calling/genotype_prior/` exists with the four files later milestones fill, and
+> `ExpectedHeterozygosity` — the cohort's expected heterozygosity at ordinary sites, the prior's θ —
+> joins ng's shared vocabulary. The species-range fallback a run uses when nothing could be fitted
+> **is a value of that type rather than a bare `f64`**: the review compiled the alternative, and as a
+> loose float it seeded the inbreeding coefficient, the error rate and the genotype frequencies
+> alike, in the one module the STR path imports from. Three of the review's four Majors were tests
+> that could not fail — the new scalar was missing from the sweep that pins the accept/reject
+> boundary, so a constructor accepting 1.1 and one rounding to six decimals both passed, and the
+> fallback's own test compared the constant with itself, so reading `1e-3` as a percentage or per
+> kilobase passed too. All six surviving mutations were re-run against the fixes and all six now
+> fail. Two more findings were **wrong mechanisms in prose**: a claim that production's STR path
+> substituted a SNP diversity, where it hardcodes a population-scaled constant of a different
+> quantity entirely; and a flat claim that tomato is more diverse than human, where this project's
+> own tomato fit sits below the human fallback.
+> [What was built](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **the genotype table matches production value for value
+> — Milestone C complete, at Checkpoint C, and the plan is finished** (step C2 of
+> [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
+> `ng-calling-foundations`). ng's table is a port, and what a port has to prove is not that it is
+> self-consistent but that it agrees with what it was ported from — so it is compared against
+> production's own enumeration across three grids: the plan's diploid-and-tetraploid one, a wider
+> haploid-to-octoploid one, and the shapes past the cache bounds. Coefficients are compared bit for
+> bit, deliberately: reversing the summation order shifts one by four units in the last place, which
+> any ordinary tolerance would have passed. **The oracle is production's own artefact**, and reaching
+> it cost production exactly one line: the module holding `GenotypeShape` was private, so no test
+> anywhere could see the thing ng's table is a port of, and it is now `pub(crate)` (owner-authorised,
+> 2026-08-21). The rule that sets — ng may widen a production item's visibility for a parity test and
+> may change nothing else — is recorded in `src/ng/mod.rs`. The review found that both grids stopped
+> exactly where the cache stops, so a coefficient formula capped at ploidy 8 passed the entire suite
+> while tilting every polyploid locus's prior toward homozygotes by a factor of nine.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_c2_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_c2_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_c2_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **the genotype table — which genotypes a locus's alleles
+> make** (step C1 of [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
+> `ng-calling-foundations`). A locus's candidate alleles fix its candidate genotypes, and how many
+> copies of each allele each genotype carries, how many orderings of the genome's copies spell it,
+> and whether every copy is the same allele are all fixed by two numbers — the ploidy and the
+> allele count — so they are computed once per pair and shared. The order the genotypes come out in
+> is the order `PL` is written in, which is why a defect there would mislabel every likelihood and
+> crash nothing. The review found two such silent defects the submitted tests could not see: the
+> order was pinned only at two shapes, so swapping two rows at ploidy 3 or above passed everything;
+> and one plausible slip in the cache's index would have handed a diploid locus a haploid locus's
+> genotypes. Both now have tests that were checked by re-running the mutation they were written for.
+> Separately, the port was proved exact against production over 128 shapes and 2,042,958 genotype
+> rows, coefficients bit for bit.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_c1_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_c1_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_c1_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **calling has its vocabulary — Milestones A and B
+> complete, at Checkpoint B**, on branch `ng-calling-foundations`
+> ([plan](doc/devel/ng/impl_plan/calling_foundations.md)). The last piece is what a locus
+> produces: the alleles it settled on, one call per sample, and four things a consumer cannot
+> reconstruct — whether the loop settled or ran out of passes, how many passes it took, the
+> weakest warrant among the parameters that fed it, and whether the repeat prior's seed had to be
+> bent to fit. Its allele table and copy counts are read-only, because a public table let the
+> discovery round widen it against unchanged counts *after* every check had passed. The review
+> also proposed refusing a locus that converged on its first pass; that would have rejected a real
+> outcome, since the loop runs a reads-only estimate before it starts iterating, so the first pass
+> already has something to settle against.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_b3_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_b3_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_b3_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **`src/ng/calling/` exists** — the folder that will hold
+> steps 6 to 9 — with the allele table a locus is called over and the cohort's fractional
+> allele-copy counts, the two things its four sub-modules share (steps B1 and B2 of
+> [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), branch
+> `ng-calling-foundations`). The copy counts are now **built against the allele table**, so a
+> vector of the wrong length cannot exist: a short one would have handed every consumer a different
+> allele's count, with a converged flag beside it. The review's mutation pass found five defects the
+> tests could not see, of which the sharpest was that admitting an allele into a table already
+> holding 65,536 would have wrapped its id onto zero — the reference — turning a discovered
+> alternative into the reference allele for every downstream test, with nothing panicking.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_b12_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_b12_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_b12_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **calling's first three types — Milestone A complete, at
+> Checkpoint A**, on branch `ng-calling-foundations`
+> ([plan](doc/devel/ng/impl_plan/calling_foundations.md)). `Genotype` (A2) is what a sample is
+> called as: the alleles it carries, one per copy of the genome, held sorted so that the same two
+> alleles named in either order are one value — without which one heterozygote in a cohort would
+> count as two. Its review found that an ordinary "is this already sorted?" shortcut would have
+> passed every test written for it while leaving three-copy and four-copy genotypes misordered;
+> a property test over the full id range now catches it. `Genotype` also refuses an empty
+> multiset, so the file no longer calls zero genome copies illegal in `Ploidy` and legal here.
+> [What was built](doc/devel/reports/implementations/ng_calling_foundations_a2_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_a2_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_a2_fixes_2026-08-21.md).
+> - **Previously (2026-08-21):** **the first two calling scalars**, step A1 of
+> [calling foundations](doc/devel/ng/impl_plan/calling_foundations.md), on branch
+> `ng-calling-foundations`. `AlleleId` names which allele of a locus; `Phred` names a quality on
+> the scale VCF's `QUAL` and `GQ` columns are written on, and `Phred::from_log_prob` is the one
+> named crossing from the natural logarithms ng works in. It **refuses** the two values the Phred
+> scale cannot hold rather than clamping them, because where to cap a `GQ` is the consumer's
+> decision — and it tells them apart by which error it returns, so a consumer never has to inspect
+> a float to know whether it met a routine certainty or a broken sum. The review's mutation pass
+> found two defects the submitted tests could not see: a certain call came back as **negative
+> zero**, which would print as `-0` in a `QUAL` column, and the promise that the arithmetic is done
+> at `f64` width had no test behind it. Both are now killed by tests, re-checked by re-running the
+> mutations. [What was built](doc/devel/reports/implementations/ng_calling_foundations_a1_2026-08-21.md),
+> [the review](doc/devel/reports/reviews/ng_calling_a1_2026-08-21.md),
+> [what the fixes changed](doc/devel/reports/implementations/ng_calling_foundations_a1_fixes_2026-08-21.md).
+> - **Previously (2026-08-20):** **contamination moves from the plant to the library**, on branch `ng-contamination-grain`. A second plant's DNA enters at library preparation or on the sequencing machine, so two libraries of one plant can differ and one number for the plant is an average wrong for both; the estimator now fits one fraction per read group, with both grains in one build. Only the read counts change grain — the frequency model, the ancestry coordinates and the refusal all still see a plant's reads pooled — so the +0.015 that partitioning a panel costs does not apply, and a plant with two libraries at 6% and 0% returns **0.0628 and 0.0008** against **0.0307 for both** at the old grain. A plant with one library returns the identical number either way, which is every sample of every benchmark here. [What splits](doc/devel/ng/reports/contamination_grain_decomposition_2026-08-20.md), [the grain and its cost](doc/devel/ng/reports/contamination_read_group_grain_2026-08-20.md). Two lint commits came with it: `clippy` had been red on `main` since the toolchain moved to 1.97, and two census-file tests were discarding the `Result` that runs their assertions.
 > - **Previously (2026-08-17):** **the ng cohort merge — milestones A, B and C complete, at Checkpoint C**, on branch `ng-cohort-merge`. **C1 and C2** made the merge run end to end on one thread: a builder owns the loci opening in its own ground, a serial driver walks the run's analysed regions, and **the first cohort observation built from records the generic generator actually minted** came out of two samples' BAMs on disk — a deletion in one sample covering a substitution in the other, chained into one locus at chr2:109–114 with three alleles; [C1 impl](doc/devel/reports/implementations/ng_cohort_merge_c1_2026-08-17.md), [C2 impl](doc/devel/reports/implementations/ng_cohort_merge_c2_2026-08-17.md). **⛦ That fixture corrected a claim the module had been carrying since B2**: the generic mint writes a record at *every covered position*, thirty for a thirty-base read, so a gap between a sample's records is ground no read covered — not, as the doc said, ground where its reads agreed with the reference — and the composition's gap-filling is in fact unreachable on that path. **⛦ It also cost an hour to a filter nobody had in mind**: the first deletion reads were 25 bases against a 30-base minimum read length, so that sample minted nothing at all, visible only because the test asserted both samples minted something before merging. **⛦ Between them the C reviews found four tests that could not fail** — no locus opening on a region's first base (losing about one locus in twenty, silently, under a one-character mutation), the other-contig break untested, `min_alt_obs` never varied, and the end-to-end quality assertion indistinguishable from its own inverse because every base was Q30. Earlier the same day, **milestone B**: **B3** put every covering sample's support against the locus's allele table; [impl](doc/devel/reports/implementations/ng_cohort_merge_b3_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_b3_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b3_2026-08-17.md). **Read counts are exact and the five quality sums are not**: every read is named, so it lands on one allele and is counted there, but the mint sums quality per observation, so where one observation's reads take different paths across a locus the sums are divided — the owner's ruling, proportional to the read counts, taken after checking freebayes (which never faces the question, holding one object per read all the way to the likelihood). **⛦ A divergence from production came out of implementing it**: production's merger takes the `min` of the constituents' mean `q_sum` where `q_sum` is `Σ ln P(error)`, so it picks the piece the read saw **best** — against its own plan's sentence, "the compound's effective quality cannot exceed any single constituent's". ng takes the weakest, which is also what ng's own pileup already does when it reduces base-quality against mapping error (`ln_bq.max(mq_log_err)`). **⛦ The review's second Blocker is the one worth remembering**: the case this whole division exists for — one observation's reads splitting onto two alleles — **had no test**, so reading the record's first sequence instead of the one the read was sighted at passed all 94 tests. One fixture closes it and both mutations were re-run against it. **⛦ And a measurement for the owner**: support is a dense row per sample per allele, so a locus where 4,000 samples each show a distinct allele costs **614 MB for one observation**, against 41 MB at 1,000 — while spec §8 prices a survivor with no sample-count factor at all. Earlier the same day, **B2** unified the alleles; [impl](doc/devel/reports/implementations/ng_cohort_merge_b2_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_b2_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b2_2026-08-17.md). Two samples that showed the same thing over one stretch of genome now come out as one allele, and the reference is among them whether or not any sample's reads showed it. **What a sample showed is derived per read, not per record** — the owner's ruling, and what B0's ids upstream made decidable: a read named at every one of that sample's records inside the locus has its allele composed across them, and a read missing from any one is removed as evidence, whether it stopped short, was capped there, or saw only part of that record. **The plan's B2 test needed its explanation corrected rather than its fixture**: projection already normalises placement, so one deletion written at three anchors inside a locus unifies by construction; what left-alignment upstream really buys is that the records **overlap and so chain into one locus at all**, and a second test shows two placements too far apart closing as two loci with half the cohort's evidence each. **⛦ The mutation pass found two blind spots that 80 green tests could not see:** no cross-record fixture contained an indel, so closing a composed allele on its own length instead of on the reference it consumed passed everything — a six-base allele over a five-base locus came back five; and no locus had two samples each holding several records, so dropping the working buffer's per-sample reset was invisible. **⛦ My first fix for the second one did not kill its own mutant**, because its two samples used different read ids — the easy case; chain ids are a per-file space, so two samples sharing id 7 is the ordinary one, and only then does the stale buffer make a read look present at four records out of two. **⛦ And the review's best catch is the same shape as B1's**: two overlapping records of one sample were refused only when one read happened to be named at both, so with different reads the sample's whole evidence vanished with no panic — now a structural check, disjoint and ascending, before any read is consulted. **Two claims of mine were wrong and are corrected**: the single-record fast path is *not* "the same answer the rule gives whenever ids are present" (a fragment whose mates overlap and disagree keeps both sequences there and is removed everywhere else — measured through both branches), and a qualifying read is not "known to have covered the whole locus" but known to be present at every record *that sample* minted. Library tests 3,693 → 3,720 over B2, → 3,731 with B3, and → **3,749** with milestone C (3,738 passing, 11 ignored). Earlier the same day, **B1** landed the projection onto the locus span; [impl](doc/devel/reports/implementations/ng_cohort_merge_b1_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_b1_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_b1_2026-08-17.md). One sample recorded a five-base deletion where another recorded a one-base SNP; before the two can be compared they are widened to the same ground, each padded with the reference bases either side. **The spec said those bases "travel on the observation already", and they do — but only over that observation's own region**, so the locus's reference is gathered across its members first and each member padded from that. Nothing is fetched. **⛦ Three review categories converged on one defect the tests could not see:** the projection took the member and the sequence as two loose arguments, so any member of a locus could be paired with another member's sequence — padded at the wrong offset, a well-formed allele, no panic. It is now one handle, obtained from the member, which also owns the iterator of that member's projectable sequences and so keeps a partial read out by construction. **⛦ Five mutations survived the first twelve tests, one of them silently:** deleting the projection's contig check let a member from another contig come back padded from this locus's reference, with no panic at all; and the coordinate-ceiling test pinned the gather while its own comment claimed it pinned the projection too — the member it projected was one base short of the ceiling, where the two ways of measuring a span agree. Nine tests added; every surviving mutant re-run and killed. **⛦ Two claims of mine were wrong and are corrected**: a doc comment cited spec §3.3's rejection of *clamping* for a reason that belongs to its next bullet, and the report said "four release-level assertions" where there are eight sites of two different kinds. Library tests 3,659 → **3,680**. **B2 is blocked on the owner's ruling** (spec §14 Q2 — whether a sample's two observations inside one locus combine into one compound allele, and on what evidence). Earlier the same day, **milestone A completed at Checkpoint A** (A1–A4). **A4** added the two per-locus verdicts, decided **width first**; [impl](doc/devel/reports/implementations/ng_cohort_merge_a4_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_a4_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a4_2026-08-17.md). **Both orders drop the locus, so nothing downstream can tell them apart — what changes is the failed count**, which §3.3 makes the only signal that the bound is charging more than expected. Swapping the two branches fails exactly the two tests that exist to pin the order, which is why the plan gives this step its own commit. **⛦ The review's Blocker was in a test's own claim about itself**, which is the failure mode this loop produces most reliably: `a_chain_of_narrow_observations_fails_on_its_closed_width` said a member-wise rule would build the locus, and its widest member was 11 bases against a bound of 10 — so a member-wise rule failed it too, and that mutant passed all 31 tests. Spec §3.2's central claim was unpinned in the test named for it. Fixture repaired to spans 10/10/7, member widths now **asserted** rather than described, mutant killed. **⛦ And a real spec contradiction, raised rather than guessed — then ruled on and applied.** §3.1 says the bound governs *generic* loci only, and `judge` applied it to every locus; gating on kind needed a rule the design did not have. **The owner ruled at Checkpoint A**: the two paths are different in kind — a generic locus's width is the mapper's CIGAR taken on trust, an STR locus's is a catalog-defined tract whose reads are re-aligned and which needs no bound, since a tract too long to span has no reads covering it — and *"a generic and a str locus shall never be mixed, never ever"*. That second half closed the question, because it is also structurally true: segments are the reference's own partition and no observation crosses a segment boundary, so no chain of overlapping observations can either, and every member of a locus comes from one segment. `judge` now matches `LocusKind` exhaustively and gates only the width test; the never-mixed rule is a **release-level** assertion on `std::mem::discriminant`. Library tests 3,646 → **3,659**. Earlier the same day, **A1** landed the module home and the three parameters, **A2** the two derivations on the observation types, **A3** the reach walk — checked against production's `derive_is_kept` over 5,000 random cohorts, identical in all of them. **A3** is the algorithmic heart: `LocusCloser`, the walk that groups the samples' observations into cohort loci by shared reference bases, closing each as its reach stops growing; [impl](doc/devel/reports/implementations/ng_cohort_merge_a3_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_a3_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a3_2026-08-17.md). **⛦ The walk is production's, and that is measured rather than asserted:** a review agent ported production's `CohortSpanFold` + `derive_is_kept` grouping into a test and ran it against `LocusCloser` over **5,000 random cohorts** — loci and membership identical in all 5,000, with **5,025 members joining at exactly the running reach**, so the `<=` boundary the two rules share is exercised rather than dodged. The one divergence is the deliberate one: ng sums every sample's non-reference reads where production sums the per-position maximum, and ng's total is strictly larger in **1,824 of the 5,000**. **⛦ The review's two best catches were both silent-wrong-answer shapes.** `ClosedLocus::span()` called `GenomeRegion::len()`, which A2 had documented one step earlier as answering **0** at the coordinate ceiling in the release profile — and `span()` is what A4's width verdict reads, so the widest locus expressible would have been judged narrow enough to build. And a sample whose observations arrive out of order closed a locus over ground it does not cover: `[50–50, 10–10]` came back as one locus spanning 50–50 holding an observation forty bases outside it, with the precondition documented three times and checked nowhere. Both fixed and pinned; the second by a release-level check, one comparison against work that already does a per-observation sequence compare. **Two mutants had survived the first suite** — members emitted in consumption order, and `saturating_add` replaced by `+` — and both now have tests that kill them. Library tests 3,623 → **3,646**. Earlier the same day, **A1** landed the module home and the three run parameters, and **A2** the two derivations on the observation types. **A2** put the merge's two derivations on the observation types — `SequenceObservation::matches_reference`, `SampleLocusObservations::reach` and `::non_reference_reads` — and moved four open-coded copies of the same byte comparison onto the shared predicate, the census's among them; [impl](doc/devel/reports/implementations/ng_cohort_merge_a2_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_a2_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a2_2026-08-17.md). **⛦ The review's best finding is what no fixture in the crate did:** nothing anywhere compared observation bases of a *different length* from the reference, so replacing the `==` with a `starts_with` — either direction — passed 58 census tests and 360 `locus_generation` tests while calling every indel a reference match, and `non_reference_reads` is exactly what the cohort keep rule sums. A deletion's bases are shorter than the reference and an insertion's are longer; three assertions now cover both, and each mutant fails them. **⛦ `reach` does not use `GenomeRegion::len`, and the reason was found by writing the test rather than predicted:** `len()` computes `end + 1` before subtracting, so a region at `u64::MAX` panics in debug and reports length 0 in release. Production's own expression also lands one short there (`u64::MAX − 1` for a base at `u64::MAX`), so the doc's first claim of agreement "everywhere" was false and is now bounded. **⛦ Two architecture documents claim the same exclusivity in opposite directions** — one says the definition must not live on the locus type, the other says it must — and the code now makes both true rather than picking a side. Library tests 3,613 → **3,623**. Earlier the same day, **A1** landed the module home and the three run parameters; its two Majors were an accessor no test exercised at a non-default value and a doc that borrowed production's measured justification for a rule that is not production's.
 > - **Previously (2026-08-17):** **A1–A3 of the ng cohort merge** on branch `ng-cohort-merge`. [Impl report](doc/devel/reports/implementations/ng_cohort_merge_a1_2026-08-17.md), [review](doc/devel/reports/reviews/ng_cohort_merge_a1_2026-08-17.md), [fixes](doc/devel/reports/reviews/fixes_applied_ng_cohort_merge_a1_2026-08-17.md), running [the plan](doc/devel/ng/impl_plan/cohort_merge.md) step by step. What landed is the module home `src/ng/run/cohort_merge/` and the three parameters a calling run sets — `MaxCohortLocusSpan` (50), `MinAltObs` (2), `CohortLocusBuilderRegionsLen` (20) — and nothing that reads them yet. **The review's two Majors were both about what the code failed to say or check, not about what it computes.** Every `get()` call in the crate went through `Default`, so an accessor that ignored its argument passed all 3,613 tests while silently running every cohort at 50/2/20 whatever the operator set — the untested class being the operator-set one, which is the only reason these types exist. And the `DEFAULT_MIN_ALT_OBS` doc borrowed production's measured justification for a rule that is **not** production's: production sums the per-position *maximum over samples*, ng sums *every* sample's non-reference reads (spec §4.3's deliberate choice), and since a maximum never exceeds a sum, ng at 2 keeps everything production at 2 keeps and more — identically at one sample, by a widening margin as the cohort grows. **⛦ The "a zeroed default is a build error" claim is measured, not asserted:** setting `DEFAULT_MIN_ALT_OBS` to 0 gives `error[E0080]: evaluation panicked: a cohort-merge default must be non-zero`, because each default is now a `pub const DEFAULT: Self` rather than three hand-paired `const _` assertions a fourth parameter could forget. **⛦ Six design-document defects are recorded under the block's `Open:`, two of which reach step A4.** Library tests 3,613, unchanged: the review deleted a test that could not fail and added one that can.
 > - **Previously (2026-08-15):** **the first performance measurement the joint fit and the census have ever had** — [perf review](doc/devel/reports/reviews/perf_ng-census-joint-fit_2026-08-15.md), a `sample(1)` profile plus six timed runs, six category agents. Headline: the repeat-tract fit is 70% of a small run, its cost is linear in **tracts fitted** rather than tracts kept, and the 63-accession cohort lands in days rather than the minutes anyone assumed. Two owner calls and three measurement gaps are recorded under the census block's `Open:`.
@@ -1646,6 +2003,41 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Open:**
   - **Resolved (Checkpoint C→D):** the 1b complex-D/I-trim question — left as-is; 1b is not the default, and complex D/I never survives the filters on real reads (0 in GIAB). Recorded, not a defect.
   - **Follow-up (other plans):** adoption of 1a on the generic read-preparation path (read-preparation's plan; D1's result is its input); a stronger real-reads screen run on a non-left-aligning aligner's output (tomato bwa CRAMs) once their reference is reachable, to move `moved_by_normalization` above 6 and re-confirm 0 disagreement with the normalizers genuinely exercised.
+
+#### Calling foundations — the `types.rs` scalars, the `calling/` vocabulary, the genotype table
+- **Status:** fixes-applied — **Milestones A and B complete, at Checkpoint B.** Branch `ng-calling-foundations`, worktree `../pop_var_caller-calling-foundations`, running in parallel with `ng-calling-prerequisites` on disjoint regions of `src/ng/types.rs`.
+- **Plan:** [calling_foundations.md](doc/devel/ng/impl_plan/calling_foundations.md); **Specs:** [calling_em_loop.md](doc/devel/ng/spec/calling_em_loop.md), [calling_priors.md](doc/devel/ng/spec/calling_priors.md), [read_likelihoods.md](doc/devel/ng/spec/read_likelihoods.md); **Arch:** [calling_em_loop.md](doc/devel/ng/arch/calling_em_loop.md) (§Module home, §2 — owns every type this plan builds), [module_layout.md](doc/devel/ng/arch/module_layout.md), [ng_step_interfaces.md](doc/devel/ng/arch/ng_step_interfaces.md) (§1).
+- **Code:** [src/ng/types.rs](src/ng/types.rs) — `AlleleId` (+ `REFERENCE`, `is_reference`), `Phred` (+ `try_new`, `from_log_prob`), `PHRED_PER_NAT`, `DomainError::Phred` and `DomainError::PhredInfinite`, `Genotype` (+ `new`, `alleles`). Reuse target and parity oracle for Milestone C: production's `GenotypeShape` ([shape.rs](src/var_calling/posterior_engine/shape.rs)).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_foundations_a1_2026-08-21.md), [A1 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_a1_fixes_2026-08-21.md), [A2](doc/devel/reports/implementations/ng_calling_foundations_a2_2026-08-21.md), [A2 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_a2_fixes_2026-08-21.md), [B1+B2](doc/devel/reports/implementations/ng_calling_foundations_b12_2026-08-21.md), [B1+B2 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_b12_fixes_2026-08-21.md), [B3](doc/devel/reports/implementations/ng_calling_foundations_b3_2026-08-21.md), [B3 fixes applied](doc/devel/reports/implementations/ng_calling_foundations_b3_fixes_2026-08-21.md).
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 8 Minors, five category agents in isolated worktrees; [A2](doc/devel/reports/reviews/ng_calling_a2_2026-08-21.md) — 0 Blockers / 2 Majors / 3 Minors, three agents; [B1+B2](doc/devel/reports/reviews/ng_calling_b12_2026-08-21.md) — 0 Blockers / 4 Majors / 11 Minors, three agents; [B3](doc/devel/reports/reviews/ng_calling_b3_2026-08-21.md) — 0 Blockers / 5 Majors / 6 Minors, two agents, one recommendation disputed on the spec. Audit trails in the gitignored `tmp/review_2026-08-21_ng-calling-*/`.
+- **B3 done (`LocusInference` + `SampleGenotypeCall`):** what calling produces at one locus — the alleles it settled on, one call per sample in run order, and four things a consumer cannot reconstruct: whether the loop settled or ran out of passes, how many passes it took, the weakest warrant among the parameters that fed it, and whether the repeat prior's seed had to be bent. **The allele table and the copy counts are private with read-only accessors**, because a public allele table let `admit()` widen it against unchanged copies *after* construction — the invariant held only at the instant the constructor returned. Five checks where there were two; **15 mutations, 2 survived, both now killed**. The review also recommended asserting that a converged locus took at least two passes, which this branch **disputes on the spec**: §2's loop runs a reads-only E-step before iterating, so the first pass has a freshly computed estimate to settle against, and a first-pass convergence is a real outcome — expected exactly where the caller is weakest, at one sample with three reads a position.
+- **B1+B2 done (`src/ng/calling/` and its first two shared types), one loop iteration for two plan steps** because B1 alone is a module file with no test to carry. `CandidateAlleles` is the allele table a locus is called over — **private field where the arch sketched a public `Vec`**, because "the reference is allele 0 and is always present" is what every REF/ALT branch rests on and a public `Vec` admits `clear()`, `insert(0, …)` and `swap_remove(0)`. `ExpectedAlleleCopies` is the cohort's fractional copy counts, **built against the allele table** so a length mismatch is unrepresentable rather than detected — the two reviewers disagreed on where that check belonged and the constructor won, because the pairing is the type's definition rather than an addition to it. **20 mutations, 5 survived, all now killed**, one of which — a wrapping id cast at a full table — would have made a discovered allele *be* the reference with nothing panicking. The review also caught a wrong claim in the module doc: sideways imports between four sibling folders are not forbidden by the tree, which is exactly why three arch docs each had to write a no-import rule by hand.
+- **A2 done (`Genotype`):** the opaque output multiset the loop mints at its last pass, `Box<[AlleleId]>` held sorted so two spellings of one genotype are one value. **The review's mutation pass found two survivors, both now killed:** an "is it already sorted?" fast path guarded on `first() > last()` leaves interior disorder in place from **three** copies up — a triploid or tetraploid heterozygote counted twice in a cohort — and a sort key narrowed to `u8` misorders any id from 256. A property test over the whole `u16` range and up to eight copies kills both; one two-entry swap in the tetraploid fixture kills the first on its own. Also: `new` now **refuses an empty multiset** — `Ploidy` refuses zero copies and the genotype's length *is* that ploidy, so the file no longer rules the same quantity legal in one type and illegal in another. Two reviewers disagreed on the remedy (`try_new` against `assert!`); the `assert!` won on this file's own convention that unconstrained newtypes over internal indices carry no checked constructor.
+- **A1 done (`AlleleId` + `Phred`):** the first two calling scalars, appended at the end of the sections they belong to so the parallel prerequisites branch cannot conflict. `Phred::from_log_prob` **rejects rather than clamps** the two values the scale cannot hold, because where to cap a `GQ` is the consumer's decision — and the two are separated by *variant*, not by the caller inspecting a float: `ln p > 0` is broken arithmetic (`DomainError::Phred`), `ln p = -∞` is a probability of exactly zero the consumer caps (`DomainError::PhredInfinite`). **The review's mutation pass found two survivors, both now killed:** `from_log_prob` stored **negative zero** for a certain call (which would print `-0` in a `QUAL` column) and the `f64`-width invariant had no test. `Phred` was also the only constrained newtype in the file without a property test; it has one now.
+- **Open:**
+  - **⚠ Two aggregate gates are red on `main`, in files this branch does not touch.** `cargo clippy --all-targets --all-features -- -D warnings` → 18 errors in `benches/cohort_var_calling_perf.rs`, `benches/ng_joint_fit_perf.rs`, `examples/ng_joint_contamination_harness.rs`. `cargo test --all-targets` → `benches/psp_writer_perf.rs:386` panics (`index out of bounds: the len is 3300000 but the index is 3300000`), verified pre-existing by stashing this branch's diff out. `cargo doc --no-deps --lib` is red for 17 pre-existing unresolved links. The library alone is clean on all three.
+  - **Follow-up (later plans):** a named quality ceiling and a capping constructor for the step that first fills a `GQ` column ([calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md)); `CandidateAlleles`' accessor must return an `Option`/`Result` rather than indexing, since `AlleleId`'s doc promises an out-of-range id is caught when the table is read (step B2); a reverse `Phred` → `LogProb` conversion when a consumer needs one.
+
+#### Genotype prior (step 8) — the `genotype_prior/` folder, the seam, the row
+- **Status:** Milestone A complete and reviewed; B1 complete and reviewed; **B2 implemented but NOT reviewed — that review is the next session's first task.** Branch `ng-calling-prior`, worktree `../pop_var_caller-calling-prior`, branched from `main` with `ng-calling-foundations` merged in (fast-forward to `1742e3d6`). Runs in parallel with `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in `src/ng/calling/mod.rs`.
+- **Plan:** [calling_prior.md](doc/devel/ng/impl_plan/calling_prior.md); **Spec:** [calling_priors.md](doc/devel/ng/spec/calling_priors.md); **Arch:** [calling_priors.md](doc/devel/ng/arch/calling_priors.md) (§2–§5 — owns every type this plan builds), [module_layout.md](doc/devel/ng/arch/module_layout.md), [ng_step_interfaces.md](doc/devel/ng/arch/ng_step_interfaces.md) (§1).
+- **Code:** [src/ng/calling/genotype_prior/](src/ng/calling/genotype_prior/) — `mod.rs` plus the four files later milestones fill (`dirichlet_multinomial.rs`, `seed_spectrum.rs`, `seed_ssr.rs`, `plug_in.rs`); [src/ng/types.rs](src/ng/types.rs) — `ExpectedHeterozygosity` (+ `SPECIES_FALLBACK`, `try_new`, `get`) and `DomainError::ExpectedHeterozygosity`. Port targets: `dirichlet_multinomial_log_priors` and `MIN_ALT_CONCENTRATION` ([genetics.rs](src/genetics.rs)), the inbreeding mixture ([posterior_engine.rs](src/var_calling/posterior_engine.rs)).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_prior_a1_2026-08-21.md), [A1 fixes applied](doc/devel/reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md), [A2](doc/devel/reports/implementations/ng_calling_prior_a2_2026-08-21.md), [A2 fixes applied](doc/devel/reports/implementations/ng_calling_prior_a2_fixes_2026-08-21.md), [B1](doc/devel/reports/implementations/ng_calling_prior_b1_2026-08-22.md), [B1 fixes applied](doc/devel/reports/implementations/ng_calling_prior_b1_fixes_2026-08-22.md), [B2](doc/devel/reports/implementations/ng_calling_prior_b2_2026-08-22.md) — **no review yet**.
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_prior_a1_2026-08-21.md) — Approve-with-changes, 0 Blockers / 4 Majors / 14 Minors, 27 mutations run and 14 survivors; [A2](doc/devel/reports/reviews/ng_calling_prior_a2_2026-08-21.md) — **Request-changes**, 0 Blockers / 8 Majors / 13 Minors, 25 mutations and 12 survivors. Five category agents in isolated worktrees each time. ; [B1](doc/devel/reports/reviews/ng_calling_prior_b1_2026-08-22.md) — **Request-changes**, 1 Blocker / 4 Majors / 16 Minors, 28 mutations and 3 genuine survivors, four agents including one written for this step: port fidelity and numerics. Audit trails in the gitignored `tmp/review_2026-08-2*_ng-calling-prior-*/`.
+- **B2 done, review owed (the two-branch inbreeding mixture) — and it found that the inbreeding coefficient was doing about half the work it should, in production as well as in the port.** The mixture adds two branches — with probability `F` the sample's two copies are one ancestral copy counted twice, otherwise they are independent draws — and the two have to be on the same scale. They were not. Spec §3.1 drops a genotype-independent term from the Dirichlet-multinomial row because it cancels when the row is rescaled; that is true of a row alone and **false once a second branch is mixed in**, since the identical-by-descent term `α_a / Σα` is a true probability. Measured: subtracting that term makes the row sum to exactly 1, so it is exactly what separates the two scales; the uncorrected mixture is 0.29 to 2.20 nats from the Wright formulas with the error **growing in `F`**; and at the shipping concentration — one sample at tomato1's fitted 6 in 10,000 — the het:hom-alt ratio is 0.400 where the model says 0.222 at `F = 0.8`, a heterozygote made **1.8×** too likely, about 2.6 Phred, in the direction the caller is weakest. **Production has the same defect and it is live**: its engine mixes the same two scales, its default coefficient is 0 where the branch short-circuits away, but `pipeline.rs:343` passes the cohort's fitted coefficient. Corrected in ng (owner, 2026-08-22) by adding the offset to the identical-by-descent branch, which leaves an outbred sample's row bit-identical to the primitive's and leaves B1's parity untouched. **What found it was the Wright oracle the plan asked for** — the only check that exercises both branches at once; at `F = 0` the two spellings agree exactly, so everything else passes either way. **The spec owes two sentences.**
+- **B1 done (the ported Dirichlet-multinomial primitive):** the random-mating half of the row — what a genotype would be worth if the sample's copies were independent draws from the population. **A port needs two oracles, and the plan asked for one.** The rising-factorial computation it names checks the mathematics; bit-for-bit equality against production checks that the arithmetic is performed the same way, and two mutations — removing the zero-count skip, and re-associating the fold — die only to the second, each moving a row by one unit in the last place. **Skipping a zero-count allele is not a saving but a requirement**: the fold associates as `(acc + lgamma(α + k)) − lgamma(α)`, so a skipped allele's two large logarithms would enter and leave the accumulator with a rounding in between. **The review's Blocker was that every fixture ran at a reference concentration of 1** — the leave-one-out concentration of one sample at a biallelic site, where what the caller is handed reaches 2,000 at a thousand diploid samples; three wrong implementations passed the whole module, moving a row by 9.9 nats and getting 57 of 78 genotypes wrong at twelve alleles. The parity grid now runs to 6,001 and twelve alleles. **And production turns out to have two spellings of this mathematics that disagree by an ulp**: the shared primitive has one shipping caller, the STR cohort's EM, while the SNP/indel engine runs its own copy that already fills caller buffers and associates differently — 112 of 492 genotype values differ. ng matches the shared one; the GIAB 83.6% → 94.6% measurement came from the other.
+- **A2 done (the local types and the step-8 seam):** the seam takes **one checked bundle**, not eight parameters. Three of the five review agents found the same defect independently and each compiled the same fix: the eight-argument row function and the shape checks that no implementation could be forced to call were one fact seen from two sides, so `PriorRow::new` runs the checks and is the only way to build the trait method's argument. **The reviewers' own version of that fix did not work, and re-running their claim is what showed it**: a private field is visible to a module's *descendants*, and the four files that will hold every implementation are descendants of `genotype_prior` — a probe in `dirichlet_multinomial.rs` built a `PriorRow` field by field and ran green. One level of nesting (`mod checked`) makes them siblings instead, and the same probe now fails with `error[E0451]`. Two more gates were added because the review showed the existing ones blind: `cargo clippy --lib` never type-checks the test module (five denied lints were sitting in it), and no run anyone does can fail on the module's "held in release" invariant — downgrading its assertions leaves the debug run at 20 passed and the release run at 6 failed. Also: the seam test moved to a **triallelic** table because the biallelic row is a palindrome and a reversed walk passed it; an empty row is refused as a wiring bug; every length message now names both buffers it compared, because `out` is the yardstick and a mis-sized `out` made every message blame a correct array.
+- **A1 done (the folder and the diversity scalar):** `ExpectedHeterozygosity` is the cohort's expected heterozygosity at ordinary sites — the prior's θ — and its doc has to keep it apart from two neighbours it is easy to confuse with: the **non-reference rate**, which books the reference accession's own quirks as cohort polymorphism, and the **STR path's repeat diversity**, which is measured separately. **The species-range fallback became a value of the type rather than a bare `f64`** (`ExpectedHeterozygosity::SPECIES_FALLBACK`, following `AlleleId::REFERENCE`), because the review compiled the alternative: as a loose float it seeded `InbreedingF`, `ErrorRate` and `GenotypeFrequency` alike, in the one module the STR path imports from. **Three of the four Majors were tests that could not fail** — the new scalar was left out of the property sweep that pins the accept/reject boundary, so a constructor widened to `(-0.25..=1.25)` and one rounding to six decimals both passed; and the fallback's own test compared the constant with itself, so reading `1e-3` as a percentage (`0.1`) or per kilobase (`1.0`) passed too. **Two prose defects the review caught were mechanism errors, not wording:** the doc claimed production's STR path *substituted* a SNP diversity, where it hardcodes freebayes' population-scaled `SFS_THETA = 0.01` — a different quantity in different units; and it asserted flat that a tomato panel is more diverse than a human one, where this project's own tomato1 fit is 6 in 10,000, **below** the 1e-3 fallback.
+- **Open:**
+  - **Settled by the owner, 2026-08-22, and the design documents now match the code.** The two filenames are renamed — `seed_generic.rs` (pairing with `seed_ssr.rs` on the locus class it serves, and using the crate's own word for the non-STR path) and `hardy_weinberg.rs` (named for its distribution, like its sibling `dirichlet_multinomial.rs`; the plug-in character stays in the type it holds). The seam keeps the checked bundle. `arch/calling_priors.md` §2.1, §2.2, §3.2 and §8 were updated to match, each carrying the reason and the measurement rather than only the new spelling.
+  - **The fallback has no carrier and no door.** Spec §4 requires a run that lands on the species-range guess to say so in its output; the thing that will carry it, `SeedRegime::FallbackDiversity`, arrives at A2 one module down, while the constant is `pub` from `ng::types`. Nothing overrides it either. Against production ng is currently weaker on both halves — though production's own `cli_override` has no flag behind it and its `DiversitySource` has no consumer outside its tests.
+  - **Nothing converts the pre-pass's `JointFit::expected_heterozygosity` (a bare `f64`) into the newtype yet** — that crossing lands at D2 and is where the range check first meets real data. The histogram route supplies only the ingredient (each sample's observed heterozygosity); nothing computes θ's mean of `Hobs / (1 − F)` across samples.
+  - **⚑ B2 has no review.** Every other step went through the fan-out before its commit; this one did not, at the owner's direction to close the session after the fix. It is the next session's first task, and the reviewers should be given the scale correction to attack rather than to confirm.
+  - **⚑ `spec/calling_priors.md` owes two sentences** after B2: §3.1's "the constant cancels" holds in a row and not in a mixture, and §3.2 should say the random-mating branch enters on the probability scale. A spec edit is the owner's.
+  - **⚑ Which of production's two spellings should ng be bit-identical to?** They disagree by one unit in the last place on about one row in four. The recommendation is to stay with the shared primitive the plan names and keep the difference recorded, because the alternative is a parity test against a private function inside a frozen file — but it is worth a ruling before anyone builds the production differential, since the design's headline GIAB measurement was taken on the other path. **`spec/calling_priors.md` §9's reuse map carries the same "two callers" error the review found in the code's prose**; a spec edit is the owner's.
+  - **No criterion bench covers `ng::calling::genotype_prior`**, so the one hot-path question the review raised — `lgamma(α_a + k_a)` recomputed per genotype where only `alleles × ploidy` distinct values exist — has no evidence either way. It saves nothing at diploid biallelic and reaches about 5× at tetraploid with four alleles.
+  - **Two gates this plan added to its own step list, because the review showed the standard ones blind here.** `cargo clippy --lib --tests --all-features -- -D warnings` (plain `--lib` never type-checks a test module) and `cargo test --release --lib ng::calling::genotype_prior` (the only command that can fail on an assertion demoted from release to debug). The second is worth a CI step; CI runs one test command, in debug.
+  - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
 
 ---
 
