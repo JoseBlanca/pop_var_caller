@@ -169,10 +169,17 @@ Nineteen, up from thirteen before the review.
   is now closed for this citation; the other four `§8` references in that file point at the **spec**
   sibling, whose §8 does exist.
 - **Doc links to `#[cfg(test)]` test functions do not resolve**, which a reviewer found on the
-  first draft of this step. They are written here as plain code spans instead, so this step adds
-  none. `cargo doc --no-deps` on the branch now reports **12 warnings, all "redundant explicit link
-  target", and no unresolved links at all** — so the handoff's note of "17 pre-existing unresolved
-  intra-doc links" is stale and there is nothing outstanding to inherit.
+  first draft of this step. They are written here as plain code spans instead.
+
+  **Correction, 2026-08-23:** this report first claimed `cargo doc --no-deps` showed "no unresolved
+  links at all" and that the handoff's note of pre-existing ones was stale. **Both halves were
+  wrong, and the cause was the grep rather than the tree**: rustdoc reports an unresolved link as
+  `error:`, not `warning:`, and the check counted only warnings. Measured properly on the merged
+  `main`: **24 unresolved links**, of which 12 are the separate "redundant explicit link target"
+  class. So the handoff's figure was live, not stale. One of the 24 was this branch's own — a
+  `tests::` link left bracketed in `hardy_weinberg.rs`'s module doc, missed because the same pass
+  caught its siblings — and it is now a plain code span, leaving 23 that predate this work. `cargo
+  doc` is not one of this project's gates, so none of them blocked anything.
 - **Spec §5.1 says production "carries the question as a deferred re-tune"** with a quoted label
   that appears nowhere in production. Flagged for whoever owns the spec; the code quotes the spec
   faithfully.

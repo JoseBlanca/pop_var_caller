@@ -226,13 +226,27 @@ impl GenotypePriorModel for MarginalizedDirichletPrior {
 
 /// The mixture on a bare coefficient rather than on the newtype.
 ///
-/// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model and not a
-/// case the caller is meant to meet: production's estimator clamps at 0.99, and ng's newtype is to
-/// be tightened to `[0, 1)` by the prerequisites plan. **That tightening has not happened** —
+/// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model rather than
+/// a case ng is meant to meet. **What keeps it away is the type, and nothing weaker** — once
+/// [`InbreedingF`](crate::ng::types::InbreedingF) is constrained to `[0, 1)` by the prerequisites
+/// plan, a coefficient of exactly 1 cannot be represented, so no path reaches the mixture carrying
+/// one. **That tightening has not happened** —
 /// [`InbreedingF::try_new(1.0)`](crate::ng::types::InbreedingF::try_new) returns `Ok` today — so
-/// `F = 1` is reachable through the trait as well, and both spellings are pinned by tests. The
-/// limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the two
-/// homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
+/// `F = 1` is reachable through the trait as well, and both spellings are pinned by tests.
+///
+/// **An earlier version of this comment credited production's estimator clamp of 0.99 with that
+/// guarantee, and the clamp does not provide it** (corrected 2026-08-23, alongside spec §7). The
+/// clamp is a line inside one estimator; production's own command line takes the closed `[0, 1]`
+/// and a test pins that it accepts exactly 1
+/// (`parse_inbreeding_coefficient`, `src/pop_var_caller/cli/parsers.rs`), so in production a
+/// coefficient of 1 reaches the engine whenever someone passes one. **ng has no such door today**
+/// — every construction from a raw `f64` outside test code is the fitted path the prerequisites
+/// plan is clamping, and `InbreedingMode::Supplied` carries an already-built value — and whoever
+/// eventually gives ng a command line owes it not to open one, because a validated type is a
+/// guarantee and a clamp beside a flag is not.
+///
+/// The limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the
+/// two homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
 ///
 /// **This is not a test-only path**, whatever its reason for existing: the trait implementation
 /// above routes every caller through it, which is why the coefficient is checked here rather than
