@@ -432,13 +432,48 @@ weight — production's behaviour — because the division needs the interrupted
 how to weight it. `OPEN:` spec Q3; the builder takes the counts, not the sequences, precisely so
 the change lands in one function.
 
-**One export the likelihood composes** (its §4.5.1 contamination stand-in): the seed shape
-normalised to a distribution over tract lengths —
-`pub fn seed_length_distribution(candidate_repeat_counts, modal, decay, out: &mut [f64])` —
-shipped at E2 as `fill_seed_shape`'s public spelling, matching this module's `fill_*` naming.
+**One export the likelihood composes** (its §4.5.1 contamination stand-in): the seed's shape
+before it is scaled, normalised to sum to one —
+
+```rust
+pub fn fill_seed_share_per_candidate(
+    candidate_repeat_counts: &[u32], modal_repeat_count: u32,
+    decay: SeedDecayPerRepeat, out: &mut [f64],
+);
+```
+
 Computed once per locus by the loop and handed into the STR scoring context
-([`read_likelihoods.md`](read_likelihoods.md) §4); defined here so the prior's shape has one
-spelling.
+([`read_likelihoods.md`](read_likelihoods.md) §4.1); defined here so the prior's shape has one
+implementation behind both consumers.
+
+**`OPEN:` it is per candidate, and the term it feeds is per observed length.** This sketch called
+it `seed_length_distribution`, and E2 shipped it under a name that says what the buffer actually
+holds, because the two are not the same thing wherever a locus has more candidates than lengths.
+The mixture's third term is `c · seed(o)` with `o` an observation, and three cases separate the
+two supports:
+
+- **two candidates of one length each take the rung's full share** — deliberate as a
+  concentration and open as spec Q3, but read as a claim about lengths it double-counts:
+  measured at `0.8` for the modal length against the geometry's own `0.667`, on a tract with the
+  mode spelled twice and one length above it, at the fallback decay;
+- **the candidate set is post-prune**, while the mixture's sibling uniform term is spread over
+  every length the stutter model can reach from a candidate — a strictly larger support;
+- **a censored read carries no length at all**, only a lower bound.
+
+None of the three is the prior's to settle, and the likelihood step should meet them as a
+decision rather than at the point of use. `SsrContamination::length_distribution`
+([`read_likelihoods.md`](read_likelihoods.md) §4.1) is the field that has to say which support it
+means.
+
+**A caller that has just built the seed already holds this shape** and should not rebuild it: on
+a seed it is the concentration divided by its own total, and on a refusal it is exactly the
+buffer `SsrSeedOutcome::DiversityUnreachable` hands back. The export is for a caller that wants
+the shape without the seed.
+
+**It does not survive a candidate being added.** A discovery round appends candidates mid-locus
+([`calling_em_loop.md`](calling_em_loop.md) §5), and a frozen candidate-parallel buffer is then
+one entry short with nothing to raise, because by construction it is not refilled. Discovery is
+off by default; a loop that turns it on has to rebuild this.
 
 ## 6. Reconciliation with existing code
 

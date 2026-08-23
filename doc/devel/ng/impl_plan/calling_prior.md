@@ -29,7 +29,7 @@ plans start on different days and still run in parallel.**
 **In:** `src/ng/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
 `Concentration`, `sample_concentration`), `dirichlet_multinomial.rs` (the ported primitive +
 `MarginalizedDirichletPrior`), `seed_generic.rs` (`project_spectrum_seed`, `seed_for_locus`),
-`seed_ssr.rs` (`fill_ssr_seed`, `fill_seed_shape`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
+`seed_ssr.rs` (`fill_ssr_seed`, `fill_seed_share_per_candidate`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
 `types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK` — and, at E1,
 `RepeatGeneDiversity` and `SeedDecayPerRepeat`, the two repeat-tract scalars arch §5 sketched as
 bare `f64`.
@@ -240,7 +240,10 @@ refusal fires exactly at the bound (test 11). **Own commit, do not bundle** — 
 defect here was a prior asserting two-fifths of the measurement, silently; test 10 is the oracle.
 *Depends:* A2. *Source:* spec §5.1; arch §5.
 
-**E2. `seed_length_distribution`.**  ☐
+**E2. `seed_length_distribution`.**  ✅ *(shipped as `fill_seed_share_per_candidate` — the buffer
+holds one entry per candidate, which is not a distribution over lengths wherever a locus has more
+candidates than lengths; the gap and its size are recorded as `OPEN:` in arch §5 and on
+`SsrContamination` in `../arch/read_likelihoods.md` §4.1)*
 The seed shape normalised to a distribution over tract lengths — the one export the likelihood's
 STR contamination stand-in composes, defined here so the prior's shape has one spelling. Test:
 sums to 1; proportional to E1's weights. *Depends:* E1. *Source:* arch §5;

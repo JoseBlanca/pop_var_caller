@@ -268,8 +268,16 @@ per locus with no cohort in it** (spec §4.5's decided repair of production's co
 
 ```rust
 /// §4.5.1's second half: the fraction (frozen, per read group) and the prior's seed
-/// shape normalised over lengths — built once per locus by the loop from
-/// genotype_prior::seed_length_distribution (calling_priors.md §5), frozen thereafter.
+/// shape normalised to sum to one — built once per locus by the loop from
+/// genotype_prior::fill_seed_share_per_candidate (calling_priors.md §5), frozen
+/// thereafter.
+///
+/// OPEN: that builder fills one entry per CANDIDATE, and `c · seed(o)` asks for a
+/// probability per observed LENGTH. The two differ wherever a locus has more candidates
+/// than lengths (two spellings of one length each take the rung's full share), wherever a
+/// read lands at a length the prune dropped, and for a censored read, which has no length
+/// at all. This field has to say which support it means before the mixture is written;
+/// calling_priors.md §5 carries the sizes.
 pub struct SsrContamination<'a> { pub fraction: f64, pub length_distribution: &'a [f64] }
 ```
 

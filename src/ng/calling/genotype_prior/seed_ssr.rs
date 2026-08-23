@@ -238,6 +238,81 @@ pub fn fill_ssr_seed<'a>(
     SsrSeedOutcome::Seeded(Concentration::new(out))
 }
 
+/// Fill `out` with the share of the prior's starting mass each **candidate** at this locus
+/// carries — one entry per candidate, in the candidate set's own order, summing to 1.
+///
+/// This is the same shape [`fill_ssr_seed`] scales into a concentration, before it is scaled:
+/// where a length sits relative to the cohort's mode, with no claim yet about how much
+/// conviction there is. One implementation stands behind both, so the prior's belief about
+/// lengths cannot drift between its two consumers (`doc/devel/ng/arch/calling_priors.md` §5) —
+/// with one exception: a locus carrying a single candidate never reaches the shared code at all,
+/// because [`fill_ssr_seed`] short-circuits it, and the two agree there only because `ALPHA_REF`
+/// is 1.
+///
+/// **The consumer is the read likelihood's contamination term.** Scoring a read against a
+/// candidate allele mixes three sources: the sample's own copies, a uniform outlier share, and a
+/// share attributable to DNA from another sample — and that third term needs a distribution over
+/// the lengths contaminating DNA might carry (`doc/devel/ng/arch/read_likelihoods.md` §4.1,
+/// `SsrContamination::length_distribution`). Absent a measured one, the prior's own belief about
+/// which lengths are common at this tract is the stand-in, and it is a stand-in rather than a
+/// measurement: it assumes the contaminant was drawn from the same population as the cohort,
+/// which is what the sibling spec's §4.5.1 says it assumes.
+///
+/// ## `OPEN:` this is per **candidate**, and the term it feeds is per observed **length**
+///
+/// The mixture's third term is `c · seed(o)`, where `o` is an observation — a read. Candidates
+/// and observed lengths coincide only when every candidate is a distinct length and every read
+/// lands on one of them, and three cases break that. **None is this function's to settle**; they
+/// are recorded here so the likelihood step meets them as a decision rather than as a surprise:
+///
+/// - **Two candidates of one length each take the rung's full share.** That is deliberate as a
+///   concentration and open as spec Q3 (see [`fill_ssr_seed`]); read as a claim about *lengths*
+///   it double-counts. Measured on candidates at the mode, the mode again, and one repeat above,
+///   at the fallback decay: length-at-the-mode arrives with `0.8` of the mass against the
+///   geometry's own `0.667`
+///   (`tests::two_spellings_of_one_length_carry_that_lengths_share_twice`).
+/// - **A read at a length that is not a candidate has no entry.** The candidate set is
+///   post-prune, while the mixture's sibling uniform term is spread over every length the stutter
+///   model can reach from a candidate — a strictly larger support (sibling spec §4.5).
+/// - **A censored read carries no length at all**, only a lower bound.
+///
+/// ## Cost, and when a caller should not use this
+///
+/// Three passes over the candidate lengths — write the raw weights, sum them, normalise — built
+/// **once per locus** rather than once per scoring call. But a loop that has just called
+/// [`fill_ssr_seed`] at this locus already holds the shape and should not rebuild it: on a seed
+/// it is the concentration divided by its own total, and on a refusal it is exactly the buffer
+/// the refusal handed back. This export is for a caller that wants the shape and not the seed.
+///
+/// **It does not survive a candidate being added.** A discovery round appends candidates mid
+/// locus (`doc/devel/ng/arch/calling_em_loop.md` §5), and a frozen buffer is then one entry short
+/// with nothing to raise, because by construction it is not refilled. Discovery is off by
+/// default; a loop that turns it on has to rebuild this, and what that costs the sibling spec's
+/// freeze requirement is the loop's to record.
+///
+/// ## Two things a caller can get wrong that nothing here can catch
+///
+/// - **The reference allele's repeat count passed as the cohort's modal count.** The peak moves
+///   off the mode and onto the reference: measured on candidates three below, at, two above and
+///   five above the mode, the mode's share falls from `0.711` to `0.108` — a factor of 6.6 —
+///   while the reference's rises from `0.089` to `0.862`
+///   (`tests::the_mode_is_the_cohorts_and_nothing_here_can_check_it`).
+/// - **A buffer reused across loci with the call skipped.** The previous locus's shares.
+///
+/// **Shares, not chromosome counts.** The entries sum to 1 and carry no conviction; nothing here
+/// may be handed where a [`Concentration`] belongs, which is why this returns nothing rather than
+/// wrapping the buffer.
+pub fn fill_seed_share_per_candidate(
+    candidate_repeat_counts: &[u32],
+    modal_repeat_count: u32,
+    decay: SeedDecayPerRepeat,
+    out: &mut [f64],
+) {
+    // The Simpson index is the seed builder's business, not this consumer's: it is the ceiling
+    // on implied diversity, which a contamination term has no use for.
+    let _ = fill_seed_shape(candidate_repeat_counts, modal_repeat_count, decay, out);
+}
+
 /// Fill `out` with the seed's shape — the share of the prior's mass each candidate length
 /// carries, summing to 1 — and return its **Simpson index**, `Σ w²`: the chance that two copies
 /// drawn from the shape alone land on the same length.
@@ -833,6 +908,138 @@ mod tests {
         refused(&one_spelling, mode, 0.5, 0.5, &mut out);
         let mut out = vec![f64::NAN; two_spellings.len()];
         seeded(&two_spellings, mode, 0.5, 0.5, &mut out);
+    }
+
+    /// **The shared export sums to one**, which is what makes it a set of shares rather than a
+    /// set of weights — the read likelihood's contamination term divides nothing by anything and
+    /// would silently mis-weight every read if it did not.
+    ///
+    /// Swept over the same spreads and decays the seed itself is swept over, so a shape that
+    /// normalises correctly for the seed and not for this consumer cannot exist.
+    #[test]
+    fn the_shared_export_sums_to_one() {
+        let spreads: [&[i32]; 4] = [&[0], &[0, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5]];
+        let mut worst = 0.0_f64;
+        for spread_offsets in spreads {
+            let (counts, mode) = spread(spread_offsets);
+            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
+                let mut out = vec![f64::NAN; counts.len()];
+                fill_seed_share_per_candidate(
+                    &counts,
+                    mode,
+                    SeedDecayPerRepeat::try_new(decay).unwrap(),
+                    &mut out,
+                );
+                assert!(out.iter().all(|w| w.is_finite() && *w > 0.0), "{out:?}");
+                worst = worst.max((out.iter().sum::<f64>() - 1.0).abs());
+            }
+        }
+        assert!(worst < 1e-15, "worst departure from one: {worst:e}");
+    }
+
+    /// **The shares are the seed's own shape**, not a second one that happens to look like it —
+    /// the whole reason arch §5 puts one implementation behind both consumers.
+    ///
+    /// Checked as an equality against the seed divided by its total, over four spreads and five
+    /// decays. **The sweep is what makes it bite:** a divergence confined to candidates three or
+    /// more repeats from the mode survives a single fixture whose widest offset is two, and
+    /// survives the sums-to-one test above, which renormalises.
+    #[test]
+    fn the_shared_export_is_the_seed_divided_by_its_total() {
+        let spreads: [&[i32]; 4] = [&[0, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5], &[-5, 0, 3, 7]];
+        for spread_offsets in spreads {
+            let (counts, mode) = spread(spread_offsets);
+            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
+                // Half of whatever this spread and decay can hold, so every combination is
+                // seeded rather than refused — a steep decay over a wide spread has a ceiling
+                // of about 0.016, well under any fixed diversity worth writing.
+                let measured = 0.5 * ceiling_of(&counts, mode, decay);
+                let mut seed = vec![f64::NAN; counts.len()];
+                let alpha = seeded(&counts, mode, decay, measured, &mut seed);
+                assert!(
+                    alpha.iter().all(|&a| a > MIN_ALT_CONCENTRATION),
+                    "the fixture must stay off the concentration floor: {alpha:?}"
+                );
+                let total: f64 = alpha.iter().sum();
+
+                let mut shares = vec![f64::NAN; counts.len()];
+                fill_seed_share_per_candidate(
+                    &counts,
+                    mode,
+                    SeedDecayPerRepeat::try_new(decay).unwrap(),
+                    &mut shares,
+                );
+                for (share, concentration) in shares.iter().zip(&alpha) {
+                    assert!(
+                        (share - concentration / total).abs() < 1e-15,
+                        "{share} against {}",
+                        concentration / total
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Two spellings of one length carry that length's share twice**, which is deliberate as a
+    /// concentration (spec §5.2, open as Q3) and is the first of the three reasons this export
+    /// is per candidate rather than per length.
+    ///
+    /// Recorded with its size so the likelihood step meets it as a number: at the fallback decay
+    /// a tract with the mode spelled twice and one length above hands the modal *length* 0.8 of
+    /// the mass, where the geometry itself says 0.667.
+    #[test]
+    fn two_spellings_of_one_length_carry_that_lengths_share_twice() {
+        let (two_spellings, mode) = spread(&[0, 0, 1]);
+        let mut shares = vec![f64::NAN; two_spellings.len()];
+        fill_seed_share_per_candidate(
+            &two_spellings,
+            mode,
+            SeedDecayPerRepeat::FALLBACK,
+            &mut shares,
+        );
+        assert!((shares[0] - 0.4).abs() < 1e-15);
+        assert!((shares[1] - 0.4).abs() < 1e-15);
+        assert!((shares[2] - 0.2).abs() < 1e-15);
+        assert!((shares[0] + shares[1] - 0.8).abs() < 1e-15);
+
+        // What the geometry alone says about those two lengths, with one spelling each.
+        let (one_spelling, _) = spread(&[0, 1]);
+        let mut geometric = vec![f64::NAN; one_spelling.len()];
+        fill_seed_share_per_candidate(
+            &one_spelling,
+            mode,
+            SeedDecayPerRepeat::FALLBACK,
+            &mut geometric,
+        );
+        assert!((geometric[0] - 2.0 / 3.0).abs() < 1e-15);
+    }
+
+    /// The modal repeat count is the **cohort's**, and passing the reference allele's instead
+    /// moves the peak off the mode with nothing raised — the trap the seed builder carries, on
+    /// the export that has it too.
+    #[test]
+    fn the_mode_is_the_cohorts_and_nothing_here_can_check_it() {
+        let (counts, mode) = spread(&[-3, 0, 2, 5]);
+        let mut right = vec![f64::NAN; counts.len()];
+        fill_seed_share_per_candidate(&counts, mode, SeedDecayPerRepeat::FALLBACK, &mut right);
+        let mut wrong = vec![f64::NAN; counts.len()];
+        fill_seed_share_per_candidate(&counts, counts[0], SeedDecayPerRepeat::FALLBACK, &mut wrong);
+
+        // Entry 1 is the cohort's mode; entry 0 is the reference candidate, three repeats below.
+        assert!((right[1] - 0.7111111111111111).abs() < 1e-15);
+        assert!((wrong[1] - 0.10774410774410774).abs() < 1e-15);
+        assert!((right[0] - 0.08888888888888889).abs() < 1e-15);
+        assert!((wrong[0] - 0.8619528619528619).abs() < 1e-15);
+        assert!(right[1] / wrong[1] > 6.5, "{}", right[1] / wrong[1]);
+    }
+
+    /// The shared export makes the same length checks, because it is public and its caller's
+    /// assertion no longer stands between it and a mis-sized buffer.
+    #[test]
+    #[should_panic(expected = "cover the locus's candidate lengths exactly")]
+    fn a_mis_sized_buffer_is_refused_by_the_shared_export_too() {
+        let mut out = [f64::NAN; 2];
+        fill_seed_share_per_candidate(&[20, 21, 22], 20, SeedDecayPerRepeat::FALLBACK, &mut out);
     }
 
     /// A buffer that does not match the candidate set is refused **in release**, because `out`

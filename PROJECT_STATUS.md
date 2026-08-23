@@ -19,7 +19,21 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the repeat-tract starting point, and the panel it
+> - **Last completed task (2026-08-23):** **the shape both consumers read, and the support it is
+> not** (step E2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone E complete, at Checkpoint E**). The prior's belief about which
+> repeat lengths are common at a tract is now exported once, so the genotype prior and the read
+> likelihood's contamination term cannot drift apart.
+> **The review found that the export answers a different question from the one its consumer
+> asks.** It gives one number per candidate allele; the contamination term needs one per observed
+> read length, and the two part company in three places — two candidates spelling the same length
+> each take that length's full share, so the length arrives with 0.8 of the mass where the
+> geometry says 0.667; a read at a length the candidate prune dropped has no entry at all; and a
+> read that runs off the end of a tract has no length, only a lower bound. None of the three is
+> the prior's to settle, so the export is named for what it actually holds and all three are
+> recorded, with their sizes, where the likelihood work will meet them.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_e2_2026-08-23.md).
+> - **Previously (2026-08-23):** **the repeat-tract starting point, and the panel it
 > refuses at every locus** (step E1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Before any read is looked at, a repeat tract's genotype prior starts from mass falling off
@@ -39,7 +53,7 @@ Skills and agents are instructed to leave it untouched.
 > answered for ten refusals in ten, not one in ten — recorded in the spec, and the reason this
 > step is worth a look before Milestone F.
 > [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_e1_2026-08-23.md).
-> - **Previously (2026-08-23):** **the three decisions taken at the end of Milestone D,
+> - **Earlier (2026-08-23):** **the three decisions taken at the end of Milestone D,
 > and the measurement the owner asked for** (branch `ng-calling-prior`). **A fit that could not
 > match the panel's allele counts now says so** rather than handing back the closest pair as
 > though it had matched — two ways that happens, a panel at complete inbreeding whose counts still
@@ -61,7 +75,7 @@ Skills and agents are instructed to leave it untouched.
 > **Conclusion: report it, do not repair it** — a single genome carries no other signal, and the
 > obvious alternative is the non-reference rate the spec rejects.
 > [The measurement](doc/devel/ng/reports/inbreeding_sensitivity_of_the_seed_2026-08-23.md).
-> - **Earlier (2026-08-22):** **the run's two numbers spread over one locus's
+> - **Before that (2026-08-22):** **the run's two numbers spread over one locus's
 > alleles — and an argument I removed that the review put back** (step D3 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`;
 > **Milestone D complete, at Checkpoint D**). The reference allele's concentration goes in first

@@ -24,6 +24,10 @@
 //!
 //! ## Two functions with one contract between them
 //!
+//! (And, since plan step E2, one export that belongs to neither: the repeat-tract seed's shape
+//! before it is scaled, which the read likelihood's contamination term composes —
+//! [`seed_ssr::fill_seed_share_per_candidate`].)
+//!
 //! 1. **Build a concentration** — per sample, per pass: the run's seed plus what the
 //!    *other* samples showed here. One addition per allele.
 //! 2. **Turn a concentration into a log-prior row** — one number per candidate genotype.
@@ -80,7 +84,7 @@ pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use seed_generic::{
     FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
 };
-pub use seed_ssr::{SsrSeedOutcome, fill_ssr_seed};
+pub use seed_ssr::{SsrSeedOutcome, fill_seed_share_per_candidate, fill_ssr_seed};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
