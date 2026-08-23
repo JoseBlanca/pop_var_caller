@@ -1167,6 +1167,21 @@ mod tests {
                 "the fixture's own shape: 60 dotted loci, two of which the deletion \
                  swallowed into one locus with the sample at 310",
             );
+            // **The fixture's one partial reaches the comparison, and that is a premise rather
+            // than a detail.** Every driver comparison in this module is on the whole rendering
+            // of the outcome, so a field that is empty in every entry is a field two drivers
+            // agree on by both building nothing. This is the assertion that keeps the fixture
+            // from drifting back to one where `partials` is that field.
+            assert_eq!(
+                merged
+                    .cohort_observations
+                    .iter()
+                    .flat_map(|observed| observed.per_sample.iter())
+                    .filter(|sample| !sample.partials.is_empty())
+                    .count(),
+                1,
+                "the deleting sample's record carries the fixture's only partial",
+            );
         }
     }
 

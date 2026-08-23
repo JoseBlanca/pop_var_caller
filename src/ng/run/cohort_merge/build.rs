@@ -309,6 +309,67 @@ impl<'a> MemberPlacement<'a> {
         self.member.complete_observations()
     }
 
+    /// Where a **partial** sequence's witnessed positions sit in the *locus*, rather than in
+    /// this member's own region.
+    ///
+    /// **This is the projection a partial gets, and it is the only one it may have.** A
+    /// complete sequence is widened to the locus's whole span by
+    /// [`project_into`](Self::project_into); a partial cannot be, because its bases stop where
+    /// its read's witness stopped and padding them from the reference would report a read as
+    /// having seen ground it never did. What a partial gets instead is its *stretch* carried
+    /// onto the locus's axis, so a consumer can restrict a candidate's projection to exactly
+    /// the positions the read saw (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    ///
+    /// The mint measures a witness against the record it belongs to
+    /// ([`SampleLocusObservations::locus_len`]), so every run moves right by how far this
+    /// member starts into the locus.
+    ///
+    /// **It takes the runs rather than the sequence, so that its one `None` means one thing.**
+    /// Whether a sequence is partial at all is the caller's question and is answered by
+    /// matching [`ReadWitness`]; what this answers is whether the shifted stretch is
+    /// *representable*, and the two were worth separating because the caller's reaction to
+    /// them differs — skipping a complete sequence is the ordinary case, and losing a partial
+    /// one is a loss.
+    ///
+    /// **`None` means the locus is wider than a witness can address, and the row is lost.**
+    /// A witnessed position is a `u16` on the locus's own axis, so a member starting 65,536
+    /// or more bases into its locus has no representable stretch. Refusing rather than
+    /// clamping, because a clamp would silently shorten a witness into a claim about ground
+    /// the read never saw — the reason
+    /// [`WitnessedLocusPositions::one_run_from_offset_and_length`] refuses too.
+    ///
+    /// **How wide a locus can get is not bounded at 50 bases, and an earlier draft of this
+    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 50
+    /// reference bases but is the operator's to set and holds any `NonZeroU32`, and
+    /// [`super::close::LocusCloser`] exempts repeat-tract loci from it outright — so the
+    /// reachable case is a satellite tract above 65,535 bases, or a raised bound. Within a
+    /// locus that *is* narrower than `u16::MAX` the shift cannot overflow, because a record's
+    /// span is capped at `MAX_RECORD_SPAN_CEILING` = `u16::MAX` and the mint clamps every run
+    /// into its record, so `offset + run end` never exceeds the locus span.
+    ///
+    /// **What should happen instead of a silent loss is a decision about a failure mode**, not
+    /// a detail of this function: a panic aborts a run over legitimate input, and a count
+    /// would need a field of its own, since
+    /// [`SampleSupport::reads_removed_as_evidence`] means something narrower (a read named at
+    /// some of a sample's records and not all). Left refusing, pinned by
+    /// `a_stretch_that_cannot_be_addressed_on_the_locus_axis_is_no_row`, and owed to whoever
+    /// takes the repeat path through the merge.
+    fn witnessed_across_locus(
+        &self,
+        positions: &WitnessedLocusPositions,
+    ) -> Option<WitnessedLocusPositions> {
+        let offset = u16::try_from(self.offset).ok()?;
+        // The runs are canonical — sorted and disjoint — so the last one ends furthest right,
+        // and every earlier run fits if it does. Checking once is what lets the shift below
+        // be plain addition over an iterator instead of a fallible one through a `Vec`.
+        positions.last_run().1.checked_add(offset)?;
+        WitnessedLocusPositions::from_half_open_runs(
+            positions
+                .runs()
+                .map(|(start, end)| (start + offset, end + offset)),
+        )
+    }
+
     /// Widen one of this member's observed sequences to the whole locus span, into
     /// `projected`.
     ///
@@ -590,10 +651,7 @@ impl AlleleTable {
 
             per_sample.push(SampleSupport {
                 sample,
-                // **Empty until C2**, which is what the merge does today rather than a
-                // placeholder: every non-`Complete` observation is dropped before an allele is
-                // derived, so there are no partials to carry yet.
-                partials: Vec::new(),
+                partials: partials_of_sample(&reference, sample_members),
                 // **Only the pairs this sample showed** — and this filter used to be
                 // load-bearing and is now a belt. The tally was a vector resized to the
                 // table's width, so it held a zero row for every allele some *other* sample
@@ -943,8 +1001,9 @@ pub struct SampleSupport {
     /// that — so a stretch alone does not order them, and `doc/devel/ng/spec/read_likelihoods.md`
     /// §8 makes the order a determinism requirement rather than a tidiness one: the sum over
     /// observations must run in a fixed order. The sibling field states its own key the same way
-    /// and `tests::the_rows_are_ordered_by_allele_then_read_group` pins it; **C2 owes this one
-    /// the same test.**
+    /// and `tests::the_rows_are_ordered_by_allele_then_read_group` pins it; this one is pinned
+    /// by `tests::the_partial_rows_are_ordered_by_stretch_then_read_group_then_bases`, which
+    /// varies all three components so that neither dropping one nor reordering them survives.
     ///
     /// **Kept apart from [`supported`](Self::supported) rather than folded into it**, because a
     /// partial read does not say what the sample carries, it says the sample carries *at least*
@@ -953,13 +1012,13 @@ pub struct SampleSupport {
     /// would read as a *short* allele, which is the one direction the model must not be biased
     /// in (`doc/devel/ng/spec/read_likelihoods.md` §5.1).
     ///
-    /// **Empty until C2 fills it**, which is today's behaviour written down rather than a new
-    /// one: the derivation drops every observation whose witness is not
-    /// [`Complete`](ReadWitness::Complete), so a cohort locus as built carries no partial reads
-    /// at all and the censored term of `read_likelihoods.md` §5 has nothing to read
-    /// (§5.4, corrected 2026-08-21).
+    /// **Filled by [`partials_of_sample`], which walks the sample's records directly** rather
+    /// than through [`MemberPlacement::projectable_sequences`] — the gate that keeps partials
+    /// out of the allele derivation is exactly the one this field exists to get past. Empty
+    /// where the sample's reads all spanned their records, which is the ordinary locus; the
+    /// censored term of `read_likelihoods.md` §5 reads it (§5.4, corrected 2026-08-21).
     ///
-    /// **It changes no locus's existence, and C2 must not either.** Whether a locus is built at
+    /// **It changes no locus's existence, and did not.** Whether a locus is built at
     /// all is decided from complete observations only — the filter is
     /// [`SampleLocusObservations::non_reference_and_compared_reads`], which skips every
     /// non-`Complete` observation before counting, and it lives in the locus generator rather
@@ -1118,9 +1177,9 @@ pub struct PartialObservation {
     /// 100 (spec §5.4.1) — those filters would see the complete reads only. Adding them later
     /// means reopening whatever routes partials in.
     ///
-    /// **That, and the ascending order the field on [`SampleSupport`] promises, are conventions
-    /// C2 has to establish**: nothing builds one of these yet, so neither is a property the type
-    /// carries.
+    /// **That, and the ascending order the field on [`SampleSupport`] promises, are the builder's
+    /// conventions rather than the type's**: the fields are public and there is no constructor,
+    /// so [`partials_of_sample`] is where both hold, and where their tests point.
     pub q_sum: f64,
 }
 
@@ -1499,6 +1558,97 @@ struct ReadSighting {
     /// Which of that record's sequences the read showed, by position in
     /// [`SampleLocusObservations::observations`].
     sequence: u32,
+}
+
+/// **Every partial observation one sample's reads left over this locus**, carried rather than
+/// dropped, keyed by the stretch each witnessed.
+///
+/// **One row per `(record, sequence)`, and nothing is merged.** The mint has already pooled
+/// every read that showed the same `(bases, witness, read group)` into one observation, and two
+/// of the sample's records are disjoint stretches of the locus, so no two rows here can be the
+/// same evidence — there is nothing left to fold.
+///
+/// **A partial is never composed across records.** Composition needs a read that showed one
+/// thing at *every* one of the sample's records, and a read that ran out at one of them showed
+/// nothing recordable there; [`alleles_of_sample`] removes it from the allele derivation for
+/// exactly that reason and counts it in
+/// [`SampleSupport::reads_removed_as_evidence`]. **So a read can be removed there and appear
+/// here**, and that is not double counting: the counter says its *allele* could not be
+/// composed, which stays true, and what appears here is not an allele.
+///
+/// **One read can back several rows, and the rows do not say so.** A read that starts inside
+/// one of the sample's records and runs out inside the next is partial at both, so it leaves
+/// one row per record: two stretches, each with `num_reads` 1, for one molecule. Nothing here
+/// carries a chain id, so a consumer cannot undo it — and
+/// [`read_likelihoods.md`](../../../../doc/devel/ng/spec/read_likelihoods.md) §5.3 scores one
+/// term per observation on the understanding that every read behind it witnessed the same
+/// stretch, which two rows for one read break. **Pinned by
+/// `one_read_partial_at_two_records_is_two_rows_and_that_is_visible`** so that the shape is a
+/// recorded fact rather than an accident, and owed to the evidence view that consumes these:
+/// either the rows carry the read, or a read's stretches are folded into one row with a hole
+/// between them. This is the first step at which such a read is visible at all — before it, a
+/// read with no complete sequence anywhere reached no field of the table, not even
+/// `reads_removed_as_evidence`.
+///
+/// **Both branches of the derivation are covered by walking the records directly.** The
+/// derivation's two shapes — one record, several — differ in how reads are placed, and a
+/// partial is placed nowhere; the walk is the same either way.
+///
+/// Sorted ascending by `(witnessed stretch, read group, bases)`. The stretch alone does not
+/// order two rows — a substitution witnessed partially is two rows over one stretch — and the
+/// order has to be total, because the sum over observations must run in a fixed one
+/// (`doc/devel/ng/spec/read_likelihoods.md` §8).
+fn partials_of_sample(
+    reference: &LocusReferenceBases,
+    members: &SampleMembers<'_>,
+) -> Vec<PartialObservation> {
+    let mut partials = Vec::new();
+    for record in members.observations {
+        // **Built on the first partial and not before.** Where a record holds none — the
+        // ordinary locus, and every locus at all before this step — placing it is work with
+        // no consumer, and `alleles_of_sample` has already placed the same record for its
+        // own use. Measured at 3,000 samples × 10 records × 32 reads with no partial
+        // anywhere: `placing` was 28 % of this function's 353 µs.
+        let mut placement = None;
+        for sequence in &record.observations {
+            // **A sequence no read is behind is not evidence**, the same rule the allele
+            // derivation applies to its own two branches.
+            if sequence.num_obs == 0 {
+                continue;
+            }
+            let ReadWitness::Partial { positions } = &sequence.read_witness else {
+                continue;
+            };
+            let placement = placement.get_or_insert_with(|| reference.placing(record));
+            let Some(witnessed_in_locus) = placement.witnessed_across_locus(positions) else {
+                continue;
+            };
+            partials.push(PartialObservation {
+                witnessed_in_locus,
+                read_group: sequence.read_group,
+                bases: sequence.bases.clone(),
+                num_reads: sequence.num_obs,
+                q_sum: sequence.q_sum,
+            });
+        }
+    }
+    // Unstable is enough: the key is total, and no two rows share one. Within a record the
+    // mint has already keyed its observations on `(bases, witness, read group)`, two of which
+    // are key components here and the third of which the shift preserves; across records the
+    // shifted stretches cannot meet, because `LocusReferenceBases::over` asserts a sample's
+    // records are disjoint and ascending before any of this runs. **That second half rests on
+    // the mint's clamping** — `ReadWitness::Partial` is a public variant with a public field,
+    // and `witness.rs` calls keeping its runs inside the record "a convention rather than a
+    // type invariant" — so a hand-built witness reaching past its own record can produce two
+    // equal keys, and their order is then unspecified rather than wrong.
+    partials.sort_unstable_by(|left, right| {
+        (&left.witnessed_in_locus, left.read_group, &left.bases).cmp(&(
+            &right.witnessed_in_locus,
+            right.read_group,
+            &right.bases,
+        ))
+    });
+    partials
 }
 
 /// Every allele one sample's reads showed over the whole locus, handed to `emit` one at a
@@ -4392,31 +4542,39 @@ mod tests {
         );
     }
 
-    /// **A sample whose reads ran out inside the locus reaches the built locus with nothing to
-    /// show for it**, which is what this step writes down rather than changes.
+    /// **A sample whose reads ran out inside the locus now reaches the built locus carrying what
+    /// they saw — and still contributes no allele.** Those are the two halves of this step, and
+    /// they pull in opposite directions, so both are asserted on one fixture.
     ///
-    /// The row that will carry such a read exists as of C1 and is always empty: the derivation
-    /// drops every observation whose witness is not `Complete` before an allele is derived, so
-    /// the censored term of `doc/devel/ng/spec/read_likelihoods.md` §5 has nothing to read.
-    /// **C2 inverts the first assertion and must leave the second standing** — a partial's bases
-    /// must never become an allele of the table.
+    /// **The stretch is the whole point and it is hand-written.** The sample's record is at 12,
+    /// two bases into a locus that opens at 10, and the read witnessed that record's first
+    /// position. The mint measures that as position 0 *of the record*; the row must carry
+    /// position 2 *of the locus*. A row built without the shift would say the read saw the
+    /// locus's first base, and a consumer restricting an allele's projection to that position
+    /// would compare the read's `A` against the reference's `A` and call it compatible — the
+    /// substitution's projection is `ACTTA`, so the shift is the difference between a partial
+    /// that matches the substitution and one that does not.
     ///
-    /// **The second assertion is also this test's premise check**, and it must not be trimmed as
-    /// a duplicate: it is what stops the test passing on a fixture where nothing was partial in
-    /// the first place. Turning the fixture's witness to `Complete` makes the partial's `ACATA`
-    /// a fourth allele and this assertion is the one that says so.
+    /// **The second assertion is also this test's premise check.** Turning the fixture's witness
+    /// to `Complete` makes the partial's `ACATA` a fourth allele of the table, which is the trap
+    /// `doc/devel/ng/spec/read_likelihoods.md` §5.1 names: a partial scored as though it were
+    /// complete mis-scores as a *short* allele.
     ///
     /// The fixture is `a_partial_sequence_contributes_no_allele`'s, deliberately: that test
     /// checks the allele table alone, and this one runs the same locus through the whole
     /// assembly, which is the only way to see the rows. **Both samples here hold one record, so
-    /// it is the single-record branch that is exercised**; the multi-record branch's own drop is
-    /// pinned by `a_read_partial_at_one_record_is_removed_as_evidence`.
+    /// it is the single-record branch that is exercised**; the multi-record branch is
+    /// `a_partial_is_carried_from_a_multi_record_sample_too`.
     #[test]
-    fn a_partial_observation_reaches_no_row_and_no_allele_yet() {
+    fn a_partial_observation_is_carried_over_the_stretch_it_witnessed() {
         let mut with_a_partial = member(region(12, 12), b"G", b"T");
         with_a_partial.observations.push(SequenceObservation {
             read_witness: ReadWitness::from_left(1, with_a_partial.locus_len())
                 .expect("a one-base run inside a one-base record"),
+            // **Not the helper's zero**, so that the assertion below reads the row rather than
+            // the fixture: with `q_sum` left at `0.0` a build writing a constant zero into
+            // every row would satisfy it just as well.
+            q_sum: -18.5,
             ..sequence(b"A")
         });
         let members = [with_a_partial];
@@ -4438,13 +4596,21 @@ mod tests {
 
         let observed = CohortObservation::over(&locus);
 
+        assert_eq!(
+            observed.per_sample[0].partials,
+            vec![PartialObservation {
+                witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 1)
+                    .expect("one position of the locus"),
+                read_group: ReadGroupId(0),
+                bases: Box::from(&b"A"[..]),
+                num_reads: 3,
+                q_sum: -18.5,
+            }],
+            "the run is 2..3 of the locus, not 0..1 of the record",
+        );
         assert!(
-            observed
-                .per_sample
-                .iter()
-                .all(|sample| sample.partials.is_empty()),
-            "C2 is what fills these: {:?}",
-            observed.per_sample,
+            observed.per_sample[1].partials.is_empty(),
+            "the sample with no partial carries no row",
         );
         assert_eq!(
             observed
@@ -4455,6 +4621,377 @@ mod tests {
             vec![b"ACGTA".to_vec(), b"ACTTA".to_vec(), b"A".to_vec()],
             "the reference, the substitution and the deletion — the partial's `A` would have \
              been a fourth",
+        );
+    }
+
+    /// **A sample with several records carries its partials too, each shifted onto the locus by
+    /// its own record's offset.** The allele derivation takes a different branch here — it
+    /// consults reads and composes across records — and partials are gathered by walking the
+    /// records either way, so the two must not come apart.
+    ///
+    /// Read 7 is complete at 12 and partial at 14, which is the fixture
+    /// `a_read_partial_at_one_record_is_removed_as_evidence` uses to show the read contributes
+    /// no allele. **It still contributes no allele, and it now contributes a row**, and the two
+    /// facts sit together: `reads_removed_as_evidence` says the read's *allele* could not be
+    /// composed, which stays true, and what the row carries is not an allele.
+    #[test]
+    fn a_partial_is_carried_from_a_multi_record_sample_too() {
+        let mut two_records = a_sample_with_two_records();
+        let locus_len = two_records[1].locus_len();
+        two_records[1].observations = vec![
+            SequenceObservation {
+                num_obs: 1,
+                chain_ids: vec![11],
+                ..sequence(b"C")
+            },
+            SequenceObservation {
+                num_obs: 1,
+                chain_ids: vec![7],
+                read_witness: ReadWitness::from_left(1, locus_len)
+                    .expect("a one-base run inside a one-base record"),
+                ..sequence(b"C")
+            },
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let sample = &observed.per_sample[0];
+
+        assert_eq!(
+            sample.partials,
+            vec![PartialObservation {
+                witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(4, 1)
+                    .expect("one position of the locus"),
+                read_group: ReadGroupId(0),
+                bases: Box::from(&b"C"[..]),
+                num_reads: 1,
+                q_sum: 0.0,
+            }],
+            "the record at 14 is four bases into the locus at 10",
+        );
+        assert!(
+            !observed.alleles.iter().any(|allele| &**allele == b"ACATC"),
+            "read 7 still composes no allele: {:?}",
+            observed.alleles,
+        );
+        assert_eq!(
+            sample.reads_removed_as_evidence, 2,
+            "read 7, whose sighting at 14 is the partial, and read 9, which the fixture's \
+             second record never names — both lost their allele, which is what this counts",
+        );
+    }
+
+    /// **A witness with a hole in it keeps both of its runs, each shifted.** The generic fold
+    /// mints these where a read contributed no event at a position inside a widened record — an
+    /// interior `N`, a ref-skip ([`ReadWitness::Partial`]) — and two numbers could only describe
+    /// the gap by swallowing it, which would credit the read with a position it never saw.
+    ///
+    /// **Adaptor masking is not one of the causes, and an earlier draft of this comment listed
+    /// it.** Masking truncates a witness from one side rather than holing it, which is why
+    /// `open_record.rs` records that the §8 probe measured zero holed witnesses in 225 million
+    /// event-folds. The hole is rare, not unreachable, and the type admits it.
+    #[test]
+    fn a_witness_with_a_hole_keeps_both_runs_shifted() {
+        let mut spliced = member(region(12, 15), b"GTAC", b"GTAC");
+        spliced.observations = vec![SequenceObservation {
+            num_obs: 2,
+            read_witness: ReadWitness::Partial {
+                positions: WitnessedLocusPositions::from_half_open_runs([(0, 1), (3, 4)])
+                    .expect("two runs inside a four-base record"),
+            },
+            ..sequence(b"GC")
+        }];
+        let members = [spliced];
+        let deletion = [member(region(10, 15), b"ACGTAC", b"A")];
+        let locus = closed_locus(region(10, 15), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0].partials[0]
+                .witnessed_in_locus
+                .runs()
+                .collect::<Vec<_>>(),
+            vec![(2, 3), (5, 6)],
+            "both runs move by the record's two-base offset, and the hole survives",
+        );
+    }
+
+    /// **Two read groups over one stretch are two rows, in read-group order** — the same
+    /// boundary `supported` keeps, for the same reason: a censored term pools reads only when
+    /// every one of them would get the same number
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    ///
+    /// **The stretch alone cannot order them**, which is why the key has three parts. Both rows
+    /// here witnessed the same position; only the group tells them apart.
+    #[test]
+    fn two_read_groups_over_one_stretch_are_two_rows_in_group_order() {
+        let mut two_lanes = member(region(12, 12), b"G", b"G");
+        let locus_len = two_lanes.locus_len();
+        let stretch =
+            ReadWitness::from_left(1, locus_len).expect("a one-base run inside a one-base record");
+        two_lanes.observations = vec![
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: stretch.clone(),
+                num_obs: 2,
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: stretch,
+                num_obs: 3,
+                ..sequence(b"A")
+            },
+        ];
+        let members = [two_lanes];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (row.read_group, row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![(ReadGroupId(1), 3), (ReadGroupId(5), 2)],
+            "two rows, ascending by group, and neither pooled into the other",
+        );
+    }
+
+    /// **A partial no read is behind is not a row**, the same rule the allele derivation applies
+    /// to its own two branches: a sequence with no reads is not evidence the sample showed
+    /// anything.
+    ///
+    /// **The record holds a second partial that one read *is* behind**, and the test asserts one
+    /// row rather than none. Without it the assertion is satisfied by a merge that builds no
+    /// rows at all — it passed unchanged on the tree before `partials_of_sample` existed — so
+    /// it would report a total failure of this step as the rule holding.
+    #[test]
+    fn a_partial_no_read_is_behind_is_not_a_row() {
+        let mut empty = member(region(12, 12), b"G", b"G");
+        let locus_len = empty.locus_len();
+        let stretch =
+            ReadWitness::from_left(1, locus_len).expect("a one-base run inside a one-base record");
+        empty.observations = vec![
+            SequenceObservation {
+                num_obs: 0,
+                read_witness: stretch.clone(),
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                num_obs: 4,
+                read_witness: stretch,
+                ..sequence(b"T")
+            },
+        ];
+        let members = [empty];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (row.bases.to_vec(), row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![(b"T".to_vec(), 4)],
+            "the sequence four reads showed is a row and the one no read showed is not",
+        );
+    }
+
+    /// **The rows are ordered by stretch, then read group, then bases** — the key
+    /// [`SampleSupport::partials`] promises, with all three parts varying so that neither
+    /// dropping one nor reordering them leaves the order intact.
+    ///
+    /// The four rows are pushed in an order no correct key produces, so a build that does not
+    /// sort at all fails too. `doc/devel/ng/spec/read_likelihoods.md` §8 is why this is a
+    /// requirement rather than tidiness: the sum over observations must run in a fixed order,
+    /// and the mint's own emission order is first-seen, not keyed.
+    #[test]
+    fn the_partial_rows_are_ordered_by_stretch_then_read_group_then_bases() {
+        let run = |start: u16, end: u16| ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(start, end)])
+                .expect("one run inside a two-base record"),
+        };
+        let mut four_rows = member(region(12, 13), b"GT", b"GT");
+        four_rows.observations = vec![
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: run(0, 1),
+                ..sequence(b"T")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: run(0, 1),
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: run(0, 1),
+                ..sequence(b"C")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: run(1, 2),
+                ..sequence(b"G")
+            },
+        ];
+        let members = [four_rows];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (
+                    row.witnessed_in_locus.first_run(),
+                    row.read_group.get(),
+                    row.bases.to_vec(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ((2, 3), 1, b"C".to_vec()),
+                ((2, 3), 5, b"A".to_vec()),
+                ((2, 3), 5, b"T".to_vec()),
+                ((3, 4), 1, b"G".to_vec()),
+            ],
+            "the stretch first, then the group, then the bases — the two rows sharing a \
+             stretch and a group are ordered by nothing else",
+        );
+    }
+
+    /// **One read partial at two of the sample's records leaves two rows, and nothing in them
+    /// says it was one read.** Recorded rather than fixed: `read_likelihoods.md` §5.3 scores
+    /// one term per observation on the understanding that the reads behind it saw the same
+    /// stretch, and two rows for one molecule break that. The row carries no chain id, so a
+    /// consumer cannot fold them back.
+    ///
+    /// **This is also the first step at which such a read is visible at all.** It has no
+    /// complete sequence anywhere, so it never enters the allele derivation's read table and
+    /// `reads_removed_as_evidence` — which counts reads that showed something at some records
+    /// and not all — does not reach it either. The assertion below pins that zero beside the
+    /// two rows.
+    #[test]
+    fn one_read_partial_at_two_records_is_two_rows_and_that_is_visible() {
+        let mut first = member(region(12, 12), b"G", b"G");
+        let first_len = first.locus_len();
+        first.observations = vec![SequenceObservation {
+            num_obs: 1,
+            chain_ids: vec![42],
+            read_witness: ReadWitness::from_right(1, first_len)
+                .expect("a one-base run inside a one-base record"),
+            ..sequence(b"C")
+        }];
+        let mut second = member(region(14, 14), b"A", b"A");
+        let second_len = second.locus_len();
+        second.observations = vec![SequenceObservation {
+            num_obs: 1,
+            chain_ids: vec![42],
+            read_witness: ReadWitness::from_left(1, second_len)
+                .expect("a one-base run inside a one-base record"),
+            ..sequence(b"G")
+        }];
+        let one_read = [first, second];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&one_read, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let sample = &observed.per_sample[0];
+
+        assert_eq!(
+            sample
+                .partials
+                .iter()
+                .map(|row| (row.witnessed_in_locus.first_run(), row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![((2, 3), 1), ((4, 5), 1)],
+            "one molecule, two rows, each claiming one read",
+        );
+        assert_eq!(
+            sample.partials.iter().map(|row| row.num_reads).sum::<u32>(),
+            2,
+            "the rows add to twice the reads there were, which is the fact this test exists \
+             to keep visible",
+        );
+        assert_eq!(
+            sample.reads_removed_as_evidence, 0,
+            "a read with no complete sequence anywhere reaches the removal counter either",
+        );
+    }
+
+    /// **A stretch that cannot be addressed on the locus's axis is no row, and the last one that
+    /// can still is.** A witnessed position is a `u16` measured from the locus's first base, so
+    /// a partial far enough into a wide locus has no representable stretch and is lost —
+    /// silently, which is a failure mode [`MemberPlacement::witnessed_across_locus`] names and
+    /// this test pins rather than endorses.
+    ///
+    /// **Three records, because the shift can fail in two different places.** The stretch's far
+    /// end can pass `u16::MAX` while the member's own offset still fits, and the offset itself
+    /// can not fit at all; a fixture with only the first would leave a build that truncated the
+    /// offset passing, and one with only the second would leave a build that clamped the end
+    /// passing. Both wrong answers are worse than the loss: a clamped end shortens a witness
+    /// into a claim about ground the read never saw, and a truncated offset moves the whole
+    /// stretch 65,536 bases to the left of where the read was.
+    ///
+    /// **Reachable only past the generic path.** A generic locus is bounded by
+    /// [`MaxCohortLocusSpan`], 50 reference bases by default, but repeat-tract loci are exempt
+    /// from that bound and the bound itself is the operator's to raise — so the case is a
+    /// satellite above 65,535 bases. The fixture is built by hand for the same reason every
+    /// other fixture here is: the walk would not close this locus.
+    #[test]
+    fn a_stretch_that_cannot_be_addressed_on_the_locus_axis_is_no_row() {
+        const LAST: u64 = 70_000;
+        let whole = [member(
+            region(0, LAST),
+            &vec![b'A'; LAST as usize + 1],
+            &vec![b'A'; LAST as usize + 1],
+        )];
+
+        let two_bases_at = |start: u64, covered: u16, bases: &[u8]| {
+            let span = usize::from(covered);
+            let mut record = member(
+                region(start, start + covered as u64 - 1),
+                &vec![b'A'; span],
+                &vec![b'A'; span],
+            );
+            let locus_len = record.locus_len();
+            record.observations = vec![SequenceObservation {
+                num_obs: 1,
+                read_witness: ReadWitness::from_left(covered, locus_len)
+                    .expect("a run as wide as the record"),
+                ..sequence(bases)
+            }];
+            record
+        };
+        let three_records = [
+            // 65,532 + 2 is `u16::MAX` — the last stretch that fits.
+            two_bases_at(65_532, 2, b"CC"),
+            // 65,534 + 2 is one past it, though the offset itself still fits.
+            two_bases_at(65_534, 2, b"TT"),
+            // and here not even the offset fits.
+            two_bases_at(66_000, 1, b"G"),
+        ];
+        let locus = closed_locus(region(0, LAST), &[&whole, &three_records]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[1]
+                .partials
+                .iter()
+                .map(|row| (row.witnessed_in_locus.first_run(), row.bases.to_vec()))
+                .collect::<Vec<_>>(),
+            vec![((65_532, 65_534), b"CC".to_vec())],
+            "the record at 65,532 keeps its row; the ones at 65,534 and 66,000 lose theirs",
         );
     }
 

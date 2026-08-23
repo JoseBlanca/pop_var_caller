@@ -185,7 +185,7 @@ bases over that stretch, `num_reads`, `q_sum`, and the read group (B's axis appl
 the evidence view's `PartialObservation` is consumed per read group like everything else).
 No logic. *Depends:* B1. *Source:* read_likelihoods spec §5.4; arch §2.1 (`SampleEvidence.partials`).
 
-**C2. Collation keeps them; projection projects the stretch.**  ☐
+**C2. Collation keeps them; projection projects the stretch.**  ✅
 The `!= Complete → continue` at [`build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)
 routes partials into C1's rows instead of dropping them; the projection gains a
 witnessed-stretch variant instead of the panic (the panic stays for the code path that must never

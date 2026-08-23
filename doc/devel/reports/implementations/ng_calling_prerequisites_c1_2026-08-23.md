@@ -123,8 +123,14 @@ under a fifth of a floor that is itself an underestimate, and no new scaling fac
 **One thing this step buys that the diff did not claim.** The module's determinism tests compare
 whole `Debug` renderings, and its region-split test compares `SampleSupport` for equality. Both
 were shown to read through the new field: two rows differing only in their partials compare
-unequal and render differently. So the day C2 fills the field, those tests start covering it with
-nothing new written.
+unequal and render differently.
+
+> **Corrected 2026-08-24, in C2.** The paragraph above went on to say that the day C2 filled the
+> field, those tests would start covering it "with nothing new written". They read *through* the
+> field; they were not covering it. Every record in every fixture behind them is minted `Complete`,
+> so the field rendered empty in every entry and two drivers agreed on it by both building nothing.
+> C2 puts a partial in the shared three-sample fixture and asserts that it arrives, which is the
+> "something new" this sentence said would not be needed.
 
 **One recommendation not taken, and why.** Two reviews asked for a newtype over the witnessed
 positions, because the field carries cohort-locus coordinates in the same type the mint uses for
