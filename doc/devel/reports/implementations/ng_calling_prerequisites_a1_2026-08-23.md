@@ -126,20 +126,20 @@ This is an implementation choice inside the coder's latitude, recorded here rath
 
 The eighth is the fitted path,
 [`generic/runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs), which constructs
-from a coverage-weighted posterior occupancy with `.expect(…)`. That occupancy can reach exactly
-`1.0` on a fully homozygous sample, so after this step the `expect` is a panic on a legitimate
-fit. **A2 is the clamp that closes it**, and the plan makes it a separate commit.
+from a coverage-weighted posterior occupancy with `.expect(…)`, so after this step a fit at the
+ceiling is a panic on a legitimate sample. **A2 is the clamp that closes it**, and the plan makes
+it a separate commit.
 
-**It is closer than "in principle", and nothing in the suite would see it.** Each window's
-posterior is `exp(a + b − logsumexp(a + b, …))`, which returns exactly `1.0` in `f64` as soon as
-the other state is about 37 nats behind — routine for a window carrying hundreds of sites, not a
-rounding accident — and the sum is clamped to `[0, 1]` at
-[`runs.rs:1178`](../../../../src/ng/parameter_estimation/generic/runs.rs), so an overshoot is
-*converted into* exactly `1.0` rather than staying above it. What stands between that and the
-panic is the used-both-states check, which needs some window below `0.5`; no reviewer could
-construct an input satisfying both at once, so this is not a reachability claim. But the whole
-library suite is green, so no test reaches the boundary either way: the four fits over real
-alignments are `#[ignore]`d for want of a BAM, and the synthetic fits never approach it.
+**Superseded by A2's review, and the correction is worth keeping visible.** This paragraph first
+said the occupancy "can reach exactly `1.0` on a fully homozygous sample" and reasoned about
+whether that was constructible. Both halves were wrong in interesting ways. A sample with no
+window below one half is *refused* before it reaches the constructor — the used-both-states check
+sees no second state — so the exact ceiling is not the case that matters. And the case that does
+matter needs no ceiling: a genome 3,599 windows of 3,600 inside a run fits **above `0.99`**, is
+accepted, and lands where the prior can no longer be argued with by read evidence. That is
+ordinary rather than exotic — under self-fertilisation `F = 1 − 2⁻ᵗ` passes `0.99` at the seventh
+generation, so a maintained inbred line is past it, and the tomato benchmark is 63 of them. A2
+carries the fixture that pins it.
 
 No production code uses this type: `InbreedingF` appears only under `src/ng/` and in one example.
 Production's own `F` (`src/paralog/inbreeding.rs`, `src/ssr/cohort/`) is a bare `f64` and is

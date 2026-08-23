@@ -124,7 +124,7 @@ is right to admit `1.0` for them. Move the existing acceptance assertion at
 [`types.rs:862`](../../../../src/ng/types.rs) to the rejection list beside `1.5`. *Source:*
 calling_priors arch §2.1; spec §7.
 
-**A2. The fitted path clamps instead of panicking.**  ☐
+**A2. The fitted path clamps instead of panicking.**  ✅
 [`runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs) builds an `InbreedingF`
 from a coverage-weighted posterior occupancy with `.expect(…)`; that occupancy can in principle
 reach exactly `1.0` on a fully homozygous sample, so after A1 the `expect` is a panic on a
