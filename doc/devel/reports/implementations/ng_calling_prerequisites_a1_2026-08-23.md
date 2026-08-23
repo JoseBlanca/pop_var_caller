@@ -208,8 +208,15 @@ the overclaim about what `[0, 1)` buys (§6), and four documents left saying `[0
   `1.0` by the test at [`:392`](../../../../src/pop_var_caller/cli/parsers.rs)) and the value
   reaches the engine as typed ([`pipeline.rs:343`](../../../../src/var_calling/pipeline.rs)).
 
-- **Five call sites and eight tests on the parallel branch `ng-calling-prior` owe a revisit.**
-  Each drives exactly `1.0` into `InbreedingF::try_new` and relies on it returning `Ok`:
+- **Done, in the merge commit that follows this one.** `main` moved while this step was being
+  reviewed: the genotype-prior branch landed, so the sites below stopped being someone else's and
+  became this branch's to fix. **The list here was measured before that merge and undercounts it
+  in two ways** — the `exact_spectrum` helper is driven with `1.0` by six tests, not four, and a
+  fifth file, `calling/genotype_prior/hardy_weinberg.rs`, has a limit test of its own that this
+  survey missed. Ten tests failed on the merge, across five constructor sites; what each became is
+  in the merge commit's message.
+
+  The list as measured on the branch, kept because it is what the survey found:
 
   | site on `ng-calling-prior` | tests reaching it with `1.0` |
   |---|---|
@@ -220,9 +227,8 @@ the overclaim about what `[0, 1)` buys (§6), and four documents left saying `[0
   | `calling/genotype_prior/seed_generic.rs:1212`, the `exact_spectrum` test helper | 4 — the loops at `:1245`, `:1451`, `:1560`, `:1804` each include `1.0` |
 
   Three of the five say in their own doc comments that they pin today's behaviour and name the
-  tightening; `seed_generic.rs:2249` does not. **A sixth site is not affected and is easy to
+  tightening; `seed_generic.rs:2249` does not. **A further site is not affected and is easy to
   miscount:** `dirichlet_multinomial.rs`'s `mixed_row_for` helper drives
   `fill_inbreeding_mixture_log_priors` with a bare `f64`, so the loop at `:1161` reaches `F = 1`
   without constructing the newtype at all — that is the mathematical-limit test spec §12 test 3
-  asks for, and it keeps working. Whichever branch merges second resolves the five; none is
-  reachable from here.
+  asks for, and it keeps working unchanged.

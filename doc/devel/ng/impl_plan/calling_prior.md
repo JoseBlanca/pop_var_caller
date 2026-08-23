@@ -28,9 +28,11 @@ plans start on different days and still run in parallel.**
 
 **In:** `src/ng/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
 `Concentration`, `sample_concentration`), `dirichlet_multinomial.rs` (the ported primitive +
-`MarginalizedDirichletPrior`), `seed_spectrum.rs` (`project_spectrum_seed`, `seed_for_locus`),
-`seed_ssr.rs` (`ssr_seed`, `seed_length_distribution`), `plug_in.rs` (`PlugInWrightPrior`);
-`types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK`.
+`MarginalizedDirichletPrior`), `seed_generic.rs` (`project_spectrum_seed`, `seed_for_locus`),
+`seed_ssr.rs` (`fill_ssr_seed`, `fill_seed_share_per_candidate`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
+`types.rs` gains `ExpectedHeterozygosity` and `DEFAULT_SPECIES_DIVERSITY_FALLBACK` — and, at E1,
+`RepeatGeneDiversity` and `SeedDecayPerRepeat`, the two repeat-tract scalars arch §5 sketched as
+bare `f64`.
 
 **Out (later plans or upstream):**
 
@@ -55,8 +57,11 @@ plans start on different days and still run in parallel.**
   built against closed-form targets before anything composes them.
 - **Reuse over rewrite.** The primitive, the floors, the mixture, the leave-one-out arithmetic
   and the STR shape are **ports** — arch §6's reconciliation table is the map, and no formula is
-  re-derived. The projection is the one genuinely new function, and its optimiser reuses
-  [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs).
+  re-derived. The projection is the one genuinely new function. *Its optimiser was expected to
+  reuse [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs);
+  at D2 that driver turned out to cost 6,401 predictions per candidate at 3,200 individuals, since
+  it scores one cell at a time and cannot cache. Its shape and its `SearchPrecision` are reused;
+  the driver is not (arch §4).*
 - **Verify against ground truth.** The primitive against the rising-factorial oracle
   (`pochhammer_ln` / `dm_log_prior_oracle`,
   [`genetics.rs:240`](../../../../src/genetics.rs)); the mixture against the Wright biallelic
@@ -106,7 +111,7 @@ plans start on different days and still run in parallel.**
 
 ### Milestone A — scaffold + types (no logic)
 
-**A1. Scaffold `genotype_prior/` and seed `types.rs`.**  ☐
+**A1. Scaffold `genotype_prior/` and seed `types.rs`.**  ✅
 `calling/genotype_prior/mod.rs` (declares the four files) wired into `calling/mod.rs`.
 `types.rs` gains `ExpectedHeterozygosity` (constrained to `[0, 1]`, `try_new`/`get`; **the
 cohort's expected heterozygosity at ordinary sites — not the non-reference rate**, and the doc
@@ -115,7 +120,7 @@ comment says so) and `DEFAULT_SPECIES_DIVERSITY_FALLBACK = 1e-3` (port of
 its "weakly informative, overridable, must be visible in output" reasoning). *Source:* arch §2.1;
 spec §4.
 
-**A2. The local types and the seam.**  ☐
+**A2. The local types and the seam.**  ✅
 In `mod.rs`: `Concentration` (borrow of caller scratch; invariant — every entry
 `≥ MIN_ALT_CONCENTRATION`, length = allele count, checked in debug), `SeedRegime`
 (`FittedSpectrum` / `NeutralShape` / `FallbackDiversity` — **a branch on absence, never on cohort
@@ -129,8 +134,8 @@ assertion, structural ones held in release. *Source:* arch §2.2, §2.3, §3.2, 
 
 ### Milestone B — the row: primitive + mixture (the decision, pure)
 
-**B1. Port the primitive.**  ☐
-`dirichlet_multinomial.rs`: `dirichlet_multinomial_log_priors` ported as-is from
+**B1. Port the primitive.**  ✅
+`dirichlet_multinomial.rs`: `fill_random_mating_log_priors` — `dirichlet_multinomial_log_priors` ported as-is from
 [`genetics.rs:127`](../../../../src/genetics.rs) with one change — fill a caller slice instead of
 returning `Vec` (the no-alloc contract, spec §8). Import `PROBABILITY_FLOOR` and
 `MIN_ALT_CONCENTRATION` with their reasons. Carry the **independent parity oracle** across:
@@ -139,7 +144,7 @@ independent implementation, not golden values, so it keeps checking after consta
 §12 test 4). Keep production's release-mode structural assertions (a short coefficient array
 silently truncates the iteration otherwise). *Source:* spec §3.1, §8, §9; arch §6.
 
-**B2. `MarginalizedDirichletPrior` — the two-branch inbreeding mixture.**  ☐
+**B2. `MarginalizedDirichletPrior` — the two-branch inbreeding mixture.**  ✅
 §3.2's mixture over the primitive: `logsumexp` on rows where `homozygous_allele_for` names an
 allele, `log(1 − F)` alone elsewhere. **The homozygous test is the table's precomputed lookup,
 consumed — never an inline comparison** (the one function the above-diploidy spec will change).
@@ -156,7 +161,9 @@ dominance (`α × 10⁶` at fixed ratio), the row converges to
 
 ### Milestone C — the per-sample concentration
 
-**C1. `sample_concentration`.**  ☐
+**C1. `sample_concentration`.**  ✅ *(shipped as `fill_sample_concentration`, taking two checked
+copy-count types rather than bare slices — both departures recorded in the step's report and owed
+to arch §3.1)*
 `α'_s(a) = seed(a) + max(0, cohort − own)` filling caller scratch — the port of
 `leave_one_out_alpha` ([`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin
 [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs), identical
@@ -172,14 +179,20 @@ into its prior and nothing crashes; tests 8 and 9 are the oracle, green before a
 
 ### Milestone D — the SNP/indel seed: the projection
 
-**D1. The exact expected spectrum, in closed form.**  ☐
+**D1. The exact expected spectrum, in closed form.**  ✅ *(shipped as `fill_expected_spectrum`,
+then made about 12× faster at no measurable cost — `N^2.45` rather than `N^2.95`. **D2 can
+therefore be built as spec §4.1 writes it**, over every class. See the step's report and
+`doc/devel/ng/reports/spectrum_projection_cost_2026-08-22.md`. *A fit turned out to cost 11.8
+minutes at 3,200 samples rather than the 2.6 that report predicts: 399 predictions against the 160
+it assumes, each averaging 1.78 s inside a fit against 0.96 s at the neutral pair, where the
+branch-tail trim drops more splits (measured at D2).*)*
 The function that predicts a candidate `(α_ref, α_alt)`'s allele-count class probabilities at
 `2N` chromosomes under **§3.2's two-branch sampling at the panel's `F`** — used twice: inside the
 projection's objective, and to build the tests' targets. Closed form; nothing simulated.
 Property test: the class probabilities sum to 1 across `N`, `θ`, `F` grids. *Depends:* B2 (the
 two-branch sampling is the mixture's). *Source:* spec §4.1; arch §4.
 
-**D2. `project_spectrum_seed`.**  ☐
+**D2. `project_spectrum_seed`.**  ✅
 Maximum-likelihood fit of D1's predicted class probabilities to the fitted spectrum's class
 weights, over **all** classes including monomorphic, via
 [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) — a
@@ -192,10 +205,10 @@ closed form**: a neutral spectrum projects to `(1, θ)` at several panel sizes (
 independent-chromosome projection returns `α_ref ≈ 0.91 / 0.86` (test 6, the test that holds the
 two-branch requirement in place); at `n = 1` the pair is `(1, θ)` with no test of `n` — the only
 branch is on the spectrum being absent (test 7). **Own commit, do not bundle** — a projection
-biased by independent-chromosome sampling is 9–14% off on `α_ref` at tomato's `F` and nothing
-crashes; tests 5–7 are the oracle. *Depends:* D1. *Source:* spec §4.1; arch §4.
+biased by independent-chromosome sampling is 12–14% off on `α_ref` at tomato's fitted `F` of 0.8
+to 0.9 (8.6% as far down as `F = 0.6`) and nothing crashes; tests 5–7 are the oracle. *Depends:* D1. *Source:* spec §4.1; arch §4.
 
-**D3. `seed_for_locus`.**  ☐
+**D3. `seed_for_locus`.**  ✅ *(shipped as `fill_locus_concentration`)*
 Expand the run's pair onto one locus's table: `α_ref` first, the ALT total split evenly across
 the locus's alternative alleles, floored at `MIN_ALT_CONCENTRATION` — the shape of
 `alpha_from_diversity` ([`genetics.rs:214`](../../../../src/genetics.rs)) with the pair as input
@@ -208,11 +221,14 @@ total polymorphism as a biallelic one. *Depends:* D2. *Source:* spec §4; arch �
 
 ### Milestone E — the STR seed
 
-**E1. `ssr_seed` — the shape ported, the total new.**  ☐
+**E1. `ssr_seed` — the shape ported, the total new.**  ✅ *(shipped as `fill_ssr_seed`, with the
+two scalars as checked types in `ng/types.rs` and the fallback decay as
+`SeedDecayPerRepeat::FALLBACK`; the refusal withholds the concentration rather than marking a
+returned one — all three recorded in arch §5 and the step's report)*
 Geometric decay from the cohort's modal repeat count (shape of `g0_pseudocounts`,
 [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs), floored so a far
 allele stays recoverable), scaled so the prior's own implied gene diversity equals the measured
-`D`: `Σα = D / (1 − c − D)`, `c` the shape's Simpson index. `DEFAULT_G0_FALLBACK_DECAY = 0.5`
+`D`: `Σα = D / (1 − c − D)`, `c` the shape's Simpson index. `SeedDecayPerRepeat::FALLBACK = 0.5`
 imported and **renamed for what it decays** (the genotype prior's pseudocount decay — not the
 stutter one-step share; the sibling spec's §4.2 trap). Where `D ≥ 1 − c`, return
 `SsrSeedOutcome::DiversityUnreachable { measured, ceiling }` — **reported, never silently
@@ -224,7 +240,10 @@ refusal fires exactly at the bound (test 11). **Own commit, do not bundle** — 
 defect here was a prior asserting two-fifths of the measurement, silently; test 10 is the oracle.
 *Depends:* A2. *Source:* spec §5.1; arch §5.
 
-**E2. `seed_length_distribution`.**  ☐
+**E2. `seed_length_distribution`.**  ✅ *(shipped as `fill_seed_share_per_candidate` — the buffer
+holds one entry per candidate, which is not a distribution over lengths wherever a locus has more
+candidates than lengths; the gap and its size are recorded as `OPEN:` in arch §5 and on
+`SsrContamination` in `../arch/read_likelihoods.md` §4.1)*
 The seed shape normalised to a distribution over tract lengths — the one export the likelihood's
 STR contamination stand-in composes, defined here so the prior's shape has one spelling. Test:
 sums to 1; proportional to E1's weights. *Depends:* E1. *Source:* arch §5;
@@ -235,7 +254,9 @@ sums to 1; proportional to E1's weights. *Depends:* E1. *Source:* arch §5;
 
 ### Milestone F — the comparator
 
-**F1. `PlugInWrightPrior`.**  ☐
+**F1. `PlugInWrightPrior`.**  ✅ *(shipped with `name()` added to `GenotypePriorModel` — the
+method step B2 deferred to here, whose `Debug` stand-in never compiled because the trait has no
+`Debug` supertrait)*
 Hardy–Weinberg at the plug-in frequency `α'_s(a)/Σα'_s` with the same `F` mixture, behind the
 same trait — kept **only** for the spec's change measurements and the production differential,
 never a shipping default. It runs on **the same seed** as the marginalized prior: a test pins

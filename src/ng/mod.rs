@@ -12,7 +12,10 @@
 //! pre-pass ([`parameter_estimation`] — the SNP/indel path, built milestone by
 //! milestone); and the calling run ([`run`] — so far the cohort merge's parameters,
 //! the first piece of the stage that turns the samples' observations into cohort
-//! observations in parallel).
+//! observations in parallel); and steps 6 to 9, the calling loop and what it drives
+//! ([`calling`] — so far the vocabulary its four sub-modules will share, and the first
+//! of the four: step 8's [`calling::genotype_prior`], as its folder and the four files
+//! the plan fills).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -21,6 +24,22 @@
 //! **copies the code and changes its own version** (owner, 2026-07-16); reuse is for
 //! what costs production nothing. Winning steps are ported back only after the
 //! experiments ng exists to run have decided something.
+//!
+//! **A test may read production as an oracle, and two do** — [`scanner_parity`]
+//! against `src/ssr/`, [`calling::genotype_table_parity`] against `src/var_calling/`.
+//! Both are `#[cfg(test)]`, so nothing shipped depends on production; the direction
+//! that matters is the other one, and production still depends on nothing in ng. A
+//! port's whole claim is that it agrees with what it was ported from, and only
+//! production can settle that.
+//!
+//! **One such oracle cost production one line, and it is the only edit ng has made to
+//! a frozen tree.** `posterior_engine.rs` declared `mod shape;` privately, which put
+//! `GenotypeShape` — the thing `calling::genotype_table` is a port *of* — out of reach
+//! of any test that could check the port. It is now `pub(crate)` (owner, 2026-08-21).
+//! No behaviour moved and nothing was re-exported. The rule this bends is worth stating
+//! precisely rather than quietly: **ng may widen a production item's visibility so a
+//! parity test can see it, and may change nothing else**; anything that would alter what
+//! production computes is still a copy-into-ng, not an edit.
 //!
 //! **The heaviest instance of that rule so far is
 //! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`
@@ -38,6 +57,7 @@
 mod scanner_parity;
 
 pub mod alignment;
+pub mod calling;
 pub mod locus_generation;
 pub mod parameter_estimation;
 pub mod raw_chrom_reader;

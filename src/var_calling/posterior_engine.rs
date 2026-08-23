@@ -51,7 +51,12 @@
 
 pub mod backends;
 mod interp;
-mod shape;
+/// `pub(crate)` for one reader outside this engine: ng's `GenotypeTable` is a port of
+/// [`shape::GenotypeShape`], and its parity test compares the two value for value
+/// (`src/ng/calling/genotype_table_parity.rs`). Widening the declaration is the whole
+/// of that change — nothing here is re-exported, and no shipping code outside
+/// `posterior_engine` names it (owner, 2026-08-21).
+pub(crate) mod shape;
 
 use std::fmt;
 

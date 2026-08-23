@@ -42,8 +42,8 @@ no-import rule between them). A folder of its own because the step has a real ba
 src/ng/calling/genotype_prior/
 ├── mod.rs                   – GenotypePriorModel trait, Concentration, the per-sample builder
 ├── dirichlet_multinomial.rs – the ported log-prior primitive + MarginalizedDirichletPrior
-├── plug_in.rs               – PlugInWrightPrior, the comparator impl
-├── seed_spectrum.rs         – SNP/indel starting point: the spectrum projection (spec §4.1)
+├── hardy_weinberg.rs        – PlugInWrightPrior, the comparator impl
+├── seed_generic.rs          – SNP/indel starting point: the spectrum projection (spec §4.1)
 └── seed_ssr.rs              – STR starting point: geometric shape, total from gene diversity (spec §5.1)
 ```
 
@@ -88,12 +88,22 @@ this module's.
 /// histogram route's mean); fallback DEFAULT_SPECIES_DIVERSITY_FALLBACK below.
 pub struct ExpectedHeterozygosity(f64);   // try_new / get
 
-/// Species-range fallback for a run with no fitted diversity, ~human nucleotide
-/// diversity. Weakly informative, overridable; a run on it must say so in its output
-/// (spec §4). Port of production's DEFAULT_DIVERSITY_PRIOR
-/// (src/var_calling/diversity.rs:78).
-pub const DEFAULT_SPECIES_DIVERSITY_FALLBACK: f64 = 1e-3;   // unitless heterozygosity
+impl ExpectedHeterozygosity {
+    /// Species-range fallback for a run with no fitted diversity, ~human nucleotide
+    /// diversity. Weakly informative, overridable; a run on it must say so in its output
+    /// (spec §4). Port of production's DEFAULT_DIVERSITY_PRIOR
+    /// (src/var_calling/diversity.rs:78).
+    pub const SPECIES_FALLBACK: Self = Self(1e-3);   // unitless heterozygosity
+}
 ```
+
+**A value of the type, not a free `f64` — decided at implementation, 2026-08-21.** As a loose
+float the constant constructs an `ErrorRate`, an `InbreedingF` and a `GenotypeFrequency` just as
+happily, because `1e-3` is a legal value of each — which is the confusion the four separate
+`[0, 1]` scalars in `types.rs` exist to prevent, and it would be the only *diversity* constant in
+the shared vocabulary for an STR-path author to reach for. Precedent in the same file:
+`AlleleId::REFERENCE`. Report:
+[`ng_calling_prior_a1_fixes_2026-08-21.md`](../../reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
 
 `InbreedingF` already exists ([`types.rs:388`](../../../../src/ng/types.rs)) **but its constructor
 accepts `1.0` and the spec requires `[0, 1)`** — the ceiling is a property of the type, not of one
@@ -127,6 +137,14 @@ drives the mixture function on a raw value through a test-only path, not through
 pub struct Concentration<'a>(&'a [f64]);   // borrow of scratch, checked in debug
 ```
 
+**It, `PriorRow` (§3.2) and `SpectrumSeed` (§2.3) live in a private `mod checked` inside
+`genotype_prior/mod.rs`, re-exported — decided at implementation, 2026-08-21, and the nesting is
+load-bearing.** A private field is visible to a module's *descendants*, and the four sub-modules
+here are descendants: with these types declared directly in `genotype_prior`, a struct literal in
+`dirichlet_multinomial.rs` builds one field by field and skips the constructor. Measured — it
+compiled and ran. One level of nesting makes those four siblings instead, and the literal fails
+with `error[E0451]`.
+
 ### 2.3 The seed — per run (SNP/indel) or per locus (STR), with its provenance
 
 ```rust
@@ -135,7 +153,19 @@ pub struct Concentration<'a>(&'a [f64]);   // borrow of scratch, checked in debu
 /// indistinguishable (spec §4, §4.1).
 pub enum SeedRegime {
     /// Read off the pre-pass's fitted spectrum by the §4.1 projection.
-    FittedSpectrum { regularizer_site_weight: f64, data_dominated: bool },
+    /// `data_dominated` is the PANEL-WIDE comparison, and spec §4.1 is explicit that a
+    /// panel-wide ratio is the wrong number to quote as reassurance — the tail is where
+    /// the regularizer binds. The per-class ratio is the pre-pass's to emit beside its
+    /// spectrum (§4); this carries the aggregate and claims nothing more.
+    /// `spectrum_match` says HOW FAR the pair is from what was measured, and whether the
+    /// search ran out of range before it got there — decided by the owner at Checkpoint D,
+    /// 2026-08-22, because a run on a compromised starting point and one that matched were
+    /// otherwise identical in the output.
+    FittedSpectrum {
+        regularizer_site_weight: f64,
+        data_dominated: bool,
+        spectrum_match: SpectrumMatch,
+    },
     /// No spectrum emitted (absent below the panel-size floor, or one sample):
     /// the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE, never on cohort
     /// size (spec §4.1).
@@ -144,8 +174,26 @@ pub enum SeedRegime {
     FallbackDiversity,
 }
 
-/// The SNP/indel seed: two numbers for the whole run (per variant class — Q1 keeps the
-/// class argument even while both classes pass the same θ, spec §4.2).
+/// How far the fit's pair is from the measured spectrum. REPORTED, never returned as though it
+/// had matched — the rule spec §12 test 11 sets for the STR seed, applied here.
+pub struct SpectrumMatch { divergence_nats: f64, at_search_limit: bool }   // both by accessor
+
+impl SpectrumMatch {
+    /// The Kullback-Leibler divergence of the measurement from the fitted pair's prediction,
+    /// in nats. ZERO means the family reproduced the measurement exactly. Free: the fit's
+    /// objective is already the measurement's own entropy minus this, so it is the winning
+    /// score subtracted from that entropy and costs no prediction.
+    fn divergence_nats(self) -> f64;
+    /// The pair sits on the edge of the range searched, so a better one may lie outside it.
+    /// Carried separately because it is not derivable from the divergence — a pair pinned
+    /// against a bound can still predict the measurement well, and a fully invariant cohort
+    /// reaches this legitimately.
+    fn at_search_limit(self) -> bool;
+}
+
+/// The SNP/indel seed: two numbers for the whole run. When Q1 splits the estimate by
+/// variant class this carries both alternative totals and `fill_locus_concentration`
+/// picks between them, so the run still holds one seed (spec §4.2, Q1).
 pub struct SpectrumSeed {
     pub alpha_ref: f64,            // 1.0 on a neutral panel — the fit's landing point, not a knob
     pub alpha_alt_total: f64,      // θ on a neutral panel; shared across the ALT alleles per locus
@@ -158,17 +206,38 @@ pub struct SpectrumSeed {
 ### 3.1 The per-sample concentration (general — both paths, identical)
 
 ```rust
+/// The two copy-count arrays, each checked when it is built. They borrow; they own
+/// nothing, so wrapping the loop's buffers costs no allocation.
+pub struct CohortAlleleCopies<'a>(/* private */);
+pub struct SampleAlleleCopies<'a>(/* private */);
+
 /// α'_s(a) = seed(a) + max(0, cohort expected copies of a − this sample's own).
 /// The max(0,·) guards float noise only (spec §6). Fills `out`; allocates nothing.
-/// At one sample the two slices are equal and out == seed, bit for bit — no branch
+/// At one sample the two arrays are equal and out == seed, bit for bit — no branch
 /// (spec §6; pinned by test 8 of spec §12).
-pub fn sample_concentration(
+pub fn fill_sample_concentration(
     seed: &[f64],
-    cohort_expected_copies: &[f64],   // the loop's ExpectedAlleleCopies, as a slice
-    own_expected_copies: &[f64],
+    cohort_copies: CohortAlleleCopies<'_>,   // wraps the loop's ExpectedAlleleCopies
+    own_copies: SampleAlleleCopies<'_>,
     out: &mut [f64],
 );
 ```
+
+**Two changes from the sketch, decided at implementation and owner-authorised 2026-08-22.**
+
+**The two copy-count arguments are checked types, not bare slices**, for the reason §3.2's checked
+bundle exists: the compiler could not otherwise tell them apart. They are the same shape and the
+same unit, their difference is the whole of the leave-one-out term, and **passed the wrong way
+round the function returns the bare seed at every allele** — the cohort's evidence gone, nothing
+raised in release, and the debug guard blind to it at one sample where the two arrays are equal by
+construction. Measured on the flat-slice version; with the types it is `error[E0308]`. The types
+also carry a debug check that the entries are finite and non-negative, which the flat version had
+nowhere: `f64::max` returns the other operand on a `NaN`, so a `NaN` copy count silently became a
+zero difference and left the allele carrying nothing but its seed.
+
+**`fill_sample_concentration`, not `sample_concentration`** — it fills a caller buffer and returns
+nothing, as the module's three other buffer-fillers do, and *sample* reads as a verb in a
+statistics context.
 
 ### 3.2 The row — the step-8 seam (the marginalized/plug-in bake-off)
 
@@ -177,16 +246,32 @@ pub fn sample_concentration(
 /// constant. Flat views (counts, coefficients, homozygous lookup) come from the
 /// loop's GenotypeTable (calling_em_loop.md §2); taking them flat is what keeps this
 /// module free of a back-reference into inference/ (spec §9).
+/// The six buffers one row call reads and writes, with every shape check already run —
+/// `new` is the only constructor and it runs them, so no implementation is reachable
+/// with mis-matched buffers. Borrow-only: nothing allocates.
+pub struct PriorRow<'a> { /* private */ }
+
+impl<'a> PriorRow<'a> {
+    pub fn new(
+        concentration: Concentration<'a>,           // α'_s, parallel to the allele table
+        genotype_allele_counts: &'a [u32],          // n_genotypes × n_alleles, row-major
+        log_multinomial_coeffs: &'a [f64],          // ln C(ploidy; counts), per genotype
+        homozygous_allele_for: &'a [Option<AlleleId>], // the ONE homozygous test (spec §3.3)
+        per_allele_scratch: &'a mut [f64],          // working space, one entry per allele
+        out: &'a mut [LogProb],
+    ) -> Self;
+    // + by-value accessors for the four views, and scratch_and_out(&mut self)
+}
+
 pub trait GenotypePriorModel {
-    fn genotype_log_priors(
-        &self,
-        concentration: &[f64],                     // α'_s, parallel to the allele table
-        genotype_allele_counts: &[u32],            // n_genotypes × n_alleles, row-major
-        log_multinomial_coeffs: &[f64],            // ln C(ploidy; counts), per genotype
-        homozygous_allele_for: &[Option<AlleleId>],// the ONE homozygous test (spec §3.3)
-        inbreeding: InbreedingF,
-        out: &mut [LogProb],
-    );
+    fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF);
+    /// Which prior this is, for a run to record beside the genotypes it produced — the seam
+    /// exists to compare two, and an arm without a label is a number nobody can act on.
+    /// Added at F1. NOT `Debug`: B2 recorded that deriving `Debug` would do in the meantime,
+    /// and it never worked — the trait has no `Debug` supertrait, so `Box<dyn
+    /// GenotypePriorModel>` does not implement it. Not the seed's provenance either:
+    /// `SeedRegime` and `SpectrumMatch` describe the input the two impls SHARE.
+    fn name(&self) -> &'static str;
 }
 
 /// Default: §3.1's Dirichlet-multinomial with §3.2's two-branch inbreeding mixture
@@ -198,6 +283,18 @@ pub struct MarginalizedDirichletPrior;
 /// production differential — never a shipping default.
 pub struct PlugInWrightPrior;
 ```
+
+**A checked bundle rather than eight flat parameters — decided at implementation, 2026-08-21,
+owner-authorised 2026-08-22.** The sketch this replaces passed the six buffers directly and put
+the shape checks in a helper the trait's prose asked every implementation to call. Three
+independent review agents reached the same conclusion: those are one defect, because a trait
+cannot require that a method body opens with a particular call — measured, deleting the call left
+every test passing. **The contract is unchanged** and that is what §7's decision is about: the
+same six caller-owned buffers, nothing allocated, the same flat views, no back-reference into the
+loop. **The per-allele scratch is the one genuinely new argument** — spec §8 requires scratch
+"sized by allele count and genotype count", and without it the ported primitive allocates a `Vec`
+of `lgamma(α_a)` per call. At a diploid six-allele locus (21 genotypes, 36 non-zero allele slots)
+keeping it costs 42 `lgamma` calls per sample per pass against 72.
 
 **Contract.** Same inputs → bit-identical rows at any thread count. The homozygous branch reads
 `homozygous_allele_for` and nothing else decides homozygosity — that lookup is the “one function”
@@ -223,27 +320,61 @@ The seed comes from the pre-pass's fitted spectrum, projected onto `(α_ref, α_
 /// Project the fitted spectrum onto the two-parameter family — maximum-likelihood fit
 /// of predicted class probabilities to the fitted spectrum's class weights, over ALL
 /// classes including monomorphic, predicting with §3.2's two-branch sampling at the
-/// panel's F (independent chromosomes bias α_ref down 9–14% at tomato's F; spec §4.1).
+/// panel's F. Independent chromosomes bias α_ref down 8.6% at F = 0.6, 12.1% at 0.8 and
+/// 14.0% at 0.9, measured on 26 individuals at tomato's diversity (spec §4.1).
 /// A change of representation, not a second estimate. `None` spectrum → NeutralShape.
 pub fn project_spectrum_seed(
-    spectrum: Option<&FittedSpectrum>,   // absent below the pre-pass's panel-size floor
-    diversity: ExpectedHeterozygosity,
+    spectrum: Option<FittedSpectrum<'_>>, // absent below the pre-pass's panel-size floor
+    diversity: Option<ExpectedHeterozygosity>, // None → FallbackDiversity; the regime is
+                                         // derived here rather than asserted by a caller
     panel_inbreeding: InbreedingF,
-    chromosomes: u32,                    // 2N of the panel the spectrum was fitted at
-    class: VariantClass,                 // Substitution | InsertionOrDeletion — Q1's argument
-) -> SpectrumSeed;
+) -> SpectrumSeed;                       // no VariantClass: the split lands one step later
 
-/// Expand the run's two numbers to one locus's table: α_ref first, the ALT total split
-/// evenly across the locus's alternative alleles, floored (spec §4). Port of
+/// Expand the run's two numbers over one locus's alleles: α_ref first, the ALT total
+/// split evenly across the locus's alternative alleles, floored (spec §4). Port of
 /// alpha_from_diversity (genetics.rs:214) with the pair as input instead of hard-coded.
-pub fn seed_for_locus(seed: &SpectrumSeed, allele_count: usize, out: &mut [f64]);
+/// Named for what it does, like the module's other two fillers.
+pub fn fill_locus_concentration(
+    seed: SpectrumSeed,                  // Copy, 24 bytes — by value, like its accessors
+    class: VariantClass,                 // Q1's argument here too; see below
+    allele_count: usize,                 // checked against out.len(): `out` is scratch the
+    out: &mut [f64],                     // loop slices, so its length is a slicing decision
+);
 ```
 
-The projection's optimiser reuses the pre-pass's fitting machinery
-([`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs)) — a
-two-parameter fit needs nothing new. Census-site exclusion on depth, the regularizer sweep, and
-the per-class reporting are the **pre-pass's** obligations (spec §4.1's traps); this module only
-carries `SeedRegime` through to the output.
+**The panel size is not an argument to the projection**: `2N + 1` class weights already fix `N`,
+and a second argument is a second place for it to disagree. `FittedSpectrum` is a **borrowed view
+over the class weights** plus the regularizer's weight and the variable-site count — decided at
+implementation, 2026-08-22, and the answer to §8's open item. Neither `FrequencyDensity`
+([`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs)) nor a gather wrapper is
+it: the first is a density over the *population's* allele frequency, and the projection matches a
+*panel's* allele counts.
+
+**The projection's optimiser is not `fit_by_multistart`, and that is a measurement.** That driver
+scores one cell at a time through `NoiseModel::append_genotype_likelihoods`, which takes `&self`
+and so cannot cache; the natural cell here is one allele-count class, and every class would
+rebuild the whole spectrum — 6,401 predictions where one is needed at 3,200 individuals, about 1.7
+hours per candidate against 0.96 seconds. It also has no notion of a search direction that is not
+an axis, and this surface is a ridge whose direction depends on the panel size, so the search
+sweeps three: the total concentration, `α_ref` alone and `α_alt` alone. What is reused is the
+driver's *shape* and its `SearchPrecision`. A fit is 399 predictions and 11.8 minutes at 3,200
+individuals, once per run.
+
+**Which end owns a SNP-versus-indel split — settled by the owner, 2026-08-23: the per-locus
+expansion.** `project_spectrum_seed` reads the *shape* of variation off the panel's allele counts,
+which the pre-pass fits without separating the two classes; a class-specific *scale* belongs where
+the run's total is shared out over a locus's alleles. So the class argument sits on
+`fill_locus_concentration` alone, and when the pre-pass measures two diversities `SpectrumSeed`
+carries both totals — the run still holds one seed, which is what the calling loop's frozen
+parameters assume.
+
+**Still `OPEN:` (spec Q3's sibling under Q1): a locus carrying one alternative of each kind.** One
+class per locus cannot express it. The classes are derivable from `CandidateAlleles`, which hold
+the bases, so the change lands in one function when Q1 is settled.
+
+Census-site exclusion on depth, the regularizer sweep, and the per-class reporting are the
+**pre-pass's** obligations (spec §4.1's traps); this module only carries `SeedRegime` through to
+the output.
 
 ## 5. The STR path
 
@@ -254,40 +385,116 @@ side already has:
 /// The STR seed: geometric decay from the cohort's modal repeat count (the shape,
 /// production's G₀), scaled so the prior's own implied gene diversity equals the
 /// measured D:  Σα = D / (1 − c − D),  c the shape's Simpson index (spec §5.1).
-pub fn ssr_seed(
+pub fn fill_ssr_seed<'a>(
     candidate_repeat_counts: &[u32],     // parallel to the locus's CandidateAlleles
     modal_repeat_count: u32,             // the cohort's mode at this locus
-    decay: f64,                          // fitted per group of loci; fallback DEFAULT_G0_FALLBACK_DECAY
-    gene_diversity: f64,                 // D, the pre-pass's STR diversity — never the SNP θ
-    out: &mut [f64],
-) -> SsrSeedOutcome;
+    decay: SeedDecayPerRepeat,           // fitted per group of loci; fallback ::FALLBACK
+    gene_diversity: RepeatGeneDiversity, // the pre-pass's STR diversity — never the SNP θ
+    out: &'a mut [f64],
+) -> SsrSeedOutcome<'a>;
 
-pub enum SsrSeedOutcome {
-    Seeded,
+#[must_use]
+pub enum SsrSeedOutcome<'a> {
+    Seeded(Concentration<'a>),
     /// D ≥ 1 − c: no total reproduces the measurement — the geometry cannot hold it.
-    /// REPORTED, never silently rescaled (spec §5.1, test 11). Until Q2 settles the
-    /// policy, the loop uses the ceiling total and this marker travels onto the locus's
-    /// output through the provenance channel (read_likelihoods.md §8).
-    DiversityUnreachable { measured: f64, ceiling: f64 },
+    /// REPORTED, never silently rescaled (spec §5.1, test 11). No Concentration comes
+    /// back; what does is the buffer holding the normalised shape, so a caller with a
+    /// policy for these loci scales it in place and wraps the result itself. Until Q2
+    /// settles that policy the loop's provisional one is a ceiling total, and this
+    /// marker travels onto the locus's output through the provenance channel
+    /// (read_likelihoods.md §1.4).
+    DiversityUnreachable { measured: f64, ceiling: f64, shape: &'a mut [f64] },
 }
-
-/// Coded fallback decay for a period with no fitted value — the genotype prior's
-/// pseudocount decay, NOT the stutter one-step share (spec sibling §4.2's trap).
-/// Source: production's DEFAULT_G0_FALLBACK_P (ssr/cohort/param_estimation.rs:167).
-pub const DEFAULT_G0_FALLBACK_DECAY: f64 = 0.5;   // unitless, per repeat unit of offset
 ```
+
+**Two departures from the sketch above, both shipped at E1 and both recorded here rather than in
+the code alone.**
+
+- **The two scalars are checked types in `ng/types.rs`, not bare `f64`** — `RepeatGeneDiversity`
+  and `SeedDecayPerRepeat`, beside `ExpectedHeterozygosity`, with `try_new` returning
+  `DomainError` like every other measured scalar the caller consumes. They are the pre-pass's
+  outputs, so a degenerate fit returning a `NaN` is a run to refuse with a message rather than a
+  process to abort — which is why they are *not* in `genotype_prior`'s `checked` module with its
+  panicking constructors. The coded fallback decay is `SeedDecayPerRepeat::FALLBACK`, an
+  associated constant following `ExpectedHeterozygosity::SPECIES_FALLBACK`, rather than a
+  free-standing `DEFAULT_G0_FALLBACK_DECAY`: as a loose `f64` it is exactly as constructible into
+  a stutter one-step share as into this, which is the trap the rename was for. Its doc carries
+  that trap verbatim.
+**A distance and not a verdict — revised 2026-08-23, after review.** The first version of
+`SpectrumMatch` was an enum whose `Reproduced` variant claimed something it never checked: it was
+set whenever the search finished inside its range and no allele-count class came back at exactly
+zero, neither of which measures how close the answer is. Measured on a panel of 26 individuals
+whose alleles sit at two middling frequencies, the fitted pair and the measurement shared **4
+parts in 100** of their mass and the marker said they matched. It now reports the distance, in
+nats, and names no threshold: nobody has measured how far off the pair has to be before a genotype
+moves, so classifying was the part that had to go rather than the checking. Reference values from
+the module's own tests: **1.1e-9 nats** where the family can hold the shape, **0.481** and
+**3.153** on two it cannot. The `F = 1` case that the old `Unreproducible` variant caught now
+appears as a divergence above 10 nats, because the objective charges the impossible classes
+`ln(PROBABILITY_FLOOR)`.
+
+- **The refusal withholds the concentration where `SpectrumMatch` marks a returned value**, and
+  the difference is deliberate. The spectrum fit runs **once per run** and the run cannot start
+  without a seed, so withholding would leave the caller nothing to do but invent one; a marker on
+  a returned value is the right shape there. The STR refusal is **per locus** and the loop can
+  pick a policy for that locus and carry on, so withholding costs nothing and stops a caller
+  falling into a buffer it was never handed. Neither shape makes the mistake unrepresentable —
+  `Concentration::new` is public and has to be, because the provisional ceiling-total policy needs
+  it.
+
+**One case the rule above does not cover: a locus with one candidate length.** Its shape has a
+Simpson index of exactly 1 and therefore a ceiling of 0, so `D ≥ 1 − c` would refuse every
+monomorphic tract whatever the measurement, including a measurement of zero. E1 seeds it at
+`ALPHA_REF` instead: one length is one genotype, whose prior probability is 1 at any positive
+concentration, so no total can be wrong there.
 
 **Two alleles on one rung** (spec §5.2): v1 gives each same-length spelling the rung's full
 weight — production's behaviour — because the division needs the interrupted-repeat work to say
 how to weight it. `OPEN:` spec Q3; the builder takes the counts, not the sequences, precisely so
 the change lands in one function.
 
-**One export the likelihood composes** (its §4.5.1 contamination stand-in): the seed shape
-normalised to a distribution over tract lengths —
-`pub fn seed_length_distribution(candidate_repeat_counts, modal, decay, out: &mut [f64])`.
+**One export the likelihood composes** (its §4.5.1 contamination stand-in): the seed's shape
+before it is scaled, normalised to sum to one —
+
+```rust
+pub fn fill_seed_share_per_candidate(
+    candidate_repeat_counts: &[u32], modal_repeat_count: u32,
+    decay: SeedDecayPerRepeat, out: &mut [f64],
+);
+```
+
 Computed once per locus by the loop and handed into the STR scoring context
-([`read_likelihoods.md`](read_likelihoods.md) §4); defined here so the prior's shape has one
-spelling.
+([`read_likelihoods.md`](read_likelihoods.md) §4.1); defined here so the prior's shape has one
+implementation behind both consumers.
+
+**`OPEN:` it is per candidate, and the term it feeds is per observed length.** This sketch called
+it `seed_length_distribution`, and E2 shipped it under a name that says what the buffer actually
+holds, because the two are not the same thing wherever a locus has more candidates than lengths.
+The mixture's third term is `c · seed(o)` with `o` an observation, and three cases separate the
+two supports:
+
+- **two candidates of one length each take the rung's full share** — deliberate as a
+  concentration and open as spec Q3, but read as a claim about lengths it double-counts:
+  measured at `0.8` for the modal length against the geometry's own `0.667`, on a tract with the
+  mode spelled twice and one length above it, at the fallback decay;
+- **the candidate set is post-prune**, while the mixture's sibling uniform term is spread over
+  every length the stutter model can reach from a candidate — a strictly larger support;
+- **a censored read carries no length at all**, only a lower bound.
+
+None of the three is the prior's to settle, and the likelihood step should meet them as a
+decision rather than at the point of use. `SsrContamination::length_distribution`
+([`read_likelihoods.md`](read_likelihoods.md) §4.1) is the field that has to say which support it
+means.
+
+**A caller that has just built the seed already holds this shape** and should not rebuild it: on
+a seed it is the concentration divided by its own total, and on a refusal it is exactly the
+buffer `SsrSeedOutcome::DiversityUnreachable` hands back. The export is for a caller that wants
+the shape without the seed.
+
+**It does not survive a candidate being added.** A discovery round appends candidates mid-locus
+([`calling_em_loop.md`](calling_em_loop.md) §5), and a frozen candidate-parallel buffer is then
+one entry short with nothing to raise, because by construction it is not refilled. Discovery is
+off by default; a loop that turns it on has to rebuild this.
 
 ## 6. Reconciliation with existing code
 
@@ -295,13 +502,13 @@ Every row read on 2026-08-21.
 
 | ng name | existing code | action |
 |---|---|---|
-| `dirichlet_multinomial_log_priors` port | [`genetics.rs:127`](../../../../src/genetics.rs) | **port as-is**, one change: fill a caller slice instead of returning `Vec` (spec §8 no-alloc) |
+| `fill_random_mating_log_priors` (the port) | [`genetics.rs:127`](../../../../src/genetics.rs) | **port as-is**, one change: fill a caller slice, and put the per-allele `lgamma(α_a)` baseline in caller scratch, instead of returning `Vec` and allocating a second one (spec §8 no-alloc). Renamed from `dirichlet_multinomial_log_priors` at implementation: the file carries the distribution, the function carries which half of §3.2's mixture the values are, and it fills rather than returns. **Production has a second, private copy of the same mathematics** — `fill_log_indep_per_g_from` ([`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs)), which the SNP/indel engine runs and which already takes a caller's `out` and `lgamma_alpha`. It associates differently and disagrees with the shared primitive on 112 of 492 measured genotype values, by at most one unit in the last place; ng's port is bit-identical to the shared one. |
 | `PROBABILITY_FLOOR`, `MIN_ALT_CONCENTRATION` | [`genetics.rs:18`](../../../../src/genetics.rs), [`genetics.rs:187`](../../../../src/genetics.rs) | import with their reasoning |
 | `seed_for_locus` | `alpha_from_diversity`, [`genetics.rs:214`](../../../../src/genetics.rs); `ALPHA_REF` [`:179`](../../../../src/genetics.rs) | **shape ported, source not** — the pair comes from the projection; `(1, θ)` is where a neutral panel lands |
 | the inbreeding mixture | [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) (`fill_log_prior_per_g_homogeneous`), STR port [`em.rs:290`](../../../../src/ssr/cohort/em.rs) | port as §3.2's two-branch form, inside `MarginalizedDirichletPrior` |
 | `sample_concentration` | `leave_one_out_alpha`, [`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin at [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs) | port (identical arithmetic in both) |
-| `ssr_seed` shape | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
-| `DEFAULT_G0_FALLBACK_DECAY` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, renamed for what it decays |
+| `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
+| `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, **retyped** and renamed for what it decays |
 | `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, [`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs) | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
 | `project_spectrum_seed` | — (production never fitted a spectrum) | **new**; optimiser reuses [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) |
 | `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |
@@ -314,7 +521,13 @@ Every row read on 2026-08-21.
 ## 7. Design decisions — decided
 
 - **Marginalized is the default and plug-in is a comparator behind the same trait — decided.**
-  One seam (`GenotypePriorModel`), two impls; the recipe selects. Production ships plug-in default
+  One seam (`GenotypePriorModel`), two impls; the recipe selects. **The trait is object-safe and
+  the selection was written and run at F1** — `Box<dyn GenotypePriorModel>` and
+  `Arc<dyn GenotypePriorModel + Send + Sync>` both work, the second across a worker boundary, so
+  the loop's own field should carry `+ Send + Sync` rather than the bare `Box<dyn …>`
+  [`ng_step_interfaces.md`](ng_step_interfaces.md) sketches. **What does not exist is the recipe**:
+  no plan builds one, and the measurement the comparator is kept for also needs the loop and a
+  specification for candidate selection. Production ships plug-in default
   behind an env toggle ([`driver.rs:287`](../../../../src/ssr/cohort/driver.rs)); ng inverts that,
   and the comparator exists so spec §2.2's measurement stays re-runnable. Why: spec §2, §5.3.
 - **The prior takes flat slices, not the loop's types — decided.** Nothing allocates per sample per
@@ -340,8 +553,13 @@ Every row read on 2026-08-21.
   isolates it.
 - `OPEN:` the policy at `DiversityUnreachable` (spec Q2) — the outcome type is settled, the
   consumer's choice among the three candidate answers is not; provisional behaviour in §5.
-- Impl-time confirmations: the concrete `FittedSpectrum` type from the pre-pass cohort gather; the
-  exact scratch slot sizes shared with `CallingScratch`.
+- ~~Impl-time confirmation: the concrete `FittedSpectrum` type from the pre-pass cohort gather.~~
+  **Settled 2026-08-22 at step D2** — a borrowed view over the class weights; see §4.
+- ~~`OPEN:` which end of the SNP/indel path owns a class split (spec Q1).~~ **Settled 2026-08-23:
+  the per-locus expansion — §4.** What remains open under Q1 is a locus carrying one alternative
+  of each kind.
+  **The scratch slot the row function needs is settled: one `f64` per allele**, which is what the
+  ported primitive hoists (`lgamma(α_a)`, one per allele); `CallingScratch` owns it.
 
 ## Test & bench shape
 
