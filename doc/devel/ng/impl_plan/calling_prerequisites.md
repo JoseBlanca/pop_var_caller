@@ -179,7 +179,7 @@ stretch rather than the whole locus span**
 table). It changes **no locus's existence** — the variability filter still counts complete
 observations only on this path (§5.4.2).
 
-**C1. The carried type.**  ☐
+**C1. The carried type.**  ✅
 A partial row on `SampleSupport`: the witnessed stretch (offset + length, off `ReadWitness`), the
 bases over that stretch, `num_reads`, `q_sum`, and the read group (B's axis applies here too —
 the evidence view's `PartialObservation` is consumed per read group like everything else).
