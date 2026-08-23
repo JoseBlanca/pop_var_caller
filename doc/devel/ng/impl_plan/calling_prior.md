@@ -254,7 +254,9 @@ sums to 1; proportional to E1's weights. *Depends:* E1. *Source:* arch §5;
 
 ### Milestone F — the comparator
 
-**F1. `PlugInWrightPrior`.**  ☐
+**F1. `PlugInWrightPrior`.**  ✅ *(shipped with `name()` added to `GenotypePriorModel` — the
+method step B2 deferred to here, whose `Debug` stand-in never compiled because the trait has no
+`Debug` supertrait)*
 Hardy–Weinberg at the plug-in frequency `α'_s(a)/Σα'_s` with the same `F` mixture, behind the
 same trait — kept **only** for the spec's change measurements and the production differential,
 never a shipping default. It runs on **the same seed** as the marginalized prior: a test pins

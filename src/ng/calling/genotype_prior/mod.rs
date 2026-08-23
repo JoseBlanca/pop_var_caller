@@ -81,6 +81,7 @@ pub mod seed_generic;
 pub mod seed_ssr;
 
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
+pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{
     FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
 };
@@ -840,6 +841,28 @@ pub trait GenotypePriorModel {
     /// than taking the view itself is what keeps this module free of a back-reference into
     /// its caller (arch §0, §7).
     fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF);
+
+    /// Which prior this is, for a run to record beside the genotypes it produced.
+    ///
+    /// **The seam exists to compare two priors, and a result that cannot name which one produced
+    /// it is not auditable** — that is the whole of the reason. The measurement this module is
+    /// built to keep re-runnable is a difference between two arms
+    /// (`doc/devel/ng/spec/calling_priors.md` §2.2), and an arm without a label is a number
+    /// nobody can act on.
+    ///
+    /// **It is `name` rather than `Debug` because `Debug` did not work.** Step B2 deferred this
+    /// method to here and recorded that deriving `Debug` on the implementations would do in the
+    /// meantime, so that a `&dyn GenotypePriorModel` "can at least be printed". It cannot: the
+    /// trait has no `Debug` supertrait, so `Box<dyn GenotypePriorModel>` does not implement it and
+    /// the stand-in never compiled at the one call site that would have wanted it. Adding the
+    /// supertrait instead would put a formatting bound on every future implementation to get a
+    /// string this returns directly.
+    ///
+    /// **Not the seed's provenance, which is a different question.**
+    /// [`SeedRegime`] says where the *concentration* came from and [`SpectrumMatch`] how far the
+    /// fit landed from the measurement; both describe the input the two implementations **share**,
+    /// so neither can tell two runs over the same seed apart.
+    fn name(&self) -> &'static str;
 }
 
 #[cfg(test)]
@@ -850,12 +873,77 @@ mod tests {
     use crate::ng::types::{AlleleId, LogProb};
     use std::sync::Arc;
 
+    /// **The two shipped implementations, reached the way a run reaches them, are different
+    /// priors** — and this is the only test in the module that goes through the folder's public
+    /// names rather than through a file's own `use super::*`.
+    ///
+    /// **The gap it closes is the bake-off's own failure mode.** Measured: re-export the default
+    /// under the comparator's name — a one-line edit in this file — and every one of the folder's
+    /// 132 tests still passes, while a run selecting between the two gets the same prior twice
+    /// and reports that the two arms agree. The prior the whole seam exists to measure against
+    /// would be silently absent, and the number that vanished is a factor of **834** on the
+    /// homozygote for the alternative allele.
+    ///
+    /// It also pins the two things a run needs from the seam beyond the row: that the trait is
+    /// object-safe, so a recipe can hold `Box<dyn GenotypePriorModel>` and choose at run time,
+    /// and that each arm can name itself.
+    #[test]
+    fn the_two_shipped_priors_differ_when_reached_the_way_a_run_reaches_them() {
+        use crate::ng::calling::genotype_prior::{MarginalizedDirichletPrior, PlugInWrightPrior};
+
+        // tomato1's fitted diversity as a single sample's seed — the thinnest input, where the
+        // two are furthest apart (spec §2.2).
+        let concentration = [1.0, 6e-4];
+        let table = GenotypeTable::build(Ploidy::try_new(2).unwrap(), 2);
+        let view = table.view();
+
+        let arms: [Box<dyn GenotypePriorModel>; 2] = [
+            Box::new(MarginalizedDirichletPrior),
+            Box::new(PlugInWrightPrior),
+        ];
+        let mut rows = Vec::new();
+        let mut names = Vec::new();
+        for arm in &arms {
+            let mut scratch = [0.0; 2];
+            let mut out = [LogProb(f64::NAN); 3];
+            let mut row = PriorRow::new(
+                Concentration::new(&concentration),
+                view.genotype_allele_counts(),
+                view.log_multinomial_coeffs(),
+                view.homozygous_alleles(),
+                &mut scratch,
+                &mut out,
+            );
+            arm.fill_genotype_log_priors(&mut row, InbreedingF::try_new(0.0).unwrap());
+            assert!(out.iter().all(|entry| entry.get().is_finite()), "{out:?}");
+            // Normalised, because a row is defined only up to a shared additive constant and the
+            // two carry different ones.
+            let total: f64 = out.iter().map(|entry| entry.get().exp()).sum();
+            rows.push(
+                out.iter()
+                    .map(|entry| entry.get().exp() / total)
+                    .collect::<Vec<f64>>(),
+            );
+            names.push(arm.name());
+        }
+
+        // Genotype 2 is the homozygote for the alternative allele — the one spec §2.2 measures.
+        let ratio = rows[0][2] / rows[1][2];
+        assert!((833.0..835.0).contains(&ratio), "{rows:?}");
+        assert_ne!(names[0], names[1]);
+        assert!(!names[0].is_empty() && !names[1].is_empty());
+    }
+
     /// A stand-in implementation, existing only so the seam is exercised by something. It
     /// copies the multinomial coefficients and ignores everything else — deliberately not a
     /// prior, so nothing here can be mistaken for a check of the real one.
     struct CoefficientOnlyPrior;
 
     impl GenotypePriorModel for CoefficientOnlyPrior {
+        fn name(&self) -> &'static str {
+            "coefficient-only (test stand-in)"
+        }
+
         fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, _inbreeding: InbreedingF) {
             let coefficients = row.log_multinomial_coeffs();
             let (_, out) = row.scratch_and_out();

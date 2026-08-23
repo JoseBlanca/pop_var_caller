@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the fit now reports how far its answer is, instead of
+> - **Last completed task (2026-08-23):** **the comparator, and the arm nothing could name**
+> (step F1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
+> `ng-calling-prior`; **Milestone F complete, at Checkpoint F — step 8 is now a complete set of
+> pure functions**). The caller can now build its genotype prior two ways behind one seam: the
+> default, which averages the genotype probability over every allele frequency the evidence finds
+> plausible, and the comparator, which picks the single most likely frequency and evaluates there.
+> The second is the route this caller does not take, kept only so the difference stays measurable
+> — on the human benchmark trio at 5×, that difference was genotype accuracy of 83.6% against
+> 94.6%.
+> **The review found that nothing tested the seam the way a run would use it.** Every test named
+> the comparator through its own file, so re-exporting the default under the comparator's name — a
+> one-line edit — left all 132 tests passing while a run comparing the two got the same prior
+> twice and reported that they agree. That is the one failure the comparator exists to prevent,
+> and the number that would have vanished is a factor of 834 on the homozygote.
+> **And a promise made three steps ago had never been kept:** the seam was supposed to let a run
+> record which of the two priors produced a row, deferred to this step with a stand-in that never
+> compiled. It does now.
+> [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_f1_2026-08-23.md).
+> - **Previously (2026-08-23):** **the fit now reports how far its answer is, instead of
 > claiming it matched** (fix-forward on `0b019e0d`, branch `ng-calling-prior`). Before starting a
 > run, the caller reads two starting numbers off the panel's own allele-frequency spectrum, and
 > carries a marker saying whether those two numbers reproduce what was measured. **Nothing
@@ -35,7 +53,7 @@ Skills and agents are instructed to leave it untouched.
 > **Found only because the owner had that commit folded into the milestone's review** — it was
 > the one batch on this branch that had never been through the fan-out.
 > [What was wrong and what replaced it](doc/devel/reports/implementations/ng_calling_prior_spectrum_match_fix_2026-08-23.md).
-> - **Previously (2026-08-23):** **the shape both consumers read, and the support it is
+> - **Earlier (2026-08-23):** **the shape both consumers read, and the support it is
 > not** (step E2 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone E complete, at Checkpoint E**). The prior's belief about which
 > repeat lengths are common at a tract is now exported once, so the genotype prior and the read
@@ -49,7 +67,7 @@ Skills and agents are instructed to leave it untouched.
 > the prior's to settle, so the export is named for what it actually holds and all three are
 > recorded, with their sizes, where the likelihood work will meet them.
 > [What was built and what the review changed](doc/devel/reports/implementations/ng_calling_prior_e2_2026-08-23.md).
-> - **Earlier (2026-08-23):** **the repeat-tract starting point, and the panel it
+> - **Before that (2026-08-23):** **the repeat-tract starting point, and the panel it
 > refuses at every locus** (step E1 of
 > [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch `ng-calling-prior`).
 > Before any read is looked at, a repeat tract's genotype prior starts from mass falling off

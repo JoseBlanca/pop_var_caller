@@ -265,6 +265,13 @@ impl<'a> PriorRow<'a> {
 
 pub trait GenotypePriorModel {
     fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF);
+    /// Which prior this is, for a run to record beside the genotypes it produced — the seam
+    /// exists to compare two, and an arm without a label is a number nobody can act on.
+    /// Added at F1. NOT `Debug`: B2 recorded that deriving `Debug` would do in the meantime,
+    /// and it never worked — the trait has no `Debug` supertrait, so `Box<dyn
+    /// GenotypePriorModel>` does not implement it. Not the seed's provenance either:
+    /// `SeedRegime` and `SpectrumMatch` describe the input the two impls SHARE.
+    fn name(&self) -> &'static str;
 }
 
 /// Default: §3.1's Dirichlet-multinomial with §3.2's two-branch inbreeding mixture
@@ -514,7 +521,13 @@ Every row read on 2026-08-21.
 ## 7. Design decisions — decided
 
 - **Marginalized is the default and plug-in is a comparator behind the same trait — decided.**
-  One seam (`GenotypePriorModel`), two impls; the recipe selects. Production ships plug-in default
+  One seam (`GenotypePriorModel`), two impls; the recipe selects. **The trait is object-safe and
+  the selection was written and run at F1** — `Box<dyn GenotypePriorModel>` and
+  `Arc<dyn GenotypePriorModel + Send + Sync>` both work, the second across a worker boundary, so
+  the loop's own field should carry `+ Send + Sync` rather than the bare `Box<dyn …>`
+  [`ng_step_interfaces.md`](ng_step_interfaces.md) sketches. **What does not exist is the recipe**:
+  no plan builds one, and the measurement the comparator is kept for also needs the loop and a
+  specification for candidate selection. Production ships plug-in default
   behind an env toggle ([`driver.rs:287`](../../../../src/ssr/cohort/driver.rs)); ng inverts that,
   and the comparator exists so spec §2.2's measurement stays re-runnable. Why: spec §2, §5.3.
 - **The prior takes flat slices, not the loop's types — decided.** Nothing allocates per sample per

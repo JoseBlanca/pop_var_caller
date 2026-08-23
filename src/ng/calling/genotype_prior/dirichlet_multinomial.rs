@@ -215,6 +215,10 @@ fn one_genotypes_log_prior(
 pub struct MarginalizedDirichletPrior;
 
 impl GenotypePriorModel for MarginalizedDirichletPrior {
+    fn name(&self) -> &'static str {
+        "marginalized-dirichlet"
+    }
+
     fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF) {
         fill_inbreeding_mixture_log_priors(row, inbreeding.get());
     }
@@ -317,8 +321,13 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 ///   helper and the next caller may not floor.
 ///
 /// Ported from the same engine as the mixture, whose own comment gives the saving as the reason.
+///
+/// **Visible to the folder because both implementations behind the seam use it**: the comparator
+/// in [`hardy_weinberg`](super::hardy_weinberg) mixes the same two branches over a different
+/// random-mating term, and a second spelling of this would let the two disagree about `−∞` without
+/// anything saying so.
 #[inline]
-fn log_sum_exp_2(a: f64, b: f64) -> f64 {
+pub(super) fn log_sum_exp_2(a: f64, b: f64) -> f64 {
     if a == f64::NEG_INFINITY {
         return b;
     }
