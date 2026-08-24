@@ -150,9 +150,27 @@ pub(super) mod fixtures {
                 member(region(at, at), b"A", b"T")
             })
             .collect();
+        // **The deletion's record carries a partial sequence as well as its deletion**, and it
+        // is the only one in the fixture. Without it no driver comparison in this module ever
+        // looks at `SampleSupport::partials`: every other record here is minted `Complete`, so
+        // the field renders empty in every entry and a driver that built it differently would
+        // agree with the others by both building nothing. It is the field where such a
+        // divergence would now hide, because a sample whose observations are all partial
+        // contributes to no other one. Adding it changes no locus's existence — the keep rule
+        // counts complete observations only — which is why it can go on an existing record.
+        let mut deletion = member(region(305, 330), &[b'A'; 26], b"A");
+        let mut ran_out = deletion.observations[0].clone();
+        ran_out.bases = Box::from(&b"AAAAAT"[..]);
+        ran_out.num_obs = 2;
+        ran_out.chain_ids = vec![4, 5];
+        ran_out.q_sum = -4.5;
+        ran_out.read_witness = ReadWitness::from_left(6, deletion.locus_len())
+            .expect("six positions inside a twenty-six-base record");
+        deletion.observations.push(ran_out);
+
         vec![
             dotted,
-            vec![member(region(305, 330), &[b'A'; 26], b"A")],
+            vec![deletion],
             vec![member(region(310, 310), b"A", b"C")],
         ]
     }

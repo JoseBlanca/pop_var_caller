@@ -70,7 +70,7 @@ use crate::pileup_record::ChainId;
 
 use super::active_read_set::ActiveReads;
 use super::errors::WalkerError;
-use super::open_record::{OpenPileupRecordTable, phred_to_ln_perr};
+use super::open_record::{OpenPileupRecordTable, minted_ln_read_error};
 
 /// What one read contributes to an ordinary column: everything the locus needs from it,
 /// with no reference to the read left behind.
@@ -85,9 +85,18 @@ struct PlainContribution {
     read_group: ReadGroupId,
     /// The read's base at this position. Its allele, and the whole of it.
     base: u8,
-    /// `ln(P_err)` for this read at this position: the BAQ-capped base quality, floored by
-    /// the read's mapping-quality log-error exactly as the general fold's
-    /// `ln_bq_for_read(..).max(mq_log_err)` does.
+    /// `ln(P_err)` for this read at this position — the BAQ-capped base quality floored by the
+    /// read's mapping-quality log-error, minted by
+    /// [`minted_ln_read_error`](super::open_record::minted_ln_read_error), which is the
+    /// function the general fold mints with too.
+    ///
+    /// **This path reaches the same number by a shorter route, not over a narrower window.**
+    /// It hands the mint one base's quality directly; the general fold reaches it through a
+    /// window that, in every column this path accepts, holds exactly that one event. The lane
+    /// refuses a read carrying any indel and refuses any column an open record overlaps, so
+    /// the record the general path would build there spans one base and its window collects
+    /// one match — which `cigar_cursor`'s own equivalence note states, and the
+    /// `debug_assert_eq!` below re-checks at every column in a debug walk.
     ln_q: f64,
     /// Forward strand.
     fwd: bool,
@@ -208,7 +217,7 @@ pub(super) fn try_ordinary_column(
             chain_id: active.chain_id,
             read_group: active.read.read_group,
             base,
-            ln_q: phred_to_ln_perr(bq).max(active.read.mq_log_err),
+            ln_q: minted_ln_read_error(bq, active.read.mq_log_err),
             fwd: !active.read.is_reverse_strand,
             placed_left: active.read.alignment_start < walker_pos,
             mapq,

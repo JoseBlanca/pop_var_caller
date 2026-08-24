@@ -1809,6 +1809,45 @@ mod tests {
         assert_eq!(l.complete_observations().count(), 2);
     }
 
+    /// **A partial observation enters neither half of the question that decides whether a
+    /// locus exists**, and that is the rule the merge's keep threshold rests on: a sample
+    /// reaches the bar on its complete reads or it does not reach it.
+    ///
+    /// **It had no test, and it is load-bearing in two directions.** Letting partials in would
+    /// build loci nobody varied at, because a partial's shorter bases compared against the
+    /// locus's whole reference read as non-reference whatever the read saw
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §5.4.2). And the same section says the rule
+    /// **must** change on the repeat path, where a sample carrying an allele too long for a
+    /// read to span shows no complete observation at all and is read as quiet — so this is the
+    /// line that moves when that lands, and it should move deliberately.
+    ///
+    /// The fixture: eight reads matching the reference and one showing something else, all
+    /// nine of them partial, beside three complete reference reads. The answer counts the
+    /// three and none of the nine.
+    #[test]
+    fn a_partial_observation_is_counted_in_neither_half_of_the_keep_rule() {
+        let half_the_locus =
+            ReadWitness::from_left(3, LocusLen::from_positions(6)).expect("a three-position run");
+        let l = SampleLocusObservations {
+            reference_bases: Box::from(&b"ATATAT"[..]),
+            ..locus(
+                region(1, 6),
+                vec![
+                    obs(b"ATATAT", ReadWitness::Complete, 3),
+                    obs(b"ATA", half_the_locus.clone(), 8),
+                    obs(b"GTA", half_the_locus, 1),
+                ],
+            )
+        };
+
+        assert_eq!(
+            l.non_reference_and_compared_reads(),
+            (0, 3),
+            "the three complete reads are compared and agree; the nine partial ones are \
+             neither compared nor counted against the reference",
+        );
+    }
+
     // ---------------------------------------------------------------
     // The two derivations the cohort merge walks on
     // (`doc/devel/ng/arch/cohort_merge.md` §2).

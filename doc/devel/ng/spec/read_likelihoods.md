@@ -283,7 +283,10 @@ between them is their quality — which is why this contract is about quality an
    already keys on it; [`cohort_merge.md`](cohort_merge.md) §4.2 describes a sample's moments being
    summed "where two of its own observations projected onto the same allele", and this document
    requires that the summing stop at the read-group boundary. On a single-library sample — which is
-   most of them — this costs nothing.
+   most of them — this costs nothing. **Built 2026-08-23**
+   ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1): the merge's rows are
+   one per `(allele, read group)`, ascending. The sentence §4.2 of the merge's own spec still
+   carries is the one that was corrected here, and it is corrected there too.
 2. **Anything else that varies read by read must enter as a term that is exactly additive in
    `q_sum`, or not at all.** §3.3's formula is built to satisfy this and §12's ninth test pins it:
    compute the likelihood from a list of made-up reads and from the aggregate of those same reads
@@ -396,9 +399,36 @@ mapping error is already in the per-read numbers, their mean is already nearer t
 the scale comes out nearer one and adds nothing further. Whatever the per-read number already
 captures, the scale supplies only the remainder.
 
-**What it asks of the pre-pass — two numbers per read group, and they are new.** A running sum of
-the per-read error probability, and the count of reads it was summed over. Two scalars per read
-group, no new traversal. Two requirements on them, and the second is easy to get wrong:
+**What it asks of the pre-pass — two numbers per read group.** A running sum of the per-read
+**log** error probability, and the count of reads it was summed over. Two scalars per read group,
+no new traversal, and **already carried**: an observation's `q_sum` is that sum over its own reads
+and `num_obs` is that count, so the accumulator adds up numbers the walk has already produced
+rather than minting anything.
+
+> **The average is the geometric mean, and an earlier version of this section asked for the
+> arithmetic one (corrected 2026-08-24, owner).** It said "a running sum of the per-read error
+> probability", which is a sum of `ε` and not of `ln ε`, and nothing carries that — the walk sums
+> the logarithms and throws the individual reads away, and `Σ ε` cannot be recovered from `Σ ln ε`.
+> Supplying it would have meant a second accumulation at fold time and a new field on every
+> observation.
+>
+> **Taking the geometric mean instead is not a concession, it is the self-consistent choice**, and
+> the reason is what the scale is applied *to*. The model charges an observation
+> `exp(q_sum / num_obs)` — a geometric mean — and production does the same, clamped
+> ([`posterior_engine.rs:1536`](../../../../src/var_calling/posterior_engine.rs); production has no
+> recalibration at all, so there is nothing there to copy but the quantity). A scale built from an
+> arithmetic mean and applied to a geometric one would not make the calibrated property hold in the
+> model's own terms, so paying for the arithmetic sum would buy an inexactness rather than remove
+> one.
+>
+> **The two are not the same number and the difference is unmeasured.** The per-read quantity takes
+> the worse of the read's base quality and its mapping quality, and the mapping-quality floor is 20,
+> so a run whose badly-mapped tail was not filtered upstream can spread `ε` over two orders of
+> magnitude, where the arithmetic mean follows the tail and the geometric one the bulk. **§12 gains a
+> test that reports both per read group on a real cohort**, so the size of the gap is on record
+> rather than assumed.
+
+Two requirements on them, and the second is easy to get wrong:
 
 - **The per-read quantity summed must be computed by the same function the locus generator mints
   with**, or the scale calibrates against a different definition of "how wrong is this read" than the
@@ -415,6 +445,22 @@ group, no new traversal. Two requirements on them, and the second is easy to get
   deleted with the other fit. **A scale whose numerator and denominator come from different site sets
   is not a calibration**, because the two sets do not have the same quality profile — the census
   sites are chosen and the histogram's are not.
+
+  **The per-position depth cap is not one of those differences, and the reason is the geometric
+  mean.** The histogram route thins every position to at most
+  [`MAX_BINNED_DEPTH`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs) = 124 reads
+  before fitting, so its rate rests on a subsample where the observations carry every read. That
+  would matter for a sum and does not matter for a mean: the draw is hypergeometric on counts and
+  never looks at a read's quality, so the mean log error over the kept reads has the same
+  expectation as over all of them. **Only the count has to match the mean it belongs to**, and both
+  come from the same observations.
+
+  **The census route cannot supply either number as it stands**, and that is a fact about its
+  records rather than about this requirement: its per-position unit is a depth code and a sparse
+  list of non-reference allele counts
+  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md)), with no quality in
+  it at all. So its accumulator waits on §4.1's comparison — if that route wins, the records gain a
+  quality field; if the histogram route wins, nothing is owed.
 
 **This does not reopen the pre-pass's decision about base qualities, and it is worth saying why.**
 [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2 decides that base qualities are
@@ -674,8 +720,46 @@ log Lg(g)  =  Σ_o  n_o · log[ (1 − c) · own(o | g)  +  c · q(o) ]
 - `c` is this read group's contamination fraction, zero when the parameters fit emits none.
 - `own(o | g)` is what §3.3's formula computes per read, as a probability rather than a logarithm:
   `k_a/P` for an explained observation, `ε̄ / m` for a wrong one.
-- `q(o)` is the contaminating population's frequency of that allele class — reference, substitution
-  alternative, insertion-or-deletion alternative — which is what the pre-pass's side-pass emits.
+- `q(o)` is **the contaminating population's frequency of the allele this observation shows, at this
+  locus** — read off the caller's own frequency estimate for the samples sequenced in the same batch
+  as this one, and recomputed every iteration as that estimate moves (owner, 2026-08-24).
+
+> **`q(o)` used to be three numbers — the frequency of an allele *class*, reference against
+> substitution against insertion-or-deletion — averaged over the census sites and emitted by a
+> side-pass in the parameter pre-pass. That is deleted (owner, 2026-08-24), and the reason is worth
+> keeping, because the old shape looks reasonable.**
+>
+> **The class split is not a modelling requirement. It is what a caller does when it has no
+> per-locus frequency to use.** Production splits by class because it has no population frequency
+> for an arbitrary alternative allele and has to fall back on a class average
+> ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs),
+> `q_b_per_batch`, a three-entry simplex per sequencing batch). **This caller has the frequency**:
+> it is the same per-locus allele frequency the genotype prior reads and the loop re-estimates, so
+> the honest `q(o)` is that number and the classes disappear with the ignorance that motivated them.
+>
+> **Three consequences, all of them simplifications.** The pre-pass owes nothing here — no
+> side-pass, nothing new in the census, and the census's fifth allele code (which lumps indels with
+> `N` and spanning deletions and so cannot cleanly answer "how often is a contaminant read an
+> indel") never has to. There is no new estimator to design, which matters because ng's
+> contamination fit produces no per-read posterior that a read came from the contaminant, so
+> production's estimator could not have been ported anyway. And the answer is per locus rather than
+> per run, which is strictly more information at the place it is used.
+>
+> **One consequence that is not a simplification, and it contradicts a sentence below.** §6.1's
+> first tier says the contaminated likelihood is computed once per sample per locus and read
+> unchanged by every iteration. **That stops being true**: the fraction `c` stays frozen, and
+> `q(o)` moves with the loop. This does not reopen the ruling that *contamination* never enters the
+> loop — that ruling is about `c`, which is a property of the library and of nothing else. It is the
+> second half of the mixture that is a property of the locus, and a per-locus quantity is what a
+> per-locus loop is for.
+>
+> **Which samples' frequency.** The batch, not the whole cohort: a contaminant is most likely a
+> neighbour on the same run, and the run already declares who was sequenced beside whom
+> ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §1.6, whose default is one
+> batch holding everything — so a run that declares no batches gets the cohort frequency and loses
+> nothing it had).
+>
+> **Owner:** the read likelihood builds this; nothing is owed by the parameter pre-pass.
 
 **At `c = 0` this is §3.3 exactly, and that is worth checking rather than asserting.** For an
 observation the genotype explains, `own` is `k_a/P` and the term is `n_o·log(k_a/P)` — §3.3's first
@@ -725,22 +809,28 @@ indistinguishable.
 **The repeat-tract path defaults on too**, for the reason that decides both: contamination is a
 property of the sample and not of the marker, so a library carrying another individual's DNA carries
 it at repeat tracts as well. What differs there is only how well the *second* half of the mixture is
-known — measured allele-class frequencies here, a stand-in built from the prior's seed there — and
+known — the locus's own allele frequency here, a stand-in built from the prior's seed there — and
 §4.5.1 bounds what that costs.
 
 **At one sample there is no contamination estimate** — it is a comparison between samples
 ([`parameter_prepass.md`](parameter_prepass.md) §1.1) — so `c` is absent and §3.3 is what runs. That
 is *emit it as absent*, not *silently fit a zero*.
 
-**Contamination belongs here and not to the EM loop, and it is worth saying why, because it looks
-like a cohort quantity.** It *is* estimated from the cohort — but it is estimated **before** calling
-and frozen, so what reaches this model is two constants per sample: the fraction `c`, and the
-contaminating population's frequency for each allele class. Neither changes as the caller iterates.
-So the contaminated likelihood is a function of frozen parameters and the evidence, computed **once
-per sample per locus** and read unchanged by every iteration — which is exactly what production does,
-filling the mixture table before its EM loop starts and never touching it again
-([`posterior_engine.rs:2357`](../../../../src/var_calling/posterior_engine.rs)). It is §6.1's first
-tier, and it stays there.
+**The fraction belongs here and not to the EM loop; the frequency beside it does belong to the
+loop.** `c` *is* estimated from the cohort, but it is estimated **before** calling and frozen: one
+constant per library, unchanged however the caller iterates. **`q(o)` is the other half of the
+mixture and it is not a constant** — it is the contaminating population's frequency for the allele
+this observation shows, at this locus, which is the loop's own estimate and moves with it
+(corrected 2026-08-24; the paragraph this replaces said both halves were frozen and that the
+contaminated likelihood was computed once per sample per locus).
+
+**So the two halves sit in different tiers, and that is the whole of the change.** The fraction is
+§6.1's first tier, frozen before the loop starts, exactly as production fills its mixture table once
+and never touches it again ([`posterior_engine.rs:2357`](../../../../src/var_calling/posterior_engine.rs)).
+The frequency is recomputed per iteration alongside the frequency the genotype prior already reads,
+which costs a lookup rather than a fit. **Production's arrangement is not available to us and does
+not need to be**: it freezes both because its second half is a three-entry class average with
+nothing per-locus in it, and ours is the locus's own number.
 
 **Decided, and it closes a door rather than leaving one open (owner, 2026-08-19): contamination
 never enters the EM loop.** How contaminated a sample is is a property of that sample — of its
@@ -1243,8 +1333,8 @@ is computed once from the observations rather than from the caller's estimates, 
 while the caller iterates. **Both requirements met, and neither by accident.**
 
 **What is weaker here than at ordinary sites, and how much weaker.** At a SNP both halves of the
-mixture are measured: the fraction and the contaminant's allele-class frequencies. At a tract only the
-fraction is, and the seed stands in for the second half — so the term assumes the contaminant was
+mixture are measured: the fraction, and the frequency of the allele the observation shows. At a tract
+only the fraction is, and the seed stands in for the second half — so the term assumes the contaminant was
 drawn from the same population as the cohort. **That assumption is bounded by `c` and it is not the
 one `verifyBamID2` was built to remove.** An earlier version of this section cited that tool's
 recorded failure — a true 10% contamination returned as 2.9% when the allele frequencies came from
@@ -1706,7 +1796,7 @@ say the same thing.**
 | comparing two equal-length sequences under one flat error rate | [`alignment.md`](alignment.md) §5.1 | **composes** it as §4.3's factor |
 | the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 sets it out because a candidate aligner there would consume it, and states it is not an alignment algorithm. **That section should be repointed here**, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, **and its *in frame* / *out of frame* wording moved to §1.3's**; neither edit is made here |
 | every parameter | [`parameter_prepass.md`](parameter_prepass.md) and its two path siblings | reads them frozen; **fits nothing** |
-| the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and places **two** requirements on it: **keep read group in the identity** (§2.3), and **let a partial observation survive collation**, keyed and projected over the stretch it witnessed, because the built merge discards it and §5 has nothing to score without it (§5.4, corrected 2026-08-21). Neither changes which loci get built — an earlier draft asked for that third change and §5.4.2 withdrew it |
+| the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and placed **two** requirements on it: **keep read group in the identity** (§2.3) — **built 2026-08-23**, rows are one per `(allele, read group)` — and **let a partial observation survive collation**, keyed and projected over the stretch it witnessed, because the built merge discards it and §5 has nothing to score without it (§5.4, corrected 2026-08-21), which is still owed. Neither changes which loci get built — an earlier draft asked for that third change and §5.4.2 withdrew it |
 | which alleles are candidates | candidate generation, [`ng_proposal.md`](ng_proposal.md) step 6 | scores what it is handed |
 | the genotype prior | [`calling_priors.md`](calling_priors.md) | added to this in log space by the third document |
 | when this is called, with which candidates, and how the results are combined | the EM loop document | defines the function only |

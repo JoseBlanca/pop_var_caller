@@ -36,8 +36,10 @@ use ahash::AHashMap;
 
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::{MaxCohortLocusSpan, MinAltReads};
-use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
-use crate::ng::types::{GenomePosition, GenomeRegion};
+use crate::ng::locus_generation::{
+    ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
+};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 /// The byte a gathered reference position starts as, so that a position no member
@@ -235,7 +237,7 @@ impl LocusReferenceBases {
     ///
     /// **This is also the reference allele**: it is what a sample whose reads all matched
     /// the reference projects to, so the table of alleles the next step builds has it
-    /// among them without a special case (spec §4.2). Pinned by
+    /// among them without a special case (`doc/devel/ng/spec/cohort_merge.md` §4.2). Pinned by
     /// `a_member_that_matched_the_reference_projects_to_the_locus_reference`.
     pub fn bases(&self) -> &[u8] {
         &self.bases
@@ -305,6 +307,67 @@ impl<'a> MemberPlacement<'a> {
     /// likelihood that would score one exists (`spec/locus_generation.md` §3).
     pub fn projectable_sequences(&self) -> impl Iterator<Item = &'a SequenceObservation> {
         self.member.complete_observations()
+    }
+
+    /// Where a **partial** sequence's witnessed positions sit in the *locus*, rather than in
+    /// this member's own region.
+    ///
+    /// **This is the projection a partial gets, and it is the only one it may have.** A
+    /// complete sequence is widened to the locus's whole span by
+    /// [`project_into`](Self::project_into); a partial cannot be, because its bases stop where
+    /// its read's witness stopped and padding them from the reference would report a read as
+    /// having seen ground it never did. What a partial gets instead is its *stretch* carried
+    /// onto the locus's axis, so a consumer can restrict a candidate's projection to exactly
+    /// the positions the read saw (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    ///
+    /// The mint measures a witness against the record it belongs to
+    /// ([`SampleLocusObservations::locus_len`]), so every run moves right by how far this
+    /// member starts into the locus.
+    ///
+    /// **It takes the runs rather than the sequence, so that its one `None` means one thing.**
+    /// Whether a sequence is partial at all is the caller's question and is answered by
+    /// matching [`ReadWitness`]; what this answers is whether the shifted stretch is
+    /// *representable*, and the two were worth separating because the caller's reaction to
+    /// them differs — skipping a complete sequence is the ordinary case, and losing a partial
+    /// one is a loss.
+    ///
+    /// **`None` means the locus is wider than a witness can address, and the row is lost.**
+    /// A witnessed position is a `u16` on the locus's own axis, so a member starting 65,536
+    /// or more bases into its locus has no representable stretch. Refusing rather than
+    /// clamping, because a clamp would silently shorten a witness into a claim about ground
+    /// the read never saw — the reason
+    /// [`WitnessedLocusPositions::one_run_from_offset_and_length`] refuses too.
+    ///
+    /// **How wide a locus can get is not bounded at 50 bases, and an earlier draft of this
+    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 50
+    /// reference bases but is the operator's to set and holds any `NonZeroU32`, and
+    /// [`super::close::LocusCloser`] exempts repeat-tract loci from it outright — so the
+    /// reachable case is a satellite tract above 65,535 bases, or a raised bound. Within a
+    /// locus that *is* narrower than `u16::MAX` the shift cannot overflow, because a record's
+    /// span is capped at `MAX_RECORD_SPAN_CEILING` = `u16::MAX` and the mint clamps every run
+    /// into its record, so `offset + run end` never exceeds the locus span.
+    ///
+    /// **What should happen instead of a silent loss is a decision about a failure mode**, not
+    /// a detail of this function: a panic aborts a run over legitimate input, and a count
+    /// would need a field of its own, since
+    /// [`SampleSupport::reads_removed_as_evidence`] means something narrower (a read named at
+    /// some of a sample's records and not all). Left refusing, pinned by
+    /// `a_stretch_that_cannot_be_addressed_on_the_locus_axis_is_no_row`, and owed to whoever
+    /// takes the repeat path through the merge.
+    fn witnessed_across_locus(
+        &self,
+        positions: &WitnessedLocusPositions,
+    ) -> Option<WitnessedLocusPositions> {
+        let offset = u16::try_from(self.offset).ok()?;
+        // The runs are canonical — sorted and disjoint — so the last one ends furthest right,
+        // and every earlier run fits if it does. Checking once is what lets the shift below
+        // be plain addition over an iterator instead of a fallible one through a `Vec`.
+        positions.last_run().1.checked_add(offset)?;
+        WitnessedLocusPositions::from_half_open_runs(
+            positions
+                .runs()
+                .map(|(start, end)| (start + offset, end + offset)),
+        )
     }
 
     /// Widen one of this member's observed sequences to the whole locus span, into
@@ -396,7 +459,7 @@ impl<'a> MemberPlacement<'a> {
 pub const REFERENCE_ALLELE: usize = 0;
 
 /// The distinct alleles the samples showed over one cohort locus, the reference among
-/// them — one table, against which every sample's support is expressed (spec §4.2).
+/// them — one table, against which every sample's support is expressed (`doc/devel/ng/spec/cohort_merge.md` §4.2).
 ///
 /// **Two sequences that come out as the same bytes are the same allele, wherever they came
 /// from.** That is the whole of unification, and it is what makes a cohort observation the
@@ -499,8 +562,14 @@ impl AlleleTable {
     /// support can be accumulated as its alleles are derived; the alternative the
     /// [`index_of`](Self::index_of) doc describes — deriving again and looking the bytes up
     /// — would compose every read's allele a second time, which is the expensive half of
-    /// this module. A sample's tally is grown as new alleles appear and padded to the
-    /// table's width at the end, so the vectors are parallel however late an allele joins.
+    /// this module. A sample's tally gains an entry the first time one of its reads reaches a
+    /// `(allele, read group)` pair, and is sorted into ascending pair order at the end.
+    ///
+    /// **The rows are not parallel to the allele table and have not been since Checkpoint B**
+    /// — a pair the sample showed no reads for has no row, and since B1 one allele can have
+    /// several. `doc/devel/ng/arch/cohort_merge.md` §4 still sketches this as
+    /// `per_allele: Vec<SequenceObservation>`, "parallel to `CohortObservation::alleles`",
+    /// which is the shape this is not; the divergence is deliberate and recorded there.
     fn assemble(locus: &ClosedLocus<'_>) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
@@ -517,7 +586,7 @@ impl AlleleTable {
         // One tally, refilled per sample rather than allocated per sample — the preference
         // the scratch beside it exists for. It cannot live *in* that scratch: the derivation
         // holds it mutably for the length of the call while the callback writes this.
-        let mut tally: Vec<AlleleSupportTally> = Vec::new();
+        let mut tally: Vec<AlleleGroupTally> = Vec::new();
 
         for sample_members in &locus.members {
             let records = sample_members.observations;
@@ -531,14 +600,43 @@ impl AlleleTable {
                 &mut scratch,
                 |bases, backing| {
                     let allele = alleles.intern(bases);
-                    if tally.len() <= allele {
-                        tally.resize(allele + 1, AlleleSupportTally::default());
-                    }
+                    let read_group = backing.read_group(sample);
+                    // **A scan, not an index, and it is what the read-group axis costs.** The
+                    // tally used to be indexed by allele and a pair cannot index a `Vec`. A
+                    // map cleared per sample would reuse its table just as this does, so the
+                    // reason is not allocation: it is that at an ordinary locus this holds one
+                    // or two entries — one per allele the sample showed, times its read
+                    // groups, and 157 of 1,707 samples in a surveyed tomato archive have more
+                    // than one group (`doc/devel/ng/spec/read_groups.md` §1). Hashing a pair
+                    // costs more than looking at two of them.
+                    //
+                    // **Where it would stop being free is a deep sample whose reads compose
+                    // many distinct alleles**, because this callback fires once per read on
+                    // the multi-record branch: 300 reads each reaching a different allele is
+                    // 45,000 comparisons where the old index was 300 lookups. Unmeasured, and
+                    // the fix if it ever matters is a sorted insert rather than a map.
+                    let entry = match tally
+                        .iter()
+                        .position(|held| held.allele == allele && held.read_group == read_group)
+                    {
+                        Some(at) => at,
+                        None => {
+                            tally.push(AlleleGroupTally {
+                                allele,
+                                read_group,
+                                tally: AlleleSupportTally::default(),
+                            });
+                            tally.len() - 1
+                        }
+                    };
                     match backing {
-                        AlleleBacking::OneSequence(sequence) => tally[allele].add_whole(sequence),
+                        AlleleBacking::OneSequence(sequence) => {
+                            tally[entry].tally.add_whole(sequence);
+                        }
                         AlleleBacking::OneRead { records, sightings } => {
                             composed_across_records = composed_across_records.saturating_add(1);
-                            tally[allele]
+                            tally[entry]
+                                .tally
                                 .add_one_reads_share(share_of_one_read(sample, records, sightings));
                         }
                     }
@@ -546,19 +644,28 @@ impl AlleleTable {
             );
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
 
+            // **Ascending `(allele, read group)`, sorted once per sample.** The tally is filled
+            // in the order the derivation emits alleles, which is neither. Unstable is enough:
+            // the key is unique, one entry per pair by construction.
+            tally.sort_unstable_by_key(|held| (held.allele, held.read_group));
+
             per_sample.push(SampleSupport {
                 sample,
-                // **Only the alleles this sample showed.** A tally entry is reached only by
-                // a sequence or by a read, and both add at least one read, so an untouched
-                // entry is an allele some *other* sample introduced — and it needs no row
-                // here, since asking about it answers no reads either way.
+                partials: partials_of_sample(&reference, sample_members),
+                // **Only the pairs this sample showed** — and this filter used to be
+                // load-bearing and is now a belt. The tally was a vector resized to the
+                // table's width, so it held a zero row for every allele some *other* sample
+                // introduced. Keyed by the pair it is pushed to on demand, and an entry exists
+                // only because a sequence or a read reached it, both of which add at least one
+                // read. Nothing reachable is filtered out; what it guards is a future path
+                // that creates an entry without filling it.
                 supported: tally
                     .iter()
-                    .enumerate()
-                    .filter(|(_, tally)| tally.num_reads > 0)
-                    .map(|(allele, tally)| SupportedAllele {
-                        allele,
-                        support: tally.finish(),
+                    .filter(|held| held.tally.num_reads > 0)
+                    .map(|held| SupportedAllele {
+                        allele: held.allele,
+                        read_group: held.read_group,
+                        support: held.tally.finish(),
                     })
                     .collect(),
                 reads_without_observation: records.iter().fold(0u32, |total, record| {
@@ -815,12 +922,12 @@ fn no_locus_can_begin_in(
 pub struct CohortObservation {
     /// The locus span, first position to furthest reach.
     pub region: GenomeRegion,
-    /// The distinct alleles, the reference at [`REFERENCE_ALLELE`] (spec §4.2).
+    /// The distinct alleles, the reference at [`REFERENCE_ALLELE`] (`doc/devel/ng/spec/cohort_merge.md` §4.2).
     pub alleles: Vec<Box<[u8]>>,
     /// The covering samples, in ascending sample order — **only** the covering ones.
     ///
     /// **A sample with no coverage over the span has no entry**, which is a different fact
-    /// from an entry whose support is all reference and stays one (spec §4.2). The
+    /// from an entry whose support is all reference and stays one (`doc/devel/ng/spec/cohort_merge.md` §4.2). The
     /// architecture's sketch says "indexed by the run's sample order", which reads two ways;
     /// this is the reading that keeps the distinction structural rather than resting on a
     /// zeroed row, and it is the shape the walk hands over
@@ -858,21 +965,74 @@ impl CohortObservation {
 pub struct SampleSupport {
     /// Which sample — its index in the run's sample order, as the walk named it.
     pub sample: usize,
-    /// **The alleles this sample's reads showed, and only those**, in ascending allele order
-    /// (the owner's ruling at Checkpoint B). An allele it did not show has no entry, which
-    /// [`support_for`](Self::support_for) reads as no reads and no sums — the same answer a
-    /// zeroed row would give, without a row per sample per allele.
+    /// **What this sample's reads showed, one row per `(allele, read group)`**, in ascending
+    /// `(allele, read group)` order. A pair it showed no reads for has no entry, which
+    /// [`pooled_support_for`](Self::pooled_support_for) reads as no reads and no sums — the
+    /// same answer a zeroed row would give, without a row per sample per allele per group.
     ///
-    /// **What that saves is proportional to how much of the table each sample missed.** A
-    /// row for every allele costs samples × alleles entries of 32 bytes whatever the cohort
-    /// showed; this costs one entry per allele a sample actually showed, which at an ordinary
-    /// locus of two or three alleles is one or two per sample.
+    /// **The read-group axis all but spent what the sparse shape was saving, and that is worth
+    /// stating rather than leaving the old sentence standing.** A row was 40 bytes and is now 48
+    /// — the support is 32, the allele index 8, the group 4 and the padding 4 — where a dense
+    /// record would hold a bare 32-byte support per cell. So a sample showing 2 of a locus's 3
+    /// alleles from one library costs 96 bytes either way, and one showing 2 of 2 costs 96
+    /// against a dense 64. **What still pays is the cohort-wide case the shape was chosen for**:
+    /// a dense record is samples × alleles × *groups* cells whatever anyone showed, and it is the
+    /// third factor that makes it unaffordable — a panel where one sample in eleven carries a
+    /// second library (`doc/devel/ng/spec/read_groups.md` §1 — 157 of 1,707 samples in a
+    /// surveyed tomato archive carry more than one) would pay for every sample the widest
+    /// sample's groups.
     ///
     /// **Support is never merged across alleles**, because a genotype likelihood needs them
-    /// apart (spec §4.2). It *is* merged within one: where two of the sample's own
-    /// observations reached the same allele — the same bases from two read groups, or two
-    /// records' worth of one read — their reads and their sums are added.
+    /// apart (`doc/devel/ng/spec/cohort_merge.md` §4.2), **and never across read groups**, because the likelihood pools an
+    /// observation's reads into one term only if every one of them would get the same number
+    /// — and two reads of the same bases from two lanes have different error rates
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3). It *is* merged within one pair: where two of the
+    /// sample's own observations reached the same allele from the same group — two records'
+    /// worth of one read, say — their reads and their sums are added.
+    ///
+    /// **A sample with one read group has exactly today's shape**, which is most samples of
+    /// most runs, so the axis costs them nothing.
     pub supported: Vec<SupportedAllele>,
+    /// **What this sample's reads showed of only *part* of the locus** — one entry per
+    /// `(record, sequence, read group)` whose reads ran out inside it.
+    ///
+    /// **Ascending `(witnessed stretch, read group, bases)`, and all three parts of that key are
+    /// needed.** Two entries can share a stretch — a substitution witnessed partially is exactly
+    /// that — so a stretch alone does not order them, and `doc/devel/ng/spec/read_likelihoods.md`
+    /// §8 makes the order a determinism requirement rather than a tidiness one: the sum over
+    /// observations must run in a fixed order. The sibling field states its own key the same way
+    /// and `tests::the_rows_are_ordered_by_allele_then_read_group` pins it; this one is pinned
+    /// by `tests::the_partial_rows_are_ordered_by_stretch_then_read_group_then_bases`, which
+    /// varies all three components so that neither dropping one nor reordering them survives.
+    ///
+    /// **Kept apart from [`supported`](Self::supported) rather than folded into it**, because a
+    /// partial read does not say what the sample carries, it says the sample carries *at least*
+    /// this, and the two claims cannot share a row: padding a partial's bases out to the locus
+    /// span and interning them would put an allele in the table that no molecule carried, and it
+    /// would read as a *short* allele, which is the one direction the model must not be biased
+    /// in (`doc/devel/ng/spec/read_likelihoods.md` §5.1).
+    ///
+    /// **Filled by [`partials_of_sample`], which walks the sample's records directly** rather
+    /// than through [`MemberPlacement::projectable_sequences`] — the gate that keeps partials
+    /// out of the allele derivation is exactly the one this field exists to get past. Empty
+    /// where the sample's reads all spanned their records, which is the ordinary locus; the
+    /// censored term of `read_likelihoods.md` §5 reads it (§5.4, corrected 2026-08-21).
+    ///
+    /// **It changes no locus's existence, and did not.** Whether a locus is built at
+    /// all is decided from complete observations only — the filter is
+    /// [`SampleLocusObservations::non_reference_and_compared_reads`], which skips every
+    /// non-`Complete` observation before counting, and it lives in the locus generator rather
+    /// than here.
+    ///
+    /// **That rule is settled for the generic path and explicitly *not* settled for repeat
+    /// tracts.** §5.4.2 answers *no* under the heading "the merge's rule stays as it is **on the
+    /// generic path**", and then says the opposite for tracts: a sample carrying an allele too
+    /// long for a read to span shows no complete observation at all, so the filter reads it as
+    /// *nothing varied here*, and "one line of the rule has to change for that to mean what it
+    /// says, and only on this path". This row is on both paths — a locus of either kind that
+    /// passes the verdict is assembled here — so the tract half is owed to whoever brings the
+    /// STR path through the merge, and is out of this plan's scope.
+    pub partials: Vec<PartialObservation>,
     /// Reads that covered one of this sample's records here and produced no observation at
     /// all — carried through from the members, not re-derived (arch §4).
     ///
@@ -893,29 +1053,134 @@ pub struct SampleSupport {
 }
 
 impl SampleSupport {
-    /// What this sample's reads lend `allele` — **nothing, where it showed that allele no
-    /// reads**, which is the answer a zeroed row would have given.
+    /// What this sample's reads lend `allele` **added up over its read groups** — nothing,
+    /// where it showed that allele no reads, which is the answer a zeroed row would have
+    /// given.
     ///
-    /// A scan, not an index, because [`supported`](Self::supported) holds only the alleles
-    /// the sample showed: at an ordinary locus that is one or two entries, and it is bounded
-    /// by how many alleles the whole cohort showed.
-    pub fn support_for(&self, allele: usize) -> AlleleSupport {
+    /// **A read likelihood must not use this.** Pooling an allele's reads across groups is
+    /// exactly what `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids: the reads of one term have to
+    /// share an error rate, and two lanes do not. Iterate [`supported`](Self::supported)
+    /// instead, which is why the pooling is in this method's name. What it is for is the
+    /// questions that really are about the sample rather than about one library — how much
+    /// depth the allele has here, and the fixtures that ask it.
+    ///
+    /// A scan, not an index, because [`supported`](Self::supported) holds only the pairs the
+    /// sample showed: at an ordinary locus that is one or two entries, and it is bounded by
+    /// how many alleles the whole cohort showed times how many groups this sample has.
+    pub fn pooled_support_for(&self, allele: usize) -> AlleleSupport {
         self.supported
             .iter()
-            .find(|supported| supported.allele == allele)
-            .map(|supported| supported.support)
-            .unwrap_or_default()
+            .filter(|supported| supported.allele == allele)
+            .fold(AlleleSupport::default(), |total, supported| {
+                total.added_to(supported.support)
+            })
     }
 }
 
-/// One allele of the locus, and what one sample's reads lend it.
+/// One allele of the locus **as one of the sample's read groups showed it**, and what those
+/// reads lend it.
+///
+/// **The read group is part of the row's identity, not a label on it.** A sample whose reads
+/// for one allele came from two lanes has two rows here, and nothing downstream may add them:
+/// a read likelihood folds an observation's reads into one term only when every one of them
+/// would get the same number, and the two lanes' error rates differ
+/// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SupportedAllele {
     /// Which allele — an index into [`CohortObservation::alleles`].
     pub allele: usize,
-    /// What this sample's reads lend it. Never zero: an allele a sample showed no reads for
-    /// has no entry at all.
+    /// Which of the sample's read groups showed it — one `@RG`, i.e. one lane. Carried from
+    /// [`SequenceObservation::read_group`], which keeps the groups apart at the mint for the
+    /// same reason.
+    pub read_group: ReadGroupId,
+    /// What this sample's reads **from that group** lend it. Never zero: a pair a sample
+    /// showed no reads for has no entry at all.
     pub support: AlleleSupport,
+}
+
+/// **What one sample's reads showed of part of the locus, and nothing outside that part.**
+///
+/// A read that entered the locus and ran off its own end shows a prefix or a suffix of what the
+/// sample carries — or, since the generic fold began minting witnesses with holes, a stretch
+/// with a gap in the middle. It does not say what the sample carries; it says the sample carries
+/// **at least** this, over the positions it saw
+/// (`doc/devel/ng/spec/read_likelihoods.md` §5.1, whose "prefix or suffix" predates the hole). Scoring it is the calling step's
+/// — a censored term, less discriminating than a complete observation of the same bases, never
+/// differently biased (§5.2 at a repeat tract, §5.3 at an ordinary locus). Carrying it is this
+/// module's, and until now the merge threw it away.
+///
+/// **Where these exist at all is decided by how wide the locus is on the reference**, and it is
+/// not intuition: a single-base substitution has none, an insertion has none — its reference
+/// span is its anchor base however long the inserted sequence — and a deletion has them, carrying
+/// the reference allele preferentially, because a read carrying the deletion crosses every
+/// deleted position without spending a read base. The class this is really for is the repeat
+/// tract, where over half the overlapping reads are partial at a 60-base tract and **an allele
+/// longer than a read can only ever be witnessed partially** (§5.4.1).
+///
+/// **One entry is one `(record, sequence, read group)`, not one allele**, and that is the point:
+/// there is no allele. A partial's bases cannot be compared against a whole-span allele — that
+/// comparison would report a read agreeing with the reference over everything it saw as
+/// non-reference — so what a candidate is scored against is the allele's projection *restricted
+/// to the positions the read witnessed* (§5.3), and both halves of that restriction are here.
+///
+/// **Named as the architecture names it** (`doc/devel/ng/arch/read_likelihoods.md` §2.1,
+/// `GenericSampleEvidence::partials`), and owned where that sketch had a borrow: the calling
+/// view can hold `&[PartialObservation]`, so there is one type rather than two.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialObservation {
+    /// **Which locus positions the read witnessed, in the cohort locus's own coordinates** —
+    /// zero at the locus's first position, whatever record inside it the observation came from.
+    /// The axis is in the name because it is not in the type: this is the same
+    /// [`WitnessedLocusPositions`] the mint puts on [`ReadWitness::Partial`], where the runs are
+    /// measured against the *record*. A newtype would close that off and is the right move when
+    /// a second consumer appears; with one writer and no reader it would be a type minted for
+    /// nobody.
+    ///
+    /// The mint measures a witness against the *record* it belongs to
+    /// ([`SampleLocusObservations::locus_len`]), and a cohort locus can hold several of one
+    /// sample's records and start before any of them, so the runs are shifted onto the locus
+    /// when the row is built. **A consumer indexing an allele's projection with an unshifted run
+    /// would read the wrong bases and nothing would say so.**
+    ///
+    /// A set of runs rather than one offset and one length: the generic fold mints witnesses
+    /// with holes in them, and two numbers can only describe a hole by swallowing it
+    /// ([`ReadWitness::Partial`]).
+    pub witnessed_in_locus: WitnessedLocusPositions,
+    /// Which of the sample's read groups these reads came from — the same axis
+    /// [`SupportedAllele`] keys on, and for the same reason: a censored term pools an
+    /// observation's reads only if every one of them would get the same number
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    pub read_group: ReadGroupId,
+    /// The bases these reads showed, exactly as the mint recorded them — **allele content, in
+    /// read coordinates**, which is not the axis [`witnessed_in_locus`](Self::witnessed_in_locus) is on.
+    ///
+    /// **The two lengths differ by the net indel the read carried over the stretch, so equality
+    /// does not license indexing one with the other.** A read carrying a two-base insertion and
+    /// a two-base deletion inside the witnessed stretch comes back with as many bases as
+    /// positions and is not a positional match for any of them.
+    pub bases: Box<[u8]>,
+    /// How many of the sample's reads showed exactly this — the same stretch, the same bases,
+    /// the same read group, which is what makes them one term.
+    ///
+    /// **Never zero, kept so by whoever builds the row rather than by this type** — the fields
+    /// are public and there is no constructor, exactly as [`SupportedAllele`]'s are, where the
+    /// same rule is executed as a filter at the moment the rows are made.
+    pub num_reads: u32,
+    /// Σ `ln P(error)` over those reads — the mint's own sum, not divided, because a partial is
+    /// not composed across records and so has nothing to apportion.
+    ///
+    /// **This and `num_reads` are the whole of what a partial carries, where a complete row
+    /// carries six numbers**, and the plan asks for exactly these two. What the other four are
+    /// for is worth knowing before anything consumes this: strand bias, the mapping-quality
+    /// multi-mapper test and the read-position-bias term all read them, so at a repeat tract —
+    /// where half the overlapping reads are partial at 50 reference bases and four in five at
+    /// 100 (spec §5.4.1) — those filters would see the complete reads only. Adding them later
+    /// means reopening whatever routes partials in.
+    ///
+    /// **That, and the ascending order the field on [`SampleSupport`] promises, are the builder's
+    /// conventions rather than the type's**: the fields are public and there is no constructor,
+    /// so [`partials_of_sample`] is where both hold, and where their tests point.
+    pub q_sum: f64,
 }
 
 /// What one sample's reads lend one allele.
@@ -952,23 +1217,30 @@ pub struct SupportedAllele {
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
 ///   locus's width — 50 bases at the default bound.
 ///
-/// Rounded once per allele rather than per read, so the counts stay as close to whole reads
-/// as the division allows.
+/// Rounded once per row rather than per read, so the counts stay as close to whole reads as the
+/// division allows. **Per row means per `(allele, read group)` since B1, and that is a change
+/// of grain, not only of wording**: two lanes' shares of one divided read are now rounded
+/// separately, so adding the rows back can differ by up to half a read per lane from what a
+/// single row would have held. The row is what a model reads, and a row has to be whole reads
+/// to be usable on its own; [`SampleSupport::pooled_support_for`] is where the difference
+/// shows, and `tests::a_divided_read_is_rounded_once_per_read_group_not_once_per_allele` pins it
+/// at one forward read. (Named rather than linked: a `#[cfg(test)]` item does not exist in a doc
+/// build, so a link to one is an unresolved link.)
 ///
-/// **One row per allele pools the read groups, and the STR path will want them apart again**
-/// (the owner, at Checkpoint C). A sample's reads at one allele may come from several read
-/// groups, and `SequenceObservation` keeps them apart deliberately — "a per-chemistry model
-/// needs the allele × group cross **with its quality moments**"
-/// ([`locus_generation/mod.rs`](../../locus_generation/mod.rs)). **Stutter is fitted per read
-/// group**, so an STR locus called from a pooled row would be scored against a stutter rate
-/// that belongs to no group in particular.
+/// **This row is one allele of one read group, not one allele of the sample** — see
+/// [`SupportedAllele`], which carries the group. It was one row per allele until the calling
+/// prerequisites split it (`doc/devel/ng/impl_plan/calling_prerequisites.md`, Milestone B step
+/// B1), and the reason for splitting turned out to be general rather
+/// than the STR path's alone: a read likelihood folds an observation's reads into one term only
+/// when every one of them would get the same number, and reads from two lanes have different
+/// error rates (`doc/devel/ng/spec/read_likelihoods.md` §2.3). Stutter, fitted per read group, is the same
+/// argument on the repeat path — a locus called from a pooled row would be scored against a
+/// rate belonging to no group in particular. The mint says the same thing from its own side:
+/// "a per-chemistry model needs the allele × group cross **with its quality moments**"
+/// ([`SequenceObservation::read_group`](crate::ng::locus_generation::SequenceObservation)), a
+/// per-group count beside one merged row giving the first and losing the second.
 ///
-/// It is pooled here anyway, for now, and deliberately: the architecture's own sketch pools
-/// them (arch §4, `per_allele: Vec<SequenceObservation>`, one entry per allele), nothing in
-/// the generic path needs the cross, and the shape that restores it is one row per
-/// `(allele, read group)`, which folds to this one — so the step that needs it can add it
-/// without unpicking anything. **Whoever brings the STR path through this merge owes that
-/// change.**
+/// A sample with one read group has one row per allele, exactly as before.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AlleleSupport {
     /// How many of the sample's reads showed this allele. **Exact** — every read is named,
@@ -995,6 +1267,24 @@ pub struct AlleleSupport {
     pub placed_left: u32,
 }
 
+impl AlleleSupport {
+    /// Two rows added together — **the read-group fold, and the only place it happens**.
+    ///
+    /// Every field is additive, so this is exact wherever the rows themselves are.
+    /// [`SampleSupport::pooled_support_for`] is its one caller, and its doc says why a read
+    /// likelihood must not be a second one.
+    fn added_to(self, other: Self) -> Self {
+        Self {
+            num_reads: self.num_reads.saturating_add(other.num_reads),
+            num_fwd: self.num_fwd.saturating_add(other.num_fwd),
+            q_sum: self.q_sum + other.q_sum,
+            mapq_sum: self.mapq_sum.saturating_add(other.mapq_sum),
+            mapq_sum_sq: self.mapq_sum_sq.saturating_add(other.mapq_sum_sq),
+            placed_left: self.placed_left.saturating_add(other.placed_left),
+        }
+    }
+}
+
 /// One sample's support as it is accumulated, before the divided sums are rounded.
 ///
 /// The four count-like sums are gathered as `f64` because a read's share of them is a
@@ -1004,6 +1294,19 @@ pub struct AlleleSupport {
 struct AlleleSupportTally {
     num_reads: u32,
     sums: SupportSums,
+}
+
+/// One `(allele, read group)` pair being accumulated, and what it has accumulated.
+///
+/// **The key travels with the tally rather than being the index into it**, because a pair
+/// cannot index a `Vec`. What the scratch buffer keeps is the allocation, not the addressing:
+/// it is cleared and refilled per sample, and found by scanning, which at an ordinary locus
+/// means looking at one or two entries.
+#[derive(Debug, Clone, Copy)]
+struct AlleleGroupTally {
+    allele: usize,
+    read_group: ReadGroupId,
+    tally: AlleleSupportTally,
 }
 
 impl AlleleSupportTally {
@@ -1257,6 +1560,97 @@ struct ReadSighting {
     sequence: u32,
 }
 
+/// **Every partial observation one sample's reads left over this locus**, carried rather than
+/// dropped, keyed by the stretch each witnessed.
+///
+/// **One row per `(record, sequence)`, and nothing is merged.** The mint has already pooled
+/// every read that showed the same `(bases, witness, read group)` into one observation, and two
+/// of the sample's records are disjoint stretches of the locus, so no two rows here can be the
+/// same evidence — there is nothing left to fold.
+///
+/// **A partial is never composed across records.** Composition needs a read that showed one
+/// thing at *every* one of the sample's records, and a read that ran out at one of them showed
+/// nothing recordable there; [`alleles_of_sample`] removes it from the allele derivation for
+/// exactly that reason and counts it in
+/// [`SampleSupport::reads_removed_as_evidence`]. **So a read can be removed there and appear
+/// here**, and that is not double counting: the counter says its *allele* could not be
+/// composed, which stays true, and what appears here is not an allele.
+///
+/// **One read can back several rows, and the rows do not say so.** A read that starts inside
+/// one of the sample's records and runs out inside the next is partial at both, so it leaves
+/// one row per record: two stretches, each with `num_reads` 1, for one molecule. Nothing here
+/// carries a chain id, so a consumer cannot undo it — and
+/// [`read_likelihoods.md`](../../../../doc/devel/ng/spec/read_likelihoods.md) §5.3 scores one
+/// term per observation on the understanding that every read behind it witnessed the same
+/// stretch, which two rows for one read break. **Pinned by
+/// `one_read_partial_at_two_records_is_two_rows_and_that_is_visible`** so that the shape is a
+/// recorded fact rather than an accident, and owed to the evidence view that consumes these:
+/// either the rows carry the read, or a read's stretches are folded into one row with a hole
+/// between them. This is the first step at which such a read is visible at all — before it, a
+/// read with no complete sequence anywhere reached no field of the table, not even
+/// `reads_removed_as_evidence`.
+///
+/// **Both branches of the derivation are covered by walking the records directly.** The
+/// derivation's two shapes — one record, several — differ in how reads are placed, and a
+/// partial is placed nowhere; the walk is the same either way.
+///
+/// Sorted ascending by `(witnessed stretch, read group, bases)`. The stretch alone does not
+/// order two rows — a substitution witnessed partially is two rows over one stretch — and the
+/// order has to be total, because the sum over observations must run in a fixed one
+/// (`doc/devel/ng/spec/read_likelihoods.md` §8).
+fn partials_of_sample(
+    reference: &LocusReferenceBases,
+    members: &SampleMembers<'_>,
+) -> Vec<PartialObservation> {
+    let mut partials = Vec::new();
+    for record in members.observations {
+        // **Built on the first partial and not before.** Where a record holds none — the
+        // ordinary locus, and every locus at all before this step — placing it is work with
+        // no consumer, and `alleles_of_sample` has already placed the same record for its
+        // own use. Measured at 3,000 samples × 10 records × 32 reads with no partial
+        // anywhere: `placing` was 28 % of this function's 353 µs.
+        let mut placement = None;
+        for sequence in &record.observations {
+            // **A sequence no read is behind is not evidence**, the same rule the allele
+            // derivation applies to its own two branches.
+            if sequence.num_obs == 0 {
+                continue;
+            }
+            let ReadWitness::Partial { positions } = &sequence.read_witness else {
+                continue;
+            };
+            let placement = placement.get_or_insert_with(|| reference.placing(record));
+            let Some(witnessed_in_locus) = placement.witnessed_across_locus(positions) else {
+                continue;
+            };
+            partials.push(PartialObservation {
+                witnessed_in_locus,
+                read_group: sequence.read_group,
+                bases: sequence.bases.clone(),
+                num_reads: sequence.num_obs,
+                q_sum: sequence.q_sum,
+            });
+        }
+    }
+    // Unstable is enough: the key is total, and no two rows share one. Within a record the
+    // mint has already keyed its observations on `(bases, witness, read group)`, two of which
+    // are key components here and the third of which the shift preserves; across records the
+    // shifted stretches cannot meet, because `LocusReferenceBases::over` asserts a sample's
+    // records are disjoint and ascending before any of this runs. **That second half rests on
+    // the mint's clamping** — `ReadWitness::Partial` is a public variant with a public field,
+    // and `witness.rs` calls keeping its runs inside the record "a convention rather than a
+    // type invariant" — so a hand-built witness reaching past its own record can produce two
+    // equal keys, and their order is then unspecified rather than wrong.
+    partials.sort_unstable_by(|left, right| {
+        (&left.witnessed_in_locus, left.read_group, &left.bases).cmp(&(
+            &right.witnessed_in_locus,
+            right.read_group,
+            &right.bases,
+        ))
+    });
+    partials
+}
+
 /// Every allele one sample's reads showed over the whole locus, handed to `emit` one at a
 /// time and in a fixed order.
 ///
@@ -1472,6 +1866,119 @@ enum AlleleBacking<'a> {
         records: &'a [SampleLocusObservations],
         sightings: &'a [ReadSighting],
     },
+}
+
+impl AlleleBacking<'_> {
+    /// Which of the sample's read groups this evidence came from — the axis
+    /// [`SupportedAllele`] keys on.
+    ///
+    /// **A read has one read group, so a read seen at several of the sample's records has one
+    /// too.** The group belongs to the library the fragment was prepared in, and the mint
+    /// stamps it from the read rather than from where the read landed
+    /// (`read_group: active.read.read_group`, `locus_generation/pileup/open_record.rs`), so
+    /// every sighting of one read names the same one and any of them is the answer. This reads
+    /// the first and checks the rest against it. `sample` is carried only so that a refusal can
+    /// name it: a chain id is comparable within one sample and means nothing without it
+    /// ([`ReadSighting::read`]).
+    ///
+    /// # What a disagreement means, and there are two ways to reach it
+    ///
+    /// Two sightings of one read naming two groups says the thing being composed here is not
+    /// one read of one library.
+    ///
+    /// **One way is a defect: the mint gave two reads the same chain id**, so the bases being
+    /// composed belong to no fragment. This catches only the half of that defect where the two
+    /// reads' sightings tile the sample's records exactly one apiece — where they overlap at a
+    /// record, [`alleles_of_sample`] has already removed the read for showing two things
+    /// there, and counted it in [`SampleSupport::reads_removed_as_evidence`].
+    ///
+    /// **The other needs no defect at all, and it is a property of the input.** A fragment's
+    /// two mates are collapsed onto one chain id **on their name alone**
+    /// (`pending_mates`, `locus_generation/pileup/chain_id_allocator.rs`), while the read group
+    /// is resolved from each SAM record's own `RG` tag
+    /// ([`resolve_read_group`](crate::ng::read::input::read_groups::ReadGroupResolution)), and
+    /// nothing requires a fragment's two mates to carry the same one. So a file whose mates
+    /// disagree about their `@RG` reaches this arm legally — needing only that the two mates
+    /// fall in one cohort locus at different records without overlapping — and so does a
+    /// merged file in which two libraries reuse a read name.
+    ///
+    /// **The same input has a worse form this cannot see**, and it is upstream: where such a
+    /// fragment's two mates *overlap* and agree, the walk sums their base quality and gives it
+    /// to one of them (`resolve_mate_overlap_at_pos`, `locus_generation/pileup/genome_walk.rs`),
+    /// which stamps one library's quality with the other's group in a single observation. One
+    /// sighting, nothing here to compare. Both forms have one repair and it is not this check:
+    /// carry the read group on the pending mate and refuse a mismatched second mate where the
+    /// chain id is handed out.
+    ///
+    /// # Why it is refused rather than resolved
+    ///
+    /// Picking a group files a read under a library that produced none of it, which is the
+    /// pooling `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids, and it is silent: the
+    /// group is half the tally's key, so the read's whole share — its count, its strand and all
+    /// four quality sums — lands in another library's row, or makes a row for a library that
+    /// showed nothing here.
+    ///
+    /// Release-level, like the chain-id check in [`alleles_of_sample`] a few lines above, and
+    /// one comparison per sighting after the first. A read that reaches here was sighted at
+    /// exactly one sequence of **every** one of the sample's records — [`alleles_of_sample`]
+    /// removes any read that was not — so the comparisons are the sample's record count less
+    /// one. **That count is not small.** The generic mint writes a record at every covered
+    /// position, so a sample can hold as many records inside a locus as the locus is wide —
+    /// six inside a six-base locus, in `serial.rs`'s own minted fixture — bounded by
+    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 50 by default. What keeps it free is
+    /// the company it keeps rather than the comparison being cheap: the same locus already
+    /// sorts every sighting and composes and divides every read across every record.
+    ///
+    /// **This arm is reached at all only where a locus holds two or more of one sample's
+    /// records**, which is the indel and wide-locus path; a one-record sample takes
+    /// [`OneSequence`](Self::OneSequence) and consults no read.
+    ///
+    /// **What this does not cover is the other arm**, where the same invariant holds by
+    /// construction and cannot be checked. Every read behind one [`SequenceObservation`] shares
+    /// its read group because the group is part of the key the mint buckets on
+    /// (`open_record.rs`, `ssr.rs`); by the time the merge sees the observation there is one
+    /// group and a list of chain ids, and the per-read groups are gone. A psp file corrupted
+    /// that way is undetectable here.
+    ///
+    /// **A panic is the wrong shape for the mate case and is owed a repair.** The release
+    /// profile aborts (`panic = "abort"`), so a header the user wrote can end a whole run —
+    /// where `arch/cohort_merge.md` §5 puts a fact about the data on the counted-error side and
+    /// keeps panics for bugs in whoever hands the work out. It is left as a panic here because
+    /// this module has no `RunError` to raise yet, and the conversion is owed together with the
+    /// chain-id check's (§5). Until then, a refusal here means *look at the file's `@RG`
+    /// records first*.
+    fn read_group(&self, sample: usize) -> ReadGroupId {
+        match self {
+            Self::OneSequence(sequence) => sequence.read_group,
+            Self::OneRead { records, sightings } => {
+                let group_at = |sighting: &ReadSighting| {
+                    records[sighting.record as usize].observations[sighting.sequence as usize]
+                        .read_group
+                };
+                let (first, rest) = sightings
+                    .split_first()
+                    .expect("a read's sightings are one group of a chunk_by and never empty");
+                let group = group_at(first);
+                for sighting in rest {
+                    let seen = group_at(sighting);
+                    // Each group is named beside the record it was read at, in that order, so
+                    // the two cannot be paired the wrong way round by a reader.
+                    assert!(
+                        seen == group,
+                        "sample index {sample}: read {} is in read group {} at {} and read \
+                         group {} at {}, and a read has one read group — look at the file's \
+                         @RG records, then at whether two reads share a chain id",
+                        sighting.read,
+                        group.get(),
+                        records[first.record as usize].region,
+                        seen.get(),
+                        records[sighting.record as usize].region,
+                    );
+                }
+                group
+            }
+        }
+    }
 }
 
 /// How far `member_region` starts into `locus_region`, in bases.
@@ -1696,7 +2203,7 @@ mod tests {
 
     /// **A member that matched the reference projects to the reference allele itself** —
     /// what `bases()` claims, and what lets the next step's allele table hold the
-    /// reference without a special case (spec §4.2). At a non-zero offset, so a prefix or
+    /// reference without a special case (`doc/devel/ng/spec/cohort_merge.md` §4.2). At a non-zero offset, so a prefix or
     /// suffix off by one would show.
     #[test]
     fn a_member_that_matched_the_reference_projects_to_the_locus_reference() {
@@ -1964,7 +2471,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Unification into one allele table (spec §4.2), and the owner's ruling of
+    // Unification into one allele table (`doc/devel/ng/spec/cohort_merge.md` §4.2), and the owner's ruling of
     // 2026-08-17 on what a sample showed when a locus spans several of its records.
     // ---------------------------------------------------------------
 
@@ -2708,7 +3215,7 @@ mod tests {
         assert_eq!(support.sample, 0);
         assert_eq!(support.reads_composed_across_records, 0, "nothing divided");
         assert_eq!(
-            support.support_for(REFERENCE_ALLELE),
+            support.pooled_support_for(REFERENCE_ALLELE),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 1,
@@ -2725,7 +3232,7 @@ mod tests {
             .position(|allele| &**allele == b"ACTTA")
             .expect("the SNP is in the table");
         assert_eq!(
-            support.support_for(snp),
+            support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 4,
                 num_fwd: 3,
@@ -2737,11 +3244,473 @@ mod tests {
         );
     }
 
-    /// **Two of a sample's own observations that reach the same allele are summed** (spec
-    /// §4.2), and support is **never** merged across alleles. The same bases from two read
-    /// groups are two observations and one allele.
+    /// **The same allele from two lanes is two rows, and the numbers are split exactly as the
+    /// reads were.**
+    ///
+    /// The mint already keeps read groups apart — `SequenceObservation` keys on the group — so
+    /// two lanes showing the same bases arrive as two observations of one record. They used to
+    /// land in one row here. Pooling them is what `doc/devel/ng/spec/read_likelihoods.md` §2.3 forbids: a
+    /// read likelihood folds an observation's reads into one term only when every one of them
+    /// would get the same number, and the two lanes have different error rates.
+    ///
+    /// **On this fixture nothing is lost or invented by the split** — the two rows' reads and
+    /// sums add back to what one pooled row held, which is what
+    /// [`pooled_support_for`](SampleSupport::pooled_support_for) is asserted against here.
+    /// **That is a property of this fixture and not of the merge**: every count here is added
+    /// whole, because the sample has one record. Where a read is divided across records the
+    /// four count-like sums are rounded per row, so two rows can round to one read more or less
+    /// than the single row would have — see
+    /// [`a_divided_read_is_rounded_once_per_read_group_not_once_per_allele`].
     #[test]
-    fn support_is_summed_within_an_allele_and_never_across_them() {
+    fn one_allele_from_two_read_groups_is_two_rows_holding_the_mints_own_numbers() {
+        let two_lanes = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                SequenceObservation {
+                    read_group: ReadGroupId(2),
+                    ..shown_by(b"T", &[7, 9], -6.0, 1, 120, 7_200, 1)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"T", &[11, 13, 15], -9.0, 2, 150, 7_500, 0)
+                },
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_lanes, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let snp = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACTTA")
+            .expect("the SNP is in the table");
+
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == snp)
+            .collect();
+        assert_eq!(rows.len(), 2, "one row per lane: {:?}", support.supported);
+        // Ascending by read group, so the lane that was emitted second comes first.
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[1].read_group, ReadGroupId(2));
+        assert_eq!(
+            rows[0].support,
+            AlleleSupport {
+                num_reads: 3,
+                num_fwd: 2,
+                q_sum: -9.0,
+                mapq_sum: 150,
+                mapq_sum_sq: 7_500,
+                placed_left: 0,
+            },
+        );
+        assert_eq!(
+            rows[1].support,
+            AlleleSupport {
+                num_reads: 2,
+                num_fwd: 1,
+                q_sum: -6.0,
+                mapq_sum: 120,
+                mapq_sum_sq: 7_200,
+                placed_left: 1,
+            },
+        );
+        assert_eq!(
+            support.pooled_support_for(snp),
+            AlleleSupport {
+                num_reads: 5,
+                num_fwd: 3,
+                q_sum: -15.0,
+                mapq_sum: 270,
+                mapq_sum_sq: 14_700,
+                placed_left: 1,
+            },
+            "the two rows add back to the one row this used to be",
+        );
+    }
+
+    /// **A read composed across records lands in its own lane's row**, which is the only test of
+    /// [`AlleleBacking::read_group`]'s multi-record arm — the two tests either side of this one
+    /// build a single record and take the other branch entirely.
+    ///
+    /// **And the rounding grain moved with the axis, which is what the second half asserts.**
+    /// The four count-like sums of a divided read are fractions until the row is finished, and
+    /// finishing rounds them. That used to happen once per allele and now happens once per
+    /// `(allele, read group)`, so each lane can round its share up or down on its own: here two
+    /// lanes each hold half a forward read, and each half rounds up, so the sample's rows total
+    /// two forward reads where one row would have held one. **Neither answer is wrong** — a row
+    /// has to be whole reads to be usable on its own — but the total is no longer what a single
+    /// row would have carried, and a reader adding the rows back must know it.
+    #[test]
+    fn a_divided_read_is_rounded_once_per_read_group_not_once_per_allele() {
+        // Two records; reads 7, 9 and 11 all show `A` then `C`, so each composes the same
+        // allele across both. Reads 7 and 9 are lane 1, read 11 is lane 2.
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![
+                    SequenceObservation {
+                        read_group: ReadGroupId(1),
+                        ..shown_by(b"A", &[7, 9], -4.0, 1, 120, 7_200, 0)
+                    },
+                    SequenceObservation {
+                        read_group: ReadGroupId(2),
+                        ..shown_by(b"A", &[11], -2.0, 1, 60, 3_600, 0)
+                    },
+                ],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![
+                    SequenceObservation {
+                        read_group: ReadGroupId(1),
+                        ..shown_by(b"C", &[7, 9], -1.0, 0, 100, 5_000, 0)
+                    },
+                    SequenceObservation {
+                        read_group: ReadGroupId(2),
+                        ..shown_by(b"C", &[11], -0.5, 0, 50, 2_500, 0)
+                    },
+                ],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATC")
+            .expect("the composed allele");
+        assert_eq!(
+            support.reads_composed_across_records, 3,
+            "every read divided"
+        );
+
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == compound)
+            .collect();
+        assert_eq!(rows.len(), 2, "one row per lane: {:?}", support.supported);
+        // **The read group came from the sightings, not from a default.** Reading it off the
+        // wrong observation would put both reads in one lane.
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[0].support.num_reads, 2);
+        assert_eq!(rows[1].read_group, ReadGroupId(2));
+        assert_eq!(rows[1].support.num_reads, 1);
+
+        // Each lane's forward share is exactly half a read, and each row rounds it to one.
+        assert_eq!(rows[0].support.num_fwd, 1, "lane 1: two reads, one forward");
+        assert_eq!(rows[1].support.num_fwd, 1, "lane 2: one read, one forward");
+        assert_eq!(
+            support.pooled_support_for(compound).num_fwd,
+            2,
+            "the rows total two forward reads; one pooled row would have rounded once",
+        );
+        assert_eq!(
+            support.pooled_support_for(compound).num_reads,
+            3,
+            "the read count is exact either way — every read is named",
+        );
+    }
+
+    /// Three records of one sample, all naming read 7, with read 7's sighting at record
+    /// `odd_lane_at` stamped with a second read group and the other two with the first.
+    ///
+    /// **A sample cannot really be in this state** — the group belongs to the library the
+    /// fragment was prepared in, so one read has one group wherever it is sighted. Building it
+    /// by hand is the only way to reach the check that says so, and the parameter exists
+    /// because the check has to look at every sighting after the first, not just one of them.
+    fn three_records_with_a_second_lane_at(odd_lane_at: usize) -> [SampleLocusObservations; 3] {
+        let lane_of = |record: usize| {
+            if record == odd_lane_at {
+                ReadGroupId(2)
+            } else {
+                ReadGroupId(1)
+            }
+        };
+        [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![SequenceObservation {
+                    read_group: lane_of(0),
+                    ..shown_by(b"A", &[7], -4.0, 1, 120, 7_200, 0)
+                }],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![SequenceObservation {
+                    read_group: lane_of(1),
+                    ..shown_by(b"C", &[7], -1.0, 0, 100, 5_000, 0)
+                }],
+            ),
+            record_of(
+                region(16, 16),
+                b"T",
+                vec![SequenceObservation {
+                    read_group: lane_of(2),
+                    ..shown_by(b"G", &[7], -2.0, 1, 80, 3_200, 0)
+                }],
+            ),
+        ]
+    }
+
+    /// Two records of one sample, both naming read 7, its sighting at the second stamped with
+    /// a second read group.
+    ///
+    /// **Two records is the smallest multi-record sample there is, and the three-record
+    /// fixture above cannot stand in for it**: a check that compared every sighting against
+    /// the *second* rather than the first would still find the disagreement at three records
+    /// and would compare the lone sighting with itself at two, passing everything.
+    fn two_records_with_a_second_lane() -> [SampleLocusObservations; 2] {
+        [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"A", &[7], -4.0, 1, 120, 7_200, 0)
+                }],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![SequenceObservation {
+                    read_group: ReadGroupId(2),
+                    ..shown_by(b"C", &[7], -1.0, 0, 100, 5_000, 0)
+                }],
+            ),
+        ]
+    }
+
+    /// **A read cannot be in two read groups, and the merge refuses rather than picking one.**
+    /// Which library a read belongs to is half the key its evidence is filed under, so a wrong
+    /// answer moves the read's whole share into another library's row
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3) — there is nothing to fall back to.
+    ///
+    /// **The expected text is the whole message, deliberately.** Each read group has to be
+    /// named beside the record it was read at, and nothing but an assertion pins which record
+    /// the message blames: reading the group off the *last* sighting instead of the first
+    /// leaves the returned value identical and only changes this line.
+    #[test]
+    #[should_panic(
+        expected = "sample index 0: read 7 is in read group 1 at contig 0:12-12 and read group \
+                    2 at contig 0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_a_sample_with_two_records() {
+        let records = two_records_with_a_second_lane();
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same refusal where the sample has three records and the disagreement is at the
+    /// **middle** one. Its twin below puts it at the last, because a check that looked at only
+    /// one sighting after the first would pass whichever of the two it happened to look at.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 1 at contig 0:12-12 and read group 2 at contig \
+                    0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_middle_of_three_records() {
+        let records = three_records_with_a_second_lane_at(1);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same refusal where the odd read group is at the sample's **first** record — the one
+    /// the other two sightings are compared against.
+    ///
+    /// **Without this the baseline itself is unpinned.** Taking the group off the last sighting
+    /// instead of the first, and keeping the comparison, passes both tests below: at a
+    /// disagreement anywhere after the first record the check still fires, and at a
+    /// disagreement *at* the first record it quietly files the read under the group its other
+    /// sightings carry. Here that would be group 1, and read 7 belongs to neither library
+    /// alone.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 2 at contig 0:12-12 and read group 1 at contig \
+                    0:14-14"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_first_of_three_records() {
+        let records = three_records_with_a_second_lane_at(0);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// The same disagreement at the sample's **last** record — see the test above for why both
+    /// positions are pinned. The blamed regions differ from that test's, which is what says the
+    /// message names the record the disagreement is actually at.
+    #[test]
+    #[should_panic(
+        expected = "read 7 is in read group 1 at contig 0:12-12 and read group 2 at contig \
+                    0:16-16"
+    )]
+    fn a_read_in_two_read_groups_is_refused_at_the_last_of_three_records() {
+        let records = three_records_with_a_second_lane_at(2);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let _ = CohortObservation::over(&locus);
+    }
+
+    /// **The same three-record sample with one read group throughout is built without
+    /// complaint**, which is what makes the refusals above evidence about the disagreement
+    /// rather than about the fixture. `usize::MAX` is no record, so every sighting names
+    /// group 1.
+    #[test]
+    fn a_read_sighted_three_times_in_one_read_group_is_one_row() {
+        let records = three_records_with_a_second_lane_at(usize::MAX);
+        let deletion = [member(region(10, 16), b"ACGTACT", b"A")];
+        let locus = closed_locus(region(10, 16), &[&records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATCCG")
+            .expect("the composed allele");
+        let rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == compound)
+            .collect();
+        assert_eq!(rows.len(), 1, "one lane, one row: {:?}", support.supported);
+        assert_eq!(rows[0].read_group, ReadGroupId(1));
+        assert_eq!(rows[0].support.num_reads, 1);
+    }
+
+    /// **A one-read-group sample's rows are in ascending allele order**, and until B1 that was
+    /// free: the tally was a vector indexed by allele, so nothing could put it out of order.
+    /// It is now a sort that can be deleted, and this is the only test that would notice —
+    /// every other one-group fixture happens to emit its alleles in ascending order anyway.
+    ///
+    /// This one does not: the record shows the alternative first, so the reference is interned
+    /// second and the emission order is allele 1 then allele 0.
+    #[test]
+    fn a_one_read_group_samples_rows_are_in_ascending_allele_order() {
+        let alternative_first = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7], -1.0, 0, 10, 100, 0),
+                shown_by(b"G", &[9], -2.0, 0, 20, 400, 0),
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&alternative_first, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let alleles: Vec<_> = support.supported.iter().map(|row| row.allele).collect();
+
+        // The premise, asserted rather than assumed: the alternative was emitted first, so an
+        // unsorted tally would hold it first.
+        assert_eq!(
+            observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == b"ACTTA"),
+            Some(1),
+            "the alternative is interned after the reference",
+        );
+        assert_eq!(alleles, vec![0, 1], "ascending allele order: {alleles:?}");
+        assert!(
+            support
+                .supported
+                .iter()
+                .all(|row| row.read_group == ReadGroupId(0)),
+            "one group, and every row says which: {:?}",
+            support.supported,
+        );
+    }
+
+    /// **The rows are in ascending `(allele, read group)` order**, which is the contract
+    /// [`SampleSupport::supported`] states and the order a consumer walking the pair may rely
+    /// on. The tally is filled in the order the derivation emits alleles, which is neither, so
+    /// this pins the sort rather than an accident of the fixture.
+    #[test]
+    fn the_rows_are_ordered_by_allele_then_read_group() {
+        let mixed = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                SequenceObservation {
+                    read_group: ReadGroupId(5),
+                    ..shown_by(b"T", &[7], -1.0, 0, 10, 100, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(3),
+                    ..shown_by(b"G", &[9], -2.0, 0, 20, 400, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"T", &[11], -3.0, 0, 30, 900, 0)
+                },
+                SequenceObservation {
+                    read_group: ReadGroupId(4),
+                    ..shown_by(b"G", &[13], -4.0, 0, 40, 1_600, 0)
+                },
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&mixed, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let keys: Vec<_> = observed.per_sample[0]
+            .supported
+            .iter()
+            .map(|row| (row.allele, row.read_group))
+            .collect();
+
+        // **Spelled out rather than compared against a sorted copy of itself**, which would be
+        // true of any order the code happened to produce and would show a reader nothing. The
+        // fixture emits `(1, 5), (0, 3), (1, 1), (0, 4)`; this is what the sort must make of it.
+        let reference = REFERENCE_ALLELE;
+        let snp = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACTTA")
+            .expect("the SNP is in the table");
+        assert_eq!(
+            keys,
+            vec![
+                (reference, ReadGroupId(3)),
+                (reference, ReadGroupId(4)),
+                (snp, ReadGroupId(1)),
+                (snp, ReadGroupId(5)),
+            ],
+        );
+    }
+
+    /// **Support is never merged across alleles** (`doc/devel/ng/spec/cohort_merge.md` §4.2),
+    /// and since B1 it is never merged across read groups either
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    ///
+    /// **This test said the opposite until B1**, and it is the only pre-existing merge test
+    /// with more than one read group in it: the same bases from two groups were "two
+    /// observations and one allele", and their reads and sums were added. They are now two rows.
+    /// It is kept — with what it asserts corrected — rather than replaced, because the second
+    /// half of its claim is unchanged and worth keeping beside the first: a *different* allele
+    /// is still never mixed in, whatever group it came from.
+    #[test]
+    fn support_is_merged_within_an_allele_and_a_read_group_and_across_neither() {
         let two_groups = [record_of(
             region(12, 12),
             b"G",
@@ -2767,8 +3736,23 @@ mod tests {
                 .expect("in the table")
         };
 
+        // **The two groups stay apart**, which is what B1 changed: two rows, each holding its
+        // own group's reads, where this used to be one row holding both.
+        let snp = allele_of(b"ACTTA");
+        let snp_rows: Vec<_> = support
+            .supported
+            .iter()
+            .filter(|row| row.allele == snp)
+            .collect();
+        assert_eq!(snp_rows.len(), 2, "{:?}", support.supported);
+        assert_eq!(snp_rows[0].read_group, ReadGroupId(0));
+        assert_eq!(snp_rows[0].support.num_reads, 2);
+        assert_eq!(snp_rows[0].support.q_sum, -4.0);
+        assert_eq!(snp_rows[1].read_group, ReadGroupId(1));
+        assert_eq!(snp_rows[1].support.num_reads, 1);
+        assert_eq!(snp_rows[1].support.q_sum, -1.0);
         assert_eq!(
-            support.support_for(allele_of(b"ACTTA")),
+            support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 2,
@@ -2777,10 +3761,10 @@ mod tests {
                 mapq_sum_sq: 9_700,
                 placed_left: 1,
             },
-            "the two read groups' reads and sums added",
+            "and adding the two rows back gives what the one row used to hold",
         );
         assert_eq!(
-            support.support_for(allele_of(b"ACATA")),
+            support.pooled_support_for(allele_of(b"ACATA")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2836,7 +3820,7 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            support.support_for(compound),
+            support.pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2916,7 +3900,7 @@ mod tests {
         let split = &observed.per_sample[0];
 
         assert_eq!(
-            split.support_for(allele_of(b"ACATC")),
+            split.pooled_support_for(allele_of(b"ACATC")),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 2,
@@ -2928,7 +3912,7 @@ mod tests {
             "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
         );
         assert_eq!(
-            split.support_for(allele_of(b"ACTTC")),
+            split.pooled_support_for(allele_of(b"ACTTC")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2952,7 +3936,9 @@ mod tests {
         );
         assert_eq!(with_a_removal.reads_composed_across_records, 1);
         assert_eq!(
-            with_a_removal.support_for(allele_of(b"AGGAA")).num_reads,
+            with_a_removal
+                .pooled_support_for(allele_of(b"AGGAA"))
+                .num_reads,
             1,
             "read 21 composed across both records",
         );
@@ -2993,7 +3979,7 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            observed.per_sample[0].support_for(compound).q_sum,
+            observed.per_sample[0].pooled_support_for(compound).q_sum,
             -1.0,
             "the weaker of −6.0 and −1.0, not the better",
         );
@@ -3115,7 +4101,7 @@ mod tests {
             .expect("the three reads' allele");
 
         assert_eq!(
-            observed.per_sample[0].support_for(compound),
+            observed.per_sample[0].pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 1,
@@ -3129,7 +4115,7 @@ mod tests {
     }
 
     /// **A sample that did not cover the locus has no entry**, which is a different fact
-    /// from an entry whose support is all reference (spec §4.2). Sample 1 here covers
+    /// from an entry whose support is all reference (`doc/devel/ng/spec/cohort_merge.md` §4.2). Sample 1 here covers
     /// nothing, and the walk is what leaves it out — so the entries name their samples
     /// rather than sitting at their index.
     #[test]
@@ -3193,12 +4179,12 @@ mod tests {
             .position(|allele| &**allele == b"ACATA")
             .expect("sample 1's allele");
         assert_eq!(
-            observed.per_sample[0].support_for(late),
+            observed.per_sample[0].pooled_support_for(late),
             AlleleSupport::default(),
             "an allele this sample never showed answers nothing at all",
         );
         assert_eq!(
-            observed.per_sample[1].support_for(late).num_reads,
+            observed.per_sample[1].pooled_support_for(late).num_reads,
             3,
             "and the sample that did show it answers its reads",
         );
@@ -3553,6 +4539,459 @@ mod tests {
             alleles_of(&table),
             vec![&b"ACGTA"[..], b"ACTTA", b"A"],
             "the partial's `A` would have been a fourth allele",
+        );
+    }
+
+    /// **A sample whose reads ran out inside the locus now reaches the built locus carrying what
+    /// they saw — and still contributes no allele.** Those are the two halves of this step, and
+    /// they pull in opposite directions, so both are asserted on one fixture.
+    ///
+    /// **The stretch is the whole point and it is hand-written.** The sample's record is at 12,
+    /// two bases into a locus that opens at 10, and the read witnessed that record's first
+    /// position. The mint measures that as position 0 *of the record*; the row must carry
+    /// position 2 *of the locus*. A row built without the shift would say the read saw the
+    /// locus's first base, and a consumer restricting an allele's projection to that position
+    /// would compare the read's `A` against the reference's `A` and call it compatible — the
+    /// substitution's projection is `ACTTA`, so the shift is the difference between a partial
+    /// that matches the substitution and one that does not.
+    ///
+    /// **The second assertion is also this test's premise check.** Turning the fixture's witness
+    /// to `Complete` makes the partial's `ACATA` a fourth allele of the table, which is the trap
+    /// `doc/devel/ng/spec/read_likelihoods.md` §5.1 names: a partial scored as though it were
+    /// complete mis-scores as a *short* allele.
+    ///
+    /// The fixture is `a_partial_sequence_contributes_no_allele`'s, deliberately: that test
+    /// checks the allele table alone, and this one runs the same locus through the whole
+    /// assembly, which is the only way to see the rows. **Both samples here hold one record, so
+    /// it is the single-record branch that is exercised**; the multi-record branch is
+    /// `a_partial_is_carried_from_a_multi_record_sample_too`.
+    #[test]
+    fn a_partial_observation_is_carried_over_the_stretch_it_witnessed() {
+        let mut with_a_partial = member(region(12, 12), b"G", b"T");
+        with_a_partial.observations.push(SequenceObservation {
+            read_witness: ReadWitness::from_left(1, with_a_partial.locus_len())
+                .expect("a one-base run inside a one-base record"),
+            // **Not the helper's zero**, so that the assertion below reads the row rather than
+            // the fixture: with `q_sum` left at `0.0` a build writing a constant zero into
+            // every row would satisfy it just as well.
+            q_sum: -18.5,
+            ..sequence(b"A")
+        });
+        let members = [with_a_partial];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        // **The premise, asserted rather than assumed.** Without this the whole test passes on a
+        // fixture holding no partial at all, and an absence proves nothing about a world where
+        // nothing was ever present.
+        assert_eq!(
+            members[0]
+                .observations
+                .iter()
+                .filter(|observed| observed.read_witness != ReadWitness::Complete)
+                .count(),
+            1,
+            "the sample must hold exactly the one partial this test is about",
+        );
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0].partials,
+            vec![PartialObservation {
+                witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 1)
+                    .expect("one position of the locus"),
+                read_group: ReadGroupId(0),
+                bases: Box::from(&b"A"[..]),
+                num_reads: 3,
+                q_sum: -18.5,
+            }],
+            "the run is 2..3 of the locus, not 0..1 of the record",
+        );
+        assert!(
+            observed.per_sample[1].partials.is_empty(),
+            "the sample with no partial carries no row",
+        );
+        assert_eq!(
+            observed
+                .alleles
+                .iter()
+                .map(|allele| allele.to_vec())
+                .collect::<Vec<_>>(),
+            vec![b"ACGTA".to_vec(), b"ACTTA".to_vec(), b"A".to_vec()],
+            "the reference, the substitution and the deletion — the partial's `A` would have \
+             been a fourth",
+        );
+    }
+
+    /// **A sample with several records carries its partials too, each shifted onto the locus by
+    /// its own record's offset.** The allele derivation takes a different branch here — it
+    /// consults reads and composes across records — and partials are gathered by walking the
+    /// records either way, so the two must not come apart.
+    ///
+    /// Read 7 is complete at 12 and partial at 14, which is the fixture
+    /// `a_read_partial_at_one_record_is_removed_as_evidence` uses to show the read contributes
+    /// no allele. **It still contributes no allele, and it now contributes a row**, and the two
+    /// facts sit together: `reads_removed_as_evidence` says the read's *allele* could not be
+    /// composed, which stays true, and what the row carries is not an allele.
+    #[test]
+    fn a_partial_is_carried_from_a_multi_record_sample_too() {
+        let mut two_records = a_sample_with_two_records();
+        let locus_len = two_records[1].locus_len();
+        two_records[1].observations = vec![
+            SequenceObservation {
+                num_obs: 1,
+                chain_ids: vec![11],
+                ..sequence(b"C")
+            },
+            SequenceObservation {
+                num_obs: 1,
+                chain_ids: vec![7],
+                read_witness: ReadWitness::from_left(1, locus_len)
+                    .expect("a one-base run inside a one-base record"),
+                ..sequence(b"C")
+            },
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let sample = &observed.per_sample[0];
+
+        assert_eq!(
+            sample.partials,
+            vec![PartialObservation {
+                witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(4, 1)
+                    .expect("one position of the locus"),
+                read_group: ReadGroupId(0),
+                bases: Box::from(&b"C"[..]),
+                num_reads: 1,
+                q_sum: 0.0,
+            }],
+            "the record at 14 is four bases into the locus at 10",
+        );
+        assert!(
+            !observed.alleles.iter().any(|allele| &**allele == b"ACATC"),
+            "read 7 still composes no allele: {:?}",
+            observed.alleles,
+        );
+        assert_eq!(
+            sample.reads_removed_as_evidence, 2,
+            "read 7, whose sighting at 14 is the partial, and read 9, which the fixture's \
+             second record never names — both lost their allele, which is what this counts",
+        );
+    }
+
+    /// **A witness with a hole in it keeps both of its runs, each shifted.** The generic fold
+    /// mints these where a read contributed no event at a position inside a widened record — an
+    /// interior `N`, a ref-skip ([`ReadWitness::Partial`]) — and two numbers could only describe
+    /// the gap by swallowing it, which would credit the read with a position it never saw.
+    ///
+    /// **Adaptor masking is not one of the causes, and an earlier draft of this comment listed
+    /// it.** Masking truncates a witness from one side rather than holing it, which is why
+    /// `open_record.rs` records that the §8 probe measured zero holed witnesses in 225 million
+    /// event-folds. The hole is rare, not unreachable, and the type admits it.
+    #[test]
+    fn a_witness_with_a_hole_keeps_both_runs_shifted() {
+        let mut spliced = member(region(12, 15), b"GTAC", b"GTAC");
+        spliced.observations = vec![SequenceObservation {
+            num_obs: 2,
+            read_witness: ReadWitness::Partial {
+                positions: WitnessedLocusPositions::from_half_open_runs([(0, 1), (3, 4)])
+                    .expect("two runs inside a four-base record"),
+            },
+            ..sequence(b"GC")
+        }];
+        let members = [spliced];
+        let deletion = [member(region(10, 15), b"ACGTAC", b"A")];
+        let locus = closed_locus(region(10, 15), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0].partials[0]
+                .witnessed_in_locus
+                .runs()
+                .collect::<Vec<_>>(),
+            vec![(2, 3), (5, 6)],
+            "both runs move by the record's two-base offset, and the hole survives",
+        );
+    }
+
+    /// **Two read groups over one stretch are two rows, in read-group order** — the same
+    /// boundary `supported` keeps, for the same reason: a censored term pools reads only when
+    /// every one of them would get the same number
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §2.3).
+    ///
+    /// **The stretch alone cannot order them**, which is why the key has three parts. Both rows
+    /// here witnessed the same position; only the group tells them apart.
+    #[test]
+    fn two_read_groups_over_one_stretch_are_two_rows_in_group_order() {
+        let mut two_lanes = member(region(12, 12), b"G", b"G");
+        let locus_len = two_lanes.locus_len();
+        let stretch =
+            ReadWitness::from_left(1, locus_len).expect("a one-base run inside a one-base record");
+        two_lanes.observations = vec![
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: stretch.clone(),
+                num_obs: 2,
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: stretch,
+                num_obs: 3,
+                ..sequence(b"A")
+            },
+        ];
+        let members = [two_lanes];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (row.read_group, row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![(ReadGroupId(1), 3), (ReadGroupId(5), 2)],
+            "two rows, ascending by group, and neither pooled into the other",
+        );
+    }
+
+    /// **A partial no read is behind is not a row**, the same rule the allele derivation applies
+    /// to its own two branches: a sequence with no reads is not evidence the sample showed
+    /// anything.
+    ///
+    /// **The record holds a second partial that one read *is* behind**, and the test asserts one
+    /// row rather than none. Without it the assertion is satisfied by a merge that builds no
+    /// rows at all — it passed unchanged on the tree before `partials_of_sample` existed — so
+    /// it would report a total failure of this step as the rule holding.
+    #[test]
+    fn a_partial_no_read_is_behind_is_not_a_row() {
+        let mut empty = member(region(12, 12), b"G", b"G");
+        let locus_len = empty.locus_len();
+        let stretch =
+            ReadWitness::from_left(1, locus_len).expect("a one-base run inside a one-base record");
+        empty.observations = vec![
+            SequenceObservation {
+                num_obs: 0,
+                read_witness: stretch.clone(),
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                num_obs: 4,
+                read_witness: stretch,
+                ..sequence(b"T")
+            },
+        ];
+        let members = [empty];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (row.bases.to_vec(), row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![(b"T".to_vec(), 4)],
+            "the sequence four reads showed is a row and the one no read showed is not",
+        );
+    }
+
+    /// **The rows are ordered by stretch, then read group, then bases** — the key
+    /// [`SampleSupport::partials`] promises, with all three parts varying so that neither
+    /// dropping one nor reordering them leaves the order intact.
+    ///
+    /// The four rows are pushed in an order no correct key produces, so a build that does not
+    /// sort at all fails too. `doc/devel/ng/spec/read_likelihoods.md` §8 is why this is a
+    /// requirement rather than tidiness: the sum over observations must run in a fixed order,
+    /// and the mint's own emission order is first-seen, not keyed.
+    #[test]
+    fn the_partial_rows_are_ordered_by_stretch_then_read_group_then_bases() {
+        let run = |start: u16, end: u16| ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(start, end)])
+                .expect("one run inside a two-base record"),
+        };
+        let mut four_rows = member(region(12, 13), b"GT", b"GT");
+        four_rows.observations = vec![
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: run(0, 1),
+                ..sequence(b"T")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(5),
+                read_witness: run(0, 1),
+                ..sequence(b"A")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: run(0, 1),
+                ..sequence(b"C")
+            },
+            SequenceObservation {
+                read_group: ReadGroupId(1),
+                read_witness: run(1, 2),
+                ..sequence(b"G")
+            },
+        ];
+        let members = [four_rows];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&members, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[0]
+                .partials
+                .iter()
+                .map(|row| (
+                    row.witnessed_in_locus.first_run(),
+                    row.read_group.get(),
+                    row.bases.to_vec(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ((2, 3), 1, b"C".to_vec()),
+                ((2, 3), 5, b"A".to_vec()),
+                ((2, 3), 5, b"T".to_vec()),
+                ((3, 4), 1, b"G".to_vec()),
+            ],
+            "the stretch first, then the group, then the bases — the two rows sharing a \
+             stretch and a group are ordered by nothing else",
+        );
+    }
+
+    /// **One read partial at two of the sample's records leaves two rows, and nothing in them
+    /// says it was one read.** Recorded rather than fixed: `read_likelihoods.md` §5.3 scores
+    /// one term per observation on the understanding that the reads behind it saw the same
+    /// stretch, and two rows for one molecule break that. The row carries no chain id, so a
+    /// consumer cannot fold them back.
+    ///
+    /// **This is also the first step at which such a read is visible at all.** It has no
+    /// complete sequence anywhere, so it never enters the allele derivation's read table and
+    /// `reads_removed_as_evidence` — which counts reads that showed something at some records
+    /// and not all — does not reach it either. The assertion below pins that zero beside the
+    /// two rows.
+    #[test]
+    fn one_read_partial_at_two_records_is_two_rows_and_that_is_visible() {
+        let mut first = member(region(12, 12), b"G", b"G");
+        let first_len = first.locus_len();
+        first.observations = vec![SequenceObservation {
+            num_obs: 1,
+            chain_ids: vec![42],
+            read_witness: ReadWitness::from_right(1, first_len)
+                .expect("a one-base run inside a one-base record"),
+            ..sequence(b"C")
+        }];
+        let mut second = member(region(14, 14), b"A", b"A");
+        let second_len = second.locus_len();
+        second.observations = vec![SequenceObservation {
+            num_obs: 1,
+            chain_ids: vec![42],
+            read_witness: ReadWitness::from_left(1, second_len)
+                .expect("a one-base run inside a one-base record"),
+            ..sequence(b"G")
+        }];
+        let one_read = [first, second];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&one_read, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let sample = &observed.per_sample[0];
+
+        assert_eq!(
+            sample
+                .partials
+                .iter()
+                .map(|row| (row.witnessed_in_locus.first_run(), row.num_reads))
+                .collect::<Vec<_>>(),
+            vec![((2, 3), 1), ((4, 5), 1)],
+            "one molecule, two rows, each claiming one read",
+        );
+        assert_eq!(
+            sample.partials.iter().map(|row| row.num_reads).sum::<u32>(),
+            2,
+            "the rows add to twice the reads there were, which is the fact this test exists \
+             to keep visible",
+        );
+        assert_eq!(
+            sample.reads_removed_as_evidence, 0,
+            "a read with no complete sequence anywhere reaches the removal counter either",
+        );
+    }
+
+    /// **A stretch that cannot be addressed on the locus's axis is no row, and the last one that
+    /// can still is.** A witnessed position is a `u16` measured from the locus's first base, so
+    /// a partial far enough into a wide locus has no representable stretch and is lost —
+    /// silently, which is a failure mode [`MemberPlacement::witnessed_across_locus`] names and
+    /// this test pins rather than endorses.
+    ///
+    /// **Three records, because the shift can fail in two different places.** The stretch's far
+    /// end can pass `u16::MAX` while the member's own offset still fits, and the offset itself
+    /// can not fit at all; a fixture with only the first would leave a build that truncated the
+    /// offset passing, and one with only the second would leave a build that clamped the end
+    /// passing. Both wrong answers are worse than the loss: a clamped end shortens a witness
+    /// into a claim about ground the read never saw, and a truncated offset moves the whole
+    /// stretch 65,536 bases to the left of where the read was.
+    ///
+    /// **Reachable only past the generic path.** A generic locus is bounded by
+    /// [`MaxCohortLocusSpan`], 50 reference bases by default, but repeat-tract loci are exempt
+    /// from that bound and the bound itself is the operator's to raise — so the case is a
+    /// satellite above 65,535 bases. The fixture is built by hand for the same reason every
+    /// other fixture here is: the walk would not close this locus.
+    #[test]
+    fn a_stretch_that_cannot_be_addressed_on_the_locus_axis_is_no_row() {
+        const LAST: u64 = 70_000;
+        let whole = [member(
+            region(0, LAST),
+            &vec![b'A'; LAST as usize + 1],
+            &vec![b'A'; LAST as usize + 1],
+        )];
+
+        let two_bases_at = |start: u64, covered: u16, bases: &[u8]| {
+            let span = usize::from(covered);
+            let mut record = member(
+                region(start, start + covered as u64 - 1),
+                &vec![b'A'; span],
+                &vec![b'A'; span],
+            );
+            let locus_len = record.locus_len();
+            record.observations = vec![SequenceObservation {
+                num_obs: 1,
+                read_witness: ReadWitness::from_left(covered, locus_len)
+                    .expect("a run as wide as the record"),
+                ..sequence(bases)
+            }];
+            record
+        };
+        let three_records = [
+            // 65,532 + 2 is `u16::MAX` — the last stretch that fits.
+            two_bases_at(65_532, 2, b"CC"),
+            // 65,534 + 2 is one past it, though the offset itself still fits.
+            two_bases_at(65_534, 2, b"TT"),
+            // and here not even the offset fits.
+            two_bases_at(66_000, 1, b"G"),
+        ];
+        let locus = closed_locus(region(0, LAST), &[&whole, &three_records]);
+
+        let observed = CohortObservation::over(&locus);
+
+        assert_eq!(
+            observed.per_sample[1]
+                .partials
+                .iter()
+                .map(|row| (row.witnessed_in_locus.first_run(), row.bases.to_vec()))
+                .collect::<Vec<_>>(),
+            vec![((65_532, 65_534), b"CC".to_vec())],
+            "the record at 65,532 keeps its row; the ones at 65,534 and 66,000 lose theirs",
         );
     }
 

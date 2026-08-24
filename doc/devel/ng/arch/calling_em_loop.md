@@ -148,10 +148,11 @@ pub struct FrozenParameters<'a> {
     pub contamination: &'a [ContaminationView],      // read_likelihoods.md §2.3
     pub inbreeding: &'a [InbreedingF],               // per sample, run order
     pub seed: &'a SpectrumSeed,                      // calling_priors.md §2.3 — SNP/indel
-    /// The (read group, stratum) slippage lookup: `StratumFit` holding `Slippage`
-    /// (`joint/ssr_fit.rs`), with the level read off the fitted curve rather than the
-    /// cell — read_likelihoods.md §4.2. Named by its contents because no wrapper type
-    /// exists yet; the parameter-prepass arch doc pins it.
+    /// The (read group, stratum) slippage lookup — `joint/stratum_fits.rs`, built
+    /// 2026-08-24 and pinned by `parameter_prepass_joint_fit.md` §1.7. `at` takes the
+    /// read group and the **candidate's** period and repeat count, not the reference
+    /// tract's (read_likelihoods.md §4.4), and returns the numbers the fit emitted with
+    /// their provenance; it does not re-derive the level.
     pub ssr_strata: &'a StratumFits,
     pub ploidy: Ploidy,
 }
@@ -407,9 +408,10 @@ Every row read on 2026-08-21.
   `passes` and the emission-call counter; none blocks building.
 - Impl-time confirmations: both `FrozenParameters` and `LocusEvidence` are sketched in §2 with their
   ordering contract; what stays open is only the concrete type of each borrowed field, which the
-  parameter-prepass arch docs pin. **`StratumFits` has no wrapper type today** — the pieces exist
-  (`StratumFit`, `Slippage`, the curve blend) but nothing gathers them, so whoever writes the
-  parameter-prepass arch doc names it; this doc records only that one borrow must cross the seam.
+  parameter-prepass arch docs pin. **`StratumFits` was built on 2026-08-24** and is pinned by
+  [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §1.7, so this item is closed;
+  what its own §1.7 leaves open is a candidate repeat count no kept reference tract occupies, and
+  the STR substitution rate, which sits at the same grain and is not in the gather.
 
 ## Test & bench shape
 

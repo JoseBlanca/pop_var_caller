@@ -513,7 +513,7 @@ Every row read on 2026-08-21.
 | `project_spectrum_seed` | — (production never fitted a spectrum) | **new**; optimiser reuses [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) |
 | `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |
 | `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs) | import value + reasoning; carried as overridable, regime-reported |
-| `InbreedingF` | [`types.rs:388`](../../../../src/ng/types.rs) | **reuse, tighten range to `[0, 1)`** (today it admits `1.0`; spec §7) |
+| `InbreedingF` | [`types.rs:412`](../../../../src/ng/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
 | `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit the four-variant enum |
 | Wright biallelic formulas | [`genetics.rs:66`](../../../../src/genetics.rs) | **test oracle only** (spec §3.2) — plus the row basis of `PlugInWrightPrior` |
 | independent parity oracle | `pochhammer_ln` / `dm_log_prior_oracle`, [`genetics.rs:240`](../../../../src/genetics.rs) | carry the test across (spec §9) |

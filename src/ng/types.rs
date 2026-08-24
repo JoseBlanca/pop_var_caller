@@ -437,9 +437,11 @@ const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
 // The parameters a caller runs on — four scalars step 4 fits (the error
 // rate, the genotype frequencies, the inbreeding coefficient, the expected
 // heterozygosity) and one it is handed (ploidy). Five types and not one
-// shared `Probability`: four of them are fractions in `[0, 1]`, so a single
-// type would let an inbreeding coefficient be handed to something expecting
-// an error rate and compile (`arch/parameter_prepass_generic.md` §2.1).
+// shared `Probability`: four of them are fractions — three closed at
+// `[0, 1]`, the inbreeding coefficient half-open at `[0, 1)` — and no range
+// tells them apart in a way a compiler could use, so a single type would let
+// an inbreeding coefficient be handed to something expecting an error rate
+// and compile (`arch/parameter_prepass_generic.md` §2.1).
 //
 // They live in the shared vocabulary rather than in `parameter_estimation/`
 // because their consumers are *other* steps: the likelihood (step 7) reads
@@ -476,6 +478,10 @@ const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
 /// predicate. It is not hypothetical drift — `SiteNoise::try_new`
 /// (`parameter_estimation::generic`) already spells the range test by hand, which is the
 /// eighth probability in the crate and the one this predicate did not reach.
+///
+/// **[`InbreedingF`] is `[0, 1)` and is not an instance of that drift**: it composes this
+/// predicate and rejects the ceiling on top of it, so the closed range is still written
+/// once and its one exception is written where the exception is explained.
 pub(crate) fn checked_probability(
     x: f64,
     reject: fn(f64) -> DomainError,
@@ -537,14 +543,47 @@ impl GenotypeFrequency {
 ///
 /// A user may supply one on the command line, which is why the constructor
 /// rejects rather than coerces (`spec/parameter_prepass_generic.md` §6.4).
+///
+/// **Half-open: `[0, 1)`. What that buys is finiteness, not a small number.**
+/// The genotype prior multiplies its heterozygote branch by `1 − F`, so at
+/// `F = 1` the factor is exactly zero and `ln(1 − F)` is `−∞`: every heterozygote
+/// becomes impossible and no read evidence, however clean, could produce a
+/// heterozygous call. Excluding the endpoint is what keeps that branch a finite
+/// number. It is **not** a numerically meaningful cap — the largest value the
+/// type accepts still leaves `1 − F = 2⁻⁵³`, which is about 160 on the Phred
+/// scale against every heterozygote, where two clean alternative bases at Q30
+/// supply 60 (`spec/calling_priors.md` §7).
+///
+/// **Capping the estimate is a different job and belongs to whoever fits one.**
+/// Production's estimator clamps its *fitted* value at `0.99`
+/// ([`MAX_INBREEDING_COEFFICIENT`](crate::paralog::inbreeding::MAX_INBREEDING_COEFFICIENT)) —
+/// 20 Phred, which read evidence can overcome. Its `--inbreeding-coefficient`
+/// flag is a second door and is not clamped: the parser accepts the closed
+/// `[0, 1]` (`pop_var_caller::cli::parsers::parse_inbreeding_coefficient`) and
+/// the value goes to the engine as given (`var_calling::pipeline`). That is the
+/// gap this newtype closes for ng — the limit is unrepresentable here whichever
+/// door a value came through.
 #[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
 pub struct InbreedingF(f64);
 
 impl InbreedingF {
-    /// The only constructor. A coefficient that is not a fraction in `[0, 1]` is
+    /// The only constructor. A coefficient that is not a fraction in `[0, 1)` is
     /// rejected rather than coerced.
+    ///
+    /// **Two rejections, not one**, because they mean different things to whoever
+    /// reads the message: a value outside `[0, 1]` is not a fraction at all
+    /// ([`DomainError::InbreedingF`]), while exactly `1` is a fraction that this
+    /// type deliberately excludes ([`DomainError::InbreedingFAtCeiling`]). The
+    /// shared `[0, 1]` predicate is reused for the first and the ceiling is checked
+    /// on top of it: [`checked_probability`] admits `1.0` for [`ErrorRate`] and
+    /// [`GenotypeFrequency`], where it is a real answer, and tightening it there
+    /// would break both (`arch/calling_priors.md` §2.1).
     pub fn try_new(coefficient: f64) -> Result<Self, DomainError> {
-        checked_probability(coefficient, DomainError::InbreedingF).map(Self)
+        let fraction = checked_probability(coefficient, DomainError::InbreedingF)?;
+        if fraction == 1.0 {
+            return Err(DomainError::InbreedingFAtCeiling(fraction));
+        }
+        Ok(Self(fraction))
     }
 
     #[inline]
@@ -823,10 +862,31 @@ pub enum DomainError {
     /// probability in `[0, 1]`.
     #[error("genotype frequency {0} is not a finite probability in [0, 1]")]
     GenotypeFrequency(f64),
-    /// An [`InbreedingF`] was built from a value that is not a finite fraction in
-    /// `[0, 1]`.
-    #[error("inbreeding coefficient {0} is not a finite fraction in [0, 1]")]
+    /// An [`InbreedingF`] was built from a value outside `[0, 1)` — and not from
+    /// the ceiling itself, which gets [`Self::InbreedingFAtCeiling`].
+    ///
+    /// **The message names `[0, 1)`, the type's whole range, not the part this
+    /// variant covers.** Someone who mistypes `1.5` reads the range and retries;
+    /// if it said `[0, 1]` they would retry with `1.0` and be refused again. Every
+    /// value this variant can carry is outside `[0, 1)` too, so nothing is lost by
+    /// naming the wider truth.
+    #[error("inbreeding coefficient {0} is not a finite fraction in [0, 1)")]
     InbreedingF(f64),
+    /// An [`InbreedingF`] was built from exactly `1` — a fraction, but the one
+    /// value the half-open type excludes.
+    ///
+    /// **Its own variant rather than one message for both**, because the two
+    /// rejections need different remedies. `1.5` is a typo and naming the range is
+    /// the whole answer. `1.0` is a coherent request the model refuses, and the
+    /// answer is what refusing it means: a prior under which no sample can ever be
+    /// called heterozygous. Carrying that explanation on the shared variant would
+    /// put it in front of someone who typed `-0.5`, where it is noise.
+    #[error(
+        "inbreeding coefficient {0} would make every heterozygote impossible; \
+         the accepted range is [0, 1), and an estimate should sit well below it \
+         (production caps a fitted one at 0.99)"
+    )]
+    InbreedingFAtCeiling(f64),
     /// An [`ExpectedHeterozygosity`] was built from a value that is not a finite
     /// probability in `[0, 1]`.
     ///
@@ -1350,20 +1410,20 @@ mod tests {
         assert!(LogProb(f64::INFINITY) > LogProb(1e300));
     }
 
-    /// The four `[0, 1]` rates accept both endpoints — a genotype frequency of exactly
-    /// zero and a fully invariant cohort's expected heterozygosity of exactly zero are
-    /// real answers, so a half-open check would reject valid data.
+    /// The three closed `[0, 1]` rates accept both endpoints — a genotype frequency
+    /// of exactly zero and a fully invariant cohort's expected heterozygosity of
+    /// exactly zero are real answers, so a half-open check would reject valid data
+    /// there.
     ///
-    /// **`InbreedingF::try_new(1.0)` is asserted here as *today's* behaviour, not as a
-    /// property to keep.** The genotype prior needs `[0, 1)` — at `F = 1` every
-    /// heterozygote is impossible, which no estimator ever reports and no sample should
-    /// carry into the caller (`arch/calling_priors.md` §2.1) — so this line moves down to
-    /// the rejection list when `calling_prerequisites.md` Milestone A tightens the
-    /// constructor. That tightening also has to clamp the one fitted producer
-    /// (`parameter_estimation::generic`'s `runs.rs`) before it can land, which is why it
-    /// is a step of its own and not done here.
+    /// [`InbreedingF`] is the exception: it is `[0, 1)`, so it accepts its lower
+    /// endpoint only, and its rejection of the upper one is asserted in
+    /// [`each_constrained_rate_rejects_out_of_range_in_both_directions`] below. What
+    /// is asserted here is that **exactly one value** is excluded — the very next
+    /// `f64` down still constructs, so the type removes the mathematical limit and
+    /// nothing else. Keeping an estimate away from that limit is a separate job and
+    /// belongs to whoever fits one.
     #[test]
-    fn the_constrained_rates_accept_both_endpoints() {
+    fn each_constrained_rate_accepts_the_endpoints_of_its_own_range() {
         assert_eq!(ErrorRate::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(ErrorRate::try_new(1.0).unwrap().get(), 1.0);
         assert_eq!(ErrorRate::try_new(0.001).unwrap().get(), 0.001);
@@ -1371,11 +1431,53 @@ mod tests {
         assert_eq!(GenotypeFrequency::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(GenotypeFrequency::try_new(1.0).unwrap().get(), 1.0);
 
-        assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
-        assert_eq!(InbreedingF::try_new(1.0).unwrap().get(), 1.0);
-
         assert_eq!(ExpectedHeterozygosity::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(ExpectedHeterozygosity::try_new(1.0).unwrap().get(), 1.0);
+
+        assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
+        let just_below_one = f64::from_bits(1.0f64.to_bits() - 1);
+        // Pinned, not assumed: any value below one would satisfy the assertion that
+        // follows, and only the nearest one shows that a single value is excluded.
+        assert_eq!(f64::from_bits(just_below_one.to_bits() + 1), 1.0);
+        assert_eq!(
+            InbreedingF::try_new(just_below_one).unwrap().get(),
+            just_below_one
+        );
+    }
+
+    /// **Neither of the coefficient's rejections may tell a user the accepted range
+    /// is `[0, 1]`.** Someone who mistypes `1.5`, reads that, and retries `1.0` is
+    /// refused again — the range in the message is the only thing they have to
+    /// retry from. That is the property; how the message words the range is not
+    /// pinned, so a rewrite that still refuses to name the closed range is free.
+    ///
+    /// The separate ceiling variant earns its place on what it *adds*: it says what
+    /// refusing `1` means, which is a prior under which no sample can ever be
+    /// called heterozygous. The other message must not carry that, because it is
+    /// noise in front of someone who typed `-0.5`.
+    ///
+    /// **Both messages are fetched through [`InbreedingF::try_new`]**, not built by
+    /// hand, so this also pins which variant the constructor picks — a constructor
+    /// returning the wrong one would otherwise be caught by a single assertion in
+    /// one other test.
+    #[test]
+    fn neither_inbreeding_rejection_names_the_closed_range() {
+        let ceiling = InbreedingF::try_new(1.0).unwrap_err().to_string();
+        let out_of_range = InbreedingF::try_new(1.5).unwrap_err().to_string();
+        for message in [&ceiling, &out_of_range] {
+            assert!(
+                !message.contains("[0, 1]"),
+                "an inbreeding rejection must not name the closed range: {message}"
+            );
+        }
+        assert!(
+            ceiling.contains("heterozygote"),
+            "the ceiling message must say what F = 1 costs: {ceiling}"
+        );
+        assert!(
+            !out_of_range.contains("heterozygote"),
+            "the out-of-range message is for a typo and needs no model talk: {out_of_range}"
+        );
     }
 
     /// Each rate names **its own quantity** when it rejects, so a message cannot
@@ -1388,6 +1490,11 @@ mod tests {
     /// a test that only ever crosses one of them leaves the other free to be
     /// widened: `InbreedingF` accepting `1.5` is the live hazard, since a user
     /// types that one at a shell.
+    ///
+    /// `InbreedingF` has a third rejection the other two do not: exactly `1`, its
+    /// excluded ceiling, which carries its own variant
+    /// ([`DomainError::InbreedingFAtCeiling`]) because it is a fraction and the
+    /// other message would be false of it.
     #[test]
     fn each_constrained_rate_rejects_out_of_range_in_both_directions() {
         assert_eq!(
@@ -1410,6 +1517,10 @@ mod tests {
         assert_eq!(
             InbreedingF::try_new(1.5),
             Err(DomainError::InbreedingF(1.5))
+        );
+        assert_eq!(
+            InbreedingF::try_new(1.0),
+            Err(DomainError::InbreedingFAtCeiling(1.0))
         );
         assert_eq!(
             ExpectedHeterozygosity::try_new(-0.5),
@@ -1555,9 +1666,16 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Over the whole `f64` line: the four rates accept a value **exactly
-        /// when** it is a finite number in `[0, 1]`, and an accepted value comes
+        /// Over the whole `f64` line: each of the four rates accepts a value
+        /// **exactly when** it is a finite number in its own range, and an accepted
+        /// value comes
         /// back bit for bit — no clamp, no round.
+        ///
+        /// **Two ranges, not one.** `ErrorRate`, `GenotypeFrequency` and
+        /// `ExpectedHeterozygosity` are closed `[0, 1]`; `InbreedingF` is half-open
+        /// `[0, 1)`, because `F = 1` makes every heterozygote impossible
+        /// (`spec/calling_priors.md` §7). Sharing one expectation across all four is
+        /// what would let the ceiling be dropped again without a test noticing.
         ///
         /// This is what the point assertions above cannot do. Each range check is
         /// two comparisons, and a widened bound on either side is a value reaching
@@ -1565,18 +1683,45 @@ mod tests {
         /// than a failure. The dense `-2.0..3.0` arm is load-bearing: sampling
         /// `f64::ANY` alone never lands in `(1, 2]`, so it does not notice an
         /// `InbreedingF` whose upper bound has moved to 2.
+        ///
+        /// **The last two arms are the boundary itself, and they are there because
+        /// neither of the first two reaches it.** Measured on the two-arm generator:
+        /// a million draws produced `1.0` exactly zero times, and came no closer
+        /// than 2.6 in a million. `f64::ANY` fills a `u64` and masks it, so one
+        /// named bit pattern arrives about once in 2⁶⁴ draws; the dense arm halves
+        /// its interval down to adjacent floats, which is uniform in real measure
+        /// and so lands on any one of them about once in 10¹⁷. Without these arms
+        /// the half-open expectation above would be asserted at every value except
+        /// the one it was written for — green, and blind. `1.0` must be rejected
+        /// and the `f64` immediately below it accepted, and the pair is what makes
+        /// a moved bound a failure rather than a silent pass.
         #[test]
         fn the_constrained_rates_accept_exactly_the_probabilities_and_round_trip(
-            x in proptest::prop_oneof![proptest::num::f64::ANY, -2.0f64..3.0f64]
+            x in proptest::prop_oneof![
+                20 => proptest::num::f64::ANY,
+                20 => -2.0f64..3.0f64,
+                1 => proptest::strategy::Just(1.0f64),
+                1 => proptest::strategy::Just(f64::from_bits(1.0f64.to_bits() - 1)),
+            ]
         ) {
             let is_probability = x.is_finite() && (0.0..=1.0).contains(&x);
-            for accepted in [
-                ErrorRate::try_new(x).map(ErrorRate::get),
-                GenotypeFrequency::try_new(x).map(GenotypeFrequency::get),
-                InbreedingF::try_new(x).map(InbreedingF::get),
-                ExpectedHeterozygosity::try_new(x).map(ExpectedHeterozygosity::get),
+            let is_inbreeding_coefficient = x.is_finite() && (0.0..1.0).contains(&x);
+            for (accepted, expected) in [
+                (ErrorRate::try_new(x).map(ErrorRate::get), is_probability),
+                (
+                    GenotypeFrequency::try_new(x).map(GenotypeFrequency::get),
+                    is_probability,
+                ),
+                (
+                    InbreedingF::try_new(x).map(InbreedingF::get),
+                    is_inbreeding_coefficient,
+                ),
+                (
+                    ExpectedHeterozygosity::try_new(x).map(ExpectedHeterozygosity::get),
+                    is_probability,
+                ),
             ] {
-                proptest::prop_assert_eq!(accepted.is_ok(), is_probability, "x = {}", x);
+                proptest::prop_assert_eq!(accepted.is_ok(), expected, "x = {}", x);
                 if let Ok(value) = accepted {
                     proptest::prop_assert_eq!(value.to_bits(), x.to_bits(), "x = {}", x);
                 }

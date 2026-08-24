@@ -1972,7 +1972,7 @@ struct RecordFoldState<'a> {
 /// Its sibling [`refold_live_reads`] deliberately does **not** call this: a widen re-places
 /// a read without re-deciding its quality, which this function would recompute.
 ///
-/// `bq_fallback` is `ln_bq_for_read`'s answer for an **empty** window, which no caller can
+/// `bq_fallback` is `min_bq_for_read`'s answer for an **empty** window, which no caller can
 /// reach: a read with no events in the window yields no observation a line below. The
 /// contributor path passes the contributor's walker-position BQ anyway, because that is
 /// what production passes and the parity claim is about the walk.
@@ -2044,7 +2044,10 @@ fn fold_read_into_record(
         active.read_id,
     );
 
-    let ln_q = ln_bq_for_read(window_events, bq_fallback).max(active.read.mq_log_err);
+    let ln_q = minted_ln_read_error(
+        min_bq_for_read(window_events, bq_fallback),
+        active.read.mq_log_err,
+    );
     let mapq = u32::from(active.read.mapq);
     let new_contribution = AlleleSupportStats {
         num_obs: 1,
@@ -2603,7 +2606,7 @@ pub(super) struct ProcessOutcome {
 /// different anchors and carry independent evidence.
 ///
 /// In today's pipeline the narrowing is invisible — the
-/// haplotype-level `min` in `ln_bq_for_read` collapses to 0 via
+/// haplotype-level `min` in `min_bq_for_read` collapses to 0 via
 /// the zeroed Match regardless. The narrow version is correct
 /// against a wider class of future reductions (median, weighted)
 /// and matches the spec wording. Mi3 in
@@ -2674,15 +2677,19 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
 }
 
 /// Per-read BQ for an allele's quality contribution: min over
-/// the read's events in the record's footprint, converted to
-/// `ln(P_err)`. Confirmed against freebayes
-/// `AlleleParser.cpp:3151-3155` (haplotype-allele construction
-/// uses `min(quality)`). For a contributor with no events in the
-/// window (a clean REF read), we fall back to the read's BQ at
-/// the walker_pos, which is a `Match` event's `bq_baq` already
-/// stamped on the contribution.
-fn ln_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> f64 {
-    let min_bq = window_events
+/// the read's events in the record's footprint. Confirmed
+/// against freebayes `AlleleParser.cpp:3151-3155` (haplotype-allele
+/// construction uses `min(quality)`). For a contributor with no
+/// events in the window (a clean REF read), we fall back to the
+/// read's BQ at the walker_pos, which is a `Match` event's
+/// `bq_baq` already stamped on the contribution.
+///
+/// **A Phred score, not a log probability**, so that the
+/// conversion and the mapping-quality floor happen in exactly one
+/// place ([`minted_ln_read_error`]) whichever column path is
+/// walking.
+fn min_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> u8 {
+    window_events
         .iter()
         .map(|e| match e {
             ReadEvent::Match { bq_baq, .. } => *bq_baq,
@@ -2690,8 +2697,52 @@ fn ln_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> f64 {
             ReadEvent::Deletion { bq_proxy, .. } => *bq_proxy,
         })
         .min()
-        .unwrap_or(fallback_bq);
-    phred_to_ln_perr(min_bq)
+        .unwrap_or(fallback_bq)
+}
+
+/// **How wrong one read is at one place, as the locus generator mints it** — the worse of what
+/// the instrument said about the bases and what the aligner said about the placement, in log
+/// space.
+///
+/// `base_quality` is a Phred score, `mq_log_err` is the read's mapping quality already as
+/// `ln(P_err)`, and the answer is the larger of the two log-error probabilities: a read placed
+/// with one chance in a hundred of being in the wrong place cannot be trusted to one chance in
+/// ten thousand however clean its bases are. **Production mints the same number by the same
+/// route** — `pileup/walker/open_record.rs:792`, over a byte-identical copy of the table below
+/// — and that is why §3.2 can say the per-read number "already contains mapping error".
+///
+/// **This exists as a named function because two things will have to mint the same number and
+/// they are in different modules.** The generator's two column paths mint it here. The
+/// parameter pre-pass's calibration accumulator — **which does not exist yet; D2 builds it** —
+/// will sum it, and the scale it feeds is
+/// `fitted error rate ÷ mean minted error probability`
+/// (`doc/devel/ng/spec/read_likelihoods.md` §3.2). A numerator and a denominator computed by
+/// two definitions of "how wrong is this read" is not a calibration, which is the whole reason
+/// for the function.
+///
+/// **Note the units, because an observation's `q_sum` is the wrong sum for it.** §3.2's mean is
+/// over error *probabilities*; this function returns their logarithm, and `q_sum` accumulates
+/// these logarithms. So `exp(q_sum / n)` is the geometric mean and the scale wants the
+/// arithmetic one, which is not recoverable from it: one read at Phred 20 and one at Phred 40
+/// have arithmetic mean 0.00505 and geometric mean 0.001, a factor of 5. **The accumulator
+/// needs its own sum of `exp` of this answer, minted where this is** — which §12's ninth test
+/// exists to catch, and which is why the two numbers §3.2 asks the pre-pass for are new rather
+/// than derivable from what the walk already carries.
+///
+/// **The `pub(crate)` reaches no further than `pub(super)` today, and that is deliberate.**
+/// `mod open_record;` is private, so nothing outside `pileup` can name this however it is
+/// marked. Opening the path costs one line in `pileup/mod.rs`, and a re-export with no consumer
+/// is an unused import the `-D warnings` gate refuses — so it lands with the caller, in D2. The
+/// wider marking says which of the two this is meant to become.
+///
+/// **§12's tenth test is not written yet, and this function is only half of what it needs.**
+/// That test asks for the scaled probabilities' mean to come back as the fitted rate, and for
+/// the mint to be called from the pre-pass's side and the generator's side on one read; there
+/// is no pre-pass side until D2. What `the_two_column_paths_mint_one_reads_error_the_same_way`
+/// pins is the weaker property available today — that the generator's own two column paths
+/// agree on one read.
+pub(crate) fn minted_ln_read_error(base_quality: u8, mq_log_err: f64) -> f64 {
+    phred_to_ln_perr(base_quality).max(mq_log_err)
 }
 
 /// `Q -> ln(P_err)` where `P_err = 10^(-Q/10)`.
@@ -2826,6 +2877,178 @@ mod tests {
             )
             .expect("a run covering at least one position"),
         }
+    }
+
+    /// **What the mint charges a read, in numbers rather than in the expression that produced
+    /// them.**
+    ///
+    /// The expectations are literals on purpose. Written as
+    /// `phred_to_ln_perr(bq).max(mq_log_err)` they would be a character copy of the function's
+    /// body, which fails only when the code changes and not when the code is wrong: had the
+    /// intended rule been the *better* of the two rather than the worse, that spelling would
+    /// have been written with `min` and passed.
+    ///
+    /// Phred 20 is one error in a hundred and Phred 40 one in ten thousand. A mapping-quality
+    /// log-error of −3.0 is about one in twenty, worse than either, so it decides both of the
+    /// first two rows; −12.0 is about one in 163,000 and the bases decide the next two.
+    ///
+    /// **Phred 0 is the last row because it is the input that is not a log probability of a
+    /// small number.** It means error probability 1 — a base the instrument disclaims — and
+    /// `ln 1 = 0` is the largest value the table holds, so no mapping quality can lift it. The
+    /// corner is live rather than decorative: the mate-overlap rule silences the losing mate by
+    /// setting exactly this quality, so a wrong answer here would move every overlapped
+    /// contribution from zero to the read's mapping term.
+    #[test]
+    fn the_mint_charges_a_read_the_worse_of_its_two_qualities() {
+        for (base_quality, mq_log_err, expected) in [
+            (20u8, -3.0f64, -3.0f64),
+            (40, -3.0, -3.0),
+            (20, -12.0, -4.605_170_185_988_092),
+            (40, -12.0, -9.210_340_371_976_184),
+            (0, -3.0, 0.0),
+        ] {
+            assert_eq!(
+                minted_ln_read_error(base_quality, mq_log_err),
+                expected,
+                "Phred {base_quality} with mapping-quality log-error {mq_log_err}",
+            );
+        }
+    }
+
+    /// **The two column paths charge one read the same number, run through both paths.**
+    ///
+    /// **This is not §12's tenth test, and the two should not be confused.** That test's two
+    /// sides are the pre-pass and the locus generator, and its headline assertion is that the
+    /// scaled probabilities' mean comes back as the fitted rate — neither is available until
+    /// the pre-pass has an accumulator (D2). Both sides here are the generator's, so what this
+    /// pins is the weaker property that can be pinned today.
+    ///
+    /// **It drives walks rather than calling the mint twice**, which is the whole point: the
+    /// two call sites are what could drift apart, and a test that calls the shared function on
+    /// both sides of its own equality would pass however either site was wired. A clean read
+    /// over plain reference takes the ordinary-column path; a read carrying a deletion opens a
+    /// record and takes the general fold. Both are given the same base quality and the same
+    /// mapping quality, and both must come back charged the same.
+    ///
+    /// The two paths differ in what they hand the mint and in nothing else: the general fold
+    /// takes the smallest base quality over the read's events inside the record's footprint,
+    /// and the ordinary-column path takes the one base it is standing on, because the columns
+    /// it accepts hold one event.
+    ///
+    /// **What no test can catch here, and what does catch it.** Putting the arithmetic back
+    /// inline at both call sites changes no number, so nothing fails — a refactor is
+    /// behaviour-preserving by construction and its reversion cannot be tested for. What is
+    /// worth defending is the two spellings *drifting apart*, and this test plus the
+    /// production-parity fixtures do that.
+    #[test]
+    fn the_two_column_paths_mint_one_reads_error_the_same_way() {
+        use crate::ng::locus_generation::pileup::tests::{MockFasta, drive_walker, snp_read};
+
+        const BQ: u8 = 33;
+        // `snp_read`'s mapping-quality log-error, which is worse than Phred 33's
+        // −7.598 — so a path that dropped the floor would come back with the base term.
+        const MQ_LOG_ERR: f64 = -3.0;
+        let expected = minted_ln_read_error(BQ, MQ_LOG_ERR);
+
+        // An ordinary column: one read, matching the reference, nothing to reconcile.
+        let clean = drive_walker(
+            vec![snp_read("clean", 1, b"ACGT", &[BQ; 4])],
+            MockFasta::new("ACGT"),
+        );
+        let ordinary = clean[1].reference_observation().q_sum;
+
+        // A read carrying a deletion opens a record, so its contribution is folded by the
+        // general path over a window rather than minted at a column.
+        let mut deleting = snp_read("deleting", 1, b"AT", &[BQ; 2]);
+        deleting.alignment_end = 4;
+        deleting.cigar = vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(1)];
+        let with_a_record = drive_walker(vec![deleting], MockFasta::new("ACGT"));
+        let record = with_a_record
+            .iter()
+            .find(|locus| locus.reference_bases.len() > 1)
+            .expect("the deletion opens a record wider than one base");
+        let general = record
+            .observations
+            .iter()
+            .find(|observed| observed.bases.len() < record.reference_bases.len())
+            .map(|observed| observed.q_sum)
+            .expect("the deleting read shows fewer bases than the record spans");
+
+        assert_eq!(
+            ordinary, expected,
+            "the ordinary-column path charged a read at Phred {BQ} something other than the \
+             worse of its two qualities",
+        );
+        assert_eq!(
+            general, expected,
+            "the general fold charged the same read differently from the ordinary column",
+        );
+    }
+
+    /// **How the general fold picks the quality it hands the mint: the smallest in the
+    /// record's window, whatever kind of event carries it.**
+    ///
+    /// Separate from the two tests above because it is about `min_bq_for_read` alone — a break
+    /// here is a wrong reduction, not a wrong charge, and reporting it under the other names
+    /// would say the wrong thing broke.
+    #[test]
+    fn the_general_folds_window_is_reduced_by_its_smallest_quality() {
+        let match_at = |bq_baq: u8| ReadEvent::Match {
+            ref_pos: 100,
+            base: b'A',
+            bq_baq,
+        };
+
+        // **The window's minimum is the general path's whole contribution**, so it is asserted
+        // rather than left to the equality above: a record whose footprint holds a clean match
+        // and a poor indel charges the read for the indel.
+        //
+        // **The poor event sits in the middle**, and that is the point of the third event: with
+        // the indel last, a build that took the window's *last* quality rather than its
+        // smallest passed this test — measured, by making that change and watching the whole
+        // test stay green. Only the parity fixtures caught it. Three events pin the reduction
+        // against both ends at once.
+        //
+        // **Each of the three event shapes is the answer once**, because the reduction reads a
+        // different field out of each — `bq_baq` from a match, `bq_proxy` from either indel —
+        // and a shape left out of the minimum is a read charged too little for the event that
+        // should have condemned it.
+        let three_shapes = |match_bq, insertion_bq, deletion_bq| {
+            min_bq_for_read(
+                &[
+                    match_at(match_bq),
+                    ReadEvent::Insertion {
+                        anchor_ref_pos: 100,
+                        seq: b"AC".to_vec(),
+                        bq_proxy: insertion_bq,
+                    },
+                    ReadEvent::Deletion {
+                        anchor_ref_pos: 100,
+                        deleted_len: 2,
+                        bq_proxy: deletion_bq,
+                    },
+                    match_at(30),
+                ],
+                0,
+            )
+        };
+        assert_eq!(
+            three_shapes(40, 25, 11),
+            11,
+            "the smallest quality in the window, neither the first nor the last",
+        );
+        assert_eq!(
+            three_shapes(40, 9, 25),
+            9,
+            "an insertion's proxy quality counts, and is read from `bq_proxy`",
+        );
+        assert_eq!(three_shapes(7, 25, 11), 7, "so does a match's own quality");
+        assert_eq!(
+            min_bq_for_read(&[], 27),
+            27,
+            "a read with no event in the window is charged the quality it showed at the \
+             position the walker is on",
+        );
     }
 
     /// **A record opens with room for as many reads as the last one to close held.**
@@ -4988,7 +5211,7 @@ mod tests {
         // their `bq_proxy`. Today the haplotype-level `min`
         // collapses to 0 via the zeroed Match regardless, so this is
         // invisible at output level. Pin the helper's contract here
-        // so a future change to `ln_bq_for_read`'s reduction (e.g.
+        // so a future change to `min_bq_for_read`'s reduction (e.g.
         // median or weighted) cannot silently corrupt indel BQ
         // proxies. Mi3 in `ia/reviews/pileup_2026-05-09.md`.
         let mut m = ReadEvent::Match {

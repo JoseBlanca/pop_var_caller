@@ -190,6 +190,33 @@ mod tests {
     /// fixture here runs at, so a number quoted in one test means the same thing in another.
     const TOMATO_DIVERSITY: f64 = 6e-4;
 
+    /// The comparator's row on a **bare** coefficient, straight to
+    /// [`fill_plug_in_mixture_log_priors`] rather than through the trait.
+    ///
+    /// **It exists so `F = 1` can be reached.** [`InbreedingF`] is half-open `[0, 1)`, so the
+    /// trait cannot deliver the limit; the limit is still worth pinning, and this is the
+    /// test-only path spec §7 and §12 test 3 name for it.
+    fn bare_row_under(concentration: &[f64], copies: u8, inbreeding: f64) -> Vec<f64> {
+        let table = GenotypeTable::build(Ploidy::try_new(copies).unwrap(), concentration.len());
+        let view = table.view();
+        let mut scratch = vec![0.0; concentration.len()];
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut row = PriorRow::new(
+            Concentration::new(concentration),
+            view.genotype_allele_counts(),
+            view.log_multinomial_coeffs(),
+            view.homozygous_alleles(),
+            &mut scratch,
+            &mut out,
+        );
+        fill_plug_in_mixture_log_priors(&mut row, inbreeding);
+        assert!(
+            out.iter().all(|entry| entry.get().is_finite()),
+            "the seam's contract requires every entry finite, got {out:?}"
+        );
+        out.iter().map(|entry| entry.get()).collect()
+    }
+
     /// Run one implementation of the seam over one shape and hand back the row.
     ///
     /// The three genotypes of a biallelic diploid come back in the table's own order, which
@@ -213,7 +240,10 @@ mod tests {
             &mut scratch,
             &mut out,
         );
-        model.fill_genotype_log_priors(&mut row, InbreedingF::try_new(inbreeding).unwrap());
+        model.fill_genotype_log_priors(
+            &mut row,
+            InbreedingF::try_new(inbreeding).expect("a coefficient in [0, 1)"),
+        );
         // **Checked here so no test below has to remember.** Every comparison in this file folds
         // its departures with `f64::max`, which *ignores* `NaN` — so a row whose entries were
         // never written would score a departure of zero and pass. Measured: filling only the
@@ -483,15 +513,14 @@ mod tests {
     /// default does: at complete inbreeding every heterozygote sits at the probability floor and
     /// the two homozygotes stand in the ratio of their own frequencies.
     ///
-    /// `InbreedingF::try_new(1.0)` returns `Ok` **today**; the prerequisites plan tightens the
-    /// type to `[0, 1)`, and when it lands this test needs revisiting rather than deleting — the
-    /// limit is worth pinning either way, through a raw-value path if the newtype stops admitting
-    /// it (spec §7, §12 test 3).
+    /// **Driven on the bare coefficient**, because `InbreedingF` is half-open `[0, 1)` since
+    /// `calling_prerequisites.md` A1 and the trait can no longer deliver `F = 1` — which is the
+    /// path spec §7 and §12 test 3 name for exactly this limit.
     #[test]
     fn at_complete_inbreeding_the_comparator_leaves_only_the_homozygotes() {
         let concentration = [1.0, TOMATO_DIVERSITY];
         let total: f64 = concentration.iter().sum();
-        let row = row_under(&PlugInWrightPrior, &concentration, 2, 1.0);
+        let row = bare_row_under(&concentration, 2, 1.0);
 
         // **The heterozygote is impossible but finite**, which is the contract: its only branch
         // is the one weighted `1 − F`, and that weight is floored rather than left at `ln(0)`. So

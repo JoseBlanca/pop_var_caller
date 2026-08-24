@@ -122,16 +122,27 @@ pub struct GenericObservation {
 }
 ```
 
-**Reconciliation note, and it is a requirement on the merge.** The built
+**Reconciliation note — `partials` now exists on the merge's own row, owned rather than
+borrowed** (`calling_prerequisites.md` C1, 2026-08-23). `SampleSupport` carries
+`partials: Vec<PartialObservation>` — the witnessed positions **in the cohort locus's
+coordinates**, the bases as the mint recorded them, the read group, a read count and a quality
+sum. The sketch above types it `PartialObservation<'a>`; it cannot borrow, because the
+observations the bases come from live in the `ObservationCache` and the organiser drops that
+ground once a locus is released (`arch/cohort_merge.md` §4) while the built locus is still in the
+caller's hands. So the view's `&'a [PartialObservation]` borrows the merge's owned rows and there
+is one type rather than two. **The field is empty until C2 routes partials into it.**
+
+**Reconciliation note — the read-group requirement this placed on the merge has been met.** The built
 `SampleSupport`/`AlleleSupport`
-([`cohort_merge/build.rs:858`](../../../../src/ng/run/cohort_merge/build.rs),
-[`:973`](../../../../src/ng/run/cohort_merge/build.rs)) pools read groups into one row per allele,
-and its own doc books the split as owed (“the STR path will want them apart again … whoever brings
-the STR path through this merge owes that change”,
-[`build.rs:958`](../../../../src/ng/run/cohort_merge/build.rs)). Spec §2.3 makes the split a
-**generic-path** requirement too — summing must stop at the read-group boundary. So the owed change
-is: `AlleleSupport` gains a read-group axis (one row per `(allele, read group)`), folding to
-today's shape where a sample has one group — which is most samples, so it costs nothing there.
+([`cohort_merge/build.rs`](../../../../src/ng/run/cohort_merge/build.rs)) pooled read groups into
+one row per allele, and its own doc booked the split as owed to whoever brought the STR path
+through. Spec §2.3 made it a **generic-path** requirement too — summing must stop at the
+read-group boundary — and it landed there first:
+[`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1, 2026-08-23.
+`SupportedAllele` now carries `read_group`, so `SampleSupport::supported` is one row per
+`(allele, read group)` in ascending pair order, folding to today's shape where a sample has one
+group. **What a consumer must not do is add the rows back**: `SampleSupport::pooled_support_for`
+exists for the questions that really are about the sample, and its name is the warning.
 
 ### 2.2 STR path
 
@@ -155,14 +166,19 @@ pub struct ReadGroupCalibration { pub scale: f64, pub provenance: Provenance }
 /// sample) — absent, not a fitted zero (spec §3.6).
 pub struct ContaminationView {
     pub fraction: f64,                          // c; 0.0 where the fit emitted none
-    pub reference_class_frequency: f64,         // the contaminant population's three
-    pub substitution_class_frequency: f64,      // allele-class frequencies (spec §3.6)
-    pub indel_class_frequency: f64,
     pub markers_with_reads: u64,                // the evidence counts that tell
     pub reads_on_markers: u64,                  //   "measured clean" from "unmeasurable" —
                                                 //   both names as ContaminationEstimate has them
 }
 ```
+
+**The three allele-class frequencies this used to carry are deleted (owner, 2026-08-24).** The
+mixture's second half is `q(o)`, the contaminating population's frequency of the allele the
+observation shows *at this locus*, and that is the loop's own estimate over the samples in this
+sample's sequencing batch — not a triple frozen before calling (spec §3.6). So it does not travel on
+this view, which holds only frozen per-library facts: it is read where the frequency is, each
+iteration. **The parameter pre-pass owes nothing for it**, and the side-pass that was to emit it is
+deleted from `impl_plan/calling_prerequisites.md` rather than left blocked.
 
 ## 3. The SNP/indel path
 
@@ -349,7 +365,7 @@ Every row read on 2026-08-21.
 | substitution comparison | `FlatEmission`, [`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs); production `pair_hmm.rs` | **compose**, never re-implement (spec §4.3, §7) |
 | the model seam | `ReadLikelihoodModel` + `ReadScoringContext`, [`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs), [`:45`](../../../../src/ssr/cohort/read_model/mod.rs) | shape ported as `SsrEmissionModel` + `SsrScoringContext`, grown by the censored method and the truncation report |
 | Model B comparator | [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs) | port **test-only**, exactly as production keeps it (spec §9) |
-| generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/ng/run/cohort_merge/build.rs) | view over them; **the (allele × read group) split is owed by the merge** — its own doc already books it ([`:958`](../../../../src/ng/run/cohort_merge/build.rs)) |
+| generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/ng/run/cohort_merge/build.rs) | view over them; the `(allele × read group)` split **landed** in [`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1 — `SupportedAllele` carries `read_group` and the rows are one per pair, ascending |
 | STR evidence | `SequenceObservation`, [`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs) | reuse as-is; the read-group identity the contract needs is already there ([`:316`](../../../../src/ng/locus_generation/mod.rs)) |
 | contamination inputs | `ContaminationEstimate` [`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs), per-read-group grain [`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs) | consume as `ContaminationView`; the three allele-class frequencies are asked of the pre-pass's side-pass (spec §3.6) |
 | numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:67`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |

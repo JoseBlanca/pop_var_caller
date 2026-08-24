@@ -160,6 +160,33 @@ pub fn fill_expected_spectrum(
     inbreeding: InbreedingF,
     out: &mut [f64],
 ) {
+    fill_expected_spectrum_at(alpha_ref, alpha_alt, individuals, inbreeding.get(), out);
+}
+
+/// The same sum on a bare coefficient rather than on the newtype.
+///
+/// **It exists so `F = 1` can be reached**, which is the mathematical edge of the model and not a
+/// case a caller is meant to meet: [`InbreedingF`] is half-open `[0, 1)`, so the one door a caller
+/// has cannot deliver it (`spec/calling_priors.md` §7, §12 test 3). At `F = 1` every individual's
+/// two copies are one copy counted twice, so the odd allele-count classes must hold exactly
+/// nothing — a property worth pinning, and unreachable through the newtype by design.
+///
+/// **This is not a test-only path**, whatever its reason for existing: the door above routes every
+/// caller through it. That is why the coefficient is checked here rather than left to the newtype.
+/// The check is `debug_assert!`, as this module's other *value* checks are; the structural checks
+/// that guard silent truncation are the ones held in release.
+fn fill_expected_spectrum_at(
+    alpha_ref: f64,
+    alpha_alt: f64,
+    individuals: u32,
+    inbreeding: f64,
+    out: &mut [f64],
+) {
+    debug_assert!(
+        (0.0..=1.0).contains(&inbreeding),
+        "the inbreeding coefficient must be a fraction in [0, 1]; got {inbreeding}. A value \
+         outside it — or a NaN — makes the classes NaN rather than failing"
+    );
     let n = individuals as usize;
     assert_eq!(
         out.len(),
@@ -188,7 +215,7 @@ pub fn fill_expected_spectrum(
         return;
     }
 
-    let f = inbreeding.get();
+    let f = inbreeding;
     let concentration_total = alpha_ref + alpha_alt;
     let log_pair_constant = lgamma(concentration_total) - lgamma(alpha_alt) - lgamma(alpha_ref);
     // `ln k!` for every count this call can reach, filled once. The sum asks for binomial
@@ -1202,16 +1229,13 @@ pub fn fill_locus_concentration<'a>(
 ///
 /// The buffer starts as `NaN` so a class the sum never writes shows up as one rather than as a
 /// plausible zero.
+/// **Takes a bare coefficient and goes to [`fill_expected_spectrum_at`]**, so that the tests
+/// below can reach `F = 1` — the mathematical edge where every individual's two copies are one
+/// copy counted twice, and the one value [`InbreedingF`] refuses.
 #[cfg(test)]
 fn exact_spectrum(alpha_ref: f64, alpha_alt: f64, individuals: u32, inbreeding: f64) -> Vec<f64> {
     let mut out = vec![f64::NAN; 2 * individuals as usize + 1];
-    fill_expected_spectrum(
-        alpha_ref,
-        alpha_alt,
-        individuals,
-        InbreedingF::try_new(inbreeding).unwrap(),
-        &mut out,
-    );
+    fill_expected_spectrum_at(alpha_ref, alpha_alt, individuals, inbreeding, &mut out);
     out
 }
 
@@ -2220,6 +2244,19 @@ mod projection_tests {
         assert!(wide > small, "{wide} against {small}");
     }
 
+    /// The greatest coefficient [`InbreedingF`] accepts — the `f64` immediately below one.
+    ///
+    /// **The projection takes the newtype, so `F = 1` cannot reach it**, and this is as close as
+    /// a caller gets. It is not "almost one" in any useful sense — `1 − F` here is `2⁻⁵³` — but
+    /// it is not zero either, so the odd allele-count classes hold about `10⁻¹⁶` of the mass
+    /// rather than exactly nothing. The tests below say which of those two facts they rest on.
+    /// The exact limit is pinned on the bare-coefficient path
+    /// ([`super::fill_expected_spectrum_at`]).
+    fn greatest_accepted_inbreeding() -> InbreedingF {
+        InbreedingF::try_new(f64::from_bits(1.0f64.to_bits() - 1))
+            .expect("the f64 below one is inside [0, 1)")
+    }
+
     /// The divergence a spectrum projects to, in nats.
     fn divergence_of(class_weights: &[f64], inbreeding: f64) -> f64 {
         let seed = project_spectrum_seed(
@@ -2235,27 +2272,34 @@ mod projection_tests {
 
     /// **A spectrum no pair can produce says so instead of returning a pair that looks fitted.**
     ///
-    /// At an inbreeding coefficient of 1 the model puts exactly nothing on an odd number of
-    /// chromosomes carrying the allele — every individual's two copies are one copy counted
-    /// twice — so a measured spectrum holding any heterozygote cannot have come from any pair.
-    /// Measured before this marker existed: all 441 points across the search box scored the same,
-    /// and the run returned whichever one it happened to reach.
+    /// At the greatest coefficient the projection can be handed the model puts about `10⁻¹⁶` on
+    /// an odd number of chromosomes carrying the allele — every individual's two copies are one
+    /// copy counted twice, up to that last `f64` — so a measured spectrum holding heterozygotes
+    /// at 4 in 100 cannot have come from any pair. Measured before this marker existed: all 441
+    /// points across the search box scored the same, and the run returned whichever one it
+    /// happened to reach.
     #[test]
     fn a_spectrum_no_pair_can_produce_is_marked_rather_than_answered() {
         let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
         let seed = project_spectrum_seed(
             Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
             Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-            InbreedingF::try_new(1.0).unwrap(),
+            greatest_accepted_inbreeding(),
         );
         let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
             panic!("a spectrum was supplied, so the regime is a fitted one");
         };
-        // The model can put nothing on an odd class, so the objective charges the pair
-        // `ln(PROBABILITY_FLOOR)` there and the divergence is enormous — 55 nats against the
-        // 3e-10 a shape the family can hold reaches.
+        // The model puts about `10⁻¹⁶` on an odd class, so the objective charges the pair
+        // `ln 10⁻¹⁶` there and the divergence lands at **1.74 nats** — against the `1.1e-9` a
+        // shape the family can hold reaches, and above the 1 nat that
+        // [`SpectrumMatch::divergence_nats`] calls the scale at which prediction and measurement
+        // disagree about where most of the panel's variable sites sit.
+        //
+        // **It was 55 nats while `InbreedingF` admitted exactly `1`**, where the odd classes held
+        // nothing at all and the objective charged `ln(PROBABILITY_FLOOR)`. The marker fires
+        // either way; the size of the gap is what the type's range changed.
         assert!(
-            spectrum_match.divergence_nats() > 10.0,
+            spectrum_match.divergence_nats() > 1.0,
             "{} nats",
             spectrum_match.divergence_nats()
         );
@@ -2415,23 +2459,24 @@ mod projection_tests {
 
     /// **A fully inbred panel whose spectrum holds heterozygotes still returns a pair.**
     ///
-    /// At `F = 1` the prediction puts exactly zero in every odd allele-count class, so a spectrum
-    /// carrying any weight in one of them cannot have come from any pair in this family — 441 of
-    /// 441 points across the search box, measured. Before the floor of
-    /// [`spectrum_log_likelihood`] every candidate scored `−∞`, no start could beat the sentinel
-    /// the search began from, and the run died three frames later complaining that a
+    /// At the top of the range the prediction puts all but about `10⁻¹⁶` of the mass in the even
+    /// allele-count classes, so a spectrum carrying 4 in 100 in an odd one cannot have come from
+    /// any pair in this family — 441 of 441 points across the search box, measured. Before the
+    /// floor of [`spectrum_log_likelihood`] every candidate scored `−∞`, no start could beat the
+    /// sentinel the search began from, and the run died three frames later complaining that a
     /// concentration was `NaN`.
     ///
-    /// `InbreedingF` still admits `1.0`; the `[0, 1)` tightening spec §7 requires belongs to
-    /// `calling_prerequisites.md` Milestone A. **What this pins is that the fit survives it**, not
-    /// that the answer means anything — see [`spectrum_log_likelihood`] on what is still missing.
+    /// **What this pins is that the fit survives it**, not that the answer means anything — see
+    /// [`spectrum_log_likelihood`] on what is still missing. `InbreedingF` is `[0, 1)` since
+    /// `calling_prerequisites.md` A1, so this takes the greatest coefficient it accepts; the exact
+    /// `F = 1` limit is pinned on the bare-coefficient path instead.
     #[test]
     fn a_fully_inbred_panel_whose_spectrum_holds_heterozygotes_still_returns_a_pair() {
         let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
         let seed = project_spectrum_seed(
             Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
             Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-            InbreedingF::try_new(1.0).unwrap(),
+            greatest_accepted_inbreeding(),
         );
         assert!(
             seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite(),

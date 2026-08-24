@@ -25,6 +25,7 @@ use std::sync::Arc;
 use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, InbreedingF, Ploidy, ReadGroupId};
 
+use super::calibration::{MintedReadErrors, fold_into, minted_error_by_read_group};
 use super::depth_and_alt_reads::{
     CountedSite, count_by_read_group, count_whole_site, count_whole_site_by_library,
 };
@@ -222,6 +223,16 @@ pub struct GenericAccumulators {
     previous_end: BTreeMap<ContigId, u64>,
     by_group_scratch: Vec<(ReadGroupId, CountedSite)>,
     alt_by_group_scratch: Vec<(ReadGroupId, u32)>,
+    /// **The read likelihood's error-rate scale, denominator half** — Σ `q_sum` and the read
+    /// count per read group, over exactly the sites [`Self::read_group_histograms`] counted
+    /// (`spec/read_likelihoods.md` §3.2, and [`calibration`](super::calibration) for what the
+    /// average is and why).
+    ///
+    /// **Beside the histograms rather than inside them**, because nothing here is fitted from it:
+    /// the fit reads the tables and this is divided into the fit's answer afterwards. One entry per
+    /// read group the sample covered — bytes.
+    minted_errors: BTreeMap<ReadGroupId, MintedReadErrors>,
+    minted_errors_scratch: Vec<(ReadGroupId, MintedReadErrors)>,
 }
 
 impl GenericAccumulators {
@@ -254,6 +265,8 @@ impl GenericAccumulators {
             previous_end: BTreeMap::new(),
             by_group_scratch: Vec::new(),
             alt_by_group_scratch: Vec::new(),
+            minted_errors: BTreeMap::new(),
+            minted_errors_scratch: Vec::new(),
         }
     }
 
@@ -303,6 +316,14 @@ impl GenericAccumulators {
                 .add_site(counted.counts(), covered);
         }
         self.by_group_scratch = by_group_scratch;
+
+        // **The scale's denominator, over the sites the table above just counted.** Folded here
+        // rather than beside the fit because this is the only place that sees a read's minted
+        // error at all — by the time the fit runs, the observations are cells.
+        let mut minted = std::mem::take(&mut self.minted_errors_scratch);
+        minted_error_by_read_group(locus, &mut minted);
+        fold_into(&mut self.minted_errors, &minted);
+        self.minted_errors_scratch = minted;
 
         // **The site is counted once and filed once, into whichever of the two tables this
         // run's mode uses.** The counting is identical; only the width of what receives it
@@ -429,6 +450,14 @@ impl GenericAccumulators {
                 }
             }
         }
+        // **The scale's denominator merges like the tables and for the same reason**: a shard saw
+        // some of the sample's sites and the average has to be over all of them. Both of its
+        // numbers are integers, so this merge is exact and the six-order test above covers it
+        // rather than passing over it — see [`MintedReadErrors`] for why an `f64` sum here would
+        // have broken that contract silently.
+        for (group, totals) in other.minted_errors {
+            self.minted_errors.entry(group).or_default().add(totals);
+        }
         for (key, table) in other.by_window {
             match self.by_window.get_mut(&key) {
                 Some(mine) => mine.merge(&table),
@@ -500,6 +529,23 @@ impl GenericAccumulators {
     #[must_use]
     pub fn windowed_histograms(&self) -> &BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>> {
         &self.by_window
+    }
+
+    /// **The read likelihood's error-rate scale, denominator half** — per read group, over
+    /// exactly the sites [`Self::read_group_histograms`] counted.
+    ///
+    /// The numerator is the error rate
+    /// [`fit_read_group_error_rates`](super::read_group_error_rate::fit_read_group_error_rates)
+    /// fits from those same tables, and the scale is the one divided by the other
+    /// (`spec/read_likelihoods.md` §3.2). **Nothing here is fitted from this**, which is why it
+    /// sits beside the tables rather than inside them and why the fit does not take it.
+    ///
+    /// A read group the sample covered with no complete observation anywhere has no entry, which
+    /// is the difference between a library that was measured and one that was not — a scale
+    /// wanting a denominator gets no number rather than a one.
+    #[must_use]
+    pub fn minted_errors(&self) -> &BTreeMap<ReadGroupId, MintedReadErrors> {
+        &self.minted_errors
     }
 
     /// Sum this sample's windows into one whole-sample table, for one ploidy — free and
@@ -593,7 +639,12 @@ mod tests {
             read_group,
             num_obs,
             num_fwd: 0,
-            q_sum: 0.0,
+            // **Awkward on purpose, and it used to be `0.0`.** The calibration totals
+            // (`Self::minted_errors`) are summed from this field, and with every fixture at zero
+            // there was nothing for a wrong sum to lose: a fold routed through `f64` passed the
+            // six-order merge test, which is the one test whose whole subject is that merging is
+            // order-independent. These decimals do not add associatively as floats.
+            q_sum: -0.1 * f64::from(num_obs) - 0.07 * f64::from(read_group.get() + 1),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
@@ -818,6 +869,15 @@ mod tests {
                 whole.whole_sample_histogram(diploid()).cells(diploid()),
                 "order {order:?}"
             );
+            // **The scale's denominator too, and it is the one field here that could have failed
+            // this.** Both of its numbers are integers, so the equality is exact rather than
+            // approximate; a running `f64` sum would have agreed with the unsharded walk in some
+            // orders and not others, and no other assertion in this test would have noticed.
+            assert_eq!(
+                merged.minted_errors(),
+                whole.minted_errors(),
+                "the minted-error totals, order {order:?}"
+            );
         }
     }
 
@@ -871,6 +931,34 @@ mod tests {
             "three loci from each shard reached the read-group table"
         );
         assert_eq!(merged.whole_sample_histogram(diploid()).total_loci(), 6);
+
+        // **The calibration totals, by value and not by agreement.** The assertion in the
+        // six-order test above compares one merge against another, so it catches an
+        // order-dependent fold and nothing else — a build that dropped the sum entirely would
+        // satisfy it, because both sides would be zero.
+        //
+        // Each shard contributes 20 + 400 + 100 + 9 = 529 reads, and `observation` gives each
+        // one `−0.1 × num_obs − 0.07`, so the four sum to −53.18 a shard and −106.36 over both.
+        let minted = merged.minted_errors();
+        assert_eq!(minted.len(), 1, "one library");
+        let group = minted[&group(0)];
+        assert_eq!(
+            group.reads, 1_058,
+            "every read of both shards, and note what that means about the depth cap: the \
+             500-read locus entered the histogram thinned to 124, and all 500 of its reads \
+             count here. The cap draws on counts and never looks at a quality, so it cannot \
+             bias a mean — only a sum, which this is not",
+        );
+        // **The tolerance is the bound `MintedReadErrors` documents**, half a unit of 2⁻²⁰, so
+        // this assertion is what checks that claim rather than a number picked to pass. The miss
+        // measured here is 1.2 × 10⁻⁹ — four fixed-point conversions' worth of rounding spread
+        // over 1,058 reads — which is about 400 times inside it, and any wrong sum would be
+        // orders of magnitude outside.
+        let mean = group.mean_log_error().expect("reads were seen");
+        assert!(
+            (mean - (-106.36 / 1_058.0)).abs() < 0.5 / (1_u64 << 20) as f64,
+            "the mean log error came back {mean}",
+        );
     }
 
     /// **Both boundaries of the overlap comparison.** A locus starting exactly where the
@@ -1026,7 +1114,7 @@ mod tests {
     #[test]
     fn a_supplied_inbreeding_coefficient_collapses_the_windowed_table() {
         let edges = ladder();
-        let supplied = InbreedingF::try_new(0.3).expect("a coefficient in [0, 1]");
+        let supplied = InbreedingF::try_new(0.3).expect("a coefficient in [0, 1)");
         let mut with_supplied_f = GenericAccumulators::new(
             Arc::clone(&edges),
             &[group(0)],

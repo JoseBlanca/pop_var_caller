@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(substituting.reads_composed_across_records, 3);
         assert_eq!(substituting.reads_removed_as_evidence, 0);
         assert_eq!(
-            substituting.support_for(1).num_reads,
+            substituting.pooled_support_for(1).num_reads,
             3,
             "three reads showed the substitution across the whole locus",
         );
@@ -526,7 +526,7 @@ mod tests {
             })
             .fold(f64::NEG_INFINITY, f64::max);
         assert_eq!(
-            substituting.support_for(1).q_sum,
+            substituting.pooled_support_for(1).q_sum,
             weakest_of_its_records * 3.0,
             "each read takes the weakest of the six positions it was seen at",
         );
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(deleting.sample, 1);
         assert_eq!(deleting.reads_composed_across_records, 0);
         assert_eq!(
-            deleting.support_for(2),
+            deleting.pooled_support_for(2),
             crate::ng::run::cohort_merge::build::AlleleSupport {
                 num_reads: minted.num_obs,
                 num_fwd: minted.num_fwd,
@@ -555,12 +555,12 @@ mod tests {
         );
 
         assert_eq!(
-            substituting.support_for(0),
+            substituting.pooled_support_for(0),
             crate::ng::run::cohort_merge::build::AlleleSupport::default(),
             "neither sample's reads showed the reference over the whole locus",
         );
         assert_eq!(
-            deleting.support_for(0),
+            deleting.pooled_support_for(0),
             crate::ng::run::cohort_merge::build::AlleleSupport::default(),
         );
     }
@@ -1166,6 +1166,21 @@ mod tests {
                 59,
                 "the fixture's own shape: 60 dotted loci, two of which the deletion \
                  swallowed into one locus with the sample at 310",
+            );
+            // **The fixture's one partial reaches the comparison, and that is a premise rather
+            // than a detail.** Every driver comparison in this module is on the whole rendering
+            // of the outcome, so a field that is empty in every entry is a field two drivers
+            // agree on by both building nothing. This is the assertion that keeps the fixture
+            // from drifting back to one where `partials` is that field.
+            assert_eq!(
+                merged
+                    .cohort_observations
+                    .iter()
+                    .flat_map(|observed| observed.per_sample.iter())
+                    .filter(|sample| !sample.partials.is_empty())
+                    .count(),
+                1,
+                "the deleting sample's record carries the fixture's only partial",
             );
         }
     }

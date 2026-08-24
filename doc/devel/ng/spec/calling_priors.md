@@ -801,8 +801,25 @@ heterozygotes fall to the probability floor and the two homozygotes stand in the
 (`dirichlet_prior_full_inbreeding_concentrates_on_homozygotes`,
 [`posterior_engine.rs:4341`](../../../../src/var_calling/posterior_engine.rs)). **What is capped is
 the estimate, not the model:** production's inbreeding estimator clamps at `0.99`
-([`inbreeding.rs:25`](../../../../src/paralog/inbreeding.rs)), so no sample ever reaches the caller
-carrying a prior that has ruled heterozygotes out.
+([`inbreeding.rs:25`](../../../../src/paralog/inbreeding.rs)), so no sample whose `F` was **fitted**
+reaches the caller carrying a prior that has ruled heterozygotes out.
+
+**A sample whose `F` was supplied does.** Production's second door is `--inbreeding-coefficient`,
+whose parser admits the closed `[0, 1]` and is pinned admitting `1.0`
+([`parsers.rs:166`](../../../../src/pop_var_caller/cli/parsers.rs), test at
+[`:392`](../../../../src/pop_var_caller/cli/parsers.rs)); the value goes to the engine as typed
+([`pipeline.rs:343`](../../../../src/var_calling/pipeline.rs)). The cap is a line inside one
+estimator, and the other route round it is a command-line flag. *(Corrected 2026-08-23 while
+building `InbreedingF`'s half-open check — the earlier text claimed the guarantee for every
+sample.)*
+
+**ng has no such second door today, and the point of the newtype is to keep it that way.** Every
+construction of `InbreedingF` from a raw number outside test code is the fitted path
+([`runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs)); a supplied coefficient
+arrives already built, so the checked constructor is the only way in. **The exposure is
+prospective:** whoever eventually gives ng a command line will reach for production's parser, whose
+range is closed, and a flag that admitted `1.0` would hand the prior a value no fit can produce.
+The half-open type is what makes that a compile-and-check problem rather than a silent one.
 
 ng should carry that ceiling in a validated newtype — `InbreedingF` in `[0, 1)`, per the interface
 conventions ([`ng_step_interfaces.md`](../arch/ng_step_interfaces.md)) — so it is a property of the
@@ -810,6 +827,14 @@ type rather than a line inside one estimator that a second estimator can forget.
 coder:** production's cap lives in the estimator and its engine config accepts `1.0`
 ([`posterior_engine.rs:4348`](../../../../src/var_calling/posterior_engine.rs) sets it), so porting
 the engine without the newtype ports a gap.
+
+**What the newtype's range buys, stated exactly, because it is easy to over-read.** Excluding the
+endpoint removes the mathematical limit and nothing more: it keeps `ln(1 − F)` finite. It is not a
+numerically meaningful cap — the largest `f64` below one leaves `1 − F = 2⁻⁵³`, about **160 on the
+Phred scale** against every heterozygote, where two clean alternative bases at Q30 supply **60**.
+Production's `0.99` is 20 Phred, which evidence can overcome. So the type makes `F = 1`
+unrepresentable and **every estimator still owes its own cap**; ng's fitted path clamps at `0.99`
+for exactly that reason ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A2).
 
 ---
 

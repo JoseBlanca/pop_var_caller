@@ -162,6 +162,21 @@ pub struct RunsModelFit {
     /// the chain by definition. A genome with unmappable stretches has a non-zero count for
     /// that reason alone.
     pub undecided_windows: u32,
+
+    /// **The emitted coefficient is [`MAX_FITTED_INBREEDING`] and the fit found more.**
+    ///
+    /// Without this, a sample capped down from 0.9997 and a sample genuinely fitted at 0.9900
+    /// are the same number to every consumer, and on a panel of inbred lines that is most of
+    /// the panel rather than an edge: under self-fertilisation `F = 1 − 2⁻ᵗ` passes the cap at
+    /// the seventh generation. A reader checking a cohort's coefficients needs to know which of
+    /// them the estimator measured and which it flattened onto the ceiling.
+    ///
+    /// **Not a provenance state.** The value really was fitted here
+    /// ([`Provenance::FittedHere`](super::super::Provenance)); what changed is that the
+    /// estimator declined to report the whole of what it found. [`starts_tried`](Self::starts_tried)
+    /// keeps the uncapped values, so this says *that* the cap fired and the starts say by how
+    /// much.
+    pub coefficient_was_capped: bool,
 }
 
 /// How many Baum–Welch passes one starting point is allowed.
@@ -631,8 +646,7 @@ pub fn fit_inbreeding(
     let best =
         best_separated_start(&outcomes).expect("some start separated the states, checked above");
 
-    let inbreeding = InbreedingF::try_new(best.inbreeding)
-        .expect("a coverage-weighted posterior occupancy is a fraction");
+    let inbreeding = capped_inbreeding(best.inbreeding);
     let fit = RunsModelFit {
         outside_het: best.frequencies[OUTSIDE][1],
         outside_hom_alt: best.frequencies[OUTSIDE][2],
@@ -650,16 +664,99 @@ pub fn fit_inbreeding(
         // one number a consumer uses to decide whether a small `F` means anything.
         resolution: resolution_at(chain.windows_holding_sites),
         undecided_windows: best.undecided_windows,
+        coefficient_was_capped: inbreeding.was_capped,
     };
 
     Ok((
         Estimate {
-            value: inbreeding,
+            value: inbreeding.coefficient,
             provenance: Provenance::FittedHere,
             observations: chain.covered_positions_total(),
         },
         fit,
     ))
+}
+
+/// The ceiling this estimator puts on its own answer, and the only place `F` is capped.
+///
+/// **`0.99` is production's number and its reasoning, copied rather than depended on** — ng does
+/// not import from the frozen tree, so this is a second literal beside
+/// [`MAX_INBREEDING_COEFFICIENT`](crate::paralog::inbreeding::MAX_INBREEDING_COEFFICIENT) and
+/// nothing but this sentence ties them. The reasoning is what carries over: no
+/// sample whose `F` was *fitted* should reach the caller carrying a prior that has ruled
+/// heterozygotes out. The genotype prior multiplies its heterozygote branch by `1 − F`, so this
+/// leaves that branch multiplied by `0.01` — 20 on the Phred scale, which two clean alternative
+/// bases at Q30 can argue with, where the coefficient just below one would leave 160 and nothing
+/// could.
+///
+/// **Production's own guarantee stops at its fitted path and this one does too.** Its
+/// `--inbreeding-coefficient` flag admits the closed `[0, 1]` and reaches the engine unclamped
+/// (`spec/calling_priors.md` §7, corrected 2026-08-23); ng has no such flag today, and whichever
+/// one it gets owes this cap rather than only the newtype's range.
+///
+/// **The newtype's range is not this cap and cannot replace it.** [`InbreedingF`] refuses exactly
+/// `1`, which removes the mathematical limit and nothing else — the value immediately below one
+/// still constructs (`spec/calling_priors.md` §7). Capping the *estimate* is this estimator's
+/// job, and it is done here rather than at the newtype so a second estimator with a different
+/// ceiling is free to have one.
+const MAX_FITTED_INBREEDING: f64 = 0.99;
+
+/// The fitted occupancy as the prior takes it, and whether the cap moved it.
+///
+/// **Both come from one call on purpose.** Deriving `was_capped` at the call site instead would
+/// be a second comparison against the same constant, free to drift from the one that acts.
+struct CappedOccupancy {
+    coefficient: InbreedingF,
+    was_capped: bool,
+}
+
+/// The fitted occupancy as the prior takes it — capped at [`MAX_FITTED_INBREEDING`].
+///
+/// **A cap, not an assertion, because what it acts on is a legitimate fit.** `F` here is the
+/// coverage-weighted posterior occupancy: each window's forward–backward probability of lying
+/// inside a run, weighted by the reference positions it covered, summed and normalised
+/// (`spec/parameter_prepass_generic.md` §6.5). A window's posterior reaches exactly `1.0` in
+/// `f64` once the losing state is roughly 16 to 27 nats behind — **not** the textbook 37, because
+/// the normaliser is added to a chain log-likelihood in the thousands or the billions, and the
+/// larger that is the sooner the loser's contribution disappears into it: 27 nats at this
+/// module's own fixture, about 16 at the totals this file quotes for a real genome. Either way,
+/// ordinary at a window carrying hundreds of sites.
+///
+/// **A sample whose occupancy is exactly `1.0` is rare and is not what this exists for.** It
+/// needs every window carrying coverage to sit inside a run *and* the windows that do not to
+/// carry none — the padded ones do — and a sample with no window below one half is refused by
+/// the used-both-states check before it ever gets here. **What is ordinary is landing above the
+/// cap without reaching one:** the fixture in this module's own tests puts 3,599 windows of 3,600
+/// inside a run and the fit lands above the cap
+/// ([`tests::the_emitted_coefficient_is_capped_where_the_fit_itself_went_higher`], which asserts
+/// exactly that rather than a number that could go stale). Under self-fertilisation
+/// `F = 1 − 2⁻ᵗ` passes 0.99
+/// at the seventh generation, so a maintained inbred line is past it and a crop panel of them is
+/// past it throughout. Before A1 those values flowed through unchanged; the cap is what keeps
+/// the prior arguable there, and refusing rather than capping would refuse the ordinary sample.
+///
+/// **The fit's own record stays uncapped, and deliberately.** [`RunsModelFit::starts_tried`] keeps
+/// what each start found, so a reader comparing it with the emitted coefficient will see two
+/// different numbers where the cap fired — that is the only surviving trace that it did. It is
+/// also load-bearing: [`MAX_IDENTIFIED_START_SPREAD`] is measured across those values, and
+/// capping them would shrink a real disagreement into an accepted one. Nine starts between 0.94
+/// and 1.00 spread by 0.06 and are refused; capped to 0.94 and 0.99 they spread by 0.05 and are
+/// not.
+///
+/// `NaN` is left to fail loudly rather than capped: `clamp` propagates it, the constructor rejects
+/// it, and the `expect` fires. That is our own arithmetic broken, which is the case the `expect`
+/// convention in this file exists for. **`f64::min` would be the shorter spelling and is silently
+/// wrong**: it ignores `NaN`, so a broken fit would arrive as a confident `0.99`.
+fn capped_inbreeding(occupancy: f64) -> CappedOccupancy {
+    let capped = occupancy.clamp(0.0, MAX_FITTED_INBREEDING);
+    CappedOccupancy {
+        coefficient: InbreedingF::try_new(capped)
+            .expect("a coverage-weighted posterior occupancy, capped below one, is a fraction"),
+        // **Not `capped != occupancy`**, which is also true at the lower bound and true of a
+        // `NaN` that never gets this far. The question a reader asks of the emitted number is
+        // whether the ceiling is why it says what it says.
+        was_capped: occupancy > MAX_FITTED_INBREEDING,
+    }
 }
 
 /// A per-**window** transition probability as a per-**base** one.
@@ -1254,6 +1351,84 @@ impl WindowChain {
 mod tests {
     use super::*;
 
+    /// **What the helper does at and above the ceiling, and what the number costs.**
+    ///
+    /// Exactly `1.0` is the value [`InbreedingF`] refuses, so without the cap it is a panic; above
+    /// `0.99` and below one it would construct, and leave a prior no read evidence can argue with.
+    /// Both come back at the cap. Whether `fit_inbreeding` actually routes through here is a
+    /// different question and is
+    /// [its own test](the_emitted_coefficient_is_capped_where_the_fit_itself_went_higher).
+    ///
+    /// **`0.99` is asserted against the literal on purpose.** Comparing
+    /// `capped_inbreeding(1.0).get()` against `MAX_FITTED_INBREEDING` is true of any cap below
+    /// one, so a constant edited to `0.9` — which moves the prior's heterozygote branch from 20
+    /// Phred to 10 — would pass. The two Phred figures are the reason `0.99` and not something
+    /// else: the genotype prior multiplies its heterozygote branch by `1 − F`, and at the cap that
+    /// is 20 on the Phred scale against the 60 two clean alternative bases at Q30 supply, so read
+    /// evidence can still overturn it. At the greatest coefficient the newtype accepts it would be
+    /// 160 and nothing could (`spec/calling_priors.md` §7).
+    #[test]
+    fn the_cap_holds_at_and_above_the_ceiling_and_costs_twenty_phred() {
+        for occupancy in [1.0, 0.995] {
+            let capped = capped_inbreeding(occupancy);
+            assert_eq!(capped.coefficient.get(), 0.99, "occupancy {occupancy}");
+            assert!(capped.was_capped, "occupancy {occupancy}");
+        }
+        // The lower bound is a different repair and is not what `was_capped` reports.
+        let floored = capped_inbreeding(-1e-9);
+        assert_eq!(floored.coefficient.get(), 0.0);
+        assert!(!floored.was_capped);
+        // Exactly at the cap is not capped: nothing was withheld.
+        let at_the_cap = capped_inbreeding(MAX_FITTED_INBREEDING);
+        assert_eq!(at_the_cap.coefficient.get(), 0.99);
+        assert!(!at_the_cap.was_capped);
+
+        let capped_phred = -10.0 * (1.0 - MAX_FITTED_INBREEDING).log10();
+        assert!((capped_phred - 20.0).abs() < 1e-9, "{capped_phred}");
+        // The alternative the cap exists to avoid: the newtype's own ceiling is far above it.
+        let greatest_the_newtype_accepts = f64::from_bits(1.0f64.to_bits() - 1);
+        assert!(MAX_FITTED_INBREEDING < greatest_the_newtype_accepts);
+        let uncapped_phred = -10.0 * (1.0 - greatest_the_newtype_accepts).log10();
+        assert!((uncapped_phred - 159.5).abs() < 0.1, "{uncapped_phred}");
+    }
+
+    /// **A fit that is not a number fails loudly rather than arriving at the cap**, and the
+    /// spelling is what decides which.
+    ///
+    /// `f64::min` ignores `NaN` by definition, so `NaN.min(0.99)` is `0.99` — a broken fit would
+    /// come back as a confident, plausible coefficient and nothing downstream could tell. `clamp`
+    /// propagates it instead, the constructor rejects it, and the `expect` fires. Both halves are
+    /// asserted here because the wrong one is the shorter thing to write.
+    #[test]
+    fn a_fit_that_is_not_a_number_fails_rather_than_arriving_at_the_cap() {
+        assert!(f64::NAN.clamp(0.0, MAX_FITTED_INBREEDING).is_nan());
+        assert_eq!(f64::NAN.min(MAX_FITTED_INBREEDING), MAX_FITTED_INBREEDING);
+        assert!(InbreedingF::try_new(f64::NAN).is_err());
+    }
+
+    /// The loud failure itself, at the door the estimator actually uses.
+    #[test]
+    #[should_panic(expected = "capped below one, is a fraction")]
+    fn a_fit_that_is_not_a_number_panics_at_the_constructor() {
+        let _ = capped_inbreeding(f64::NAN);
+    }
+
+    /// **Everything below the cap passes through untouched**, bit for bit — the cap is a ceiling
+    /// on one end and not a rescaling. `0.0` matters on its own: an outcrossing sample must not
+    /// come back as anything else.
+    #[test]
+    fn a_fit_below_the_cap_is_carried_verbatim() {
+        for occupancy in [0.0, 1e-12, 0.2634, 0.5, 0.9, MAX_FITTED_INBREEDING] {
+            let capped = capped_inbreeding(occupancy);
+            assert_eq!(
+                capped.coefficient.get().to_bits(),
+                occupancy.to_bits(),
+                "occupancy {occupancy}"
+            );
+            assert!(!capped.was_capped, "occupancy {occupancy}");
+        }
+    }
+
     /// **The default starts span the state separation, and that is the property the
     /// type exists for.** Three distinct separations is what makes them a spread; three
     /// distinct inside fractions sharing one separation would not be, and the
@@ -1331,6 +1506,7 @@ mod tests {
             ]),
             resolution: 0.01,
             undecided_windows: 0,
+            coefficient_was_capped: false,
         };
 
         assert_eq!(fit.best_start().map(|s| s.inbreeding), Some(0.2634));
@@ -1870,6 +2046,103 @@ mod tests {
                  realised {realised}; all levels: {fitted_at:?}"
             );
         }
+    }
+
+    /// **The cap is on the estimator's own output, not merely on a helper beside it.**
+    ///
+    /// The helper tests above pin the arithmetic; this pins that `fit_inbreeding` goes through
+    /// it. Both matter, and the second is the one a careless edit removes: with the call site
+    /// restored to constructing directly, every other test in this module stays green.
+    ///
+    /// **The genome is built rather than drawn, because a drawn one cannot get here.**
+    /// [`draw_genome`] walks a Markov chain whose entry rate is `LEAVE_RUN·F/(1 − F)`, and past
+    /// about `F` = 0.97 that rate exceeds one and the draw stops meaning anything — measured, a
+    /// nominal 0.995 and a nominal 0.9995 both return the same fit of 0.966. So every window here
+    /// is written directly: all 3,600 hold the inside state's heterozygote rate except one, which
+    /// holds the outside state's. **That one window is not decoration** — the fit refuses a
+    /// sample in which no window's posterior falls below one half, so a genome entirely inside a
+    /// run comes back as `InbreedingStatesNotSeparated` and never reaches the cap at all.
+    ///
+    /// The realised autozygous fraction is 3,599 windows of 3,600, and the fit finds it; the
+    /// emitted coefficient is the cap. That gap is the assertion — a test comparing only against
+    /// `0.99` would also pass on a fit that genuinely landed there.
+    #[test]
+    fn the_emitted_coefficient_is_capped_where_the_fit_itself_went_higher() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut windowed = BTreeMap::new();
+        let mut inside_positions = 0u64;
+        let mut total_positions = 0u64;
+
+        for contig in 0..CONTIGS {
+            for window in 0..WINDOWS_PER_CONTIG {
+                let inside = !(contig == 0 && window == 0);
+                let het = if inside { INSIDE_HET } else { OUTSIDE_HET };
+                let het_sites = (SITES_PER_WINDOW as f64 * het).round() as u64;
+                let hom_alt_sites = (SITES_PER_WINDOW as f64 * HOM_ALT).round() as u64;
+                let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+                for _ in 0..het_sites {
+                    table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, WINDOW_DEPTH / 2), Bp(1));
+                }
+                for _ in 0..hom_alt_sites {
+                    table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, WINDOW_DEPTH), Bp(1));
+                }
+                for _ in 0..(SITES_PER_WINDOW - het_sites - hom_alt_sites) {
+                    table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+                }
+                total_positions += table.total_covered_positions();
+                if inside {
+                    inside_positions += table.total_covered_positions();
+                }
+                windowed.insert(
+                    (
+                        WindowKey::InWindow {
+                            contig: ContigId(contig),
+                            window: WindowIndex(window),
+                        },
+                        diploid,
+                    ),
+                    table,
+                );
+            }
+        }
+
+        let realised = inside_positions as f64 / total_positions as f64;
+        assert!(
+            realised > MAX_FITTED_INBREEDING,
+            "this fixture only says something if the genome itself is above the cap: {realised}"
+        );
+
+        let (estimate, fit) = fit_inbreeding(
+            "nearly-all-runs",
+            &windowed,
+            &one_library(),
+            diploid,
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect("one window outside the run is what makes the states separable");
+
+        let found = fit
+            .best_start()
+            .expect("a fit that returned Ok tried at least one start")
+            .inbreeding;
+        assert!(
+            found > MAX_FITTED_INBREEDING,
+            "the fit must land above the cap or this proves nothing; it found {found} against a \
+             realised {realised}"
+        );
+        assert_eq!(
+            estimate.value.get(),
+            MAX_FITTED_INBREEDING,
+            "the fit found {found} and the emitted coefficient is {}",
+            estimate.value.get()
+        );
+        // Without this a reader cannot tell this sample from one genuinely fitted at 0.99.
+        assert!(
+            fit.coefficient_was_capped,
+            "the fit reached {found} and the emitted coefficient does not say it was capped"
+        );
     }
 
     /// **Starts that share one separation guess return a failed search, not a zero.** This

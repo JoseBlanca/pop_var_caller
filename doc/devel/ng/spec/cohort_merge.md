@@ -388,7 +388,11 @@ Two steps, both mechanical:
 - **Unification.** Two projected sequences that are identical are the same allele, wherever they
   came from. The locus ends with one table of distinct alleles, the reference among them, and each
   sample's support expressed against that table — its per-read moments summed where two of its own
-  observations projected onto the same allele.
+  observations projected onto the same allele **and came from the same read group**. The second
+  half was added 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md)
+  B1): two reads showing the same bases from two lanes have different error rates, so a read
+  likelihood may not fold them into one term ([`read_likelihoods.md`](read_likelihoods.md) §2.3).
+  A sample with one read group is unaffected, which is most of them.
 
 **Unification by exact match is only sound because indels were left-aligned upstream.** The same
 deletion written at two placements would otherwise project to two sequences and become two alleles,
@@ -398,9 +402,11 @@ generator mints anything (`LeftAlignPreparer`,
 do mean the same allele. It is worth stating because the failure is invisible in the output: two
 half-supported alleles look like a noisy site, not like a bug.
 
-**A sample's own evidence is not merged across alleles.** Its members' counts and moments stay
-attached to the allele each projected onto, so the caller sees per-allele support per sample, which
-is what a genotype likelihood needs.
+**A sample's own evidence is not merged across alleles, nor across read groups.** Its members'
+counts and moments stay attached to the allele each projected onto and to the group the reads came
+from, so the caller sees per-allele support per read group per sample — the first because a
+genotype likelihood needs the alleles apart, the second because a read likelihood needs the groups
+apart.
 
 **Production does this in a merger too, and it is worth being exact about which one**, because it
 has two and they do different jobs. `PerPositionMerger`

@@ -226,27 +226,28 @@ impl GenotypePriorModel for MarginalizedDirichletPrior {
 
 /// The mixture on a bare coefficient rather than on the newtype.
 ///
-/// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model rather than
-/// a case ng is meant to meet. **What keeps it away is the type, and nothing weaker** — once
-/// [`InbreedingF`](crate::ng::types::InbreedingF) is constrained to `[0, 1)` by the prerequisites
-/// plan, a coefficient of exactly 1 cannot be represented, so no path reaches the mixture carrying
-/// one. **That tightening has not happened** —
-/// [`InbreedingF::try_new(1.0)`](crate::ng::types::InbreedingF::try_new) returns `Ok` today — so
-/// `F = 1` is reachable through the trait as well, and both spellings are pinned by tests.
+/// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model and a case
+/// no caller here can reach. **What keeps it away is the type, and nothing weaker**:
+/// [`InbreedingF`](crate::ng::types::InbreedingF) is half-open `[0, 1)` — the tightening the
+/// prerequisites plan owed, **done 2026-08-23**, so
+/// [`InbreedingF::try_new(1.0)`](crate::ng::types::InbreedingF::try_new) now returns an error and a
+/// coefficient of exactly 1 cannot be represented. The trait above therefore cannot deliver the
+/// limit at all, and this is the only spelling that reaches it.
+///
+/// The limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the
+/// two homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
 ///
 /// **An earlier version of this comment credited production's estimator clamp of 0.99 with that
 /// guarantee, and the clamp does not provide it** (corrected 2026-08-23, alongside spec §7). The
 /// clamp is a line inside one estimator; production's own command line takes the closed `[0, 1]`
 /// and a test pins that it accepts exactly 1
 /// (`parse_inbreeding_coefficient`, `src/pop_var_caller/cli/parsers.rs`), so in production a
-/// coefficient of 1 reaches the engine whenever someone passes one. **ng has no such door today**
-/// — every construction from a raw `f64` outside test code is the fitted path the prerequisites
-/// plan is clamping, and `InbreedingMode::Supplied` carries an already-built value — and whoever
-/// eventually gives ng a command line owes it not to open one, because a validated type is a
-/// guarantee and a clamp beside a flag is not.
-///
-/// The limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the
-/// two homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
+/// coefficient of 1 reaches the engine whenever someone passes one. **ng has no such door, and now
+/// cannot have one by accident** — every construction from a raw `f64` outside test code goes
+/// through the checked constructor, the fitted path clamps at 0.99 before it, and
+/// `InbreedingMode::Supplied` carries an already-built value. Whoever eventually gives ng a command
+/// line still owes it not to open one, because a validated type is a guarantee and a clamp beside a
+/// flag is not.
 ///
 /// **This is not a test-only path**, whatever its reason for existing: the trait implementation
 /// above routes every caller through it, which is why the coefficient is checked here rather than
@@ -883,11 +884,10 @@ mod tests {
     ///
     /// **The estimator never delivers this**, so it tests the mathematics at its edge rather than a
     /// case the caller meets: production clamps its inbreeding estimate at 0.99, and ng's newtype is
-    /// *to be* tightened to `[0, 1)`. **It has not been** — `InbreedingF::try_new(1.0)` returns `Ok`
-    /// today, which is why the sibling test drives the same limit through the seam as well. Once the
-    /// tightening lands, the largest coefficient the type can carry is `1 − 2⁻⁵³`, where `1 − F` is
-    /// about `1.1e-16` and the floor below never bites; this path keeps the limit reachable, because
-    /// the bare-coefficient function admits `1` by design.
+    /// half-open `[0, 1)` since `calling_prerequisites.md` A1. **This is the only path that reaches
+    /// the limit**, because the bare-coefficient function admits `1` by design. The largest
+    /// coefficient the type can carry is `1 − 2⁻⁵³`, where `1 − F` is about `1.1e-16` and the floor
+    /// below never bites — what the seam does there is the sibling test's subject.
     ///
     /// **The heterozygote lands at the probability floor, not at `−∞`** (spec §8, arch §1.1, owner
     /// 2026-08-22). `log(1 − 1)` is `ln 0`, and the mixture floors the weight at
@@ -1071,25 +1071,46 @@ mod tests {
         );
     }
 
-    /// **The full-inbreeding limit on the path a caller actually takes.**
+    /// **How far the seam can push a heterozygote down, on the path a caller actually takes —
+    /// and it is not all the way.**
     ///
     /// [`at_full_inbreeding_only_the_homozygotes_survive_and_they_stand_at_the_concentration_ratio`]
-    /// drives the bare coefficient because [`InbreedingF`] is *to be* tightened to `[0, 1)`. It has
-    /// not been — measured, `InbreedingF::try_new(1.0)` returns `Ok` on this commit — so the limit
-    /// is reachable through the seam today and is pinned there too.
+    /// drives the bare coefficient, because [`InbreedingF`] is half-open `[0, 1)` since
+    /// `calling_prerequisites.md` A1 and `F = 1` cannot reach the seam at all. The greatest
+    /// coefficient that can is the `f64` immediately below one, where `1 − F` is `2⁻⁵³`: the
+    /// heterozygote's only branch loses exactly `ln 2⁻⁵³`, which is 36.74 nats or about **160 on
+    /// the Phred scale**, against the **60** two clean alternative bases at Q30 supply.
     ///
-    /// **When the tightening lands this constructor stops returning `Ok`**, and that is the signal
-    /// to move this test to the largest coefficient the newtype then accepts rather than to delete
-    /// it.
+    /// **So the type's range is not a cap on the estimate**, and this is where that is measured
+    /// rather than asserted: impossible for any practical purpose, still a finite number, and
+    /// still short of the limit. Capping the estimate stays the estimator's job
+    /// (`spec/calling_priors.md` §7).
     #[test]
-    fn the_seam_rules_out_heterozygotes_at_the_greatest_coefficient_the_newtype_accepts() {
-        let one = InbreedingF::try_new(1.0)
-            .expect("InbreedingF still accepts 1.0; tighten this test when it stops");
+    fn the_seam_at_the_greatest_coefficient_costs_a_heterozygote_a_measured_amount() {
+        let greatest = InbreedingF::try_new(f64::from_bits(1.0f64.to_bits() - 1))
+            .expect("the f64 below one is inside [0, 1)");
+        assert!(
+            InbreedingF::try_new(1.0).is_err(),
+            "this test's premise is that the seam cannot be handed exactly 1"
+        );
+        let outbred = InbreedingF::try_new(0.0).expect("zero is a coefficient");
+        // `1 − F` is exact here: the f64 below one is one ulp down, and 1.0 minus it is 2⁻⁵³.
+        let heterozygote_weight = 1.0 - greatest.get();
+        assert_eq!(heterozygote_weight, 2.0f64.powi(-53));
         for alternative_total in [1e-3, 1e-2, 0.25] {
-            let row = seam_row_for(2, 2, 1.0, alternative_total, one);
+            let row = seam_row_for(2, 2, 1.0, alternative_total, greatest);
+            // The heterozygote has one branch and it is weighted `1 − F`, so the whole cost is
+            // `ln(1 − F)` against the outbred row — computed, not a number that can go stale.
+            let outbred_row = seam_row_for(2, 2, 1.0, alternative_total, outbred);
+            let cost_nats = outbred_row[1].get() - row[1].get();
             assert!(
-                row[1].get().is_finite() && row[1].get() < -600.0,
-                "the heterozygote must be impossible at F = 1 but finite, got {}",
+                (cost_nats + heterozygote_weight.ln()).abs() < 1e-9,
+                "the heterozygote should lose ln(1 − F) = {} nats, lost {cost_nats}",
+                -heterozygote_weight.ln()
+            );
+            assert!(
+                row[1].get().is_finite(),
+                "the heterozygote must stay finite, got {}",
                 row[1].get()
             );
             assert!(
