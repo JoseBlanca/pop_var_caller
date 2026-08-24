@@ -128,6 +128,34 @@ if [[ "$RUNTIME" == container ]]; then
     RESOURCE_FLAGS+=(--memory "${DEV_MEM:-16g}" --cpus "${DEV_CPUS:-8}")
 fi
 
+# **Build-affecting environment is forwarded, because otherwise it is silently
+# dropped.** The container starts with a fresh environment, so
+# `RUSTFLAGS=… ./scripts/dev.sh cargo build` used to run with no `RUSTFLAGS` at
+# all — no error, no warning, and a measurement that looks like it tested
+# something it did not. Every `CARGO_*` variable the caller exported is passed
+# through, along with the handful of `RUST*` ones cargo reads.
+#
+# **Three names are excluded, and each would break the container if forwarded.**
+# `CARGO_TARGET_DIR` is set below instead: the whole point of the separate
+# `target-container/` tree is that the container and the host can hold different
+# builds of the same binary, and letting the host override it would merge them.
+# `CARGO_HOME` and `RUSTUP_HOME` point at the container's own toolchain
+# (`/usr/local/cargo`); a host that exports them — which rustup installs
+# commonly do — would send cargo looking for a registry at a path that is not
+# mounted.
+#
+# `compgen -e` lists exported names only, so shell-local variables cannot leak
+# in. Indirect expansion `${!name}` reads each one's value.
+FORWARDED_ENV=()
+while read -r forwarded_name; do
+    case "$forwarded_name" in
+        CARGO_TARGET_DIR | CARGO_HOME | RUSTUP_HOME | HOME) continue ;;
+        CARGO_* | RUSTFLAGS | RUSTDOCFLAGS | RUSTC_WRAPPER | RUST_BACKTRACE | RUST_LOG)
+            FORWARDED_ENV+=(-e "$forwarded_name=${!forwarded_name}")
+            ;;
+    esac
+done < <(compgen -e)
+
 # Empty-array expansions trip `set -u` on bash 3.2 (macOS default).
 # The `${arr[@]+"${arr[@]}"}` form expands to zero args when the
 # array is empty rather than erroring. TTY_FLAGS is always populated
@@ -140,6 +168,7 @@ fi
 exec "$RUNTIME" run --rm "${TTY_FLAGS[@]}" ${RESOURCE_FLAGS[@]+"${RESOURCE_FLAGS[@]}"} \
     -v "$MOUNT_SPEC" ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
     -w "$PROJECT_DIR" \
+    ${FORWARDED_ENV[@]+"${FORWARDED_ENV[@]}"} \
     -e CARGO_TARGET_DIR="$PROJECT_DIR/target-container" \
     -e HOME="$HOME" \
     "$IMAGE" \
