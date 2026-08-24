@@ -36,7 +36,7 @@ Each step is one commit, with an implementation report under
   `genotype_log_likelihood_row`: spec §3.3's closed form, reconciled term-by-term against
   production's `standard_log_likelihood`.
 
-Suite at B2: **4,260 passed / 0 failed / 14 ignored**, 73 of them in this module.
+Suite at B2: **4,268 passed / 0 failed / 14 ignored**, 81 of them in this module.
 `cargo doc --no-deps` at `main`'s 23 unresolved links.
 
 ## The five things a successor must not rediscover
