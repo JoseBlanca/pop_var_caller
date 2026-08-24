@@ -233,6 +233,16 @@ share over every sample where the module maximises it over the samples that clea
 *Depends:* C3. *Source:* spec §3.3, §4.2, §5.
 
 **D2. The truth-set property, as a checked-in test.**  ☐
+**Widened at D1's measurement, with two reasons and the owner's agreement of 2026-08-24.**
+**Both depths, not 300× alone**, because the bar has two terms and each depth is the only place
+one of them decides: at 300× a 5-in-100 share asks for about 15 reads so the floor of 2 can never
+bind, and at 30× `ceil(0.02 × 30) = 1` so the share is inert and the bar is a read count. Measured
+consequence: at 300× a count-only bar and the shipped bar lose **the same two** alleles, so the
+assertion this entry originally described passes with the share term deleted from the caller.
+**And the join must project every truth record in a span together**, not one at a time: both of
+those two "losses" are a SNP and a deletion in one 7-bp span, whose combined haplotype the caller
+does call (spec §3.3). A fixture built from the one-record-at-a-time join would freeze a scoring
+defect in as the expected answer.
 An integration test over a small committed fixture cut from the GIAB trio: of the true alternative
 alleles some sample's reads showed, the bar keeps them all but the two spec §3.3 records at 300×.
 Written as a property with the count, not as a golden number, so a fixture regenerated at a

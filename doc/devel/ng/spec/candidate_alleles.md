@@ -239,6 +239,30 @@ At **300×** — 15,474 alternatives:
 | **2 reads or 5%** | **2,308** | **2** |
 | 2 reads or 10% | 1,273 | 4 |
 
+**The two the bar "loses" at 300× are not losses, and the column overstates what the bar costs**
+(traced 2026-08-24, on the owner's question about why a real allele would sit below a tenth of a
+sample's reads at that depth). Both are HG002 loci where the truth set records **two** variants in
+one 7-bp span, and the scoring join projects one record at a time onto the reference span — so
+what it looks for is a haplotype the sample does not carry.
+
+- **chr1:90667287-90667293**, reference `TATACAC`. HG002 carries `TAC→T` at 90667289 **1/1** and
+  `C→T` at 90667293 **0/1**. Apply the deletion and the span reads `TATAC`, which the table holds
+  at 162 reads and keeps; apply the deletion and the SNP and it reads `TATAT`, held at 127 reads
+  and kept. **Both of the sample's haplotypes are called.** The sequence the join looked for —
+  the SNP on an undeleted background — has one read, because no read carries it.
+- **chr1:224085951-224085957**, reference `CTATATA`, with `CTA→C` and `A→C` both **0/1** and in
+  phase: the span reads `CTCTA`, held at 108 reads and kept.
+
+**So the recall cost of the 5-in-100 share at 300× is zero true alleles, not two.** The two that
+move at 10 in 100 are real: `chr1:193718424` `T→C` at 6 of one sample's 107 compared reads, and
+`chr1:120579074` `C→A` at 4 of 42 — single-base loci where the true allele is the only
+alternative, kept at 5 in 100 and dropped at 10.
+
+**The 30× floor column is not affected and its claim stands.** Of the five the floor of 3 loses,
+four are single-base loci whose true allele has exactly two reads — the case the floor is
+choosing against — and the fifth is an 11-bp deletion in a `CCCTT` tract with one read against a
+kept 4-read neighbour.
+
 **Two things follow.** The share is free up to 5 in 100 at both depths while removing three
 quarters of the table at 300×, which is why the share here is 5% where the merge's is 2% — and it
 changes nothing below about 40 compared reads a sample, so a tomato-depth run sees the identical
