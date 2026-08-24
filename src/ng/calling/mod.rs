@@ -19,10 +19,12 @@
 //! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
 //! counts the loop feeds back to itself; and [`LocusInference`] with
 //! [`SampleGenotypeCall`], what a locus produces. Of the four sub-modules — the candidate
-//! step, the likelihood, the genotype prior and the inference loop — one is here:
+//! step, the likelihood, the genotype prior and the inference loop — two are here:
 //! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
-//! (`doc/devel/ng/impl_plan/calling_prior.md`). The other three, and the shared types that
-//! borrow from them, arrive with their own plans
+//! (`doc/devel/ng/impl_plan/calling_prior.md`), and [`likelihood`], step 7, how probable
+//! this sample's reads are given each genotype
+//! (`doc/devel/ng/impl_plan/calling_read_likelihoods.md`). The other two, and the shared
+//! types that borrow from them, arrive with their own plans
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`).
 //!
 //! Beside this file rather than inside any one sub-module: [`genotype_table`], which
@@ -44,8 +46,16 @@ mod genotype_table_parity;
 
 pub mod genotype_prior;
 pub mod genotype_table;
+pub mod likelihood;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
+/// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
+/// worth stating: **without a `use` of it that has to compile, deleting `pub mod
+/// likelihood;` orphans the whole module silently.** The crate still builds, clippy is
+/// still clean, and `cargo test --lib ng::calling::likelihood` reports `0 passed; ok` —
+/// a green run naming a module that is no longer compiled. With this line the same
+/// deletion is `error[E0432]: unresolved import`.
+pub use likelihood::{GenericObservation, GenericSampleEvidence, SsrSampleEvidence};
 
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;

@@ -115,7 +115,7 @@ pub struct GenericSampleEvidence<'a> {
 
 /// The merge's fold of every read that showed one allele from one read group.
 pub struct GenericObservation {
-    pub allele: AlleleId,          // a(o) — resolved by the merge's byte unification
+    pub allele: AlleleId,          // a(o) — the CANDIDATE index, not the merge's own
     pub read_group: ReadGroupId,   // part of the identity — spec §2.3's aggregation contract
     pub num_reads: u32,            // n_o
     pub q_sum: f64,                // Σ ln P(error) over those reads
@@ -144,6 +144,22 @@ read-group boundary — and it landed there first:
 group. **What a consumer must not do is add the rows back**: `SampleSupport::pooled_support_for`
 exists for the questions that really are about the sample, and its name is the warning.
 
+**Correction, 2026-08-24, made while A1 was built: `allele` above cannot be filled from the merge's
+row, and the deleted comment said it could.** `SupportedAllele::allele` indexes the merge's
+unification table — every distinct sequence the whole cohort showed, uncapped — and `AlleleId`
+indexes the **candidate** table, which selection produces by keeping some of those alleles and
+dropping the rest. Dropping allele *k* renumbers every allele above it, as `CandidateAlleles`'
+own doc states, so the two numberings agree only until the first prune, and a view that assumed
+the identity would score reads against the wrong sequence with nothing saying so.
+
+Two consequences, both now in the built code. The narrowing is **not** this module's:
+`GenericObservation::of_supported_allele` takes the candidate id as an argument, and
+`fill_from_supported_alleles` takes selection's whole mapping — `&[Option<AlleleId>]` indexed by
+merge allele — so the assumption is a parameter rather than a silence. And a row the mapping
+drops is not merely skipped: its `q_sum` comes back from the fill, because those reads are part of
+`unmatched_q_sum` (spec §3.3) and a function that discards evidence has to say what it discarded.
+**Selection still owes the rest of the pool**; the fill returns only the part it can see.
+
 ### 2.2 STR path
 
 The evidence is the locus generator's own type, unchanged: `SequenceObservation`
@@ -151,8 +167,23 @@ The evidence is the locus generator's own type, unchanged: `SequenceObservation`
 `(bases, witness, read_group)` and carries `num_obs` — the aggregation contract holds by
 construction. `SsrSampleEvidence<'a>` is a slice of them plus the locus's `SsrDetail`
 ([`mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)); complete and partial observations are
-told apart by `ReadWitness`, and the guard iterator `complete_observations()`
-([`mod.rs:134`](../../../../src/ng/locus_generation/mod.rs)) stays the only unguarded access.
+told apart by `ReadWitness`.
+
+**Correction, 2026-08-24, made while A1 was built. This sentence used to say the generator's
+`complete_observations()` ([`mod.rs:134`](../../../../src/ng/locus_generation/mod.rs)) "stays the
+only unguarded access", and neither half of that is true.** It is not a guard — the field it reads,
+`SampleLocusObservations::observations`, is `pub`, so the iterator is a helpful name and not an
+enforcement — and it is no longer the only one: `SsrSampleEvidence` holds a bare slice, so A1
+spells the same split again as `complete_observations()` and `partial_observations()` on the view.
+What the pair actually buys is that scoring a partial as complete has to be written rather than
+fallen into, and that the split has one spelling per type instead of one per caller.
+
+Two shapes those two methods carry that this sketch did not ask for, both earned in review. They
+yield **`(position in the slice, observation)`**, because the STR row's emission cache is keyed by
+that position (§4.1) and an iterator yielding only the observation would leave the row re-walking
+the unguarded field to recover it. And the partial side is an **exhaustive match** on `ReadWitness`
+rather than `!= Complete`, so a third variant is a compile error at the one place that decides what
+reaches the censored term.
 
 ### 2.3 Frozen per-read-group parameters (both paths)
 

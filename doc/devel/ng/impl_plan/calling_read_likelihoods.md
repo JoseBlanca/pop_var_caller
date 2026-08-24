@@ -97,7 +97,10 @@ production); the two doc repointings spec §7 asks for.
 - The STR evidence needs no merge work: `SequenceObservation`
   ([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
   `(bases, witness, read_group)`; `complete_observations()`
-  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) stays the only unguarded access.
+  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) is where the split is spelled there.
+  *(Corrected 2026-08-24 at A1: this said that method "stays the only unguarded access", and it is
+  neither a guard — the field it reads is `pub` — nor now the only one, since `SsrSampleEvidence`
+  holds a bare slice and spells the split again. Arch §2.2 carries the full correction.)*
 - The pieces to reuse or port: `StutterModel`/`StutterRates`/`probability`
   ([`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs),
   [`:82`](../../../../src/ng/alignment/stutter.rs),
@@ -127,7 +130,11 @@ production); the two doc repointings spec §7 asks for.
 
 ### Milestone A — module scaffold + the shared vocabulary (types, no logic)
 
-**A1. Scaffold + evidence views.**  ☐
+**A1. Scaffold + evidence views.**  ✅ *(shipped with the merge-to-candidate mapping as an argument
+rather than an assumption — `GenericObservation::fill_from_supported_alleles` takes selection's
+`&[Option<AlleleId>]` and returns the quality of the rows it dropped, because the merge's allele
+index and `AlleleId` are two numberings and a prune renumbers between them; arch §2.1 carries the
+correction)*
 `calling/likelihood/mod.rs` wired into `calling/mod.rs`. `GenericSampleEvidence`
 (`supported: &[GenericObservation]`, `unmatched_q_sum`, `partials`) and `GenericObservation`
 (`allele`, `read_group`, `num_reads`, `q_sum`) as **views over the merge's rows** — one entry per
