@@ -65,8 +65,10 @@
 //! 2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned first — **2.7%, or 0.12 Phred**.
 //! On the tomato cohort — 2.5× to 28.6× over 63 accessions — it is nothing: on the deepest of them
 //! 228,468,065 read-positions of 228,492,796 are under the cap and the mean moves by 1.0000.
-//! Whether to thin here too is the owner's, and nothing decides it until the scale has a consumer
-//! (spec §3.2).
+//! **This fold does not thin, and that is decided rather than pending** (owner, 2026-08-24): the
+//! scale is applied to every read at calling time, so the average it is built from is over every
+//! read. The 2.7% is carried knowingly, and it is a question about how the *fit* weights deep sites
+//! against shallow ones rather than about this average (spec §3.2).
 //!
 //! # One thing the numerator can be that this cannot
 //!

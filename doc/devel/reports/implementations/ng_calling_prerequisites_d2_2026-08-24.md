@@ -101,8 +101,9 @@ statement: the cap keeps a count, never an identity, so the kept subset's own me
 > [`ng_prereq_closeout_d2_review`](ng_prereq_closeout_d2_review_2026-08-24.md) §1.1).** The cap
 > removes reads only from *deep* positions, so it changes how much weight each position carries in
 > the average even though it changes no position's expected mean. Measured, the denominator's
-> geometric mean moves by **2.7%** on HG002 at 300× and by nothing on tomato. Whether to thin the
-> accumulator to match is the owner's; spec §3.2 carries both options.
+> geometric mean moves by **2.7%** on HG002 at 300× and by nothing on tomato. **Decided 2026-08-24:
+> the accumulator does not thin** — the scale is applied to every read, so the average it is built
+> from is over every read; spec §3.2 records why.
 
 **One real defect, and widening the sum removed it.** The running total was an `i64`, and it is an
 `i128` now.
@@ -181,9 +182,9 @@ still owed.
   tomato cohort, 44.1 on HG002 at 300×.
 - ~~**An independent review of this step**, which nothing has had.~~ **Done 2026-08-24**, four
   categories — [`ng_prereq_closeout_d2_review`](ng_prereq_closeout_d2_review_2026-08-24.md).
-- **New, and the owner's: does the calibration fold thin at the histogram's depth cap?** It does not
-  today, and that moves the denominator by 2.7% on HG002 at 300× and by nothing on tomato. Spec §3.2
-  carries both options.
+- ~~**New, and the owner's: does the calibration fold thin at the histogram's depth cap?**~~
+  **Settled 2026-08-24: it does not thin.** The 2.7% it carries on HG002 at 300× — nothing on
+  tomato — is a fact about how the fit weights deep sites, not about this average. Spec §3.2.
 - **The census route's accumulator** waits on the comparison between the two error-rate routes. Its
   records carry no quality, so if that route wins they gain a field; if the histogram route wins,
   nothing is owed.

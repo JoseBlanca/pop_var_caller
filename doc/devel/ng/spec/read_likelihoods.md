@@ -505,11 +505,23 @@ Two requirements on them, and the second is easy to get wrong:
   read-positions are under the cap, and the mean moves by a factor of 1.0000.
 
   **So the divergence is real, bounded at the top of the depth range, and unmeasured beyond 300×.**
-  Two ways to close it, and the choice is the owner's: thin the accumulator at the same cap, which
-  makes the two counts identical and costs a multiply per site; or leave it and accept 3 parts in
-  100 at 300×, on the argument that the population the *scale* is applied to at calling time is
-  every read and not a thinned subsample. **Nothing decides this until the scale has a consumer**,
-  which is [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) A2.
+
+  **Decided (owner, 2026-08-24): the average stays over every read, and the accumulator does not
+  thin.** The two options were to thin the average at the same cap, which makes the two counts
+  identical and costs a multiply per site, or to leave it and carry 3 parts in 100 at 300×.
+
+  **The reason is what the scale is applied to.** At calling time the caller charges *every* read,
+  not a thinned subsample, so the average the scale is calibrated against should be over every read.
+  Thinning would make this section's requirement literally true at the price of making the
+  calibrated property — the average charged error equals the measured rate — wrong by the same
+  2.7%. Both options are 2.7% wrong about something; this one is wrong about the population the
+  numerator was fitted over, which is a question about **the fit's weighting across sites** and
+  belongs to the fit rather than to a second place that cancels it.
+
+  **What it costs to revisit**: one multiply per site and a re-run. Below about 124 reads a position
+  the two answers are identical, so on tomato-like data the choice is free, and nothing observable
+  moves until the read likelihood consumes the scale
+  ([`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) A2).
 
   **The census route cannot supply either number as it stands**, and that is a fact about its
   records rather than about this requirement: its per-position unit is a depth code and a sparse
