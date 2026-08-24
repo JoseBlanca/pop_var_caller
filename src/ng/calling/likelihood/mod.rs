@@ -113,6 +113,8 @@
 //! a contaminating read *shows* is a property of the locus, and a per-locus quantity is what
 //! a per-locus loop is for.
 
+pub mod generic;
+
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
@@ -169,8 +171,17 @@ pub const MAX_BASE_ERROR: f64 = 0.5;
 /// ```text
 ///                    fitted error rate for this read group
 /// scale  =  ──────────────────────────────────────────────────────────
-///           the average error the reads were minted with, over that group
+///           geometric mean of the minted error over that group's reads
 /// ```
+///
+/// **The caller has no per-read error probability to rescale**, and it is worth being exact
+/// about that because the looser picture is what made the arithmetic mean look reachable. The
+/// merge keeps, per `(allele, read group)` per locus, how many reads support it and the sum of
+/// their *log* error probabilities; the reads are gone from there on. Exactly one average is
+/// recoverable from those two numbers, and it is the geometric one — which is why the scale is
+/// **one addition in log space per observation** and never a multiplication read by read.
+/// Nothing about the arithmetic changes: scaling every read and scaling their geometric mean
+/// are the same operation, `exp(Σ ln(s·ε) / n) = s · exp(Σ ln ε / n)` (owner, 2026-08-24).
 ///
 /// **Why both halves and not either one alone.** The reads' own qualities carry the only
 /// information that tells one read from another, and at three reads a position that is the
@@ -181,10 +192,11 @@ pub const MAX_BASE_ERROR: f64 = 0.5;
 /// than asserted by the machine. The scale keeps the shape from the first and the size from
 /// the second (spec §3.2).
 ///
-/// **The average is the geometric mean, and the specification originally asked for the
-/// arithmetic one** (corrected 2026-08-24, owner). Nothing carries the arithmetic mean: the
-/// walk sums the *logarithms* of the per-read error probabilities and throws the individual
-/// reads away, and `Σ ε` cannot be recovered from `Σ ln ε`. Taking the geometric mean is
+/// **The specification originally asked for the arithmetic mean** (corrected 2026-08-24,
+/// owner), and the sharper statement of why it could not be that is the paragraph above:
+/// there is nowhere in the model a per-read `ε` survives to be averaged that way. The walk
+/// sums the *logarithms* and throws the individual reads away, and `Σ ε` cannot be recovered
+/// from `Σ ln ε`. Taking the geometric mean is
 /// also the self-consistent choice rather than a concession, because it is what the model
 /// charges an observation — `exp(q_sum / num_reads)` — so a scale built from an arithmetic
 /// mean and applied to a geometric one would not make the calibrated property hold in the
@@ -207,7 +219,7 @@ pub const MAX_BASE_ERROR: f64 = 0.5;
 /// HG002 carry an error of exactly one, and they are **73% of Σ ε**; on tomato, 7 in 1,000 and
 /// 47%.
 ///
-/// # The depth cap, and the decision this step takes
+/// # The depth cap, and what it costs to leave it
 ///
 /// **The fitted rate and this denominator are not fitted over quite the same reads.** The
 /// error-rate histogram thins every position to at most 124 reads before fitting; the
@@ -222,14 +234,16 @@ pub const MAX_BASE_ERROR: f64 = 0.5;
 /// it moves it by a factor of 1.0000: 228,468,065 of 228,492,796 read-positions on the
 /// deepest accession are under the cap.
 ///
-/// **Decision, taken here because spec §3.2 says nothing decides it until the scale has a
-/// consumer and names this step: the denominator stays unthinned.** The scale is applied at
-/// calling time to *every* read the caller sees, not to a subsample, so the average it is
-/// built from should be over every read too — thinning it would calibrate against a
-/// population the model never charges. The cost is bounded at 3 parts in 100 at 300× and
-/// nothing at the depths the tomato panel runs at, and it is **unmeasured beyond 300×**.
-/// Reversing this is one multiply per site in the accumulator, so nothing here forecloses it.
-/// **The owner may want to rule on it** — spec §3.2 calls the choice theirs.
+/// **Decided by the owner on 2026-08-24: the denominator stays unthinned, and the 2.7% is
+/// carried knowingly.** The scale is applied at calling time to *every* read the caller sees,
+/// not to a subsample, so the average it is built from is over every read too. **Both options
+/// are 2.7% wrong about something** — thinning would make spec §3.2's one-site-set requirement
+/// literally true at the price of making the property that requirement exists to serve wrong by
+/// the same amount — and this one is wrong about how the *fit* weights deep sites against
+/// shallow ones, which is the fit's question rather than a second place that cancels it.
+///
+/// Below about 124 reads a position the two answers are identical, so on tomato-like data the
+/// choice is free. Revisiting it is one multiply per site and a re-run.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct ReadGroupCalibration {
     /// The multiplier, applied to each read's own error probability. **One** where nothing
@@ -576,22 +590,28 @@ pub struct GenericSampleEvidence<'a> {
     /// [`GenericObservation::fill_from_supported_alleles`] returns the part it can see, the
     /// quality of the rows the mapping dropped.
     pub unmatched_q_sum: f64,
-    /// The partial observations, bases and witnessed run intact.
+    /// The partial observations, bases and witnessed positions intact.
     ///
     /// **Not folded onto alleles**, because there is no allele: a partial's bases cannot be
     /// compared against a whole-span allele. Padding one out to the span and interning it
     /// would put a sequence in the table that no molecule carried, and it would read as a
     /// *short* allele — the one direction the model must not be biased in. What a candidate
     /// is scored against is its projection *restricted to the positions the read witnessed*,
-    /// so the run has to survive to the scoring (spec §5.1, §5.3).
+    /// so those positions have to survive to the scoring (spec §5.1, §5.3).
     ///
-    /// **The witnessed run and the bases are on different axes, and their lengths are not
-    /// interchangeable.** The run counts *locus positions*; the bases are what the read
-    /// showed over them, so the two differ by the net indel the read carried — a read
+    /// **They are a set of runs with holes in it, not one run**, because the generic fold
+    /// mints witnesses that way (spec §5.3, corrected 2026-08-24). So the restricted
+    /// projection is a **gather** and cannot be a subslice of the allele's bases — it needs a
+    /// buffer sized by the widest witness, which is the generic row's own scratch and lands
+    /// with Milestone D.
+    ///
+    /// **The witnessed positions and the bases are on different axes, and their lengths are
+    /// not interchangeable.** The witness counts *locus positions*; the bases are what the
+    /// read showed over them, so the two differ by the net indel the read carried — a read
     /// carrying a two-base insertion and a two-base deletion inside the stretch comes back
     /// with as many bases as positions and is still not a positional match for any of them
     /// ([`PartialObservation::bases`]). Scoring indexes the *allele's* projection with the
-    /// run, never the partial's own bases.
+    /// witness, never the partial's own bases.
     pub partials: &'a [PartialObservation],
 }
 

@@ -246,8 +246,38 @@ pub fn genotype_log_likelihood_row(
 /// m(a, g): 3.0 where the observation differs from every allele the genotype carries by
 /// a substitution at exactly one position, 1.0 otherwise. A property of the allele pair,
 /// computed once per locus over the projected sequences (spec §3.5).
-pub fn error_spread_divisors(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
+pub fn fill_error_spread_divisors(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
+
+/// The filled buffer, carrying the stride it was filled at. A bare `(values, allele_count)`
+/// pair cannot check that the count is the stride the buffer really has, and reading a
+/// three-allele table at a stride of two returns a real divisor from the wrong row on half
+/// the lookups — measured, six of twelve, with nothing to panic about (B1, 2026-08-24).
+pub struct DivisorTable<'a> { /* values, allele_count */ }
+impl<'a> DivisorTable<'a> {
+    pub fn over(values: &'a [f64], genotypes: &GenotypeTableView<'_>) -> Self;
+    pub fn row_of(&self, genotype: GenotypeIdx) -> Option<&'a [f64]>;   // the row shape the row function walks
+    pub fn at(&self, genotype: GenotypeIdx, allele: AlleleId) -> f64;
+}
 ```
+
+**Two things B1 settled that this block used to leave open**, both recorded here so B2 does not
+rediscover them. The filler is a **verb** — it writes into `out` — where this sketch named it as a
+noun. And the divisor table's **owner is `CallingScratch`**
+([`calling_em_loop.md`](calling_em_loop.md) §2), as an eighth field sized
+`genotype_count × allele_count`: it is per **locus**, and `CallingScratch` is the type documented
+as allocated once per worker and reused per locus. It must **not** live in `GenericRowScratch`,
+which is per sample — putting it there would invite a refill per sample of a quantity that does not
+vary by sample. It is refilled **once per locus and not once per pass** (on the generic path both
+outer rounds are structurally inert, so a per-pass refill would be 3–5× the work for an identical
+answer), and it is **generic-path only**.
+
+`OPEN: the table stores `m`, and every consumer wants `log m`.` Spec §3.3 charges
+`q_sum_o + n_o·(log scale − log m)`, once per `(observation, genotype)` in the row's inner loop, so
+as it stands B2 calls `.ln()` on every term. Measured at 21 genotypes × 100 observations: **1.392 ns
+a term against 0.553 ns** if the table held the logarithm — a factor of 2.5 on that lookup, about 26
+seconds single-threaded over a high-depth sample's 15 M loci. **B2's to decide, and it has to be
+decided there rather than later**, because storing `log m` makes *divisor* the wrong word: nobody
+divides by 1.0986. Spec §3.5's `m = 3` framing stays in the doc comment either way.
 
 **Contract.** No multinomial coefficient (spec §3.4 — a genotype-changing decision, measured by
 the change measurement below, not asserted). A read the genotype explains is charged `log(k_a/P)`

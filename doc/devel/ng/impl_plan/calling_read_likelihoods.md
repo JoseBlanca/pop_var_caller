@@ -176,7 +176,12 @@ spec §3.2, §3.6, §8.
 
 ### Milestone B — the SNP/indel closed form
 
-**B1. `error_spread_divisors` — `m(a, g)`.**  ☐
+**B1. `error_spread_divisors` — `m(a, g)`.**  ✅ *(shipped as `fill_error_spread_divisors` plus
+`DivisorTable`, which carries the stride: a bare `(values, allele_count)` pair cannot check that
+the count is the stride the buffer really has, and reading a three-allele table at a stride of two
+returns a real divisor from the wrong row on six of twelve lookups with nothing to panic about —
+which is this step's own named failure shape arriving through the accessor written to prevent it.
+Verified against an independent oracle over 1,758,811 cells at ploidy 1 to 4: no disagreements.)*
 `3.0` where the observation differs from every allele the genotype carries by a substitution at
 exactly one position, `1.0` otherwise — a property of the allele pair, computed once per
 `(allele, genotype)` over the projected sequences the merge unified. **Own commit, do not
@@ -198,6 +203,24 @@ test in closed form) minus the `÷3` effect equals `standard_log_likelihood`
 floating-point tolerance — every difference attributed to the two recorded changes (spec §3.4,
 §3.5), none unexplained. **Own commit, do not bundle.** *Depends:* B1. *Source:* spec §3.3; arch
 §3.
+
+**Three things B1's review put on this step** (2026-08-24), the first of them a gate:
+
+- **The differential must take the `÷3` effect from `DivisorTable`, not from a literal
+  `n_alt · ln 3`.** Written with the literal it passes with B1 deleted and the divisor hardcoded —
+  the same shape as a test B1 shipped and had to repair, which computed `3.0_f64.ln()` and never
+  touched the table. More generally: **at least one B2 test must obtain its divisors by calling
+  `fill_error_spread_divisors` on a real candidate table**, so that deleting B1 is a compile error
+  rather than a quiet subtraction. Every step of this plan so far reverts green, and this is where
+  that stops.
+- **Decide whether the table stores `m` or `log m`.** The row charges `log m` once per
+  `(observation, genotype)`, so as it stands B2 calls `.ln()` in the inner loop — measured at 1.392
+  ns a term against 0.553 ns if the table held the logarithm, about 26 s single-threaded over a
+  high-depth sample. It has to be decided here because storing the logarithm makes *divisor* the
+  wrong word (arch §3 carries the `OPEN:`).
+- **Widen `standard_log_likelihood` to `pub(crate)`** ([`per_group_merger.rs:1948`]
+  (../../../../src/var_calling/per_group_merger.rs)) — it is a private `fn` and the differential
+  cannot reach it. Visibility only, which is the one production change the freeze allows.
 
 > **Checkpoint B:** the closed form matches production term-for-term once the two recorded
 > changes are reconciled, and aggregation is exact. Pause for review.

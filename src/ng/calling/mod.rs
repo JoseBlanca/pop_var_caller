@@ -55,6 +55,7 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// still clean, and `cargo test --lib ng::calling::likelihood` reports `0 passed; ok` —
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
+pub use likelihood::generic::{DivisorTable, ERROR_SPREAD_BASES, fill_error_spread_divisors};
 pub use likelihood::{
     ContaminationView, GenericEvidenceBuffer, GenericObservation, GenericSampleEvidence,
     MAX_BASE_ERROR, MIN_BASE_ERROR, ReadGroupCalibration, SsrRowScratch, SsrSampleEvidence,
