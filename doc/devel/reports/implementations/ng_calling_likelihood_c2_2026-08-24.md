@@ -74,9 +74,10 @@ So the floor is **defensive**, and it is set where it cannot compete with the ro
 at a 3% fraction a floored allele contributes `3 × 10⁻¹⁴` against a misread's `3 × 10⁻⁵` at a
 middling Phred 40 — **nine orders of magnitude below**, pinned by a test.
 
-**Whether it should instead be a pseudocount over the batch's copies is a modelling decision
-this step did not take.** It belongs in the producer, it has a genotype effect, and it is the
-owner's.
+**Whether it should instead be a pseudocount over the batch's copies was the owner's, and it is
+settled: keep it very low** (2026-08-24). The statistical reading is the honest expression of what
+a finite batch does not know, and it is the wrong thing to put here — it would say *this read
+might well be contamination* at every candidate the cohort is thin on.
 
 ## 5. A batch that shows nothing
 
@@ -192,7 +193,7 @@ test is what survives them, so reintroducing a cap fails there rather than movin
 **The error-spread table stores `m`**, so the row divides by 3 rather than by `exp(ln 3)`, and
 the log form has no consumer to keep.
 
-**The floor's size is the one still open**, and §4 states the choice.
+**The floor's size was settled the same way**: keep it very low — §4 carries the argument.
 
 **And §3.6's reporting requirement has a home**: [`calling_loop.md`](../../ng/impl_plan/calling_loop.md)
 E2b, added the same day, together with E2a which owns the batching itself.
@@ -219,9 +220,7 @@ cheapest.
 **Recommendation: subtract the sample's own copies, and pay for it in the loop rather than in the
 row.** *Taken by the owner on 2026-08-24 and built — §7b.*
 
-**The second question is the floor's size**, carried from §4: defensive at `1e-12`, or a
-pseudocount over the batch's copies. The two are the same question at different ends — what a
-batch that shows little or nothing is allowed to say about a contaminant.
+*(The floor's size was the second question here and is settled — §4 and §7b.)*
 
 ## 9. Validation
 

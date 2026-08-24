@@ -504,9 +504,12 @@ impl ContaminationView {
 /// Phred 40 — **nine orders of magnitude below**.
 /// `tests::the_frequency_floor_cannot_outweigh_a_misread` pins it.
 ///
-/// **A caller wanting the statistical reading should say so and choose its own number**, and
-/// it belongs in the producer rather than here: a pseudocount over the batch's copies is the
-/// natural shape, and it is a modelling decision this step did not take.
+/// **Settled by the owner, 2026-08-24: keep it very low.** The alternative was a statistical
+/// reading — a pseudocount over the batch's copies, which for a 63-sample cohort would put an
+/// unseen allele near 1 in 42 rather than 1 in a trillion. That is the honest expression of what
+/// a finite batch does not know, and it is the wrong thing to put here, because it would say
+/// *this read might well be contamination* at every candidate the cohort is thin on. **A floor
+/// this low cannot compete with the route beside it, and that is its whole job.**
 pub const MIN_CONTAMINANT_FREQUENCY: f64 = 1e-12;
 
 /// Fill one locus's expected allele copies, added up per sequencing batch — the first half of
@@ -1643,7 +1646,7 @@ impl<'a> ReadGroupParameters<'a> {
 /// restricted to a witness with holes in it. There is none, because the comparison turned out
 /// not to need one: an allele is the whole locus as a carrier has it, so a partial read is
 /// checked against the allele's *prefix* or *suffix* and nothing is assembled
-/// ([`generic::partial_is_compatible`]). The buffer was a consequence of reading the rule as a
+/// ([`generic::allele_is_compatible_with_partial`]). The buffer was a consequence of reading the rule as a
 /// positional restriction; it is not one (owner, 2026-08-24).
 #[derive(Default, Debug)]
 pub struct GenericRowScratch {
@@ -1659,7 +1662,7 @@ impl GenericRowScratch {
     /// *this allele cannot have produced this read* — the conservative direction, and one an
     /// incomplete fill shows up as a partial that stopped constraining anything rather than as
     /// one that silently constrained the wrong genotype.
-    pub fn prepare_compatibility(&mut self, partials: usize, alleles: usize) {
+    pub fn prepare_verdicts(&mut self, partials: usize, alleles: usize) {
         self.alleles = alleles;
         self.compatible.clear();
         self.compatible.resize(partials * alleles, false);
@@ -1667,12 +1670,12 @@ impl GenericRowScratch {
 
     /// Whether this allele could have produced this partial read.
     #[must_use]
-    pub fn is_compatible(&self, partial: usize, allele: usize) -> bool {
+    pub fn is_compatible(&self, partial: usize, allele: AlleleId) -> bool {
         self.compatible[self.slot(partial, allele)]
     }
 
     /// Record one verdict.
-    pub fn set_compatible(&mut self, partial: usize, allele: usize, compatible: bool) {
+    pub fn set_compatible(&mut self, partial: usize, allele: AlleleId, compatible: bool) {
         let slot = self.slot(partial, allele);
         self.compatible[slot] = compatible;
     }
@@ -1686,7 +1689,8 @@ impl GenericRowScratch {
     /// **The one spelling of the two-dimensional index**, asserting in release for
     /// [`SsrRowScratch`]'s reason: a cache sized for one locus and read at another's stride
     /// returns a real verdict from the wrong row rather than running off the end.
-    fn slot(&self, partial: usize, allele: usize) -> usize {
+    fn slot(&self, partial: usize, allele: AlleleId) -> usize {
+        let allele = usize::from(allele.get());
         assert!(
             allele < self.alleles,
             "allele {allele} is past the {} this cache was prepared for",
@@ -2975,18 +2979,18 @@ mod tests {
     #[should_panic(expected = "allele 4 is past the 3")]
     fn the_scratch_refuses_an_allele_past_the_stride_it_was_prepared_for() {
         let mut scratch = GenericRowScratch::default();
-        scratch.prepare_compatibility(2, 3);
+        scratch.prepare_verdicts(2, 3);
 
-        let _ = scratch.is_compatible(0, 4);
+        let _ = scratch.is_compatible(0, AlleleId(4));
     }
 
     #[test]
     #[should_panic(expected = "partial 5 is past the 2")]
     fn the_scratch_refuses_a_partial_past_the_rows_it_was_prepared_for() {
         let mut scratch = GenericRowScratch::default();
-        scratch.prepare_compatibility(2, 3);
+        scratch.prepare_verdicts(2, 3);
 
-        let _ = scratch.is_compatible(5, 0);
+        let _ = scratch.is_compatible(5, AlleleId(0));
     }
 
     /// **One scratch serves every sample of a locus, and every locus of a worker** — which is
@@ -2998,26 +3002,28 @@ mod tests {
     fn one_scratch_is_reused_across_samples_and_forgets_the_last() {
         let mut scratch = GenericRowScratch::default();
 
-        scratch.prepare_compatibility(3, 2);
+        scratch.prepare_verdicts(3, 2);
         assert_eq!(scratch.verdict_count(), 6);
         for partial in 0..3 {
-            for allele in 0..2 {
-                scratch.set_compatible(partial, allele, true);
+            for allele in 0..2u16 {
+                scratch.set_compatible(partial, AlleleId(allele), true);
             }
         }
 
         // A narrower sample at the same locus.
-        scratch.prepare_compatibility(1, 2);
+        scratch.prepare_verdicts(1, 2);
         assert_eq!(scratch.verdict_count(), 2);
         assert!(
-            !scratch.is_compatible(0, 0) && !scratch.is_compatible(0, 1),
+            !scratch.is_compatible(0, AlleleId(0)) && !scratch.is_compatible(0, AlleleId(1)),
             "preparing again must forget what the last sample wrote"
         );
 
         // And a wider locus afterwards, which grows it.
-        scratch.prepare_compatibility(2, 5);
+        scratch.prepare_verdicts(2, 5);
         assert_eq!(scratch.verdict_count(), 10);
-        assert!((0..2).all(|partial| (0..5).all(|allele| !scratch.is_compatible(partial, allele))));
+        assert!((0..2).all(|partial| {
+            (0..5u16).all(|allele| !scratch.is_compatible(partial, AlleleId(allele)))
+        }));
     }
 
     /// A sample with no partial reads prepares an empty cache rather than keeping the last
@@ -3026,9 +3032,9 @@ mod tests {
     fn a_sample_with_no_partials_prepares_an_empty_cache() {
         let mut scratch = GenericRowScratch::default();
 
-        scratch.prepare_compatibility(2, 3);
-        scratch.set_compatible(1, 2, true);
-        scratch.prepare_compatibility(0, 3);
+        scratch.prepare_verdicts(2, 3);
+        scratch.set_compatible(1, AlleleId(2), true);
+        scratch.prepare_verdicts(0, 3);
 
         assert_eq!(scratch.verdict_count(), 0);
     }

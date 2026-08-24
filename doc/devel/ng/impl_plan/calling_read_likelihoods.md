@@ -265,8 +265,9 @@ is still unbuilt and is not built here; the mixture takes the batching as a
 `BatchOfEachReadGroup`, which that type produces trivially when it lands. **Two things are owed and named in the step's
 report:** which batch a sample belongs to when its libraries ran in different ones — that rule
 belongs with `SequencingBatches`, so the producer takes the sample's batch as an argument — and
-whether the never-seen floor should stay defensive at `1e-12` or become a statistical pseudocount,
-which is a modelling decision with a genotype effect and remains open. **The review found a third
+whether the never-seen floor should stay defensive at `1e-12` or become a statistical pseudocount
+— **settled 2026-08-24: keep it very low**, since the statistical reading would say *this read
+might well be contamination* at every candidate the cohort is thin on. **The review found a third
 and the owner settled it the same day:** the frequency was summed over the batch's samples
 *including the one being scored*, so a sample alone in a batch explained its own alternative reads
 as its own contaminant. It now leaves itself out, as the genotype prior's concentration already
