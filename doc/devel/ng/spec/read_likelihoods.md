@@ -421,12 +421,30 @@ rather than minting anything.
 > model's own terms, so paying for the arithmetic sum would buy an inexactness rather than remove
 > one.
 >
-> **The two are not the same number and the difference is unmeasured.** The per-read quantity takes
-> the worse of the read's base quality and its mapping quality, and the mapping-quality floor is 20,
-> so a run whose badly-mapped tail was not filtered upstream can spread `ε` over two orders of
-> magnitude, where the arithmetic mean follows the tail and the geometric one the bulk. **§12 gains a
-> test that reports both per read group on a real cohort**, so the size of the gap is on record
-> rather than assumed.
+> **The two are not the same number, and they are twenty-five to forty-four times apart on real
+> reads** (measured 2026-08-24, `examples/ng_minted_error_means.rs`; report
+> [`ng_prereq_closeout_two_averages_2026-08-24.md`](../../reports/implementations/ng_prereq_closeout_two_averages_2026-08-24.md)).
+>
+> | | tomato, 63 accessions, 2.5× to 28.6× | HG002, 100 benchmark regions, 300× |
+> |---|---|---|
+> | read-positions | 5,485,730,235 | 172,616,054 |
+> | geometric mean of `ε` | 5.982 × 10⁻⁴ (Phred 32.2) | 2.905 × 10⁻⁴ (Phred 35.4) |
+> | arithmetic mean of `ε` | 1.505 × 10⁻² (Phred 18.2) | 1.282 × 10⁻² (Phred 18.9) |
+> | ratio | **25.2** | **44.1** |
+>
+> Per read group on tomato the ratio runs 22.7 to 37.0, median 24.4 over 63 accessions — **no read
+> group anywhere near one**. Building the scale from the arithmetic mean would therefore have
+> divided every charged error by 25 to 44: **14 to 16 Phred**, every read treated as that much
+> cleaner than the pre-pass measured it to be.
+>
+> **And the arithmetic mean is not measuring the chemistry.** A read's minted error is the *worse*
+> of its base and mapping qualities, and the mate-overlap rule silences the losing mate of an
+> overlapping pair by giving it base quality Phred 0 — an error probability of exactly one, on a
+> read that still counts. `ln 1 = 0`, so such a read adds nothing to the log sum and a whole unit to
+> the probability sum. Measured: **9 read-positions in 1,000 on HG002 carry `ε = 1`, and they are
+> 73% of Σ ε**; on tomato, 7 in 1,000 and 47%. So the arithmetic mean is mostly a measurement of how
+> often mates overlap. That is a second, independent reason for the geometric mean, and it does not
+> depend on the self-consistency argument above.
 
 Two requirements on them, and the second is easy to get wrong:
 
@@ -446,14 +464,34 @@ Two requirements on them, and the second is easy to get wrong:
   is not a calibration**, because the two sets do not have the same quality profile — the census
   sites are chosen and the histogram's are not.
 
-  **The per-position depth cap is not one of those differences, and the reason is the geometric
-  mean.** The histogram route thins every position to at most
+  **The per-position depth cap does divide them, and by 3 parts in 100 on the deepest real sample
+  we have.** The histogram route thins every position to at most
   [`MAX_BINNED_DEPTH`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs) = 124 reads
-  before fitting, so its rate rests on a subsample where the observations carry every read. That
-  would matter for a sum and does not matter for a mean: the draw is hypergeometric on counts and
-  never looks at a read's quality, so the mean log error over the kept reads has the same
-  expectation as over all of them. **Only the count has to match the mean it belongs to**, and both
-  come from the same observations.
+  before fitting; the accumulator thins nothing. *An earlier version of this paragraph said the two
+  were undivided, and gave the per-site argument as the reason. The per-site argument is right and
+  it is not the whole of it.*
+
+  **Per site, the cap is harmless**: the draw is hypergeometric on counts and never looks at a
+  read's quality, so the mean log error over the kept reads has the same expectation as over all of
+  them. **Across sites, it re-weights.** A 500-read position casts 500 votes in the denominator and
+  124 in the population the numerator was fitted from, so the two averages weight deep positions
+  differently — and deep positions are not a random sample of the genome, they are where reads pile
+  up from elsewhere and where mapping quality collapses.
+
+  **The size, measured rather than argued** (`examples/ng_minted_error_means.rs`, 2026-08-24). On
+  HG002's 100 benchmark regions at 300×, where the cap fires at essentially every position — the fit
+  sees 70,288,390 of 172,616,054 read-positions, 41 in 100 — the denominator's geometric mean is
+  2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned to the cap first. **The
+  re-weighting moves it by 2.7%, which is 0.12 Phred.** On the 63-accession tomato cohort at 10× to
+  28.6× it moves it by nothing at all: on the deepest accession 228,468,065 of 228,492,796
+  read-positions are under the cap, and the mean moves by a factor of 1.0000.
+
+  **So the divergence is real, bounded at the top of the depth range, and unmeasured beyond 300×.**
+  Two ways to close it, and the choice is the owner's: thin the accumulator at the same cap, which
+  makes the two counts identical and costs a multiply per site; or leave it and accept 3 parts in
+  100 at 300×, on the argument that the population the *scale* is applied to at calling time is
+  every read and not a thinned subsample. **Nothing decides this until the scale has a consumer**,
+  which is [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) A2.
 
   **The census route cannot supply either number as it stands**, and that is a fact about its
   records rather than about this requirement: its per-position unit is a depth code and a sparse
@@ -826,7 +864,8 @@ contaminated likelihood was computed once per sample per locus).
 
 **So the two halves sit in different tiers, and that is the whole of the change.** The fraction is
 §6.1's first tier, frozen before the loop starts, exactly as production fills its mixture table once
-and never touches it again ([`posterior_engine.rs:2357`](../../../../src/var_calling/posterior_engine.rs)).
+and never touches it again ([`posterior_engine.rs:2361`](../../../../src/var_calling/posterior_engine.rs) — the
+mixture branch's own comment; `let did_mixture` is on 2367).
 The frequency is recomputed per iteration alongside the frequency the genotype prior already reads,
 which costs a lookup rather than a fit. **Production's arrangement is not available to us and does
 not need to be**: it freezes both because its second half is a three-entry class average with
@@ -2078,6 +2117,16 @@ production already tests and ng's port should carry across
     has not proved it for every parameter combination.
 
 **The change measurements, which are not tests but must be run before adoption.**
+
+13a. **The two averages of a read's error — DONE, 2026-08-24.** Per read group on a real cohort,
+    the geometric and the arithmetic mean of the minted per-read error over the sites the
+    error-rate histogram counts, and the ratio between them. Not a unit test, because the property
+    is about a walk over real reads and no fixture can stand in for one:
+    `examples/ng_minted_error_means.rs`. **Result: 25.2 on the 63-accession tomato cohort and 44.1
+    on HG002 at 300×** — §3.2 carries the table and what it means. The same run is what checks
+    §3.2's site-set requirement on real data: the reads the accumulator counts and the reads the
+    walk emitted at those loci agreed exactly, 172,616,054 on HG002 and on all 63 tomato
+    accessions.
 
 14. **The dropped multinomial coefficient.** Compute both forms over the same merged records and
     report which genotypes move and by how much, on GIAB HG002 at 5× and at full depth. §3.4 argues

@@ -1056,6 +1056,17 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
                 .walker;
             match walker.next() {
                 Some(Ok(locus)) => {
+                    // **Measurement scaffolding: the clamp is where a locus becomes real.**
+                    // The walk builds records in the halo beyond the region, so a census that
+                    // counted at build time would count reads at loci nothing ever sees. Off
+                    // unless armed — see [`minted_error_census`](super::minted_error_census).
+                    if super::minted_error_census::enabled() {
+                        if clamp.contains(locus.region.start) {
+                            super::minted_error_census::keep_locus(locus.region.start.get());
+                        } else {
+                            super::minted_error_census::drop_locus(locus.region.start.get());
+                        }
+                    }
                     if clamp.contains(locus.region.start) {
                         return Ok(Some(locus));
                     }

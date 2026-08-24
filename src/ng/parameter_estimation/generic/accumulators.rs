@@ -452,9 +452,10 @@ impl GenericAccumulators {
         }
         // **The scale's denominator merges like the tables and for the same reason**: a shard saw
         // some of the sample's sites and the average has to be over all of them. Both of its
-        // numbers are integers, so this merge is exact and the six-order test above covers it
-        // rather than passing over it — see [`MintedReadErrors`] for why an `f64` sum here would
-        // have broken that contract silently.
+        // numbers are integers, so this merge is exact and
+        // `three_shards_merged_in_every_order_give_the_same_counters` (below, in this file's test
+        // module) covers it rather than passing over it — see [`MintedReadErrors`] for why an
+        // `f64` sum here would have broken that contract silently.
         for (group, totals) in other.minted_errors {
             self.minted_errors.entry(group).or_default().add(totals);
         }
@@ -943,7 +944,8 @@ mod tests {
         assert_eq!(minted.len(), 1, "one library");
         let group = minted[&group(0)];
         assert_eq!(
-            group.reads, 1_058,
+            group.reads(),
+            1_058,
             "every read of both shards, and note what that means about the depth cap: the \
              500-read locus entered the histogram thinned to 124, and all 500 of its reads \
              count here. The cap draws on counts and never looks at a quality, so it cannot \
@@ -951,9 +953,9 @@ mod tests {
         );
         // **The tolerance is the bound `MintedReadErrors` documents**, half a unit of 2⁻²⁰, so
         // this assertion is what checks that claim rather than a number picked to pass. The miss
-        // measured here is 1.2 × 10⁻⁹ — four fixed-point conversions' worth of rounding spread
-        // over 1,058 reads — which is about 400 times inside it, and any wrong sum would be
-        // orders of magnitude outside.
+        // measured here is 1.226 × 10⁻⁹ — eight fixed-point conversions' worth of rounding (four
+        // observations in each of two shards) spread over 1,058 reads — which is 389 times
+        // inside it, and any wrong sum would be orders of magnitude outside.
         let mean = group.mean_log_error().expect("reads were seen");
         assert!(
             (mean - (-106.36 / 1_058.0)).abs() < 0.5 / (1_u64 << 20) as f64,
@@ -1158,6 +1160,22 @@ mod tests {
                 .whole_sample_histogram(diploid())
                 .cells(diploid()),
             "and the fold over them is the same table either way"
+        );
+
+        // **The scale's denominator does not know about `F`, and this is what says so.** The
+        // calibration fold sits before `add_locus`'s mode branch, so both modes must produce the
+        // same totals — and until this assertion existed, moving the fold inside the `Fitted`
+        // arm left all 274 tests in this module's parent green while a supplied-`F` run silently
+        // shipped an empty denominator. Every other accumulator test builds through a helper
+        // that hard-codes `Fitted`.
+        assert_eq!(
+            fitted.minted_errors(),
+            with_supplied_f.minted_errors(),
+            "the minted-error totals are the same whether F was fitted or supplied"
+        );
+        assert!(
+            !with_supplied_f.minted_errors().is_empty(),
+            "and they are not empty, or the assertion above would hold by both sides being so"
         );
     }
 

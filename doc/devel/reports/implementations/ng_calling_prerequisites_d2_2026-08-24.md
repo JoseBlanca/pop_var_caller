@@ -57,7 +57,8 @@ this into the fit's answer afterwards.
 **[`spec/read_likelihoods.md`](../../ng/spec/read_likelihoods.md) §3.2** — both corrections, with
 their reasons.
 
-Six tests, plus two assertions on existing accumulator tests.
+Seven tests, plus two assertions on existing accumulator tests. *(An earlier version of this
+line said six; §4 and §5 said seven, which is right.)*
 
 ## 3. The one thing in the implementation that is not obvious
 
@@ -75,8 +76,8 @@ test asserts exactly that bound, and the miss it measures is 1.2 × 10⁻⁹.
 
 ## 4. What checking my own work changed
 
-**The server-side outage that hit this step's reviews is why this section exists**: three of four
-review agents died on API errors, so the check that the denominator runs over the same reads as the
+**The server-side outage that hit this step's reviews is why this section exists**: all seven
+review agents died on API errors — the subsection below has the two waves — so the check that the denominator runs over the same reads as the
 fit — the requirement §3.2 spends most of its length on — I made myself. What it found:
 
 **The two site sets are identical, by construction rather than by luck.** Both paths run behind the
@@ -96,13 +97,28 @@ it notionally keeps are a uniformly random subset, and the mean log error over a
 unbiased estimate of the mean over the kept ones. **Unbiased and not equal**, which is the honest
 statement: the cap keeps a count, never an identity, so the kept subset's own mean is unobservable.
 
-**One real defect, and widening the sum removed it.** The running total was an `i64`. One read group
-of one human sample reaches about 2.2 × 10¹⁶ scaled units, which an `i64` holds four hundred times
-over — but `add` is documented to fold across *samples* as well as shards, because a read group is a
-library and a library can hold more than one plant. Past about four hundred human-scale samples in
-one read group an `i64` saturates, and `saturating_add` pins rather than panicking, so the symptom
-would have been a mean that was merely wrong. It is an `i128` now: 7 × 10²¹ such samples, beyond any
-run, and the map holds one entry per read group so the width costs bytes.
+> **True per site, and it is not the whole of the question (corrected 2026-08-24,
+> [`ng_prereq_closeout_d2_review`](ng_prereq_closeout_d2_review_2026-08-24.md) §1.1).** The cap
+> removes reads only from *deep* positions, so it changes how much weight each position carries in
+> the average even though it changes no position's expected mean. Measured, the denominator's
+> geometric mean moves by **2.7%** on HG002 at 300× and by nothing on tomato. Whether to thin the
+> accumulator to match is the owner's; spec §3.2 carries both options.
+
+**One real defect, and widening the sum removed it.** The running total was an `i64`, and it is an
+`i128` now.
+
+> **The size given here was wrong by about 150×, and the direction is the alarming one (corrected
+> 2026-08-24, [`ng_prereq_closeout_two_averages`](ng_prereq_closeout_two_averages_2026-08-24.md)
+> §4).** This paragraph said "one read group of one human sample reaches about 2.2 × 10¹⁶ scaled
+> units, which an `i64` holds four hundred times over", reasoning from a billion **reads**. What the
+> counter holds is a read **at a position** — an observation contributes its `num_obs` at every
+> locus it appears at — so a sample's total is its covered length times its depth. Measured:
+> 172,616,054 over 571,984 bases on HG002 at 300×, which is 301.8 a base. A human genome at 30× is
+> about 9.3 × 10¹⁰ of these and 7.9 × 10¹⁷ scaled units, which an `i64` holds **twelve** times, not
+> four hundred; **the same genome at 300× is 7.9 × 10¹⁸ on its own — 86% of `i64::MAX`, for one
+> sample.** So the widening was not headroom for an inconceivable cohort, it was a fix for a run
+> anyone might make. The other reason this paragraph gave — that `add` folds across *samples* — is
+> prospective rather than current: nothing merges two samples' accumulators today.
 
 ### What the reviews changed — nothing, because they could not run
 
@@ -120,6 +136,15 @@ promised the owner — how far the geometric and arithmetic means actually sit a
 also not done**, because it was one of the agents that died. It is the first thing to run when
 capacity returns, and until it does, §3.2's choice rests on the argument that the geometric mean is
 what the model consumes, not on a number.
+
+> **Both are done, 2026-08-24, and both changed things.** The review ran four ways on branch
+> `ng-prereq-closeout` and found twenty-one findings, four of which were defects in this step's own
+> claims: the depth cap does divide the two site sets across positions (2.7% at 300×), the overflow
+> paragraph above was 150× out, the `f64` running sum **is** distinguishable in the regime the type
+> is sized for, and two tests could not have failed. See
+> [`ng_prereq_closeout_d2_review`](ng_prereq_closeout_d2_review_2026-08-24.md). The measurement is in
+> [`ng_prereq_closeout_two_averages`](ng_prereq_closeout_two_averages_2026-08-24.md): the two means
+> are **25 to 44 times apart**, so the choice no longer rests on the argument alone.
 
 **One near-miss worth recording, because the rule that saved it exists for exactly this.** A
 `perl -0pi -e` substitution truncated `calibration.rs` to zero bytes — silently; `cargo fmt`
@@ -139,7 +164,7 @@ All in the dev container, on the tree as committed.
 | `cargo test --lib ng::parameter_estimation::generic::calibration` | **7 passed, 0 failed** |
 | `cargo test --lib ng::parameter_estimation::generic::accumulators` | **16 passed, 0 failed** |
 | `cargo test --lib` | **4,181 passed, 0 failed, 14 ignored**, 735.38 s |
-| `cargo doc --no-deps` | 24 unresolved-link errors, 12 redundant-explicit-link-target warnings — the recorded baseline, unchanged |
+| `cargo doc --no-deps` | 23 unresolved-link errors, 12 redundant-explicit-link-target warnings — `main`'s baseline, unchanged. *(This line said 24; measured 2026-08-24 as 23. Corrected here rather than in a follow-up, because a wrong baseline is what lets a twenty-fourth in.)* |
 
 **Every mutation quoted below was applied to this tree and run.** Dropping the summed log error, and
 counting observations instead of reads, each redden the tests written for them — the second in three
@@ -151,11 +176,14 @@ still owed.
 
 ## 6. Follow-ups
 
-- **The two averages, measured on real reads.** Owed to the owner and not done: the review agent that
-  was to run it died. Until it is, the geometric choice rests on the argument that it is what the
-  model consumes.
-- **An independent review of this step**, which nothing has had. The three categories that would
-  have run are in `/Users/jose/devel/d2_review_brief.md`.
+- ~~**The two averages, measured on real reads.**~~ **Done 2026-08-24** —
+  [`ng_prereq_closeout_two_averages`](ng_prereq_closeout_two_averages_2026-08-24.md). 25.2 on the
+  tomato cohort, 44.1 on HG002 at 300×.
+- ~~**An independent review of this step**, which nothing has had.~~ **Done 2026-08-24**, four
+  categories — [`ng_prereq_closeout_d2_review`](ng_prereq_closeout_d2_review_2026-08-24.md).
+- **New, and the owner's: does the calibration fold thin at the histogram's depth cap?** It does not
+  today, and that moves the denominator by 2.7% on HG002 at 300× and by nothing on tomato. Spec §3.2
+  carries both options.
 - **The census route's accumulator** waits on the comparison between the two error-rate routes. Its
   records carry no quality, so if that route wins they gain a field; if the histogram route wins,
   nothing is owed.

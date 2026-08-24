@@ -108,6 +108,14 @@ mod errors;
 mod fast_column;
 mod generator;
 mod genome_walk;
+// **Measurement scaffolding, not part of the walk** — per-read-group sums of the minted
+// per-read error in both the shapes an average can be taken in, so the gap between the
+// geometric mean the scale uses and the arithmetic one the spec first asked for can be
+// measured on real reads. Off unless `PVC_MINTED_ERROR_CENSUS=1`; read by
+// `ng_minted_error_means`. The module's own header is the documentation; a doc comment
+// here as well would be resolved in *this* module's scope, where the names it links are
+// not in scope, and `cargo doc` counts each of those as an error.
+pub mod minted_error_census;
 mod open_record;
 /// **ng's, not a copy** — the deterministic per-read number both depth caps select on,
 /// so which reads survive a cap is a fact about the reads and not about the container
