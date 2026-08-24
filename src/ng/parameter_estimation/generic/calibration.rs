@@ -75,11 +75,17 @@
 //! A read group standing on fewer than [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) sites — ten
 //! thousand — does not get its own fitted rate:
 //! [`resolve_error_rates`](super::fallback::resolve_error_rates) hands it the mean of the other
-//! groups' rates, or a supplied one, or a default. **Its denominator is still its own reads**, so for such a group the
-//! scale is "make this library's average charged error come out at somebody else's measured rate".
-//! That may be exactly right — it is what borrowing a rate means — but §3.2's sentence about one
-//! site set does not describe it, and a capture panel or a minor library in a multi-library sample
-//! reaches it.
+//! groups' rates, or a supplied one, or a default. **Its denominator is still its own reads**, so
+//! for such a group the scale is "make this library's average charged error come out at somebody
+//! else's measured rate". §3.2's sentence about one site set does not describe that case, and a
+//! capture panel or a minor library in a multi-library sample reaches it.
+//!
+//! **It is the least wrong of the available answers, and the sizes are measured** (2026-08-24, 63
+//! tomato libraries; `arch/parameter_prepass_generic.md` §5 carries the table). A borrowed rate
+//! leaves the average charged error a median factor of **1.51** from the library's own; the default
+//! of 0.001 leaves it at 2.99; and not rescaling at all leaves it at about **5**, because read
+//! qualities overstate quality by roughly that much. Borrowing is a compromise with a size, not a
+//! placeholder.
 
 use std::collections::BTreeMap;
 
