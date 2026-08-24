@@ -120,7 +120,7 @@ Then, in the new `calling/allele_candidates/mod.rs`: `CandidateSelectionConfig`,
 soft. Widen `reached_by`'s doc comment: the numerator is the caller's, and selection and a
 discovery round pass different ones. *Depends:* none. *Source:* arch §2.1; spec §3.3, §4.
 
-**A2. The output vocabulary.**  ☐
+**A2. The output vocabulary.**  ✅
 `SelectionVerdict` (`Selected` / `Truncated { dropped }` / `NotPeriodic`, `#[non_exhaustive]`, the
 last documented as repeat-tract-only), `UnmatchedSupport`, `AlleleRemap` with `candidate_for`,
 `LocusSelection`, `SelectionScratch`. `calling/mod.rs` gains `pub mod allele_candidates;`. The
