@@ -484,12 +484,13 @@ share even a within-sample share and a cohort read total. So the +2 is the share
 the two implementations side by side the disagreement count is the single line of output that
 differs.
 
-**Everything else in §3.3 and §4.2 that a probe run produces was reproduced to the digit**: both
-benchmarks' built-locus counts, both merge tables' alternative totals, every bar's
-kept-alternative total at both depths, every cap's binding count, the loci-above-three counts,
-and §5's leftover at 0.36% of tomato's reads. **§3.3's other column was not re-derived** — "true
-alleles lost to the bar" is a join against the v4.2.1 truth VCFs rather than a probe run, and D2
-is where it gets a standing check.
+**Everything else in §3.3 and §4.2 was reproduced to the digit**: both benchmarks' built-locus
+counts, both merge tables' alternative totals, every bar's kept-alternative total at both depths,
+every cap's binding count, the loci-above-three counts, and §5's leftover at 0.36% of tomato's
+reads. **§3.3's truth-set column too, at all nine of its cells** — 920 true alleles carried inside
+the regions, the 6 the merge built no locus for and the 1 no sample showed, and 2 / 2 / 2 / 4 lost
+at 300× against 1 / 1 / 1 / 2 / 5 at 30×. That column is a join against the v4.2.1 VCFs rather
+than a probe run, and D2 is what turns the join into a standing check.
 
 ---
 
