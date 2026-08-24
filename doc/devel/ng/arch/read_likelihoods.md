@@ -245,21 +245,21 @@ pub fn genotype_log_likelihood_row(
     genotypes: &GenotypeTableView<'_>,          // flat views from the loop's table
     calibration: &[ReadGroupCalibration],       // indexed by ReadGroupId
     contamination: &[ContaminationView],        // indexed by ReadGroupId; empty = §3.3 exactly
-    log_error_spreads: LogErrorSpreadTable<'_>, // log m(a, g), per (allele, genotype)
+    error_spreads: ErrorSpreadTable<'_>,        // m(a, g), per (allele, genotype)
     out: &mut [LogProb],
 );   // no contamination and no scratch yet — see the note below
 
 /// m(a, g): 3.0 where the observation differs from every allele the genotype carries by
 /// a substitution at exactly one position, 1.0 otherwise. A property of the allele pair,
 /// computed once per locus over the projected sequences (spec §3.5).
-pub fn fill_log_error_spreads(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
+pub fn fill_error_spreads(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
 
 /// The filled buffer, carrying the stride it was filled at. A bare `(values, allele_count)`
 /// pair cannot check that the count is the stride the buffer really has, and reading a
 /// three-allele table at a stride of two returns a real divisor from the wrong row on half
 /// the lookups — measured, six of twelve, with nothing to panic about (B1, 2026-08-24).
-pub struct LogErrorSpreadTable<'a> { /* values, allele_count */ }
-impl<'a> LogErrorSpreadTable<'a> {
+pub struct ErrorSpreadTable<'a> { /* values, allele_count */ }
+impl<'a> ErrorSpreadTable<'a> {
     pub fn over(values: &'a [f64], genotypes: &GenotypeTableView<'_>) -> Self;
     pub fn row_of(&self, genotype: GenotypeIdx) -> Option<&'a [f64]>;
     pub fn column_of(&self, allele: AlleleId) -> impl Iterator<Item = f64>;  // what the row walks
@@ -278,16 +278,25 @@ vary by sample. It is refilled **once per locus and not once per pass** (on the 
 outer rounds are structurally inert, so a per-pass refill would be 3–5× the work for an identical
 answer), and it is **generic-path only**.
 
-**Decided at B2 (2026-08-24): the table stores `log m`.** The argument is not the 2.5× the lookup
-measured but that **spec §3.3's closed form takes no logarithm at all inside its loop** — every
-logarithm it needs belongs to the read group, the copy count or the allele pair, and is computed
-before the observation walk. A table of `m` would have put one back into the one place the formula
-was shaped to keep clear of. So the filler is `fill_log_error_spreads`, the reader is
-`LogErrorSpreadTable`, and *divisor* is retired: nobody divides by 1.0986. Spec §3.5's `m = 3`
-framing stays in the doc comments.
+**Decided at B2 and reversed after C2 (owner, 2026-08-24): the table stores `m`.**
+
+B2 chose `log m`, and the argument was sound at the time: **spec §3.3's closed form takes no
+logarithm at all inside its loop** — every logarithm it needs belongs to the read group, the copy
+count or the allele pair, and is computed before the observation walk — so a table of `m` would
+have put one back into the one place the formula was shaped to keep clear of.
+
+**C1 is what made that argument false.** Spec §3.6's mixture replaced §3.3's closed form as the
+row's one shipped path, and §8 requires the mixture be evaluated in probability space and logged
+once — so the loop takes a logarithm by specification, and what it needs inside is `m` itself,
+`(1 − c)·ε̄/m`. Storing the logarithm then cost an `exp` on every error-side term to undo, left
+the log form with no consumer at all, and made `exp(ln 3)` rather than `3` the number the row
+divided by.
+
+So the filler is `fill_error_spreads`, the reader is `ErrorSpreadTable`, and **divisor is the
+right word again**: the row divides, by 3 or by 1.
 
 **The row's signature as built**, and the two departures from the sketch above. It takes
-`log_error_spreads: LogErrorSpreadTable<'_>` rather than a bare slice, for the reason that type
+`error_spreads: ErrorSpreadTable<'_>` rather than a bare slice, for the reason that type
 exists. It takes **no `contamination` and no scratch**: the mixture is Milestone C and the generic
 row's own scratch is Milestone D, which is the step that first has buffers to put in it (a
 compatibility cache per `(partial, allele)`, and a gather buffer for a witness with holes).

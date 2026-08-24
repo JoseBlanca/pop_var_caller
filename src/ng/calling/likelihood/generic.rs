@@ -11,36 +11,32 @@ use crate::ng::types::{AlleleId, LogProb};
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
 /// than a tuning choice**: three bases to go wrong into, one to come back to.
 ///
-/// Named because it is kept in sync with three other places: spec §3.5, the parameter
-/// pre-pass's own noise model, and [`LOG_ERROR_SPREAD`], which is what the row actually reads.
+/// Named because it is kept in sync with two other places — spec §3.5 and the parameter
+/// pre-pass's own noise model — and because **it is what the table stores and the row divides
+/// by**, `m` in the specification's own terms.
+///
+/// **The table held `log m` until 2026-08-24 and no longer does.** B2 chose the logarithm with
+/// a stated argument: spec §3.3's closed form takes no logarithm inside its loop, so a table of
+/// `m` would have put one there. **C1 is what made that argument false** — spec §3.6's mixture
+/// is evaluated in probability space and takes one logarithm per term by specification (§8), so
+/// the loop has one either way, and what it needs there is `m`. Storing the logarithm then cost
+/// an `exp` on every error-side term to undo, and left the log form with no consumer at all.
+/// So the filler writes `3` and `1`, and *divisor* is the right word again: the row divides.
 pub const ERROR_SPREAD_BASES: f64 = 3.0;
 
-/// What the row subtracts from a wrong read's charge where the error mass spreads three ways —
-/// `ln 3`, about 1.0986 nats or 4.77 Phred.
-///
-/// **The table stores this and not the 3 it is the logarithm of** (decided at B2). Spec §3.3
-/// charges an unexplained observation `q_sum + n·(log scale − log m)`, so `log m` is what the
-/// inner loop wants, once per `(observation, genotype)` — and the whole shape of that formula
-/// is that **no logarithm is taken inside it**: every logarithm it needs is a property of the
-/// allele, the genotype or the read group, and is computed before the loop starts. A table
-/// holding `m` would put an `ln` back in, measured at 1.392 ns a term against 0.553 ns.
-///
-/// It also means *divisor* stops being the right word for what is stored — nobody divides by
-/// 1.0986 — which is why the table is [`LogErrorSpreadTable`].
-pub const LOG_ERROR_SPREAD: f64 = 1.098_612_288_668_109_7;
+/// What a wrong read's charge is divided by where the model has nothing to say — **one, because
+/// the error mass is left unspread**, which is the conservative direction and favours the
+/// reference.
+pub const NO_ERROR_SPREAD: f64 = 1.0;
 
-/// What it subtracts where the model has nothing to say — **nothing, because the error mass is
-/// left unspread.** `ln 1 = 0`, which is the conservative direction and favours the reference.
-pub const NO_LOG_ERROR_SPREAD: f64 = 0.0;
-
-/// `log m(a, g)` — how much a wrong read's charge is reduced because the error could have gone
-/// several ways (spec §3.5).
+/// `m(a, g)` — how many things a wrong read could have shown, given what the genotype carries
+/// (spec §3.5). It is what a wrong read's charge is divided by.
 ///
-/// [`LOG_ERROR_SPREAD`] where the observation differs from **every** allele the genotype
-/// carries by a substitution at exactly one position, [`NO_LOG_ERROR_SPREAD`] otherwise. In
-/// spec §3.5's own terms `m` is `3` and `1`; the table holds their logarithms, because that is
-/// what the row's inner loop subtracts and taking the logarithm there would be the one place
-/// spec §3.3's closed form has none.
+/// [`ERROR_SPREAD_BASES`] where the observation differs from **every** allele the genotype
+/// carries by a substitution at exactly one position, [`NO_ERROR_SPREAD`] otherwise. In
+/// In spec §3.5's own terms `m` is `3` and `1`, and the table holds exactly those: the row's
+/// inner loop divides by `m` inside the logarithm spec §3.6's mixture takes, so a table of
+/// logarithms would have to be undone to be used.
 ///
 /// # Why a spread at all
 ///
@@ -83,7 +79,7 @@ pub const NO_LOG_ERROR_SPREAD: f64 = 0.0;
 ///
 /// `out` is `genotype_count × allele_count`, **row-major by genotype** — the same shape and the
 /// same order as [`GenotypeTableView::genotype_allele_counts`], so a reader holding one row of
-/// counts holds the matching row of spreads at the same offset. [`LogErrorSpreadTable`] is
+/// counts holds the matching row of spreads at the same offset. [`ErrorSpreadTable`] is
 /// the one way to read it, and it carries the stride so no caller has to supply one.
 ///
 /// # Panics
@@ -98,9 +94,9 @@ pub const NO_LOG_ERROR_SPREAD: f64 = 0.0;
 /// **The length check is an equality and not "at least enough", which matters twice over.** A
 /// longer buffer leaves its tail unwritten, so every genotype past the first reads a slot the
 /// fill never touched — a real number and a wrong one. And it is what makes
-/// [`LogErrorSpreadTable`]'s own bound meaningful: a longer table admits a genotype index that
+/// [`ErrorSpreadTable`]'s own bound meaningful: a longer table admits a genotype index that
 /// should have been out of range.
-pub fn fill_log_error_spreads(
+pub fn fill_error_spreads(
     alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     out: &mut [f64],
@@ -159,9 +155,9 @@ pub fn fill_log_error_spreads(
                 });
             out[genotype * allele_count + observed_allele] =
                 if every_carried_is_one_substitution_away {
-                    LOG_ERROR_SPREAD
+                    ERROR_SPREAD_BASES
                 } else {
-                    NO_LOG_ERROR_SPREAD
+                    NO_ERROR_SPREAD
                 };
         }
     }
@@ -185,13 +181,13 @@ pub fn fill_log_error_spreads(
 ///
 /// [`CandidateAlleles::bases_of`]: super::super::CandidateAlleles::bases_of
 #[derive(Copy, Clone, Debug)]
-pub struct LogErrorSpreadTable<'a> {
+pub struct ErrorSpreadTable<'a> {
     values: &'a [f64],
     allele_count: usize,
 }
 
-impl<'a> LogErrorSpreadTable<'a> {
-    /// Wrap a buffer [`fill_log_error_spreads`] filled, against the genotype table it was
+impl<'a> ErrorSpreadTable<'a> {
+    /// Wrap a buffer [`fill_error_spreads`] filled, against the genotype table it was
     /// filled for.
     ///
     /// **The genotype view is the argument rather than a bare stride**, so the two dimensions
@@ -228,7 +224,7 @@ impl<'a> LogErrorSpreadTable<'a> {
     /// row 4 of a triallelic diploid table and row 4 of a tetraploid one are different
     /// genotypes, so an index from another shape must not quietly resolve.
     #[must_use]
-    pub fn log_spreads_for(&self, genotype: GenotypeIdx) -> Option<&'a [f64]> {
+    pub fn spreads_for(&self, genotype: GenotypeIdx) -> Option<&'a [f64]> {
         let start = (genotype.get() as usize).checked_mul(self.allele_count)?;
         self.values.get(start..start + self.allele_count)
     }
@@ -248,7 +244,7 @@ impl<'a> LogErrorSpreadTable<'a> {
             "allele {allele} is past the {} this locus is called over",
             self.allele_count
         );
-        let row = self.log_spreads_for(genotype).unwrap_or_else(|| {
+        let row = self.spreads_for(genotype).unwrap_or_else(|| {
             panic!(
                 "genotype {} is past the {} this table was filled for",
                 genotype.get(),
@@ -258,7 +254,7 @@ impl<'a> LogErrorSpreadTable<'a> {
         row[allele]
     }
 
-    /// One allele's column of log spreads — its entry for every genotype, in genotype order.
+    /// One allele's column of spreads — its entry for every genotype, in genotype order.
     ///
     /// **The shape the row's inner loop wants**, because for a fixed observation the allele is
     /// fixed and what varies is the genotype. Walking a column checks the allele once and then
@@ -269,7 +265,7 @@ impl<'a> LogErrorSpreadTable<'a> {
     /// # Panics
     ///
     /// **In release as well as debug**, on an allele this locus is not called over.
-    pub(crate) fn log_spreads_of(&self, allele: AlleleId) -> impl Iterator<Item = f64> + use<'a> {
+    pub fn spreads_of(&self, allele: AlleleId) -> impl Iterator<Item = f64> + use<'a> {
         let allele = usize::from(allele.get());
         assert!(
             allele < self.allele_count,
@@ -280,34 +276,6 @@ impl<'a> LogErrorSpreadTable<'a> {
             .iter()
             .step_by(self.allele_count)
             .copied()
-    }
-
-    /// The same column as [`log_spreads_of`](Self::log_spreads_of), read as `m` rather than as `log m`.
-    ///
-    /// **This is what the row reads**, and [`log_spreads_of`](Self::log_spreads_of) is what it read
-    /// before the contamination mixture arrived. Spec §3.6 evaluates the mixture in
-    /// probability space and takes one logarithm of the result (spec §8), so `(1 − c)·ε̄/m`
-    /// needs the spread as the number the spec calls `m` — 3 or 1 — and not as its logarithm.
-    ///
-    /// **So the table's stored form now costs an `exp` per error-side term**, one for every
-    /// `(observation, genotype)` pair the genotype cannot explain. The reason it is stored the
-    /// other way is recorded and was right when it was taken: spec §3.3's closed form takes no
-    /// logarithm inside its loop, so a table of `m` would have put one there (B2, 2026-08-24).
-    /// The mixture takes a logarithm inside that loop by specification, which is what makes the
-    /// argument no longer hold. Two cheaper shapes are available and neither belongs to this
-    /// step: the filler could write `m` (a `log` moves to whoever still wants one, and nothing
-    /// in the caller does), or the table could carry both, for one extra buffer of
-    /// `genotypes × alleles` — 126 values, 1,008 bytes, at a six-allele diploid locus.
-    ///
-    /// `exp(0)` is exactly `1.0`, so the spread that does not apply costs nothing in accuracy;
-    /// `tests::the_linear_column_is_the_bases_the_log_column_is_the_logarithm_of` pins the
-    /// other one against [`ERROR_SPREAD_BASES`].
-    ///
-    /// # Panics
-    ///
-    /// **In release as well as debug**, on an allele this locus is not called over.
-    pub fn spreads_of(&self, allele: AlleleId) -> impl Iterator<Item = f64> + use<'a> {
-        self.log_spreads_of(allele).map(f64::exp)
     }
 
     /// How many alleles the locus is called over — the table's stride.
@@ -397,9 +365,8 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// hoisted, because they can be. The **explained** side depends on the genotype only through its
 /// copy count, so its logarithm is taken once per copy count per observation, into a
 /// `ploidy + 1` array, rather than once per genotype. The **error** side has one logarithm per
-/// term and an `exp` beside it, the second because the spread table stores `log m` where the
-/// mixture needs `m` — [`LogErrorSpreadTable::spreads_of`] carries that and what it would take
-/// to remove it.
+/// term and nothing beside it: the spread table stores `m`, which is what the mixture divides
+/// by, so no logarithm is taken or undone there.
 ///
 /// # Two approximations live in this formula and both have a size
 ///
@@ -454,7 +421,7 @@ pub fn genotype_log_likelihood_row(
     genotypes: &GenotypeTableView<'_>,
     calibration: &[super::ReadGroupCalibration],
     contamination: super::ContaminationMixture<'_>,
-    error_spreads: LogErrorSpreadTable<'_>,
+    error_spreads: ErrorSpreadTable<'_>,
     out: &mut [LogProb],
 ) {
     let genotype_count = genotypes.genotype_count();
@@ -637,18 +604,18 @@ mod tests {
         GenotypeTable::build(Ploidy::try_new(2).expect("two is a ploidy"), allele_count)
     }
 
-    /// Fill the table, so a test reads it through [`LogErrorSpreadTable`] rather than
+    /// Fill the table, so a test reads it through [`ErrorSpreadTable`] rather than
     /// open-coding the stride.
     fn spreads(alleles: &CandidateAlleles, table: &GenotypeTable) -> Vec<f64> {
         let view = table.view();
         let mut out = vec![0.0; view.genotype_count() * alleles.len()];
-        fill_log_error_spreads(alleles, &view, &mut out);
+        fill_error_spreads(alleles, &view, &mut out);
         out
     }
 
     /// The filled buffer, read through the type that carries its stride.
-    fn table_over<'a>(out: &'a [f64], table: &GenotypeTable) -> LogErrorSpreadTable<'a> {
-        LogErrorSpreadTable::over(out, &table.view())
+    fn table_over<'a>(out: &'a [f64], table: &GenotypeTable) -> ErrorSpreadTable<'a> {
+        ErrorSpreadTable::over(out, &table.view())
     }
 
     /// Which genotype index carries exactly these copies, so a test can name a genotype by what
@@ -739,7 +706,7 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(1)),
-            LOG_ERROR_SPREAD
+            ERROR_SPREAD_BASES
         );
     }
 
@@ -754,7 +721,7 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(1)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
     }
 
@@ -770,7 +737,7 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(1)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
     }
 
@@ -792,13 +759,13 @@ mod tests {
         // Allele 1 is one substitution from allele 0 and a different length from allele 2.
         assert_eq!(
             table_over(&out, &table).at(het_ref_and_deletion, AlleleId(1)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
         // …and against the reference homozygote alone it does get the spread, so the fixture is
         // not simply one where nothing ever would.
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(1)),
-            LOG_ERROR_SPREAD
+            ERROR_SPREAD_BASES
         );
     }
 
@@ -815,7 +782,7 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(het, AlleleId(2)),
-            LOG_ERROR_SPREAD
+            ERROR_SPREAD_BASES
         );
     }
 
@@ -834,15 +801,15 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(0)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
         assert_eq!(
             table_over(&out, &table).at(het, AlleleId(0)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
         assert_eq!(
             table_over(&out, &table).at(het, AlleleId(1)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
     }
 
@@ -878,9 +845,9 @@ mod tests {
                                 .expect("an allele"),
                         )
                     }) {
-                    LOG_ERROR_SPREAD
+                    ERROR_SPREAD_BASES
                 } else {
-                    NO_LOG_ERROR_SPREAD
+                    NO_ERROR_SPREAD
                 };
                 assert_eq!(
                     table_over(&out, &table)
@@ -892,7 +859,7 @@ mod tests {
                 // row function walk a genotype's spreads beside its copy counts.
                 assert_eq!(
                     table_over(&out, &table)
-                        .log_spreads_for(GenotypeIdx(genotype as u32))
+                        .spreads_for(GenotypeIdx(genotype as u32))
                         .expect("the table holds this genotype")[observed],
                     expected
                 );
@@ -909,18 +876,18 @@ mod tests {
         let tetraploid = GenotypeTable::build(Ploidy::try_new(4).expect("four is a ploidy"), 3);
         let view = tetraploid.view();
         let mut out = vec![0.0; view.genotype_count() * 3];
-        fill_log_error_spreads(&alleles, &view, &mut out);
+        fill_error_spreads(&alleles, &view, &mut out);
 
         let three_ref_one_deletion = genotype_carrying(&tetraploid, &[3, 0, 1]);
         let four_ref = genotype_carrying(&tetraploid, &[4, 0, 0]);
 
         assert_eq!(
             table_over(&out, &tetraploid).at(three_ref_one_deletion, AlleleId(1)),
-            NO_LOG_ERROR_SPREAD
+            NO_ERROR_SPREAD
         );
         assert_eq!(
             table_over(&out, &tetraploid).at(four_ref, AlleleId(1)),
-            LOG_ERROR_SPREAD
+            ERROR_SPREAD_BASES
         );
     }
 
@@ -937,11 +904,11 @@ mod tests {
             assert_eq!(view.genotype_count(), 1);
 
             let mut out = vec![0.0; 1];
-            fill_log_error_spreads(&alleles, &view, &mut out);
+            fill_error_spreads(&alleles, &view, &mut out);
 
             assert_eq!(
                 table_over(&out, &table).at(GenotypeIdx(0), AlleleId::REFERENCE),
-                NO_LOG_ERROR_SPREAD
+                NO_ERROR_SPREAD
             );
         }
     }
@@ -969,7 +936,7 @@ mod tests {
             let view = table.view();
             let mut out = vec![f64::NAN; view.genotype_count() * allele_count];
 
-            fill_log_error_spreads(&alleles, &view, &mut out);
+            fill_error_spreads(&alleles, &view, &mut out);
 
             let spread_table = table_over(&out, &table);
             assert_eq!(spread_table.allele_count(), allele_count);
@@ -980,10 +947,10 @@ mod tests {
                 .collect();
             let hom_ref = genotype_carrying(&table, &hom_ref_counts);
             let row = spread_table
-                .log_spreads_for(hom_ref)
+                .spreads_for(hom_ref)
                 .expect("a genotype the table holds");
-            assert_eq!(row[0], NO_LOG_ERROR_SPREAD);
-            assert!(row[1..].iter().all(|&spread| spread == LOG_ERROR_SPREAD));
+            assert_eq!(row[0], NO_ERROR_SPREAD);
+            assert!(row[1..].iter().all(|&spread| spread == ERROR_SPREAD_BASES));
         }
     }
 
@@ -999,11 +966,11 @@ mod tests {
         let view = table.view();
         let mut out = vec![f64::NAN; view.genotype_count() * 3];
 
-        fill_log_error_spreads(&alleles, &view, &mut out);
+        fill_error_spreads(&alleles, &view, &mut out);
 
         for (cell, value) in out.iter().enumerate() {
             assert!(
-                *value == NO_LOG_ERROR_SPREAD || *value == LOG_ERROR_SPREAD,
+                *value == NO_ERROR_SPREAD || *value == ERROR_SPREAD_BASES,
                 "cell {cell} was left holding {value}"
             );
         }
@@ -1016,14 +983,14 @@ mod tests {
         let table = diploid(2);
         let mut out = vec![0.0; 5];
 
-        fill_log_error_spreads(&alleles, &table.view(), &mut out);
+        fill_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// **A buffer that is too long is a caller bug too, and only this test says so.** The
     /// check has to be an equality rather than "at least enough": the trailing entries would
     /// never be written, and every genotype past the first would then read a slot the fill
     /// left alone — which is a real number and a wrong one. It is also what makes
-    /// [`LogErrorSpreadTable`]'s bound meaningful, since a longer table admits a genotype
+    /// [`ErrorSpreadTable`]'s bound meaningful, since a longer table admits a genotype
     /// should have been out of range.
     #[test]
     #[should_panic(expected = "one entry per (genotype, allele)")]
@@ -1033,7 +1000,7 @@ mod tests {
         let needed = table.view().genotype_count() * 2;
         let mut out = vec![0.0; needed + 1];
 
-        fill_log_error_spreads(&alleles, &table.view(), &mut out);
+        fill_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// A repeat tract's substitution term is a different rate on a different model, so a
@@ -1052,7 +1019,7 @@ mod tests {
         let table = diploid(1);
         let mut out = vec![0.0; table.view().genotype_count()];
 
-        fill_log_error_spreads(&alleles, &table.view(), &mut out);
+        fill_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// An allele id from another locus, or a genotype index past what the table holds, is
@@ -1092,8 +1059,8 @@ mod tests {
         let out = spreads(&alleles, &table);
         let spread_table = table_over(&out, &table);
 
-        assert!(spread_table.log_spreads_for(GenotypeIdx(2)).is_some());
-        assert!(spread_table.log_spreads_for(GenotypeIdx(3)).is_none());
+        assert!(spread_table.spreads_for(GenotypeIdx(2)).is_some());
+        assert!(spread_table.spreads_for(GenotypeIdx(3)).is_none());
         assert_eq!(spread_table.allele_count(), 2);
     }
 
@@ -1104,7 +1071,7 @@ mod tests {
         let table = diploid(3);
         let mut out = vec![0.0; table.view().genotype_count() * 2];
 
-        fill_log_error_spreads(&alleles, &table.view(), &mut out);
+        fill_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// The size the divisor is worth, **taken from a filled table rather than from a literal**:
@@ -1123,8 +1090,9 @@ mod tests {
         let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0, 0]);
 
-        let spread = table_over(&out, &table).at(hom_ref, AlleleId(1))
-            - table_over(&out, &table).at(hom_ref, AlleleId(2));
+        let spread = (table_over(&out, &table).at(hom_ref, AlleleId(1))
+            / table_over(&out, &table).at(hom_ref, AlleleId(2)))
+        .ln();
 
         assert!(
             (spread - 1.0986).abs() < 5e-5,
@@ -1214,7 +1182,7 @@ mod tests {
             &view,
             calibration,
             contamination,
-            LogErrorSpreadTable::over(&spreads, &view),
+            ErrorSpreadTable::over(&spreads, &view),
             &mut out,
         );
         out.into_iter().map(LogProb::get).collect()
@@ -1259,9 +1227,9 @@ mod tests {
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
         let half = 0.5_f64.ln();
 
-        assert!((scored[hom_ref] - (-7.0 - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((scored[hom_ref] - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
         assert!((scored[het] - 3.0 * half).abs() < 1e-12);
-        assert!((scored[hom_alt] - (-6.0 - 2.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((scored[hom_alt] - (-6.0 - 2.0 * LOG_SPREAD)).abs() < 1e-12);
 
         // The heterozygote wins here, which is the answer two reads against one should give.
         assert!(scored[het] > scored[hom_ref] && scored[het] > scored[hom_alt]);
@@ -1271,9 +1239,9 @@ mod tests {
         // it. At a scale of 2.5 each error-side read is charged `ln 2.5` more.
         let calibrated_scored = row(&evidence, &alleles, &table, &calibrated(2.5));
         let log_scale = 2.5_f64.ln();
-        assert!((calibrated_scored[hom_ref] - (-7.0 + log_scale - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((calibrated_scored[hom_ref] - (-7.0 + log_scale - LOG_SPREAD)).abs() < 1e-12);
         assert!(
-            (calibrated_scored[hom_alt] - (-6.0 + 2.0 * log_scale - 2.0 * LOG_ERROR_SPREAD)).abs()
+            (calibrated_scored[hom_alt] - (-6.0 + 2.0 * log_scale - 2.0 * LOG_SPREAD)).abs()
                 < 1e-12
         );
         // The heterozygote explains every read, so no scale reaches it at all.
@@ -1645,7 +1613,7 @@ mod tests {
         let scale = 2.5_f64;
         let log_scale = scale.ln();
         let spread_values = spreads(&alleles, &table);
-        let spread_table = LogErrorSpreadTable::over(&spread_values, &view);
+        let spread_table = ErrorSpreadTable::over(&spread_values, &view);
         let mut ours = vec![LogProb(f64::NAN); view.genotype_count()];
         genotype_log_likelihood_row(
             &evidence,
@@ -1704,12 +1672,14 @@ mod tests {
                     .map(|(allele, _)| ln_factorial(u64::from(supported[allele].num_reads)))
                     .sum::<f64>();
 
-            // The spread ng subtracts and production does not — taken from the table.
+            // The spread ng subtracts and production does not — taken from the table, whose
+            // entries are `m` itself, so the logarithm is taken here rather than stored.
             let spread_effect: f64 = supported
                 .iter()
                 .filter(|o| counts[usize::from(o.allele.get())] == 0)
                 .map(|o| {
-                    f64::from(o.num_reads) * spread_table.at(GenotypeIdx(genotype as u32), o.allele)
+                    f64::from(o.num_reads)
+                        * spread_table.at(GenotypeIdx(genotype as u32), o.allele).ln()
                 })
                 .sum();
 
@@ -1753,18 +1723,25 @@ mod tests {
 
         assert_eq!(
             table_over(&out, &table).at(hom_ref, AlleleId(1)),
-            LOG_ERROR_SPREAD
+            ERROR_SPREAD_BASES
         );
     }
 
-    /// **The named constant is the logarithm of the named count**, so a transcribed digit in one
-    /// cannot drift from the other. Nothing else ties them together — [`ERROR_SPREAD_BASES`] is
-    /// read by no code at all — and the size test below admits any value within 5 × 10⁻⁵ of
-    /// 1.0986, a band a typo in the fifth decimal fits inside.
+    /// **What a wrongly explained read is charged in log space**, which is what the row's own
+    /// fixtures hand-compute against. It is derived from the stored constant rather than
+    /// transcribed, so the two cannot drift — the size test above admits any value within
+    /// 5 × 10⁻⁵ of 1.0986, a band a typo in the fifth decimal fits inside.
+    ///
+    /// **The table stored this and now stores `ERROR_SPREAD_BASES` instead** (owner,
+    /// 2026-08-24). The logarithm survives only here, in the fixtures that state spec §3.3's
+    /// log-space form by hand.
+    const LOG_SPREAD: f64 = 1.098_612_288_668_109_7;
+
     #[test]
-    fn the_log_spread_is_the_logarithm_of_the_bases_it_is_named_for() {
-        assert_eq!(LOG_ERROR_SPREAD, ERROR_SPREAD_BASES.ln());
-        assert_eq!(NO_LOG_ERROR_SPREAD, 1.0_f64.ln());
+    fn the_log_spread_the_fixtures_use_is_the_logarithm_of_what_the_table_stores() {
+        assert_eq!(LOG_SPREAD, ERROR_SPREAD_BASES.ln());
+        assert_eq!(NO_ERROR_SPREAD, 1.0);
+        assert_eq!(NO_ERROR_SPREAD.ln(), 0.0);
     }
 
     /// **At a scale of three the calibration and the spread cancel exactly**, so a wrongly
@@ -1823,11 +1800,9 @@ mod tests {
         let het = genotype_carrying(&table, &[1, 1]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
 
-        assert!((scored[hom_ref] - (-1.0 - 6.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((scored[hom_ref] - (-1.0 - 6.0 * LOG_SPREAD)).abs() < 1e-12);
         assert!((scored[het] - 11.0 * 0.5_f64.ln()).abs() < 1e-12);
-        assert!(
-            (scored[hom_alt] - (-1.0 + 5.0 * 0.01_f64.ln() - 5.0 * LOG_ERROR_SPREAD)).abs() < 1e-12
-        );
+        assert!((scored[hom_alt] - (-1.0 + 5.0 * 0.01_f64.ln() - 5.0 * LOG_SPREAD)).abs() < 1e-12);
         assert!(
             scored[hom_ref] > scored[het] && scored[hom_ref] > scored[hom_alt],
             "the reference homozygote should win: {scored:?}"
@@ -1851,11 +1826,11 @@ mod tests {
         let scored = row(&evidence, &alleles, &table, &uncalibrated());
         let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
 
-        assert!((at(&[4, 0]) - (-7.0 - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((at(&[4, 0]) - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
         assert!((at(&[3, 1]) - (3.0 * 0.75_f64.ln() + 0.25_f64.ln())).abs() < 1e-12);
         assert!((at(&[2, 2]) - 4.0 * 0.5_f64.ln()).abs() < 1e-12);
         assert!((at(&[1, 3]) - (3.0 * 0.25_f64.ln() + 0.75_f64.ln())).abs() < 1e-12);
-        assert!((at(&[0, 4]) - (-6.0 - 3.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((at(&[0, 4]) - (-6.0 - 3.0 * LOG_SPREAD)).abs() < 1e-12);
         assert!(
             scored.iter().all(|&value| value < 0.0),
             "a log-probability cannot be positive: {scored:?}"
@@ -1865,7 +1840,7 @@ mod tests {
     /// **A wrongly explained read that could not have been a misread takes no spread, and the row
     /// has to read that out of the table.** Every row fixture before this one used single-base
     /// alleles, where every pair is one substitution apart — so the whole table could be replaced
-    /// by the constant `LOG_ERROR_SPREAD` and every test still passed. **That is the gate this
+    /// by the constant `LOG_SPREAD` and every test still passed. **That is the gate this
     /// step set for the production differential, still open one level down in the row itself.**
     ///
     /// Here the locus carries a deletion. Against the reference homozygote the substitution allele
@@ -1881,7 +1856,7 @@ mod tests {
         let scored = row(&evidence, &alleles, &table, &uncalibrated());
         let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
 
-        assert!((at(&[2, 0, 0]) - (-4.0 - 2.0 * LOG_ERROR_SPREAD - 5.0)).abs() < 1e-12);
+        assert!((at(&[2, 0, 0]) - (-4.0 - 2.0 * LOG_SPREAD - 5.0)).abs() < 1e-12);
         assert!(
             (at(&[0, 0, 2]) - -4.0).abs() < 1e-12,
             "a genotype whose every wrong read is an indel away is charged {}, not −4",
@@ -1908,7 +1883,7 @@ mod tests {
             &narrow_view,
             &uncalibrated(),
             ContaminationMixture::uncontaminated(),
-            LogErrorSpreadTable::over(&spread_values, &wide_view),
+            ErrorSpreadTable::over(&spread_values, &wide_view),
             &mut out,
         );
     }
@@ -1936,7 +1911,7 @@ mod tests {
     }
 
     /// A buffer longer than the table it is wrapped against admits a genotype index that should
-    /// have been out of range — the case [`LogErrorSpreadTable`]'s own documentation names, and
+    /// have been out of range — the case [`ErrorSpreadTable`]'s own documentation names, and
     /// which only the *fill*'s length check was tested for.
     #[test]
     #[should_panic(expected = "holds 6 entries, not 8")]
@@ -1944,7 +1919,7 @@ mod tests {
         let table = diploid(2);
         let values = vec![0.0; 8];
 
-        let _ = LogErrorSpreadTable::over(&values, &table.view());
+        let _ = ErrorSpreadTable::over(&values, &table.view());
     }
 
     #[test]
@@ -1961,7 +1936,7 @@ mod tests {
             &view,
             &uncalibrated(),
             ContaminationMixture::uncontaminated(),
-            LogErrorSpreadTable::over(&spread_values, &view),
+            ErrorSpreadTable::over(&spread_values, &view),
             &mut out,
         );
     }
@@ -2010,7 +1985,7 @@ mod tests {
     /// under a flag — a shared implementation would agree with itself whatever either of them
     /// did.
     ///
-    /// **It reads its spreads from [`fill_log_error_spreads`]** rather than from a literal
+    /// **It reads its spreads from [`fill_error_spreads`]** rather than from a literal
     /// `ln 3`, so deleting that filler is a compile error here rather than a quiet subtraction
     /// (the gate B1's review put on this file).
     fn plain_log_likelihood_row(
@@ -2023,7 +1998,7 @@ mod tests {
         let allele_count = view.allele_count();
         let ploidy = f64::from(view.ploidy().get());
         let spread_values = spreads(alleles, table);
-        let spread_table = LogErrorSpreadTable::over(&spread_values, &view);
+        let spread_table = ErrorSpreadTable::over(&spread_values, &view);
         let counts = view.genotype_allele_counts();
 
         (0..view.genotype_count())
@@ -2037,8 +2012,9 @@ mod tests {
                         reads * (f64::from(copies) / ploidy).ln()
                     } else {
                         let scale = calibration[observation.read_group.get() as usize];
-                        let log_spread =
-                            spread_table.at(GenotypeIdx(genotype as u32), observation.allele);
+                        let log_spread = spread_table
+                            .at(GenotypeIdx(genotype as u32), observation.allele)
+                            .ln();
                         observation.q_sum + reads * (scale.log_scale() - log_spread)
                     };
                 }
@@ -2587,30 +2563,36 @@ mod tests {
         let _ = table_over(&values, &table).spreads_of(AlleleId(2)).count();
     }
 
-    /// The linear column is the bases the log column is the logarithm of.
+    /// **A column holds only the two numbers the model has, exactly** — `3` where the error
+    /// mass spreads three ways and `1` where it does not — so the row's division is by a value
+    /// the specification names rather than by anything derived.
     ///
-    /// **`exp(0)` is exactly one**, so the spread that does not apply costs no accuracy at all;
-    /// the one that does comes back within a unit in the last place of
-    /// [`ERROR_SPREAD_BASES`], which is what the mixture divides by.
+    /// It is exactness that this pins. While the table stored `log m`, the row recovered `m`
+    /// with an `exp`, and `exp(ln 3)` is not `3`; nothing downstream could see the difference,
+    /// which is why it took an argument rather than a test to remove it (owner, 2026-08-24).
     #[test]
-    fn the_linear_column_is_the_bases_the_log_column_is_the_logarithm_of() {
+    fn a_column_holds_the_two_spreads_the_model_has_and_nothing_between() {
         let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
         let table = diploid(3);
         let values = spreads(&alleles, &table);
         let read = table_over(&values, &table);
 
+        let mut spread_seen = false;
+        let mut unspread_seen = false;
         for allele in [AlleleId(0), AlleleId(1), AlleleId(2)] {
-            for (log_spread, spread) in read.log_spreads_of(allele).zip(read.spreads_of(allele)) {
-                if log_spread == NO_LOG_ERROR_SPREAD {
-                    assert_eq!(spread, 1.0, "exp(0) has to be exactly one");
-                } else {
-                    assert!(
-                        (spread - ERROR_SPREAD_BASES).abs() <= f64::EPSILON * ERROR_SPREAD_BASES,
-                        "the spread came back as {spread}, not {ERROR_SPREAD_BASES}"
-                    );
-                }
+            for spread in read.spreads_of(allele) {
+                assert!(
+                    spread == ERROR_SPREAD_BASES || spread == NO_ERROR_SPREAD,
+                    "a spread came back as {spread}, which is neither                      {ERROR_SPREAD_BASES} nor {NO_ERROR_SPREAD}"
+                );
+                spread_seen |= spread == ERROR_SPREAD_BASES;
+                unspread_seen |= spread == NO_ERROR_SPREAD;
             }
         }
+        assert!(
+            spread_seen && unspread_seen,
+            "the fixture has to show both spreads or it pins only one"
+        );
     }
 
     /// A mixture built for a locus with a different number of alleles would read a real
@@ -2656,7 +2638,7 @@ mod tests {
             &tetraploid_view,
             &uncalibrated(),
             ContaminationMixture::uncontaminated(),
-            LogErrorSpreadTable::over(&diploid_spreads, &diploid_table.view()),
+            ErrorSpreadTable::over(&diploid_spreads, &diploid_table.view()),
             &mut out,
         );
     }

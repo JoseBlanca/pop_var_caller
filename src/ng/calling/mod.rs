@@ -56,8 +56,8 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
 pub use likelihood::generic::{
-    ERROR_SPREAD_BASES, LOG_ERROR_SPREAD, LogErrorSpreadTable, NO_LOG_ERROR_SPREAD,
-    fill_log_error_spreads, genotype_log_likelihood_row,
+    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, fill_error_spreads,
+    genotype_log_likelihood_row,
 };
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
