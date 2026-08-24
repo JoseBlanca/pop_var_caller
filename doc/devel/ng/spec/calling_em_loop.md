@@ -574,6 +574,22 @@ locus already contributes zero for every genotype and is decided by the prior al
 smaller cohort is a shape the loop is built for. What it does change is the denominator of the
 fitted frequencies, which is the right denominator: the samples the locus was actually called on.
 
+**The ruling has a producer and no carrier, and the gap is in the shared vocabulary rather than
+in this loop** (found 2026-08-24, checking candidate selection against the modules it feeds).
+Selection already decides the fact — `UnmatchedSupport::genotype_must_be_missing()` is true for a
+sample whose own reads earned an allele the cap then cut. What does not exist is anywhere to put
+the answer: `SampleGenotypeCall` is `{ genotype, genotype_quality }` with no absent variant, and
+`Genotype::new` panics on an empty multiset, deliberately — *"an empty multiset is not a haploid
+call, it is a sample with no genome"*. **So a missing genotype cannot currently be expressed**, and
+this section's decision cannot be implemented until it can. The type is `calling/mod.rs`'s; whoever
+builds the loop adds the variant there, and §9's hand-off is written against its existence.
+
+**And the two per-sample lists are in different orders.** `LocusSelection::unmatched` is parallel
+to the merge's covering samples, `LocusInference::per_sample` is one entry per sample of the run in
+run order. A sample that does not cover the locus and a covering sample that lost nothing are
+different facts that look identical if the join is by position rather than through the sample index
+the merge records.
+
 *What would still be worth measuring, though nothing turns on it:* the tomato panel at the loci
 where the cap binds, comparing the fitted frequencies with the samples in and out — it would say
 how large the bias would have been. Not measurable until selection is wired into the builder, which

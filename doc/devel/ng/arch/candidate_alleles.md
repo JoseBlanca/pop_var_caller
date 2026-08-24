@@ -451,6 +451,50 @@ from a clean one. *That is an edit to that document and is not made here.*
 
 ---
 
+## 5.1 The seam with the genotype prior — checked against the shipped prior code
+
+*Added 2026-08-24, at the owner's request that selection be fitted to the modules it feeds before
+this work merges. **The prior is built and merged; the calling loop is not**, so this section is
+what the loop's author has to get right rather than something anyone can compile against today.
+Nothing in `src/ng/` calls [`select_generic`](../../../../src/ng/calling/allele_candidates/generic.rs)
+outside its own tests and the probe, so every claim below is about code that has never met.*
+
+**The prior takes flat slices and a count, never `CandidateAlleles`** — its own architecture
+records that as decided. So nothing in the type system holds the two together, and three things
+have to be got right by hand.
+
+**1. The count is the total, and this module's accessor is the other one.** The prior's
+`fill_locus_concentration(seed, class, allele_count, out)`
+([`seed_generic.rs:1181`](../../../../src/ng/calling/genotype_prior/seed_generic.rs)) wants the
+locus's allele count **including the reference**, and computes `allele_count - 1` itself. The
+right argument is `selection.alleles().len()`. `LocusSelection::alternative_allele_count()` is
+`len - 1` and **must not be passed to it** — at a locus with three alternatives it spreads four
+alleles' concentration over three, and at a reference-only locus, which is more than one built
+locus in four, it is 0 and the prior asserts. *This document previously described that accessor as
+"the number the genotype prior divides its alternative concentration by", which is exactly the
+mistake; the accessor's own doc comment now carries the warning.*
+
+**2. `unmatched` is not in the run's sample order.** [`LocusSelection::unmatched`](../../../../src/ng/calling/allele_candidates/mod.rs)
+is parallel to `CohortObservation::per_sample`, which holds **only the covering samples**, while
+`LocusInference::per_sample` is one entry per sample of the run in run order. Whatever joins them
+re-indexes through `SampleSupport::sample`. A zeroed `UnmatchedSupport` and a sample that does not
+cover the locus are different facts and look identical after a careless join.
+
+**3. The missing genotype has nowhere to go yet.** `UnmatchedSupport::genotype_must_be_missing()`
+is the flag [`../spec/calling_em_loop.md`](../spec/calling_em_loop.md) §5.0 rules on — the sample
+leaves the loop before the first pass and emission writes its `GT` as missing. But
+`SampleGenotypeCall` is `{ genotype: Genotype, genotype_quality: Phred }` with no absent variant,
+and `Genotype::new` panics on an empty multiset. **So the ruling has a producer and no carrier.**
+The type that gains the variant is `calling/mod.rs`'s, which this plan does not own; recorded here
+because selection is where the fact originates and the loop is where it will be needed.
+
+**What selection could produce and does not, for the prior's benefit.** `VariantClass`
+(`Substitution` / `InsertionOrDeletion`) has **no producer anywhere in the tree**, and selection is
+its natural home: it holds the surviving bases, and the reference's length against each
+alternative's is the whole test. It is not added here because the prior takes the same seed for
+both classes today, so a producer would have no reader — and because a locus carrying one
+substitution and one indel has no single answer, which is that document's own open item.
+
 ## 6. Open items
 
 - `OPEN:` **whether a `q_sum` bar joins the read-count bar at high depth** — spec Q1's neighbour,

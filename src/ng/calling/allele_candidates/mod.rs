@@ -544,15 +544,30 @@ impl LocusSelection {
         (self.alleles, self.verdict, self.unmatched, self.remap)
     }
 
-    /// How many alternatives survived — the number the genotype prior divides its
-    /// alternative concentration by (`doc/devel/ng/spec/calling_priors.md` §4, which
-    /// spells the same quantity `alternative_allele_count`).
+    /// How many alternatives survived — the locus's allele count **without** the reference.
     ///
     /// Zero at a locus that selected down to the reference alone, which is legal and
     /// happens at more than one built locus in four on both benchmarks (see
     /// [`SelectionVerdict::Selected`]). **The subtraction cannot underflow**:
     /// [`CandidateAlleles`] has one constructor, which pushes the reference, and one
     /// mutator, which only pushes, so its length is at least one by construction.
+    ///
+    /// # Do not hand this to the genotype prior
+    ///
+    /// **An earlier version of this comment said it was "the number the genotype prior
+    /// divides its alternative concentration by", and that sentence would have caused the
+    /// bug it was describing.** The prior's
+    /// [`fill_locus_concentration`](crate::ng::calling::genotype_prior::seed_generic::fill_locus_concentration)
+    /// takes the locus's **total** allele count, the reference included, and does the
+    /// subtraction itself. The right argument is `selection.alleles().len()`.
+    ///
+    /// Passing this one instead fails two ways, and only the second is loud. At a locus
+    /// with three alternatives it asks the prior for four alleles' worth of concentration
+    /// spread over three — and if the buffer was sliced by the same expression, which that
+    /// function's own documentation warns is the usual way it is written, its length check
+    /// agrees with itself and the last allele keeps whatever the previous locus left. At a
+    /// reference-only locus this is 0 and the prior asserts, on more than a quarter of
+    /// built loci.
     #[inline]
     pub fn alternative_allele_count(&self) -> usize {
         self.alleles.len() - 1
