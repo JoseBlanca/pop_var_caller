@@ -7,8 +7,8 @@
 //! functions and not two implementations of one trait.
 
 use super::{
-    AlleleRemap, CandidateSelectionConfig, LocusSelection, SelectionScratch, SelectionVerdict,
-    UnmatchedSupport, summarise_alleles,
+    AlleleRemap, CandidateSelectionConfig, LocusSelection, RankedAlternative, SelectionScratch,
+    SelectionVerdict, UnmatchedSupport, compare_best_first, summarise_alleles,
 };
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::locus_generation::LocusKind;
@@ -32,9 +32,18 @@ use crate::ng::types::AlleleId;
 /// So the shape is: fold the rows, cap the survivor list (step C2), admit, then walk the rows
 /// again for the leftover (step C3).
 ///
-/// **This step is the middle two of those four and returns placeholders for the others.** The
-/// verdict is always [`SelectionVerdict::Selected`], and the leftover is one zeroed entry per
-/// covering sample — the right length in the right order, which is what C3 fills.
+/// **The leftover is still a placeholder** — one zeroed entry per covering sample, the right
+/// length in the right order, which is what step C3 fills.
+///
+/// **Above the cap the list is cut and the locus is still called; it is never refused**
+/// (spec §4.1). What is cut is the worst-evidenced by [`compare_best_first`], and the count is
+/// reported as [`SelectionVerdict::Truncated`] — not how many alleles were dropped in total,
+/// since an alternative that failed the admission rule was never a candidate for the cap.
+/// **Refusing the whole locus was the alternative and it loses more**: it is what HipSTR does
+/// above 1,000 haplotypes and what production's repeat-tract path does above 24 candidates
+/// (`src/ssr/cohort/candidate_set.rs`),
+/// and at 63 accessions it costs 62 samples a locus they were called at perfectly well because
+/// one accession carried something rare.
 ///
 /// **The reference is admitted first and is asked nothing.** It is exempt from the rule and
 /// from the cap (spec §6.1), so it is seeded structurally rather than by reading whether it
@@ -62,12 +71,16 @@ use crate::ng::types::AlleleId;
 /// bases are read — measured, not assumed: a reviewer deleted the assertion and got exactly
 /// that, which points at the wrong line and says nothing about the locus.
 ///
-/// **And, until the cap of step C2 lands, on a locus where more than 65,535 alternatives clear
-/// the rule**: this step admits every one of them, and [`CandidateAlleles::admit`] refuses an
-/// admission no [`AlleleId`] could name. Nothing upstream bounds a locus's allele table at that
-/// width — see [`SelectionVerdict::Truncated`]'s own documentation, which records a review
-/// building a locus of 70,001 alternatives. C2 makes it unreachable and this paragraph goes
-/// with it.
+/// **And on a merge table of more than four billion alleles**, where the two `u32` conversions
+/// here refuse rather than wrap. That width is not reachable through any input this project can
+/// build; it is stated because the conversions are visible in the code and a reader should know
+/// they are the only remaining ones.
+///
+/// **What can no longer panic is a wide locus.** The cap holds the candidate table at
+/// [`MaxCandidateAlleles`](super::MaxCandidateAlleles), six by default, so
+/// [`CandidateAlleles::admit`]'s refusal at 65,536 alleles is unreachable however many
+/// alternatives the merge interned — and the count of cut alternatives is a `u32`, which is why
+/// [`SelectionVerdict::Truncated`] carries one.
 pub fn select_generic(
     observation: &CohortObservation,
     config: &CandidateSelectionConfig,
@@ -106,6 +119,30 @@ pub fn select_generic(
             }),
     );
 
+    // The cap, and the two orders the buffer holds in turn. First the ranking, so that what is
+    // cut is the worst-evidenced; then the merge table's own index order, because that is the
+    // order the survivors are admitted in (arch §3.1) and so the order that reaches the VCF's
+    // `ALT` column. The ranking decides *which* alleles survive and never what order they
+    // appear in.
+    let allowed_alternatives = usize::from(config.max_candidate_alleles.alternatives());
+    let verdict = if ranked_table_indices.len() <= allowed_alternatives {
+        SelectionVerdict::Selected
+    } else {
+        let alternative_of = |table_index: u32| RankedAlternative {
+            summary: per_allele[table_index as usize],
+            bases: &observation.alleles[table_index as usize],
+        };
+        ranked_table_indices.sort_unstable_by(|&left, &right| {
+            compare_best_first(alternative_of(left), alternative_of(right))
+        });
+        let dropped = ranked_table_indices.len() - allowed_alternatives;
+        ranked_table_indices.truncate(allowed_alternatives);
+        ranked_table_indices.sort_unstable();
+        SelectionVerdict::Truncated {
+            dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
+        }
+    };
+
     let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), LocusKind::Generic);
     let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
     remap.admit(0, AlleleId::REFERENCE);
@@ -118,7 +155,7 @@ pub fn select_generic(
     let covering_samples = observation.per_sample.len();
     LocusSelection::new(
         alleles,
-        SelectionVerdict::Selected,
+        verdict,
         vec![UnmatchedSupport::default(); covering_samples],
         remap,
         covering_samples,
@@ -127,6 +164,7 @@ pub fn select_generic(
 
 #[cfg(test)]
 mod tests {
+    use super::super::MaxCandidateAlleles;
     use super::super::fixtures::*;
     use super::*;
     use crate::ng::run::cohort_merge::MinAltReads;
@@ -536,9 +574,12 @@ mod tests {
     /// refilled would pass it; this one admits twelve alleles after two.
     #[test]
     fn narrowing_a_wider_locus_after_a_narrow_one_admits_every_survivor() {
+        // A cap wide enough not to bind, so what this test measures is the scratch and not the
+        // cap — under the default cap of six the twelve-allele locus is truncated. Thirteen and
+        // not twelve, so the cap misses binding by one rather than by nothing.
         let config = CandidateSelectionConfig {
             min_allele_support: support_rule_of(2, 0.0),
-            ..CandidateSelectionConfig::DEFAULT
+            max_candidate_alleles: cap_of(13),
         };
         let mut scratch = SelectionScratch::new();
         let narrow = locus_of(
@@ -580,5 +621,385 @@ mod tests {
             ),
             support_rule_of(2, 0.0),
         );
+    }
+
+    // ---- the cap (step C2) --------------------------------------------------------------
+
+    /// Narrow `observation` under a support rule of 2 reads and a cap of `cap` alleles
+    /// **counting the reference**.
+    fn selection_capped_at(
+        observation: &CohortObservation,
+        max_candidate_alleles: MaxCandidateAlleles,
+    ) -> LocusSelection {
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.0),
+            max_candidate_alleles,
+        };
+        select_generic(observation, &config, &mut SelectionScratch::new())
+    }
+
+    /// A cap of `alleles` **counting the reference**, said in the type so no call site has to
+    /// respell it in words.
+    fn cap_of(alleles: u16) -> MaxCandidateAlleles {
+        MaxCandidateAlleles::new(alleles).expect("a cap of at least two")
+    }
+
+    /// One sample showing every allele at `num_reads[i]` reads, the reference first.
+    fn one_sample_showing(num_reads: &[u32]) -> Vec<SampleSupport> {
+        let rows = num_reads
+            .iter()
+            .enumerate()
+            .map(|(allele, &num_reads)| row(allele, num_reads, -f64::from(num_reads)))
+            .collect();
+        vec![sample_showing(0, rows)]
+    }
+
+    /// **Below the cap nothing is cut and the verdict is `Selected`** — including at exactly
+    /// the cap, which is the boundary a `<` in place of a `<=` would move.
+    #[test]
+    fn a_locus_at_or_below_the_cap_keeps_everything_that_cleared_the_rule() {
+        let three = locus_of(&[b"A", b"C", b"G"], one_sample_showing(&[4, 3, 2]));
+        let selection = selection_capped_at(&three, cap_of(3));
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
+        assert_eq!(selection.alleles().len(), 3, "exactly the cap, nothing cut");
+
+        let two = locus_of(&[b"A", b"C"], one_sample_showing(&[4, 3]));
+        let selection = selection_capped_at(&two, cap_of(3));
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
+        assert_eq!(selection.alleles().len(), 2);
+    }
+
+    /// **Above the cap the list is cut to the best and the locus is still called.** Four
+    /// alternatives, a cap of three alleles counting the reference, so two alternatives fit and
+    /// two are cut.
+    ///
+    /// The table holds five alternatives at 8, 3, 6, 4 and 1 reads of one sample's 24, and the
+    /// last of them never cleared a rule of two reads. So **four** are candidates for the cap,
+    /// two fit under it, and the two kept are the 8 and the 6 — the ranking's first key is the
+    /// largest share of one sample's compared reads, and one sample is all there is here.
+    ///
+    /// **The cut count is two, not three**: the 1-read alternative was dropped by the admission
+    /// rule and was never a candidate for the cap, and spec §4.1 makes that distinction because
+    /// it is what step C3's second count keys on.
+    #[test]
+    fn above_the_cap_the_worst_evidenced_alternatives_are_cut_and_the_locus_is_still_called() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA", b"AC"],
+            one_sample_showing(&[2, 8, 3, 6, 4, 1]),
+        );
+        let selection = selection_capped_at(&observation, cap_of(3));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 2 },
+            "four alternatives cleared the rule, two fit under the cap, and the fifth never \
+             cleared it so was never a candidate for it"
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"C".to_vec(), b"T".to_vec()],
+            "the reference, and the two best-evidenced alternatives"
+        );
+    }
+
+    /// **The survivors of a binding cap are admitted in the merge table's order, not in rank
+    /// order** — the whole `ALT` column depends on it, and no test before this one could see it.
+    ///
+    /// A reviewer deleted the sort that puts the kept prefix back into index order and every
+    /// test in this file still passed while the column came out permuted. Here the best-ranked
+    /// alternative is the *last* of the table's four, so admitting in rank order gives
+    /// `AA, C` where the table's order gives `C, AA`.
+    #[test]
+    fn the_survivors_of_a_binding_cap_are_admitted_in_the_merge_tables_order() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA"],
+            one_sample_showing(&[2, 4, 2, 3, 9]),
+        );
+        let selection = selection_capped_at(&observation, cap_of(3));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 2 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"C".to_vec(), b"AA".to_vec()],
+            "the best-ranked alternative is the table's last, and it stays last"
+        );
+        assert_eq!(selection.remap().candidate_for(1), Some(AlleleId(1)));
+        assert_eq!(selection.remap().candidate_for(4), Some(AlleleId(2)));
+        assert_eq!(
+            selection.remap().candidate_for(3),
+            None,
+            "the 3-read alternative is what the cap cut"
+        );
+    }
+
+    /// **The reference is exempt from the cap as well as from the rule** (spec §6.1): at the
+    /// smallest cap a locus can carry — two alleles, one alternative — the reference is still
+    /// there and one alternative fits beside it.
+    #[test]
+    fn the_reference_survives_the_tightest_cap_there_is() {
+        // The better-evidenced alternative is the table's *second*, so keeping the merge
+        // table's leading prefix would give `C` and fail here.
+        let observation = locus_of(&[b"A", b"C", b"G"], one_sample_showing(&[2, 3, 5]));
+        let selection = selection_capped_at(&observation, cap_of(MaxCandidateAlleles::SMALLEST));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "the reference and the better-evidenced of the two alternatives, which is the \
+             table's second"
+        );
+        assert_eq!(selection.alternative_allele_count(), 1);
+    }
+
+    /// **The default cap is six alleles counting the reference**, so five alternatives fit and it
+    /// first bites at six — the width production's own constant is set at, and which spec §4.2
+    /// measures binding at 23 of 53,935 tomato loci and none of the GIAB trio's.
+    #[test]
+    fn the_default_cap_first_bites_at_six_alternatives() {
+        let six = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA", b"AC"],
+            one_sample_showing(&[2, 7, 6, 5, 4, 3]),
+        );
+        let selection = select_generic(
+            &six,
+            &CandidateSelectionConfig::DEFAULT,
+            &mut SelectionScratch::new(),
+        );
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
+        assert_eq!(selection.alleles().len(), 6);
+
+        let seven = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA", b"AC", b"AG"],
+            one_sample_showing(&[2, 2, 6, 5, 4, 3, 7]),
+        );
+        let selection = select_generic(
+            &seven,
+            &CandidateSelectionConfig::DEFAULT,
+            &mut SelectionScratch::new(),
+        );
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            selection.alleles().len(),
+            6,
+            "six counting the reference, which is five alternatives"
+        );
+        assert_eq!(
+            selection.remap().candidate_for(1),
+            None,
+            "the 2-read alternative is what the cap cut, and it is the table's first rather \
+             than its last — so keeping the table's leading prefix fails here"
+        );
+    }
+
+    /// **A cap that binds does not change which alleles cleared the rule**, only how many of
+    /// them are kept — so the same locus under a wide cap and a tight one gives the tight one's
+    /// survivors as a subset of the wide one's, and the same relative order.
+    #[test]
+    fn the_cap_keeps_a_subset_of_what_a_wider_cap_would_keep() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA"],
+            one_sample_showing(&[2, 9, 3, 7, 5]),
+        );
+        let wide = surviving_bases(&selection_capped_at(&observation, cap_of(5)));
+        let tight = surviving_bases(&selection_capped_at(&observation, cap_of(3)));
+        assert_eq!(
+            wide,
+            vec![
+                b"A".to_vec(),
+                b"C".to_vec(),
+                b"G".to_vec(),
+                b"T".to_vec(),
+                b"AA".to_vec()
+            ]
+        );
+        assert_eq!(tight, vec![b"A".to_vec(), b"C".to_vec(), b"T".to_vec()]);
+        assert!(
+            tight.iter().all(|bases| wide.contains(bases)),
+            "the cap removes, it never admits"
+        );
+    }
+
+    /// **The cap is what makes a wide locus safe, at the cohort size it exists for.** Four
+    /// hundred samples each carrying a different private allele, every one of them earning it
+    /// on its own reads: the merge's table is 401 sequences, the default cap leaves six, and
+    /// the verdict counts the 395 it cut.
+    ///
+    /// **What that costs is not the alleles, it is the samples** — each of the 395 earned the
+    /// allele the cap took away, so step C3's second count will mark every one of them for a
+    /// missing genotype. Spec §4.1 measures the cap binding at 23 of 53,935 tomato loci and
+    /// reassures that "only the samples that earned a cut allele are affected"; at several
+    /// hundred samples that sentence means almost everybody. Raised with the owner at
+    /// Checkpoint C; asserted here so the behaviour is not a surprise.
+    #[test]
+    fn four_hundred_private_alleles_are_cut_to_the_cap_and_the_locus_is_still_called() {
+        let bases: Vec<Vec<u8>> = std::iter::once(b"A".to_vec())
+            .chain((0..400).map(|i| format!("{i:03}").into_bytes()))
+            .collect();
+        let table: Vec<&[u8]> = bases.iter().map(Vec::as_slice).collect();
+        let per_sample = (0..400)
+            .map(|sample| sample_showing(sample, vec![row(0, 4, -4.0), row(sample + 1, 6, -6.0)]))
+            .collect();
+        let observation = locus_of(&table, per_sample);
+        let selection = select_generic(
+            &observation,
+            &CandidateSelectionConfig::DEFAULT,
+            &mut SelectionScratch::new(),
+        );
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 395 },
+            "400 alternatives cleared the rule and five fit under the default cap"
+        );
+        assert_eq!(selection.alleles().len(), 6);
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![
+                b"A".to_vec(),
+                b"000".to_vec(),
+                b"001".to_vec(),
+                b"002".to_vec(),
+                b"003".to_vec(),
+                b"004".to_vec(),
+            ],
+            "every alternative ties on all three numeric keys — a share of six in ten, one \
+             clearing sample, six cohort reads — so the bases are the only thing separating 400 \
+             of them, and the five kept are the five the bases rank first"
+        );
+        assert_eq!(selection.unmatched().len(), 400);
+    }
+
+    /// **The first ranking key is a share of one sample's reads, not the cohort's total** (spec
+    /// §4.1), on the only kind of input that can tell the two apart.
+    ///
+    /// One sample is heterozygous for `C`, showing it at 15 of its 30 reads — a share of a half.
+    /// Ten other samples each show `G` at 2 reads in 30, which is a low-level artefact: a share
+    /// of one in fifteen each, but **20 reads across the cohort against the heterozygote's 15**.
+    /// At a cap of one alternative, this ranking keeps `C` and production's cohort-read-total
+    /// ranking keeps `G`.
+    ///
+    /// **Every other cap fixture in this file has one sample**, where the share and the cohort
+    /// total are the same number over a constant and no fixture can separate the two rankings —
+    /// so without this test the whole first key could be replaced by production's and nothing
+    /// would fail. That is the key spec §4.1 spends four paragraphs defending, and getting it
+    /// wrong cuts the real allele, which step C3 then turns into a missing genotype for the one
+    /// sample that carries it.
+    #[test]
+    fn the_cap_ranks_by_the_within_sample_share_and_not_the_cohort_total() {
+        let heterozygote = sample_showing(0, vec![row(0, 15, -15.0), row(1, 15, -15.0)]);
+        let artefact_carriers =
+            (1..11).map(|sample| sample_showing(sample, vec![row(0, 28, -28.0), row(2, 2, -2.0)]));
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            std::iter::once(heterozygote)
+                .chain(artefact_carriers)
+                .collect(),
+        );
+        let selection = selection_capped_at(&observation, cap_of(2));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"C".to_vec()],
+            "half of one sample's reads beats 20 cohort reads spread one in fifteen"
+        );
+    }
+
+    /// **At about three reads a position the shares tie and the count of samples decides** — the
+    /// tomato panel's whole regime, and spec §4.1's stated reason for the tie-break order.
+    ///
+    /// Both alternatives take exactly two thirds of their carriers' reads, so the first key
+    /// ties. Three samples cleared the rule for `C` and one for `G` — and `G` carries 20 cohort
+    /// reads to `C`'s 6, so a ranking that skipped the second key and fell through to the third
+    /// would keep the wrong one.
+    #[test]
+    fn the_cap_falls_through_to_the_sample_count_before_the_cohort_total() {
+        let shallow =
+            (0..3).map(|sample| sample_showing(sample, vec![row(0, 1, -1.0), row(1, 2, -2.0)]));
+        let deep = sample_showing(3, vec![row(0, 10, -10.0), row(2, 20, -20.0)]);
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            shallow.chain(std::iter::once(deep)).collect(),
+        );
+        let selection = selection_capped_at(&observation, cap_of(2));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"C".to_vec()],
+            "both shares are two thirds; three samples cleared the rule for C and one for G, \
+             and G's larger cohort total is the third key, which never gets asked"
+        );
+    }
+
+    /// **Where all three numeric keys tie, the bases decide, ascending** — and that is the
+    /// regime the cap actually meets at scale, since a cohort of private alleles at one depth
+    /// ties on every number the fold records.
+    ///
+    /// It is also **the only shape in which a summary paired with the wrong allele's bases is
+    /// visible**, because the bases are read nowhere else. `RankedAlternative` exists to make
+    /// that mis-pairing impossible at a call site, and this test is what checks the call site
+    /// the cap actually wrote.
+    #[test]
+    fn the_cap_at_a_tie_on_every_number_keeps_the_alleles_the_bases_rank_first() {
+        let observation = locus_of(
+            &[b"A", b"CG", b"CA", b"CT"],
+            one_sample_showing(&[4, 3, 3, 3]),
+        );
+        let selection = selection_capped_at(&observation, cap_of(3));
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"CG".to_vec(), b"CA".to_vec()],
+            "each alternative takes 3 of the sample's 13 reads for one sample, so all three \
+             numbers tie and the bases break it ascending: CA and CG survive, CT is cut"
+        );
+    }
+
+    /// **A scratch reused across a locus the cap truncated.** The cap sorts and truncates the
+    /// buffer of surviving indices **in place**, so after a binding cap it holds a short,
+    /// reordered list — and the next locus inherits the buffer.
+    ///
+    /// What makes that safe is `SelectionScratch::reset_for`'s `clear`, which lives in the
+    /// parent module and had no test tying it to the in-place truncation the cap introduced. A
+    /// stale index surviving into the second locus is either an out-of-range panic or, worse, an
+    /// in-range index naming a *different* allele of the new locus — a wrong `ALT` entry with no
+    /// other symptom.
+    #[test]
+    fn a_scratch_reused_after_a_truncated_locus_carries_no_index_into_the_next() {
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.0),
+            max_candidate_alleles: cap_of(3),
+        };
+        let mut scratch = SelectionScratch::new();
+        let truncated = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA"],
+            one_sample_showing(&[2, 9, 3, 7, 5]),
+        );
+        let first = select_generic(&truncated, &config, &mut scratch);
+        assert_eq!(first.verdict(), SelectionVerdict::Truncated { dropped: 2 });
+
+        let narrow = locus_of(&[b"A", b"CC"], one_sample_showing(&[3, 4]));
+        let second = select_generic(&narrow, &config, &mut scratch);
+        assert_eq!(second.verdict(), SelectionVerdict::Selected);
+        assert_eq!(
+            surviving_bases(&second),
+            vec![b"A".to_vec(), b"CC".to_vec()],
+            "the second locus's own alleles, and nothing left over from the first"
+        );
+        assert_eq!(second.remap().table_len(), 2);
     }
 }

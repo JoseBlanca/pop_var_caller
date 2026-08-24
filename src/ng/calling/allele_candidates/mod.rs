@@ -883,12 +883,6 @@ struct RankedAlternative<'bases> {
 /// no partial-order footgun. Nothing here can be handed a `NaN`: [`summarise_alleles`] asserts
 /// a non-zero denominator for every sample that has rows, so every share is one `u32` over
 /// another.
-#[allow(
-    dead_code,
-    reason = "its shipping caller is the cap of step C2; until then the tests are its only \
-              callers, which `expect` cannot express — the expectation would be unfulfilled \
-              in the test build and satisfied in the library one"
-)]
 fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>) -> Ordering {
     right
         .summary

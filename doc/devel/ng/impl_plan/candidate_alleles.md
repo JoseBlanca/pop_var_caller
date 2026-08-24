@@ -178,7 +178,7 @@ through `candidate_for` and require the dense id back, and `None` for the droppe
 hand-off of arch §3.2 reproduces the evidence rows exactly.
 *Depends:* B2. *Source:* arch §2.3, §3.1; spec §3, §6.2.
 
-**C2. The cap and truncation.**  ☐
+**C2. The cap and truncation.**  ✅
 Above `max_candidate_alleles`, keep the best by B2's ranking, reference always, and return
 `Truncated { dropped }`. Below it, `Selected`. The reference is exempt from both the bar and the
 cap. *Depends:* C1. *Source:* arch §2.2, §2.5; spec §4.1.
