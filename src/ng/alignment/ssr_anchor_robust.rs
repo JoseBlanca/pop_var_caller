@@ -949,6 +949,47 @@ mod tests {
         aligner.align(bases, reference, context, &mut scratch)
     }
 
+    /// **A contraction must be cheaper to open than an expansion**, on a model that says so.
+    /// The asymmetry lives at the cost level, and this is the only thing in this file that
+    /// reads it: without it, `open_expansion` and `open_contraction` could be exchanged and
+    /// every other test here would still pass.
+    #[test]
+    fn a_contraction_is_cheaper_to_open_than_an_expansion() {
+        let slip = SlipCosts::from_model(&contraction_biased());
+        assert!(
+            slip.open_contraction > slip.open_expansion,
+            "a contraction-biased model must make contraction the cheaper slip to open"
+        );
+    }
+
+    /// The slip costs reconstruct the stutter model's own probabilities exactly — the affine
+    /// open plus its extends must sum back to `ln(P(n)) − ln(same_length_share)`, or this
+    /// aligner is pricing a different distribution than the one it was handed.
+    #[test]
+    fn the_slip_costs_reconstruct_the_stutter_probability() {
+        let model = contraction_biased();
+        let slip = SlipCosts::from_model(&model);
+        let period = std::num::NonZeroU8::new(3).unwrap();
+        let ln_same_length_share = model.same_length_share().ln();
+
+        for n in 1..=5i64 {
+            // Expansion of n units: one open plus (n − 1) extends, relative to no slip.
+            let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "expansion of {n} units diverged: {reconstructed} vs {expected}"
+            );
+            // Contraction likewise, and it is the direction the fixture makes cheaper.
+            let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "contraction of {n} units diverged"
+            );
+        }
+    }
+
     /// **Mandatory property 1: a clean read of the reference measures the reference length.**
     #[test]
     fn a_clean_read_measures_the_reference_tract() {
