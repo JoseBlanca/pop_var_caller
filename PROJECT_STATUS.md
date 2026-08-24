@@ -19,7 +19,36 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **step 6's vocabulary, and the id collision no bounds
+> - **Last completed task (2026-08-24):** **the rule that decides which sequences a locus is called
+> over, and four properties of it that nothing was pinning** (step B1 of
+> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`). Selection now has its arithmetic. For each sample covering a locus, its
+> *compared reads* are the sum of its rows in the merge's table — over alleles and over read
+> groups — and each sequence it showed, its read-group rows pooled, is asked whether those reads
+> reached `max(2 reads, share × that sample's compared reads)`. One sample reaching it admits the
+> sequence for the whole cohort. The pass fills, per sequence, the largest share any one sample
+> gave it, how many samples cleared the rule, and the cohort read total. Nothing calls it yet; the
+> ranking that reads those three is B2.
+> **Both Blockers were tests that could not fail, and the code was right the whole time.** The
+> rule has two halves — a floor of 2 reads and a share of the sample's own reads — that bind at
+> opposite ends of the depth range, and **in all seven fixtures the floor decided**, so deleting
+> the share term outright left every test green. The share is the half that does all the work at
+> high coverage: on the GIAB trio at 300× it keeps 2,308 of the merge's 15,474 alternatives where
+> a count-only bar keeps 10,793. And **the count of samples clearing the rule was asserted as 1
+> everywhere and never above**, so a fold that could not count past one passed — that count is the
+> cap's deciding key at 3 reads a position, where every admitted allele's share ties near two
+> thirds.
+> **One conformance failure with a second cost nobody predicted.** A sample with rows and no reads
+> was skipped where spec §8 names it among the assertions held in release. Because the skip fired
+> before the row loop, such a sample was also never checked by the two conditions the fold *does*
+> assert — a reviewer showed a zero-read row naming an allele outside the table passing in silence.
+> **Twelve mutations, twelve killed; eight of them survived before the review.**
+> **Raised and not decided: a sample the rule refused can still decide a truncation.** The cap
+> ranks on the largest share any one sample gave a sequence, maximised over *every* sample, so a
+> sample with one compared read contributes a share of 1.0 while clearing nothing — and a
+> reviewer built the locus where that cuts the sequence another sample earned at 20 reads in 100.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_b1_2026-08-24.md).
+> - **Previously (2026-08-24):** **step 6's vocabulary, and the id collision no bounds
 > check could see** (step A2 of
 > [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`; **Milestone A complete, at Checkpoint A**). Selection now has the shapes

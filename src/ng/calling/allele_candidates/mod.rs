@@ -23,6 +23,7 @@
 //! (spec §3.2).
 
 use crate::ng::calling::CandidateAlleles;
+use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
 use crate::ng::types::AlleleId;
 
@@ -632,10 +633,173 @@ impl AlleleSummary {
     }
 }
 
+/// **How many of one sample's reads at this locus were read off whole and compared with
+/// the reference** — the denominator every question in this module divides by
+/// (spec §1.3, §3).
+///
+/// It is the sum of that sample's rows, over alleles **and** over read groups, because the
+/// merge admits only complete observations onto alleles: a read that reached a row is a
+/// read that spanned the locus and was compared. **The reference's own rows are in it** —
+/// the bar is a share of the sample's reads, not of its non-reference reads, which is what
+/// makes a heterozygote's alternative sit near a half rather than near one.
+///
+/// **Three of the merge's other counts are deliberately not in it** (spec §5.1), and each
+/// would make the bar ask a sample for more than its comparable reads can answer:
+/// [`partials`](SampleSupport::partials), which say the sample carries *at least* this
+/// rather than what it carries and are scored on their own axis;
+/// [`reads_without_observation`](SampleSupport::reads_without_observation), which showed
+/// nothing; and [`reads_removed_as_evidence`](SampleSupport::reads_removed_as_evidence),
+/// which the merge withheld from the table. None of the three ever reached an allele, so
+/// none of them can be in a numerator either, and a denominator they entered alone would
+/// be a bar that rises with a sample's *unusable* depth.
+///
+/// Saturating, like the merge's own sums, which needs four billion reads of one sample at
+/// one locus to bind.
+fn compared_reads_of(sample: &SampleSupport) -> u32 {
+    sample
+        .supported
+        .iter()
+        .fold(0, |total, row| total.saturating_add(row.support.num_reads))
+}
+
+/// **Fold one locus's rows into one summary per allele, asking the bar of each sample
+/// separately** — the pass that decides which sequences are worth calling over
+/// (spec §3; arch §3.1).
+///
+/// One sample at a time: its denominator is [`compared_reads_of`], and then each allele it
+/// showed — **its read-group rows pooled** — is asked whether it reached the bar against
+/// that denominator. **One sample reaching it admits the sequence for the whole cohort**
+/// (spec §3.2), so the count of samples that did is not a term of the bar; it is only the
+/// cap's first tie-break, where it can reorder and never exclude.
+///
+/// **The read-group rows are pooled here, and this is the one place pooling is right**
+/// (arch §3.1). The merge keys its rows on `(allele, read group)` because a read likelihood
+/// may fold reads into one term only when every one of them would get the same number, and
+/// two lanes have different error rates (`doc/devel/ng/spec/read_likelihoods.md` §2.3). The
+/// bar counts reads, and a read is a read whichever lane produced it. Asking it of each row
+/// separately would be a **stricter rule applied to exactly the samples that carry more
+/// than one read group**, which a surveyed tomato archive found in 157 of 1,707 samples
+/// — 133 with two libraries, 20 with three, and four with 7, 16, 16 and 42
+/// (`doc/devel/ng/spec/read_groups.md` §1). A sample showing an allele 3 reads from one lane
+/// and 2 from another would then be asked to reach a bar of 5 twice over, and would fail it
+/// with the 5 reads that clear it.
+///
+/// **Pooled here rather than through [`SampleSupport::pooled_support_for`]**, which arch §3.1
+/// nominates. That method answers one allele, so reaching a sample's distinct alleles through
+/// it means scanning the whole locus table per sample — rows the sample never showed
+/// included — where grouping the rows walks each sample's own rows once. It also rebuilds all
+/// six of the merge's quality moments where the bar reads one of them.
+///
+/// **The reference is folded like every other allele, the bar included.** Its read total, its
+/// within-sample share and its count of samples reaching the bar are all filled, because they
+/// are honest facts about it and cost nothing to keep. **Nothing downstream reads that last
+/// one**: the reference is exempt from the bar, and step C1 seeds it into the candidate table
+/// structurally, before any sample's evidence is read (spec §6.1). It is recorded rather than
+/// suppressed so that no reader has to wonder which of the three fields is missing for
+/// allele 0.
+///
+/// # Panics
+///
+/// On three merge bugs, each an assertion held in release because its symptom would be a
+/// wrong candidate list rather than a crash, which is the convention spec §8 sets for this
+/// step and names two of these three in:
+///
+/// - a support row naming an allele the locus's table does not hold;
+/// - a sample's rows out of ascending allele order, or a locus's samples out of ascending
+///   sample order;
+/// - **a sample that has rows and no reads on any of them.** A sample with *no* rows is a
+///   different thing and is legitimate — it covers the locus and every one of its reads
+///   stopped inside it, so all it has is partials — and that one is stepped over.
+///
+/// **The `dead_code` allow covers [`compared_reads_of`] as well**, which is why that
+/// function carries none of its own: rustc treats an item with an `allow` on it as a live
+/// root, so everything it calls is live too. Removing this one alone makes the lint fire on
+/// both.
+#[allow(
+    dead_code,
+    reason = "its shipping caller is `select_generic`, built at step C1; until then the \
+              tests are its only callers, which `expect` cannot express — the expectation \
+              would be unfulfilled in the test build and satisfied in the library one"
+)]
+fn summarise_alleles(
+    observation: &CohortObservation,
+    min_allele_support: MinAltReads,
+    scratch: &mut SelectionScratch,
+) {
+    let table_len = observation.alleles.len();
+    let locus = observation.region;
+    scratch.reset_for(table_len);
+    let mut previous_sample: Option<usize> = None;
+    for sample in &observation.per_sample {
+        assert!(
+            previous_sample.is_none_or(|previous| previous < sample.sample),
+            "the locus's covering samples must be in ascending sample order, and sample {} \
+             follows {previous_sample:?} at {locus}: one sample listed twice is folded twice, \
+             which lifts its allele's cohort total and lets one sample clear the bar as two",
+            sample.sample
+        );
+        previous_sample = Some(sample.sample);
+        if sample.supported.is_empty() {
+            // A covering sample whose reads all stopped inside the locus: it has partials
+            // and nothing else, and partials count toward no bar (spec §5.1). Stepped over,
+            // and the samples after it are still folded.
+            continue;
+        }
+        let compared_reads = compared_reads_of(sample);
+        assert!(
+            compared_reads > 0,
+            "sample {} has {} support rows and no reads on any of them at {locus}: the merge \
+             writes no row for a pair a sample showed no reads for, and a zero denominator \
+             would divide the bar's share by nothing",
+            sample.sample,
+            sample.supported.len()
+        );
+        // The merge writes the rows in ascending `(allele, read group)` order, so one
+        // allele's rows are one contiguous run and `chunk_by` pools exactly the read
+        // groups.
+        let mut previous_allele: Option<usize> = None;
+        for rows in sample
+            .supported
+            .chunk_by(|left, right| left.allele == right.allele)
+        {
+            let allele = rows[0].allele;
+            assert!(
+                previous_allele.is_none_or(|previous| previous < allele),
+                "sample {}'s rows must be in ascending allele order, and allele {allele} \
+                 follows {previous_allele:?} at {locus}: out of order, one allele's rows \
+                 split into two runs and each asks the bar with part of the sample's reads, \
+                 so a sequence the sample really did earn quietly fails",
+                sample.sample
+            );
+            previous_allele = Some(allele);
+            let pooled_reads = rows.iter().fold(0_u32, |total, row| {
+                total.saturating_add(row.support.num_reads)
+            });
+            let summary = scratch.per_allele.get_mut(allele).unwrap_or_else(|| {
+                panic!(
+                    "sample {}'s support row named allele {allele} of a locus whose table \
+                     holds {table_len}, at {locus}",
+                    sample.sample
+                )
+            });
+            summary.cohort_reads = summary.cohort_reads.saturating_add(u64::from(pooled_reads));
+            let share = f64::from(pooled_reads) / f64::from(compared_reads);
+            summary.best_within_sample_share = summary.best_within_sample_share.max(share);
+            if min_allele_support.reached_by(pooled_reads, compared_reads) {
+                summary.samples_clearing_the_bar =
+                    summary.samples_clearing_the_bar.saturating_add(1);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::LocusKind;
+    use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
+    use crate::ng::run::cohort_merge::build::{AlleleSupport, PartialObservation, SupportedAllele};
+    use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+    use std::num::NonZeroU32;
 
     /// The two numbers themselves, and the floor's **coupling** to the merge's constant
     /// rather than to the digit 2 — the doc comment says the floor *is* the merge's own,
@@ -1058,5 +1222,516 @@ mod tests {
             remap,
             1,
         );
+    }
+
+    // ---- the fold: the per-sample denominator and the bar (step B1) --------------------
+
+    /// A support rule of `floor` reads or `share` of a sample's compared reads.
+    ///
+    /// Written out rather than taken from [`DEFAULT_MIN_ALLELE_SUPPORT`] because the
+    /// shipped share of 5 in 100 is inert below 41 compared reads, so a fixture of a
+    /// handful of reads built on it could not tell a right denominator from a wrong one:
+    /// the floor would decide either way. **Raising the share is not by itself enough to
+    /// make it decide** — the fixture also has to be deep enough that
+    /// `ceil(share × compared reads)` exceeds the floor, which is what
+    /// `the_share_refuses_what_the_floor_would_admit` is for.
+    fn support_rule_of(floor: u32, share: f64) -> MinAltReads {
+        MinAltReads {
+            floor: MinAltObs(NonZeroU32::new(floor).expect("a floor of at least one read")),
+            share: MinAltReadShare::new(share).expect("a share that is a fraction of one"),
+        }
+    }
+
+    /// One allele's row from the sample's **first** read group — the shape of every sample
+    /// that carries one library, which is most samples of most runs.
+    ///
+    /// `q_sum` is carried although no assertion in this step reads it: it is the field
+    /// step C3 sums into the leftover, so the fixtures hold a plausible error mass from
+    /// the start rather than gaining one when C3 arrives.
+    fn row(allele: usize, num_reads: u32, q_sum: f64) -> SupportedAllele {
+        row_from_group(allele, ReadGroupId(0), num_reads, q_sum)
+    }
+
+    /// One `(allele, read group)` row, naming the group — for the fixtures about two lanes
+    /// of one sample. The group is a [`ReadGroupId`] rather than a bare number so that it
+    /// cannot be transposed with `num_reads`, which is the neighbouring argument and also
+    /// counts something.
+    fn row_from_group(
+        allele: usize,
+        read_group: ReadGroupId,
+        num_reads: u32,
+        q_sum: f64,
+    ) -> SupportedAllele {
+        SupportedAllele {
+            allele,
+            read_group,
+            support: AlleleSupport {
+                num_reads,
+                q_sum,
+                ..AlleleSupport::default()
+            },
+        }
+    }
+
+    /// One covering sample showing `rows` and nothing on the merge's other axes.
+    fn sample_showing(sample: usize, rows: Vec<SupportedAllele>) -> SampleSupport {
+        SampleSupport {
+            sample,
+            supported: rows,
+            partials: Vec::new(),
+            reads_without_observation: 0,
+            reads_removed_as_evidence: 0,
+            reads_composed_across_records: 0,
+        }
+    }
+
+    /// A covering sample whose reads **all stopped inside the locus**: no support rows at
+    /// all, `num_reads` partial ones. The merge builds this — `per_sample` holds the
+    /// samples that covered the span, not the ones that spanned it — and it is the only
+    /// input that reaches the fold with a denominator of zero.
+    fn sample_with_only_partials(sample: usize, num_reads: u32) -> SampleSupport {
+        let mut only_partials = sample_showing(sample, Vec::new());
+        only_partials.partials = vec![partial_of(num_reads)];
+        only_partials
+    }
+
+    /// `num_reads` reads that stopped inside the locus — the axis the denominator must not
+    /// read.
+    fn partial_of(num_reads: u32) -> PartialObservation {
+        PartialObservation {
+            witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
+                .expect("a two-position witness"),
+            read_group: ReadGroupId(0),
+            bases: Box::from(b"AC".as_slice()),
+            num_reads,
+            q_sum: -3.0,
+        }
+    }
+
+    /// A cohort locus over `alleles`, the reference first, covered by `per_sample`.
+    fn locus_of(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
+        CohortObservation {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(100),
+                end: Position(100),
+            },
+            alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
+            per_sample,
+        }
+    }
+
+    /// The fold's summaries for `observation` under `min_allele_support`.
+    fn summaries_of(
+        observation: &CohortObservation,
+        min_allele_support: MinAltReads,
+    ) -> Vec<AlleleSummary> {
+        let mut scratch = SelectionScratch::new();
+        summarise_alleles(observation, min_allele_support, &mut scratch);
+        scratch.per_allele.clone()
+    }
+
+    /// **The plan's oracle for this step**, and the four things it separates.
+    ///
+    /// One sample, whose compared reads are 9 by an independent count — 4 reference reads
+    /// and 5 on one alternative — while the merge's other three axes hold 6 partial reads,
+    /// 5 that showed nothing and 3 removed as evidence. The rule is 2 reads or half of the
+    /// sample's compared reads, so it asks for 5, and the alternative has exactly 5. Every
+    /// wrong denominator this step can produce moves the answer:
+    ///
+    /// - counting the **partials** makes it 15 compared reads and a bar of 8, so the
+    ///   alternative fails;
+    /// - counting the **silent reads** makes it 14 and a bar of 7, and it fails;
+    /// - counting the **reads removed as evidence** makes it 12 and a bar of 6, and it
+    ///   fails;
+    /// - dropping the **reference's own rows** makes it 5 and a bar of 3, which the
+    ///   alternative passes — so the count is asserted directly as well, since that one
+    ///   error is invisible in the verdict.
+    ///
+    /// And the alternative's 5 reads are 3 from one read group and 2 from another, so a
+    /// fold that took the larger row instead of the sum would ask 5 of 3 and fail.
+    #[test]
+    fn the_denominator_is_the_samples_compared_reads_and_nothing_else() {
+        let mut sample = sample_showing(
+            0,
+            vec![
+                row(0, 4, -4.0),
+                row_from_group(1, ReadGroupId(0), 3, -3.0),
+                row_from_group(1, ReadGroupId(1), 2, -2.0),
+            ],
+        );
+        sample.partials = vec![partial_of(6)];
+        sample.reads_without_observation = 5;
+        sample.reads_removed_as_evidence = 3;
+
+        assert_eq!(
+            compared_reads_of(&sample),
+            9,
+            "four reference reads and five on the alternative, pooled over both read groups"
+        );
+
+        let observation = locus_of(&[b"A", b"C"], vec![sample]);
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.5));
+        assert_eq!(
+            summaries[1].samples_clearing_the_bar, 1,
+            "half of nine compared reads is five, and the alternative has exactly five"
+        );
+        assert_eq!(
+            summaries[1].best_within_sample_share,
+            5.0 / 9.0,
+            "the share is of the sample's compared reads, the reference's included"
+        );
+    }
+
+    /// **The share half of the rule, in the regime where it is the half that decides** —
+    /// which no other fixture here enters, because below 41 compared reads the floor
+    /// decides for any share up to 5 in 100.
+    ///
+    /// One sample with 100 compared reads shows 3 on the alternative, against 2 reads or 5
+    /// in 100: the floor would admit it and the share asks for 5, so it is refused; at 5
+    /// reads it is admitted. **Without this pair the whole share term could be deleted and
+    /// every other test here would still pass**, and a fold applying the floor alone admits
+    /// sequencing error as a candidate allele at 300× — the depth at which the share is the
+    /// only half of the rule doing any work (spec §3.3: a 5-in-100 share cuts the GIAB
+    /// trio's 15,474 alternatives to 2,308 where a count-only bar keeps 10,793).
+    ///
+    /// It also pins the **denominator** the share is taken of: asked against the allele's
+    /// own 3 reads instead of the sample's 100, `ceil(0.05 × 3) = 1` and the alternative
+    /// would clear.
+    #[test]
+    fn the_share_refuses_what_the_floor_would_admit() {
+        let refused = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 97, -97.0), row(1, 3, -3.0)])],
+        );
+        assert_eq!(
+            summaries_of(&refused, support_rule_of(2, 0.05))[1].samples_clearing_the_bar,
+            0,
+            "three reads clear a floor of two and fail a share of five in a hundred of 100"
+        );
+
+        let admitted = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 95, -95.0), row(1, 5, -5.0)])],
+        );
+        assert_eq!(
+            summaries_of(&admitted, support_rule_of(2, 0.05))[1].samples_clearing_the_bar,
+            1,
+            "and five reads is exactly the share, so this is a boundary and not a refusal \
+             of everything at depth"
+        );
+    }
+
+    /// **A sample's two read groups sum rather than the larger winning**, in the direction
+    /// the oracle above cannot show: here each row on its own clears a rule of 2 reads, so
+    /// a fold asking the rule once per row would count the sample twice and report an
+    /// allele two samples cleared where one did.
+    ///
+    /// That count is the cap's first tie-break (spec §4.1), so the wrong answer is a
+    /// different allele kept at a truncated locus, with nothing failing.
+    #[test]
+    fn one_samples_two_read_groups_are_one_sample() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 5, -5.0),
+                    row_from_group(1, ReadGroupId(0), 3, -3.0),
+                    row_from_group(1, ReadGroupId(1), 2, -2.0),
+                ],
+            )],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(
+            summaries[1].samples_clearing_the_bar, 1,
+            "one sample showed the allele, from two lanes"
+        );
+        assert_eq!(
+            summaries[1].cohort_reads, 5,
+            "and its five reads are five reads whichever lane produced them"
+        );
+    }
+
+    /// **The count is a count and not a flag** (spec §4.1). Two samples clear the rule on
+    /// the alternative and the summary says two.
+    ///
+    /// **This is the number the cap breaks its first tie on, and at three reads a position
+    /// it is the only key that separates two alleles at all** — every admitted allele there
+    /// has a share near two thirds, so the share key ties and this one decides (spec §4.1).
+    /// A count stuck at one would drop the ranking through to the cohort read total, which
+    /// is production's ranking and the one spec §4.1 exists not to be: at a thousand
+    /// samples it truncates the private alleles first.
+    #[test]
+    fn every_sample_that_cleared_the_rule_is_counted() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 1, -1.0), row(1, 3, -3.0)]),
+                sample_showing(1, vec![row(0, 1, -1.0), row(1, 4, -4.0)]),
+            ],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(summaries[1].samples_clearing_the_bar, 2);
+        assert_eq!(summaries[1].cohort_reads, 7);
+    }
+
+    /// **The share is the largest of one sample's, never the cohort's** (spec §4.1): the
+    /// allele takes 3 of 4 reads in one sample and 1 of 40 in another, and the summary
+    /// keeps 0.75 — where a cohort share would be 4 in 44, about 0.09, and would rank a
+    /// private allele below a systematic artefact at scale.
+    ///
+    /// The sample of 40 reads is also what makes the rule's independence visible: at 2
+    /// reads or a tenth it asks 4 of that sample and gets 1, so it does not clear, and the
+    /// count stays at the one sample that did.
+    ///
+    /// **The larger share arrives first here**, which is what separates a maximum from a
+    /// last-wins assignment; `the_largest_share_wins_when_it_arrives_last` is the other
+    /// direction, and both are needed.
+    #[test]
+    fn the_share_is_one_samples_own_and_the_rule_is_asked_of_each_sample_alone() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 1, -1.0), row(1, 3, -3.0)]),
+                sample_showing(1, vec![row(0, 39, -39.0), row(1, 1, -1.0)]),
+            ],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.10));
+        assert_eq!(summaries[1].best_within_sample_share, 0.75);
+        assert_eq!(
+            summaries[1].samples_clearing_the_bar, 1,
+            "the second sample's one read in forty reaches neither half of the rule"
+        );
+        assert_eq!(
+            summaries[1].cohort_reads, 4,
+            "the cohort total is the one place a sum over samples appears"
+        );
+    }
+
+    /// **The share is maximised in both directions**, and the two fixtures fail different
+    /// wrong folds: with the larger share first, a last-wins assignment is caught; with it
+    /// last, a first-wins one is.
+    ///
+    /// A first-wins fold would make the cap's first ranking key depend on the order the
+    /// samples happen to be walked in, so which allele survives a truncated locus would
+    /// change when the cohort is re-ordered — and spec §8 requires the output to be
+    /// byte-identical at any worker count.
+    #[test]
+    fn the_largest_share_wins_when_it_arrives_last() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 3, -3.0), row(1, 1, -1.0)]),
+                sample_showing(1, vec![row(0, 1, -1.0), row(1, 3, -3.0)]),
+            ],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(summaries[1].best_within_sample_share, 0.75);
+    }
+
+    /// **Adding a sample that shows only reference reads changes nothing about the
+    /// alternatives** — spec §3.2's principle, that no term of the rule reads the cohort,
+    /// as a test. It is the one that fails first if a cohort term ever creeps into the
+    /// denominator or the share.
+    #[test]
+    fn a_sample_showing_only_reference_reads_changes_no_alternatives_summary() {
+        let carrier = || sample_showing(0, vec![row(0, 1, -1.0), row(1, 2, -2.0)]);
+        let alone = summaries_of(
+            &locus_of(&[b"A", b"C"], vec![carrier()]),
+            support_rule_of(2, 0.5),
+        );
+        let with_a_bystander = summaries_of(
+            &locus_of(
+                &[b"A", b"C"],
+                vec![carrier(), sample_showing(1, vec![row(0, 60, -60.0)])],
+            ),
+            support_rule_of(2, 0.5),
+        );
+        assert_eq!(alone[1], with_a_bystander[1]);
+    }
+
+    /// **What the fold records for the reference**, pinned rather than left to a reader of
+    /// the doc comment. It is folded like every other allele: its reads are totalled, its
+    /// within-sample share is kept, and the rule is asked of it too.
+    ///
+    /// **Nothing downstream reads that last answer** — step C1 seeds the reference into the
+    /// candidate table structurally, before any sample's evidence is read (spec §6.1) — so
+    /// this test exists to stop a C1 that loops `cleared_the_bar()` over the whole table
+    /// from either double-seeding the reference or dropping it, neither of which any other
+    /// test here would notice.
+    #[test]
+    fn the_reference_row_is_folded_like_every_other_allele() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 3, -3.0), row(1, 1, -1.0)])],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.5));
+        assert_eq!(summaries[0].cohort_reads, 3);
+        assert_eq!(summaries[0].best_within_sample_share, 0.75);
+        assert_eq!(
+            summaries[0].samples_clearing_the_bar, 1,
+            "the rule is asked of the reference too; C1 does not read the answer"
+        );
+    }
+
+    /// A support row naming an allele the locus's table does not hold is a merge bug, and
+    /// it is refused rather than folded into a neighbouring allele's summary.
+    #[test]
+    #[should_panic(expected = "named allele 2 of a locus whose table holds 2")]
+    fn a_row_naming_an_allele_the_locus_does_not_hold_is_refused() {
+        summaries_of(
+            &locus_of(
+                &[b"A", b"C"],
+                vec![sample_showing(7, vec![row(0, 1, -1.0), row(2, 3, -3.0)])],
+            ),
+            support_rule_of(2, 0.0),
+        );
+    }
+
+    /// **Rows out of ascending allele order are refused**, because pooling the read groups
+    /// reads them as contiguous runs: split into two runs, one allele asks the rule twice
+    /// with part of the sample's reads each time, and a sequence the sample earned quietly
+    /// fails. Here 3 reads and 2 reads would each be asked against a bar of 5.
+    #[test]
+    #[should_panic(expected = "must be in ascending allele order")]
+    fn rows_out_of_allele_order_are_refused() {
+        summaries_of(
+            &locus_of(
+                &[b"A", b"C"],
+                vec![sample_showing(
+                    4,
+                    vec![
+                        row_from_group(1, ReadGroupId(0), 3, -3.0),
+                        row(0, 5, -5.0),
+                        row_from_group(1, ReadGroupId(1), 2, -2.0),
+                    ],
+                )],
+            ),
+            support_rule_of(2, 0.5),
+        );
+    }
+
+    /// **A sample listed twice is refused**, which is the same failure shape as rows out of
+    /// allele order one level up: folded twice, one sample's evidence lifts its allele's
+    /// cohort total and clears the rule as two samples, and the cap's first tie-break moves
+    /// with nothing failing.
+    #[test]
+    #[should_panic(expected = "must be in ascending sample order")]
+    fn a_sample_listed_twice_is_refused() {
+        let twice = || sample_showing(3, vec![row(0, 1, -1.0), row(1, 3, -3.0)]);
+        summaries_of(
+            &locus_of(&[b"A", b"C"], vec![twice(), twice()]),
+            support_rule_of(2, 0.0),
+        );
+    }
+
+    /// **A sample with rows and no reads on any of them is refused** — spec §8 names it
+    /// among the caller bugs this step asserts on, beside the out-of-range allele index.
+    /// The merge cannot build it: it writes no row for a pair a sample showed no reads for.
+    ///
+    /// The assertion is what makes the two other assertions reachable for such a sample. A
+    /// guard that skipped it instead would step over the ordering and range checks as well,
+    /// so a zero-read row naming an allele outside the table would pass unnoticed.
+    #[test]
+    #[should_panic(expected = "no reads on any of them")]
+    fn a_sample_with_rows_and_no_reads_is_refused() {
+        summaries_of(
+            &locus_of(
+                &[b"A", b"C"],
+                vec![sample_showing(2, vec![row(0, 0, 0.0), row(1, 0, 0.0)])],
+            ),
+            support_rule_of(2, 0.5),
+        );
+    }
+
+    /// **A covering sample with no rows at all is legitimate, and is the merge's only
+    /// realisable zero denominator**: it covered the locus and every one of its reads
+    /// stopped inside it, so all it has is partials — which count toward no rule and enter
+    /// no denominator (spec §5.1).
+    #[test]
+    fn a_covering_sample_whose_reads_all_stopped_inside_the_locus_has_no_compared_reads() {
+        assert_eq!(compared_reads_of(&sample_with_only_partials(0, 7)), 0);
+    }
+
+    /// That sample is **stepped over and is not a stop**: the samples listed after it are
+    /// still folded, which is what separates the `continue` from a `return`.
+    #[test]
+    fn a_sample_with_only_partial_reads_is_stepped_over_and_the_next_sample_is_folded() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_with_only_partials(0, 7),
+                sample_showing(1, vec![row(0, 1, -1.0), row(1, 3, -3.0)]),
+            ],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.5));
+        assert_eq!(summaries[1].samples_clearing_the_bar, 1);
+        assert_eq!(summaries[1].best_within_sample_share, 0.75);
+        assert_eq!(summaries[1].cohort_reads, 3);
+    }
+
+    /// A locus whose table is the reference alone gets one summary, not none and not two.
+    /// **It is a first-class outcome rather than a corner** — selection reaches it at more
+    /// than one built locus in four on both benchmarks (spec §6.2) — and the fold has to
+    /// size its buffers for it before C1 can return it.
+    #[test]
+    fn a_reference_only_table_gets_one_summary() {
+        let observation = locus_of(&[b"A"], vec![sample_showing(0, vec![row(0, 3, -3.0)])]);
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].cohort_reads, 3);
+    }
+
+    /// A locus no sample covers leaves every summary at its default — and this is the
+    /// fixture that catches a reset moved inside the sample loop, which would leave the
+    /// *previous* locus's summaries standing for a locus that has no samples to overwrite
+    /// them.
+    #[test]
+    fn a_locus_no_sample_covers_leaves_every_summary_at_its_default() {
+        let mut scratch = SelectionScratch::new();
+        let covered = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 1, -1.0), row(1, 4, -4.0)])],
+        );
+        summarise_alleles(&covered, support_rule_of(2, 0.0), &mut scratch);
+        let uncovered = locus_of(&[b"A", b"C"], Vec::new());
+        summarise_alleles(&uncovered, support_rule_of(2, 0.0), &mut scratch);
+        assert_eq!(scratch.table_len(), 2);
+        assert!(
+            scratch
+                .per_allele
+                .iter()
+                .all(|summary| *summary == AlleleSummary::default())
+        );
+    }
+
+    /// The fold resets its buffers, so a second locus carries nothing of the first —
+    /// neither a summary from an allele the second locus does not have, nor a count added
+    /// on top of the first locus's.
+    #[test]
+    fn folding_a_second_locus_carries_nothing_from_the_first() {
+        let mut scratch = SelectionScratch::new();
+        let wide = locus_of(
+            &[b"A", b"C", b"G"],
+            vec![sample_showing(
+                0,
+                vec![row(0, 1, -1.0), row(1, 4, -4.0), row(2, 4, -4.0)],
+            )],
+        );
+        summarise_alleles(&wide, support_rule_of(2, 0.0), &mut scratch);
+        assert_eq!(scratch.table_len(), 3);
+
+        let narrow = locus_of(
+            &[b"A", b"C"],
+            vec![sample_showing(0, vec![row(0, 1, -1.0), row(1, 4, -4.0)])],
+        );
+        summarise_alleles(&narrow, support_rule_of(2, 0.0), &mut scratch);
+        assert_eq!(scratch.table_len(), 2, "the third allele is gone");
+        assert_eq!(
+            scratch.per_allele[1].cohort_reads, 4,
+            "and the second locus's four reads are four, not eight"
+        );
+        assert_eq!(scratch.per_allele[1].samples_clearing_the_bar, 1);
     }
 }

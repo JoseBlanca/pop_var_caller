@@ -133,7 +133,7 @@ indexed by the merge table's own index. *Depends:* A1. *Source:* arch §2.2, §2
 
 ### Milestone B — the fold (the heart, on hand-built observations)
 
-**B1. The per-sample denominator and the bar. — own commit, do not bundle.**  ☐
+**B1. The per-sample denominator and the bar. — own commit, do not bundle.**  ✅
 The single pass over `CohortObservation::per_sample`: a sample's reads at the locus are the sum of
 its rows, **pooled across read groups** and across alleles, which is that sample's compared reads
 because the merge admits only complete observations onto alleles; each row then asks
