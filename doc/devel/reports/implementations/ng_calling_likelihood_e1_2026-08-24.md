@@ -183,16 +183,25 @@ All in the container, from this worktree.
 
 | command | at the rename (`80ecd863`) | after the review's fixes |
 |---|---|---|
-| `./scripts/dev.sh cargo test` — library target | **4,354 passed, 0 failed, 14 ignored** — identical to `bb7a41e9`, measured on the clean tree before the edit | **4,355 / 0 / 14** — the one added test |
-| `./scripts/dev.sh cargo test --all-features` — every target | 4,448 / 0 / 18 | 4,449 / 0 / 18 |
+| `./scripts/dev.sh cargo test` — library target | **4,354 passed, 0 failed, 14 ignored** — identical to `bb7a41e9`, measured on the clean tree before the edit | **4,358 / 0 / 14** — four added tests, one replaced |
+| `./scripts/dev.sh cargo test --all-features` — every target | 4,448 / 0 / 18 | 4,452 / 0 / 18 |
 | `clippy --lib --all-features --tests -- -D warnings` | exit 0, no warnings | exit 0, no warnings |
 | `cargo check --examples --all-features` | exit 0 | exit 0 |
 | `cargo fmt --check` | exit 0 | exit 0 |
 
 `ng::alignment::stutter::tests` held **15 tests before and after the rename** — none added, none
-removed — and holds **16** after the review, the one addition being
-`every_accessor_returns_its_own_rate`. `ng::calling::likelihood` holds **162** throughout,
-untouched: the generic path does not read this module.
+removed — and holds **19** after the review: four added
+(`every_accessor_returns_its_own_rate`, `sanitizing_maps_each_ill_formed_rate_to_its_documented_value`,
+`the_extreme_length_changes_score_zero_rather_than_overflowing`, and the property test
+`any_rates_yield_a_distribution_that_is_zero_past_the_cutoff`), and one replaced
+(`part_repeat_sizes_compress_onto_consecutive_ranks` → `part_repeat_probabilities_step_down_one_rank_at_a_time`).
+`ng::calling::likelihood` holds **162** throughout, untouched: the generic path does not read
+this module.
+
+*(One full-suite run failed with a **rustc internal compiler error** in the codegen backend
+while building `examples/ng_catalog_window_probe`, a file nothing here touches. It did not
+reproduce: the immediate re-run was clean. Recorded because a green log that follows a red one
+should say why.)*
 
 *(`--all-targets` clippy is red on `main` in `examples/ng_duplicated_class_harness.rs` and
 `benches/freebayes_bookkeeping.rs`, unrelated to this branch; `--lib --all-features --tests` is the
@@ -249,15 +258,76 @@ Also applied:
 | `read_likelihoods.md` §4.2 and §7 record that the repointing was made | both still read "the edit is not made here", while §7's own preamble says the three documents "must say the same thing" |
 | line anchors in the plan and arch updated | the rename moved every line in `stutter.rs`; **E2's own bullet was sending the next implementer to `stutter.rs:63`**, where `MAX_SLIP` no longer is (it is at 78) |
 
+### The mutation round, and the four holes it found in tests that already passed
+
+The reliability pass ran **50 mutations: 41 killed, 9 survived, and 4 of those nine changed no
+behaviour on any input the suite supplies** — so five genuine survivors. It also settled the
+question §3 above asks: **all 15 unordered pairs of the six rates, transposed inside the
+constructor, are killed**, by between two and eight tests each. The narrowest — the two
+part-repeat direction shares — is caught by exactly two, which is what the fixture's 0.004
+against 0.012 and the negative-Δ half of the part-repeat formula test were put there for.
+
+What survived, and what now kills it:
+
+| the mutation that lived | why nothing saw it | the test added |
+|---|---|---|
+| `NaN` in a direction slot sanitized to **1.0** — the *most*-stutter end, where the contract promises the least; and the one-step equivalent sending `NaN` to `GEOM_MAX` | `ill_formed_rates_still_yield_probabilities` reaches that path for all 36 slot-and-value combinations and asserts only that the output is finite and inside `[0, 1]` — **not one of the 36 had its value checked** | `sanitizing_maps_each_ill_formed_rate_to_its_documented_value`, a table of eight inputs against both slot kinds |
+| the one-step clamp firing only at the exact endpoints, letting a share of 0.001 through | no fixture supplied a one-step share strictly inside `(0, 0.01)` or `(0.99, 1)`. It matters: 0.001 reaches an aligner as `ln(1 − 0.001) ≈ −0.001`, an almost-free slip extension | the same table's last two rows |
+| `hipstr_em_start`'s whole-repeat shorter share edited 0.1 → 0.2, and its part-repeat shorter share 0.01 → 0.02 | the matched-rows test named five of one row's six values and four of the other's | that test extended to **all twelve** |
+| a size computed by negation rather than `unsigned_abs`, which panics on `i64::MIN` | the widest change any test passed was ±60 | `the_extreme_length_changes_score_zero_rather_than_overflowing` |
+
+**And one test was doing nothing.** `part_repeat_sizes_compress_onto_consecutive_ranks` built no
+`StutterModel` and called nothing in the module — it recomputed `bp_diff - bp_diff / period` in
+its own body and compared the answer with `[1, 2, 3, 4, 5]`, which is a statement about Rust's
+truncating division. Across all 50 mutations **it never once killed one**, including the two that
+corrupt the very re-indexing it was named for. Replaced by
+`part_repeat_probabilities_step_down_one_rank_at_a_time`, which asserts the same property as a
+ratio between consecutive values *through* `probability`, so it re-spells nothing the
+implementation says.
+
+**A property test now covers the rate space**, because the sweep it joins walks three hand-built
+models — three corners of six dimensions — and that stops being enough at step E3, where
+`stutter_rates_for` starts handing this type **fitted** numbers. No fitted row has ever been
+through this suite.
+
+Every one of the six mutations above was re-run here against the added tests: each is killed, and
+the source was restored from a checksum-verified copy after each. *(One batch run hit its timeout
+mid-loop and left a mutation on disk — caught by the checksum check, restored, and re-run one
+mutation at a time. It is exactly the failure mode the project's own commit discipline warns
+about, and the reason that check exists.)*
+
 **Two claims in this report were wrong and are corrected above**: the matched-rows test pins five
 and four values rather than seven and seven, and §3's "the existing fixtures already separate
 them" held for `probability` but not for the accessors.
 
+**One inherited doc sentence was wrong about its own code.** `StutterModel::new` promised that "a
+non-finite rate becomes `0` (no stutter), the no-information end of the scale". That holds for
+`NaN` and `−∞`; **`+∞` clamps to 1.0** in a direction slot and to `GEOM_MAX` in a one-step slot,
+which is the opposite end. The wording came from `bb7a41e9` unchanged, and nothing would have
+caught it — writing the table test is what exposed it. Corrected to say what the code does and
+why the two cases differ: `NaN` is missing information, an overshoot is a magnitude past the
+range.
+
 ## 11. Left for the owner, not decided here
 
-Four things the review raised that reach past a rename step, listed with a recommendation each in
-the handover rather than settled in this commit: renaming `StutterRates`, whose noun says *rates*
-while all six fields say *share*; a vocabulary sweep of `alignment.md`'s remaining 14 occurrences
-and six aligner identifiers; unifying the six aligners' near-identical `SlipCosts::from_model`;
-and the tautological `assert_eq!` at `ng::calling::likelihood`'s `mod.rs:2129-2130`, which
-compares a re-export to itself and cannot fail.
+Five things the review raised that reach past a rename step, listed with a recommendation each in
+the handover rather than settled in this commit.
+
+**The one with a live defect behind it: three of the six aligners cannot tell an expansion from a
+contraction.** Swapping `open_expansion` with `open_contraction` in
+[`ssr_anchor_robust.rs`](../../../../src/ng/alignment/ssr_anchor_robust.rs) survives the whole
+`ng::alignment` suite, and it is **not** a no-op there — measured on that file's own
+contraction-biased fixture, the two costs are −3.489 and −2.641, so the swap moves a slip by
+0.847 nats. In [`ssr_noise_robust.rs`](../../../../src/ng/alignment/ssr_noise_robust.rs) and
+[`ssr_robust_indel.rs`](../../../../src/ng/alignment/ssr_robust_indel.rs) it is worse in kind: every
+fixture there is `hipstr_shipped()`, whose two whole-repeat shares are both 0.05, so both opens
+are −2.9191921964316565 clean **and** swapped, bit for bit — **no transposition in those files can
+ever be caught**. That is the same blindness `all_distinct()` was created to remove, in the module
+that fixture lives in. It is pre-existing, it is not this step's to fix, and the fix is small:
+give those three files an asymmetric fixture, as `ssr_anchor_firm.rs` already has.
+
+The other four: renaming `StutterRates`, whose noun says *rates* while all six fields say *share*;
+a vocabulary sweep of `alignment.md`'s remaining 14 occurrences and six aligner identifiers;
+unifying the six aligners' near-identical `SlipCosts::from_model`; and the tautological
+`assert_eq!` at `ng::calling::likelihood`'s `mod.rs:2129-2130`, which compares a re-export to
+itself and cannot fail.

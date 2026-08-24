@@ -217,8 +217,17 @@ impl StutterModel {
     /// `probability` return `1.9`, a negative share returns a negative probability, and
     /// `NaN` poisons every score while *reporting a healthy floor* — because `f64::max`
     /// absorbs `NaN` and `f64::clamp` passes it straight through, so the constructor would
-    /// look fine and only the results would be wrong. A non-finite rate becomes `0` (no
-    /// stutter), the no-information end of the scale.
+    /// look fine and only the results would be wrong.
+    ///
+    /// **What each ill-formed value becomes**, because "sanitized" on its own says nothing
+    /// about which end of the scale it lands at. `NaN` and `−∞` become the **least**-stutter
+    /// end — `0` in a direction slot, [`GEOM_MIN`] in a one-step slot — which is the
+    /// no-information answer. **`+∞` and any overshoot clamp to the top of the slot's range
+    /// instead**, `1.0` or [`GEOM_MAX`]: they are not missing information, they are a
+    /// magnitude past the range, and the nearest legal value is the honest reading of them.
+    /// `sanitizing_maps_each_ill_formed_rate_to_its_documented_value` is the table, and it
+    /// exists because a sanitizer that sent `NaN` to the *most*-stutter end satisfied every
+    /// assertion this module had.
     #[must_use]
     pub fn new(rates: StutterRates) -> Self {
         debug_assert!(
@@ -609,24 +618,39 @@ mod tests {
         assert!(model.probability(-1, period) > model.probability(1, period));
     }
 
-    /// **Rank compression, the reason for the re-indexing.** At period 3 the part-repeat
-    /// changes 1, 2, 4, 5, 7 must map onto consecutive geometric steps 1, 2, 3, 4, 5 — so
-    /// the support has no gaps. Indexing by Δ itself would skip the multiples and distort
-    /// the distribution. Negatives mirror exactly, because Rust truncates toward zero.
+    /// **Rank compression, the reason for the re-indexing**, asserted *through the model*.
+    /// At period 3 the part-repeat changes 1, 2, 4, 5, 7 must land on consecutive geometric
+    /// steps 1, 2, 3, 4, 5, so the support has no gaps; indexing by Δ itself would skip the
+    /// multiples and distort the distribution.
+    ///
+    /// **The ratio form is the point.** This test's predecessor recomputed
+    /// `bp_diff - bp_diff / period` in its own body and compared the result with
+    /// `[1, 2, 3, 4, 5]` — a statement about Rust's truncating division that built no
+    /// `StutterModel` and called nothing in this module, so it held whatever `probability`
+    /// did. Measured by this step's review across 50 mutations, it never once killed one,
+    /// including the two that corrupt the very re-indexing it was named for. Asserting the
+    /// *ratio between consecutive values* instead re-spells nothing the implementation says,
+    /// so a shared misconception cannot hide in it: each step down must be exactly
+    /// `1 − one_step_share`, in both directions.
     #[test]
-    fn part_repeat_sizes_compress_onto_consecutive_ranks() {
-        let period = 3i64;
-        let ranks: Vec<i64> = [1i64, 2, 4, 5, 7]
-            .iter()
-            .map(|&bp_diff| bp_diff - bp_diff / period)
-            .collect();
-        assert_eq!(ranks, vec![1, 2, 3, 4, 5]);
+    fn part_repeat_probabilities_step_down_one_rank_at_a_time() {
+        let model = all_distinct();
+        let period = period(3);
+        let ratio = 1.0 - model.part_repeat_one_step_share();
 
-        let negative_ranks: Vec<i64> = [-1i64, -2, -4, -5, -7]
-            .iter()
-            .map(|&bp_diff| bp_diff - bp_diff / period)
-            .collect();
-        assert_eq!(negative_ranks, vec![-1, -2, -3, -4, -5]);
+        for pair in [1i64, 2, 4, 5, 7].windows(2) {
+            let (small, large) = (pair[0], pair[1]);
+            for sign in [1i64, -1] {
+                let step = model.probability(sign * large, period)
+                    / model.probability(sign * small, period);
+                assert!(
+                    (step - ratio).abs() < 1e-12,
+                    "Δ={} to Δ={} moved by {step}, not one rank ({ratio})",
+                    sign * small,
+                    sign * large
+                );
+            }
+        }
     }
 
     /// **The inverted one-step-share trap** (`doc/devel/ng/spec/read_likelihoods.md` §4.2). A
@@ -853,20 +877,30 @@ mod tests {
     /// exists nowhere (`doc/devel/ng/spec/alignment.md` §5.2 records an earlier draft of the
     /// spec doing exactly that). The named constructors are what stop that happening by hand;
     /// this pins their contents.
+    ///
+    /// **All twelve values, which it did not always cover.** It used to name five of
+    /// `hipstr_shipped`'s six and four of `hipstr_em_start`'s, and this step's review
+    /// measured what that left open: editing `hipstr_em_start`'s whole-repeat shorter share
+    /// from 0.1 to 0.2, or its part-repeat shorter share from 0.01 to 0.02, changed the
+    /// distribution and left the whole suite green. A test whose stated job is that a row
+    /// cannot be edited by hand has to name every number in it.
     #[test]
     fn the_two_hipstr_parameter_sets_are_kept_as_matched_rows() {
         let shipped = StutterModel::hipstr_shipped();
-        assert_eq!(shipped.whole_repeat_one_step_share(), 0.95);
-        assert_eq!(shipped.part_repeat_one_step_share(), 0.95);
         assert_eq!(shipped.whole_repeat_longer_share(), 0.05);
         assert_eq!(shipped.whole_repeat_shorter_share(), 0.05);
+        assert_eq!(shipped.whole_repeat_one_step_share(), 0.95);
         assert_eq!(shipped.part_repeat_longer_share(), 0.01);
+        assert_eq!(shipped.part_repeat_shorter_share(), 0.01);
+        assert_eq!(shipped.part_repeat_one_step_share(), 0.95);
 
         let em_start = StutterModel::hipstr_em_start();
-        assert_eq!(em_start.whole_repeat_one_step_share(), 0.9);
-        assert_eq!(em_start.part_repeat_one_step_share(), 0.8);
         assert_eq!(em_start.whole_repeat_longer_share(), 0.1);
+        assert_eq!(em_start.whole_repeat_shorter_share(), 0.1);
+        assert_eq!(em_start.whole_repeat_one_step_share(), 0.9);
         assert_eq!(em_start.part_repeat_longer_share(), 0.01);
+        assert_eq!(em_start.part_repeat_shorter_share(), 0.01);
+        assert_eq!(em_start.part_repeat_one_step_share(), 0.8);
 
         // The rows differ in their one-step shares — which is the whole reason to keep them
         // apart, and also why HipSTR treats the two as independent.
@@ -874,6 +908,150 @@ mod tests {
             em_start.whole_repeat_one_step_share(),
             em_start.part_repeat_one_step_share()
         );
+    }
+
+    /// **What sanitizing turns each ill-formed rate into**, not merely that what comes out is
+    /// still a probability. `ill_formed_rates_still_yield_probabilities` reaches this path for
+    /// all 36 slot-and-value combinations and asserts finiteness and range only — so a
+    /// sanitizer that mapped `NaN` to `1.0`, the *most* stutter rather than the least,
+    /// satisfied it just as well. Measured by this step's review: that mutation, and the
+    /// one-step equivalent sending `NaN` to [`GEOM_MAX`], both survived the whole suite.
+    ///
+    /// Note what the table says about `+∞`: on a direction share it clamps to **1.0**, not to
+    /// zero. `StutterModel::new`'s "the least-stutter end" holds for `NaN` and `−∞`; an
+    /// overshoot is a magnitude past the range rather than missing information, and clamps to
+    /// the nearest legal value.
+    ///
+    /// The last two rows are well formed as a direction share and outside the one-step
+    /// bounds, which is the only thing that separates the real clamp from one that fires
+    /// at the exact endpoints alone — a share of 0.001 reaches an aligner as an
+    /// almost-free slip extension, `ln(1 − 0.001) ≈ −0.001`.
+    #[test]
+    fn sanitizing_maps_each_ill_formed_rate_to_its_documented_value() {
+        let well_formed = StutterRates {
+            whole_repeat_longer_share: 0.05,
+            whole_repeat_shorter_share: 0.05,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.01,
+            part_repeat_shorter_share: 0.01,
+            part_repeat_one_step_share: 0.95,
+        };
+        // (what goes in, what a direction slot becomes, what a one-step slot becomes)
+        let table = [
+            (f64::NAN, 0.0, GEOM_MIN),
+            (f64::NEG_INFINITY, 0.0, GEOM_MIN),
+            (-0.5, 0.0, GEOM_MIN),
+            (f64::INFINITY, 1.0, GEOM_MAX),
+            (2.0, 1.0, GEOM_MAX),
+            (1e300, 1.0, GEOM_MAX),
+            (0.001, 0.001, GEOM_MIN),
+            (0.999, 0.999, GEOM_MAX),
+        ];
+        for (bad, as_direction, as_one_step) in table {
+            for slot in 0..6 {
+                let mut rates = well_formed;
+                match slot {
+                    0 => rates.whole_repeat_longer_share = bad,
+                    1 => rates.whole_repeat_shorter_share = bad,
+                    2 => rates.whole_repeat_one_step_share = bad,
+                    3 => rates.part_repeat_longer_share = bad,
+                    4 => rates.part_repeat_shorter_share = bad,
+                    _ => rates.part_repeat_one_step_share = bad,
+                }
+                let model = StutterModel::sanitized(rates);
+                let (got, want) = match slot {
+                    0 => (model.whole_repeat_longer_share(), as_direction),
+                    1 => (model.whole_repeat_shorter_share(), as_direction),
+                    2 => (model.whole_repeat_one_step_share(), as_one_step),
+                    3 => (model.part_repeat_longer_share(), as_direction),
+                    4 => (model.part_repeat_shorter_share(), as_direction),
+                    _ => (model.part_repeat_one_step_share(), as_one_step),
+                };
+                assert_eq!(got, want, "rate {bad} in slot {slot}");
+            }
+        }
+    }
+
+    /// `Regime::probability`'s comment says `unsigned_abs` keeps `i64::MIN` safe where a
+    /// `-steps - 1` form would overflow — panicking in debug and wrapping in release.
+    /// **Nothing exercised that**: the widest change any test passed was ±60. A doc-comment
+    /// invariant with no test is a claim, and this makes it a fact.
+    #[test]
+    fn the_extreme_length_changes_score_zero_rather_than_overflowing() {
+        let model = all_distinct();
+        for period in (1..=6u8).map(period) {
+            for bp_diff in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+                assert_eq!(
+                    model.probability(bp_diff, period),
+                    0.0,
+                    "Δ={bp_diff} at period {period:?} is far past the cutoff"
+                );
+            }
+        }
+    }
+
+    proptest::proptest! {
+        /// **Every row of rates yields a distribution, not only the three this file names.**
+        ///
+        /// The sweep above walks three hand-built models over 2,178 points — three corners of
+        /// a six-dimensional rate space. That was enough while every consumer used
+        /// hard-coded parameters, and it stops being enough at plan step E3, where
+        /// `stutter_rates_for` starts handing this type **fitted** numbers: a row the
+        /// pre-pass produced has never been through this suite.
+        ///
+        /// Two invariants, both of which the genotyping likelihood will rely on. Every value
+        /// is a real probability — a negative or a `NaN` here poisons a log downstream while
+        /// reporting nothing. And **past the cutoff the answer is exactly zero**, on whichever
+        /// scale the regime counts, so an implausibly large change falls to the outlier term
+        /// instead of being explained away as stutter.
+        #[test]
+        fn any_rates_yield_a_distribution_that_is_zero_past_the_cutoff(
+            longer in 0.0f64..=1.0,
+            shorter in 0.0f64..=1.0,
+            whole_one_step in 0.0f64..=1.0,
+            part_longer in 0.0f64..=1.0,
+            part_shorter in 0.0f64..=1.0,
+            part_one_step in 0.0f64..=1.0,
+            bp_diff in -400i64..=400,
+            period_bases in 1u8..=6,
+        ) {
+            let model = StutterModel::new(StutterRates {
+                whole_repeat_longer_share: longer,
+                whole_repeat_shorter_share: shorter,
+                whole_repeat_one_step_share: whole_one_step,
+                part_repeat_longer_share: part_longer,
+                part_repeat_shorter_share: part_shorter,
+                part_repeat_one_step_share: part_one_step,
+            });
+            let period = period(period_bases);
+            let probability = model.probability(bp_diff, period);
+
+            proptest::prop_assert!(
+                probability.is_finite() && (0.0..=1.0).contains(&probability),
+                "Δ={} period={} gave {}",
+                bp_diff,
+                period_bases,
+                probability
+            );
+
+            // The cutoff counts repeats on one branch and re-indexed base pairs on the other,
+            // so the size is whichever the regime is sized in.
+            let period_bases = i64::from(period_bases);
+            let size = if bp_diff % period_bases == 0 {
+                (bp_diff / period_bases).unsigned_abs()
+            } else {
+                (bp_diff - bp_diff / period_bases).unsigned_abs()
+            };
+            if size > u64::from(MAX_SLIP) {
+                proptest::prop_assert_eq!(
+                    probability,
+                    0.0,
+                    "Δ={} is {} steps past the cutoff and was not zero",
+                    bp_diff,
+                    size
+                );
+            }
+        }
     }
 
     /// **The copied cutoff must not drift from production's.** The doc on [`MAX_SLIP`]
