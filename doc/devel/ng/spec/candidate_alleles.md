@@ -355,20 +355,22 @@ those.
 **§5's per-sample count is what makes the narrower answer available**, and it is why that count
 exists.
 
-**But "it loses more" holds on one condition, and that condition is not yet met** (raised by the
-owner at Checkpoint C, 2026-08-24). Emitting only the affected samples as missing is better than
+**"It loses more" holds on one condition, and that condition is now met** (the owner's ruling of
+2026-08-24, raised at this plan's Checkpoint C). Emitting only the affected samples as missing beats
 refusing the locus **only if those samples also leave the frequency fit**. Left in the EM's M-step,
 a sample whose carried allele is absent from the table is explained by whichever surviving genotype
 its reads mismatch least — usually homozygous reference — and that pulls the locus's allele
-frequencies toward the reference **for every sample, not only for it**. At that point the locus's
-numbers are corrupted cohort-wide and refusing it is the honest answer after all.
+frequencies toward the reference **for every sample, not only for it**. The error is systematic and
+in one direction, so the locus's numbers would be corrupted cohort-wide and refusing it would be the
+honest answer after all.
 
-So the choice between the two policies is decided elsewhere: by
-[`calling_em_loop.md`](calling_em_loop.md) §5.0's open question on whether an uncallable sample
-drops out of the M-step. **That question is load-bearing rather than a tidiness one**, and until it
-is settled this section's preference for truncation rests on an assumption it does not state. The
-recommendation stands — exclude the sample, keep the locus — because it retains strictly more
-information than refusing, and D3 measures what each policy costs in sample-genotypes at each cap.
+**The ruling: an uncallable sample is set aside when the calling loop is entered, and takes no part
+in either step** — [`calling_em_loop.md`](calling_em_loop.md) §5.0 carries it, because that is the
+module it constrains. It is not scored, it contributes nothing to the fitted frequencies, and
+emission writes its genotype as missing because it has no call rather than because a call was
+withheld. **That is what makes this section's preference for truncation sound**, and it is why the
+two decisions have to be read together: cutting the allele list is only better than refusing the
+locus if the samples that lost an earned allele stop shaping the locus's numbers.
 
 **The ranking: the largest share of one sample's compared reads the allele took, maximised over
 the samples that cleared the bar for it.** Ties break on how many samples cleared the bar, then on

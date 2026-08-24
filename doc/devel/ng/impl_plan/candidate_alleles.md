@@ -240,10 +240,12 @@ different depth still means something.
 *Depends:* D1. *Source:* spec §3.3, §12.
 
 **D3. What each cap would cost — the owner's measurement of 2026-08-24.**  ☐
-The cap's default of six was inherited and has never been chosen from data; the owner's decision at
-Checkpoint C is to **raise it and make it a command-line parameter**, and this is the run that says
-to what. `MaxCandidateAlleles` is already a newtype refusing anything below two, so the wiring is
-the argument parser's; the number is this step's.
+The cap's default of six was inherited from production and has never been chosen from data.
+**Settled at Checkpoint C: it becomes a command-line parameter** — `MaxCandidateAlleles` is already
+a newtype refusing anything below two, so that wiring is the argument parser's.
+**Open at Checkpoint C: what the default should be.** The owner's expectation is that it goes up,
+and by how much is a decision to take with these numbers in hand, not before them. **This step
+measures; it does not choose.**
 
 **On the tomato panel (63 accessions, ~3 reads a position, 53,935 built loci) and the GIAB trio at
 30× and 300×**, for caps of 4, 6, 8, 10, 12, 16, 20 and no cap at all:
@@ -268,8 +270,9 @@ default from numbers the shipped code does not produce is the thing to avoid.
 *Depends:* D1. *Source:* spec §4, §4.1, §4.2, §11 Q2.
 
 > **Checkpoint D:** both external checks green, the numbers in the spec are reproduced by the
-> shipped code rather than by the probe's own copy, and the cap has a value chosen from D3's
-> measurement rather than inherited. Pause for review.
+> shipped code rather than by the probe's own copy, and D3's table is in front of the owner so the
+> cap's default can be chosen from it rather than inherited. **That choice is the owner's and is
+> not this plan's to make.** Pause for review.
 
 ---
 
