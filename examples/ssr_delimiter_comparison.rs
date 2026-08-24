@@ -264,12 +264,12 @@ fn main() {
     // Contraction-biased parameters — HipSTR's fitted values are, and it is the direction
     // asymmetry that algorithm 4 can express and algorithm 3 cannot.
     let model = StutterModel::new(StutterRates {
-        in_up: 0.03,
-        in_down: 0.07,
-        in_geom: 0.9,
-        out_up: 0.004,
-        out_down: 0.012,
-        out_geom: 0.8,
+        whole_repeat_longer_share: 0.03,
+        whole_repeat_shorter_share: 0.07,
+        whole_repeat_one_step_share: 0.9,
+        part_repeat_longer_share: 0.004,
+        part_repeat_shorter_share: 0.012,
+        part_repeat_one_step_share: 0.8,
     });
     let emission = PerQualityEmission::new();
     let flat = SsrFlatGapAligner::new(emission);

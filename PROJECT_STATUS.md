@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **some of a sample's reads came from somebody else, and
+> - **Last completed task (2026-08-24):** **the stutter model says *repeats*, because *frame*
+> meant something else here** (step E1 of
+> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
+> `ng-calling-likelihoods`; the first step of the STR path, after **Checkpoint C/D** completed the
+> generic one). The seven numbers that say how often a read shows a length other than its
+> allele's were named after HipSTR's fields — `in_up`, `out_geom` — and those names carry *in
+> frame* and *out of frame*, which the read-likelihood spec bans: *frame* is borrowed from coding
+> sequence, and in this repository it was read as meaning *inside the tract* against *in the
+> flanks*. They are now `whole_repeat_longer_share`, `part_repeat_one_step_share` and so on, with
+> HipSTR's names kept in the doc comments for whoever reads the two side by side. **No arithmetic
+> moved:** every numeric literal in the module's test code is identical before and after, and the
+> library target holds the same 4,354 passing tests. The fixtures that hold the rename are the
+> ones that were already there — `all_distinct()` gives all six rates different values, so a
+> longer/shorter or whole/part transposition fails a published-formula test rather than passing
+> silently. Alongside it, the alignment spec's §5.2 stopped restating the distribution and now
+> points at the read-likelihood spec's §4.2, which owns it.
+> [What was renamed, what stayed, and why the tests did not need to change](doc/devel/reports/implementations/ng_calling_likelihood_e1_2026-08-24.md).
+> - **Previously (2026-08-24):** **some of a sample's reads came from somebody else, and
 > the likelihood now says so** (step C1 of
 > [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
 > `ng-calling-likelihoods`). A read is scored as either something this individual's genotype can

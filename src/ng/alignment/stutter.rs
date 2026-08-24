@@ -1,9 +1,13 @@
 //! The stutter model — how likely each length change is, for one repeat.
 //!
 //! **Not an alignment algorithm**, and it lives here anyway because *two* consumers share
-//! it: the two-penalty best-path aligner in this module (spec §4.2), and the genotyping
-//! likelihood outside it. One description, so the two cannot drift apart (spec §5.2). It
-//! is HipSTR's model.
+//! it: the two-penalty best-path aligner in this module (the alignment spec §4.2), and the
+//! genotyping likelihood outside it. One description, so the two cannot drift apart. It is
+//! HipSTR's model.
+//!
+//! **The distribution is owned by `doc/devel/ng/spec/read_likelihoods.md` §4.2**, which
+//! states it in full; the alignment spec's §5.2 is repointed there and no longer restates
+//! it. Cite the first when this module's behaviour is in question.
 //!
 //! Everything here is a **linear probability**, not a logarithm — unlike HipSTR's own
 //! fields, which are logs (`log_equal_`), and matching production's `stutter_pmf`, which
@@ -12,32 +16,38 @@
 //!
 //! ## The two regimes are the model's defining structure
 //!
-//! A read's length change is either a whole number of repeat units or it is not, and the
-//! two mean different things:
+//! A read's length change is either a whole number of repeats or it is not, and the two mean
+//! different things:
 //!
-//! - **in frame** — a whole number of units. This is slippage, the common event, and its
-//!   size is measured in **units**.
-//! - **out of frame** — not a whole number of units. This is a sequencing indel or an
-//!   interruption, not slippage; it is rarer, it gets its **own** parameters, and its size
+//! - **a whole-repeat change** — a whole number of repeats. This is slippage, the common
+//!   event, and its size is measured in **repeats**.
+//! - **a part-repeat change** — not a whole number of repeats. This is a sequencing indel or
+//!   an interruption, not slippage; it is rarer, it gets its **own** parameters, and its size
 //!   is measured in **base pairs**.
 //!
-//! Each regime splits again by direction, because stutter is asymmetric: **losing units is
+//! *(HipSTR calls these two **in frame** and **out of frame**. This project does not use
+//! those words — `doc/devel/ng/spec/read_likelihoods.md` §1.3 bans them, because *frame* is
+//! borrowed from coding sequence and was read here as meaning inside the tract against in
+//! the flanks, which is a different distinction. HipSTR's field names are kept in the doc
+//! comments below for whoever ports from it.)*
+//!
+//! Each regime splits again by direction, because stutter is asymmetric: **losing repeats is
 //! more common than gaining them**.
 //!
 //! **Which regime applies is decided by arithmetic alone** — is the change a multiple of
 //! the period? — and **never by what was actually inserted**. So an insertion that happens
-//! to be period-sized is treated as slippage whether or not its bases are the repeat unit.
-//! The composition is caught downstream instead, as a base-error mismatch against the
-//! re-tiled candidate. The mis-routing is worst at period 1, where it catches roughly three
-//! of every four single-base insertions — which is why the algorithm-3-versus-4 comparison
+//! to be period-sized is treated as slippage whether or not its bases are the motif. The
+//! composition is caught downstream instead, as a base-error mismatch against the re-tiled
+//! candidate. The mis-routing is worst at period 1, where it catches roughly three of every
+//! four single-base insertions — which is why the algorithm-3-versus-4 comparison
 //! (Milestone D) must score an indel *of the repeat's own base* separately from an indel of
-//! a different base, or the two effects cancel in the average (spec §4.2).
+//! a different base, or the two effects cancel in the average (the alignment spec §4.2).
 
 use std::num::NonZeroU8;
 
 /// Largest slip this model scores at all; anything past it is **zero**, so an implausibly
 /// large change is not explained away as stutter — such a read falls to the genotyping's
-/// outlier handling instead (spec §5.2).
+/// outlier handling instead (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
 ///
 /// Copied from production's `MAX_SLIP` rather than imported: ng is a from-scratch caller
 /// that does not depend on production (owner, 2026-07-16). **The value must stay equal to
@@ -48,65 +58,72 @@ use std::num::NonZeroU8;
 ///
 /// # The one constant, two scales — inherited deliberately
 ///
-/// Production applies this single number to the **unit** count in the in-frame branch and
-/// to the re-indexed **base-pair** count in the out-of-frame branch. Those are different
-/// scales, and spec §5.2 says to decide about that rather than inherit it silently.
+/// Production applies this single number to the **repeat** count on the whole-repeat branch
+/// and to the re-indexed **base-pair** count on the part-repeat branch. Those are different
+/// scales, and `doc/devel/ng/spec/read_likelihoods.md` §4.2 says to decide about that rather
+/// than inherit it silently.
 ///
 /// **The decision here is to reproduce production's behaviour**, and to write down what it
-/// costs. Out-of-frame changes are cut off about **`period − 1` times sooner** in real
-/// terms: the re-indexed size is `Δ − Δ/period`, so a cutoff of 10 re-indexed steps admits
-/// roughly `10 · period/(period − 1)` base pairs, against `10 · period` in frame. At period
-/// 4 that is about 13 bp out of frame against 40 bp in frame; **at period 2 the effect
-/// vanishes** (about 20 against 20), and it grows with the period. Changing this is a
-/// **behaviour change to a model the genotyping shares**, and this plan's rule is transcribe
-/// first, change separately with its own evidence. Recorded as a follow-up, not fixed here.
+/// costs. Part-repeat changes are cut off about **`period − 1` times sooner** in real terms:
+/// the re-indexed size is `Δ − Δ/period`, so a cutoff of 10 re-indexed steps admits roughly
+/// `10 · period/(period − 1)` base pairs, against `10 · period` in whole repeats. At period
+/// 4 that is about 13 bp for part-repeat changes against 40 bp for whole-repeat ones; **at
+/// period 2 the effect vanishes** (about 20 against 20), and it grows with the period.
+/// Changing this is a **behaviour change to a model the genotyping shares**, and this plan's
+/// rule is transcribe first, change separately with its own evidence. Recorded as a
+/// follow-up, not fixed here.
 pub const MAX_SLIP: u32 = 10;
 
-/// Lower bound on a geometric success probability, and the floor under
-/// [`StutterModel::equal`]. Production uses one constant for both, so this does too.
+/// Lower bound on a one-step share, and the floor under
+/// [`StutterModel::same_length_share`]. Production uses one constant for both, so this does
+/// too. Named for HipSTR's `geom` fields, which is what a one-step share is called there.
 ///
 /// **Public so the genotyping likelihood can name it rather than spell a second copy.** Its
 /// contract says every probability is floored before a logarithm and asks for the floors as
 /// named constants with their reasons (`doc/devel/ng/spec/read_likelihoods.md` §8); the
-/// clamp on a geometric is this one, and two spellings of one number are two things that can
-/// drift apart. The clamping itself stays here, where the distribution is — a consumer reads
-/// the value to document and to test against, never to apply.
+/// clamp on a one-step share is this one, and two spellings of one number are two things
+/// that can drift apart. The clamping itself stays here, where the distribution is — a
+/// consumer reads the value to document and to test against, never to apply.
 pub const GEOM_MIN: f64 = 0.01;
-/// Upper bound on a geometric success probability. See [`GEOM_MIN`], including why it is
-/// public.
+/// Upper bound on a one-step share. See [`GEOM_MIN`], including why it is public.
 pub const GEOM_MAX: f64 = 0.99;
 
 /// The six stutter rates a [`StutterModel`] is built from, **named** rather than positional.
 ///
-/// The names are load-bearing, not decoration. As six positional `f64` arguments, an
-/// `in_up`/`in_down` or `in_geom`/`out_geom` transposition is invisible at every call site
+/// The names are load-bearing, not decoration. As six positional `f64` arguments, a
+/// longer/shorter or whole-repeat/part-repeat transposition is invisible at every call site
 /// *and* in a test suite whose fixtures happen to give the two members of a pair the same
 /// value — which is exactly what the first version of this module's tests did. HipSTR keeps
-/// the two geometrics genuinely independent (spec §5.2), so the pairing matters.
+/// the two one-step shares genuinely independent
+/// (`doc/devel/ng/spec/read_likelihoods.md` §4.2), so the pairing matters.
 ///
-/// `equal` is **not** here: it is derived from these four masses, and taking it as an input
-/// would let it disagree with the values that define it.
+/// The same-length share is **not** here: it is derived from these four masses, and taking
+/// it as an input would let it disagree with the values that define it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StutterRates {
-    /// Probability of an in-frame expansion, of any size.
-    pub in_up: f64,
-    /// Probability of an in-frame contraction, of any size. Usually exceeds `in_up` —
-    /// stutter is contraction-biased.
-    pub in_down: f64,
-    /// How fast in-frame slip size decays, per **unit**.
+    /// Share of reads a whole repeat longer than the allele, at any size. HipSTR's `in_up_`.
+    pub whole_repeat_longer_share: f64,
+    /// Share of reads a whole repeat shorter than the allele, at any size. Usually exceeds
+    /// [`Self::whole_repeat_longer_share`] — stutter is contraction-biased. HipSTR's
+    /// `in_down_`.
+    pub whole_repeat_shorter_share: f64,
+    /// **Of the reads that slipped by whole repeats**, the share that moved by exactly one
+    /// repeat. HipSTR's `in_geom_`.
     ///
-    /// A geometric **success** probability, *not* a decay rate — see [`StutterModel::new`]
-    /// for the trap.
-    pub in_geom: f64,
-    /// Probability of an out-of-frame expansion, of any size.
-    pub out_up: f64,
-    /// Probability of an out-of-frame contraction, of any size.
-    pub out_down: f64,
-    /// How fast out-of-frame size decays, per **base pair**. A geometric **success**
-    /// probability. HipSTR keeps this independent of [`Self::in_geom`]; production ties the
-    /// two to a single value, which is an undeclared placeholder rather than a fitted
-    /// result (spec §5.2).
-    pub out_geom: f64,
+    /// A share of the slips, *not* a rate of decline — see [`StutterModel::new`] for the
+    /// trap.
+    pub whole_repeat_one_step_share: f64,
+    /// Share of reads longer by part of a repeat, at any size. HipSTR's `out_up_`.
+    pub part_repeat_longer_share: f64,
+    /// Share of reads shorter by part of a repeat, at any size. HipSTR's `out_down_`.
+    pub part_repeat_shorter_share: f64,
+    /// **Of the reads that changed by part of a repeat**, the share that moved by exactly one
+    /// base. HipSTR's `out_geom_`.
+    ///
+    /// HipSTR keeps this independent of [`Self::whole_repeat_one_step_share`]; production
+    /// ties the two to a single value, which is an undeclared placeholder rather than a
+    /// fitted result (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
+    pub part_repeat_one_step_share: f64,
 }
 
 /// How likely each length change is, for one repeat.
@@ -122,61 +139,63 @@ pub struct StutterRates {
 ///
 /// Production derives its parameters per call from a per-locus stutter shape plus a
 /// per-read stutter level. **ng has no stutter-shape type yet** — fitting one is the
-/// genotyping's job (spec §5.2) — so this step lands the parameters and the distribution,
-/// and the adapting constructor is owed once that type exists.
+/// genotyping's job (`doc/devel/ng/spec/read_likelihoods.md` §4.2) — so this step lands the
+/// parameters and the distribution, and the adapting constructor is owed once that type
+/// exists.
 ///
-/// # Contract: `equal` is floored, so **do not test that the five sum to one**
+/// # Contract: the same-length share is floored, so **do not test that the five sum to one**
 ///
-/// The unchanged mass is *defined* as whatever the four direction masses leave,
-/// `equal = 1 − in_up − in_down − out_up − out_down` — **but it is floored**. When the floor
-/// binds, the five values sum to slightly more than one. That is deliberate: the floor is
-/// what stops a hostile parameter combination producing a negative probability. It means
-/// "the five sum to one" must **not** be written as a test, and
-/// `the_five_masses_do_not_sum_to_one_when_the_floor_binds` exists to make that explicit
-/// rather than merely absent.
+/// The same-length share is *defined* as whatever the four direction shares leave —
+/// `1` minus the whole-repeat longer and shorter shares and the part-repeat longer and
+/// shorter shares — **but it is floored**. When the floor binds, the five values sum to
+/// slightly more than one. That is deliberate: the floor is what stops a hostile parameter
+/// combination producing a negative probability. It means "the five sum to one" must **not**
+/// be written as a test, and `the_five_masses_do_not_sum_to_one_when_the_floor_binds` exists
+/// to make that explicit rather than merely absent.
 ///
-/// (HipSTR instead *asserts* the masses sum below one at construction and never clamps.
+/// (HipSTR instead *asserts* the shares sum below one at construction and never clamps.
 /// Both disciplines are defensible; they differ, and only the floor matches the code being
 /// ported — arch §2.4.)
 ///
 /// # Why the fields are private
 ///
 /// The clamps **are** the contract. Arch §2.4 sketches these as public fields, but public
-/// fields would let a caller assemble a model whose geometrics sit at 0 or 1, or whose
-/// `equal` is negative, and every guarantee above would be a comment rather than a fact.
-/// Construction goes through [`StutterModel::new`], which applies them; the seven values are
-/// readable through accessors. (Arch states its signatures are illustrative and the contract
-/// is the deliverable.)
+/// fields would let a caller assemble a model whose one-step shares sit at 0 or 1, or whose
+/// same-length share is negative, and every guarantee above would be a comment rather than a
+/// fact. Construction goes through [`StutterModel::new`], which applies them; the seven
+/// values are readable through accessors. (Arch states its signatures are illustrative and
+/// the contract is the deliverable.)
 ///
 /// Not `Copy`: at seven `f64`s this is 56 bytes, well past the size where an implicit copy
 /// is free, and the per-call repeat context holds it **by reference** by design — so `Copy`
 /// would buy nothing and hide the cost of the cases it did serve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StutterModel {
-    equal: f64,
-    in_up: f64,
-    in_down: f64,
-    in_geom: f64,
-    out_up: f64,
-    out_down: f64,
-    out_geom: f64,
+    same_length_share: f64,
+    whole_repeat_longer_share: f64,
+    whole_repeat_shorter_share: f64,
+    whole_repeat_one_step_share: f64,
+    part_repeat_longer_share: f64,
+    part_repeat_shorter_share: f64,
+    part_repeat_one_step_share: f64,
 }
 
 impl StutterModel {
-    /// Build a model from the six rates. `equal` is derived, as one minus the four direction
-    /// masses, then floored.
+    /// Build a model from the six rates. The same-length share is derived, as one minus the
+    /// four direction shares, then floored.
     ///
     /// # The trap this type exists to make hard
     ///
-    /// **`in_geom` and `out_geom` are geometric *success* probabilities, not decay rates.**
-    /// A geometric with success probability `g` puts mass `g` on the first step and
-    /// multiplies by `(1 − g)` for each step after, so a **larger** `g` concentrates mass on
-    /// *single*-unit slips — HipSTR ships 0.95, meaning nineteen slips in twenty are exactly
-    /// one unit. If a parameter arrives expressed as the probability of *continuing* to the
-    /// next step (mean size `1/(1 − decay)`), it is the **complement**: `geom = 1 − decay`.
-    /// Getting this backwards inverts the size distribution — large slips become common —
-    /// and **nothing crashes** (spec §5.2, trap 1).
-    /// `a_single_unit_slip_outweighs_a_larger_one` fails if it is inverted.
+    /// **A one-step share is the share of the slips that moved by exactly one step, not a
+    /// per-step multiplier.** Of the reads that moved at all, this fraction moved one step;
+    /// the mass at the next step is multiplied by `(1 − share)` for each step after, so a
+    /// **larger** share concentrates mass on *single*-repeat slips — HipSTR ships 0.95,
+    /// meaning nineteen slips in twenty are exactly one repeat. If a parameter arrives
+    /// expressed as the probability of *continuing* to the next step (mean size
+    /// `1/(1 − decay)`), it is the **complement**: `share = 1 − decay`. Getting this
+    /// backwards inverts the size distribution — large slips become common — and **nothing
+    /// crashes** (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
+    /// `a_single_repeat_slip_outweighs_a_larger_one` fails if it is inverted.
     ///
     /// # Panics
     ///
@@ -186,25 +205,26 @@ impl StutterModel {
     ///
     /// # What sanitizing does, and why it is not the same thing as the clamps
     ///
-    /// Two different jobs, easy to conflate. The **clamps on the geometrics and the floor
-    /// under `equal` are ported model behaviour** — production does exactly this — and they
-    /// bind only at degenerate values. The **mass sanitizing is a release-mode backstop** for
-    /// a violated precondition, and it exists because without it this type would break its
-    /// own stated contract: an unchecked mass of `2.0` makes `probability` return `1.9`, a
-    /// negative mass returns a negative probability, and `NaN` poisons every score while
-    /// *reporting a healthy floor* — because `f64::max` absorbs `NaN` and `f64::clamp` passes
-    /// it straight through, so the constructor would look fine and only the results would be
-    /// wrong. A non-finite rate becomes `0` (no stutter), the no-information end of the scale.
+    /// Two different jobs, easy to conflate. The **clamps on the one-step shares and the
+    /// floor under the same-length share are ported model behaviour** — production does
+    /// exactly this — and they bind only at degenerate values. The **mass sanitizing is a
+    /// release-mode backstop** for a violated precondition, and it exists because without it
+    /// this type would break its own stated contract: an unchecked share of `2.0` makes
+    /// `probability` return `1.9`, a negative share returns a negative probability, and
+    /// `NaN` poisons every score while *reporting a healthy floor* — because `f64::max`
+    /// absorbs `NaN` and `f64::clamp` passes it straight through, so the constructor would
+    /// look fine and only the results would be wrong. A non-finite rate becomes `0` (no
+    /// stutter), the no-information end of the scale.
     #[must_use]
     pub fn new(rates: StutterRates) -> Self {
         debug_assert!(
             [
-                rates.in_up,
-                rates.in_down,
-                rates.in_geom,
-                rates.out_up,
-                rates.out_down,
-                rates.out_geom
+                rates.whole_repeat_longer_share,
+                rates.whole_repeat_shorter_share,
+                rates.whole_repeat_one_step_share,
+                rates.part_repeat_longer_share,
+                rates.part_repeat_shorter_share,
+                rates.part_repeat_one_step_share
             ]
             .iter()
             .all(|rate| rate.is_finite() && (0.0..=1.0).contains(rate)),
@@ -219,83 +239,89 @@ impl StutterModel {
     /// Separated so the release path is reachable from a test: the assertion fires in the
     /// test profile, so `new` cannot be used to check what happens once it is gone.
     fn sanitized(rates: StutterRates) -> Self {
-        let in_up = sanitize_mass(rates.in_up);
-        let in_down = sanitize_mass(rates.in_down);
-        let out_up = sanitize_mass(rates.out_up);
-        let out_down = sanitize_mass(rates.out_down);
+        let whole_repeat_longer_share = sanitize_mass(rates.whole_repeat_longer_share);
+        let whole_repeat_shorter_share = sanitize_mass(rates.whole_repeat_shorter_share);
+        let part_repeat_longer_share = sanitize_mass(rates.part_repeat_longer_share);
+        let part_repeat_shorter_share = sanitize_mass(rates.part_repeat_shorter_share);
 
         Self {
-            equal: (1.0 - in_up - in_down - out_up - out_down).clamp(GEOM_MIN, 1.0),
-            in_up,
-            in_down,
-            in_geom: sanitize_geom(rates.in_geom),
-            out_up,
-            out_down,
-            out_geom: sanitize_geom(rates.out_geom),
+            same_length_share: (1.0
+                - whole_repeat_longer_share
+                - whole_repeat_shorter_share
+                - part_repeat_longer_share
+                - part_repeat_shorter_share)
+                .clamp(GEOM_MIN, 1.0),
+            whole_repeat_longer_share,
+            whole_repeat_shorter_share,
+            whole_repeat_one_step_share: sanitize_geom(rates.whole_repeat_one_step_share),
+            part_repeat_longer_share,
+            part_repeat_shorter_share,
+            part_repeat_one_step_share: sanitize_geom(rates.part_repeat_one_step_share),
         }
     }
 
     /// HipSTR's **shipped** default parameters, as a matched set.
     ///
     /// HipSTR has **two** parameter sets, and mixing them yields a pairing that exists
-    /// nowhere — spec §5.2 records that an earlier draft of the spec did exactly that. These
-    /// constructors exist so the two rows cannot be crossed by hand: this one is in-frame
-    /// geom 0.95 with 0.05/0.05, out-of-frame geom 0.95 with 0.01/0.01.
+    /// nowhere — `doc/devel/ng/spec/alignment.md` §5.2 records that an earlier draft of the
+    /// spec did exactly that. These constructors exist so the two rows cannot be crossed by
+    /// hand: this one is whole-repeat one-step share 0.95 with 0.05/0.05, part-repeat
+    /// one-step share 0.95 with 0.01/0.01.
     ///
     /// Note the shipped row makes expansion and contraction **equal**. That symmetry is a
     /// starting point, not a claim — HipSTR's *fitted* values are contraction-biased.
     #[must_use]
     pub fn hipstr_shipped() -> Self {
         Self::new(StutterRates {
-            in_up: 0.05,
-            in_down: 0.05,
-            in_geom: 0.95,
-            out_up: 0.01,
-            out_down: 0.01,
-            out_geom: 0.95,
+            whole_repeat_longer_share: 0.05,
+            whole_repeat_shorter_share: 0.05,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.01,
+            part_repeat_shorter_share: 0.01,
+            part_repeat_one_step_share: 0.95,
         })
     }
 
     /// HipSTR's EM **starting point** — an initialisation its fitting immediately moves away
     /// from, and **not** a default. Provided as a matched set for the same reason as
-    /// [`Self::hipstr_shipped`]: in-frame geom 0.9 with 0.1/0.1, out-of-frame geom 0.8 with
-    /// 0.01/0.01.
+    /// [`Self::hipstr_shipped`]: whole-repeat one-step share 0.9 with 0.1/0.1, part-repeat
+    /// one-step share 0.8 with 0.01/0.01.
     ///
-    /// Note this row keeps the two geometrics **different** (0.9 against 0.8), which is the
-    /// shape HipSTR actually uses — production ties them to one value, an undeclared
-    /// placeholder (spec §5.2).
+    /// Note this row keeps the two one-step shares **different** (0.9 against 0.8), which is
+    /// the shape HipSTR actually uses — production ties them to one value, an undeclared
+    /// placeholder (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
     #[must_use]
     pub fn hipstr_em_start() -> Self {
         Self::new(StutterRates {
-            in_up: 0.1,
-            in_down: 0.1,
-            in_geom: 0.9,
-            out_up: 0.01,
-            out_down: 0.01,
-            out_geom: 0.8,
+            whole_repeat_longer_share: 0.1,
+            whole_repeat_shorter_share: 0.1,
+            whole_repeat_one_step_share: 0.9,
+            part_repeat_longer_share: 0.01,
+            part_repeat_shorter_share: 0.01,
+            part_repeat_one_step_share: 0.8,
         })
     }
 
     /// `P(length change)` for a change of `bp_diff` bases on a repeat of period `period`.
     ///
-    /// Both regimes are a direction mass times a geometric over size, following spec §5.2
-    /// term by term. Zero beyond [`MAX_SLIP`], so an implausibly large slip is not explained
-    /// away.
+    /// Both regimes are a direction share times a geometric over size, following
+    /// `doc/devel/ng/spec/read_likelihoods.md` §4.2 term by term. Zero beyond [`MAX_SLIP`],
+    /// so an implausibly large slip is not explained away.
     ///
-    /// # Why out-of-frame sizes are re-indexed
+    /// # Why part-repeat sizes are re-indexed
     ///
-    /// The out-of-frame geometric is indexed by `e = Δ − Δ/period` (truncated division), not
+    /// The part-repeat geometric is indexed by `e = Δ − Δ/period` (truncated division), not
     /// by `Δ`. The reason is **not** double-counting — the two regimes are disjoint by
-    /// construction, since a change is out-of-frame precisely when it is *not* a multiple of
-    /// the period, so no length can reach both. What the re-indexing does is **compress the
-    /// ranks**: it maps the out-of-frame values onto consecutive integers so the geometric's
-    /// support has no gaps. At period 3 the out-of-frame values 1, 2, 4, 5, 7 map to
-    /// e = 1, 2, 3, 4, 5. Without it the geometric would be evaluated at indices that skip
-    /// the multiples, distorting the distribution.
+    /// construction, since a change is a part-repeat one precisely when it is *not* a
+    /// multiple of the period, so no length can reach both. What the re-indexing does is
+    /// **compress the ranks**: it maps the part-repeat values onto consecutive integers so
+    /// the geometric's support has no gaps. At period 3 the part-repeat values 1, 2, 4, 5, 7
+    /// map to e = 1, 2, 3, 4, 5. Without it the geometric would be evaluated at indices that
+    /// skip the multiples, distorting the distribution.
     ///
     /// # Why `period` is a [`NonZeroU8`]
     ///
-    /// The in-frame test divides by the period, so a zero would divide by zero — and a
+    /// The whole-repeat test divides by the period, so a zero would divide by zero — and a
     /// period-zero repeat is not a repeat in the first place. A `debug_assert!` would be the
     /// module's usual answer (arch §3), but here the illegal state is cheap to make
     /// **unrepresentable**, which is better than making it testable: there is no release
@@ -309,63 +335,71 @@ impl StutterModel {
         let period = i64::from(period.get());
 
         if bp_diff % period == 0 {
-            // In frame: slippage, sized in whole units.
-            let units = bp_diff / period;
-            if units == 0 {
-                self.equal
+            // A whole-repeat change: slippage, sized in whole repeats.
+            let repeats = bp_diff / period;
+            if repeats == 0 {
+                self.same_length_share
             } else {
-                regime(self.in_up, self.in_down, self.in_geom, units)
+                regime(
+                    self.whole_repeat_longer_share,
+                    self.whole_repeat_shorter_share,
+                    self.whole_repeat_one_step_share,
+                    repeats,
+                )
             }
         } else {
-            // Out of frame: a sequencing indel or an interruption, sized in base pairs and
-            // rank-compressed (see above). The size is never zero here — `bp_diff` is not a
-            // multiple of the period, so truncated division cannot consume all of it.
+            // A part-repeat change: a sequencing indel or an interruption, sized in base
+            // pairs and rank-compressed (see above). The size is never zero here — `bp_diff`
+            // is not a multiple of the period, so truncated division cannot consume all of
+            // it.
             regime(
-                self.out_up,
-                self.out_down,
-                self.out_geom,
+                self.part_repeat_longer_share,
+                self.part_repeat_shorter_share,
+                self.part_repeat_one_step_share,
                 bp_diff - bp_diff / period,
             )
         }
     }
 
-    /// Probability the read shows the allele's length unchanged. **Floored** — see the
-    /// type's contract.
+    /// Share of reads showing the allele's own length — neither longer nor shorter.
+    /// **Floored** — see the type's contract. HipSTR's `log_equal_`, exponentiated.
     #[must_use]
-    pub fn equal(&self) -> f64 {
-        self.equal
+    pub fn same_length_share(&self) -> f64 {
+        self.same_length_share
     }
-    /// Probability of an in-frame expansion, of any size.
+    /// Share of reads a whole repeat longer than the allele, at any size. HipSTR's `in_up_`.
     #[must_use]
-    pub fn in_up(&self) -> f64 {
-        self.in_up
+    pub fn whole_repeat_longer_share(&self) -> f64 {
+        self.whole_repeat_longer_share
     }
-    /// Probability of an in-frame contraction, of any size. Usually exceeds
-    /// [`Self::in_up`] — stutter is contraction-biased.
+    /// Share of reads a whole repeat shorter than the allele, at any size. Usually exceeds
+    /// [`Self::whole_repeat_longer_share`] — stutter is contraction-biased. HipSTR's
+    /// `in_down_`.
     #[must_use]
-    pub fn in_down(&self) -> f64 {
-        self.in_down
+    pub fn whole_repeat_shorter_share(&self) -> f64 {
+        self.whole_repeat_shorter_share
     }
-    /// How fast in-frame slip size decays, per **unit**. A geometric *success* probability.
+    /// **Of the reads that slipped by whole repeats**, the share that moved by exactly one
+    /// repeat. HipSTR's `in_geom_`.
     #[must_use]
-    pub fn in_geom(&self) -> f64 {
-        self.in_geom
+    pub fn whole_repeat_one_step_share(&self) -> f64 {
+        self.whole_repeat_one_step_share
     }
-    /// Probability of an out-of-frame expansion, of any size.
+    /// Share of reads longer by part of a repeat, at any size. HipSTR's `out_up_`.
     #[must_use]
-    pub fn out_up(&self) -> f64 {
-        self.out_up
+    pub fn part_repeat_longer_share(&self) -> f64 {
+        self.part_repeat_longer_share
     }
-    /// Probability of an out-of-frame contraction, of any size.
+    /// Share of reads shorter by part of a repeat, at any size. HipSTR's `out_down_`.
     #[must_use]
-    pub fn out_down(&self) -> f64 {
-        self.out_down
+    pub fn part_repeat_shorter_share(&self) -> f64 {
+        self.part_repeat_shorter_share
     }
-    /// How fast out-of-frame size decays, per **base pair**. A geometric *success*
-    /// probability.
+    /// **Of the reads that changed by part of a repeat**, the share that moved by exactly one
+    /// base. HipSTR's `out_geom_`.
     #[must_use]
-    pub fn out_geom(&self) -> f64 {
-        self.out_geom
+    pub fn part_repeat_one_step_share(&self) -> f64 {
+        self.part_repeat_one_step_share
     }
 }
 
@@ -374,26 +408,30 @@ impl StutterModel {
 ///
 /// Written once and shared by both regimes because they are the same shape over different
 /// parameters — which also makes the "size is at least one" precondition provable in one
-/// place. `steps` is a **unit** count in frame and a re-indexed **base-pair** count out of
-/// frame; [`MAX_SLIP`] is applied to whichever it is, which is the two-scale inheritance
-/// recorded on that constant.
+/// place. `steps` is a **repeat** count on the whole-repeat branch and a re-indexed
+/// **base-pair** count on the part-repeat branch; [`MAX_SLIP`] is applied to whichever it is,
+/// which is the two-scale inheritance recorded on that constant.
 #[inline]
-fn regime(up: f64, down: f64, geom: f64, steps: i64) -> f64 {
+fn regime(longer_share: f64, shorter_share: f64, one_step_share: f64, steps: i64) -> f64 {
     debug_assert!(
         steps != 0,
-        "a zero-size change is the `equal` case, not a regime"
+        "a zero-size change is the same-length case, not a regime"
     );
     let size = steps.unsigned_abs();
     if size > u64::from(MAX_SLIP) {
         return 0.0;
     }
-    let mass = if steps < 0 { down } else { up };
+    let share = if steps < 0 {
+        shorter_share
+    } else {
+        longer_share
+    };
     // `size >= 1` here, so the exponent cannot underflow. `unsigned_abs` also means
     // `i64::MIN` is safe, which a `-steps - 1` form would not be.
-    mass * geom * (1.0 - geom).powi((size - 1) as i32)
+    share * one_step_share * (1.0 - one_step_share).powi((size - 1) as i32)
 }
 
-/// A direction mass, made safe for release: `NaN` becomes zero (no stutter — the
+/// A direction share, made safe for release: `NaN` becomes zero (no stutter — the
 /// no-information end), and anything outside `[0, 1]` is clamped into it.
 #[inline]
 fn sanitize_mass(mass: f64) -> f64 {
@@ -404,8 +442,8 @@ fn sanitize_mass(mass: f64) -> f64 {
     }
 }
 
-/// A geometric success probability, held strictly inside `(0, 1)`. `NaN` becomes
-/// [`GEOM_MIN`]; `f64::clamp` would otherwise pass it straight through.
+/// A one-step share, held strictly inside `(0, 1)`. `NaN` becomes [`GEOM_MIN`];
+/// `f64::clamp` would otherwise pass it straight through.
 #[inline]
 fn sanitize_geom(geom: f64) -> f64 {
     if geom.is_nan() {
@@ -428,43 +466,44 @@ mod tests {
     /// changes an answer.
     ///
     /// This exists because the first version of these tests could not see one. Every fixture
-    /// then used 0.05/0.05 for the in-frame masses, 0.01/0.01 for the out-of-frame ones, and
-    /// 0.95 for *both* geometrics — so swapping `in_up` with `in_down`, or `in_geom` with
-    /// `out_geom`, passed all twelve tests byte-identically. Contraction-biased in both
-    /// regimes, as HipSTR's fitted values are.
+    /// then used 0.05/0.05 for the whole-repeat shares, 0.01/0.01 for the part-repeat ones,
+    /// and 0.95 for *both* one-step shares — so swapping longer with shorter, or the
+    /// whole-repeat one-step share with the part-repeat one, passed all twelve tests
+    /// byte-identically. Contraction-biased in both regimes, as HipSTR's fitted values are.
     fn all_distinct() -> StutterModel {
         StutterModel::new(StutterRates {
-            in_up: 0.03,
-            in_down: 0.07,
-            in_geom: 0.95,
-            out_up: 0.004,
-            out_down: 0.012,
-            out_geom: 0.8,
+            whole_repeat_longer_share: 0.03,
+            whole_repeat_shorter_share: 0.07,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.004,
+            part_repeat_shorter_share: 0.012,
+            part_repeat_one_step_share: 0.8,
         })
     }
 
-    /// The published in-frame formula, term by term: `mass · geom · (1 − geom)^(n − 1)`,
-    /// in **both** directions with different masses.
+    /// The published whole-repeat formula, term by term:
+    /// `share · one_step · (1 − one_step)^(n − 1)`, in **both** directions with different
+    /// shares.
     #[test]
-    fn the_in_frame_branch_reproduces_the_published_formula() {
+    fn the_whole_repeat_branch_reproduces_the_published_formula() {
         let model = all_distinct();
         let period = period(3);
-        for units in 1..=5i64 {
-            let decay = 0.05f64.powi((units - 1) as i32);
-            let bp = units * i64::from(period.get());
+        for repeats in 1..=5i64 {
+            let decay = 0.05f64.powi((repeats - 1) as i32);
+            let bp = repeats * i64::from(period.get());
             assert!((model.probability(bp, period) - 0.03 * 0.95 * decay).abs() < 1e-15);
             assert!((model.probability(-bp, period) - 0.07 * 0.95 * decay).abs() < 1e-15);
         }
     }
 
-    /// The published out-of-frame formula, on the **re-indexed** size `e = Δ − Δ/period`,
+    /// The published part-repeat formula, on the **re-indexed** size `e = Δ − Δ/period`,
     /// in **both** directions.
     ///
-    /// The direction half is the point: with `out_up == out_down` — as every fixture in the
-    /// first version of this file had — swapping the two out-of-frame masses passed the
-    /// entire suite, because no assertion anywhere used a negative out-of-frame change.
+    /// The direction half is the point: with the two part-repeat shares equal — as every
+    /// fixture in the first version of this file had — swapping them passed the entire
+    /// suite, because no assertion anywhere used a negative part-repeat change.
     #[test]
-    fn the_out_of_frame_branch_reproduces_the_published_formula_in_both_directions() {
+    fn the_part_repeat_branch_reproduces_the_published_formula_in_both_directions() {
         let model = all_distinct();
         let period = period(3);
         for bp_diff in [1i64, 2, 4, 5, 7] {
@@ -477,25 +516,26 @@ mod tests {
 
     /// **Direction asymmetry must be expressible in both regimes.** Stutter is
     /// contraction-biased, and a direction-symmetric model would be a step backwards from
-    /// production's scoring, which already carries this (spec §4.2).
+    /// production's scoring, which already carries this
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
     #[test]
     fn a_contraction_outscores_an_expansion_of_the_same_size_in_both_regimes() {
         let model = all_distinct();
         let period = period(4);
-        let unit = i64::from(period.get());
+        let repeat = i64::from(period.get());
 
-        // In frame.
-        assert!(model.probability(-unit, period) > model.probability(unit, period));
-        // Out of frame — the case nothing used to cover.
+        // A whole-repeat change.
+        assert!(model.probability(-repeat, period) > model.probability(repeat, period));
+        // A part-repeat change — the case nothing used to cover.
         assert!(model.probability(-1, period) > model.probability(1, period));
     }
 
-    /// **Rank compression, the reason for the re-indexing.** At period 3 the out-of-frame
+    /// **Rank compression, the reason for the re-indexing.** At period 3 the part-repeat
     /// changes 1, 2, 4, 5, 7 must map onto consecutive geometric steps 1, 2, 3, 4, 5 — so
     /// the support has no gaps. Indexing by Δ itself would skip the multiples and distort
     /// the distribution. Negatives mirror exactly, because Rust truncates toward zero.
     #[test]
-    fn out_of_frame_sizes_compress_onto_consecutive_ranks() {
+    fn part_repeat_sizes_compress_onto_consecutive_ranks() {
         let period = 3i64;
         let ranks: Vec<i64> = [1i64, 2, 4, 5, 7]
             .iter()
@@ -510,89 +550,90 @@ mod tests {
         assert_eq!(negative_ranks, vec![-1, -2, -3, -4, -5]);
     }
 
-    /// **The inverted-geometric trap** (spec §5.2, trap 1). A geometric *success*
-    /// probability of 0.95 means nineteen slips in twenty are exactly one unit, so a
-    /// one-unit slip must outweigh a two-unit slip by exactly `1/(1 − geom) = 20`. Read as a
-    /// *decay* instead — the complement, 0.05 — the distribution inverts and large slips
+    /// **The inverted one-step-share trap** (`doc/devel/ng/spec/read_likelihoods.md` §4.2). A
+    /// one-step share of 0.95 means nineteen slips in twenty are exactly one repeat, so a
+    /// one-repeat slip must outweigh a two-repeat slip by exactly `1/(1 − share) = 20`. Read
+    /// as a *decay* instead — the complement, 0.05 — the distribution inverts and large slips
     /// become common, and nothing crashes.
     ///
     /// **The quantitative assertion is the one doing the work.** Monotonicity alone would
-    /// *not* catch the inversion: at geom = 0.05 the sequence still decreases, just far more
-    /// slowly. The ratio is what pins it.
+    /// *not* catch the inversion: at a share of 0.05 the sequence still decreases, just far
+    /// more slowly. The ratio is what pins it.
     #[test]
-    fn a_single_unit_slip_outweighs_a_larger_one() {
+    fn a_single_repeat_slip_outweighs_a_larger_one() {
         let model = StutterModel::hipstr_shipped();
         let period = period(4);
-        let unit = i64::from(period.get());
-        let one_unit = model.probability(unit, period);
-        let two_units = model.probability(2 * unit, period);
-        let three_units = model.probability(3 * unit, period);
+        let repeat = i64::from(period.get());
+        let one_repeat = model.probability(repeat, period);
+        let two_repeats = model.probability(2 * repeat, period);
+        let three_repeats = model.probability(3 * repeat, period);
 
-        assert!(one_unit > two_units && two_units > three_units);
-        assert!((one_unit / two_units - 20.0).abs() < 1e-9);
-        assert!((two_units / three_units - 20.0).abs() < 1e-9);
+        assert!(one_repeat > two_repeats && two_repeats > three_repeats);
+        assert!((one_repeat / two_repeats - 20.0).abs() < 1e-9);
+        assert!((two_repeats / three_repeats - 20.0).abs() < 1e-9);
     }
 
-    /// **The `equal` floor, and why "the five sum to one" must not be a test** (arch §2.4).
-    /// With four direction masses summing past 1, the derived unchanged mass would go
-    /// negative; the floor stops that, and the consequence is that the five values then sum
-    /// to *more* than one. Asserted here so the absence of a sums-to-one test reads as a
+    /// **The same-length floor, and why "the five sum to one" must not be a test** (arch
+    /// §2.4). With four direction shares summing past 1, the derived same-length share would
+    /// go negative; the floor stops that, and the consequence is that the five values then
+    /// sum to *more* than one. Asserted here so the absence of a sums-to-one test reads as a
     /// decision rather than an oversight.
     #[test]
     fn the_five_masses_do_not_sum_to_one_when_the_floor_binds() {
         let hostile = StutterModel::new(StutterRates {
-            in_up: 0.5,
-            in_down: 0.5,
-            in_geom: 0.95,
-            out_up: 0.1,
-            out_down: 0.1,
-            out_geom: 0.95,
+            whole_repeat_longer_share: 0.5,
+            whole_repeat_shorter_share: 0.5,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.1,
+            part_repeat_shorter_share: 0.1,
+            part_repeat_one_step_share: 0.95,
         });
         assert!(
-            hostile.equal() > 0.0,
-            "the floor must keep `equal` positive"
+            hostile.same_length_share() > 0.0,
+            "the floor must keep the same-length share positive"
         );
-        assert_eq!(hostile.equal(), 0.01);
+        assert_eq!(hostile.same_length_share(), 0.01);
 
-        let total = hostile.equal()
-            + hostile.in_up()
-            + hostile.in_down()
-            + hostile.out_up()
-            + hostile.out_down();
+        let total = hostile.same_length_share()
+            + hostile.whole_repeat_longer_share()
+            + hostile.whole_repeat_shorter_share()
+            + hostile.part_repeat_longer_share()
+            + hostile.part_repeat_shorter_share();
         assert!(total > 1.0, "expected the floor to push the total past one");
     }
 
-    /// With well-behaved masses the floor does not bind, and `equal` is exactly the
-    /// remainder.
+    /// With well-behaved shares the floor does not bind, and the same-length share is exactly
+    /// the remainder.
     #[test]
-    fn equal_is_the_remainder_when_the_floor_does_not_bind() {
+    fn the_same_length_share_is_the_remainder_when_the_floor_does_not_bind() {
         let model = StutterModel::hipstr_shipped();
-        assert!((model.equal() - (1.0 - 0.05 - 0.05 - 0.01 - 0.01)).abs() < 1e-15);
-        assert_eq!(model.probability(0, period(4)), model.equal());
+        assert!((model.same_length_share() - (1.0 - 0.05 - 0.05 - 0.01 - 0.01)).abs() < 1e-15);
+        assert_eq!(model.probability(0, period(4)), model.same_length_share());
     }
 
-    /// The geometrics are held strictly inside `(0, 1)`, so neither a certainty nor an
-    /// impossibility is expressible (spec §5.2, trap 2). Asserted against the **contractual
-    /// values** 0.01 and 0.99, not against the constants the implementation uses — otherwise
-    /// editing a constant would move both sides of the assertion.
+    /// The one-step shares are held strictly inside `(0, 1)`, so neither a certainty nor an
+    /// impossibility is expressible (`doc/devel/ng/spec/read_likelihoods.md` §4.2). Asserted
+    /// against the **contractual values** 0.01 and 0.99, not against the constants the
+    /// implementation uses — otherwise editing a constant would move both sides of the
+    /// assertion.
     #[test]
-    fn the_geometrics_are_held_strictly_inside_zero_and_one() {
+    fn the_one_step_shares_are_held_strictly_inside_zero_and_one() {
         let extreme = StutterModel::new(StutterRates {
-            in_up: 0.05,
-            in_down: 0.05,
-            in_geom: 0.0,
-            out_up: 0.01,
-            out_down: 0.01,
-            out_geom: 1.0,
+            whole_repeat_longer_share: 0.05,
+            whole_repeat_shorter_share: 0.05,
+            whole_repeat_one_step_share: 0.0,
+            part_repeat_longer_share: 0.01,
+            part_repeat_shorter_share: 0.01,
+            part_repeat_one_step_share: 1.0,
         });
-        assert_eq!(extreme.in_geom(), 0.01);
-        assert_eq!(extreme.out_geom(), 0.99);
+        assert_eq!(extreme.whole_repeat_one_step_share(), 0.01);
+        assert_eq!(extreme.part_repeat_one_step_share(), 0.99);
     }
 
     /// **Every ill-formed rate must still yield a probability**, because the debug assertion
     /// that rejects them is compiled out of the release build this project runs. Each of
-    /// these produced a non-probability before the sanitizing: a mass of 2.0 gave 1.9, a
-    /// negative mass gave a negative score, and `NaN` poisoned every score *while the
+    /// these produced a non-probability before the sanitizing: a share of 2.0 gave 1.9, a
+    /// negative share gave a negative score, and `NaN` poisoned every score *while the
     /// constructor reported a healthy floor* — `f64::max` absorbs `NaN` and `f64::clamp`
     /// passes it through, so only the results were wrong.
     ///
@@ -601,26 +642,29 @@ mod tests {
     #[test]
     fn ill_formed_rates_still_yield_probabilities() {
         let well_formed = StutterRates {
-            in_up: 0.05,
-            in_down: 0.05,
-            in_geom: 0.95,
-            out_up: 0.01,
-            out_down: 0.01,
-            out_geom: 0.95,
+            whole_repeat_longer_share: 0.05,
+            whole_repeat_shorter_share: 0.05,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.01,
+            part_repeat_shorter_share: 0.01,
+            part_repeat_one_step_share: 0.95,
         };
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 2.0, 1e300] {
             for slot in 0..6 {
                 let mut rates = well_formed;
                 match slot {
-                    0 => rates.in_up = bad,
-                    1 => rates.in_down = bad,
-                    2 => rates.in_geom = bad,
-                    3 => rates.out_up = bad,
-                    4 => rates.out_down = bad,
-                    _ => rates.out_geom = bad,
+                    0 => rates.whole_repeat_longer_share = bad,
+                    1 => rates.whole_repeat_shorter_share = bad,
+                    2 => rates.whole_repeat_one_step_share = bad,
+                    3 => rates.part_repeat_longer_share = bad,
+                    4 => rates.part_repeat_shorter_share = bad,
+                    _ => rates.part_repeat_one_step_share = bad,
                 }
                 let model = StutterModel::sanitized(rates);
-                assert!(model.equal().is_finite(), "rate {bad} in slot {slot}");
+                assert!(
+                    model.same_length_share().is_finite(),
+                    "rate {bad} in slot {slot}"
+                );
                 for period in (1..=6u8).map(period) {
                     for bp_diff in [-9i64, -4, -1, 0, 1, 4, 9] {
                         let probability = model.probability(bp_diff, period);
@@ -641,19 +685,19 @@ mod tests {
     fn slips_past_the_cutoff_score_zero() {
         let model = all_distinct();
         let period = period(4);
-        let unit = i64::from(period.get());
-        let last = i64::from(MAX_SLIP) * unit;
+        let repeat = i64::from(period.get());
+        let last = i64::from(MAX_SLIP) * repeat;
 
-        // In frame: exactly at the cutoff is still scored; one unit past is zero.
+        // Whole-repeat: exactly at the cutoff is still scored; one repeat past is zero.
         assert!(model.probability(last, period) > 0.0);
         assert!(model.probability(-last, period) > 0.0);
-        assert_eq!(model.probability(last + unit, period), 0.0);
-        assert_eq!(model.probability(-last - unit, period), 0.0);
+        assert_eq!(model.probability(last + repeat, period), 0.0);
+        assert_eq!(model.probability(-last - repeat, period), 0.0);
 
-        // Out of frame: the boundary is on the *re-indexed* size. Δ = 13 → e = 10 (scored),
+        // Part-repeat: the boundary is on the *re-indexed* size. Δ = 13 → e = 10 (scored),
         // Δ = 14 → e = 11 (zero).
-        assert_eq!(13 - 13 / unit, 10);
-        assert_eq!(14 - 14 / unit, 11);
+        assert_eq!(13 - 13 / repeat, 10);
+        assert_eq!(14 - 14 / repeat, 11);
         assert!(model.probability(13, period) > 0.0);
         assert!(model.probability(-13, period) > 0.0);
         assert_eq!(model.probability(14, period), 0.0);
@@ -661,14 +705,15 @@ mod tests {
     }
 
     /// **The one constant applied at two scales**, reproduced from production and pinned so
-    /// the asymmetry is visible rather than surprising: in frame the cutoff counts *units*,
-    /// out of frame it counts *re-indexed base pairs*, so out-of-frame changes are cut off
-    /// about `period − 1` times sooner in real terms.
+    /// the asymmetry is visible rather than surprising: on the whole-repeat branch the cutoff
+    /// counts *repeats*, on the part-repeat branch it counts *re-indexed base pairs*, so
+    /// part-repeat changes are cut off about `period − 1` times sooner in real terms.
     #[test]
-    fn the_cutoff_counts_units_in_frame_and_base_pairs_out_of_frame() {
+    fn the_cutoff_counts_repeats_on_one_branch_and_base_pairs_on_the_other() {
         let model = all_distinct();
 
-        // Period 4: 40 bp accepted in frame, but 14 bp already rejected out of frame.
+        // Period 4: 40 bp accepted as whole repeats, but 14 bp already rejected as a
+        // part-repeat change.
         assert!(model.probability(40, period(4)) > 0.0);
         assert_eq!(model.probability(14, period(4)), 0.0);
 
@@ -681,16 +726,16 @@ mod tests {
     }
 
     /// Period 1 is the case the comparison most needs, not the one to skip: **every**
-    /// change is in frame there, so the out-of-frame branch is unreachable and the
+    /// change is a whole-repeat one there, so the part-repeat branch is unreachable and the
     /// arithmetic regime split collapses. What does *not* collapse is direction, size decay
-    /// and placement multiplicity (spec §4.2).
+    /// and placement multiplicity (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
     #[test]
-    fn every_change_is_in_frame_at_period_one() {
+    fn every_change_is_a_whole_repeat_change_at_period_one() {
         let model = all_distinct();
         for bp_diff in [-3i64, -1, 1, 2, 5] {
-            let mass = if bp_diff < 0 { 0.07 } else { 0.03 };
+            let share = if bp_diff < 0 { 0.07 } else { 0.03 };
             let steps = bp_diff.unsigned_abs();
-            let expected = mass * 0.95 * 0.05f64.powi((steps - 1) as i32);
+            let expected = share * 0.95 * 0.05f64.powi((steps - 1) as i32);
             assert!((model.probability(bp_diff, period(1)) - expected).abs() < 1e-15);
         }
         // Direction asymmetry survives at period 1 — the one-penalty model cannot express
@@ -724,26 +769,30 @@ mod tests {
     }
 
     /// The two HipSTR parameter rows are matched sets, and mixing them yields a pairing that
-    /// exists nowhere (spec §5.2 records an earlier draft of the spec doing exactly that).
-    /// The named constructors are what stop that happening by hand; this pins their contents.
+    /// exists nowhere (`doc/devel/ng/spec/alignment.md` §5.2 records an earlier draft of the
+    /// spec doing exactly that). The named constructors are what stop that happening by hand;
+    /// this pins their contents.
     #[test]
     fn the_two_hipstr_parameter_sets_are_kept_as_matched_rows() {
         let shipped = StutterModel::hipstr_shipped();
-        assert_eq!(shipped.in_geom(), 0.95);
-        assert_eq!(shipped.out_geom(), 0.95);
-        assert_eq!(shipped.in_up(), 0.05);
-        assert_eq!(shipped.in_down(), 0.05);
-        assert_eq!(shipped.out_up(), 0.01);
+        assert_eq!(shipped.whole_repeat_one_step_share(), 0.95);
+        assert_eq!(shipped.part_repeat_one_step_share(), 0.95);
+        assert_eq!(shipped.whole_repeat_longer_share(), 0.05);
+        assert_eq!(shipped.whole_repeat_shorter_share(), 0.05);
+        assert_eq!(shipped.part_repeat_longer_share(), 0.01);
 
         let em_start = StutterModel::hipstr_em_start();
-        assert_eq!(em_start.in_geom(), 0.9);
-        assert_eq!(em_start.out_geom(), 0.8);
-        assert_eq!(em_start.in_up(), 0.1);
-        assert_eq!(em_start.out_up(), 0.01);
+        assert_eq!(em_start.whole_repeat_one_step_share(), 0.9);
+        assert_eq!(em_start.part_repeat_one_step_share(), 0.8);
+        assert_eq!(em_start.whole_repeat_longer_share(), 0.1);
+        assert_eq!(em_start.part_repeat_longer_share(), 0.01);
 
-        // The rows differ in their geometrics — which is the whole reason to keep them
-        // apart, and also why HipSTR treats the two geometrics as independent.
-        assert_ne!(em_start.in_geom(), em_start.out_geom());
+        // The rows differ in their one-step shares — which is the whole reason to keep them
+        // apart, and also why HipSTR treats the two as independent.
+        assert_ne!(
+            em_start.whole_repeat_one_step_share(),
+            em_start.part_repeat_one_step_share()
+        );
     }
 
     /// **The copied cutoff must not drift from production's.** The doc on [`MAX_SLIP`]

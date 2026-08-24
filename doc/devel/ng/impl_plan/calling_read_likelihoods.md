@@ -343,7 +343,7 @@ prerequisites C. *Source:* spec §5.3; arch §3.
 The distribution is **reused, not duplicated**; the file already records the follow-ups its port
 deferred. All three changes are in ng code.
 
-**E1. Rename to the spec's vocabulary.**  ☐
+**E1. Rename to the spec's vocabulary.**  ✅
 `StutterRates`/`StutterModel` fields renamed — `whole_repeat_longer_share`,
 `part_repeat_one_step_share`, … — with HipSTR's names kept in doc comments for whoever ports
 alongside; *in frame / out of frame* is banned vocabulary (spec §1.3) and the fields currently

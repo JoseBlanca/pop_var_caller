@@ -194,21 +194,31 @@ fn effective_guard(configured: usize, tract_len: usize, period: usize) -> usize 
 /// [`StutterModel`] — algorithm 4's derivation plus [`NoiseRobustConfig::slip_margin`].
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
-    /// `ln(in_up · in_geom) − ln(equal) − margin`.
+    /// `ln(whole_repeat_longer_share · whole_repeat_one_step_share)`
+    /// `− ln(same_length_share) − margin`.
     open_expansion: f64,
-    /// `ln(in_down · in_geom) − ln(equal) − margin`.
+    /// `ln(whole_repeat_shorter_share · whole_repeat_one_step_share)`
+    /// `− ln(same_length_share) − margin`.
     open_contraction: f64,
-    /// `ln(1 − in_geom)`, per unit after the first.
+    /// `ln(1 − whole_repeat_one_step_share)`, per unit after the first.
     extend: f64,
 }
 
 impl SlipCosts {
     fn from_model(model: &StutterModel, margin: f64) -> Self {
-        let ln_equal = model.equal().ln();
+        let ln_same_length = model.same_length_share().ln();
         Self {
-            open_expansion: (model.in_up() * model.in_geom()).ln() - ln_equal - margin,
-            open_contraction: (model.in_down() * model.in_geom()).ln() - ln_equal - margin,
-            extend: (1.0 - model.in_geom()).ln(),
+            open_expansion: (model.whole_repeat_longer_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length
+                - margin,
+            open_contraction: (model.whole_repeat_shorter_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length
+                - margin,
+            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
 }

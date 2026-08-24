@@ -61,19 +61,23 @@
 //! at once, which is why the score scratch keeps a small ring of the last `period + 1` rows
 //! rather than the two rolling rows algorithm 3 needs.
 //!
-//! 1. **The geometric decomposes onto affine slip transitions.** The stutter probability of
-//!    an `n`-unit expansion is `in_up · in_geom · (1 − in_geom)^(n − 1)` (spec §5.2), which in
-//!    log space is `[ln(in_up · in_geom)] + (n − 1)·[ln(1 − in_geom)]` — an affine *open* plus
+//! 1. **The geometric decomposes onto affine slip transitions.** Writing `longer` for
+//!    `whole_repeat_longer_share`, `shorter` for `whole_repeat_shorter_share` and `one_step`
+//!    for `whole_repeat_one_step_share`, the stutter probability of an `n`-unit expansion is
+//!    `longer · one_step · (1 − one_step)^(n − 1)`
+//!    (`doc/devel/ng/spec/read_likelihoods.md` §4.2), which in log space is
+//!    `[ln(longer · one_step)] + (n − 1)·[ln(1 − one_step)]` — an affine *open* plus
 //!    `n − 1` *extends*. So a run of unit slips is priced exactly like an affine gap, one
-//!    open and then extends, and the direction split (`in_up` vs `in_down`) is the asymmetry
+//!    open and then extends, and the direction split (`longer` vs `shorter`) is the asymmetry
 //!    the spec demands.
 //!
 //! 2. **The slip cost is relative to no-slip.** A best-path aligner *maximises*, and only
-//!    relative scores matter in an argmax — so the `equal` mass (the stutter probability of
-//!    Δ = 0) is folded into the baseline: no slip scores `0`, and an `n`-unit slip scores
-//!    `ln(P(n)) − ln(equal)`. This is the only place the `equal` mass can live in a Viterbi,
-//!    since Δ = 0 corresponds to *not taking* a slip transition and so has nothing to attach a
-//!    cost to. The open cost therefore carries the `− ln(equal)` term; the extend does not.
+//!    relative scores matter in an argmax — so the same-length share (the stutter probability
+//!    of Δ = 0) is folded into the baseline: no slip scores `0`, and an `n`-unit slip scores
+//!    `ln(P(n)) − ln(same_length_share)`. This is the only place that share can live in a
+//!    Viterbi, since Δ = 0 corresponds to *not taking* a slip transition and so has nothing to
+//!    attach a cost to. The open cost therefore carries the `− ln(same_length_share)` term;
+//!    the extend does not.
 //!
 //! 3. **A slipped unit's bases are scored against the motif** (decided with the owner,
 //!    2026-07-23): an inserted unit that really is a copy of the repeat is rewarded, and one
@@ -144,16 +148,19 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 /// written once and shared).
 ///
 /// See the module docs for the derivation: `open` carries the affine open plus the
-/// `− ln(equal)` baseline shift; `extend` is the geometric's per-extra-unit factor.
+/// `− ln(same_length_share)` baseline shift; `extend` is the geometric's per-extra-unit factor.
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
-    /// Log cost to open a run of **expansion** units (the read gains units), relative to
-    /// no slip: `ln(in_up · in_geom) − ln(equal)`.
+    /// Log cost to open a run of **expansion** units (the read gains units), relative to no
+    /// slip: `ln(whole_repeat_longer_share · whole_repeat_one_step_share)`
+    /// `− ln(same_length_share)`.
     open_expansion: f64,
-    /// Log cost to open a run of **contraction** units (the read loses units), relative to
-    /// no slip: `ln(in_down · in_geom) − ln(equal)`.
+    /// Log cost to open a run of **contraction** units (the read loses units), relative to no
+    /// slip: `ln(whole_repeat_shorter_share · whole_repeat_one_step_share)`
+    /// `− ln(same_length_share)`.
     open_contraction: f64,
-    /// Log cost of each unit **after** the first, either direction: `ln(1 − in_geom)`.
+    /// Log cost of each unit **after** the first, either direction:
+    /// `ln(1 − whole_repeat_one_step_share)`.
     extend: f64,
 }
 
@@ -161,11 +168,17 @@ impl SlipCosts {
     /// Derive the slip costs from the stutter model. Reads the model's parameters; keeps no
     /// copy of them.
     fn from_model(model: &StutterModel) -> Self {
-        let ln_equal = model.equal().ln();
+        let ln_same_length = model.same_length_share().ln();
         Self {
-            open_expansion: (model.in_up() * model.in_geom()).ln() - ln_equal,
-            open_contraction: (model.in_down() * model.in_geom()).ln() - ln_equal,
-            extend: (1.0 - model.in_geom()).ln(),
+            open_expansion: (model.whole_repeat_longer_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length,
+            open_contraction: (model.whole_repeat_shorter_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length,
+            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
 }
@@ -761,12 +774,12 @@ mod tests {
     /// property is the whole point of algorithm 4.
     fn contraction_biased() -> StutterModel {
         StutterModel::new(StutterRates {
-            in_up: 0.03,
-            in_down: 0.07,
-            in_geom: 0.9,
-            out_up: 0.004,
-            out_down: 0.012,
-            out_geom: 0.8,
+            whole_repeat_longer_share: 0.03,
+            whole_repeat_shorter_share: 0.07,
+            whole_repeat_one_step_share: 0.9,
+            part_repeat_longer_share: 0.004,
+            part_repeat_shorter_share: 0.012,
+            part_repeat_one_step_share: 0.8,
         })
     }
 
@@ -839,26 +852,26 @@ mod tests {
     }
 
     /// The slip costs reconstruct the stutter model's own probabilities exactly — the affine
-    /// open + extends must sum back to `ln(P(n)) − ln(equal)`, or the aligner is pricing a
-    /// different distribution than the one it was handed.
+    /// open + extends must sum back to `ln(P(n)) − ln(same_length_share)`, or the aligner is
+    /// pricing a different distribution than the one it was handed.
     #[test]
     fn the_slip_costs_reconstruct_the_stutter_probability() {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_equal = model.equal().ln();
+        let ln_same_length = model.same_length_share().ln();
 
         for n in 1..=5i64 {
             // Expansion of n units: open + (n−1) extends, relative to equal.
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_equal;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "expansion of {n} units diverged: {reconstructed} vs {expected}"
             );
             // Contraction likewise.
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_equal;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "contraction of {n} units diverged"
