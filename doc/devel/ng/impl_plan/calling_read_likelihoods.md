@@ -377,7 +377,7 @@ share, and an off-by-one re-indexing, all three silent). **Own commit, do not bu
 
 ### Milestone F — the STR emission seam
 
-**F1. The seam types.**  ☐
+**F1. The seam types.**  ✅
 `ssr_emission.rs`: `SsrScoringContext` (the tier-two seam — every number arrives per call, none
 read from global state; carries `stutter`, `substitution_rate` — the fitted per-stratum rate,
 **never the SNP ε and never `q_sum`**, spec's closed Q6 — `truncated_mass_lost`,

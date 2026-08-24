@@ -70,6 +70,44 @@ pub enum Provenance {
     Supplied,
 }
 
+impl Provenance {
+    /// The weaker of two warrants — what a value derived from both is entitled to claim.
+    ///
+    /// **Consumers combine provenances; they do not branch on them** (`spec/read_likelihoods.md`
+    /// §4.4). A score resting on one fitted parameter and one borrowed parameter is a borrowed
+    /// score, and saying otherwise would launder the weaker of the two — the failure this enum's
+    /// own documentation exists to prevent.
+    ///
+    /// **The order is the ladder this module already states**, in
+    /// [`ParameterEstimationError`]'s own doc: *fitted here, borrowed from the sample's other
+    /// read groups, supplied, defaulted*. So [`Self::FittedHere`] is the strongest and
+    /// [`Self::Defaulted`] the weakest, and **[`Self::Supplied`] sits below [`Self::Borrowed`]**
+    /// — a number the run was handed says nothing about this data, where a borrowed one is at
+    /// least a measurement of a neighbouring grain.
+    ///
+    /// *(That last placement is the ladder's, not this method's invention. If a run's supplied
+    /// values should outrank a borrowed fit, the ladder is where to change it and this follows.)*
+    #[must_use]
+    pub fn weaker_of(self, other: Self) -> Self {
+        if other.strength() < self.strength() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// Where this warrant sits on the ladder — higher is better founded. Private, because the
+    /// number is an implementation of [`Self::weaker_of`] and not a quantity to expose.
+    fn strength(self) -> u8 {
+        match self {
+            Self::FittedHere => 3,
+            Self::Borrowed => 2,
+            Self::Supplied => 1,
+            Self::Defaulted => 0,
+        }
+    }
+}
+
 /// A fitted number with its warrant: what it is, where it came from, and how much data
 /// stood behind it.
 ///
