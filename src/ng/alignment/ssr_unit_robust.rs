@@ -275,16 +275,16 @@ struct SlipCosts {
 
 impl SlipCosts {
     fn from_model(model: &StutterModel) -> Self {
-        let ln_same_length = model.same_length_share().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
             open_expansion: (model.whole_repeat_longer_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             open_contraction: (model.whole_repeat_shorter_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
@@ -1133,14 +1133,14 @@ mod tests {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_same_length = model.same_length_share().ln();
+        let ln_same_length_share = model.same_length_share().ln();
 
         for n in 1..=5i64 {
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_same_length;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_same_length;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
         }
     }

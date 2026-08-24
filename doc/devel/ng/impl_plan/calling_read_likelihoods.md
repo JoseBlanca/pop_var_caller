@@ -102,11 +102,11 @@ production); the two doc repointings spec §7 asks for.
   neither a guard — the field it reads is `pub` — nor now the only one, since `SsrSampleEvidence`
   holds a bare slice and spells the split again. Arch §2.2 carries the full correction.)*
 - The pieces to reuse or port: `StutterModel`/`StutterRates`/`probability`
-  ([`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs),
-  [`:82`](../../../../src/ng/alignment/stutter.rs),
-  [`:300`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
-  ([`:63`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
-  ([`:74`](../../../../src/ng/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
+  ([`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs),
+  [`:106`](../../../../src/ng/alignment/stutter.rs),
+  [`:345`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
+  ([`:78`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
+  ([`:90`](../../../../src/ng/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
   rather than spelling a second copy); production's seam and comparator
   ([`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs),
   [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)); the placement enumeration
@@ -354,7 +354,7 @@ spec's §4.2 as the distribution's owner, its *in frame / out of frame* wording 
 
 **E2. Two named cutoffs + the reported truncation.**  ☐
 `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base pairs) replace the
-single `MAX_SLIP` ([`stutter.rs:63`](../../../../src/ng/alignment/stutter.rs)) — both inherited
+single `MAX_SLIP` ([`stutter.rs:78`](../../../../src/ng/alignment/stutter.rs)) — both inherited
 from production's provisional 10 and declared inherited. The mass the cutoffs discard is
 **computed and reported per candidate** (feeds `SsrScoringContext.truncated_mass_lost`). Test:
 the reported loss equals one minus the truncated sum, to floating-point tolerance, across

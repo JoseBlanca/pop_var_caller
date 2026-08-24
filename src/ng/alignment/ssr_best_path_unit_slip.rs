@@ -122,12 +122,12 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
     /// Log cost to open a run of **expansion** units (the read gains units), relative to no
-    /// slip: `ln(whole_repeat_longer_share · whole_repeat_one_step_share)`
-    /// `− ln(same_length_share)`.
+    /// slip: `ln(whole_repeat_longer_share · whole_repeat_one_step_share)
+    /// − ln(same_length_share)`.
     open_expansion: f64,
     /// Log cost to open a run of **contraction** units (the read loses units), relative to no
-    /// slip: `ln(whole_repeat_shorter_share · whole_repeat_one_step_share)`
-    /// `− ln(same_length_share)`.
+    /// slip: `ln(whole_repeat_shorter_share · whole_repeat_one_step_share)
+    /// − ln(same_length_share)`.
     open_contraction: f64,
     /// Log cost of each unit **after** the first, either direction:
     /// `ln(1 − whole_repeat_one_step_share)`.
@@ -138,16 +138,16 @@ impl SlipCosts {
     /// Derive the slip costs from the stutter model. Reads the model's parameters; keeps no
     /// copy of them.
     fn from_model(model: &StutterModel) -> Self {
-        let ln_same_length = model.same_length_share().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
             open_expansion: (model.whole_repeat_longer_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             open_contraction: (model.whole_repeat_shorter_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
@@ -738,19 +738,19 @@ mod tests {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_same_length = model.same_length_share().ln();
+        let ln_same_length_share = model.same_length_share().ln();
 
         for n in 1..=5i64 {
             // Expansion of n units: open + (n−1) extends, relative to equal.
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_same_length;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "expansion of {n} units diverged: {reconstructed} vs {expected}"
             );
             // Contraction likewise.
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_same_length;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
             assert!(
                 (reconstructed - expected).abs() < 1e-12,
                 "contraction of {n} units diverged"

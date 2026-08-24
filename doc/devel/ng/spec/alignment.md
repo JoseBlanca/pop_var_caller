@@ -401,7 +401,7 @@ sequence, and it was read here as meaning inside the tract against in the flanks
 different distinction entirely. HipSTR's own field names are kept in that document's parameter table
 and in `stutter.rs`'s doc comments, for whoever reads the two side by side.)*
 
-Three things stay in this section because [`read_likelihoods.md`](read_likelihoods.md) §4.2 does not
+Four things stay in this section because [`read_likelihoods.md`](read_likelihoods.md) §4.2 does not
 carry them.
 
 **A second silent trap, beside the one that document sets out at length** (a one-step share is not a
@@ -430,6 +430,17 @@ point, not a claim: HipSTR's fitted values are contraction-biased. And note that
 one-step shares as **independent** parameters, with genuinely different values in its EM start.
 **Production ties them to a single value** — an undeclared placeholder alongside the fixed
 part-repeat share, and it should be recorded as one rather than mistaken for a fitted result.
+
+**The follow-up this section is a named home for, and what it costs any comparison run before it
+lands.** One of the seven parameters is a placeholder rather than an estimate: **the part-repeat
+share is a fixed 5% of the whole-repeat share**
+([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)). A real part-repeat estimator —
+**binning part-repeat reads separately in the parameter pre-pass, as HipSTR does** — is a known and
+unfinished follow-up, and **any comparison involving part-repeat reads inherits that weakness**,
+this module's algorithm comparisons included.
+[`read_likelihoods.md`](read_likelihoods.md) §4.2 and §10 both name *this section* as one of the two
+places the follow-up is recorded, and §10 files it as "Home: unowned, and that is the finding" — so
+this paragraph is load-bearing, not a summary of one elsewhere.
 
 **Which grain the parameters belong to**, because that is what an aligner's caller has to supply.
 HipSTR does **not** rely on its shipped values in normal use: it fits the two direction masses and

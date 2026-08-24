@@ -60,11 +60,14 @@ use std::num::NonZeroU8;
 ///
 /// Production applies this single number to the **repeat** count on the whole-repeat branch
 /// and to the re-indexed **base-pair** count on the part-repeat branch. Those are different
-/// scales, and `doc/devel/ng/spec/read_likelihoods.md` §4.2 says to decide about that rather
-/// than inherit it silently.
+/// scales, and `doc/devel/ng/spec/read_likelihoods.md` §4.2 has **decided against inheriting
+/// that**: ng is to carry two cutoffs named for what they count — `max_whole_repeat_slip` in
+/// repeats and `max_part_repeat_slip` in base pairs — because 10 repeats at a hexamer is 60
+/// base pairs and 10 base pairs is not the same claim. **This constant is what stands until
+/// they land** (plan step E2).
 ///
-/// **The decision here is to reproduce production's behaviour**, and to write down what it
-/// costs. Part-repeat changes are cut off about **`period − 1` times sooner** in real terms:
+/// **Until then the behaviour is production's**, and here is what that costs. Part-repeat
+/// changes are cut off about **`period − 1` times sooner** in real terms:
 /// the re-indexed size is `Δ − Δ/period`, so a cutoff of 10 re-indexed steps admits roughly
 /// `10 · period/(period − 1)` base pairs, against `10 · period` in whole repeats. At period
 /// 4 that is about 13 bp for part-repeat changes against 40 bp for whole-repeat ones; **at
@@ -137,11 +140,12 @@ pub struct StutterRates {
 /// candidates. This module *measures*; letting the measurement's own model vary with the
 /// candidate being tested would bias the ruler toward the answer under test (arch §5, §2.4).
 ///
-/// Production derives its parameters per call from a per-locus stutter shape plus a
-/// per-read stutter level. **ng has no stutter-shape type yet** — fitting one is the
-/// genotyping's job (`doc/devel/ng/spec/read_likelihoods.md` §4.2) — so this step lands the
-/// parameters and the distribution, and the adapting constructor is owed once that type
-/// exists.
+/// **This type fits nothing**, which `doc/devel/ng/spec/read_likelihoods.md` §7 states as
+/// the model's side of the parameter boundary: it reads its seven numbers frozen. Production
+/// derives them per call from a per-locus stutter shape plus a per-read stutter level; ng's
+/// come from the parameter pre-pass, per read group per stratum (§4.2 of the same document).
+/// **The constructor that adapts a fit to these rates is `stutter_rates_for`, which plan
+/// step E3 lands**; until then a caller builds [`StutterRates`] itself.
 ///
 /// # Contract: the same-length share is floored, so **do not test that the five sum to one**
 ///
@@ -150,7 +154,7 @@ pub struct StutterRates {
 /// shorter shares — **but it is floored**. When the floor binds, the five values sum to
 /// slightly more than one. That is deliberate: the floor is what stops a hostile parameter
 /// combination producing a negative probability. It means "the five sum to one" must **not**
-/// be written as a test, and `the_five_masses_do_not_sum_to_one_when_the_floor_binds` exists
+/// be written as a test, and `the_five_shares_do_not_sum_to_one_when_the_floor_binds` exists
 /// to make that explicit rather than merely absent.
 ///
 /// (HipSTR instead *asserts* the shares sum below one at construction and never clamps.
@@ -218,16 +222,9 @@ impl StutterModel {
     #[must_use]
     pub fn new(rates: StutterRates) -> Self {
         debug_assert!(
-            [
-                rates.whole_repeat_longer_share,
-                rates.whole_repeat_shorter_share,
-                rates.whole_repeat_one_step_share,
-                rates.part_repeat_longer_share,
-                rates.part_repeat_shorter_share,
-                rates.part_repeat_one_step_share
-            ]
-            .iter()
-            .all(|rate| rate.is_finite() && (0.0..=1.0).contains(rate)),
+            every_rate(&rates)
+                .iter()
+                .all(|rate| rate.is_finite() && (0.0..=1.0).contains(rate)),
             "stutter rates must be finite probabilities in [0, 1]: {rates:?}"
         );
         Self::sanitized(rates)
@@ -239,10 +236,24 @@ impl StutterModel {
     /// Separated so the release path is reachable from a test: the assertion fires in the
     /// test profile, so `new` cannot be used to check what happens once it is gone.
     fn sanitized(rates: StutterRates) -> Self {
-        let whole_repeat_longer_share = sanitize_mass(rates.whole_repeat_longer_share);
-        let whole_repeat_shorter_share = sanitize_mass(rates.whole_repeat_shorter_share);
-        let part_repeat_longer_share = sanitize_mass(rates.part_repeat_longer_share);
-        let part_repeat_shorter_share = sanitize_mass(rates.part_repeat_shorter_share);
+        // Destructured exhaustively, with no `..`: a seventh rate added later must break
+        // this line rather than be dropped here in silence. Measured before the change —
+        // adding a field to `StutterRates` failed to compile at the two named-row
+        // constructors and **nowhere else**, so the new rate would have been neither
+        // validated nor sanitized nor stored.
+        let StutterRates {
+            whole_repeat_longer_share,
+            whole_repeat_shorter_share,
+            whole_repeat_one_step_share,
+            part_repeat_longer_share,
+            part_repeat_shorter_share,
+            part_repeat_one_step_share,
+        } = rates;
+
+        let whole_repeat_longer_share = sanitize_direction_share(whole_repeat_longer_share);
+        let whole_repeat_shorter_share = sanitize_direction_share(whole_repeat_shorter_share);
+        let part_repeat_longer_share = sanitize_direction_share(part_repeat_longer_share);
+        let part_repeat_shorter_share = sanitize_direction_share(part_repeat_shorter_share);
 
         Self {
             same_length_share: (1.0
@@ -253,10 +264,10 @@ impl StutterModel {
                 .clamp(GEOM_MIN, 1.0),
             whole_repeat_longer_share,
             whole_repeat_shorter_share,
-            whole_repeat_one_step_share: sanitize_geom(rates.whole_repeat_one_step_share),
+            whole_repeat_one_step_share: sanitize_one_step_share(whole_repeat_one_step_share),
             part_repeat_longer_share,
             part_repeat_shorter_share,
-            part_repeat_one_step_share: sanitize_geom(rates.part_repeat_one_step_share),
+            part_repeat_one_step_share: sanitize_one_step_share(part_repeat_one_step_share),
         }
     }
 
@@ -340,24 +351,24 @@ impl StutterModel {
             if repeats == 0 {
                 self.same_length_share
             } else {
-                regime(
-                    self.whole_repeat_longer_share,
-                    self.whole_repeat_shorter_share,
-                    self.whole_repeat_one_step_share,
-                    repeats,
-                )
+                Regime {
+                    longer_share: self.whole_repeat_longer_share,
+                    shorter_share: self.whole_repeat_shorter_share,
+                    one_step_share: self.whole_repeat_one_step_share,
+                }
+                .probability(repeats)
             }
         } else {
             // A part-repeat change: a sequencing indel or an interruption, sized in base
             // pairs and rank-compressed (see above). The size is never zero here — `bp_diff`
             // is not a multiple of the period, so truncated division cannot consume all of
             // it.
-            regime(
-                self.part_repeat_longer_share,
-                self.part_repeat_shorter_share,
-                self.part_repeat_one_step_share,
-                bp_diff - bp_diff / period,
-            )
+            Regime {
+                longer_share: self.part_repeat_longer_share,
+                shorter_share: self.part_repeat_shorter_share,
+                one_step_share: self.part_repeat_one_step_share,
+            }
+            .probability(bp_diff - bp_diff / period)
         }
     }
 
@@ -403,53 +414,96 @@ impl StutterModel {
     }
 }
 
-/// One regime's whole answer: pick the direction by the sign of `steps`, drop anything past
-/// the cutoff, and evaluate the geometric.
+/// The three shares one regime is scored from, **named at the call site** rather than passed
+/// positionally.
 ///
-/// Written once and shared by both regimes because they are the same shape over different
-/// parameters — which also makes the "size is at least one" precondition provable in one
-/// place. `steps` is a **repeat** count on the whole-repeat branch and a re-indexed
-/// **base-pair** count on the part-repeat branch; [`MAX_SLIP`] is applied to whichever it is,
-/// which is the two-scale inheritance recorded on that constant.
-#[inline]
-fn regime(longer_share: f64, shorter_share: f64, one_step_share: f64, steps: i64) -> f64 {
-    debug_assert!(
-        steps != 0,
-        "a zero-size change is the same-length case, not a regime"
-    );
-    let size = steps.unsigned_abs();
-    if size > u64::from(MAX_SLIP) {
-        return 0.0;
+/// Both regimes are the same shape over different parameters, so the arithmetic is written
+/// once — but as three bare `f64` arguments in a row, a mispairing is invisible to the
+/// compiler *and* to a reader, which is the hazard [`StutterRates`]'s own doc argues about
+/// thirty lines above. Built as a literal at each of the two call sites, a crossed pair reads
+/// as two disagreeing words on one line (`longer_share: self.whole_repeat_shorter_share`).
+#[derive(Debug, Clone, Copy)]
+struct Regime {
+    /// The share of reads longer than the allele in this regime, at any size.
+    longer_share: f64,
+    /// The share shorter, at any size.
+    shorter_share: f64,
+    /// Of the reads that moved at all in this regime, the share that moved by one step.
+    one_step_share: f64,
+}
+
+impl Regime {
+    /// This regime's whole answer: pick the direction by the sign of `steps`, drop anything
+    /// past the cutoff, and evaluate the geometric.
+    ///
+    /// Shared by both regimes, which also makes the "size is at least one" precondition
+    /// provable in one place. `steps` is a **repeat** count on the whole-repeat branch and a
+    /// re-indexed **base-pair** count on the part-repeat branch; [`MAX_SLIP`] is applied to
+    /// whichever it is, which is the two-scale inheritance recorded on that constant.
+    #[inline]
+    fn probability(self, steps: i64) -> f64 {
+        debug_assert!(
+            steps != 0,
+            "a zero-size change is the same-length case, not a regime"
+        );
+        let size = steps.unsigned_abs();
+        if size > u64::from(MAX_SLIP) {
+            return 0.0;
+        }
+        let share = if steps < 0 {
+            self.shorter_share
+        } else {
+            self.longer_share
+        };
+        // `size >= 1` here, so the exponent cannot underflow. `unsigned_abs` also means
+        // `i64::MIN` is safe, which a `-steps - 1` form would not be. The `MAX_SLIP` early
+        // return above is what makes the cast safe: whatever replaces that cutoff must keep
+        // the guard.
+        share * self.one_step_share * (1.0 - self.one_step_share).powi((size - 1) as i32)
     }
-    let share = if steps < 0 {
-        shorter_share
-    } else {
-        longer_share
-    };
-    // `size >= 1` here, so the exponent cannot underflow. `unsigned_abs` also means
-    // `i64::MIN` is safe, which a `-steps - 1` form would not be.
-    share * one_step_share * (1.0 - one_step_share).powi((size - 1) as i32)
+}
+
+/// Every rate a [`StutterRates`] carries, as an array — destructured exhaustively so that a
+/// rate added later cannot slip past [`StutterModel::new`]'s validation unnoticed.
+#[inline]
+fn every_rate(rates: &StutterRates) -> [f64; 6] {
+    let StutterRates {
+        whole_repeat_longer_share,
+        whole_repeat_shorter_share,
+        whole_repeat_one_step_share,
+        part_repeat_longer_share,
+        part_repeat_shorter_share,
+        part_repeat_one_step_share,
+    } = *rates;
+    [
+        whole_repeat_longer_share,
+        whole_repeat_shorter_share,
+        whole_repeat_one_step_share,
+        part_repeat_longer_share,
+        part_repeat_shorter_share,
+        part_repeat_one_step_share,
+    ]
 }
 
 /// A direction share, made safe for release: `NaN` becomes zero (no stutter — the
 /// no-information end), and anything outside `[0, 1]` is clamped into it.
 #[inline]
-fn sanitize_mass(mass: f64) -> f64 {
-    if mass.is_nan() {
+fn sanitize_direction_share(share: f64) -> f64 {
+    if share.is_nan() {
         0.0
     } else {
-        mass.clamp(0.0, 1.0)
+        share.clamp(0.0, 1.0)
     }
 }
 
 /// A one-step share, held strictly inside `(0, 1)`. `NaN` becomes [`GEOM_MIN`];
 /// `f64::clamp` would otherwise pass it straight through.
 #[inline]
-fn sanitize_geom(geom: f64) -> f64 {
-    if geom.is_nan() {
+fn sanitize_one_step_share(share: f64) -> f64 {
+    if share.is_nan() {
         GEOM_MIN
     } else {
-        geom.clamp(GEOM_MIN, GEOM_MAX)
+        share.clamp(GEOM_MIN, GEOM_MAX)
     }
 }
 
@@ -479,6 +533,29 @@ mod tests {
             part_repeat_shorter_share: 0.012,
             part_repeat_one_step_share: 0.8,
         })
+    }
+
+    /// **Every accessor returns its own rate, on a fixture where all six differ.**
+    ///
+    /// `all_distinct` exists so that a transposition cannot hide, and until this test it
+    /// could: seven tests used the fixture and every one of them went through
+    /// [`StutterModel::probability`], while every test that read an **accessor** used a
+    /// fixture whose longer and shorter shares are equal — `0.05/0.05`, `0.1/0.1`,
+    /// `0.01/0.01`. Measured by this step's review: making `part_repeat_longer_share()`
+    /// return the shorter field left the whole library green at 4,354 passing tests, while
+    /// the accessor returned 0.012 where 0.004 is right. The two part-repeat accessors have
+    /// no caller outside this module yet, and the genotyping likelihood is the named coming
+    /// one — so the crossing would have been waiting for it rather than caught before it.
+    #[test]
+    fn every_accessor_returns_its_own_rate() {
+        let model = all_distinct();
+        assert_eq!(model.whole_repeat_longer_share(), 0.03);
+        assert_eq!(model.whole_repeat_shorter_share(), 0.07);
+        assert_eq!(model.whole_repeat_one_step_share(), 0.95);
+        assert_eq!(model.part_repeat_longer_share(), 0.004);
+        assert_eq!(model.part_repeat_shorter_share(), 0.012);
+        assert_eq!(model.part_repeat_one_step_share(), 0.8);
+        assert!((model.same_length_share() - (1.0 - 0.03 - 0.07 - 0.004 - 0.012)).abs() < 1e-15);
     }
 
     /// The published whole-repeat formula, term by term:
@@ -514,10 +591,12 @@ mod tests {
         }
     }
 
-    /// **Direction asymmetry must be expressible in both regimes.** Stutter is
-    /// contraction-biased, and a direction-symmetric model would be a step backwards from
-    /// production's scoring, which already carries this
-    /// (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
+    /// **Direction asymmetry must be expressible in both regimes.** Reads lose repeats more
+    /// often than they gain them — at tomato dinucleotides by a factor of 4.9, 2,438 reads
+    /// against 501 (`doc/devel/ng/spec/read_likelihoods.md` §4.2) — and a direction-symmetric
+    /// model would be a step backwards from production's scoring, which already carries the
+    /// asymmetry (the alignment spec §4.2, which requires a two-penalty aligner to inherit
+    /// it).
     #[test]
     fn a_contraction_outscores_an_expansion_of_the_same_size_in_both_regimes() {
         let model = all_distinct();
@@ -574,12 +653,12 @@ mod tests {
     }
 
     /// **The same-length floor, and why "the five sum to one" must not be a test** (arch
-    /// §2.4). With four direction shares summing past 1, the derived same-length share would
+    /// §2.4). With four direction shares summing past one, the derived same-length share would
     /// go negative; the floor stops that, and the consequence is that the five values then
     /// sum to *more* than one. Asserted here so the absence of a sums-to-one test reads as a
     /// decision rather than an oversight.
     #[test]
-    fn the_five_masses_do_not_sum_to_one_when_the_floor_binds() {
+    fn the_five_shares_do_not_sum_to_one_when_the_floor_binds() {
         let hostile = StutterModel::new(StutterRates {
             whole_repeat_longer_share: 0.5,
             whole_repeat_shorter_share: 0.5,
@@ -612,7 +691,8 @@ mod tests {
     }
 
     /// The one-step shares are held strictly inside `(0, 1)`, so neither a certainty nor an
-    /// impossibility is expressible (`doc/devel/ng/spec/read_likelihoods.md` §4.2). Asserted
+    /// impossibility is expressible — the *clamps carry weight* trap, which the alignment
+    /// spec's §5.2 keeps because the read-likelihood spec does not state it. Asserted
     /// against the **contractual values** 0.01 and 0.99, not against the constants the
     /// implementation uses — otherwise editing a constant would move both sides of the
     /// assertion.
@@ -728,7 +808,8 @@ mod tests {
     /// Period 1 is the case the comparison most needs, not the one to skip: **every**
     /// change is a whole-repeat one there, so the part-repeat branch is unreachable and the
     /// arithmetic regime split collapses. What does *not* collapse is direction, size decay
-    /// and placement multiplicity (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
+    /// and placement multiplicity (the alignment spec §4.2, which works through what the
+    /// collapse costs).
     #[test]
     fn every_change_is_a_whole_repeat_change_at_period_one() {
         let model = all_distinct();

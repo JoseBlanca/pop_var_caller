@@ -1125,9 +1125,11 @@ does not depend on its size.
 **How likely is it that a copy of an allele `L` bases long produced a read showing `L + Δ` bases?**
 That is the whole of this section, and it is a genetics model — a statement about how a polymerase
 slips — rather than an alignment algorithm. **It belongs to this document.**
-[`alignment.md`](alignment.md) §5.2 sets out the same distribution, because a candidate repeat-aware
-aligner there would consume it too, and says outright that it is *"not an alignment algorithm"*. §7
-below fixes the ownership and asks for that section to be repointed here; the edit is not made here.
+[`alignment.md`](alignment.md) §5.2 used to set out the same distribution, because a candidate
+repeat-aware aligner there would consume it too, and said outright that it is *"not an alignment
+algorithm"*. §7 below fixes the ownership, and **that section was repointed here on 2026-08-24**
+(plan step E1): it now names this section as the owner and keeps only what this one does not
+carry.
 
 **The distribution has two regimes and that split is its defining structure.**
 
@@ -1972,7 +1974,7 @@ say the same thing.**
 |---|---|---|
 | measuring a read's repeat tract — the ruler | [`alignment.md`](alignment.md) §4.2 | consumes the measurement; never re-measures |
 | comparing two equal-length sequences under one flat error rate | [`alignment.md`](alignment.md) §5.1 | **composes** it as §4.3's factor |
-| the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 sets it out because a candidate aligner there would consume it, and states it is not an alignment algorithm. **That section should be repointed here**, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, **and its *in frame* / *out of frame* wording moved to §1.3's**; neither edit is made here |
+| the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 used to set it out, because a candidate aligner there would consume it, while stating it is not an alignment algorithm. **Both edits were made on 2026-08-24** (plan step E1): that section is repointed here, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, and its *in frame* / *out of frame* wording is now §1.3's. It keeps three things this document does not carry — the *clamps carry weight* trap, HipSTR's two parameter rows as matched sets, and the grain the parameters belong to |
 | every parameter | [`parameter_prepass.md`](parameter_prepass.md) and its two path siblings | reads them frozen; **fits nothing** |
 | the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and placed **two** requirements on it: **keep read group in the identity** (§2.3) — **built 2026-08-23**, rows are one per `(allele, read group)` — and **let a partial observation survive collation**, keyed and projected over the stretch it witnessed, because the built merge discards it and §5 has nothing to score without it (§5.4, corrected 2026-08-21), which is still owed. Neither changes which loci get built — an earlier draft asked for that third change and §5.4.2 withdrew it |
 | which alleles are candidates | candidate generation, [`ng_proposal.md`](ng_proposal.md) step 6 | scores what it is handed |

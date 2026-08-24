@@ -70,7 +70,7 @@ to the loop's `GenotypeTable`. Contract, both paths:
 - every probability is floored before a logarithm: `MIN_BASE_ERROR = 1e-12`
   ([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)),
   geometric clamps `(0.01, 0.99)`
-  ([`alignment/stutter.rs:74`](../../../../src/ng/alignment/stutter.rs)) — imported as named
+  ([`alignment/stutter.rs:90`](../../../../src/ng/alignment/stutter.rs)) — imported as named
   constants with their reasons.
 
 ### 1.2 Correction to `ng_step_interfaces.md` §3 step 7 — recorded, not applied there
@@ -407,9 +407,9 @@ pub struct SsrContamination<'a> { pub fraction: f64, pub length_distribution: &'
 ### 4.2 The stutter distribution — reused, and two cutoffs replace one
 
 The distribution of spec §4.2 is **already built**:
-[`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs)'s `StutterModel`, constructed
-from `StutterRates` ([`:82`](../../../../src/ng/alignment/stutter.rs)), evaluated by
-`probability(bp_diff, period)` ([`:300`](../../../../src/ng/alignment/stutter.rs)), with the
+[`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs)'s `StutterModel`, constructed
+from `StutterRates` ([`:106`](../../../../src/ng/alignment/stutter.rs)), evaluated by
+`probability(bp_diff, period)` ([`:345`](../../../../src/ng/alignment/stutter.rs)), with the
 one-step-share trap already typed against (its constructor doc). Three changes, all in that file
 (ng code, not frozen production):
 
@@ -418,7 +418,7 @@ one-step-share trap already typed against (its constructor doc). Three changes, 
   alongside. *In frame / out of frame* is banned vocabulary in this doc set (spec §1.3), and the
   fields currently carry it (`in_up`, `out_geom`).
 - **Two named cutoffs replace the single `MAX_SLIP = 10`**
-  ([`alignment/stutter.rs:63`](../../../../src/ng/alignment/stutter.rs), whose own comment records
+  ([`alignment/stutter.rs:78`](../../../../src/ng/alignment/stutter.rs), whose own comment records
   the follow-up): `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base
   pairs) — both inherited from production's provisional 10
   ([`param_estimation.rs:21`](../../../../src/ssr/cohort/param_estimation.rs)) and declared
@@ -466,7 +466,7 @@ Every row read on 2026-08-21.
 | contamination mixture | [`posterior_engine.rs:1475`](../../../../src/var_calling/posterior_engine.rs) (`compute_mixture_log_likelihoods`), c = 0 fallback [`:1509`](../../../../src/var_calling/posterior_engine.rs) | ported without the fallback branch — ng's two forms agree to ulp (spec §3.6) |
 | minted per-read error (worse of BQ/MAPQ; min-BQ over window) | [`open_record.rs:792`](../../../../src/pileup/walker/open_record.rs), [`:944`](../../../../src/pileup/walker/open_record.rs) | upstream mint, consumed as `q_sum`; the calibration scale on top is **new** |
 | `ReadGroupCalibration`'s fit input | [`generic/read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs) `ReadGroupErrorRateFit` | consume; the two-scalar accumulator is asked of the pre-pass (spec §3.2) |
-| `StutterModel` / `StutterRates` | [`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs), [`:82`](../../../../src/ng/alignment/stutter.rs); production [`hipstr.rs:53`](../../../../src/ssr/cohort/read_model/hipstr.rs) | **reuse ng's**, with §4.2's three changes; do not port from the GPL HipSTR tree (spec §4.2's licence rule) |
+| `StutterModel` / `StutterRates` | [`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs), [`:106`](../../../../src/ng/alignment/stutter.rs); production [`hipstr.rs:53`](../../../../src/ssr/cohort/read_model/hipstr.rs) | **reuse ng's**, with §4.2's three changes; do not port from the GPL HipSTR tree (spec §4.2's licence rule) |
 | stutter parameters at the (read group, stratum) grain | `Slippage` [`joint/ssr_fit.rs:83`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs), `StratumFit` [`:281`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs), `blend_level` [`joint/slippage_curve.rs:574`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs) | consume, provenance included |
 | placement enumeration (interrupted candidates) | [`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs) (whole-repeat only; part-repeat resized at tract end) | port with production's split, stated (spec §4.2) |
 | substitution comparison | `FlatEmission`, [`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs); production `pair_hmm.rs` | **compose**, never re-implement (spec §4.3, §7) |
@@ -475,7 +475,7 @@ Every row read on 2026-08-21.
 | generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/ng/run/cohort_merge/build.rs) | view over them; the `(allele × read group)` split **landed** in [`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1 — `SupportedAllele` carries `read_group` and the rows are one per pair, ascending |
 | STR evidence | `SequenceObservation`, [`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs) | reuse as-is; the read-group identity the contract needs is already there ([`:316`](../../../../src/ng/locus_generation/mod.rs)) |
 | contamination inputs | `ContaminationEstimate` [`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs), per-read-group grain [`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs) | consume as `ContaminationView`; the three allele-class frequencies are asked of the pre-pass's side-pass (spec §3.6) |
-| numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:74`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
+| numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:90`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
 | censored term (both paths) | — | **new**; production discards partials ([`locus_tally.rs:91`](../../../../src/ssr/pileup/locus_tally.rs)) |
 
 ## 6. Design decisions — decided

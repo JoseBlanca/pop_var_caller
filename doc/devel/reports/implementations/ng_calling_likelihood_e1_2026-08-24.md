@@ -37,9 +37,11 @@ and every doc comment names HipSTR's field beside the new name — `in_up_`, `ou
 — so someone reading the two side by side is not left translating.
 
 **Two names the rename deliberately leaves alone.** `GEOM_MIN` and `GEOM_MAX` keep their spelling:
-they are the clamp on a one-step share, `ng::calling::likelihood` re-exports them and asserts they
-are the same two numbers ([`mod.rs:151`](../../../../src/ng/calling/likelihood/mod.rs)), and
-renaming them reaches outside this step. *Geometric* is not banned vocabulary — only *frame* is —
+they are the clamp on a one-step share, `ng::calling::likelihood` re-exports them
+([`mod.rs:151`](../../../../src/ng/calling/likelihood/mod.rs)), and renaming them reaches outside
+this step. The deeper reason the review supplied is better than blast radius: **`GEOM_MIN` bounds
+two different quantities** — the one-step-share floor and the derived same-length floor — so an
+honest rename splits the constant in two, and that is a decision rather than a substitution. *Geometric* is not banned vocabulary — only *frame* is —
 so the constants' docs now say what they bound (a one-step share) and note that `geom` is HipSTR's
 name for it. `MAX_SLIP` also stays, because **E2 replaces it with two cutoffs** and renaming it
 twice would be churn.
@@ -66,11 +68,28 @@ the fixture since the alignment module's own review. On top of it:
   Δ ∈ {1, 2, 4, 5, 7} against 0.004/0.012 and the re-indexed size.
 - `the_same_length_share_is_the_remainder_when_the_floor_does_not_bind` pins the derived share
   against `1 − 0.05 − 0.05 − 0.01 − 0.01` and against `probability(0, ·)`.
-- `the_two_hipstr_parameter_sets_are_kept_as_matched_rows` pins each constructor's seven values
-  one at a time.
+- `the_two_hipstr_parameter_sets_are_kept_as_matched_rows` pins **five** of
+  `hipstr_shipped`'s seven values and **four** of `hipstr_em_start`'s, one at a time.
+  (An earlier draft of this report said "each constructor's seven values"; the step's own
+  review measured it. `part_repeat_shorter_share` is asserted for neither constructor and the
+  same-length share for neither — the test body is unchanged from `bb7a41e9`, so this is a
+  gap in an inherited fixture rather than something the rename introduced.)
 
-So the tests that hold this step are the ones that were already there, and they hold it because
-their fixture refuses to give any two rates the same value.
+So for `probability` — the whole of the arithmetic — the tests that hold this step are the ones
+that were already there, and they hold it because their fixture refuses to give any two rates the
+same value.
+
+**That was not true of the accessors, and the step's review is what established it.** Every test
+that read an *accessor* used a fixture whose longer and shorter shares are equal (`0.05/0.05`,
+`0.1/0.1`, `0.01/0.01`), and the seven tests that use `all_distinct()` all go through
+`probability`. So making `part_repeat_longer_share()` return the shorter field left the **whole
+library green at 4,354 passing tests** while the accessor returned 0.012 where 0.004 is right;
+the mirror mutation behaved the same, and so did the whole-repeat pair. The two part-repeat
+accessors have no caller outside the module yet — **the genotyping likelihood is the named coming
+one**, so a crossed pair would have been waiting for step F2 rather than caught before it.
+`every_accessor_returns_its_own_rate` reads all seven on `all_distinct()`; measured here, it
+fails on each of those three mutations, and the source was restored from a checksum-verified
+copy afterwards.
 
 ## 4. Eight test names changed; no assertion did
 
@@ -130,9 +149,18 @@ one parenthesis giving the correspondence. The two in-document references to §5
 "the parameters, the formulas and the two silent conversion traps … in full" (§4.2's requirement
 list) and the reuse map's row were repointed at §4.2 as well.
 
-**The rest of `alignment.md` still says *in frame* / *out of frame*** — its §4.2, for one. Spec §7
-asked for §5.2's wording, and widening the edit to a document this step does not otherwise touch
-is not E1's to make. The parenthesis in §5.2 gives a reader the mapping.
+**The rest of `alignment.md` still says *in frame* / *out of frame*** — 14 occurrences, its §4.2
+among them. Spec §7 asked for §5.2's wording specifically, and a document-wide vocabulary sweep is
+a larger edit than a rename step should carry; the parenthesis in §5.2 gives a reader the mapping
+meanwhile. **This is a cost, not a clean boundary**: `alignment.md` now speaks two vocabularies
+160 lines apart, and six identifiers in the aligner test modules and the delimiter example
+(`Scenario::OutOfFrameIndel`, `an_out_of_frame_change_still_has_a_route`) carry the retired words
+by exactly the criterion that renamed eight test names inside `stutter.rs`. **Recorded for the
+owner as a step of its own**, not left implicit.
+
+*(The claim is about vocabulary, not about which files were opened: this commit does touch
+`alignment.md` outside §5.2, in two hunks — the §4.2 requirement list and the reuse map row — both
+of which cite §5.2 and had to be repointed.)*
 
 ## 6. What was touched outside `stutter.rs`, and why it is forced
 
@@ -153,17 +181,18 @@ where the formula they quote now lives.
 
 All in the container, from this worktree.
 
-| command | result |
-|---|---|
-| `./scripts/dev.sh cargo test` | **4,354 passed, 0 failed, 14 ignored** in the library target — identical to `bb7a41e9`, measured on the clean tree before the edit |
-| `./scripts/dev.sh cargo test --all-features` | same 4,354 / 0 / 14; 4,448 / 0 / 18 across every target |
-| `./scripts/dev.sh cargo clippy --lib --all-features --tests -- -D warnings` | exit 0, no warnings |
-| `./scripts/dev.sh cargo check --examples --all-features` | exit 0 |
-| `./scripts/dev.sh cargo fmt --check` | exit 0 |
+| command | at the rename (`80ecd863`) | after the review's fixes |
+|---|---|---|
+| `./scripts/dev.sh cargo test` — library target | **4,354 passed, 0 failed, 14 ignored** — identical to `bb7a41e9`, measured on the clean tree before the edit | **4,355 / 0 / 14** — the one added test |
+| `./scripts/dev.sh cargo test --all-features` — every target | 4,448 / 0 / 18 | 4,449 / 0 / 18 |
+| `clippy --lib --all-features --tests -- -D warnings` | exit 0, no warnings | exit 0, no warnings |
+| `cargo check --examples --all-features` | exit 0 | exit 0 |
+| `cargo fmt --check` | exit 0 | exit 0 |
 
-`ng::alignment::stutter::tests` holds **15 tests before and after**, all passing, none added and
-none removed. `ng::calling::likelihood` holds **162**, untouched — the generic path does not read
-this module.
+`ng::alignment::stutter::tests` held **15 tests before and after the rename** — none added, none
+removed — and holds **16** after the review, the one addition being
+`every_accessor_returns_its_own_rate`. `ng::calling::likelihood` holds **162** throughout,
+untouched: the generic path does not read this module.
 
 *(`--all-targets` clippy is red on `main` in `examples/ng_duplicated_class_harness.rs` and
 `benches/freebayes_bookkeeping.rs`, unrelated to this branch; `--lib --all-features --tests` is the
@@ -188,3 +217,47 @@ Nothing here changes a design decision, so none of it was escalated.
 costs — E2 splits it into `MAX_WHOLE_REPEAT_SLIP` and `MAX_PART_REPEAT_SLIP` and makes the
 discarded mass reported rather than silent. E3 adds `stutter_rates_for(&Slippage)` and the
 sums-to-one tripwire. Both now have the vocabulary to be written in.
+
+---
+
+## 10. What the review found, and what it changed
+
+Five agents, one worktree each, against `80ecd863`: naming, refactor safety, reliability,
+module structure, and an intent-and-numbers audit. **The rename itself came back clean** — all
+seven names match the spec's §4.2 table character for character, every accessor carries HipSTR's
+original field name, and no stale identifier survives in `src/ng/` or `examples/`.
+Behaviour-preservation was measured rather than argued: **29,787 evaluated cells across three
+all-distinct parameter sets, the two named constructor rows and the release sanitizer, maximum
+absolute difference 0.0** against both the parent commit and the specification's own formula, with
+zero disagreeing cells.
+
+**The one Major was a hole the rename did not open but did put at risk** — the accessor
+transposition that the whole library could not see (§3 above). Fixed by
+`every_accessor_returns_its_own_rate`, and the fix was mutation-tested three ways.
+
+Also applied:
+
+| what | why |
+|---|---|
+| `sanitized` destructures `StutterRates` exhaustively, and `new`'s validation array comes from `every_rate` | measured: adding a seventh rate failed to compile at the two constructors **and nowhere else** — the new rate would have been neither validated nor sanitized nor stored |
+| the two sanitizers renamed `sanitize_direction_share` / `sanitize_one_step_share`; `the_five_masses_…` → `the_five_shares_…` | undeclared survivors of the retired vocabulary |
+| the positional `regime(f64, f64, f64, i64)` helper became a `Regime` literal built at each call site | three same-typed shares in a row is the hazard `StutterRates`'s own doc argues about thirty lines above; a crossed pair now reads as two disagreeing words on one line |
+| `ln_same_length` → `ln_same_length_share` at 27 sites | half a name for the quantity the step renamed |
+| eight doc formulas rejoined into one code span each | splitting `` `ln(a · b)` `` / `` `− ln(c)` `` across lines made rustdoc emit two adjacent `<code>` elements; a code span carries across a line break |
+| five citations in `stutter.rs` repointed | the wholesale "spec §5.2 → `read_likelihoods.md` §4.2" substitution was wrong five times: three of those claims live in the **alignment** spec, one cites §4.2 for the clamps trap that §5.2 deliberately keeps, and one said §4.2 "says to decide" where §4.2 has decided |
+| `alignment.md` §5.2 regained the part-repeat-estimator follow-up | **a real loss**: §5.2 was one of only two recorded homes for it, and `read_likelihoods.md` §10 files the item as "Home: unowned, and that is the finding" — so deleting the paragraph orphaned two live citations. The sentence "any comparison involving part-repeat reads inherits that weakness" existed nowhere else |
+| `read_likelihoods.md` §4.2 and §7 record that the repointing was made | both still read "the edit is not made here", while §7's own preamble says the three documents "must say the same thing" |
+| line anchors in the plan and arch updated | the rename moved every line in `stutter.rs`; **E2's own bullet was sending the next implementer to `stutter.rs:63`**, where `MAX_SLIP` no longer is (it is at 78) |
+
+**Two claims in this report were wrong and are corrected above**: the matched-rows test pins five
+and four values rather than seven and seven, and §3's "the existing fixtures already separate
+them" held for `probability` but not for the accessors.
+
+## 11. Left for the owner, not decided here
+
+Four things the review raised that reach past a rename step, listed with a recommendation each in
+the handover rather than settled in this commit: renaming `StutterRates`, whose noun says *rates*
+while all six fields say *share*; a vocabulary sweep of `alignment.md`'s remaining 14 occurrences
+and six aligner identifiers; unifying the six aligners' near-identical `SlipCosts::from_model`;
+and the tautological `assert_eq!` at `ng::calling::likelihood`'s `mod.rs:2129-2130`, which
+compares a re-export to itself and cannot fail.

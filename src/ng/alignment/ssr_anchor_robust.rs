@@ -209,16 +209,16 @@ struct SlipCosts {
 
 impl SlipCosts {
     fn from_model(model: &StutterModel) -> Self {
-        let ln_same_length = model.same_length_share().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
             open_expansion: (model.whole_repeat_longer_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             open_contraction: (model.whole_repeat_shorter_share()
                 * model.whole_repeat_one_step_share())
             .ln()
-                - ln_same_length,
+                - ln_same_length_share,
             extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
