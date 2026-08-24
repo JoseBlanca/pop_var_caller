@@ -297,7 +297,19 @@ first tier holds the fraction only.
 
 ### Milestone D — partial observations on the generic path
 
-**D1. The compatibility rule.**  ☐
+**D1. The compatibility rule.**  ✅ *(shipped, and **the rule turned out to need no positional
+restriction at all** — the correction that made the step small. An allele is the whole locus as a
+carrier has it, not the reference with gaps, so a read from a carrier shows the start or the end
+of that carrier's own sequence: flush left means its bases are a **prefix** of the allele, flush
+right a **suffix**, and `WitnessedLocusPositions`' two predicates are documented as exactly those
+constraints. **So there is no gather and no buffer sized by the widest witness** — this step's
+scratch is the compatibility cache alone. A witness with a hole reaching both borders splits into
+a prefix and a suffix at an unknown point, which is checked without trying every split; a witness
+flush at neither border is anchored to nothing and constrains nothing, rather than being matched
+by content somewhere inside the allele, which would move a genotype on a coincidence. The row
+gained `&CandidateAlleles` and the scratch, and its two per-read-group parameters were paired into
+`ReadGroupParameters` — which is where their read-group counts are now checked against each
+other.)*
 An allele is compatible with a partial when its projection **restricted to the positions the read
 witnessed** equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the
 genotype's compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly

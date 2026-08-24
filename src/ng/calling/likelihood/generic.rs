@@ -5,7 +5,7 @@
 //! written: **where a wrong read's probability goes.**
 
 use crate::ng::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
-use crate::ng::locus_generation::LocusKind;
+use crate::ng::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::ng::types::{AlleleId, LogProb};
 
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
@@ -326,6 +326,100 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
     differing == 1
 }
 
+/// Whether an allele could have produced a read that saw only part of the locus — spec §5.3's
+/// compatibility rule.
+///
+/// # What a partial read can and cannot say
+///
+/// **An allele is the whole locus, as a sample carrying it has it** — not the reference with
+/// gaps punched in. So a read from a carrier shows a stretch of that carrier's own sequence,
+/// and comparing the read's bases against the allele's bases is comparing like with like. What
+/// is *not* like with like is the witness: it counts **locus positions**, while the bases are
+/// **read content**, and the two differ by whatever indel the read carried over the stretch
+/// ([`PartialObservation::bases`]). So the witness may never be used to index the bases.
+///
+/// What it may be used for is the one thing it settles: **which end of the allele the read is
+/// anchored to.** A read flush to the locus's left border showed the start of its carrier's
+/// sequence, so its bases are a **prefix** of that carrier's allele; one flush to the right
+/// border, a **suffix**. `WitnessedLocusPositions`' two predicates are documented as exactly
+/// these constraints, and this is their consumer.
+///
+/// - **Flush left only** — the bases must be a prefix of the allele.
+/// - **Flush right only** — a suffix.
+/// - **Flush both, with a hole between** — the bases split somewhere into a prefix and a
+///   suffix, and **where they split is not known**: the hole swallowed an unknown number of the
+///   read's bases. So the test is that *some* split works, which is what
+///   [`splits_into_a_prefix_and_a_suffix`] answers.
+/// - **Flush at neither border** — the read saw only the middle. It is anchored to nothing, so
+///   it constrains nothing and is compatible with every allele.
+///
+/// # Why the middle case says nothing rather than matching anywhere
+///
+/// A read that saw the middle could be matched against the allele by content — does its
+/// sequence occur anywhere inside? — and that is *sound* in one direction only: a carrier's
+/// read does occur in its carrier's sequence, but so may a few bases in an allele the read
+/// never came from, and short reads in repetitive sequence make that ordinary rather than rare.
+/// **Counting it compatible with everything costs the information we cannot justify claiming
+/// and invents none**: the observation then contributes the same amount to every genotype and
+/// cancels, which is spec §5.3's own account of what a read that saw little should do.
+///
+/// # Panics
+///
+/// **In release as well as debug**, on a locus of no positions — a locus is at least its
+/// reference base, and a zero length would make every witness flush right.
+#[must_use]
+pub fn partial_is_compatible(
+    witnessed_in_locus: &WitnessedLocusPositions,
+    bases: &[u8],
+    allele: &[u8],
+    locus_len: LocusLen,
+) -> bool {
+    assert!(
+        locus_len.get() > 0,
+        "a locus covers at least one reference position"
+    );
+    match (
+        witnessed_in_locus.is_flush_left(),
+        witnessed_in_locus.is_flush_right(locus_len),
+    ) {
+        (true, true) => splits_into_a_prefix_and_a_suffix(bases, allele),
+        (true, false) => allele.starts_with(bases),
+        (false, true) => allele.ends_with(bases),
+        // Anchored to neither border: see the note above.
+        (false, false) => true,
+    }
+}
+
+/// Whether `bases` can be cut in two so that the allele starts with the first part and ends
+/// with the second — the test for a read that reached both borders with a hole in between.
+///
+/// **Where the cut falls is exactly what is unknown.** The read's bases are what it showed
+/// across every run of its witness, and the hole swallowed an unknown number of them, so the
+/// question is whether *any* cut is consistent rather than whether a particular one is.
+///
+/// It is answered without trying every cut: take how far the allele agrees with the bases from
+/// the left, and how far from the right. A consistent cut exists exactly when those two
+/// agreements between them cover the whole of the bases — and the allele is long enough to hold
+/// them without the two halves overlapping, since a read cannot have shown more bases than its
+/// carrier's sequence has.
+fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
+    if allele.len() < bases.len() {
+        return false;
+    }
+    let agreeing_from_the_left = bases
+        .iter()
+        .zip(allele)
+        .take_while(|(base, allele_base)| base == allele_base)
+        .count();
+    let agreeing_from_the_right = bases
+        .iter()
+        .rev()
+        .zip(allele.iter().rev())
+        .take_while(|(base, allele_base)| base == allele_base)
+        .count();
+    agreeing_from_the_left + agreeing_from_the_right >= bases.len()
+}
+
 /// One sample's whole `Lg` row at an ordinary site — one log-probability per candidate
 /// genotype: spec §3.6's contamination mixture, which is spec §3.3 wherever nothing is
 /// contaminated.
@@ -396,34 +490,47 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// and not where it is common**, and the aggregation identity spec §12 test 9 pins is a property
 /// of the uncontaminated row.
 ///
+/// # Reads that saw only part of the locus
+///
+/// They are scored beside the complete observations, by spec §5.3's compatibility rule:
+/// **an allele could have produced a partial read when the read's bases are a prefix of it (the
+/// read reached the locus's left border) or a suffix (the right)**, since an allele is the whole
+/// locus as a carrier has it and a read from a carrier shows the start or the end of that
+/// carrier's sequence. A partial the genotype's carried alleles can all have produced
+/// contributes `Σ k_a/P` over them; one none of them can is charged as an error **with no
+/// spread**, because a read disagreeing over several positions has no finite set of wrong
+/// outcomes to divide by. [`partial_is_compatible`] carries the rule and what it declines to
+/// decide; the verdicts are cached in the caller's [`GenericRowScratch`], once per
+/// `(partial, allele)` rather than once per genotype.
+///
 /// # What is not here
 ///
 /// **No multinomial coefficient** — production carries one and this does not (spec §3.4), which
 /// is a genotype-changing decision the plan measures rather than asserts. **No producer for
-/// `q(o)`**: the frequencies arrive as a parameter, and computing them from the batch the sample
-/// was sequenced in is the next step (C2). **No partial observations**:
-/// [`GenericSampleEvidence::partials`] is not read here, and Milestone D adds the compatibility
-/// rule that scores it.
+/// `q(o)` here**: the frequencies are filled by the caller, once per locus and once per sample
+/// (`fill_batch_allele_copies` and `fill_contaminant_allele_frequencies`).
 ///
 /// # Panics
 ///
 /// **In release as well as debug**, on a caller bug (spec §8): an `out` whose length is not the
 /// genotype count, a read group with no calibration or no contamination fraction, an observation
-/// naming an allele the locus is not called over, or a mixture holding a frequency per allele for
-/// a different locus's allele table. Production holds the analogous assertion in release because
-/// a scratch array too short for the allele count would otherwise be indexed out of bounds
-/// silently.
+/// naming an allele the locus is not called over, a mixture holding a frequency per allele for a
+/// different locus's allele table, or a candidate table whose allele count is not the genotype
+/// table's. Production holds the analogous assertion in release because a scratch array too
+/// short for the allele count would otherwise be indexed out of bounds silently.
 ///
 /// [`ContaminationMixture::none`]: super::ContaminationMixture::none
 /// [`GenericSampleEvidence::partials`]: super::GenericSampleEvidence::partials
 pub fn genotype_log_likelihood_row(
     evidence: &super::GenericSampleEvidence<'_>,
+    alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
-    calibration: &[super::ReadGroupCalibration],
-    contamination: super::ContaminationMixture<'_>,
+    read_groups: super::ReadGroupParameters<'_>,
     error_spreads: ErrorSpreadTable<'_>,
+    scratch: &mut super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
+    let contamination = read_groups.contamination();
     let genotype_count = genotypes.genotype_count();
     let allele_count = genotypes.allele_count();
     assert_eq!(
@@ -462,13 +569,6 @@ pub fn genotype_log_likelihood_row(
         "the mixture holds a contaminant frequency for {} alleles and this locus is called over \
          {allele_count}, so one of them belongs to a different locus",
         contamination.allele_count()
-    );
-    assert!(
-        contamination.is_absent() || contamination.read_group_count() == calibration.len(),
-        "the mixture holds a fraction for {} read groups and the run supplied {} calibrations, \
-         so one of them belongs to a different run",
-        contamination.read_group_count(),
-        calibration.len()
     );
 
     // **The pooled leftover seeds every genotype**, which is what makes it cancel: it is the
@@ -513,13 +613,7 @@ pub fn genotype_log_likelihood_row(
             "an observation names allele {allele}, past the {allele_count} this locus is called \
              over"
         );
-        let read_group = observation.read_group.get() as usize;
-        let scale = calibration.get(read_group).unwrap_or_else(|| {
-            panic!(
-                "read group {read_group} has no calibration; the run supplied {}",
-                calibration.len()
-            )
-        });
+        let scale = read_groups.calibration_of(observation.read_group);
         // Hoisted out of the genotype loop: every one of these is a property of the observation
         // and of the read group it came from, not of the genotype being scored.
         let reads = f64::from(observation.num_reads);
@@ -574,6 +668,121 @@ pub fn genotype_log_likelihood_row(
                 };
         }
     }
+
+    score_partials(
+        evidence,
+        alleles,
+        genotypes,
+        read_groups,
+        &copy_share,
+        scratch,
+        out,
+    );
+}
+
+/// Add what the reads that saw only part of the locus are worth — spec §5.3.
+///
+/// **Split out of the row rather than inlined**, because it is a different walk over different
+/// evidence: the supported observations are folded onto alleles and these are not, so nothing
+/// above is reused but the copy shares and the mixture.
+///
+/// # The shape, and where the cost goes
+///
+/// Compatibility is decided **once per `(partial, allele)`** into the caller's scratch, then
+/// read `genotypes` times — the cache is what makes this `partials × alleles` rather than
+/// `partials × genotypes × alleles`, a factor of 3.5 at a six-allele diploid.
+///
+/// For one genotype, a partial's own term is `Σ k_a/P` over the alleles it carries that are
+/// compatible — **a sum, not a maximum**, because the read could have come from any copy the
+/// genotype holds and the copies are what the share divides. Compatible with none, it is
+/// charged as an error exactly as §3.3 charges one, **with `m = 1`**: a read that disagrees over
+/// several positions has no finite set of wrong outcomes to divide by.
+///
+/// The contaminant's half is the same sum over the same alleles, weighted by their frequency in
+/// the batch — the chance a neighbour's DNA would have shown what this read showed is the chance
+/// it carries any allele compatible with it.
+fn score_partials(
+    evidence: &super::GenericSampleEvidence<'_>,
+    alleles: &CandidateAlleles,
+    genotypes: &GenotypeTableView<'_>,
+    read_groups: super::ReadGroupParameters<'_>,
+    copy_share: &[f64],
+    scratch: &mut super::GenericRowScratch,
+    out: &mut [LogProb],
+) {
+    let contamination = read_groups.contamination();
+    let allele_count = genotypes.allele_count();
+    assert_eq!(
+        alleles.len(),
+        allele_count,
+        "the candidate table holds {} alleles and the genotype table is built over \
+         {allele_count}, so one of them belongs to a different locus",
+        alleles.len()
+    );
+    scratch.prepare_compatibility(evidence.partials.len(), allele_count);
+    if evidence.partials.is_empty() {
+        return;
+    }
+
+    // The locus's own length in reference positions — what decides whether a witness reached a
+    // border, and the only thing the witness is used for.
+    let locus_len = LocusLen::from_positions(alleles.reference().len() as u64);
+
+    for (partial_at, partial) in evidence.partials.iter().enumerate() {
+        for (allele_at, allele_bases) in alleles.iter().enumerate() {
+            scratch.set_compatible(
+                partial_at,
+                allele_at,
+                partial_is_compatible(
+                    &partial.witnessed_in_locus,
+                    &partial.bases,
+                    allele_bases,
+                    locus_len,
+                ),
+            );
+        }
+    }
+
+    let counts = genotypes.genotype_allele_counts();
+    for (partial_at, partial) in evidence.partials.iter().enumerate() {
+        let scale = read_groups.calibration_of(partial.read_group);
+        let reads = f64::from(partial.num_reads);
+        let contamination_fraction = contamination.fraction_of(partial.read_group);
+        let from_this_individual = 1.0 - contamination_fraction;
+        // **The contaminant's half is over the same alleles**: a neighbour's DNA shows what this
+        // read showed exactly when it carries an allele compatible with it, so the frequencies
+        // of those alleles add.
+        let from_somebody_else_showing_this: f64 = (0..allele_count)
+            .filter(|&allele_at| scratch.is_compatible(partial_at, allele_at))
+            .map(|allele_at| {
+                contamination
+                    .contaminant_frequency_of(partial.read_group, AlleleId(allele_at as u16))
+            })
+            .sum();
+        let from_somebody_else_showing_this =
+            contamination_fraction * from_somebody_else_showing_this;
+        // A partial the genotype cannot explain is charged with **no spread**: `m = 1`.
+        let charged_when_nothing_explains_it = from_this_individual
+            * scale.charged_error(partial.q_sum, partial.num_reads)
+            / NO_ERROR_SPREAD;
+
+        for (genotype, slot) in out.iter_mut().enumerate() {
+            let carried = &counts[genotype * allele_count..(genotype + 1) * allele_count];
+            let compatible_copies: u32 = carried
+                .iter()
+                .enumerate()
+                .filter(|&(allele_at, _)| scratch.is_compatible(partial_at, allele_at))
+                .map(|(_, &copies)| copies)
+                .sum();
+
+            let own = if compatible_copies > 0 {
+                from_this_individual * copy_share[compatible_copies as usize]
+            } else {
+                charged_when_nothing_explains_it
+            };
+            slot.0 += reads * (own + from_somebody_else_showing_this).ln();
+        }
+    }
 }
 
 /// The widest ploidy the row builds a copy-share table for.
@@ -588,7 +797,7 @@ const MAX_PLOIDY_COPIES: usize = 16;
 mod tests {
     use super::*;
     use crate::ng::calling::GenotypeTable;
-    use crate::ng::locus_generation::LocusKind;
+    use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
     use crate::ng::types::Ploidy;
 
     /// A locus over the bases given, the first of them the reference.
@@ -1109,8 +1318,8 @@ mod tests {
 
     use super::super::test_batching::one_batch;
     use super::super::{
-        ContaminationMixture, ContaminationView, GenericObservation, GenericSampleEvidence,
-        ReadGroupCalibration,
+        ContaminationMixture, ContaminationView, GenericObservation, GenericRowScratch,
+        GenericSampleEvidence, ReadGroupCalibration, ReadGroupParameters,
     };
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
@@ -1179,10 +1388,11 @@ mod tests {
         let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
         genotype_log_likelihood_row(
             evidence,
+            alleles,
             &view,
-            calibration,
-            contamination,
+            ReadGroupParameters::new(calibration, contamination),
             ErrorSpreadTable::over(&spreads, &view),
+            &mut GenericRowScratch::default(),
             &mut out,
         );
         out.into_iter().map(LogProb::get).collect()
@@ -1617,10 +1827,11 @@ mod tests {
         let mut ours = vec![LogProb(f64::NAN); view.genotype_count()];
         genotype_log_likelihood_row(
             &evidence,
+            &alleles,
             &view,
-            &calibrated(scale),
-            ContaminationMixture::uncontaminated(),
+            ReadGroupParameters::uncontaminated(&calibrated(scale)),
             spread_table,
+            &mut GenericRowScratch::default(),
             &mut ours,
         );
 
@@ -1874,16 +2085,18 @@ mod tests {
         let wide_view = wide_table.view();
         let spread_values = spreads(&wide, &wide_table);
 
+        let narrow = locus(&[b"A", b"C"]);
         let narrow_table = diploid(2);
         let narrow_view = narrow_table.view();
         let mut out = vec![LogProb(f64::NAN); narrow_view.genotype_count()];
 
         genotype_log_likelihood_row(
             &GenericSampleEvidence::empty(),
+            &narrow,
             &narrow_view,
-            &uncalibrated(),
-            ContaminationMixture::uncontaminated(),
+            ReadGroupParameters::uncontaminated(&uncalibrated()),
             ErrorSpreadTable::over(&spread_values, &wide_view),
+            &mut GenericRowScratch::default(),
             &mut out,
         );
     }
@@ -1933,10 +2146,11 @@ mod tests {
 
         genotype_log_likelihood_row(
             &GenericSampleEvidence::empty(),
+            &alleles,
             &view,
-            &uncalibrated(),
-            ContaminationMixture::uncontaminated(),
+            ReadGroupParameters::uncontaminated(&uncalibrated()),
             ErrorSpreadTable::over(&spread_values, &view),
+            &mut GenericRowScratch::default(),
             &mut out,
         );
     }
@@ -2635,10 +2849,11 @@ mod tests {
 
         genotype_log_likelihood_row(
             &GenericSampleEvidence::empty(),
+            &alleles,
             &tetraploid_view,
-            &uncalibrated(),
-            ContaminationMixture::uncontaminated(),
+            ReadGroupParameters::uncontaminated(&uncalibrated()),
             ErrorSpreadTable::over(&diploid_spreads, &diploid_table.view()),
+            &mut GenericRowScratch::default(),
             &mut out,
         );
     }
@@ -2669,5 +2884,223 @@ mod tests {
             &calibration,
             one_batch(&fractions, &frequencies),
         );
+    }
+    // ---- D1: reads that saw only part of the locus ----
+
+    use crate::ng::run::cohort_merge::build::PartialObservation;
+
+    /// A partial read over the given locus runs, showing `bases`.
+    fn partial(
+        runs: &[(u16, u16)],
+        bases: &[u8],
+        num_reads: u32,
+        q_sum: f64,
+    ) -> PartialObservation {
+        PartialObservation {
+            witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                .expect("the fixture's runs are a witness"),
+            read_group: ReadGroupId(0),
+            bases: bases.into(),
+            num_reads,
+            q_sum,
+        }
+    }
+
+    fn row_with_partials(
+        supported: &[GenericObservation],
+        partials: &[PartialObservation],
+        alleles: &CandidateAlleles,
+        table: &GenotypeTable,
+    ) -> Vec<f64> {
+        contaminated_row(
+            &GenericSampleEvidence::new(supported, 0.0, partials),
+            alleles,
+            table,
+            &uncalibrated(),
+            ContaminationMixture::uncontaminated(),
+        )
+    }
+
+    /// **A partial compatible with both of a heterozygote's alleles contributes exactly one** —
+    /// no information, correctly. Its two copy shares are a half each and they add.
+    ///
+    /// The read saw the locus's first two positions and showed `AC`, which both alleles start
+    /// with; they differ only at the third position, which it never reached. `ln 1` is zero, so
+    /// the heterozygote's row is untouched — and that is the property, not an accident of the
+    /// fixture: a read that cannot tell two alleles apart must not move the genotype carrying
+    /// both.
+    #[test]
+    fn a_partial_compatible_with_both_of_a_heterozygotes_alleles_says_nothing() {
+        let alleles = locus(&[b"ACG", b"ACT"]);
+        let table = diploid(2);
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        let seen_the_first_two = [partial(&[(0, 2)], b"AC", 3, -21.0)];
+        let scored = row_with_partials(&[], &seen_the_first_two, &alleles, &table);
+
+        assert_eq!(scored[het], 0.0, "the heterozygote is untouched");
+        // And the homozygote too, since it also carries a compatible allele at full share.
+        assert_eq!(scored[hom_ref], 0.0);
+    }
+
+    /// **A partial no allele of the genotype can have produced is charged as an error, with no
+    /// spread.** Three reads at a summed log error of −21 are charged `3 × ln(e⁻⁷)` — their own
+    /// quality and nothing else, because a read disagreeing over several positions has no finite
+    /// set of wrong outcomes to divide by (spec §5.3).
+    #[test]
+    fn a_partial_no_carried_allele_explains_is_charged_its_own_quality() {
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+
+        // Flush left, showing what only the alternative starts with.
+        let showed_the_alternative = [partial(&[(0, 2)], b"TT", 3, -21.0)];
+        let scored = row_with_partials(&[], &showed_the_alternative, &alleles, &table);
+
+        assert!((scored[hom_ref] - 3.0 * (-7.0)).abs() < 1e-12);
+        assert_eq!(scored[hom_alt], 0.0);
+        // **No spread**: `ln 3` per read away from what the complete path charges a
+        // one-substitution mismatch.
+        assert!((scored[hom_ref] - (3.0 * -7.0 - 3.0 * LOG_SPREAD)).abs() > 3.0);
+    }
+
+    /// A read flush to the locus's **right** border constrains the allele's suffix, and the same
+    /// bases flush left constrain its prefix — different questions, and an implementation asking
+    /// only one answers this fixture wrongly.
+    #[test]
+    fn which_border_a_partial_reached_decides_which_end_of_the_allele_it_constrains() {
+        let alleles = locus(&[b"ACG", b"TCG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        // `CG` at the right border: both alleles end with it, so neither is refused.
+        let at_the_right_border = [partial(&[(1, 3)], b"CG", 2, -14.0)];
+        let scored = row_with_partials(&[], &at_the_right_border, &alleles, &table);
+        assert_eq!(scored[hom_ref], 0.0);
+
+        // The same bases at the left border: neither allele starts with `CG`, so every genotype
+        // is charged.
+        let at_the_left_border = [partial(&[(0, 2)], b"CG", 2, -14.0)];
+        let scored = row_with_partials(&[], &at_the_left_border, &alleles, &table);
+        assert!((scored[hom_ref] - 2.0 * (-7.0)).abs() < 1e-12);
+    }
+
+    /// **A witness with a hole in it, against an allele differing only inside the hole** — the
+    /// case a contiguous-range implementation gets wrong and no single-run fixture can see.
+    ///
+    /// The read reached both borders and missed the middle, so its bases split into a prefix and
+    /// a suffix of whatever allele produced it — **and where they split is unknown**, since the
+    /// hole swallowed however many bases the read did not show. An allele that differs *only*
+    /// inside the hole must stay compatible: the read has no evidence against it. One that
+    /// differs at a witnessed position must not.
+    #[test]
+    fn an_allele_differing_only_inside_the_hole_stays_compatible() {
+        // Position 2 is the hole. The three alternatives differ inside it, before it, and after
+        // it.
+        let alleles = locus(&[b"ACGTT", b"ACATT", b"AGGTT", b"ACGTA"]);
+        let table = diploid(4);
+        let carries = |copies: &[u32]| genotype_carrying(&table, copies).get() as usize;
+
+        let missed_the_middle = [partial(&[(0, 2), (3, 5)], b"ACTT", 2, -14.0)];
+        let scored = row_with_partials(&[], &missed_the_middle, &alleles, &table);
+
+        // Differs only inside the hole — the read cannot tell it from the reference.
+        assert_eq!(scored[carries(&[2, 0, 0, 0])], 0.0);
+        assert_eq!(scored[carries(&[0, 2, 0, 0])], 0.0);
+        // Differs at position 1, which the read saw.
+        assert!((scored[carries(&[0, 0, 2, 0])] - 2.0 * (-7.0)).abs() < 1e-12);
+        // Differs at position 4, which the read also saw.
+        assert!((scored[carries(&[0, 0, 0, 2])] - 2.0 * (-7.0)).abs() < 1e-12);
+    }
+
+    /// A read anchored to neither border is anchored to nothing, so it constrains nothing and
+    /// every genotype is charged alike — which cancels when the caller normalises.
+    ///
+    /// **It is not matched by content anywhere in the allele**, and that is a decision rather
+    /// than an omission: a carrier's read does occur inside its carrier's sequence, but so may a
+    /// few bases in an allele it never came from, and inventing a verdict there would move a
+    /// genotype on no evidence. [`partial_is_compatible`] carries the argument.
+    #[test]
+    fn a_partial_anchored_to_neither_border_says_nothing_about_anything() {
+        let alleles = locus(&[b"ACGTT", b"AGGTT"]);
+        let table = diploid(2);
+
+        let saw_only_the_middle = [partial(&[(1, 3)], b"CG", 2, -14.0)];
+        let scored = row_with_partials(&[], &saw_only_the_middle, &alleles, &table);
+
+        assert!(
+            scored.iter().all(|&score| score == 0.0),
+            "every genotype should be untouched, and they are {scored:?}"
+        );
+    }
+
+    /// **The verdict is the same however the reads were pooled**, which is what makes the rule
+    /// exactly aggregable: the witnessed positions are part of an observation's identity, so
+    /// every read folded into one partial saw the same positions and gets the same answer.
+    #[test]
+    fn pooling_a_partials_reads_does_not_change_the_verdict() {
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = diploid(2);
+
+        let one_at_a_time = [
+            partial(&[(0, 2)], b"TT", 1, -7.0),
+            partial(&[(0, 2)], b"TT", 1, -7.0),
+            partial(&[(0, 2)], b"TT", 1, -7.0),
+        ];
+        let folded = [partial(&[(0, 2)], b"TT", 3, -21.0)];
+
+        let from_reads = row_with_partials(&[], &one_at_a_time, &alleles, &table);
+        let from_fold = row_with_partials(&[], &folded, &alleles, &table);
+
+        for (individually, pooled) in from_reads.iter().zip(&from_fold) {
+            assert!((individually - pooled).abs() < 1e-12);
+        }
+    }
+
+    /// A partial is scored beside the complete observations, not instead of them: the two walks
+    /// add.
+    #[test]
+    fn partials_and_complete_observations_are_both_charged() {
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        let complete = [observation(1, 0, 2, -14.0)];
+        let unexplained = [partial(&[(0, 2)], b"TT", 3, -21.0)];
+
+        let alone = row_with_partials(&complete, &[], &alleles, &table);
+        let together = row_with_partials(&complete, &unexplained, &alleles, &table);
+
+        assert!((together[hom_ref] - alone[hom_ref] - 3.0 * (-7.0)).abs() < 1e-12);
+    }
+
+    /// The contaminant's half of the mixture is over the same alleles the partial is compatible
+    /// with: a neighbour's DNA shows what this read showed exactly when it carries one of them,
+    /// so their frequencies add.
+    #[test]
+    fn a_contaminated_partial_is_explained_by_whatever_the_neighbours_carry() {
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        let unexplained = [partial(&[(0, 2)], b"TT", 3, -21.0)];
+        let evidence = GenericSampleEvidence::new(&[], 0.0, &unexplained);
+
+        let fractions = every_read_group_contaminated_at(0.05);
+        let frequencies = [0.7, 0.3];
+        let contaminated = contaminated_row(
+            &evidence,
+            &alleles,
+            &table,
+            &uncalibrated(),
+            one_batch(&fractions, &frequencies),
+        );
+
+        // Only the alternative is compatible, so the contaminant explains the read at
+        // `0.05 × 0.3`, against a misread's `0.95 × e⁻⁷`.
+        let expected = 3.0 * (0.95 * (-7.0_f64).exp() + 0.05 * 0.3).ln();
+        assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
     }
 }

@@ -1540,6 +1540,168 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
     }
 }
 
+/// Everything the SNP/indel row knows about a read group — its calibration and its share of
+/// somebody else's DNA.
+///
+/// **They travel together because they are read off the same axis and have to agree about it.**
+/// Both are dense over [`ReadGroupId`], and a run whose calibration covers ten read groups and
+/// whose mixture covers four is a caller bug the row can only find lazily — at whichever locus
+/// first holds a read from the fifth, or never. Pairing them puts that check at construction,
+/// which is where [`ContaminationMixture::new`] already puts the checks between the mixture's
+/// own two halves.
+///
+/// It also keeps the row's argument list inside what a reader can hold: the row takes what the
+/// sample showed, what the locus is, what the run's chemistry is, its scratch, and its output.
+#[derive(Copy, Clone, Debug)]
+pub struct ReadGroupParameters<'a> {
+    calibration: &'a [ReadGroupCalibration],
+    contamination: ContaminationMixture<'a>,
+}
+
+impl<'a> ReadGroupParameters<'a> {
+    /// # Panics
+    ///
+    /// **In release as well as debug**, when the two disagree about how many read groups the
+    /// run has — unless there is no mixture at all, which is the uncontaminated case and says
+    /// nothing about read groups.
+    #[must_use]
+    pub fn new(
+        calibration: &'a [ReadGroupCalibration],
+        contamination: ContaminationMixture<'a>,
+    ) -> Self {
+        assert!(
+            contamination.is_absent() || contamination.read_group_count() == calibration.len(),
+            "the mixture holds a fraction for {} read groups and the run supplied {} \
+             calibrations, so one of them belongs to a different run",
+            contamination.read_group_count(),
+            calibration.len()
+        );
+        Self {
+            calibration,
+            contamination,
+        }
+    }
+
+    /// A run with no contamination estimate — a single sample, or a fit that emitted none.
+    #[must_use]
+    pub fn uncontaminated(calibration: &'a [ReadGroupCalibration]) -> Self {
+        Self::new(calibration, ContaminationMixture::uncontaminated())
+    }
+
+    /// One read group's calibration.
+    ///
+    /// # Panics
+    ///
+    /// On a read group the run supplied no calibration for. A row scoring evidence from a group
+    /// the parameters do not cover is a caller bug, and reading it as uncalibrated would be a
+    /// genotype quietly moved rather than a run that stopped.
+    #[must_use]
+    pub fn calibration_of(&self, read_group: ReadGroupId) -> &'a ReadGroupCalibration {
+        let at = read_group.get() as usize;
+        self.calibration.get(at).unwrap_or_else(|| {
+            panic!(
+                "read group {at} has no calibration; the run supplied {}",
+                self.calibration.len()
+            )
+        })
+    }
+
+    /// The mixture, for the two halves the row reads per observation.
+    #[must_use]
+    pub fn contamination(&self) -> ContaminationMixture<'a> {
+        self.contamination
+    }
+
+    /// How many read groups the run has.
+    #[must_use]
+    pub fn read_group_count(&self) -> usize {
+        self.calibration.len()
+    }
+}
+
+/// The SNP/indel row's own scratch — **one verdict per `(partial observation, candidate
+/// allele)`**, held across a locus and refilled per sample.
+///
+/// # Why the verdict is cached rather than recomputed
+///
+/// Whether an allele could have produced a partial read is a property of the two of them and of
+/// nothing else — not of the genotype being scored. Every genotype carrying that allele asks
+/// the same question, so without a cache the answer is recomputed `genotypes` times instead of
+/// once: at a six-allele diploid, 21 times over rather than 6. It is the same argument the STR
+/// path's emission cache rests on, one axis narrower.
+///
+/// # Why it is a separate type from [`GenericEvidenceBuffer`]
+///
+/// **The evidence view borrows that buffer**, so it is still borrowed while the row runs, and a
+/// row taking `&mut` the same object the evidence borrows cannot be called at all. A2 recorded
+/// that and deferred this type to the step that first had something to put in it, which is this
+/// one.
+///
+/// # What is not here, and was expected to be
+///
+/// A2 and the plan both expected a **gather buffer** — somewhere to assemble an allele's bases
+/// restricted to a witness with holes in it. There is none, because the comparison turned out
+/// not to need one: an allele is the whole locus as a carrier has it, so a partial read is
+/// checked against the allele's *prefix* or *suffix* and nothing is assembled
+/// ([`generic::partial_is_compatible`]). The buffer was a consequence of reading the rule as a
+/// positional restriction; it is not one (owner, 2026-08-24).
+#[derive(Default, Debug)]
+pub struct GenericRowScratch {
+    /// Partial-major, one row of `alleles` per partial observation.
+    compatible: Vec<bool>,
+    alleles: usize,
+}
+
+impl GenericRowScratch {
+    /// Size the cache for one sample at one locus and clear it.
+    ///
+    /// **Filled `false` rather than left alone**, so a verdict that was never written reads as
+    /// *this allele cannot have produced this read* — the conservative direction, and one an
+    /// incomplete fill shows up as a partial that stopped constraining anything rather than as
+    /// one that silently constrained the wrong genotype.
+    pub fn prepare_compatibility(&mut self, partials: usize, alleles: usize) {
+        self.alleles = alleles;
+        self.compatible.clear();
+        self.compatible.resize(partials * alleles, false);
+    }
+
+    /// Whether this allele could have produced this partial read.
+    #[must_use]
+    pub fn is_compatible(&self, partial: usize, allele: usize) -> bool {
+        self.compatible[self.slot(partial, allele)]
+    }
+
+    /// Record one verdict.
+    pub fn set_compatible(&mut self, partial: usize, allele: usize, compatible: bool) {
+        let slot = self.slot(partial, allele);
+        self.compatible[slot] = compatible;
+    }
+
+    /// How many verdicts the cache is sized for.
+    #[must_use]
+    pub fn verdict_count(&self) -> usize {
+        self.compatible.len()
+    }
+
+    /// **The one spelling of the two-dimensional index**, asserting in release for
+    /// [`SsrRowScratch`]'s reason: a cache sized for one locus and read at another's stride
+    /// returns a real verdict from the wrong row rather than running off the end.
+    fn slot(&self, partial: usize, allele: usize) -> usize {
+        assert!(
+            allele < self.alleles,
+            "allele {allele} is past the {} this cache was prepared for",
+            self.alleles
+        );
+        let slot = partial * self.alleles + allele;
+        assert!(
+            slot < self.compatible.len(),
+            "partial {partial} is past the {} this cache was prepared for",
+            self.compatible.len() / self.alleles.max(1)
+        );
+        slot
+    }
+}
+
 /// Fixtures both this module's tests and `generic.rs`'s need, in one place.
 ///
 /// **They were copied byte-identically into both test modules and would have drifted** — the

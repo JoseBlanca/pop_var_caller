@@ -57,13 +57,13 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// deletion is `error[E0432]: unresolved import`.
 pub use likelihood::generic::{
     ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, fill_error_spreads,
-    genotype_log_likelihood_row,
+    genotype_log_likelihood_row, partial_is_compatible,
 };
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
-    GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY, ReadGroupCalibration,
-    SsrRowScratch, SsrSampleEvidence, fill_batch_allele_copies,
-    fill_contaminant_allele_frequencies,
+    GenericRowScratch, GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY,
+    ReadGroupCalibration, ReadGroupParameters, SsrRowScratch, SsrSampleEvidence,
+    fill_batch_allele_copies, fill_contaminant_allele_frequencies,
 };
 
 use crate::ng::locus_generation::LocusKind;
