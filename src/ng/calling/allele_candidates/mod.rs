@@ -209,7 +209,17 @@ pub enum SelectionVerdict {
     Truncated {
         /// How many alternatives the cap removed. Not how many were dropped in total: an
         /// alternative that failed the bar was never a candidate for the cap.
-        dropped: u16,
+        ///
+        /// **A `u32`, because a `u16` could not count what the cap can cut** (owner's
+        /// decision, 2026-08-24). A review built a locus of 70,001 alternatives that all
+        /// cleared the bar, and narrowing 69,995 into a `u16` panics — so the one input on
+        /// which this step would have refused a locus is the one spec §4.1's whole argument
+        /// says must be truncated instead. Nothing upstream bounds a locus's allele table at
+        /// 65,536: [`CandidateAlleles::admit`]'s refusal at that width guards the *candidate*
+        /// table, which the cap holds at six. It takes 65,536 distinct sequences at one
+        /// position, which neither benchmark approaches; the two extra bytes buy the
+        /// guarantee rather than a measured case.
+        dropped: u32,
     },
     /// **Repeat tracts only, and never minted by the ordinary path.** A tract whose reads
     /// do not agree on a repeat unit is not called as a tract
@@ -602,10 +612,23 @@ impl SelectionScratch {
 /// hands back. The fold that fills it is step B1 and the ranking that reads it is B2.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct AlleleSummary {
-    /// **The largest share of one sample's compared reads this allele took**, maximised
-    /// over samples — the cap's first ranking key (spec §4.1). Not a cohort share: a
-    /// cohort total would truncate the private alleles first at scale, which is the one
-    /// thing the ranking exists to avoid.
+    /// **The largest share of one sample's compared reads this allele took, over the samples
+    /// that cleared the admission rule for it** — the cap's first ranking key (spec §4.1).
+    /// Not a cohort share: a cohort total would truncate the private alleles first at scale,
+    /// which is the one thing the ranking exists to avoid.
+    ///
+    /// **Which samples the maximum runs over is the whole of it, and the wider reading was
+    /// wrong** (owner's decision, 2026-08-24; spec §4.1). Maximised over *every* sample, a
+    /// sample with one compared read contributes a share of 1.0 to whatever that read landed
+    /// on — and because this is the ranking's first key, no later key can overturn it. The
+    /// case a review built and this now refuses: an allele 40 samples carry at 150 of their
+    /// 300 reads each, 6,000 reads across the cohort, cut by the cap in favour of an allele
+    /// one sample carries, because a *second* sample's lone read landed on it — after which
+    /// the leftover's second count emits all 40 carriers as a missing genotype.
+    ///
+    /// **Zero where no sample cleared the rule**, which is not a share of nothing but an
+    /// allele the cap never ranks: only alternatives that cleared the rule enter
+    /// [`SelectionScratch::ranked_table_indices`].
     best_within_sample_share: f64,
     /// How many samples' reads reached the bar. **One is enough to admit the allele**
     /// (spec §3.2); the count is the cap's tie-break, where it can only reorder and never
@@ -678,6 +701,11 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// that denominator. **One sample reaching it admits the sequence for the whole cohort**
 /// (spec §3.2), so the count of samples that did is not a term of the bar; it is only the
 /// cap's first tie-break, where it can reorder and never exclude.
+///
+/// **A sample that did not reach the rule lends the allele nothing** — not a share, not a
+/// count — and only its reads reach the cohort total (owner's decision, 2026-08-24; spec
+/// §4.1). The share and the count are raised in the same branch for that reason;
+/// [`AlleleSummary::best_within_sample_share`] carries what the other reading cost.
 ///
 /// **The read-group rows are pooled here, and this is the one place pooling is right**
 /// (arch §3.1). The merge keys its rows on `(allele, read group)` because a read likelihood
@@ -790,11 +818,14 @@ fn summarise_alleles(
                 )
             });
             summary.cohort_reads = summary.cohort_reads.saturating_add(u64::from(pooled_reads));
-            let share = f64::from(pooled_reads) / f64::from(compared_reads);
-            summary.best_within_sample_share = summary.best_within_sample_share.max(share);
             if min_allele_support.reached_by(pooled_reads, compared_reads) {
                 summary.samples_clearing_the_bar =
                     summary.samples_clearing_the_bar.saturating_add(1);
+                // The share and the count are raised in the same branch, so they describe the
+                // same set of samples — see `best_within_sample_share`'s own documentation for
+                // what happened when they did not.
+                let share = f64::from(pooled_reads) / f64::from(compared_reads);
+                summary.best_within_sample_share = summary.best_within_sample_share.max(share);
             }
         }
     }
@@ -848,11 +879,14 @@ struct RankedAlternative<'bases> {
 /// thirds, the first key ties, and how many samples cleared the rule is the only signal there
 /// is (spec §4.1). Production's key is this ranking's third.
 ///
-/// **What it does in a cohort of mixed depth is not covered by that argument**, and is worth
-/// knowing before reading a truncated locus: a homozygous alternative scores 1.0 whatever its
-/// depth, and a heterozygote scores about 0.5 whatever its depth, so a sample sequenced at 3
-/// reads outranks every sample sequenced at 300 that is heterozygous — three agreeing reads
-/// beat 150. Raised with the owner at Checkpoint B rather than decided here.
+/// **In a cohort of mixed depth the first key does not compare amounts of evidence**, which
+/// that argument states one depth at a time and never says outright: a homozygous alternative
+/// scores 1.0 whatever its depth and a heterozygote about 0.5 whatever its depth, so a sample
+/// sequenced at 3 reads outranks every heterozygous sample sequenced at 300 — three agreeing
+/// reads beat 150. **Kept, and now stated** (owner's decision, 2026-08-24; spec §4.1): three
+/// agreeing reads are evidence, and the alternative is a share shrunk toward a half by the
+/// sample's depth, which would change what the key means everywhere to fix a case the depth
+/// range makes rare.
 ///
 /// **The bases are the tie-break that cannot tie**, which is why they are here rather than a
 /// stable sort of the rows. The merge's table keys its alleles by their own bytes
@@ -1617,12 +1651,53 @@ mod tests {
         let observation = locus_of(
             &[b"A", b"C"],
             vec![
-                sample_showing(0, vec![row(0, 3, -3.0), row(1, 1, -1.0)]),
+                sample_showing(0, vec![row(0, 2, -2.0), row(1, 2, -2.0)]),
                 sample_showing(1, vec![row(0, 1, -1.0), row(1, 3, -3.0)]),
             ],
         );
         let summaries = summaries_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(
+            summaries[1].samples_clearing_the_bar, 2,
+            "both samples must clear the rule, or only one share reaches the maximum and the \
+             test cannot tell a maximum from an assignment"
+        );
         assert_eq!(summaries[1].best_within_sample_share, 0.75);
+    }
+
+    /// **A sample that did not clear the admission rule lends the allele no share** (owner's
+    /// decision, 2026-08-24; spec §4.1), and this is the case that decided it.
+    ///
+    /// One sample carries the allele at 20 of its 100 reads and clears the rule. A second
+    /// sample has a single compared read, and it landed there — a share of 1.0, and the floor
+    /// of 2 refuses it. Maximised over every sample, that one read would set the allele's
+    /// first ranking key to 1.0 and **no later key could overturn it**, because the share is
+    /// compared first: at a binding cap it displaces alleles that dozens of samples earned,
+    /// and the leftover's second count then emits every one of those samples as missing.
+    ///
+    /// The cohort read total still counts the refused sample's read, which is the honest
+    /// place for it: it is a read on the allele, it is just not evidence about a sample.
+    #[test]
+    fn a_sample_that_did_not_clear_the_rule_lends_no_share() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 80, -80.0), row(1, 20, -20.0)]),
+                sample_showing(1, vec![row(1, 1, -1.0)]),
+            ],
+        );
+        let summaries = summaries_of(&observation, support_rule_of(2, 0.05));
+        assert_eq!(
+            summaries[1].samples_clearing_the_bar, 1,
+            "one compared read reaches neither half of the rule"
+        );
+        assert_eq!(
+            summaries[1].best_within_sample_share, 0.20,
+            "the carrier's share, not the single read's 1.0"
+        );
+        assert_eq!(
+            summaries[1].cohort_reads, 21,
+            "the refused sample's read is still a read on the allele"
+        );
     }
 
     /// **Adding a sample that shows only reference reads changes nothing about the

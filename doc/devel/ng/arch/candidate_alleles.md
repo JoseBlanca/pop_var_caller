@@ -138,7 +138,14 @@ pub enum SelectionVerdict {
     /// reference alone** — more than one built locus in four, on both benchmarks (spec §6.2).
     Selected,
     /// The cap bound and `dropped` alternatives were cut, lowest-ranked first (§2.5).
-    Truncated { dropped: u16 },
+    ///
+    /// **A `u32`, and it was a `u16`** (owner's decision, 2026-08-24). A review of step B2
+    /// built a locus of 70,001 alternatives that all cleared the bar; narrowing the 69,995
+    /// the cap cuts into a `u16` panics, so the one input on which this step would refuse a
+    /// locus is the one spec §4.1's whole argument says must be truncated instead. Nothing
+    /// upstream bounds a locus's allele table at 65,536 — `CandidateAlleles::admit`'s
+    /// refusal at that width guards the *candidate* table, which the cap holds at six.
+    Truncated { dropped: u32 },
     /// Repeat tracts only; never minted by `generic.rs`
     /// ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §3).
     NotPeriodic,
@@ -301,9 +308,20 @@ correction.*
 ### 2.5 The ranking
 
 ```rust
-/// Whether `left` outranks `right` for the cap: the largest share of one sample's reads
+/// One alternative as the ranking reads it: the fold's summary and the bases that break the
+/// last tie, travelling together.
+struct RankedAlternative<'bases> {
+    summary: AlleleSummary,
+    bases: &'bases [u8],
+}
+
+/// Order two alternatives best-first for the cap: the largest share of one sample's reads
 /// first, then how many samples cleared the bar, then the cohort's read total, then the bases
 /// (spec §4.1 — why this and not production's cohort read total).
+///
+/// **The name carries the direction because the return cannot.** `Ordering::Less` means `left`
+/// belongs earlier in a best-first list; `min_by` gives the best allele and **`max_by` gives
+/// the worst**.
 ///
 /// **The bases are the tie-break that cannot tie**, which is what makes the order independent
 /// of the merge's own allele order rather than inheriting it. A three-way tie before that point
@@ -311,11 +329,19 @@ correction.*
 ///
 /// **Shares compare with `f64::total_cmp`** — a total order, so there is no NaN branch and no
 /// partial-order footgun. A `NaN` share is a caller bug and asserts in the fold, not here.
-fn ranks_above(
-    left: &AlleleSummary, left_bases: &[u8],
-    right: &AlleleSummary, right_bases: &[u8],
-) -> Ordering;
+fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>) -> Ordering;
 ```
+
+*Corrected 2026-08-24, on step B2's review, and both halves were measured rather than argued.*
+**The name was `ranks_above`**, which is the shape Rust reserves for `-> bool` predicates
+answered with a value whose obvious reading is the opposite — and the cost is concrete:
+`max_by(ranks_above)` returns the *worst*-ranked allele, compiles, and is what somebody reaching
+for "the best one" would write. **The signature took four positional arguments** — two summaries
+and two base slices — and a reviewer swapped the two slices at a call site: it compiled, `clippy`
+was silent, and the test still passed, because the bases only decide when all three numeric keys
+tie. **The mis-pairing is therefore invisible at exactly the loci where the ranking does its
+work**, and the shipping caller is worse than any test: step C2 sorts a buffer of table indices,
+so every argument is an index expression.
 
 ---
 

@@ -147,7 +147,8 @@ first and the two group rows must sum rather than the larger winning.
 
 **B2. The per-allele summary and the ranking. — own commit, do not bundle.**  ✅
 The private `AlleleSummary` (largest within-sample share, samples clearing the bar, cohort read
-total) filled by B1's pass, and `ranks_above`: share first by
+total) filled by B1's pass, and `compare_best_first` (arch §2.5's `ranks_above`, renamed at
+Checkpoint B): share first by
 `f64::total_cmp`, then samples clearing, then cohort reads, then the bases.
 *Corrected at Checkpoint A: this step originally also asked the summary for "the reads and mass it
 would contribute to the leftover", and it cannot hold them — the summary is per allele where the
@@ -219,6 +220,16 @@ oracle:** the standalone implementation produced every number spec §3.3, §4.2 
 run must reproduce them — 5,596 alternatives kept of 15,474 on the trio at 300× with the 2% bar,
 23 tomato loci of 53,935 above six alleles, 0.36% of tomato's reads in the pool. A difference is a
 defect in one of the two implementations and must be traced, not accepted.
+
+**Two differences are expected, and both were introduced deliberately after those numbers were
+taken** (recorded at Checkpoint B so the run is not read as a regression). The probe's
+`summarise_over` asks the support rule of each `(allele, read group)` row separately where the
+shipped fold pools a sample's rows first, so **the probe applied a stricter rule to the samples
+carrying more than one read group** — 157 of 1,707 in the surveyed tomato archive — and its
+figures are a lower bound on what the module admits. And the probe maximises the within-sample
+share over every sample where the module maximises it over the samples that cleared the rule
+(spec §4.1, owner's decision 2026-08-24), which can move which alleles a binding cap keeps. Any
+*other* difference is a defect.
 *Depends:* C3. *Source:* spec §3.3, §4.2, §5.
 
 **D2. The truth-set property, as a checked-in test.**  ☐

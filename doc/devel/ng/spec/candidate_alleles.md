@@ -75,12 +75,23 @@ blocker, twice).
 
 Three terms, all used below before anything is built on them.
 
-- **compared reads** — a sample's reads whose whole sequence over the locus was read off and
-  compared with the reference. Reads that stopped inside the locus, and reads that covered it and
-  showed nothing, are in neither the numerator nor the denominator of anything here
-  ([`SampleLocusObservations::reads_compared_with_reference`](../../../../src/ng/locus_generation/mod.rs)).
-  At a cohort locus this is the sum of a sample's rows in the merge's table, because the merge
-  admits only complete observations onto alleles.
+- **compared reads** — at a cohort locus, **the sum of a sample's rows in the merge's table**,
+  over alleles and over read groups, the reference's own rows included. Every read that reached a
+  row is a read whose whole sequence over the locus was read off and compared with the reference,
+  because the merge admits only complete observations onto alleles.
+
+  *Corrected 2026-08-24. This entry also cited
+  [`SampleLocusObservations::reads_compared_with_reference`](../../../../src/ng/locus_generation/mod.rs),
+  the locus generator's own count, as though the two were the same number. They are not: they
+  differ by the reads the merge removed as evidence, which never reach a row. The sum of the rows
+  is the definition — it is what [`../arch/candidate_alleles.md`](../arch/candidate_alleles.md)
+  §3.1 says and what the code implements, and a denominator holding reads that cannot appear in
+  any numerator would be a bar that rises with a sample's unusable depth. The generator's count
+  remains the right thing for the generator's own question.*
+
+  Three of the merge's other per-sample counts are outside it, and none of them can be in a
+  numerator either: reads that stopped inside the locus, reads that covered it and showed nothing,
+  and reads removed as evidence.
 - **the leftover** — for one sample, the reads whose sequence was in the merge's table and did
   not survive selection, with their summed log error probability. The read likelihood consumes
   the mass; §5 explains why the count has to travel with it.
@@ -335,8 +346,21 @@ those.
 exists.
 
 **The ranking: the largest share of one sample's compared reads the allele took, maximised over
-samples.** Ties break on how many samples cleared the bar, then on the cohort's read total, then
-on the bases themselves so the result is deterministic at any worker count.
+the samples that cleared the bar for it.** Ties break on how many samples cleared the bar, then on
+the cohort's read total, then on the bases themselves so the result is deterministic at any worker
+count.
+
+**Which samples that maximum runs over is not a detail, and an earlier draft of this sentence —
+"maximised over samples" — was wrong** (owner's decision, 2026-08-24, on a case a review of the
+implementation built). Over *every* sample, a sample with one compared read contributes a share of
+1.0 to whatever that read landed on, and because the share is the **first** key no later one can
+overturn it. The case: an allele 40 samples carry at 150 of their 300 reads each — 6,000 reads
+across the cohort — cut by the cap in favour of an allele one sample carries, because a *second*
+sample's lone read landed on it. §5's second count then emits all 40 carriers as missing. Taking
+the maximum over the samples that cleared the bar makes the first two keys describe the same set
+of samples, which is also what makes the depth argument below true. A refused sample's reads still
+enter the cohort read total: they are reads on the allele, they are simply not evidence about a
+sample.
 
 **This is not production's ranking, and the difference is what it does at scale.** Production
 ranks by the cohort's raw read total
@@ -354,6 +378,20 @@ rather than counts
 for the tie-break order. At 300 reads a sample the shares separate cleanly and the first key
 decides. At 3 reads every admitted allele has a share near 0.67, the first key ties, and how many
 samples showed it decides — which is the only signal there is at that depth.
+
+**In a cohort of mixed depth the first key does not compare amounts of evidence, and the two
+sentences above do not say so because each describes a cohort at one depth.** Where the regimes
+meet inside one comparison, the arithmetic is exact and blunt: a homozygous alternative scores 1.0
+whatever its depth, and a heterozygote scores about 0.5 whatever its depth. So a sample sequenced
+at 3 reads outranks every heterozygous sample sequenced at 300 — three agreeing reads beat 150 —
+and at a binding cap the shallow sample's allele is the last thing cut.
+
+**That is kept** (owner's decision, 2026-08-24). Three agreeing reads *are* evidence, the caller
+commits to working from 3 reads a position to several hundred, and the alternative — a share
+shrunk toward a half by the sample's depth, a posterior mean rather than the raw proportion —
+would change what the key means at every locus to fix a case the cap makes rare: it binds at 23 of
+53,935 tomato loci and none of the GIAB trio's (§4.2). It is stated here because a reader of the
+two sentences above would conclude the opposite.
 
 **No second, harder ceiling is needed.** Production carries one at 64 alleles, where the group is
 refused outright, because its genotype enumeration uses a `u64` bitmask
@@ -479,7 +517,7 @@ force it to index 0 for the same reason — every downstream branch tests agains
 
 ```text
 Selected                    the list is everything that cleared the bar
-Truncated { dropped: u16 }  the cap bound; `dropped` alternatives were cut
+Truncated { dropped: u32 }  the cap bound; `dropped` alternatives were cut
 ```
 
 **There is no depth verdict, and its absence is a decision.** The architecture sketched
