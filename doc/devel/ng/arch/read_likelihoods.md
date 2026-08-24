@@ -130,8 +130,9 @@ pub struct GenericSampleEvidence<'a> {
     pub unmatched_q_sum: f64,
     /// The partial observations, bases + witnessed positions intact — §3's compatibility
     /// rule (spec §5.3) needs them, so they are NOT folded onto alleles. **A set of runs
-    /// with holes in it, not one run** (spec §5.3, corrected 2026-08-24), which makes the
-    /// restricted projection a gather rather than a subslice.
+    /// with holes in it, not one run** (spec §5.3, corrected 2026-08-24). What the holes
+    /// cost is an unknown split point rather than a gather: the read's bases divide into a
+    /// prefix and a suffix of the allele somewhere the hole swallowed (D1, 2026-08-24).
     pub partials: &'a [PartialObservation<'a>],
 }
 
@@ -295,11 +296,17 @@ divided by.
 So the filler is `fill_error_spreads`, the reader is `ErrorSpreadTable`, and **divisor is the
 right word again**: the row divides, by 3 or by 1.
 
-**The row's signature as built**, and the two departures from the sketch above. It takes
-`error_spreads: ErrorSpreadTable<'_>` rather than a bare slice, for the reason that type
-exists. It takes **no `contamination` and no scratch**: the mixture is Milestone C and the generic
-row's own scratch is Milestone D, which is the step that first has buffers to put in it (a
-compatibility cache per `(partial, allele)`, and a gather buffer for a witness with holes).
+**The row's signature as built.** It takes `error_spreads: ErrorSpreadTable<'_>` rather than a
+bare slice, for the reason that type exists; `read_groups: ReadGroupParameters<'_>` pairing the
+calibration with the contamination mixture, which are dense over the same axis and had to agree
+about how long it is; `alleles: &CandidateAlleles`, which the partial rule needs; and
+`scratch: &mut GenericRowScratch`.
+
+**That scratch holds the compatibility cache and nothing else** — one verdict per
+`(partial, allele)`, so a verdict is decided once rather than once per genotype. **The gather
+buffer this paragraph used to promise beside it does not exist**, because the comparison turned
+out not to assemble anything: an allele is the whole locus as a carrier has it, so a partial is
+checked against the allele's prefix or suffix (spec §5.3, corrected at D1 the same day).
 
 **Contract.** No multinomial coefficient (spec §3.4 — a genotype-changing decision, measured by
 the change measurement below, not asserted). A read the genotype explains is charged `log(k_a/P)`

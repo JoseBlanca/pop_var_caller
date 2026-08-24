@@ -1687,15 +1687,27 @@ type's own documentation names.
 > not an offset and a length — its own documentation says two numbers "can only describe a hole by
 > swallowing it".
 >
-> **Two consequences a coder must not miss.** The restricted projection is a **gather** and cannot
-> be a subslice of the allele's bases, so scoring needs a buffer sized by the widest witness rather
-> than a range — a buffer §8's no-allocation contract makes the caller's, and which
-> [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) D1 owes a home. And
-> **the two axes are not interchangeable**: the witness counts *locus positions* while the
-> observation's bases are what the read showed over them, so the two lengths differ by the net indel
-> the read carried — a read carrying a two-base insertion and a two-base deletion inside the stretch
-> comes back with as many bases as positions and is still not a positional match for any of them
-> (`PartialObservation::bases`).
+> **One consequence a coder must not miss, and one this paragraph drew and was wrong about.**
+>
+> The one that holds: **the two axes are not interchangeable**. The witness counts *locus
+> positions* while the observation's bases are what the read showed over them, so the two lengths
+> differ by the net indel the read carried — a read carrying a two-base insertion and a two-base
+> deletion inside the stretch comes back with as many bases as positions and is still not a
+> positional match for any of them (`PartialObservation::bases`). **The witness may never index the
+> bases.**
+>
+> **The one that does not: there is no gather, and scoring needs no buffer** *(corrected
+> 2026-08-24 at D1, which was built against this paragraph and found it had no work to do)*. This
+> said the restricted projection could not be a subslice of the allele's bases and so needed a
+> buffer sized by the widest witness, which
+> [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) D1 owed a home. **It
+> follows from reading the rule below as a positional restriction, and it is not one.** An allele
+> is the whole locus *as a carrier has it*, so a read from a carrier shows the start or the end of
+> that carrier's own sequence, and the comparison is against the allele's **prefix** or **suffix** —
+> nothing is assembled. `WitnessedLocusPositions`' own `is_flush_left`/`is_flush_right` are
+> documented as exactly those two constraints, which is the shape the rule really has. What a
+> witness with a hole costs is not a gather but an unknown *split point*: the read's bases divide
+> into a prefix and a suffix somewhere the hole swallowed, so the test is that some split works.
 >
 > The aggregation argument below is unaffected: a *set* of runs is part of the observation's
 > identity exactly as a single run would be, so every read pooled into one observation witnessed the

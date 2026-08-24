@@ -344,18 +344,34 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// border, a **suffix**. `WitnessedLocusPositions`' two predicates are documented as exactly
 /// these constraints, and this is their consumer.
 ///
-/// - **Flush left only** — the bases must be a prefix of the allele.
-/// - **Flush right only** — a suffix.
-/// - **Flush both, with a hole between** — the bases split somewhere into a prefix and a
-///   suffix, and **where they split is not known**: the hole swallowed an unknown number of the
-///   read's bases. So the test is that *some* split works, which is what
-///   [`splits_into_a_prefix_and_a_suffix`] answers.
-/// - **Flush at neither border** — the read saw only the middle. It is anchored to nothing, so
-///   it constrains nothing and is compatible with every allele.
+/// # The rule, and why the cases are the cases
 ///
-/// # Why the middle case says nothing rather than matching anywhere
+/// **A partial constrains an allele only when every base it showed belongs to a run anchored at
+/// a border.** That is the whole rule, and the four shapes below are what satisfy it rather than
+/// a list to remember:
 ///
-/// A read that saw the middle could be matched against the allele by content — does its
+/// - **One run, flush left** — every base is in it, and it is anchored left: a **prefix**.
+/// - **One run, flush right** — a **suffix**.
+/// - **One run, flush both** — the read witnessed every position, so it showed its carrier's
+///   whole sequence: **equality**.
+/// - **Two runs, flush both** — the bases divide into a prefix and a suffix which between them
+///   account for every base. **Where they divide is not known**, since the hole swallowed however
+///   many the read did not show, so the test is that *some* division works
+///   ([`splits_into_a_prefix_and_a_suffix`]).
+///
+/// **Everything else is vacuous, not merely weak**, and this is the part D1 shipped wrong and its
+/// review caught. Any other shape leaves at least one run anchored to neither border — and the
+/// bases in that run are unconstrained, so they can absorb any disagreement. A three-run witness
+/// flush at both borders is satisfied by taking its prefix and its suffix to be empty; a two-run
+/// witness flush at one border, the same. Testing such a witness as though its bases were one
+/// contiguous stretch does not weaken the verdict, it **inverts** it: measured on a six-position
+/// locus, the allele agreeing with the read at every position it actually saw was charged 14 nats
+/// and the allele disagreeing was charged nothing. So *compatible with everything* is the
+/// arithmetic these shapes genuinely imply.
+///
+/// # Why an unplaceable read says nothing rather than matching anywhere
+///
+/// A read whose bases cannot be placed could be matched against the allele by content — does its
 /// sequence occur anywhere inside? — and that is *sound* in one direction only: a carrier's
 /// read does occur in its carrier's sequence, but so may a few bases in an allele the read
 /// never came from, and short reads in repetitive sequence make that ordinary rather than rare.
@@ -379,14 +395,18 @@ pub fn partial_is_compatible(
         "a locus covers at least one reference position"
     );
     match (
+        witnessed_in_locus.runs().len(),
         witnessed_in_locus.is_flush_left(),
         witnessed_in_locus.is_flush_right(locus_len),
     ) {
-        (true, true) => splits_into_a_prefix_and_a_suffix(bases, allele),
-        (true, false) => allele.starts_with(bases),
-        (false, true) => allele.ends_with(bases),
-        // Anchored to neither border: see the note above.
-        (false, false) => true,
+        // Saw every position, so it showed its carrier's whole sequence.
+        (1, true, true) => allele == bases,
+        (1, true, false) => allele.starts_with(bases),
+        (1, false, true) => allele.ends_with(bases),
+        (2, true, true) => splits_into_a_prefix_and_a_suffix(bases, allele),
+        // Some run is anchored to neither border, so the bases it holds are unconstrained and
+        // absorb any disagreement: the test is vacuous rather than merely weak. See above.
+        _ => true,
     }
 }
 
@@ -797,7 +817,7 @@ const MAX_PLOIDY_COPIES: usize = 16;
 mod tests {
     use super::*;
     use crate::ng::calling::GenotypeTable;
-    use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
+    use crate::ng::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
     use crate::ng::types::Ploidy;
 
     /// A locus over the bases given, the first of them the reference.
@@ -3102,5 +3122,253 @@ mod tests {
         // `0.05 × 0.3`, against a misread's `0.95 × e⁻⁷`.
         let expected = 3.0 * (0.95 * (-7.0_f64).exp() + 0.05 * 0.3).ln();
         assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
+    }
+
+    /// **A run anchored to neither border makes the whole test vacuous, and the rule has to say
+    /// so** — this is the defect D1's first version shipped, found by its own review.
+    ///
+    /// The read is flush left with a hole, and its second run stops short of the right border.
+    /// Its bases are one blob and the witness never says how many of them fell in each run, so
+    /// asking whether the allele *starts with* all of them compares bases the read showed at
+    /// positions 0, 1 and 3 as though they were adjacent. Measured before the fix, on a
+    /// six-position locus: the allele agreeing with the read at every position it actually saw
+    /// was charged 14 nats, and the allele disagreeing at position 3 was charged nothing —
+    /// **the verdicts inverted**, which is the over-restrictive direction spec §5.1 names as the
+    /// danger.
+    #[test]
+    fn a_hole_beside_an_unanchored_run_constrains_nothing() {
+        let alleles = locus(&[b"ACGTTT", b"ACTGGG"]);
+        let table = diploid(2);
+
+        // Flush left, a hole at position 2, and stopping short of the right border.
+        let read = [partial(&[(0, 2), (3, 4)], b"ACT", 2, -14.0)];
+        let scored = row_with_partials(&[], &read, &alleles, &table);
+
+        assert!(
+            scored.iter().all(|&score| score == 0.0),
+            "no genotype may be charged when the read's bases cannot be placed, and they are \
+             {scored:?}"
+        );
+    }
+
+    /// The same for a witness reaching both borders with **two** holes: the middle run is
+    /// anchored to nothing, so its bases absorb any disagreement and no allele can be refused.
+    ///
+    /// One hole is different, and the fixture above it shows why: with two runs the bases split
+    /// into a prefix and a suffix that between them account for every base, so the test binds.
+    #[test]
+    fn two_holes_leave_a_run_anchored_to_nothing_and_constrain_nothing() {
+        let alleles = locus(&[b"AXBYC", b"ABCYC"]);
+        let table = diploid(2);
+
+        let read = [partial(&[(0, 1), (2, 3), (4, 5)], b"ABC", 2, -14.0)];
+        let scored = row_with_partials(&[], &read, &alleles, &table);
+
+        assert!(
+            scored.iter().all(|&score| score == 0.0),
+            "every genotype should be untouched, and they are {scored:?}"
+        );
+    }
+
+    /// A read that witnessed every position of the locus showed its carrier's whole sequence, so
+    /// the test is equality — not the weaker prefix-and-suffix one, which would also accept an
+    /// allele the read only half agrees with.
+    ///
+    /// Such a read should have been minted `Complete` rather than `Partial`, and the type does
+    /// not enforce that; equality is what it means if one arrives.
+    #[test]
+    fn a_partial_that_saw_every_position_must_equal_the_allele() {
+        let alleles = locus(&[b"ACGT", b"ACGG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+
+        let saw_everything = [partial(&[(0, 4)], b"ACGT", 2, -14.0)];
+        let scored = row_with_partials(&[], &saw_everything, &alleles, &table);
+
+        assert_eq!(scored[hom_ref], 0.0);
+        assert!((scored[hom_alt] - 2.0 * (-7.0)).abs() < 1e-12);
+    }
+
+    /// **A read whose carrier carries an insertion**, which is where the implemented rule and the
+    /// positional one the specification used to state come apart — and where every other fixture
+    /// here cannot tell them apart, because all of theirs spell alleles the reference's length
+    /// and show as many bases as positions (D1's review).
+    ///
+    /// Four reference positions, a carrier spelling five bases over them. The read reached both
+    /// borders and missed position 2, so its bases divide into the prefix `AXC` and the suffix
+    /// `T` of `AXCGT` — **and the dividing point is not a position index**, which is the whole
+    /// difference. Indexing the allele by the witness's positions would gather `AXG` and refuse
+    /// the carrier the read came from.
+    #[test]
+    fn a_holed_read_whose_carrier_carries_an_insertion_is_a_prefix_and_a_suffix() {
+        let witness = WitnessedLocusPositions::from_half_open_runs([(0, 2), (3, 4)])
+            .expect("the fixture's runs are a witness");
+
+        assert!(partial_is_compatible(
+            &witness,
+            b"AXCT",
+            b"AXCGT",
+            LocusLen::from_positions(4)
+        ));
+        // And the same read refuses a carrier that differs where it did look.
+        assert!(!partial_is_compatible(
+            &witness,
+            b"AXCT",
+            b"AYCGT",
+            LocusLen::from_positions(4)
+        ));
+    }
+
+    /// **The locus's length is the reference's, not the longest allele's.** A carrier with an
+    /// insertion spells more bases than the locus has positions, so measuring the locus by the
+    /// widest allele would put the right border past where any read can reach — and every
+    /// suffix test would stop binding.
+    #[test]
+    fn the_locus_length_comes_from_the_reference_not_the_longest_allele() {
+        let alleles = locus(&[b"ACG", b"ACGG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        // Positions 1..3 reach the reference's right border, so this is a suffix test — and
+        // neither allele ends with `TT`.
+        let at_the_right_border = [partial(&[(1, 3)], b"TT", 2, -14.0)];
+        let scored = row_with_partials(&[], &at_the_right_border, &alleles, &table);
+
+        assert!((scored[hom_ref] - 2.0 * (-7.0)).abs() < 1e-12, "{scored:?}");
+    }
+
+    /// **A read cannot have shown more bases than its carrier's sequence has**, and without the
+    /// length guard the two agreements overlap and say a split exists where none does: the left
+    /// walk runs out of allele after three, the right agrees on one, and `3 + 1` covers four
+    /// bases that are not there. Deleting the guard left the whole module green (D1's review).
+    #[test]
+    fn a_split_refuses_bases_longer_than_the_allele() {
+        assert!(!splits_into_a_prefix_and_a_suffix(b"ACTT", b"ACT"));
+    }
+
+    /// **The counting form against its own definition, over every word it can be asked about.**
+    ///
+    /// `splits_into_a_prefix_and_a_suffix` does not try every cut — it counts how far the allele
+    /// agrees from each end and asks whether the two reach — so the two forms could differ at an
+    /// off-by-one or at the length guard and nothing else would say so. This runs both over every
+    /// word of up to four bases against every word of up to five, on a two-letter alphabet: 2,046
+    /// pairs, which is small enough to be exhaustive and wide enough that a boundary cannot hide.
+    #[test]
+    fn the_counted_split_agrees_with_trying_every_cut() {
+        fn some_cut_works(bases: &[u8], allele: &[u8]) -> bool {
+            if allele.len() < bases.len() {
+                return false;
+            }
+            (0..=bases.len())
+                .any(|cut| allele.starts_with(&bases[..cut]) && allele.ends_with(&bases[cut..]))
+        }
+        fn words(max: u32) -> Vec<Vec<u8>> {
+            let mut out = vec![Vec::new()];
+            for len in 1..=max {
+                for n in 0..(1u32 << len) {
+                    out.push(
+                        (0..len)
+                            .map(|at| if n >> at & 1 == 0 { b'A' } else { b'C' })
+                            .collect(),
+                    );
+                }
+            }
+            out
+        }
+
+        let mut compared = 0usize;
+        let mut disagreeing_pairs = 0usize;
+        for bases in words(4) {
+            for allele in words(5) {
+                let counted = splits_into_a_prefix_and_a_suffix(&bases, &allele);
+                let by_hand = some_cut_works(&bases, &allele);
+                assert_eq!(
+                    counted,
+                    by_hand,
+                    "bases {} against allele {}",
+                    String::from_utf8_lossy(&bases),
+                    String::from_utf8_lossy(&allele)
+                );
+                compared += 1;
+                disagreeing_pairs += usize::from(!counted);
+            }
+        }
+        assert_eq!(compared, 31 * 63, "the sweep covers every pair");
+        // **Both answers have to occur**, or the sweep is comparing one constant against another.
+        assert!(disagreeing_pairs > 0 && disagreeing_pairs < compared);
+    }
+
+    /// **A partial compatible with several of a tetraploid's alleles sums their copies**, which
+    /// indexes the copy-share table further than any diploid fixture reaches — and the array is
+    /// sized by ploidy, so an implementation that took a maximum instead, or sized the table by
+    /// something else, is only visible above two copies (D1's review).
+    ///
+    /// The genotype carries two copies each of two alleles the read cannot tell apart, so all
+    /// four copies are compatible and the share is one: the read says nothing, which is right.
+    /// The genotype carrying one compatible allele and three of an incompatible one keeps a
+    /// quarter.
+    #[test]
+    fn a_partial_compatible_with_several_alleles_sums_their_copies_at_a_tetraploid() {
+        let alleles = locus(&[b"ACG", b"ACT", b"TTT"]);
+        let table = GenotypeTable::build(Ploidy::try_new(4).expect("a fixture ploidy"), 3);
+        let carries = |copies: &[u32]| genotype_carrying(&table, copies).get() as usize;
+
+        // Flush left over the first two positions: `AC` matches both of the first two alleles.
+        let saw_the_first_two = [partial(&[(0, 2)], b"AC", 2, -14.0)];
+        let scored = row_with_partials(&[], &saw_the_first_two, &alleles, &table);
+
+        // Two copies each of two compatible alleles — all four copies, so `ln 1` is zero.
+        assert_eq!(scored[carries(&[2, 2, 0])], 0.0);
+        // One compatible copy in four.
+        assert!((scored[carries(&[1, 0, 3])] - 2.0 * 0.25_f64.ln()).abs() < 1e-12);
+        // Three compatible copies in four.
+        assert!((scored[carries(&[2, 1, 1])] - 2.0 * 0.75_f64.ln()).abs() < 1e-12);
+        // None — charged the reads' own quality, with no spread.
+        assert!((scored[carries(&[0, 0, 4])] - 2.0 * (-7.0)).abs() < 1e-12);
+    }
+
+    /// **One scratch across two samples at one locus**, which is how the loop will use it and
+    /// which no other fixture here exercises: every one of them stands up a fresh scratch, so a
+    /// verdict left by the previous sample could not show up.
+    ///
+    /// The second sample has fewer partials than the first and different bases, so a cache that
+    /// kept the first sample's rows would score it against the wrong reads.
+    #[test]
+    fn one_scratch_carries_two_samples_of_a_locus_without_mixing_them() {
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let mut scratch = GenericRowScratch::default();
+
+        let mut score = |partials: &[PartialObservation]| {
+            let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+            genotype_log_likelihood_row(
+                &GenericSampleEvidence::new(&[], 0.0, partials),
+                &alleles,
+                &view,
+                ReadGroupParameters::uncontaminated(&uncalibrated()),
+                ErrorSpreadTable::over(&spread_values, &view),
+                &mut scratch,
+                &mut out,
+            );
+            out.into_iter().map(LogProb::get).collect::<Vec<_>>()
+        };
+
+        // A sample whose two partials both show the alternative.
+        let showed_the_alternative = [
+            partial(&[(0, 2)], b"TT", 1, -7.0),
+            partial(&[(0, 2)], b"TT", 1, -7.0),
+        ];
+        let first = score(&showed_the_alternative);
+        assert!((first[hom_ref] - 2.0 * (-7.0)).abs() < 1e-12);
+
+        // A narrower sample whose one partial shows the reference: the reference homozygote is
+        // untouched, which it would not be if the previous sample's verdicts survived.
+        let showed_the_reference = [partial(&[(0, 2)], b"AC", 1, -7.0)];
+        let second = score(&showed_the_reference);
+        assert_eq!(second[hom_ref], 0.0);
     }
 }

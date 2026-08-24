@@ -2966,6 +2966,73 @@ mod tests {
             .contaminant_frequency_of(ReadGroupId(0), AlleleId(5));
     }
 
+    // ---- D1: the row's own scratch ----
+
+    /// **The stride assertions are the whole reason `slot` exists**, and removing both left the
+    /// module green (D1's review): a cache prepared for one locus and read at another's stride
+    /// returns a real verdict from the wrong row rather than running off the end.
+    #[test]
+    #[should_panic(expected = "allele 4 is past the 3")]
+    fn the_scratch_refuses_an_allele_past_the_stride_it_was_prepared_for() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_compatibility(2, 3);
+
+        let _ = scratch.is_compatible(0, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "partial 5 is past the 2")]
+    fn the_scratch_refuses_a_partial_past_the_rows_it_was_prepared_for() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_compatibility(2, 3);
+
+        let _ = scratch.is_compatible(5, 0);
+    }
+
+    /// **One scratch serves every sample of a locus, and every locus of a worker** — which is
+    /// what it is for, and which no call site exercised, since all of them stood up a fresh one.
+    ///
+    /// Preparing it again resizes it and clears what the previous sample wrote, so a sample with
+    /// fewer partials than the one before cannot read a verdict left by it.
+    #[test]
+    fn one_scratch_is_reused_across_samples_and_forgets_the_last() {
+        let mut scratch = GenericRowScratch::default();
+
+        scratch.prepare_compatibility(3, 2);
+        assert_eq!(scratch.verdict_count(), 6);
+        for partial in 0..3 {
+            for allele in 0..2 {
+                scratch.set_compatible(partial, allele, true);
+            }
+        }
+
+        // A narrower sample at the same locus.
+        scratch.prepare_compatibility(1, 2);
+        assert_eq!(scratch.verdict_count(), 2);
+        assert!(
+            !scratch.is_compatible(0, 0) && !scratch.is_compatible(0, 1),
+            "preparing again must forget what the last sample wrote"
+        );
+
+        // And a wider locus afterwards, which grows it.
+        scratch.prepare_compatibility(2, 5);
+        assert_eq!(scratch.verdict_count(), 10);
+        assert!((0..2).all(|partial| (0..5).all(|allele| !scratch.is_compatible(partial, allele))));
+    }
+
+    /// A sample with no partial reads prepares an empty cache rather than keeping the last
+    /// sample's — the case a locus where only some samples ran out reaches at every worker.
+    #[test]
+    fn a_sample_with_no_partials_prepares_an_empty_cache() {
+        let mut scratch = GenericRowScratch::default();
+
+        scratch.prepare_compatibility(2, 3);
+        scratch.set_compatible(1, 2, true);
+        scratch.prepare_compatibility(0, 3);
+
+        assert_eq!(scratch.verdict_count(), 0);
+    }
+
     // ---- C2: the frequency the contaminant is drawn against ----
 
     /// Four diploids at a two-allele locus: two carrying the reference twice, one

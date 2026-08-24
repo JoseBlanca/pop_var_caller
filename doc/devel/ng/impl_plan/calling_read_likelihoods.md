@@ -309,7 +309,12 @@ flush at neither border is anchored to nothing and constrains nothing, rather th
 by content somewhere inside the allele, which would move a genotype on a coincidence. The row
 gained `&CandidateAlleles` and the scratch, and its two per-read-group parameters were paired into
 `ReadGroupParameters` — which is where their read-group counts are now checked against each
-other.)*
+other. **The first version shipped a defect its own review caught and this note keeps:** the rule
+branched on the two borders alone, so a witness with a hole that reached only one border was
+tested as though its bases were contiguous, and the verdicts **inverted** — the allele agreeing
+with the read at every position it saw was charged 14 nats and the one disagreeing was charged
+nothing. The rule now decides on the run count too, and *says nothing* wherever a run is anchored
+to neither border, which is what those shapes genuinely imply rather than a fallback.)*
 An allele is compatible with a partial when its projection **restricted to the positions the read
 witnessed** equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the
 genotype's compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly
