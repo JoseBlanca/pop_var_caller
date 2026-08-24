@@ -239,8 +239,37 @@ Written as a property with the count, not as a golden number, so a fixture regen
 different depth still means something.
 *Depends:* D1. *Source:* spec §3.3, §12.
 
-> **Checkpoint D:** both external checks green, and the numbers in the spec are reproduced by the
-> shipped code rather than by the probe's own copy. Pause for review.
+**D3. What each cap would cost — the owner's measurement of 2026-08-24.**  ☐
+The cap's default of six was inherited and has never been chosen from data; the owner's decision at
+Checkpoint C is to **raise it and make it a command-line parameter**, and this is the run that says
+to what. `MaxCandidateAlleles` is already a newtype refusing anything below two, so the wiring is
+the argument parser's; the number is this step's.
+
+**On the tomato panel (63 accessions, ~3 reads a position, 53,935 built loci) and the GIAB trio at
+30× and 300×**, for caps of 4, 6, 8, 10, 12, 16, 20 and no cap at all:
+
+- **loci above the cap** — what a run would truncate, or discard under the policy §4.1 rejected;
+- **sample-genotypes lost, two ways**: the per-sample missing this design ships, against discarding
+  the whole locus. That is the direct comparison, and §4.1 has argued it from principle without
+  ever putting the two numbers side by side;
+- the same at **1, 4, 16 and 63 samples asked**, so §4.2's growth is measured at each cap rather
+  than extrapolated from one;
+- **loci one reference base wide whose alleles are all one base, admitting more than three
+  alternatives.** Four bases means at most three alternatives, so **every one of those is error or
+  mismapping rather than segregating variation** — which is what decides whether the growth §4.2
+  measures saturates. If it does, a wider cap ends the problem; if it does not, the admission rule
+  needs a term it has not got.
+
+**It has to follow D1, not precede it.** The probe's own copy of the rule now differs from the
+shipped module twice over: it asks the bar of each `(allele, read group)` row where the module pools
+them first, and it maximises the within-sample share over every sample where the module maximises
+over the samples that cleared the bar (§4.1, the owner's ruling of 2026-08-24). Choosing a shipped
+default from numbers the shipped code does not produce is the thing to avoid.
+*Depends:* D1. *Source:* spec §4, §4.1, §4.2, §11 Q2.
+
+> **Checkpoint D:** both external checks green, the numbers in the spec are reproduced by the
+> shipped code rather than by the probe's own copy, and the cap has a value chosen from D3's
+> measurement rather than inherited. Pause for review.
 
 ---
 

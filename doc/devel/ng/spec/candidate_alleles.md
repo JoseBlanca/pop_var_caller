@@ -313,8 +313,18 @@ it; *corrected 2026-08-24, checked against the vendored tree.*
 obvious variants and six noise sequences is refused whole under production's repeat-tract rule
 (over 24 candidates, every sample no-called,
 [`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)) and under HipSTR's
-(over 1,000 haplotypes, the locus is abandoned). GATK, freebayes, bcftools' indel path and
-production's own ordinary path all truncate instead. The cut alleles' reads keep their error mass
+(over 1,000 haplotypes, the locus is abandoned). GATK, bcftools' indel path and production's own
+ordinary path truncate instead, and **freebayes does not cap at all unless asked to** —
+`--use-best-n-alleles` defaults to 0, which its own usage text spells "use all"
+([`Parameters.cpp:203`](../../../../freebayes/src/Parameters.cpp),
+[`:421`](../../../../freebayes/src/Parameters.cpp)). Set to *N* it sorts by the alleles' quality
+sum **pooled across the cohort** ([`Allele.h:318`](../../../../freebayes/src/Allele.h)), forces the
+reference in, and pops the tail
+([`AlleleParser.cpp:3963-4006`](../../../../freebayes/src/AlleleParser.cpp)); no path anywhere
+refuses a locus for its allele count. *Corrected 2026-08-24 against the vendored tree — an earlier
+draft listed freebayes among the callers that truncate, which is only true of a run that opts in.
+**So the only two callers that refuse are repeat-tract callers**, where the allele count is a
+ladder rather than a handful of bases, which weakens the analogy in both directions.* The cut alleles' reads keep their error mass
 in the arithmetic instead of being silently reassigned to the reference, which is what GATK does
 (`AlleleLikelihoods.marginalize` takes a maximum over the collapsed alleles and drops the rest;
 `AlleleSubsettingUtils.subsetAlleles` deletes the genotype entries and subtracts the maximum).
@@ -344,6 +354,21 @@ those.
 62 samples a locus they were called at perfectly well because one accession carried something rare.
 **§5's per-sample count is what makes the narrower answer available**, and it is why that count
 exists.
+
+**But "it loses more" holds on one condition, and that condition is not yet met** (raised by the
+owner at Checkpoint C, 2026-08-24). Emitting only the affected samples as missing is better than
+refusing the locus **only if those samples also leave the frequency fit**. Left in the EM's M-step,
+a sample whose carried allele is absent from the table is explained by whichever surviving genotype
+its reads mismatch least — usually homozygous reference — and that pulls the locus's allele
+frequencies toward the reference **for every sample, not only for it**. At that point the locus's
+numbers are corrupted cohort-wide and refusing it is the honest answer after all.
+
+So the choice between the two policies is decided elsewhere: by
+[`calling_em_loop.md`](calling_em_loop.md) §5.0's open question on whether an uncallable sample
+drops out of the M-step. **That question is load-bearing rather than a tidiness one**, and until it
+is settled this section's preference for truncation rests on an assumption it does not state. The
+recommendation stands — exclude the sample, keep the locus — because it retains strictly more
+information than refusing, and D3 measures what each policy costs in sample-genotypes at each cap.
 
 **The ranking: the largest share of one sample's compared reads the allele took, maximised over
 the samples that cleared the bar for it.** Ties break on how many samples cleared the bar, then on
