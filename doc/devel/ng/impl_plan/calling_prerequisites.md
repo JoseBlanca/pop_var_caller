@@ -31,8 +31,10 @@ read-likelihoods plan waits for this one.
 2. the merge **keeps partial observations** instead of discarding every non-`Complete` witness;
 3. the pre-pass emits the **calibration accumulator** — the per-read-group numerator/denominator
    the likelihood's error-rate scale divides;
-4. the pre-pass's contamination side-pass emits the **contaminating population's three allele-class
-   frequencies**;
+4. ~~the pre-pass's contamination side-pass emits the contaminating population's three allele-class
+   frequencies~~ — **withdrawn 2026-08-24 (owner)**: the mixture's second half is the locus's own
+   allele frequency, which the calling loop already estimates, so nothing here is owed. Milestone E
+   records why;
 5. a **`StratumFits` gather** — the one borrow of `(read group, stratum)` slippage numbers, level
    read off the fitted curve, that crosses the calling seam;
 6. **`InbreedingF` tightened to `[0, 1)`**, with the fitted path clamping rather than panicking.
@@ -216,116 +218,76 @@ sites ([`pileup/open_record.rs:2047`](../../../../src/ng/locus_generation/pileup
 byte-identical `q_sum` on the existing pileup fixtures. *Source:* read_likelihoods spec §3.2,
 §12 test 10 ("checked by calling it from both sides on the same read").
 
-**D2. The accumulator, both routes.**  ⛔ **blocked — this step rests on two things that are not
-true, found while building D1 (2026-08-24; measurements in
-[`ng_calling_prerequisites_d1_2026-08-24.md`](../../reports/implementations/ng_calling_prerequisites_d1_2026-08-24.md)
-§4).**
+**D2. The accumulator, on the route that can carry it.**  ✅
+**The step as written asked for something that does not exist, and the owner settled it on
+2026-08-24. Two corrections, both now in
+[`read_likelihoods.md`](../spec/read_likelihoods.md) §3.2.**
 
-**First, neither route can call D1's function, because neither has a read.** The census route's
-per-position unit is depth and allele counts
-([`joint/fit.rs:467`](../../../../src/ng/parameter_estimation/joint/fit.rs)) and the histogram
-route reads pooled observations, not reads. The last place either sees per-read qualities is the
-walk itself.
+**The average is the geometric mean, not the arithmetic one.** §3.2 asked for a running sum of the
+per-read error *probability*, and nothing carries that: the walk sums the *logarithms* into an
+observation's `q_sum` and throws the individual reads away, so `Σ ε` is not recoverable. Supplying it
+would have meant a second accumulation at fold time and a new field on every observation. Taking
+`exp(Σ q_sum / Σ num_obs)` instead is the self-consistent choice rather than a concession: it is the
+quantity the model charges an observation, and the one production uses
+([`posterior_engine.rs:1536`](../../../../src/var_calling/posterior_engine.rs) — production has no
+recalibration at all, so there is nothing there to copy but the quantity). **So the accumulator adds
+up numbers that already exist**, which is what "no new traversal" meant all along.
 
-**Second, an observation's `q_sum` is the wrong sum.** §3.2 asks for "a running sum of the per-read
-error **probability**"; `q_sum` accumulates the *logarithms*, so `exp(q_sum / n)` is the geometric
-mean and Σ ε is not recoverable from it. At §3.2's own example — one read at Phred 20 and one at
-Phred 40 — the arithmetic mean is 0.00505 and the geometric 0.001, so a scale built from `q_sum`
-comes out **five times wrong**. §12's ninth test exists to catch exactly this substitution.
+**Neither route can call D1's function, and neither needs to.** The census route's per-position unit
+is a depth code and allele counts ([`joint/fit.rs:467`](../../../../src/ng/parameter_estimation/joint/fit.rs))
+with no quality in it, and the histogram route reads pooled observations rather than reads. The
+histogram route can supply both numbers from the observations it already walks; **the census route
+cannot supply either, whichever average is chosen**, so its accumulator waits on §4.1's comparison
+between the two routes — if it wins, its records gain a quality field; if the histogram route wins,
+nothing is owed.
 
-**So the step is three, and one of them is a decision:**
+**Built:** [`generic/calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs),
+accumulated in `GenericAccumulators::add_locus` over exactly the loci and read groups the
+error-rate histogram counts, exposed beside the histograms because nothing is fitted from it.
+**The sum is a fixed-point integer**, because the accumulator promises order-independent merging
+across region shards and an `f64` running sum would have broken that silently. *Source:*
+read_likelihoods spec §3.2; arch §3.
 
-1. **The walk accumulates Σ `exp(minted)` alongside `q_sum`** and carries it on
-   `SequenceObservation`. Certain under every design, because the quantity is unrecoverable
-   afterwards. About 89 construction sites, most of them fixtures.
-2. **The histogram route sums it over the sites its histogram counts** — and **over the kept
-   subsample, not the raw observation**: every site is thinned to `MAX_BINNED_DEPTH = 124`
-   ([`generic/depth_bins.rs:77`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs)),
-   so above about 124 reads a position a denominator taken from `num_obs` covers reads the fitted
-   rate never saw. That fires on the GIAB trio and never on the tomato cohort at about 3×.
-3. **The census route's accumulator is a file-format change**, not an addition: `GenericEvidence`
-   gains a field, the section encoding gains bytes, and `census_file.rs`'s `VERSION` moves from 2
-   to 3, which makes every existing census file a rebuild. The format's own doc calls that the
-   designed answer — "a census is a cache with a pileup behind it, so the answer to a version this
-   build does not know is to rebuild rather than to interpret" — but it is the owner's call, not a
-   build-order consequence.
+> **Checkpoint D:** the histogram route carries the accumulator, over the sites its own fit reads,
+> minted by nothing — the numbers come from the walk. The census route's is deferred to the
+> comparison that decides whether that route survives at all. Pause for review.
 
-*(Original text follows, kept because 1 and 2 are still what it asks for.)*
-`ReadGroupErrorRateFit`
-([`read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs))
-gains the two fields, summed over the sites its histogram counts; the census route's fit
-([`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs)) gains its own pair,
-summed over the census sites its fit reads, calling D1's function. Whichever route the pre-pass's
-§4.1 comparison keeps, its accumulator goes with it and the other is deleted with the other fit.
-Test: on a fixture, `Σ minted / count` equals a hand-computed mean; a route's accumulator counts
-no site the route's fit did not read. **Own commit, do not bundle** — numerator and denominator
-from different site sets "is not a calibration" and nothing crashes; the oracle is the
-hand-computed fixture mean. *Depends:* D1. *Source:* read_likelihoods spec §3.2; arch §3.
+### Milestone E — deleted: the contamination mixture's second half is not the pre-pass's (item 4)
 
-> **Checkpoint D:** both routes carry the accumulator, minted by the one shared function. Pause
-> for review.
+**This milestone asked the parameter pre-pass for the contaminating population's three allele-class
+frequencies — how often it carries the reference, a substitution, an insertion or deletion — from a
+side-pass over the census sites. That is deleted rather than built (owner, 2026-08-24), and nothing
+replaces it here.**
 
-### Milestone E — the contaminating population's allele-class frequencies (item 4)
+**What the model needs is the frequency of the allele an observation shows, at the locus being
+called** ([`read_likelihoods.md`](../spec/read_likelihoods.md) §3.6, corrected the same day). The
+three-class split is not a modelling requirement: it is what production does because it has no
+per-locus population frequency for an arbitrary alternative allele and must fall back on a class
+average. This caller has that frequency — it is the same one the genotype prior reads and the
+calling loop re-estimates — so the classes disappear along with the ignorance that motivated them.
 
-The mixture's second half: how often the contaminating population carries the reference, a
-substitution alternative, an insertion-or-deletion alternative — one frequency per allele class,
-averaged over the census sites, following production and freebayes
-([`read_likelihoods.md`](../spec/read_likelihoods.md) §3.6).
+**Three reasons this could never have been the pre-pass's**, all of which came out of trying:
 
-**Only this half is owed.** The contamination *fraction* and its evidence counts landed on `main`
-with the read-group-grain work: `ContaminationEstimate::Estimated` already carries `alpha`,
-`source`, `markers_with_reads` and `reads_on_markers`
-([`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs)),
-which is four of `ContaminationView`'s six fields. The three class frequencies are the two that
-are missing, and `joint/contamination.rs` has none of them.
+- **The pre-pass visits a selection of census sites; the caller calls everywhere.** A side-pass
+  cannot supply a per-locus frequency for a locus it never looked at, so no amount of work here
+  would have produced the number.
+- **The estimator could not have been ported.** Production fits its three-entry simplex from
+  per-read posteriors that a read came from the contaminant
+  ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs)).
+  ng's contamination fit computes no such posterior — it works from marker read shares against
+  ancestry-predicted dosages — so there was nothing to take shares of, and inventing an estimator is
+  design this plan says in its own header it is not a place for.
+- **The census cannot answer the indel half cleanly anyway.** Its fifth allele code lumps insertions
+  and deletions together with `N` and spanning deletions
+  ([`joint/census.rs`](../../../../src/ng/parameter_estimation/joint/census.rs),
+  `ObservedAllele::Other`), so an "insertion-or-deletion frequency" read off it is contaminated by
+  two things that are not alleles.
 
-**The grain question is settled by that same work, not left open.** The spec's §6 table puts the
-fraction and the population's frequencies on one row at read-group grain; only the first belongs
-there, and the merged code says why in its own words — the fraction is per read group because
-*"a second plant's DNA enters at library preparation or at sequencing, so two libraries of one
-plant can carry different amounts of it"*
-([`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs)). That reasoning is
-about **how much** contaminant there is. The class frequencies say **what** the contaminant
-carries, and a run's contaminant is one population however many libraries it entered through. So
-they are fitted once per run and copied into each read group's view.
-
-**E1. The three frequencies.**  ⛔ **blocked — see the note below.**
-A side-pass over the census evidence the contamination fit already reads: classify each site's
-alternative alleles into the three classes, average the fitted frequencies per class, and carry
-the triple beside the run's contamination output (one triple per run — the frequencies describe
-the contaminating population, not any one read group; the per-read-group `ContaminationView`
-copies them in, [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2.3). Emitted as
-absent where contamination itself is not estimated (one sample). Test: a fixture census with
-hand-classified sites gives the hand-computed averages. *Source:* read_likelihoods spec §3.6;
-arch §2.3.
-
-> ⛔ **Blocked 2026-08-24: "average the fitted frequencies per class" does not name an estimator
-> this plan is allowed to choose.**
->
-> **What the caller needs is a simplex, not three averages.** §3.6 puts `q(o)` inside
-> `(1 − c)·own(o | g) + c·q(o)`, so it is *what a contaminant read shows at this observation* — a
-> probability over the three classes summing to one, which is production's `q_b`
-> ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs)
-> §`q_b_per_batch`, validated as a simplex). A mean of per-site allele frequencies within a class is
-> a different object and does not sum to one.
->
-> **Production's estimator cannot be ported, because ng's contamination fit produces none of its
-> inputs.** Production fits `q_b` by a Dirichlet-smoothed M-step over
-> `S_b[a] = Σ over reads r of class a of γ_r`, where `γ_r` is a **per-read posterior responsibility
-> that the read came from the contaminant**. ng fits its fraction per read group from marker read
-> shares against ancestry-predicted dosages
-> ([`joint/contamination.rs`](../../../../src/ng/parameter_estimation/joint/contamination.rs)) and
-> never computes a per-read responsibility, so there is nothing to smooth.
->
-> **Two further questions the plan's sentence leaves open**, and both change the answer: over which
-> sites — the contamination fit's *selected markers*, which are chosen inside a frequency band and
-> are overwhelmingly substitutions, or every census position; and what the reference class's entry
-> is, since the census's fifth allele code lumps indels with `N` and spanning deletions
-> ([`joint/census.rs`](../../../../src/ng/parameter_estimation/joint/census.rs) `ObservedAllele::Other`)
-> so the "insertion-or-deletion" class cannot be read off it cleanly.
->
-> Choosing among these is new design, which this plan says in its own header it is not a place for.
-> **Owner's call.**
+**Owner:** the read likelihood, in
+[`calling_read_likelihoods.md`](calling_read_likelihoods.md). It is a few lines there because the
+frequency is already in hand. The one consequence recorded with the design: the contamination
+*fraction* stays frozen before the loop and this frequency does not, so the two halves of the
+mixture sit in different tiers.
 
 ### Milestone F — the `StratumFits` gather (item 5)
 
@@ -346,9 +308,11 @@ type, per the em-loop arch's instruction that the parameter-prepass arch doc pin
 read_likelihoods arch §4.2; calling_em_loop arch §2.
 
 > **Checkpoint E/F:** the gather exists with its tests and the pre-pass's own outputs are
-> otherwise untouched. **The plan is not complete: D2 and E1 are blocked on decisions the plan is
-> not allowed to take** (see their notes). Of the read-likelihoods plan's preconditions, items 1,
-> 2 and 5 hold; item 3 holds only as far as the shared mint, and item 4 not at all.
+> otherwise untouched. **Every precondition the read-likelihoods plan needs from here now holds or
+> has been withdrawn:** the merge's read-group axis, its partial observations and the slippage
+> gather are built; the calibration accumulator is built on the histogram route, with the census
+> route's deferred to the comparison that decides whether that route survives; and the contamination
+> mixture's second half turned out not to be the pre-pass's at all. Pause for review.
 
 ---
 
@@ -359,8 +323,8 @@ read_likelihoods arch §4.2; calling_em_loop arch §2.
 | A | boundary tests both directions; the fitted-`1.0` clamp test |
 | B | **parity:** one-read-group fixtures byte-identical to today (existing merge suite); two-group fixture splits rows exactly |
 | C | hand-written partial fixture (stretch, bases, counts); existing suite green; locus-existence verdicts unchanged |
-| D | same-function check from both mint sites; hand-computed fixture mean; per-route site-set discipline |
-| E | hand-classified fixture census → hand-computed class averages |
+| D | same-function check from both mint sites; hand-computed fixture mean; the totals equal the histogram's own read count, and merge in any shard order gives one answer |
+| E | deleted — nothing to verify here |
 | F | **the curve as oracle:** gathered level ≡ `blend_level` called directly; provenance carried |
 
 ## Out of scope (next plans)
@@ -370,7 +334,12 @@ read_likelihoods arch §4.2; calling_em_loop arch §2.
   consumes what B and C produce.
 - **`FrozenParameters` assembling the gather, the calibration and the contamination views** —
   [`calling_loop.md`](calling_loop.md).
+- **The contamination mixture's second half** — the frequency of the observed allele among the
+  samples in this one's sequencing batch, recomputed each iteration
+  ([`calling_read_likelihoods.md`](calling_read_likelihoods.md); spec §3.6, and Milestone E for why
+  it left this plan).
 - **The repeat-path locus-existence amendment** — whoever brings the STR path through the merge
   (see Scope).
-- **Choosing between the two error-rate routes** — the pre-pass's own comparison; D leaves both
-  routes carrying their accumulator so the choice loses nothing.
+- **Choosing between the two error-rate routes** — the pre-pass's own comparison. D gives the
+  histogram route its accumulator; the census route cannot carry one without a quality field in its
+  records, so that comparison now also decides whether those records change.

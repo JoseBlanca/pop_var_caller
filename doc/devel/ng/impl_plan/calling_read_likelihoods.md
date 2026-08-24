@@ -20,11 +20,20 @@ are the cut line.)*
 [`calling_prerequisites`](calling_prerequisites.md) ∥
 [`calling_foundations`](calling_foundations.md) → [`calling_prior`](calling_prior.md) ∥
 `calling_read_likelihoods` → [`calling_loop`](calling_loop.md) →
-[`calling_bakeoffs`](calling_bakeoffs.md). **This plan needs prerequisites items 1–5** — the
-merge's read-group axis and kept partials are what the generic evidence views read; the
-calibration accumulator, the contamination class frequencies and the `StratumFits` gather are
-what its parameter views consume. The prior plan needs none of that, which is why it starts
-earlier; the two still run in parallel once this one starts.
+[`calling_bakeoffs`](calling_bakeoffs.md). **This plan needs prerequisites items 1, 2, 3 and 5** —
+the merge's read-group axis and kept partials are what the generic evidence views read; the
+calibration accumulator and the `StratumFits` gather are what its parameter views consume. The
+prior plan needs none of that, which is why it starts earlier; the two still run in parallel once
+this one starts.
+
+**Item 4 came here instead of arriving from there (owner, 2026-08-24).** The contamination
+mixture's second half was to be three allele-class frequencies emitted by the parameter pre-pass;
+it is now the frequency of the allele an observation shows, at the locus being called, over the
+samples in this sample's sequencing batch — **recomputed every iteration**, because it is a
+property of the locus and the loop already estimates it. **So this plan builds it**, in Milestone C,
+and the pre-pass owes nothing (spec §3.6, corrected the same day;
+[`calling_prerequisites.md`](calling_prerequisites.md) Milestone E records why it could never have
+been the pre-pass's).
 
 ---
 
@@ -80,10 +89,11 @@ production); the two doc repointings spec §7 asks for.
 
 - **Foundations merged:** `GenotypeTableView`, `CandidateAlleles`, `AlleleId`
   ([`calling_foundations.md`](calling_foundations.md)).
-- **Prerequisites merged, items 1–5** ([`calling_prerequisites.md`](calling_prerequisites.md)):
-  the `(allele, read group)` support rows and kept partials (Milestones B–C there), the
-  calibration accumulator (D), the contamination class frequencies (E), the `StratumFits` gather
-  (F).
+- **Prerequisites merged, items 1, 2, 3 and 5**
+  ([`calling_prerequisites.md`](calling_prerequisites.md)): the `(allele, read group)` support rows
+  and kept partials (Milestones B–C there), the calibration accumulator (D — on the histogram
+  route; the census route's waits on the comparison between the two routes), the `StratumFits`
+  gather (F). **Item 4 is not owed by that plan** — see the note above.
 - The STR evidence needs no merge work: `SequenceObservation`
   ([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
   `(bases, witness, read_group)`; `complete_observations()`
@@ -129,10 +139,16 @@ Milestone C's kept rows, bases + witnessed run intact. `SsrSampleEvidence` — a
 
 **A2. Parameter views, floors, contract.**  ☐
 `ReadGroupCalibration { scale, provenance }` (scale 1.0 + `Defaulted` where no rate was emitted —
-visible, never silent) and `ContaminationView` (fraction, the three allele-class frequencies,
-`markers_with_reads`, `reads_at_markers` — "measured clean" vs "unmeasurable" told apart by the
-counts). Import `MIN_BASE_ERROR = 1e-12` and the geometric clamps as named constants with their
-reasons. The row contract in `mod.rs`'s docs: pure function, fills caller scratch, empty evidence
+visible, never silent) and `ContaminationView` (fraction, `markers_with_reads`, `reads_at_markers` —
+"measured clean" vs "unmeasurable" told apart by the counts). **`ContaminationView` carries no
+allele-class frequencies**: the mixture's second half is per locus and per iteration, so it is read
+where the allele frequency is rather than frozen on this view (C2 below).
+
+**The scale is `fitted rate ÷ exp(Σ q_sum / Σ num_obs)`, a geometric mean** — the pre-pass's
+accumulator supplies the two sums
+([`generic/calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs)), and
+spec §3.2 records why that average and not the arithmetic one. Import `MIN_BASE_ERROR = 1e-12` and
+the geometric clamps as named constants with their reasons. The row contract in `mod.rs`'s docs: pure function, fills caller scratch, empty evidence
 row = all zeros (the prior decides, no branch), mis-shaped input = assertion held in release
 ([`per_group_merger.rs:1963`](../../../../src/var_calling/per_group_merger.rs) is the precedent).
 Scratch shells `GenericRowScratch`, `SsrRowScratch<S>`. *Depends:* A1. *Source:* arch §1.1, §2.3;
@@ -173,12 +189,33 @@ floating-point tolerance — every difference attributed to the two recorded cha
 
 **C1. The mixture, no `c = 0` branch.**  ☐
 Spec §3.6: `n_o · log[(1 − c)·own(o|g) + c·q(o)]`, evaluated in probability space with one
-logarithm, `q(o)` read from the class frequencies prerequisites Milestone E emitted. **There is
-no `c == 0` branch** — the two forms agree to a few ulp and the tolerance is a named test
-constant (spec §12 test 11); the test also fails the moment anyone reintroduces production's
+logarithm, `q(o)` taken as a parameter for now so this step is about the mixture and nothing else.
+**There is no `c == 0` branch** — the two forms agree to a few ulp and the tolerance is a named
+test constant (spec §12 test 11); the test also fails the moment anyone reintroduces production's
 extra `(1 − ε)` factor or its allele-count divisor into `own`. A second test hand-computes one
 contaminated case (`c = 0.03`, contaminant frequency 1 in 1,000). *Depends:* B2. *Source:* spec
 §3.6; arch §3.
+
+**C2. `q(o)` — the contaminating population's frequency for the allele the observation shows.**  ☐
+**New here on 2026-08-24 (owner); this used to arrive from the pre-pass as three allele-class
+frequencies and does not.** `q(o)` is the frequency of the observation's own allele at the locus
+being called, over the samples in this sample's **sequencing batch** — the grain
+[`parameter_prepass_joint_fit.md`](../arch/parameter_prepass_joint_fit.md) §1.6 already carries,
+whose default is one batch holding the whole run, so a run declaring no batches gets the cohort
+frequency. **Recomputed every iteration** from the loop's current estimate, which is the same
+number the genotype prior reads, so this is a lookup and not a fit.
+
+Tests: the frequency of a candidate the batch never shows is the floor rather than zero (a
+contaminant read of an allele nobody carries must not make the term collapse); two batches with
+different frequencies at one locus give one sample's reads different `q` from another's; and at one
+batch the answer equals the cohort frequency, which is what makes the default lose nothing.
+**Own commit, do not bundle** — a wrong `q` is a genotype quietly pulled toward the contaminant's
+allele and nothing crashes. *Depends:* C1. *Source:* spec §3.6;
+[`calling_prerequisites.md`](calling_prerequisites.md) Milestone E for why it is here.
+
+**The one consequence to carry into the loop plan:** the contamination *fraction* is frozen before
+the loop and `q(o)` is not, so the two halves of the mixture sit in different tiers. Spec §6.1's
+first tier holds the fraction only.
 
 ### Milestone D — partial observations on the generic path
 

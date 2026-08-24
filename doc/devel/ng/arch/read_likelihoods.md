@@ -166,14 +166,19 @@ pub struct ReadGroupCalibration { pub scale: f64, pub provenance: Provenance }
 /// sample) — absent, not a fitted zero (spec §3.6).
 pub struct ContaminationView {
     pub fraction: f64,                          // c; 0.0 where the fit emitted none
-    pub reference_class_frequency: f64,         // the contaminant population's three
-    pub substitution_class_frequency: f64,      // allele-class frequencies (spec §3.6)
-    pub indel_class_frequency: f64,
     pub markers_with_reads: u64,                // the evidence counts that tell
     pub reads_on_markers: u64,                  //   "measured clean" from "unmeasurable" —
                                                 //   both names as ContaminationEstimate has them
 }
 ```
+
+**The three allele-class frequencies this used to carry are deleted (owner, 2026-08-24).** The
+mixture's second half is `q(o)`, the contaminating population's frequency of the allele the
+observation shows *at this locus*, and that is the loop's own estimate over the samples in this
+sample's sequencing batch — not a triple frozen before calling (spec §3.6). So it does not travel on
+this view, which holds only frozen per-library facts: it is read where the frequency is, each
+iteration. **The parameter pre-pass owes nothing for it**, and the side-pass that was to emit it is
+deleted from `impl_plan/calling_prerequisites.md` rather than left blocked.
 
 ## 3. The SNP/indel path
 
