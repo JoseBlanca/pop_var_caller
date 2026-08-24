@@ -371,10 +371,28 @@ so that the average over that read group's admitted reads equals the rate the pr
 ```text
 ε_read(after)  =  ε_read(as minted) × scale(read group)
 
-               fitted error rate for this read group
-scale  =  ────────────────────────────────────────────────────────
-          mean, over that read group's admitted reads, of ε as minted
+                       fitted error rate for this read group
+scale  =  ────────────────────────────────────────────────────────────────
+          geometric mean, over that group's admitted reads, of ε as minted
 ```
+
+> **Written per read, applied per observation — the caller never holds a per-read `ε` at all.**
+> The merge keeps, for each allele in each read group at each locus, how many reads support it and
+> the **sum of their log error probabilities**; the reads themselves are gone from there on (§1.4).
+> From those two numbers exactly one average is recoverable — `exp(q_sum / num_obs)`, the geometric
+> mean — and that is what §3.3 charges. So the line above states an intent, not a mechanism: in the
+> code the scale is **one addition of `log scale` per observation**, and nothing is multiplied read
+> by read.
+>
+> **The two are the same arithmetic**, which is why the line above is still true of the result:
+> `exp(Σ ln(s·ε) / n) = s · exp(Σ ln ε / n)`. Scaling every read and scaling their geometric mean
+> are one operation, so the aggregation costs nothing.
+>
+> **And this is the sharper form of the correction recorded below (owner, 2026-08-24).** An earlier
+> version of this section asked for the **arithmetic** mean of the per-read `ε`. That was not a
+> worse choice than the geometric mean — **it was not a choice at all**, because nowhere in the
+> model does a per-read `ε` survive to be averaged that way. Reading the sentence above as a
+> per-read mechanism is what made it look reachable.
 
 **Why this and not either half alone.** The base qualities carry the only information that
 distinguishes one read from another, and at three reads a position that distinction is the whole
@@ -1950,7 +1968,7 @@ anything.
 five real alignments ask for a noisier class than the model covers and are refused, at 0.42% and
 0.49% of sites, and what they are asking for fits a duplication the reference does not carry
 ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1). Such a sample gets a one-rate
-answer, and §3.2 would then scale every read's quality by a ratio computed against a rate that is
+answer, and §3.2 would then scale that library's charged errors by a ratio computed against a rate that is
 itself absorbing an artefact. *Leaning: scale anyway and report it,* because the alternative — trusting
 the instrument on the sample we have most reason to distrust — is worse, and because the refusal is
 already reported. **Settled by:** fitting the scale on those two tomato accessions and on three that

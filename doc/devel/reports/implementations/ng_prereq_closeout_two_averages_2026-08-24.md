@@ -33,9 +33,10 @@ The lowest is `SRS3394549_SRR7279515`; the highest is `SRS3394559`. **No read gr
 near one**, which is what "the two means agree" would have looked like.
 
 **What that would do to a charged error.** The scale is
-`fitted error rate ÷ mean minted error`, and the caller multiplies every read's own error by it.
-Building the scale from the arithmetic mean instead of the geometric one divides every charged
-error by 44.1 on HG002 and by 25.2 on tomato — **16.4 and 14.0 Phred**. The reads would be treated
+`fitted error rate ÷ mean minted error`, and it is added once per observation in log space — the
+caller holds no per-read error probability to multiply, only `exp(q_sum / num_obs)` per allele per
+library. Building the scale from the arithmetic mean instead of the geometric one divides every
+charged error by 44.1 on HG002 and by 25.2 on tomato — **16.4 and 14.0 Phred**. The reads would be treated
 as that much cleaner than the pre-pass measured them to be. So the correction of 2026-08-24 was not
 a tidy-up; it is the difference between a scale that is right and one that is wrong by a factor of
 forty.

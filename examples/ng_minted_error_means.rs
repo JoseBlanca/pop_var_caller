@@ -7,10 +7,12 @@
 //!
 //! # The question
 //!
-//! The caller will charge each read the error probability the walk minted for it — the worse of
-//! what the instrument said about the bases and what the aligner said about the placement — and
-//! rescale it by one number per library so the average comes out at the rate the parameter
-//! pre-pass measured. That average is the **geometric** mean, `exp(Σ ln ε / n)`
+//! The walk mints one error probability per read — the worse of what the instrument said about the
+//! bases and what the aligner said about the placement — and then throws the reads away, keeping per
+//! allele per library a read count and the sum of those probabilities' logarithms. **So what the
+//! caller charges is one number per observation**, `exp(Σ ln ε / n)`, and a single factor per library
+//! rescales it so the average comes out at the rate the parameter pre-pass measured. That average is
+//! therefore the **geometric** mean
 //! (`doc/devel/ng/spec/read_likelihoods.md` §3.2, corrected by the owner on 2026-08-24). The
 //! specification first asked for the **arithmetic** mean, `Σ ε / n`, and nothing in the walk
 //! carries it: the fold sums logarithms into an observation's `q_sum` and discards the reads.
