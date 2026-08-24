@@ -166,7 +166,7 @@ table with its rows reversed — the ranking must not move.
 
 ### Milestone C — the output
 
-**C1. Admission and the remapping. — own commit, do not bundle.**  ☐
+**C1. Admission and the remapping. — own commit, do not bundle.**  ✅
 `select_generic`'s second pass: seed `CandidateAlleles::new` with the merge's allele 0, `admit`
 each surviving alternative in table order, and fill `AlleleRemap` as it goes. A locus where every
 alternative failed the bar returns the reference alone with `Selected` — a normal outcome, and the

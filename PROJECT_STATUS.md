@@ -19,7 +19,37 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **the order the cap keeps alleles in, and an oracle that
+> - **Last completed task (2026-08-24):** **the first whole answer selection returns, and a rule two
+> tests could not tell from a cohort sum** (step C1 of
+> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`). `select_generic` now takes one assembled cohort locus and returns the
+> narrowed allele table: it seeds the candidate list with the merge's reference, admits every
+> alternative some single sample's reads earned — **in the merge table's own order, which is the
+> order that reaches the VCF's `ALT` column** — and records where each of the merge's allele
+> indices ended up, which is what lets the calling loop re-key a sample's evidence rows onto the
+> new dense ids. The cap is C2 and the per-sample leftover is C3.
+> **Both Blockers were again tests that could not fail, and this is now three steps in a row.**
+> The whole admission rule could be replaced by a cohort read total — `cohort_reads >= 2` in place
+> of *did some single sample earn this* — and all 65 tests stayed green, because no fixture had two
+> samples each lending an allele less than the floor so that their reads pooled over it. A cohort
+> term there is the one thing this module exists to prevent: it makes a sample's candidate list
+> depend on who else is in the run, and it admits error alleles in proportion to cohort size. And
+> **the rule's share could be dropped entirely**, because every fixture was shallow enough that the
+> floor decided — where the shipped share binds above 41 compared reads, which is exactly where the
+> GIAB trio runs at 30× and 300×.
+> **The recurring shape is now legible: a fixture built at a size where the term under test is not
+> the one that decides.** Raising a threshold in the fixture is not the same as raising its depth.
+> **And one wrong mechanism in the prose, proved by deleting the code.** The panic note claimed an
+> empty allele table would fail inside `CandidateAlleles::new`; a reviewer deleted the assertion and
+> got `index out of bounds` two statements earlier, never reaching that call. A wrong mechanism is
+> worse than a wrong number — it sends the next reader hunting a symptom that does not happen.
+> **Raised for Checkpoint C: the cap's by-catch is samples, not alleles.** At 400 samples each
+> carrying a different private allele the cap cuts 395 and **395 samples are emitted as missing**,
+> because each earned the allele it took away. Spec §4.1's "only the samples that earned a cut
+> allele are affected" is measured at 63 accessions where the cap binds at 23 loci in 53,935; at
+> several hundred samples the same sentence means almost everybody.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_c1_2026-08-24.md).
+> - **Previously (2026-08-24):** **the order the cap keeps alleles in, and an oracle that
 > did not test the thing it was written for** (step B2 of
 > [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`; **Milestone B complete, at Checkpoint B**). A locus is called over at

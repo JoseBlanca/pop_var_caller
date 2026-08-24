@@ -22,6 +22,8 @@
 //! because otherwise a sample's candidate list would depend on who else is in the run
 //! (spec §3.2).
 
+pub mod generic;
+
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
@@ -443,12 +445,10 @@ impl LocusSelection {
     /// than the observation itself so that this module need not import the merge's
     /// assembled locus type.
     ///
-    /// **The fields stay public because arch §2.4 declares them so**, which means this
-    /// constructor can be bypassed by a struct literal. It is still worth having: it is
-    /// what `select_generic` and `select_ssr` call, so the checks run on every value a run
-    /// produces, and a test that writes a literal is a test that has said it wants to.
-    /// Making the fields private would make this the *only* door and is raised at
-    /// Checkpoint A.
+    /// **The fields are private, so this is the only door** (the owner's ruling at
+    /// Checkpoint A, departing from arch §2.4's `pub` fields): a bypassable check on a value
+    /// whose defect is a wrong genotype rather than a crash is not a check. Every value a run
+    /// produces comes through here, tests included.
     ///
     /// # Panics
     ///
@@ -652,12 +652,6 @@ impl AlleleSummary {
     /// evidence is read and is exempt from both the bar and the cap (spec §6.1), so C1
     /// seeds it structurally rather than reading a flag that says it passed.
     #[inline]
-    #[allow(
-        dead_code,
-        reason = "its shipping caller is the admission pass of step C1; the test below is \
-                  its only caller today, which `expect` cannot express — that would be \
-                  unfulfilled in the test build and satisfied in the library one"
-    )]
     fn cleared_the_bar(self) -> bool {
         self.samples_clearing_the_bar > 0
     }
@@ -746,16 +740,6 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 ///   different thing and is legitimate — it covers the locus and every one of its reads
 ///   stopped inside it, so all it has is partials — and that one is stepped over.
 ///
-/// **The `dead_code` allow covers [`compared_reads_of`] as well**, which is why that
-/// function carries none of its own: rustc treats an item with an `allow` on it as a live
-/// root, so everything it calls is live too. Removing this one alone makes the lint fire on
-/// both.
-#[allow(
-    dead_code,
-    reason = "its shipping caller is `select_generic`, built at step C1; until then the \
-              tests are its only callers, which `expect` cannot express — the expectation \
-              would be unfulfilled in the test build and satisfied in the library one"
-)]
 fn summarise_alleles(
     observation: &CohortObservation,
     min_allele_support: MinAltReads,
@@ -920,15 +904,124 @@ fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>)
         .then(left.bases.cmp(right.bases))
 }
 
+/// **Hand-built cohort loci, shared by this module and by [`generic`]'s tests.**
+///
+/// One home rather than a copy per file, for the reason `cohort_merge`'s own `fixtures`
+/// module gives: a locus fixture is fiddly enough that two copies drift, and the two
+/// callers here test the same rule from either side of it — the fold in this file, the
+/// whole narrowing in [`generic`].
 #[cfg(test)]
-mod tests {
+pub(super) mod fixtures {
     use super::*;
-    use proptest::prelude::*;
-
-    use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
+    use crate::ng::locus_generation::WitnessedLocusPositions;
     use crate::ng::run::cohort_merge::build::{AlleleSupport, PartialObservation, SupportedAllele};
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
     use std::num::NonZeroU32;
+
+    /// A support rule of `floor` reads or `share` of a sample's compared reads.
+    ///
+    /// Written out rather than taken from [`DEFAULT_MIN_ALLELE_SUPPORT`] because the
+    /// shipped share of 5 in 100 is inert below 41 compared reads, so a fixture of a
+    /// handful of reads built on it could not tell a right denominator from a wrong one:
+    /// the floor would decide either way. **Raising the share is not by itself enough to
+    /// make it decide** — the fixture also has to be deep enough that
+    /// `ceil(share × compared reads)` exceeds the floor, which is what
+    /// `the_share_refuses_what_the_floor_would_admit` is for.
+    pub(super) fn support_rule_of(floor: u32, share: f64) -> MinAltReads {
+        MinAltReads {
+            floor: MinAltObs(NonZeroU32::new(floor).expect("a floor of at least one read")),
+            share: MinAltReadShare::new(share).expect("a share that is a fraction of one"),
+        }
+    }
+
+    /// One allele's row from the sample's **first** read group — the shape of every sample
+    /// that carries one library, which is most samples of most runs.
+    ///
+    /// `q_sum` is carried although no assertion in this step reads it: it is the field
+    /// step C3 sums into the leftover, so the fixtures hold a plausible error mass from
+    /// the start rather than gaining one when C3 arrives.
+    pub(super) fn row(allele: usize, num_reads: u32, q_sum: f64) -> SupportedAllele {
+        row_from_group(allele, ReadGroupId(0), num_reads, q_sum)
+    }
+
+    /// One `(allele, read group)` row, naming the group — for the fixtures about two lanes
+    /// of one sample. The group is a [`ReadGroupId`] rather than a bare number so that it
+    /// cannot be transposed with `num_reads`, which is the neighbouring argument and also
+    /// counts something.
+    pub(super) fn row_from_group(
+        allele: usize,
+        read_group: ReadGroupId,
+        num_reads: u32,
+        q_sum: f64,
+    ) -> SupportedAllele {
+        SupportedAllele {
+            allele,
+            read_group,
+            support: AlleleSupport {
+                num_reads,
+                q_sum,
+                ..AlleleSupport::default()
+            },
+        }
+    }
+
+    /// One covering sample showing `rows` and nothing on the merge's other axes.
+    pub(super) fn sample_showing(sample: usize, rows: Vec<SupportedAllele>) -> SampleSupport {
+        SampleSupport {
+            sample,
+            supported: rows,
+            partials: Vec::new(),
+            reads_without_observation: 0,
+            reads_removed_as_evidence: 0,
+            reads_composed_across_records: 0,
+        }
+    }
+
+    /// A covering sample whose reads **all stopped inside the locus**: no support rows at
+    /// all, `num_reads` partial ones. The merge builds this — `per_sample` holds the
+    /// samples that covered the span, not the ones that spanned it — and it is the only
+    /// input that reaches the fold with a denominator of zero.
+    pub(super) fn sample_with_only_partials(sample: usize, num_reads: u32) -> SampleSupport {
+        let mut only_partials = sample_showing(sample, Vec::new());
+        only_partials.partials = vec![partial_of(num_reads)];
+        only_partials
+    }
+
+    /// `num_reads` reads that stopped inside the locus — the axis the denominator must not
+    /// read.
+    pub(super) fn partial_of(num_reads: u32) -> PartialObservation {
+        PartialObservation {
+            witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
+                .expect("a two-position witness"),
+            read_group: ReadGroupId(0),
+            bases: Box::from(b"AC".as_slice()),
+            num_reads,
+            q_sum: -3.0,
+        }
+    }
+
+    /// A cohort locus over `alleles`, the reference first, covered by `per_sample`.
+    pub(super) fn locus_of(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
+        CohortObservation {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(100),
+                end: Position(100),
+            },
+            alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
+            per_sample,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::*;
+    use super::*;
+    use proptest::prelude::*;
+
+    use crate::ng::locus_generation::LocusKind;
+    use crate::ng::types::ReadGroupId;
 
     /// The two numbers themselves, and the floor's **coupling** to the merge's constant
     /// rather than to the digit 2 — the doc comment says the floor *is* the merge's own,
@@ -1353,104 +1446,9 @@ mod tests {
         );
     }
 
-    // ---- the fold: the per-sample denominator and the bar (step B1) --------------------
-
-    /// A support rule of `floor` reads or `share` of a sample's compared reads.
-    ///
-    /// Written out rather than taken from [`DEFAULT_MIN_ALLELE_SUPPORT`] because the
-    /// shipped share of 5 in 100 is inert below 41 compared reads, so a fixture of a
-    /// handful of reads built on it could not tell a right denominator from a wrong one:
-    /// the floor would decide either way. **Raising the share is not by itself enough to
-    /// make it decide** — the fixture also has to be deep enough that
-    /// `ceil(share × compared reads)` exceeds the floor, which is what
-    /// `the_share_refuses_what_the_floor_would_admit` is for.
-    fn support_rule_of(floor: u32, share: f64) -> MinAltReads {
-        MinAltReads {
-            floor: MinAltObs(NonZeroU32::new(floor).expect("a floor of at least one read")),
-            share: MinAltReadShare::new(share).expect("a share that is a fraction of one"),
-        }
-    }
-
-    /// One allele's row from the sample's **first** read group — the shape of every sample
-    /// that carries one library, which is most samples of most runs.
-    ///
-    /// `q_sum` is carried although no assertion in this step reads it: it is the field
-    /// step C3 sums into the leftover, so the fixtures hold a plausible error mass from
-    /// the start rather than gaining one when C3 arrives.
-    fn row(allele: usize, num_reads: u32, q_sum: f64) -> SupportedAllele {
-        row_from_group(allele, ReadGroupId(0), num_reads, q_sum)
-    }
-
-    /// One `(allele, read group)` row, naming the group — for the fixtures about two lanes
-    /// of one sample. The group is a [`ReadGroupId`] rather than a bare number so that it
-    /// cannot be transposed with `num_reads`, which is the neighbouring argument and also
-    /// counts something.
-    fn row_from_group(
-        allele: usize,
-        read_group: ReadGroupId,
-        num_reads: u32,
-        q_sum: f64,
-    ) -> SupportedAllele {
-        SupportedAllele {
-            allele,
-            read_group,
-            support: AlleleSupport {
-                num_reads,
-                q_sum,
-                ..AlleleSupport::default()
-            },
-        }
-    }
-
-    /// One covering sample showing `rows` and nothing on the merge's other axes.
-    fn sample_showing(sample: usize, rows: Vec<SupportedAllele>) -> SampleSupport {
-        SampleSupport {
-            sample,
-            supported: rows,
-            partials: Vec::new(),
-            reads_without_observation: 0,
-            reads_removed_as_evidence: 0,
-            reads_composed_across_records: 0,
-        }
-    }
-
-    /// A covering sample whose reads **all stopped inside the locus**: no support rows at
-    /// all, `num_reads` partial ones. The merge builds this — `per_sample` holds the
-    /// samples that covered the span, not the ones that spanned it — and it is the only
-    /// input that reaches the fold with a denominator of zero.
-    fn sample_with_only_partials(sample: usize, num_reads: u32) -> SampleSupport {
-        let mut only_partials = sample_showing(sample, Vec::new());
-        only_partials.partials = vec![partial_of(num_reads)];
-        only_partials
-    }
-
-    /// `num_reads` reads that stopped inside the locus — the axis the denominator must not
-    /// read.
-    fn partial_of(num_reads: u32) -> PartialObservation {
-        PartialObservation {
-            witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
-                .expect("a two-position witness"),
-            read_group: ReadGroupId(0),
-            bases: Box::from(b"AC".as_slice()),
-            num_reads,
-            q_sum: -3.0,
-        }
-    }
-
-    /// A cohort locus over `alleles`, the reference first, covered by `per_sample`.
-    fn locus_of(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
-        CohortObservation {
-            region: GenomeRegion {
-                contig: ContigId(0),
-                start: Position(100),
-                end: Position(100),
-            },
-            alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
-            per_sample,
-        }
-    }
-
-    /// The fold's summaries for `observation` under `min_allele_support`.
+    /// The fold's summaries for `observation` under `min_allele_support`. It stays here
+    /// rather than in [`fixtures`] because it reaches into the scratch's private buffer,
+    /// which is this file's business and not a locus fixture.
     fn summaries_of(
         observation: &CohortObservation,
         min_allele_support: MinAltReads,
