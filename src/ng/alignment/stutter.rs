@@ -45,37 +45,47 @@
 
 use std::num::NonZeroU8;
 
-/// Largest slip this model scores at all; anything past it is **zero**, so an implausibly
-/// large change is not explained away as stutter — such a read falls to the genotyping's
-/// outlier handling instead (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
+/// Largest **whole-repeat** slip this model scores at all, counted in **repeats**; anything
+/// past it is **zero**, so an implausibly large change is not explained away as stutter —
+/// such a read falls to the genotyping's outlier handling instead
+/// (`doc/devel/ng/spec/read_likelihoods.md` §4.2).
 ///
-/// Copied from production's `MAX_SLIP` rather than imported: ng is a from-scratch caller
-/// that does not depend on production (owner, 2026-07-16). **The value must stay equal to
-/// production's** while the two models are meant to agree, and
-/// `the_copied_cutoff_still_equals_productions` is what enforces that rather than trusting
-/// this sentence. Production's is a compile-time array bound described there as a
-/// provisional choice awaiting recalibration on the simulator.
+/// # Inherited, not measured
 ///
-/// # The one constant, two scales — inherited deliberately
+/// **The value is production's provisional 10, declared inherited rather than fitted.**
+/// Neither cutoff has a source in the parameters the pre-pass fits, and production's own
+/// comment calls its 10 "a provisional choice"
+/// ([`param_estimation.rs`](../../../../src/ssr/cohort/param_estimation.rs)). Copied rather
+/// than imported: ng is a from-scratch caller that does not depend on production (owner,
+/// 2026-07-16), and `the_copied_cutoffs_still_equal_productions` keeps the two equal rather
+/// than trusting this sentence.
 ///
-/// Production applies this single number to the **repeat** count on the whole-repeat branch
-/// and to the re-indexed **base-pair** count on the part-repeat branch. Those are different
-/// scales, and `doc/devel/ng/spec/read_likelihoods.md` §4.2 has **decided against inheriting
-/// that**: ng is to carry two cutoffs named for what they count — `max_whole_repeat_slip` in
-/// repeats and `max_part_repeat_slip` in base pairs — because 10 repeats at a hexamer is 60
-/// base pairs and 10 base pairs is not the same claim. **This constant is what stands until
-/// they land** (plan step E2).
+/// **What should eventually set it is the mass it discards**, which
+/// [`StutterModel::truncated_mass_lost`] now computes per candidate.
+pub const MAX_WHOLE_REPEAT_SLIP: u32 = 10;
+
+/// Largest **part-repeat** change this model scores at all, counted in **base pairs** — on
+/// the re-indexed scale of `Δ − Δ/period`, which is what makes the geometric's support
+/// gapless (see [`StutterModel::probability`]).
 ///
-/// **Until then the behaviour is production's**, and here is what that costs. Part-repeat
-/// changes are cut off about **`period − 1` times sooner** in real terms:
-/// the re-indexed size is `Δ − Δ/period`, so a cutoff of 10 re-indexed steps admits roughly
-/// `10 · period/(period − 1)` base pairs, against `10 · period` in whole repeats. At period
-/// 4 that is about 13 bp for part-repeat changes against 40 bp for whole-repeat ones; **at
-/// period 2 the effect vanishes** (about 20 against 20), and it grows with the period.
-/// Changing this is a **behaviour change to a model the genotyping shares**, and this plan's
-/// rule is transcribe first, change separately with its own evidence. Recorded as a
-/// follow-up, not fixed here.
-pub const MAX_SLIP: u32 = 10;
+/// # Why this is a second constant and not the same one
+///
+/// Production applies **one** number to the repeat count on the whole-repeat branch and to
+/// the re-indexed base-pair count on the part-repeat branch. Those are different scales, and
+/// `doc/devel/ng/spec/read_likelihoods.md` §4.2 decided against inheriting that: **10
+/// repeats at a hexamer is 60 base pairs, and 10 base pairs is not the same claim.**
+///
+/// Naming them separately does not by itself change any number — both are 10, so this step
+/// is behaviour-preserving — but it makes the two independently settable by whoever measures
+/// them, which one shared constant did not. What the split costs today, kept here because it
+/// is the thing a measurement would move: a part-repeat change is cut off about
+/// `period − 1` times sooner in real terms, since a cutoff of 10 re-indexed steps admits
+/// roughly `10 · period/(period − 1)` base pairs against `10 · period` in whole repeats. At
+/// period 4 that is about 13 bp against 40 bp; **at period 2 the effect vanishes** (about 20
+/// against 20), and it grows with the period.
+///
+/// Inherited on the same terms as [`MAX_WHOLE_REPEAT_SLIP`] — see there.
+pub const MAX_PART_REPEAT_SLIP: u32 = 10;
 
 /// Lower bound on a one-step share, and the floor under
 /// [`StutterModel::same_length_share`]. Production uses one constant for both, so this does
@@ -325,8 +335,9 @@ impl StutterModel {
     /// `P(length change)` for a change of `bp_diff` bases on a repeat of period `period`.
     ///
     /// Both regimes are a direction share times a geometric over size, following
-    /// `doc/devel/ng/spec/read_likelihoods.md` §4.2 term by term. Zero beyond [`MAX_SLIP`],
-    /// so an implausibly large slip is not explained away.
+    /// `doc/devel/ng/spec/read_likelihoods.md` §4.2 term by term. Zero beyond each branch's
+    /// own cutoff — [`MAX_WHOLE_REPEAT_SLIP`] in repeats, [`MAX_PART_REPEAT_SLIP`] in
+    /// re-indexed base pairs — so an implausibly large slip is not explained away.
     ///
     /// # Why part-repeat sizes are re-indexed
     ///
@@ -364,6 +375,7 @@ impl StutterModel {
                     longer_share: self.whole_repeat_longer_share,
                     shorter_share: self.whole_repeat_shorter_share,
                     one_step_share: self.whole_repeat_one_step_share,
+                    max_steps: MAX_WHOLE_REPEAT_SLIP,
                 }
                 .probability(repeats)
             }
@@ -376,9 +388,121 @@ impl StutterModel {
                 longer_share: self.part_repeat_longer_share,
                 shorter_share: self.part_repeat_shorter_share,
                 one_step_share: self.part_repeat_one_step_share,
+                max_steps: MAX_PART_REPEAT_SLIP,
             }
             .probability(bp_diff - bp_diff / period)
         }
+    }
+
+    /// **The mass this model never scores for a candidate of this shape** — one minus the
+    /// total it puts on everything a read of that candidate could actually show.
+    ///
+    /// # Why it has to be reported rather than assumed small
+    ///
+    /// A model that quietly loses mass on some candidates and not others is **comparing them
+    /// on different scales**, and the genotyping is a comparison between candidates. Spec
+    /// §4.2 requires this computed and surfaced per candidate for exactly that reason, and
+    /// spec §12's fifth test pins that it is computed and surfaced — **not that it is
+    /// small**, because it is not always small.
+    ///
+    /// # The three things that are missing, and their sizes
+    ///
+    /// 1. **The cutoffs.** Each branch drops everything past its own limit, which costs that
+    ///    branch's direction shares times `(1 − one_step_share)^cutoff`. At HipSTR's shipped
+    ///    one-step share of 0.95 over ten steps that is a factor of `0.05^10`, around 1 part
+    ///    in 10¹³ — negligible. At a one-step share of 0.5 it is `0.5^10`, about 1 in a
+    ///    thousand of that branch's mass, which is not.
+    /// 2. **Contractions the tract is too short to reach.** A read of this candidate must
+    ///    still show a repeat, so at most `repeat_count − 1` of them can go: the whole-repeat
+    ///    contraction geometric is cut there whenever that is below the cutoff, and the
+    ///    part-repeat one at the `(repeat_count − 1) · (period − 1)` non-multiples inside the
+    ///    part of the tract that can go. **This is the term that varies per candidate.**
+    ///    Measured here on the shortest tract the copy floors admit — four repeats, at
+    ///    hexamers, at a slippage level of 2 in 100 split 4:1 toward contraction — it is
+    ///    **2.0 parts in a million** at a one-step share of 0.95 and **2.0 parts in a
+    ///    thousand** at 0.5. A thousandfold range over one fitted parameter, which is why the
+    ///    step chance is fitted and not defaulted;
+    ///    `the_shortest_admissible_tract_loses_the_size_the_specification_states` pins both.
+    ///
+    ///    **Which boundary this is, because the specification says two things.** Spec §4.2's
+    ///    prose calls the unreachable slips "contracting away *more repeats than exist*",
+    ///    which would make losing all `repeat_count` reachable; its worked figures call the
+    ///    unreachable tail at a four-repeat tract "a contraction of **four repeats or
+    ///    more**", which makes losing all of them unreachable. **The two readings differ by
+    ///    one step, and only the second reproduces the two sizes the specification states** —
+    ///    exactly, to the digits quoted. This follows the figures. Flipping it is one
+    ///    subtraction, and the test above would need its two numbers changed with it.
+    /// 3. **At period 1, the whole part-repeat branch.** Every length change is a whole
+    ///    number of repeats when the motif is one base, so the part-repeat branch is
+    ///    unreachable and *all* of its mass is lost — 2 in 100 at HipSTR's shipped values.
+    ///    This is the largest of the three by far, and the one most easily mistaken for a
+    ///    defect. It is a property of the model, and reporting it is what keeps a
+    ///    mononucleotide candidate comparable with a dinucleotide one.
+    ///
+    /// # The floor case
+    ///
+    /// [`Self::same_length_share`] is floored, so a hostile parameter row can make the five
+    /// shares sum to **more** than one and the arithmetic here go negative. There is no
+    /// negative mass to report, so the answer is clamped at zero — a degenerate model has no
+    /// truncation to account for, it has a construction problem, and
+    /// `a_floored_model_reports_no_loss_rather_than_a_negative_one` pins that.
+    ///
+    /// # Closed form, checked against enumeration
+    ///
+    /// This sums five geometric tails rather than walking the support, because it is called
+    /// once per candidate per read group. `the_reported_loss_equals_one_minus_the_reachable_sum`
+    /// is the guard: it enumerates the support by calling [`Self::probability`] over every
+    /// length a read could show and requires the two to agree. Deriving the closed form and
+    /// checking it by enumeration is the point — a version that enumerated would make that
+    /// test compare a thing with itself.
+    #[must_use]
+    pub fn truncated_mass_lost(&self, period: NonZeroU8, repeat_count: u32) -> f64 {
+        let period_bases = u32::from(period.get());
+
+        // A geometric's first `steps` terms: `1 − (1 − one_step)^steps`, and zero at no
+        // steps at all.
+        let reached = |one_step: f64, steps: u32| -> f64 {
+            if steps == 0 {
+                0.0
+            } else {
+                1.0 - (1.0 - one_step).powi(steps.min(i32::MAX as u32) as i32)
+            }
+        };
+
+        // How far a read of this candidate can contract: the tract keeps at least one
+        // repeat, so `repeat_count - 1` of them can go. See the doc above for why this
+        // boundary and not `repeat_count`.
+        let contractable_repeats = repeat_count.saturating_sub(1);
+
+        // Whole repeats: expansion is unbounded above, contraction stops at the tract's own
+        // length.
+        let whole_up = self.whole_repeat_longer_share
+            * reached(self.whole_repeat_one_step_share, MAX_WHOLE_REPEAT_SLIP);
+        let whole_down = self.whole_repeat_shorter_share
+            * reached(
+                self.whole_repeat_one_step_share,
+                MAX_WHOLE_REPEAT_SLIP.min(contractable_repeats),
+            );
+
+        // Part repeats: at period 1 there are none at all, because every change is a whole
+        // number of repeats. Otherwise the reachable contractions are the non-multiples of
+        // the period inside the contractable part of the tract — `(period - 1)` of them per
+        // repeat, the same count the whole-repeat rule leaves.
+        let (part_up_steps, part_down_steps) = if period_bases == 1 {
+            (0, 0)
+        } else {
+            (
+                MAX_PART_REPEAT_SLIP,
+                MAX_PART_REPEAT_SLIP.min(contractable_repeats.saturating_mul(period_bases - 1)),
+            )
+        };
+        let part_up =
+            self.part_repeat_longer_share * reached(self.part_repeat_one_step_share, part_up_steps);
+        let part_down = self.part_repeat_shorter_share
+            * reached(self.part_repeat_one_step_share, part_down_steps);
+
+        let reachable = self.same_length_share + whole_up + whole_down + part_up + part_down;
+        (1.0 - reachable).max(0.0)
     }
 
     /// Share of reads showing the allele's own length — neither longer nor shorter.
@@ -439,6 +563,10 @@ struct Regime {
     shorter_share: f64,
     /// Of the reads that moved at all in this regime, the share that moved by one step.
     one_step_share: f64,
+    /// The largest size this regime scores, **on this regime's own scale** — repeats on the
+    /// whole-repeat branch, re-indexed base pairs on the part-repeat one. Carried per regime
+    /// rather than read from one shared constant, which is the whole of what E2 changes.
+    max_steps: u32,
 }
 
 impl Regime {
@@ -447,8 +575,8 @@ impl Regime {
     ///
     /// Shared by both regimes, which also makes the "size is at least one" precondition
     /// provable in one place. `steps` is a **repeat** count on the whole-repeat branch and a
-    /// re-indexed **base-pair** count on the part-repeat branch; [`MAX_SLIP`] is applied to
-    /// whichever it is, which is the two-scale inheritance recorded on that constant.
+    /// re-indexed **base-pair** count on the part-repeat branch, and [`Self::max_steps`] is
+    /// the cutoff for whichever scale this regime counts in.
     #[inline]
     fn probability(self, steps: i64) -> f64 {
         debug_assert!(
@@ -456,7 +584,7 @@ impl Regime {
             "a zero-size change is the same-length case, not a regime"
         );
         let size = steps.unsigned_abs();
-        if size > u64::from(MAX_SLIP) {
+        if size > u64::from(self.max_steps) {
             return 0.0;
         }
         let share = if steps < 0 {
@@ -465,9 +593,8 @@ impl Regime {
             self.longer_share
         };
         // `size >= 1` here, so the exponent cannot underflow. `unsigned_abs` also means
-        // `i64::MIN` is safe, which a `-steps - 1` form would not be. The `MAX_SLIP` early
-        // return above is what makes the cast safe: whatever replaces that cutoff must keep
-        // the guard.
+        // `i64::MIN` is safe, which a `-steps - 1` form would not be. The `max_steps` early
+        // return above is what makes the cast safe: any future cutoff must keep the guard.
         share * self.one_step_share * (1.0 - self.one_step_share).powi((size - 1) as i32)
     }
 }
@@ -790,7 +917,7 @@ mod tests {
         let model = all_distinct();
         let period = period(4);
         let repeat = i64::from(period.get());
-        let last = i64::from(MAX_SLIP) * repeat;
+        let last = i64::from(MAX_WHOLE_REPEAT_SLIP) * repeat;
 
         // Whole-repeat: exactly at the cutoff is still scored; one repeat past is zero.
         assert!(model.probability(last, period) > 0.0);
@@ -808,10 +935,18 @@ mod tests {
         assert_eq!(model.probability(-14, period), 0.0);
     }
 
-    /// **The one constant applied at two scales**, reproduced from production and pinned so
-    /// the asymmetry is visible rather than surprising: on the whole-repeat branch the cutoff
-    /// counts *repeats*, on the part-repeat branch it counts *re-indexed base pairs*, so
-    /// part-repeat changes are cut off about `period − 1` times sooner in real terms.
+    /// **Two constants at two scales**, pinned so the asymmetry is visible rather than
+    /// surprising: on the whole-repeat branch the cutoff counts *repeats*, on the part-repeat
+    /// branch *re-indexed base pairs*, so part-repeat changes are cut off about `period − 1`
+    /// times sooner in real terms.
+    ///
+    /// **What no test here can check while both constants hold 10.** Which constant feeds
+    /// which branch is not observable when they are equal — measured: wiring the part-repeat
+    /// regime to [`MAX_WHOLE_REPEAT_SLIP`] leaves all 24 tests in this module green. That is
+    /// inherent rather than a gap to fill: the split is about making the two *settable*
+    /// apart, and the moment a measurement moves either one, the boundaries asserted below
+    /// become the check. Named here so a later reader does not mistake the silence for
+    /// coverage.
     #[test]
     fn the_cutoff_counts_repeats_on_one_branch_and_base_pairs_on_the_other() {
         let model = all_distinct();
@@ -1042,7 +1177,12 @@ mod tests {
             } else {
                 (bp_diff - bp_diff / period_bases).unsigned_abs()
             };
-            if size > u64::from(MAX_SLIP) {
+            let cutoff = if bp_diff % period_bases == 0 {
+                MAX_WHOLE_REPEAT_SLIP
+            } else {
+                MAX_PART_REPEAT_SLIP
+            };
+            if size > u64::from(cutoff) {
                 proptest::prop_assert_eq!(
                     probability,
                     0.0,
@@ -1054,16 +1194,227 @@ mod tests {
         }
     }
 
-    /// **The copied cutoff must not drift from production's.** The doc on [`MAX_SLIP`]
-    /// asserts they stay equal while the two models are meant to agree; this makes that true
-    /// rather than aspirational. A **test-only** reference, so shipping ng code still depends
-    /// on nothing in production.
+    /// **The copied cutoffs must not drift from production's.** Both are inherited from its
+    /// single provisional 10, and their docs say so; this makes that true rather than
+    /// aspirational. A **test-only** reference, so shipping ng code still depends on nothing
+    /// in production.
+    ///
+    /// **ng carries two where production carries one**, named for the scale each counts in.
+    /// Splitting the name is what makes them independently settable by whoever measures them;
+    /// until someone does, both must equal the number they were copied from.
     #[test]
-    fn the_copied_cutoff_still_equals_productions() {
+    fn the_copied_cutoffs_still_equal_productions() {
         assert_eq!(
-            MAX_SLIP as usize,
+            MAX_WHOLE_REPEAT_SLIP as usize,
             crate::ssr::cohort::param_estimation::MAX_SLIP,
-            "ng's MAX_SLIP has drifted from production's"
+            "ng's whole-repeat cutoff has drifted from production's"
         );
+        assert_eq!(
+            MAX_PART_REPEAT_SLIP as usize,
+            crate::ssr::cohort::param_estimation::MAX_SLIP,
+            "ng's part-repeat cutoff has drifted from production's"
+        );
+    }
+
+    /// Every length a read of a candidate with `repeat_count` repeats of `period` bases could
+    /// actually show: the tract keeps at least one repeat, so the deepest contraction is
+    /// `repeat_count − 1` repeats, and nothing beyond either cutoff is scored. Written as an
+    /// enumeration, deliberately — it is the oracle for
+    /// [`StutterModel::truncated_mass_lost`], which uses a closed form.
+    fn reachable_mass(model: &StutterModel, period: NonZeroU8, repeat_count: u32) -> f64 {
+        let period_bases = i64::from(period.get());
+        let deepest_contraction = i64::from(repeat_count.saturating_sub(1)) * period_bases;
+        // Far past both cutoffs on either scale, so the sum is complete.
+        let widest = period_bases * i64::from(MAX_WHOLE_REPEAT_SLIP + MAX_PART_REPEAT_SLIP + 4)
+            + deepest_contraction;
+        (-deepest_contraction..=widest)
+            .map(|bp_diff| model.probability(bp_diff, period))
+            .sum()
+    }
+
+    /// **Spec §12's fifth test: truncation removes a stated mass, and the model reports it.**
+    ///
+    /// Sum the distribution over everything a read of this candidate could show, subtract
+    /// from one, and require the *reported* loss to equal that — for every candidate length,
+    /// every period, and one-step shares across the clamped range.
+    ///
+    /// **What this pins is that the loss is computed and surfaced, not that it is small.**
+    /// An earlier version of the specification compared it against "a named bound" and named
+    /// none, which is unrunnable. The size is a property of the parameters, and this sweep
+    /// spans it: the assertions below record the extremes it actually reaches.
+    ///
+    /// The oracle enumerates by calling `probability`; the implementation sums five
+    /// geometric tails. That is the whole point of the test — two routes to one number, so a
+    /// closed form that drops a term has something to disagree with.
+    #[test]
+    fn the_reported_loss_equals_one_minus_the_reachable_sum() {
+        let mut smallest = f64::INFINITY;
+        let mut largest = 0.0f64;
+
+        for one_step in [GEOM_MIN, 0.1, 0.5, 0.9, 0.95, GEOM_MAX] {
+            for part_one_step in [GEOM_MIN, 0.5, GEOM_MAX] {
+                let model = StutterModel::new(StutterRates {
+                    whole_repeat_longer_share: 0.004,
+                    whole_repeat_shorter_share: 0.016,
+                    whole_repeat_one_step_share: one_step,
+                    part_repeat_longer_share: 0.0002,
+                    part_repeat_shorter_share: 0.0008,
+                    part_repeat_one_step_share: part_one_step,
+                });
+                for period_bases in 1..=6u8 {
+                    let period = period(period_bases);
+                    for repeat_count in [1u32, 2, 4, 5, 9, 10, 11, 30] {
+                        let reported = model.truncated_mass_lost(period, repeat_count);
+                        let enumerated = 1.0 - reachable_mass(&model, period, repeat_count);
+                        assert!(
+                            (reported - enumerated).abs() < 1e-12,
+                            "period {period_bases}, {repeat_count} repeats, one-step \
+                             {one_step}/{part_one_step}: reported {reported}, \
+                             enumerated {enumerated}"
+                        );
+                        if period_bases > 1 {
+                            smallest = smallest.min(reported);
+                        }
+                        largest = largest.max(reported);
+                    }
+                }
+            }
+        }
+
+        // The sweep's own extremes, asserted so the range is a measurement rather than a
+        // sentence — **2 in 100 down to nothing at all**, across parameters that are all
+        // inside §8's clamps. The widest is a single-repeat tract at the slowest fall-off:
+        // it can contract by nothing, so its whole contraction mass is unreachable, and at
+        // period 1 the part-repeat branch goes too. The narrowest is exactly zero, where a
+        // one-step share of 0.99 puts every reachable step's mass within a rounding of one.
+        assert!(
+            (largest - 2.061_752_830_003_5e-2).abs() < 1e-14,
+            "the widest loss this sweep reaches is {largest}"
+        );
+        assert_eq!(
+            smallest, 0.0,
+            "the narrowest loss this sweep reaches is {smallest}"
+        );
+    }
+
+    /// **The two sizes spec §4.2 states, reproduced.** The shortest tract the copy floors
+    /// admit is four repeats, at hexamers; at a slippage level of 2 in 100 split 4:1 toward
+    /// contraction, the mass the model cannot place is **2.0 parts in a million** at a
+    /// one-step share of 0.95 and **2.0 parts in a thousand** at 0.5.
+    ///
+    /// **These two numbers are what settle which boundary the specification meant.** Its
+    /// prose says the unreachable slips are those "contracting away more repeats than
+    /// exist", which would let a four-repeat tract lose all four; its figures call the
+    /// unreachable tail "a contraction of four repeats or more", which does not. Only the
+    /// second reproduces the sizes above — the first gives 1.0 in ten million and 1.0 in a
+    /// thousand, each one step of the geometric away. So this test is the record of a reading
+    /// as much as a guard on the arithmetic.
+    #[test]
+    fn the_shortest_admissible_tract_loses_the_size_the_specification_states() {
+        let at_fall_off = |one_step: f64| {
+            StutterModel::new(StutterRates {
+                whole_repeat_longer_share: 0.004,
+                whole_repeat_shorter_share: 0.016,
+                whole_repeat_one_step_share: one_step,
+                part_repeat_longer_share: 0.0002,
+                part_repeat_shorter_share: 0.0008,
+                part_repeat_one_step_share: one_step,
+            })
+            .truncated_mass_lost(period(6), 4)
+        };
+
+        let shipped_fall_off = at_fall_off(0.95);
+        assert!(
+            (shipped_fall_off - 2.0e-6).abs() < 1e-14,
+            "expected 2 parts in a million, got {shipped_fall_off}"
+        );
+
+        let slow_fall_off = at_fall_off(0.5);
+        assert!(
+            (slow_fall_off - 2.0e-3).abs() < 1e-5,
+            "expected 2 parts in a thousand, got {slow_fall_off}"
+        );
+
+        // A thousandfold range over one fitted parameter — the reason the step chance is
+        // fitted rather than defaulted.
+        assert!(slow_fall_off / shipped_fall_off > 900.0);
+    }
+
+    /// **At period 1 the whole part-repeat branch is unreachable**, because every length
+    /// change is a whole number of repeats when the motif is one base — so all of that
+    /// branch's mass is lost, and the report must say so. At HipSTR's shipped values that is
+    /// 2 in 100, far larger than either cutoff's tail, and it is the loss most easily
+    /// mistaken for a defect.
+    #[test]
+    fn a_mononucleotide_candidate_loses_the_whole_part_repeat_mass() {
+        let model = StutterModel::hipstr_shipped();
+        // Long enough that no contraction is out of reach, so the part-repeat branch is the
+        // only thing missing.
+        let lost = model.truncated_mass_lost(period(1), 40);
+        let part_repeat_mass = model.part_repeat_longer_share() + model.part_repeat_shorter_share();
+        assert!(
+            (lost - part_repeat_mass).abs() < 1e-12,
+            "period 1 lost {lost}, and the part-repeat mass is {part_repeat_mass}"
+        );
+        assert!((part_repeat_mass - 0.02).abs() < 1e-12);
+
+        // The same model at period 2 loses essentially nothing: the branch is reachable
+        // there, and both cutoffs' tails are 0.05^10.
+        assert!(model.truncated_mass_lost(period(2), 40) < 1e-11);
+    }
+
+    /// **A short tract loses the contractions it cannot reach**, and that is the term that
+    /// varies per candidate. A one-repeat tract cannot contract at all — a read of it must
+    /// still show a repeat — while a thirty-repeat tract reaches every step of both
+    /// geometrics.
+    #[test]
+    fn a_short_tract_loses_more_than_a_long_one() {
+        let model = StutterModel::hipstr_shipped();
+        let short = model.truncated_mass_lost(period(3), 1);
+        let long = model.truncated_mass_lost(period(3), 30);
+        assert!(
+            short > long,
+            "a one-repeat tract lost {short}, a thirty-repeat one {long}"
+        );
+
+        // A one-repeat tract can contract by nothing at all, so **both** contraction shares
+        // are unreachable in full — 0.05 whole-repeat plus 0.01 part-repeat, six parts in a
+        // hundred, which is nothing like negligible. That is the case this report exists for.
+        let both_contraction_shares =
+            model.whole_repeat_shorter_share() + model.part_repeat_shorter_share();
+        assert!(
+            (short - both_contraction_shares).abs() < 1e-12,
+            "a one-repeat tract lost {short}, against {both_contraction_shares} expected"
+        );
+        assert!((short - 0.06).abs() < 1e-12);
+
+        // Thirty repeats reach every step of both geometrics, so all that is missing is the
+        // two cutoffs' tails at 0.05^10 — eleven orders of magnitude smaller.
+        assert!(long < 1e-13, "a thirty-repeat tract lost {long}");
+    }
+
+    /// **A degenerate model reports no loss rather than a negative one.** The same-length
+    /// share is floored, so four direction shares summing past one make the five sum to
+    /// *more* than one — and one minus that is negative. There is no negative mass to
+    /// report: such a row has a construction problem, not a truncation to account for.
+    #[test]
+    fn a_floored_model_reports_no_loss_rather_than_a_negative_one() {
+        let hostile = StutterModel::new(StutterRates {
+            whole_repeat_longer_share: 0.5,
+            whole_repeat_shorter_share: 0.5,
+            whole_repeat_one_step_share: 0.95,
+            part_repeat_longer_share: 0.1,
+            part_repeat_shorter_share: 0.1,
+            part_repeat_one_step_share: 0.95,
+        });
+        for period_bases in 1..=6u8 {
+            for repeat_count in [1u32, 5, 30] {
+                let lost = hostile.truncated_mass_lost(period(period_bases), repeat_count);
+                assert!(
+                    lost >= 0.0 && lost.is_finite(),
+                    "period {period_bases}, {repeat_count} repeats reported {lost}"
+                );
+            }
+        }
     }
 }

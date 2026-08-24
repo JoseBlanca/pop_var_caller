@@ -352,7 +352,7 @@ doc repointings spec §7 records: [`alignment.md`](../spec/alignment.md) §5.2 r
 spec's §4.2 as the distribution's owner, its *in frame / out of frame* wording moved to §1.3's.
 *Source:* spec §1.3, §4.2, §7; arch §4.2.
 
-**E2. Two named cutoffs + the reported truncation.**  ☐
+**E2. Two named cutoffs + the reported truncation.**  ✅
 `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base pairs) replace the
 single `MAX_SLIP` ([`stutter.rs:78`](../../../../src/ng/alignment/stutter.rs)) — both inherited
 from production's provisional 10 and declared inherited. The mass the cutoffs discard is

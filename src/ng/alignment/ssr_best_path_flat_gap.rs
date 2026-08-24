@@ -164,9 +164,11 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 ///    too generous is a few wasted cells while the cost of being too narrow is a silently
 ///    wrong measurement. Held at byte-parity across the whole 200,000-case soak.
 ///
-/// **No term is derived from [`MAX_SLIP`](super::stutter::MAX_SLIP)**, which is a *scoring*
-/// cutoff: coupling the ruler's width to it would be too narrow for the long-allele test and
-/// would let the scoring model blind the measurement (spec §3).
+/// **No term is derived from the stutter model's slip cutoffs**
+/// ([`MAX_WHOLE_REPEAT_SLIP`](super::stutter::MAX_WHOLE_REPEAT_SLIP),
+/// [`MAX_PART_REPEAT_SLIP`](super::stutter::MAX_PART_REPEAT_SLIP)), which are *scoring*
+/// cutoffs: coupling the ruler's width to them would be too narrow for the long-allele test
+/// and would let the scoring model blind the measurement (spec §3).
 const BAND_HEADROOM: usize = 8;
 
 /// Gap-open probability (match → insertion, or → deletion) in the **flanks**. Dindel's
@@ -1480,8 +1482,9 @@ mod tests {
         // Flanks widen it — the run-off correction. (Equal-length read/reference, so the
         // floor term is zero and only the flanks and the slop remain.)
         assert_eq!(band_width(30, 30, 8, 10), 8 + 10 + BAND_HEADROOM);
-        // MAX_SLIP (a scoring cutoff) is nowhere in it: a 40-unit expansion of a period-2
-        // tract is 80 forced cells, far past MAX_SLIP × period = 20.
+        // The stutter model's slip cutoffs (which are scoring cutoffs) are nowhere in it: a
+        // 40-unit expansion of a period-2 tract is 80 forced cells, far past
+        // MAX_WHOLE_REPEAT_SLIP × period = 20.
         assert!(band_width(110, 30, 0, 0) >= 80);
     }
 

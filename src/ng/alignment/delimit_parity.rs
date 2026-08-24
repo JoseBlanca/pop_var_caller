@@ -454,13 +454,21 @@ fn the_named_fixture_cases_all_agree_with_production() {
     }
 }
 
-/// ng's copied slip cutoff must not drift from production's — asserted where the stutter
+/// ng's copied slip cutoffs must not drift from production's — asserted where the stutter
 /// model lives, and re-stated here because this file is where "ng agrees with production" is
 /// the subject.
+///
+/// **ng carries two where production carries one**, named for the scale each counts in
+/// (`doc/devel/ng/spec/read_likelihoods.md` §4.2). Both inherit production's provisional 10,
+/// so both must equal it while the two models are meant to agree.
 #[test]
 fn the_shared_constants_still_agree() {
     assert_eq!(
-        stutter::MAX_SLIP as usize,
+        stutter::MAX_WHOLE_REPEAT_SLIP as usize,
+        crate::ssr::cohort::param_estimation::MAX_SLIP
+    );
+    assert_eq!(
+        stutter::MAX_PART_REPEAT_SLIP as usize,
         crate::ssr::cohort::param_estimation::MAX_SLIP
     );
 }
