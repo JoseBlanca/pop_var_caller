@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the comparator, and the arm nothing could name**
+> - **Last completed task (2026-08-24):** **the bar's two numbers, and the one value none of
+> their tests read** (step A1 of [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md),
+> branch `ng-candidate-alleles`). Step 6 now has the constants its admission rule is made of: an
+> alternative allele survives if some single sample's reads lent it at least 2 reads or 5 in 100
+> of that sample's own reads at the locus, and a locus is called over at most six alleles counting
+> the reference. No logic yet — the fold that uses them is Milestone B.
+> **The review found that nothing pinned the value the fold will actually read.** All six of the
+> step's tests read the constant directly; none read the config that carries it. Writing the
+> *merge's* rule there instead — one token, both names in scope in the same file, same type, same
+> floor — left every test green while the share dropped from 5 in 100 to 2 in 100. On the GIAB
+> trio at 300× that is 2,308 alternatives kept against 5,596, feeding a genotype prior that
+> divides its concentration by however many alternatives survive.
+> **And a negative share would not have crashed anything — it deletes half the rule.** The
+> `const` constructor's lower bound was untested, and `required_of` casts a negative product to an
+> unsigned integer, which saturates to zero; so the bar would have been the 2-read floor at every
+> depth, answering 2 where 300 reads should ask 15. The range test now lives in one function both
+> constructors call.
+> **Every one of the six findings that mattered came from mutating the code; none came from
+> reading it.** Four measured figures were also quoted under conditions they were not measured
+> under — of 19 checked against the spec — and `cargo doc`, a `deny`-level lint in this crate, was
+> not in the step's gate at all.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_a1_2026-08-24.md).
+> - **Previously (2026-08-23):** **the comparator, and the arm nothing could name**
 > (step F1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone F complete, at Checkpoint F — step 8 is now a complete set of
 > pure functions**). The caller can now build its genotype prior two ways behind one seam: the
@@ -37,7 +59,7 @@ Skills and agents are instructed to leave it untouched.
 > record which of the two priors produced a row, deferred to this step with a stand-in that never
 > compiled. It does now.
 > [What was built and what the reviews changed](doc/devel/reports/implementations/ng_calling_prior_f1_2026-08-23.md).
-> - **Previously (2026-08-23):** **the fit now reports how far its answer is, instead of
+> - **Before that (2026-08-23):** **the fit now reports how far its answer is, instead of
 > claiming it matched** (fix-forward on `0b019e0d`, branch `ng-calling-prior`). Before starting a
 > run, the caller reads two starting numbers off the panel's own allele-frequency spectrum, and
 > carries a marker saying whether those two numbers reproduce what was measured. **Nothing
@@ -2038,6 +2060,18 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **No criterion bench covers `ng::calling::genotype_prior`**, so the one hot-path question the review raised — `lgamma(α_a + k_a)` recomputed per genotype where only `alleles × ploidy` distinct values exist — has no evidence either way. It saves nothing at diploid biallelic and reaches about 5× at tetraploid with four alleles.
   - **Two gates this plan added to its own step list, because the review showed the standard ones blind here.** `cargo clippy --lib --tests --all-features -- -D warnings` (plain `--lib` never type-checks a test module) and `cargo test --release --lib ng::calling::genotype_prior` (the only command that can fail on an assertion demoted from release to debug). The second is worth a CI step; CI runs one test command, in debug.
   - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
+
+#### Candidate alleles (step 6) — narrowing the merge's table to what a locus is called over
+- **Status:** A1 implemented, reviewed and fixes applied. Branch `ng-candidate-alleles`, worktree `../pop_var_caller-candidate-alleles`, from `main` at `3edab4cd`. Runs beside `ng-calling-loop` and `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in [src/ng/calling/mod.rs](src/ng/calling/mod.rs).
+- **Plan:** [candidate_alleles.md](doc/devel/ng/impl_plan/candidate_alleles.md) (A–D, 8 steps, 4 checkpoints); the repeat-tract path is [candidate_alleles_ssr.md](doc/devel/ng/impl_plan/candidate_alleles_ssr.md), a later session. **Spec:** [candidate_alleles.md](doc/devel/ng/spec/candidate_alleles.md); **Arch:** [candidate_alleles.md](doc/devel/ng/arch/candidate_alleles.md).
+- **Code:** [src/ng/calling/allele_candidates/](src/ng/calling/allele_candidates/) — `mod.rs` with `CandidateSelectionConfig`, `DEFAULT_ALLELE_SUPPORT` and `DEFAULT_MAX_CANDIDATE_ALLELES`; [src/ng/run/cohort_merge/mod.rs](src/ng/run/cohort_merge/mod.rs) — `MinAltReadShare::new_const` and the shared `is_a_fraction_of_one`, plus `MinAltReads::reached_by`'s widened doc. Reuse targets, all called as they are: `MinAltReads`, `CandidateAlleles`, `SampleSupport::pooled_support_for`, `AlleleSupport::q_sum`.
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_candidate_alleles_a1_2026-08-24.md).
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_candidate_alleles_a1_2026-08-24.md) — Approve-with-changes, 1 Blocker / 7 Majors / 23 Minors as filed — **three distinct defects** once the convergent filings are merged, since three agents found the same two independently; 18 mutations run and 12 survivors; five category agents in isolated worktrees. Audit trail in the gitignored `tmp/review_2026-08-24_candidate-alleles-a1/`.
+- **A1 done (the rule's two constants) — and the review found that nothing pinned the one value the fold will actually read.** All six of the step's original tests read `DEFAULT_ALLELE_SUPPORT` directly; none read `CandidateSelectionConfig::DEFAULT.support`. Writing `MinAltReads::DEFAULT` there instead — one token, both names in scope in the same file, same type, same floor — left every test green while the share dropped from 5 in 100 to the merge's 2 in 100. By spec §3.3's own GIAB measurement that is **2,308 alternatives kept against 5,596** on the trio at 300×, feeding a genotype prior that divides its concentration by the alternative count. **Second, `new_const`'s lower bound was untested and a negative share does not crash — it deletes half the rule**: `required_of` casts a negative product to `u32`, which saturates to 0, so `max(floor, 0)` is the floor at every depth and `required_of(300)` answers 2 where it should answer 15. The range check now lives in one private `const fn` both constructors call, and its tests moved beside the type they guard. **Third, the test claimed to be discriminating was half vacuous** — its equality arm stopped at 20 compared reads, where the floor still decides for every share up to 10 in 100, so doubling the share passed it, one read short of the fixture that would have caught it; it now carries 40 and 41, the exact crossover. **Every one of the six findings that mattered came from a mutation, none from reading.** Also: four measured figures were quoted under conditions they were not measured under (of 19 checked against the spec), and `cargo doc` — a `deny`-level lint in this crate — was not in the step's gate at all.
+- **Open:**
+  - **⚑ Four naming and shape questions for Checkpoint A**, all of which edit [arch/candidate_alleles.md](doc/devel/ng/arch/candidate_alleles.md) §2.1 and are inherited by the repeat-tract plan: `support`/`DEFAULT_ALLELE_SUPPORT` name observed evidence but hold a threshold; `max_candidate_alleles: u16` lets a cap of 0 or 1 be built, which is refusal under another name and what spec §4.1 rules out; `new_const` names the language mechanism rather than the panic; and production's six counts the reference where GATK's `--max-alternate-alleles` counts alternates, which spec §4 equates.
+  - **The cap's validation is an obligation, not a type.** Until the shape question is settled, `select_generic` must assert a cap of at least 2 (plan step C2); the field's doc comment carries that.
+  - **⚠ `cargo clippy --all-targets --all-features` is red on `main`** with 14 errors in five benches and examples, none in `src/` and none touched by this plan. This step is gated on `--lib --tests` plus `cargo doc --lib --no-deps`.
 
 ---
 

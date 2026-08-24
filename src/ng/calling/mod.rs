@@ -19,9 +19,12 @@
 //! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
 //! counts the loop feeds back to itself; and [`LocusInference`] with
 //! [`SampleGenotypeCall`], what a locus produces. Of the four sub-modules — the candidate
-//! step, the likelihood, the genotype prior and the inference loop — one is here:
+//! step, the likelihood, the genotype prior and the inference loop — two are here:
+//! [`allele_candidates`], step 6, which will narrow the merge's allele table to the
+//! sequences worth calling over — so far the two constants its admission rule is made of
+//! (`doc/devel/ng/impl_plan/candidate_alleles.md`), and
 //! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
-//! (`doc/devel/ng/impl_plan/calling_prior.md`). The other three, and the shared types that
+//! (`doc/devel/ng/impl_plan/calling_prior.md`). The other two, and the shared types that
 //! borrow from them, arrive with their own plans
 //! (`doc/devel/ng/impl_plan/calling_foundations.md`).
 //!
@@ -42,6 +45,7 @@
 #[cfg(test)]
 mod genotype_table_parity;
 
+pub mod allele_candidates;
 pub mod genotype_prior;
 pub mod genotype_table;
 

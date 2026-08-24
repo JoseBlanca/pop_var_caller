@@ -13,9 +13,10 @@
 //! milestone); and the calling run ([`run`] — so far the cohort merge's parameters,
 //! the first piece of the stage that turns the samples' observations into cohort
 //! observations in parallel); and steps 6 to 9, the calling loop and what it drives
-//! ([`calling`] — so far the vocabulary its four sub-modules will share, and the first
-//! of the four: step 8's [`calling::genotype_prior`], as its folder and the four files
-//! the plan fills).
+//! ([`calling`] — so far the vocabulary its four sub-modules will share, and two of the
+//! four: step 8's [`calling::genotype_prior`], as its folder and the four files the plan
+//! fills, and step 6's [`calling::allele_candidates`], so far the two constants its
+//! admission rule is made of).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,

@@ -1,0 +1,335 @@
+# ng step 6 — candidate alleles: types & interfaces
+
+*Architecture draft, 2026-08-24. Companion to [`../spec/candidate_alleles.md`](../spec/candidate_alleles.md),
+which argues every **why** below; this doc adds only the code shape. The repeat-tract path's
+types are [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md), which extends these.*
+
+*This document **is** step 6's real interface.*
+[`ng_step_interfaces.md`](ng_step_interfaces.md) sketches the wire type in §2, the
+`CandidateGenerator` recipe slot in §4, and marks the rename in §6 — all three deferring the
+design; §5 below records what of that sketch survives. Shared
+vocabulary — `CandidateAlleles`, `AlleleId`, `LocusKind` — is
+[`calling_em_loop.md`](calling_em_loop.md) §2's and `calling/mod.rs`'s, and is used here, not
+redefined.*
+
+---
+
+## Module home
+
+`src/ng/calling/allele_candidates/`, the folder
+[`module_layout.md`](module_layout.md) already reserves for step 6:
+
+- `mod.rs` — everything both paths share: the config, the verdict, the leftover, the remapping,
+  the output bundle, the ranking, and the fold that produces them.
+- `generic.rs` — the ordinary path's entry point (§3.1).
+- `ssr.rs` — the repeat-tract path's ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)).
+
+**A folder rather than a file, and no trait.** Two paths with different inputs is two functions,
+not two impls of one seam: they take different evidence, return different extras, and are chosen
+by the locus kind rather than by a recipe. `ng_step_interfaces.md`'s `Box<dyn CandidateGenerator>`
+does not survive — there is no bake-off here and nothing to swap.
+
+---
+
+## 1. What the module does, as a contract
+
+**In:** one assembled `CohortObservation`
+([`cohort_merge/build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs)) and the run's
+selection config. **Out:** a `LocusSelection` — the narrowed table, the verdict, the per-sample
+leftover, and the remapping from the merge's allele indices to the new ids.
+
+**Contract.**
+
+- **Pure.** Reads one locus and the config; no other locus, no accumulated state, no clock, no
+  random source. Same input, same bytes, at any worker count (spec §2, §8).
+- **Infallible.** There is no error type. A locus that selects to the reference alone is a normal
+  outcome (spec §6.2) and a locus above the cap is a normal outcome (spec §4.1). The remaining
+  failure modes are caller bugs — a support row naming an allele outside the table, a non-finite
+  `q_sum`, a sample with rows but no reads — and are assertions, the structural ones held in
+  release, which is the convention [`read_likelihoods.md`](read_likelihoods.md) §1.1 sets for this
+  module.
+- **Allocation-free per locus** beyond the surviving table itself: the fold's buffers live in
+  `CallingScratch` (§2.4).
+- **The reference is never a candidate for removal** and stays at `AlleleId::REFERENCE`;
+  `CandidateAlleles` makes that structural already
+  ([`calling/mod.rs:101-118`](../../../../src/ng/calling/mod.rs)).
+
+---
+
+## 2. Types
+
+### 2.1 The rule, and the constants
+
+**The support rule is the merge's type, reused rather than copied**, so the two cannot drift
+(spec §3). Only the default differs, and it gets its own named constant so a reader can see that
+two rules share a shape and not a number.
+
+```rust
+/// The support one sample must lend one sequence for it to be called over, and the cap on
+/// how many sequences a locus is called over at all.
+pub struct CandidateSelectionConfig {
+    /// `max(floor, ceil(share × that sample's reads at the locus))`, asked of each sample;
+    /// one sample reaching it admits the sequence (spec §3).
+    pub support: MinAltReads,
+    /// Counting the reference. Above it the list is cut to the best, never refused (spec §4).
+    pub max_candidate_alleles: u16,
+}
+
+/// Floor 2 reads, share 5 in 100. **The floor is the merge's own and is defended there**
+/// (`MinAltObs::DEFAULT`); the share is 5 in 100 where the merge's keep rule uses 2, because
+/// the allele-level question tolerates a stricter share at depth and is unchanged below about
+/// 40 reads a sample (spec §3.3, measured).
+pub const DEFAULT_ALLELE_SUPPORT: MinAltReads = MinAltReads {
+    floor: MinAltObs::DEFAULT,
+    share: MinAltReadShare::new_const(0.05),
+};
+
+/// Six alleles including the reference — production's `DEFAULT_MAX_ALLELES_PER_RECORD` and
+/// GATK's `--max-alternate-alleles` default. **Inherited, and measured to bind at about one
+/// tomato locus in 2,300 and none of the human trio's** (spec §4.2). Soft.
+pub const DEFAULT_MAX_CANDIDATE_ALLELES: u16 = 6;
+```
+
+**`MinAltReads::reached_by` is the predicate, unwrapped** — it already takes a numerator and a
+denominator ([`cohort_merge/mod.rs:466`](../../../../src/ng/run/cohort_merge/mod.rs)). Its
+argument is named `non_reference_reads` because the merge asks it of a sample's pooled
+non-reference reads; selection passes one allele's reads and a discovery round passes a narrower
+count still (spec §3.4). **No wrapper**: a second spelling of one rule is how two rules become
+different rules. *Impl-time: widen that method's doc comment to say the numerator is the caller's.*
+
+### 2.2 The verdict
+
+```rust
+/// What selection did at one locus, beyond the list itself.
+///
+/// **There is no depth variant**, deliberately: depth is the merge's keep rule, asked once
+/// upstream per sample, and production's version of it here is a cohort sum measured refusing
+/// 98.6% of repeat tracts at one sample sequenced to 5× (spec §6.2).
+#[non_exhaustive]
+pub enum SelectionVerdict {
+    /// Everything that cleared the bar is in the list. **Including when the list is the
+    /// reference alone** — more than one built locus in four, on both benchmarks (spec §6.2).
+    Selected,
+    /// The cap bound and `dropped` alternatives were cut, lowest-ranked first (§2.5).
+    Truncated { dropped: u16 },
+    /// Repeat tracts only; never minted by `generic.rs`
+    /// ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §3).
+    NotPeriodic,
+}
+```
+
+### 2.3 The leftover, and the remapping
+
+```rust
+/// One sample's reads whose sequence selection dropped, and the error mass they carry —
+/// `read_likelihoods.md` §2.1's `unmatched_q_sum`, with the count it was missing.
+///
+/// **The count is not decoration: it is what makes truncation defensible.** The mass is the
+/// same under every genotype and cancels, so without the count a sample whose true allele was
+/// cut is scored confidently against a set that does not contain it, with nothing per-sample
+/// saying so (spec §5). Drop the count and refusing the locus becomes the correct policy again.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct UnmatchedSupport {
+    pub num_reads: u32,
+    /// Σ `ln P(error)` over them — summed straight from the merge's own per-row `q_sum`,
+    /// so it is never re-derived. Zero (not negative) where nothing was dropped.
+    pub q_sum: f64,
+}
+
+/// For each allele of the merge's table, in that table's own index order: the id it now has
+/// among the candidates, or nothing where selection dropped it.
+///
+/// **The evidence builder cannot be written without this.** `CandidateAlleles` ids are dense
+/// and in admission order ([`calling/mod.rs:170-186`](../../../../src/ng/calling/mod.rs)),
+/// while `SupportedAllele::allele` indexes the merge's table
+/// ([`build.rs:1089`](../../../../src/ng/run/cohort_merge/build.rs)); after narrowing the two
+/// are different numbers and nothing else records the correspondence.
+pub struct AlleleRemap(Box<[Option<AlleleId>]>);
+
+impl AlleleRemap {
+    /// The candidate id for one of the merge table's alleles, or `None` where it was
+    /// dropped. `None` is "absent", never a sentinel id.
+    pub fn candidate_for(&self, table_index: usize) -> Option<AlleleId>;
+}
+```
+
+### 2.4 What one call returns, and where its buffers live
+
+```rust
+/// Everything selection produces at one locus.
+pub struct LocusSelection {
+    pub alleles: CandidateAlleles,
+    pub verdict: SelectionVerdict,
+    /// **Parallel to `CohortObservation::per_sample`** — same length, same order, so entry `i`
+    /// belongs to that entry's sample. Not indexed by the run's sample order, because
+    /// `per_sample` holds only the covering samples and each names its own
+    /// ([`build.rs:929-941`](../../../../src/ng/run/cohort_merge/build.rs)).
+    pub unmatched: Vec<UnmatchedSupport>,
+    pub remap: AlleleRemap,
+}
+
+/// The fold's buffers, one set per worker. **A nested section of `CallingScratch`**
+/// ([`calling_em_loop.md`](calling_em_loop.md) §2) rather than a scratch of its own: the same
+/// worker runs selection and then the loop on the same locus, so a second per-worker
+/// allocation buys nothing.
+pub struct SelectionScratch {
+    per_allele: Vec<AlleleSummary>,   // cleared and refilled per locus
+    ranked: Vec<u32>,                 // table indices, sorted by §2.5
+}
+```
+
+`AlleleSummary` is private to the module — one allele's fold across samples: the largest share of
+one sample's reads it took, how many samples cleared the bar, its cohort read total, and the reads
+and mass it would contribute to the leftover.
+
+### 2.5 The ranking
+
+```rust
+/// Whether `left` outranks `right` for the cap: the largest share of one sample's reads
+/// first, then how many samples cleared the bar, then the cohort's read total, then the bases
+/// (spec §4.1 — why this and not production's cohort read total).
+///
+/// **The bases are the tie-break that cannot tie**, which is what makes the order independent
+/// of the merge's own allele order rather than inheriting it. A three-way tie before that point
+/// is rare enough that the byte comparison costs nothing.
+///
+/// **Shares compare with `f64::total_cmp`** — a total order, so there is no NaN branch and no
+/// partial-order footgun. A `NaN` share is a caller bug and asserts in the fold, not here.
+fn ranks_above(
+    left: &AlleleSummary, left_bases: &[u8],
+    right: &AlleleSummary, right_bases: &[u8],
+) -> Ordering;
+```
+
+---
+
+## 3. The interface
+
+### 3.1 The ordinary path
+
+```rust
+/// Narrow one locus's allele table to the sequences worth calling over (spec §3, §4).
+///
+/// **One pass over the locus's rows.** For each sample: its reads at the locus are the sum of
+/// its rows, which is that sample's compared reads because the merge admits only complete
+/// observations onto alleles (spec §1.3); each row then feeds its allele's summary. A second
+/// pass admits the survivors in table order, applies the cap, and fills the leftover.
+///
+/// The reference is admitted first and is exempt from both the bar and the cap.
+pub fn select_generic(
+    observation: &CohortObservation,
+    config: &CandidateSelectionConfig,
+    scratch: &mut SelectionScratch,
+) -> LocusSelection;
+```
+
+**Read-group rows are pooled here, and that is the one place pooling is correct.** The merge keys
+its rows on `(allele, read group)` because the likelihood must not pool them
+([`build.rs:1089`](../../../../src/ng/run/cohort_merge/build.rs)); the bar counts reads, and a read
+is a read whichever lane it came from, so it sums over groups —
+`SampleSupport::pooled_support_for` is the existing method that does it
+([`:1070`](../../../../src/ng/run/cohort_merge/build.rs)).
+
+**Partial observations are not read.** They are held on their own axis with their own bases and
+witnessed stretch ([`PartialObservation`, `build.rs:1130`](../../../../src/ng/run/cohort_merge/build.rs)),
+they count toward no bar, and they do not enter the leftover (spec §5.1).
+
+### 3.2 What the caller does next
+
+Selection does not build `GenericSampleEvidence`; the loop's input edge does
+([`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)). What this module owes it is
+`remap` plus `unmatched`, and the shape of the hand-off is fixed:
+
+```text
+for each covering sample i:
+    GenericSampleEvidence {
+        supported:       rows of per_sample[i] whose remap.candidate_for(row.allele) is Some,
+                         re-keyed to that AlleleId,
+        unmatched_q_sum: unmatched[i].q_sum,
+        partials:        per_sample[i].partials, untouched,
+    }
+```
+
+**`GenericSampleEvidence` gains a field.** `read_likelihoods.md` §2.1 declares `unmatched_q_sum`
+alone; the count of §2.3 has to travel with it or nothing downstream can tell a truncated sample
+from a clean one. *That is an edit to that document and is not made here.*
+
+---
+
+## 4. Design decisions — decided
+
+- **No trait, two functions.** Two paths with different inputs and different extras, chosen by
+  the locus kind; `ng_step_interfaces.md`'s `Box<dyn CandidateGenerator>` had no second impl to
+  swap in. — spec §1, module home above.
+- **The support rule is `MinAltReads`, reused.** One home for the contract so the merge's rule and
+  the allele rule cannot become different rules. — spec §3.
+- **The share is 5 in 100 and the floor is 2.** The floor is the expensive knob: raising it to 3
+  loses five true alleles where raising the share to 10% loses two, for the same reduction in
+  table size. — spec §3.3, measured.
+- **Truncate, ranked by the largest within-sample share.** Production ranks by the cohort read
+  total and truncates private alleles first at scale; refusal loses the good alleles with the bad.
+  — spec §4.1.
+- **The leftover carries a read count.** Truncation and the count stand or fall together. — spec §5.
+- **The verdict has no depth variant.** — spec §6.2.
+- **Selection returns a remapping.** Dense candidate ids and merge table indices are different
+  numbers after narrowing, and nothing else records the correspondence. — this doc §2.3; the spec
+  does not name it because it is a code shape, not a design choice.
+- **`SelectionScratch` nests inside `CallingScratch`.** One allocation per worker, not two. —
+  [`calling_em_loop.md`](calling_em_loop.md) §2's convention.
+- **Infallible, assertions for caller bugs.** — spec §8, matching
+  [`read_likelihoods.md`](read_likelihoods.md) §1.1.
+- **`DEFAULT_MAX_CANDIDATE_ALLELES` lives here and `CallingLoopConfig` reads it.**
+  [`calling_em_loop.md`](calling_em_loop.md) §2.1 declares the same constant because the loop
+  enforces the cap after a discovery round; **it must be the same constant, not a second one with
+  the same value.** — spec §6.3.
+
+---
+
+## 5. Reconciliation with existing code
+
+| this doc's name | existing code | how it converges |
+|---|---|---|
+| the support rule | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs); `required_of` [`:451`](../../../../src/ng/run/cohort_merge/mod.rs), `reached_by` [`:466`](../../../../src/ng/run/cohort_merge/mod.rs) | **the type itself, unchanged.** Only `DEFAULT_ALLELE_SUPPORT` is new, and it reuses `MinAltObs::DEFAULT` ([`:317`](../../../../src/ng/run/cohort_merge/mod.rs)) |
+| the input | [`CohortObservation`, `build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs); `SampleSupport` [`:965`](../../../../src/ng/run/cohort_merge/build.rs), `SupportedAllele` [`:1089`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:1245`](../../../../src/ng/run/cohort_merge/build.rs) | read, unchanged. `q_sum` on `AlleleSupport` is the leftover's only source |
+| pooling a sample's rows for one allele | [`SampleSupport::pooled_support_for`, `:1070`](../../../../src/ng/run/cohort_merge/build.rs) | called as-is (§3.1) |
+| the output table | [`CandidateAlleles`, `calling/mod.rs:86`](../../../../src/ng/calling/mod.rs); `new` [`:101`](../../../../src/ng/calling/mod.rs), `admit` [`:184`](../../../../src/ng/calling/mod.rs) | built and merged; selection seeds with `new` and fills with `admit`. **No new allele-table type is minted** |
+| the id | [`AlleleId`, `types.rs:304`](../../../../src/ng/types.rs), `AlleleId::REFERENCE` | reused; `AlleleRemap` holds `Option<AlleleId>` and never a sentinel |
+| the cap's value | [`DEFAULT_MAX_ALLELES_PER_RECORD`, `per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs) | the number is inherited and declared inherited; **the ranking is not ported** — production's is [`enforce_max_alleles`, `:1434`](../../../../src/var_calling/per_group_merger.rs) |
+| the leftover | [`pool_dropped_other_scalars`, `per_group_merger.rs:1555`](../../../../src/var_calling/per_group_merger.rs), consumed [`:1979`](../../../../src/var_calling/per_group_merger.rs) | same shape, plus the read count. **Do not repeat its contamination-path omission** ([`posterior_engine.rs:2429`](../../../../src/var_calling/posterior_engine.rs)) |
+| the consumer's field | `GenericSampleEvidence::unmatched_q_sum`, [`read_likelihoods.md`](read_likelihoods.md) §2.1 | filled by `unmatched[i].q_sum`; that struct gains the read count (§3.2) |
+| the superseded sketch | `AlleleCandidates` + `Admission` ([`ng_step_interfaces.md`](ng_step_interfaces.md) §2), `CandidateGenerator` (§4), the rename note (§6) | **superseded.** `AlleleCandidates` was already renamed to `CandidateAlleles`; `Admission`'s four variants become `SelectionVerdict`'s three (§2.2); the trait is dropped |
+
+---
+
+## 6. Open items
+
+- `OPEN:` **whether a `q_sum` bar joins the read-count bar at high depth** — spec Q1's neighbour,
+  recorded in spec §3.3 with what would trigger it. Nothing here reserves a field for it: the
+  merge already carries `q_sum`, so adding it later is a config field and a term in the fold.
+- `OPEN:` **whether the cap becomes load-bearing past 63 samples, and whether the ranking then
+  matters** — spec Q2. No code shape depends on the answer; both are already switchable values.
+- *Impl-time:* pin `MinAltReadShare`'s const constructor. `MinAltReadShare::new` is fallible
+  ([`cohort_merge/mod.rs:366-380`](../../../../src/ng/run/cohort_merge/mod.rs)) and
+  `DEFAULT_ALLELE_SUPPORT` needs a `const` path; the merge's own `DEFAULT` uses a private const
+  field, so either widen that or add `new_const` beside it.
+- *Impl-time:* whether `AlleleRemap` is `Box<[Option<AlleleId>]>` or a bitset plus a prefix sum.
+  The first is written here because a locus holds a handful of alleles; measure before changing.
+
+---
+
+## Test & bench shape
+
+Tests live in `#[cfg(test)] mod tests` beside each file, per the repo rule. Spec §12 lists what
+they assert; the two that pin *this* document's shapes rather than the spec's rules:
+
+- **the remapping** — after a narrowing that drops the middle allele of five, every surviving
+  row's `candidate_for` returns the dense id and the dropped one returns `None`; feeding the
+  result through §3.2's hand-off reproduces the evidence view exactly.
+- **the leftover is the merge's own arithmetic** — the pool equals the sum of the dropped rows'
+  `q_sum` to the last bit, not a re-derivation from counts and a rate.
+
+The regression anchor is spec §12's last entry: the GIAB trio and the tomato panel through the
+calling loop with real candidates, which is the blocker
+[`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) records. The measurement harness
+already exists — `examples/ng_candidate_selection_probe.rs` — and produced every number the spec
+quotes.
