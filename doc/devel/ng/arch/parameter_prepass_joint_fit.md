@@ -423,7 +423,8 @@ pub fn fit_jointly(
 
 `CohortCensusEvidence` is built from every sample's `SampleCensusEvidence` — resident ones in the run that never
 writes a file, file-backed ones otherwise — and this signature does not distinguish the two, which is
-the point. The identity check across samples happens when it is built, before any section is decoded.
+the point. Two checks across samples happen when it is built, before any section is decoded: that the
+samples recorded under the same terms, and that no two of them claim the same read group.
 
 **What is still open** is whether the fit also reads locus-major within the generic half, which
 question 10 measures. That would add a call to `CohortCensusEvidence`, not change the ones here: the unit of
@@ -506,6 +507,13 @@ pub enum JointFitError {
     /// (spec §7).
     #[error("samples disagree on {field}; they did not keep the same loci")]
     IdentityMismatch { field: &'static str },
+    /// Two samples claiming one read group, so the cohort's read groups were
+    /// identified separately — one call per alignment file, each numbering from zero.
+    /// **Refuses rather than merging**: a rate is keyed on the read group alone, so a
+    /// merged cohort reports one rate for every library and says nothing about it
+    /// (loci spec §7 check 10).
+    #[error("samples {first} and {second} both claim read group {read_group}")]
+    SharedReadGroup { first: String, second: String, read_group: ReadGroupId },
     /// The panel is too small for the parameter to be identified at all. At one sample
     /// this is `HomozygoteExcess` and contamination — the route still fits everything
     /// else and degenerates to the per-sample estimator (spec §6.1, §12.5).

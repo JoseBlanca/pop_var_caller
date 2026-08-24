@@ -421,9 +421,13 @@ on one sample:
 pub struct CohortCensusEvidence { /* Vec<SampleCensusEvidence>, in sample-name order */ }
 
 impl CohortCensusEvidence {
-    /// Opens or adopts each sample's records and checks the twelve recording terms
-    /// across all of them **before any section is decoded** (spec §5).
-    pub fn new(samples: Vec<SampleCensusEvidence>) -> Result<Self, CensusError>;
+    /// Opens or adopts each sample's records and makes two checks across all of them
+    /// **before any section is decoded** (spec §5): that the twelve recording terms
+    /// agree, and that no two samples claim the same read group. The second is what
+    /// stops a run that identified its read groups a file at a time — every sample's
+    /// first read group would be identifier `0`, and the fit, which keys its error
+    /// rates on the read group alone, would merge every library into one.
+    pub fn new(samples: Vec<SampleCensusEvidence>) -> Result<Self, CohortRefusal>;
 
     pub fn read_groups(&self) -> &[ReadGroupId];
     pub fn strata(&self) -> &[Stratum];
