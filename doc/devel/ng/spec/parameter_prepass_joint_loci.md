@@ -869,5 +869,7 @@ asserted. They are not restated here. What follows is this consumer's own.*
     pooled. Measured on the 63-accession tomato panel, whose libraries' own rates span 15.6-fold,
     the pooled answer was a marginal error rate of 3.9813 × 10⁻³ against the per-sample route's
     read-weighted mean of 3.9721 × 10⁻³ — two parts in a thousand apart, which is to say
-    indistinguishable from a correct answer. So the refusal is at the cohort's door, before a
-    section is decoded, and it names both samples and the identifier they share.
+    indistinguishable from a correct answer
+    ([`ng_error_rate_spread_2026-08-24.md`](../reports/ng_error_rate_spread_2026-08-24.md) measures
+    the spread the merged answer hides). So the refusal is at the cohort's door, before a section is
+    decoded, and it names both samples and the identifier they share.

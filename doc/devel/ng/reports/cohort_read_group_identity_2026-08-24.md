@@ -149,6 +149,12 @@ read group ReadGroupId(62): a read misreads at 0.00430 at an ordinary position a
 | ordinary position | 0.00051 | 0.00839 | **16.45-fold** | 0.00299 |
 | mismapped position | 0.0030 | 0.0398 | **13.27-fold** | 0.0209 |
 
+**Two routes, measured apart, agree on how wide the spread is.** These 16.45-fold are the cohort
+route's own estimate. The per-sample route, fitting each library's rate from that sample's depth
+histograms instead, put the same 63 libraries **15.6-fold** apart on the same day
+([`ng_error_rate_spread_2026-08-24.md`](ng_error_rate_spread_2026-08-24.md)) — so the spread is a
+property of the panel, not of either estimator.
+
 **That spread is what the single line was hiding.** The merged rate of 0.00334 sits in the middle of
 a range whose ends differ by a factor of sixteen — high enough to look like a plausible cohort-wide
 number, and wrong by a factor of six and a half for the cleanest library and by two and a half for
