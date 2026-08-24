@@ -52,6 +52,25 @@ panic = "abort"
 inherits = "release"
 debug = true
 
+# **The test suite is a numerical workload, and unoptimised it costs fifteen
+# minutes.** `ng::parameter_estimation::joint` alone is essentially the whole
+# suite — 190 tests, each a search or a maximisation over a count table, because
+# that module has no parity oracle and no legible fixture, so its check is the
+# estimator's bias computed exactly. Measured 2026-08-24: that module ran in
+# 926.5 s at `opt-level = 0` and **26.1 s at 2**, and the whole library went from
+# 897 s to 57 s. A one-line change against a thirty-five-fold difference.
+#
+# **`debug-assertions` and `overflow-checks` stay on**, since cargo leaves them
+# at the `dev` default here — which this project needs, because it deliberately
+# holds structural assertions in release and has gates that compare the two
+# profiles.
+#
+# **The cost is compile time on a clean build**, which the container pays more
+# often than a host checkout does. `opt-level = 1` was measured too and is the
+# worse trade: 71 s of execution against 57 s.
+[profile.test]
+opt-level = 2
+
 # Symbolised heap/CPU profiling: release-like codegen but with full debug
 # info and without fat-LTO frame collapsing, so dhat backtraces resolve to
 # `pop_var_caller::` source sites (line-tables-only release builds don't).
