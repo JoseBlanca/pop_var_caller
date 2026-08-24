@@ -387,7 +387,7 @@ the **candidate's** stratum, not the reference's, so contexts are per
 `SsrEmissionModel` trait with `emission` and `censored_emission`. *Depends:* A2. *Source:* arch
 §4.1; spec §4.3, §4.4.
 
-**F2. `StutterSubstitutionEmission` — Model A.**  ☐
+**F2. `StutterSubstitutionEmission` — Model A.**  ✅
 The stutter factor (E's distribution, via the reused `StutterModel`) times the substitution
 factor — **composed** from `FlatEmission`
 ([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)) under the fitted rate,
