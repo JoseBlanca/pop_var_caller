@@ -148,6 +148,27 @@ into both test modules, lives in one place.
 ratio of `1e-600` all behave; `BatchId` deliberately does not derive `Default`; the batching is a
 required positional parameter rather than an option.
 
+### What mutation testing added
+
+**Sixteen mutations run, six survived, none changed no behaviour** — and the one that mattered
+is a divisor. **No fixture separated *divide by the batch's own copies* from *give every sample
+one vote***, because every sample in every fixture carried exactly two copies: `FOUR_DIPLOIDS` is
+four rows summing to 2, and even the deliberately fractional one is `[1.5, 0.5]` and
+`[0.25, 1.75]`. A divisor of two copies per sample passed all 127 tests. There is now a
+mixed-ploidy fixture — a tetraploid at 3:1 beside two diploids, five reference copies and three
+alternative out of eight — where the wrong divisor gives `[0.833, 0.5]`, **a row summing to
+1.33**, and a property test over 3 to 20 samples, 1 to 5 alleles and 1 to 4 batches pinning the
+two laws this producer obeys: every row is a distribution, and multiplying every copy by the same
+number changes nothing. Both catch it, checked by putting the mutation back.
+
+Three release-mode guards had no test and now do: a negative copy count (the finiteness check
+alone does not catch it, and every other fixture reaching that guard uses a `NaN`), a frequency
+buffer that is not a whole number of rows, and `BatchId`'s own rendering.
+
+**And a batch of one sample is now written down.** `q(o)` comes back as that sample's own
+genotype — a lone heterozygote gets `[0.5, 0.5]` — which is §8's open question, and a test saying
+so is better than a gap. It pins the behaviour without endorsing it.
+
 ## 8. Two questions this step raises and does not answer
 
 **A batch of one sample makes `q(o)` the sample's own genotype.** The frequency is summed over
@@ -186,5 +207,5 @@ All in the container, on the committed tree:
 - `cargo clippy --lib --all-features --tests -- -D warnings`: clean. The repo-wide
   `--all-targets --all-features` run is red on `main`, in `examples/ng_duplicated_class_harness.rs`
   and `benches/freebayes_bookkeeping.rs` — pre-existing and out of scope.
-- `cargo test`: **4,323 passed, 0 failed, 14 ignored**; 133 of them in
+- `cargo test`: **4,330 passed, 0 failed, 14 ignored**; 138 of them in
   `ng::calling::likelihood`, against 113 at C1.

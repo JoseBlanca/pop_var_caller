@@ -2060,6 +2060,22 @@ mod tests {
         }
     }
 
+    /// A batch renders as the bare index, so a message can supply its own word for it —
+    /// "batch {batch}", not "batch batch 2". Untested until mutation testing gave `Display` a
+    /// prefix and the whole suite stayed green (C2's review).
+    #[test]
+    fn a_batch_renders_as_the_index_alone() {
+        assert_eq!(BatchId(2).to_string(), "2");
+        assert_eq!(BatchId::ALL_TOGETHER.to_string(), "0");
+    }
+
+    /// The default batching is batch zero, which is what makes an all-zero batching mean
+    /// "every read group ran together" without anyone saying so.
+    #[test]
+    fn the_default_batch_is_the_first_one() {
+        assert_eq!(BatchId::ALL_TOGETHER.get(), 0);
+    }
+
     /// A period renders as the bare number, so a message can supply its own word for it.
     #[test]
     fn a_period_renders_as_the_number_of_bases_alone() {

@@ -2926,6 +2926,71 @@ mod tests {
         assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
     }
 
+    /// **A batch is divided by its own copies, not by how many samples are in it** — and every
+    /// other fixture here is blind to the difference, because every sample in them carries
+    /// exactly two copies. Mutation testing found it: a divisor of *two copies per sample*
+    /// passed all 127 module tests (C2's review).
+    ///
+    /// This cohort mixes ploidies, which is what separates the two. A tetraploid carrying three
+    /// reference copies and one alternative sits beside two diploids, so the batch holds five
+    /// reference copies and three alternative out of eight — `[0.625, 0.375]`. Counting samples
+    /// instead would divide by six and give `[0.833, 0.5]`, **a row summing to 1.33**, with the
+    /// alternative's `q` inflated by a third.
+    #[test]
+    fn a_batch_is_divided_by_its_copies_and_not_by_its_sample_count() {
+        // A tetraploid at 3:1, then two diploids — six copies against three samples.
+        let mixed_ploidy = [
+            3.0, 1.0, // a tetraploid carrying one alternative copy
+            2.0, 0.0, // a diploid reference homozygote
+            0.0, 2.0, // a diploid alternative homozygote
+        ];
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(
+            &mixed_ploidy,
+            BatchOfEachSample(&[BatchId::ALL_TOGETHER; 3]),
+            2,
+            &mut out,
+        );
+
+        assert_eq!(out, [0.625, 0.375]);
+        assert!(
+            (out.iter().sum::<f64>() - 1.0).abs() < 1e-15,
+            "a frequency table's row is a distribution, and this one sums to {}",
+            out.iter().sum::<f64>()
+        );
+    }
+
+    /// **A sample alone in its batch is its own contaminant**, which this test pins as the
+    /// behaviour rather than endorsing it.
+    ///
+    /// `q(o)` is summed over the batch's samples *including the one being scored*, so a
+    /// heterozygote by itself returns `[0.5, 0.5]` — its own genotype — and its own alternative
+    /// reads are then partly explained as a neighbour's. At 63 samples its own contribution is
+    /// one part in 63 and the circularity is nothing; at one it is everything, and one sample
+    /// per batch is the low end of the range this caller commits to (`CLAUDE.md`).
+    ///
+    /// **The genotype prior already solves this and `q(o)` did not inherit the solution:**
+    /// `fill_sample_concentration` subtracts a sample's own copies before using the cohort as
+    /// that sample's prior. Doing the same here makes `q` per `(sample, batch, allele)`, and the
+    /// row deliberately carries no sample identity — so it is a design decision for the owner,
+    /// recorded in C2's report §8. Until it is taken, **this is what a batch of one does**, and
+    /// a test saying so is better than a gap.
+    #[test]
+    fn a_sample_alone_in_its_batch_is_scored_against_its_own_genotype() {
+        let one_heterozygote = [1.0, 1.0];
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(
+            &one_heterozygote,
+            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
+            2,
+            &mut out,
+        );
+
+        assert_eq!(out, [0.5, 0.5]);
+    }
+
     /// The loop's copies are expectations over genotype posteriors, not counts, so they need
     /// not be whole — and the frequency is still the ratio.
     #[test]
@@ -2942,6 +3007,38 @@ mod tests {
         );
 
         assert!((out[0] - 1.75 / 4.0).abs() < 1e-15 && (out[1] - 2.25 / 4.0).abs() < 1e-15);
+    }
+
+    /// A negative copy count is arithmetic that went wrong upstream, and the finiteness check
+    /// alone does not catch it — mutation testing dropped the `>= 0.0` half and the module
+    /// stayed green, because every other fixture that reaches this guard uses a `NaN`.
+    #[test]
+    #[should_panic(expected = "copy count is finite and at or above zero")]
+    fn a_negative_copy_count_is_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(
+            &[2.0, -1.0],
+            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
+            2,
+            &mut out,
+        );
+    }
+
+    /// An `out` that is not a whole number of rows would leave the last batch short, and
+    /// `chunks_exact_mut` drops the remainder — so the row would keep whatever it held. The
+    /// check is release-mode and had no test until mutation testing neutered it (C2's review).
+    #[test]
+    #[should_panic(expected = "a batch's row is 2 alleles wide")]
+    fn a_frequency_buffer_that_is_not_whole_rows_is_a_caller_bug() {
+        let mut out = [f64::NAN; 3];
+
+        fill_contaminant_allele_frequencies(
+            &[2.0, 0.0],
+            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
+            2,
+            &mut out,
+        );
     }
 
     #[test]
@@ -3087,6 +3184,68 @@ mod tests {
             ),
             0
         );
+    }
+
+    /// **The two laws this producer obeys, over cohorts nobody chose.**
+    ///
+    /// Every row is a distribution — the frequencies of one batch sum to one, up to whatever
+    /// the never-seen floor lifted — and **the answer depends only on the ratios**, so
+    /// multiplying every copy in the cohort by the same positive number changes nothing. The
+    /// second is what says this is a frequency and not a count, and it is the law a divisor
+    /// taken from the wrong place breaks.
+    ///
+    /// Hand-built fixtures pin values; this pins the shape of the function over 3 to 20
+    /// samples, 1 to 5 alleles and 1 to 4 batches, which is the range around the corner the
+    /// benchmarks sit in.
+    #[test]
+    fn every_row_is_a_distribution_and_only_the_ratios_matter() {
+        use proptest::prelude::*;
+
+        proptest!(|(
+            sample_count in 3usize..20,
+            allele_count in 1usize..5,
+            batch_count in 1usize..4,
+            copies in proptest::collection::vec(0.0f64..8.0, 3 * 5 * 20),
+            scale in 0.25f64..40.0,
+        )| {
+            // Every declared batch must hold a sample, so deal them round-robin.
+            let batches: Vec<BatchId> = (0..sample_count)
+                .map(|sample| BatchId((sample % batch_count) as u32))
+                .collect();
+            let copies = &copies[..sample_count * allele_count];
+
+            let mut out = vec![f64::NAN; batch_count * allele_count];
+            fill_contaminant_allele_frequencies(
+                copies,
+                BatchOfEachSample(&batches),
+                allele_count,
+                &mut out,
+            );
+
+            for row in out.chunks_exact(allele_count) {
+                let total: f64 = row.iter().sum();
+                prop_assert!(
+                    (total - 1.0).abs() < 1e-9,
+                    "a batch's frequencies sum to {total}, and a row is a distribution"
+                );
+                prop_assert!(row.iter().all(|&f| (0.0..=1.0).contains(&f)));
+            }
+
+            let scaled: Vec<f64> = copies.iter().map(|c| c * scale).collect();
+            let mut from_scaled = vec![f64::NAN; batch_count * allele_count];
+            fill_contaminant_allele_frequencies(
+                &scaled,
+                BatchOfEachSample(&batches),
+                allele_count,
+                &mut from_scaled,
+            );
+            for (plain, scaled) in out.iter().zip(&from_scaled) {
+                prop_assert!(
+                    (plain - scaled).abs() < 1e-12,
+                    "scaling every copy by {scale} moved a frequency from {plain} to {scaled}"
+                );
+            }
+        });
     }
 
     /// **A mixture whose batching names fewer batches than its table has rows scores every
