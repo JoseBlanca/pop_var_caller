@@ -876,16 +876,22 @@ never enters the EM loop.** How contaminated a sample is is a property of that s
 library and of how it was handled — and not of any locus, so there is nothing about it for a
 per-locus loop to re-estimate.
 
-**The one half that could in principle have varied is the contaminant's allele frequency**, since a
-contaminating read shows whatever the contaminating population carries *at this locus*, and the
-cohort's own per-locus frequency is exactly what the EM rewrites each iteration. **That route is
-closed by the same ruling.** Tying a sample-level quantity to a number the loop keeps rewriting would
-make the contamination term move locus by locus and pass by pass, for a refinement nobody has
-measured, and it would cost the model the property that makes it cheap — that its numbers survive
-every pass of the caller's loop. Production uses one frequency per allele *class* — reference,
-substitution alternative, insertion-or-deletion alternative — averaged over the census sites, and
-freebayes likewise uses per read-group constants
-([`Contamination.h`](../../../../freebayes/src/Contamination.h)). ng follows both.
+**Retracted 2026-08-24, and kept here because it argued the opposite of what this section now
+decides.** The paragraph that stood here said: *the one half that could in principle have varied is
+the contaminant's allele frequency … that route is closed by the same ruling*, on the grounds that
+letting it move would cost the model the property that makes it cheap. **The owner opened that route
+the same day** — `q(o)` is the locus's own frequency and moves with the loop — and the cost argument
+does not survive contact with what actually moves: the **emission** reads no frequency, so it is
+still computed once per `(sample, observation, candidate)`, and what changes per iteration is one
+multiply and one add inside a logarithm the row was taking anyway. What is genuinely given up is
+narrower and worth naming: **a caller may no longer cache a whole row across iterations wherever
+contamination is on.**
+
+Production uses one frequency per allele *class* — reference, substitution alternative,
+insertion-or-deletion alternative — averaged over the census sites, and freebayes likewise uses per
+read-group constants ([`Contamination.h`](../../../../freebayes/src/Contamination.h)). **ng follows
+neither**, and the correction block above says why: those are what a caller does when it has no
+per-locus frequency, and this caller has one.
 
 ### 3.7 Positions that are not the kind of position the model assumes — and why the repair is not here
 
@@ -1716,7 +1722,8 @@ out rather than left to be discovered.
 |---|---|---|---|
 | per-read-group error rate and its calibration scale | read group | no | no |
 | slippage level, direction split, fall-off, STR substitution rate | read group × stratum | **yes** — through the candidate's stratum (§4.4) | no — **as this document specifies them**, and the first three are a live candidate for per-locus re-estimation, which would change that answer (§6.1) |
-| contamination fraction and the contaminating population's frequencies | read group | no | fitted from the cohort, then **frozen**; absent at one sample |
+| the contamination **fraction** | read group | no | fitted from the cohort, then **frozen**; absent at one sample |
+| the contaminating population's frequency for the allele an observation shows, `q(o)` | **locus × sequencing batch** | **yes** | **yes** — it is the loop's own estimate, re-read every iteration (§3.6, corrected 2026-08-24). *This row said "frozen" alongside the fraction until the read likelihood's A2 was built against it.* |
 | the allele table and the candidate set | locus | yes | yes — the merge unifies across samples |
 | the outlier term's spread | — | should be per locus | **is per cohort today, and §4.5 is why that is wrong** |
 
@@ -1725,10 +1732,12 @@ out rather than left to be discovered.
 **Three tiers, and only the middle one is open.**
 
 **Tier one — frozen for the whole run, and this document requires it.** The per-read-group error rate
-and its calibration scale, the STR substitution rate, the contamination fraction and the contaminating
-population's frequencies. **Contamination is frozen by a ruling and for its own reason** — how
-contaminated a sample is is a property of that sample and not of any locus, so a per-locus loop has
-nothing about it to re-estimate (§3.6, owner, 2026-08-19). **For the rest the reason is not tidiness,
+and its calibration scale, the STR substitution rate, and the contamination **fraction**. *(Corrected
+2026-08-24 at the read likelihood's A2: this said "the contamination fraction and the contaminating
+population's frequencies", and §3.6's own correction of the same day moves the second half into tier
+three. Only the fraction is frozen.)* **The fraction is frozen by a ruling and for its own reason** —
+how contaminated a *library* is is a property of that library and not of any locus, so a per-locus
+loop has nothing about it to re-estimate (§3.6, owner, 2026-08-19). **For the rest the reason is not tidiness,
 it is selection.** The caller only ever sees
 the loci that survived the merge's variability filter — positions selected precisely for carrying
 non-reference reads. An error rate re-fitted from those loci would be an error rate measured on the
@@ -1793,12 +1802,22 @@ they cover both ends of the axis that matters.
 value are known misspecifications of this same emission, and un-nailing them is already scheduled
 work, so a per-locus refit measured before them would be fitting around a defect.
 
-**Tier three — re-estimated every iteration, and this model never sees it.** The per-locus allele
-frequencies. They enter the **prior** as expected allele copies summed over the other samples
-([`calling_priors.md`](calling_priors.md) §6), and no term of §2.1 reads them. That separation is
-worth keeping deliberately: it is what lets the read likelihood be computed once per
-`(sample, observation, candidate)` and reused across every iteration of the caller's loop, which is
-the difference between a cheap EM and an expensive one.
+**Tier three — re-estimated every iteration.** The per-locus allele frequencies. They enter the
+**prior** as expected allele copies summed over the other samples
+([`calling_priors.md`](calling_priors.md) §6), and **one term of §2.1 reads them too**: `q(o)`, the
+contaminating population's frequency for the allele an observation shows, over the samples in that
+sample's sequencing batch (§3.6, corrected 2026-08-24).
+
+*(This paragraph said "and this model never sees it … no term of §2.1 reads them", which the same
+day's correction to §3.6 makes false. It is corrected here at the read likelihood's A2, which was
+building the tier table onto the types.)*
+
+**What the separation still buys, and what it no longer buys.** The **emission** — the expensive part,
+the answer to how one copy of one allele produced one observed sequence — reads no frequency, so it is
+still computed once per `(sample, observation, candidate)` and reused across every iteration, which is
+the difference between a cheap EM and an expensive one. What moves per iteration is one multiply and
+one add inside a logarithm the row was taking anyway. **A caller that caches whole rows rather than
+emissions no longer may**, wherever contamination is on.
 
 **One sample.** Everything above except contamination is available and unchanged. Contamination is a
 comparison between samples and does not exist at one, so `c` is absent and §3.3's formula runs — the
@@ -1871,8 +1890,12 @@ already imposes ([`run_streaming.md`](run_streaming.md) §12).
 **Cost and memory.** Per sample per locus, `observations × genotypes` inner terms on the SNP/indel
 path. On the STR path the emission is evaluated once per `(observation, candidate)` and reused across
 every genotype containing that candidate — **the caching is not an optimisation, it is what makes the
-cost `observations × candidates` instead of `observations × genotypes`**, a factor of 10 at six
-candidates and a diploid. **Nothing may allocate inside the per-sample loop.** The caller hands in
+cost `observations × candidates` instead of `observations × genotypes`**, a factor of **3.5** at six
+candidates and a diploid. *(Corrected 2026-08-24 at the read likelihood's A2, which was copying the
+figure into a doc comment: this said a factor of 10, and a diploid at six candidates has 21
+genotypes — §6.1 two paragraphs below says so — which is 3.5 times six, not ten. The factor is
+`(candidates + 1)/2` at a diploid, so it reaches ten at 19 candidates; at a tetraploid's 126
+genotypes it is 21.)* **Nothing may allocate inside the per-sample loop.** The caller hands in
 scratch sized by candidate count and observation count and the model fills it; production lifted
 exactly these buffers out of its own iteration after a profile put the allocator's self-time at about
 16% of cycles ([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs)). The

@@ -164,6 +164,15 @@ pub struct MintedReadErrors {
 }
 
 impl MintedReadErrors {
+    /// The unit the log-error sum is counted in, in nats — 2⁻²⁰, about 9.5 in ten million.
+    ///
+    /// **Exported so a consumer can state its own tolerance in terms of this rather than
+    /// restating the number.** The read likelihood's calibration is the first such consumer:
+    /// the scale it builds reproduces the fitted rate exactly in real arithmetic and to within
+    /// half of this per read in practice, and a test that spelled `2⁻²⁰` again would go on
+    /// passing if this moved (`doc/devel/ng/spec/read_likelihoods.md` §3.2).
+    pub const LOG_ERROR_QUANTUM: f64 = 1.0 / PARTS_OF_ONE;
+
     /// The totals for one observation: its own `q_sum` over its own `num_obs` reads.
     #[must_use]
     pub fn of_observation(q_sum: f64, num_obs: u32) -> Self {

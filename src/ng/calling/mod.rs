@@ -55,7 +55,10 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// still clean, and `cargo test --lib ng::calling::likelihood` reports `0 passed; ok` —
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
-pub use likelihood::{GenericObservation, GenericSampleEvidence, SsrSampleEvidence};
+pub use likelihood::{
+    ContaminationView, GenericEvidenceBuffer, GenericObservation, GenericSampleEvidence,
+    MAX_BASE_ERROR, MIN_BASE_ERROR, ReadGroupCalibration, SsrRowScratch, SsrSampleEvidence,
+};
 
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;

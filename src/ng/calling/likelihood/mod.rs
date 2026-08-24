@@ -62,10 +62,365 @@
 //! ([`GenericObservation::fill_from_supported_alleles`]), and the reads on alleles the
 //! mapping drops are exactly the reads whose quality the formula pools into
 //! [`GenericSampleEvidence::unmatched_q_sum`].
+//!
+//! ## What a row function promises
+//!
+//! One call computes **one sample's whole row** — one log-probability per candidate
+//! genotype, parallel to the loop's genotype table. Both paths promise the same six things,
+//! and each is a property some later step's test has to keep:
+//!
+//! - **A pure function** of the evidence, the candidates and the frozen parameters. No
+//!   clock, no random numbers, nothing read from global state.
+//! - **Bit-identical at any thread count**, which means the sum over observations runs in
+//!   one fixed order — the order the merge sorted them into. Floating-point addition is not
+//!   associative, so an order that varies is a run whose genotypes vary (spec §8).
+//! - **The row itself allocates nothing**: every buffer it works in is the caller's, held
+//!   once per worker and reused across every sample of every locus ([`SsrRowScratch`], and
+//!   the generic path's own from Milestone D). Production lifted exactly these out of its
+//!   iteration after a profile put the allocator's self-time at about a sixth of cycles.
+//!   **The buffers themselves are amortised rather than allocation-free** — they grow when a
+//!   sample or locus is wider than any before it and never shrink — and
+//!   [`GenericEvidenceBuffer`], which is where the evidence lives rather than where the row
+//!   scribbles, is the same.
+//! - **An empty evidence row is all zeros, with no branch to make it so.** An empty sum is
+//!   zero, so a sample that showed nothing scores every genotype alike and the prior decides
+//!   — which is the right answer rather than a special case (spec §3.3).
+//! - **A mis-shaped input is a caller bug and asserts, structurally in release too**: a row
+//!   whose length is not the genotype count, a candidate with no stratum entry, a parameter
+//!   that is not finite. Production holds the analogous assertion in release because a
+//!   scratch array too short for the allele count would otherwise be indexed out of bounds
+//!   silently (`per_group_merger.rs:1963`).
+//! - **Every probability is floored before a logarithm**, so one impossible observation
+//!   yields a finite very negative number instead of turning a sample's whole row into
+//!   `NaN`. The floors are [`MIN_BASE_ERROR`] and [`MAX_BASE_ERROR`] here, and the geometric
+//!   clamps in the stutter distribution.
+//!
+//! ## Three tiers of parameter, and only the middle one is open
+//!
+//! Spec §6.1 sorts every number this module reads into three tiers. The tier decides where
+//! the number travels, which is why it is documented on the types rather than in prose
+//! somewhere:
+//!
+//! | tier | which numbers | how they arrive |
+//! |---|---|---|
+//! | **frozen for the whole run** | the per-read-group error rate and its calibration scale, the STR substitution rate, the contamination **fraction** | fields of the run-level views — [`ReadGroupCalibration`], [`ContaminationView`] — which nothing downstream may write |
+//! | **re-estimable per locus, off by default** | the slippage level, the direction split, the fall-off | per call, inside the STR scoring context, so the caller's loop can re-fit them with no change here. This is the one constraint spec §6.1 makes binding |
+//! | **re-estimated every iteration** | the per-locus allele frequencies | the prior reads them — and so does one term here: the contaminating population's frequency for the allele an observation shows, which moves with the loop (spec §3.6, corrected 2026-08-24) |
+//!
+//! **The two halves of the contamination mixture sit in different tiers, and that is the
+//! whole of what changed on 2026-08-24.** How contaminated a library is is a property of
+//! that library and of nothing else, so the fraction is frozen before the loop starts. What
+//! a contaminating read *shows* is a property of the locus, and a per-locus quantity is what
+//! a per-locus loop is for.
 
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+use crate::ng::parameter_estimation::joint::contamination::{
+    ContaminationEstimate, ContaminationSource,
+};
+use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::run::cohort_merge::build::{PartialObservation, SupportedAllele};
-use crate::ng::types::{AlleleId, ReadGroupId};
+use crate::ng::types::{AlleleId, ErrorRate, ReadGroupId};
+
+/// The clamps a geometric success probability is held inside, **re-exported and not copied**.
+///
+/// **Why these are re-exported where the two floors below are copied, which looks
+/// inconsistent and is not.** These live in `alignment/stutter.rs`, which is ng's own code, so
+/// there is one implementation and one name and a consumer points at it — two spellings of one
+/// number are two things that can drift, and the tree already shows what that costs: production
+/// keeps a *third* private copy of these same two values in its own stutter model with nothing
+/// connecting it to either. The floors below come from `src/var_calling/`, which is frozen
+/// production that ng does not depend on, so they are copied deliberately and pinned by a test
+/// — the same discipline `alignment/stutter.rs` uses for the slip cutoff it inherited.
+pub use crate::ng::alignment::stutter::{GEOM_MAX, GEOM_MIN};
+
+/// Floor under any per-read error probability before a logarithm is taken of it.
+///
+/// **Inherited from production at `1e-12` and declared inherited**
+/// (`var_calling::contamination_estimation::MIN_BASE_ERROR`), not measured here.
+/// `tests::the_floors_still_equal_productions` pins the equality, so the two cannot drift
+/// while they are meant to describe one model assumption.
+///
+/// What it buys: an observation the genotype cannot explain at all yields about −27.6 nats
+/// rather than negative infinity, so one such read makes a genotype very unlikely instead of
+/// making the sample's whole row `NaN` (spec §8).
+pub const MIN_BASE_ERROR: f64 = 1e-12;
+
+/// Ceiling on the same quantity, `0.5` — inherited from production's `MAX_BASE_ERROR`
+/// alongside [`MIN_BASE_ERROR`], which is why they are named together.
+///
+/// A read charged more than half is a read the model says is more often wrong than right, and
+/// production's own comment calls its ceiling a safety net rather than a modelling claim — a
+/// sample whose mean error came near one would not have passed the filter before it. **It is
+/// not the point at which a read stops being evidence for the base it reports**, which an
+/// earlier version of this sentence said: with the error mass spread over the three other
+/// bases, a read at an error of a half still favours the base it shows by 0.5 against a sixth
+/// each, and that crossing is at three-quarters. The ceiling is a guard, not a threshold.
+///
+/// **The `.clamp` that applies it is also what stops a `NaN` reaching a logarithm**, and it
+/// does not: `f64::clamp` passes `NaN` straight through. That is why the one input that can
+/// produce one — an observation with no reads behind it — is an assertion rather than a
+/// clamped value ([`ReadGroupCalibration::calibrated_error`]).
+pub const MAX_BASE_ERROR: f64 = 0.5;
+
+/// §3.2's calibration: one multiplier per read group, so that the average error the model
+/// charges that group's reads is the rate the parameter fit measured.
+///
+/// ```text
+///                    fitted error rate for this read group
+/// scale  =  ──────────────────────────────────────────────────────────
+///           the average error the reads were minted with, over that group
+/// ```
+///
+/// **Why both halves and not either one alone.** The reads' own qualities carry the only
+/// information that tells one read from another, and at three reads a position that is the
+/// whole call — one alternative read at Phred 40 and one at Phred 13 are not the same
+/// evidence, and a single fitted rate says they are. The fitted rate carries the only
+/// information about what the instrument cannot see — a mismapped read, a chimera, a
+/// chimeric fragment, DNA from another individual — and it was measured on this data rather
+/// than asserted by the machine. The scale keeps the shape from the first and the size from
+/// the second (spec §3.2).
+///
+/// **The average is the geometric mean, and the specification originally asked for the
+/// arithmetic one** (corrected 2026-08-24, owner). Nothing carries the arithmetic mean: the
+/// walk sums the *logarithms* of the per-read error probabilities and throws the individual
+/// reads away, and `Σ ε` cannot be recovered from `Σ ln ε`. Taking the geometric mean is
+/// also the self-consistent choice rather than a concession, because it is what the model
+/// charges an observation — `exp(q_sum / num_reads)` — so a scale built from an arithmetic
+/// mean and applied to a geometric one would not make the calibrated property hold in the
+/// model's own terms.
+///
+/// **The two are far apart on real reads, and the size is now measured rather than assumed:
+/// a factor of 25.2 on the 63-accession tomato cohort and 44.1 on HG002 at 300×**
+/// (`examples/ng_minted_error_means.rs`, 2026-08-24; spec §3.2 carries the table). Per read
+/// group on tomato the ratio runs 22.7 to 37.0, median 24.4, with no read group anywhere near
+/// one. So building the scale from the arithmetic mean would have divided every charged error
+/// by 25 to 44 — **14 to 16 Phred**, every read treated as that much cleaner than the fit
+/// measured it to be.
+///
+/// **And a second reason that does not depend on the self-consistency argument at all: the
+/// arithmetic mean is mostly measuring how often mates overlap.** A read's minted error is
+/// the worse of its base and mapping qualities, and the mate-overlap rule silences the losing
+/// mate of an overlapping pair by giving it base quality Phred 0 — an error probability of
+/// exactly one, on a read that still counts. `ln 1 = 0`, so such a read adds nothing to the
+/// log sum and a whole unit to the probability sum. Measured: 9 read-positions in 1,000 on
+/// HG002 carry an error of exactly one, and they are **73% of Σ ε**; on tomato, 7 in 1,000 and
+/// 47%.
+///
+/// # The depth cap, and the decision this step takes
+///
+/// **The fitted rate and this denominator are not fitted over quite the same reads.** The
+/// error-rate histogram thins every position to at most 124 reads before fitting; the
+/// accumulator thins nothing. Per site the cap is harmless — the draw is on counts and never
+/// looks at a read's quality — but across sites it re-weights, because a 500-read position
+/// casts 500 votes in the denominator and 124 in the population the numerator came from, and
+/// deep positions are not a random sample of the genome.
+///
+/// **Measured, on the deepest real sample there is:** on HG002's benchmark regions at 300×,
+/// where the cap fires nearly everywhere, thinning the denominator to the same cap moves it
+/// from 2.9055 × 10⁻⁴ to 2.9862 × 10⁻⁴ — **2.7%, which is 0.12 Phred**. On the tomato cohort
+/// it moves it by a factor of 1.0000: 228,468,065 of 228,492,796 read-positions on the
+/// deepest accession are under the cap.
+///
+/// **Decision, taken here because spec §3.2 says nothing decides it until the scale has a
+/// consumer and names this step: the denominator stays unthinned.** The scale is applied at
+/// calling time to *every* read the caller sees, not to a subsample, so the average it is
+/// built from should be over every read too — thinning it would calibrate against a
+/// population the model never charges. The cost is bounded at 3 parts in 100 at 300× and
+/// nothing at the depths the tomato panel runs at, and it is **unmeasured beyond 300×**.
+/// Reversing this is one multiply per site in the accumulator, so nothing here forecloses it.
+/// **The owner may want to rule on it** — spec §3.2 calls the choice theirs.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct ReadGroupCalibration {
+    /// The multiplier, applied to each read's own error probability. **One** where nothing
+    /// was fitted, which leaves the qualities exactly as the instrument reported them.
+    pub scale: f64,
+    /// Where the scale came from. **`Defaulted` is not an error condition and it is not a
+    /// detail**: a run calibrated against a measurement and a run trusting the instrument
+    /// are otherwise indistinguishable in the output, and spec §3.2 requires them not to be.
+    pub provenance: Provenance,
+}
+
+impl ReadGroupCalibration {
+    /// The calibration for a read group the parameter fit measured, from its fitted rate and
+    /// the two sums the accumulator kept.
+    ///
+    /// **`None` for any of three reasons, and they are one answer: there is no scale to be
+    /// had.** The accumulator saw no read, so there is no average to divide by; or that
+    /// average underflowed to zero, which no real base quality reaches but a hand-built
+    /// fixture can; or the fitted rate itself is zero, which would make the scale zero and
+    /// charge every read of the library the floor — maximal confidence about every base,
+    /// from a number that says the fit found no errors at all. Take
+    /// [`defaulted`](Self::defaulted) in all three, which is the honest answer and says so in
+    /// the provenance.
+    ///
+    /// **A zero fitted rate is refused here rather than trusted**, on the same reasoning
+    /// [`ContaminationView`] uses for a fraction that could not be identified: *absent* and
+    /// *zero* are different answers, and only one of them is safe to multiply by.
+    ///
+    /// The accumulator is `parameter_estimation::generic::calibration`'s, which sums the
+    /// per-read log error in fixed point precisely so that merging shards in different
+    /// orders gives the same denominator — the same determinism requirement the row itself
+    /// works under (spec §8).
+    ///
+    /// **The calibrated property holds to the accumulator's quantum, not exactly, and the
+    /// difference is the fixed point.** In real arithmetic, scaling every read by one
+    /// multiplier multiplies their geometric mean by it, so the calibrated average *is* the
+    /// fitted rate with nothing to bound. The denominator that reaches this function has been
+    /// rounded to units of 2⁻²⁰ nats, and [`MintedReadErrors`]'s own documentation bounds the
+    /// resulting miss on the **mean** at 2⁻²¹ ≈ 4.768 × 10⁻⁷ nats — a bound that is attained
+    /// rather than approached, and that does not grow with the length of the run. A relative
+    /// shift of that size in the mean log error is a relative shift of that size in the rate,
+    /// so the average the model charges sits within **five parts in ten million** of the
+    /// fitted rate. Measured at 4 in a thousand over three reads spanning Phred 40 to Phred
+    /// 13: **4.7 × 10⁻¹⁰ against a rate of 4 × 10⁻³**, a quarter of the bound.
+    /// `tests::the_scale_makes_the_charged_average_the_fitted_rate` asserts against the bound
+    /// rather than against zero, and names where it comes from.
+    #[must_use]
+    pub fn from_fitted_rate(rate: &Estimate<ErrorRate>, minted: MintedReadErrors) -> Option<Self> {
+        let mean_minted_error = minted.mean_error_probability()?;
+        (mean_minted_error > 0.0 && rate.value.get() > 0.0).then(|| Self {
+            scale: rate.value.get() / mean_minted_error,
+            // **The rate's own provenance and not `FittedHere`.** A rate borrowed from a
+            // sibling read group makes a *borrowed* calibration, and stamping this one
+            // `FittedHere` would launder it — which is the failure `Provenance`'s own
+            // documentation says it exists to prevent. The scale adds no warrant of its own:
+            // it is a ratio, so it is exactly as well founded as its numerator.
+            provenance: rate.provenance,
+        })
+    }
+
+    /// A read group the parameter fit emitted no rate for: **the qualities are used as
+    /// reported**, and the provenance says so.
+    ///
+    /// **The case is too little data to fit from, not a sample the fit found difficult.** Two
+    /// of five real tomato alignments ask for a noisier class than the pre-pass's model
+    /// covers and are refused it — and they still get an error rate, the one-rate answer, so
+    /// their calibration is `FittedHere` and not this. *Spec §3.2 puts those two samples on
+    /// this side of the line and it is wrong to; the correction is owed there.*
+    ///
+    /// What must not happen is that a defaulted calibration be invisible: a run calibrated
+    /// against a measurement and a run trusting the instrument are otherwise indistinguishable
+    /// in the output (spec §3.2).
+    #[must_use]
+    pub fn defaulted() -> Self {
+        Self {
+            scale: 1.0,
+            provenance: Provenance::Defaulted,
+        }
+    }
+
+    /// This read group's calibrated error probability for an observation, from the sum of
+    /// log errors over its reads.
+    ///
+    /// **The geometric mean of the observation's reads, times the scale.** That the two
+    /// compose exactly is what makes the calibrated property hold: scaling every read by one
+    /// multiplier multiplies their geometric mean by it, so a read group's calibrated average
+    /// *is* the fitted rate — **for every read whose calibrated error stays inside the
+    /// floors.**
+    ///
+    /// Floored into `[MIN_BASE_ERROR, MAX_BASE_ERROR]` before it can reach a logarithm, and
+    /// **the ceiling is the one that binds in practice**: at a scale of 2.3 any read minted
+    /// worse than an error of about 1 in 5 — base Phred 7 or worse — is clamped, and its
+    /// charge stops tracking the fitted rate. Where the clamp binds, the group's charged
+    /// average is below the fitted rate by however much the clamp removed, and that is not
+    /// bounded here.
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on `num_reads == 0`. An observation with no reads
+    /// behind it is a row the merge does not build, so it is a caller bug — and the two
+    /// things this returns without the check are worse than a panic: `NaN` at a zero
+    /// `q_sum`, which `f64::clamp` passes straight through the floors the module promises,
+    /// and `MIN_BASE_ERROR` at a negative one, which is a plausible number nothing
+    /// downstream could tell from a real charge. The module's own contract puts structural
+    /// assertions in release (`per_group_merger.rs:1963` is the precedent), and the cost here
+    /// is one integer branch beside an `exp`.
+    #[must_use]
+    pub fn calibrated_error(&self, q_sum: f64, num_reads: u32) -> f64 {
+        assert!(
+            num_reads > 0,
+            "an observation with no reads behind it has no average error; the merge builds \
+             no such row"
+        );
+        let mean_log_error = q_sum / f64::from(num_reads);
+        (self.scale * mean_log_error.exp()).clamp(MIN_BASE_ERROR, MAX_BASE_ERROR)
+    }
+}
+
+/// §3.6's mixture inputs for one read group, frozen before the caller's loop starts.
+///
+/// **What is *not* here is the other half of the mixture.** The contaminating population's
+/// frequency for the allele an observation shows is a property of the locus being called,
+/// re-read from the caller's own estimate every iteration, so it is looked up where the
+/// frequency is rather than frozen on this view (spec §3.6, corrected 2026-08-24; an earlier
+/// design had three allele-class frequencies here and they are deleted).
+///
+/// **The two counts are not diagnostics.** A read group with too little evidence comes back
+/// with a fraction near zero, because the likelihood barely moves with the fraction and the
+/// search keeps zero — which is the right default for a value this term multiplies. A read
+/// group that was measured and found clean comes back near zero as well. Those are different
+/// claims, and the counts are the only thing that tells them apart, so they travel beside the
+/// value rather than being summarised away.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct ContaminationView {
+    /// `c` — the share of this read group's reads that came from another individual.
+    pub fraction: f64,
+    /// How many of the panel's varying positions this read group put a read on.
+    pub markers_with_reads: u64,
+    /// How many reads it put there. Both names are [`ContaminationEstimate`]'s own.
+    pub reads_on_markers: u64,
+    /// **Whose reads the fraction was fitted from**, and the third thing spec §3.6 says must
+    /// travel beside it: `c` can be four different things and a consumer cannot act on them
+    /// alike. A fraction fitted from this library's own reads and one fitted from every read
+    /// of the plant and copied onto it are different claims — the first can say two libraries
+    /// of one sample differ, the second cannot — and nothing downstream can tell them apart
+    /// from the value.
+    ///
+    /// A plant sequenced from one library gets the same number either way, and that is every
+    /// sample of every benchmark cohort here; the distinction bites on the plant with two.
+    pub source: ContaminationSource,
+}
+
+impl ContaminationView {
+    /// What the parameter fit's estimate says, or `None` where it identified nothing.
+    ///
+    /// **`None` is *absent*, not a fitted zero**, and the distinction is the reason the
+    /// estimator returns an enum rather than an `Option<f64>`. At one sample there is no
+    /// panel to be surprised by, so contamination is not estimable at all and the plain
+    /// formula of spec §3.3 is what runs — which is the *simple* case for this model, not
+    /// the weak one.
+    #[must_use]
+    pub fn of_estimate(estimate: &ContaminationEstimate) -> Option<Self> {
+        match estimate {
+            ContaminationEstimate::Estimated {
+                alpha,
+                source,
+                markers_with_reads,
+                reads_on_markers,
+                ..
+            } => Some(Self {
+                fraction: *alpha,
+                markers_with_reads: *markers_with_reads,
+                reads_on_markers: *reads_on_markers,
+                source: *source,
+            }),
+            ContaminationEstimate::NotIdentified { .. } => None,
+        }
+    }
+
+    /// Whether anything at all stood behind this fraction.
+    ///
+    /// **This is the whole of what the counts can be asked without inventing a threshold.**
+    /// A read group that touched no marker was not measured, whatever its fraction says. How
+    /// *many* markers a fraction needs before it is a measurement rather than a shrug is a
+    /// number nobody here has, so this predicate does not pretend to one: a consumer wanting
+    /// a stronger test reads the counts and says what it chose.
+    #[must_use]
+    pub fn was_measured(&self) -> bool {
+        self.markers_with_reads > 0 && self.reads_on_markers > 0
+    }
+}
 
 /// The merge's fold of every read that showed one allele from one read group — one term of
 /// the SNP/indel formula's first two sums.
@@ -384,6 +739,178 @@ impl<'a> SsrSampleEvidence<'a> {
     }
 }
 
+/// Where one sample's narrowed merge rows live while the SNP/indel row reads them.
+///
+/// **One per worker, reused across every sample of every locus** — which is the point, and
+/// is why it is cleared and refilled rather than freshly made.
+///
+/// **It is deliberately not the row's scratch, and calling it that was a mistake this step
+/// corrected.** The evidence view *borrows* this buffer, so it is still borrowed while the
+/// row runs — and a row taking `&mut` the same object as the evidence borrows cannot be
+/// called at all. Compiled, the mistake is `error[E0499]: cannot borrow as mutable more than
+/// once`, at the first call site the next milestone writes. The two have different lifetimes
+/// of use: what the row reads has to outlive the call, and what the row scribbles in does
+/// not. So they are two types, and **the row's own scratch arrives with the step that first
+/// needs one** — Milestone D, which adds a compatibility cache per `(partial, allele)` and a
+/// gather buffer for a witness with holes in it. Inventing it empty here would be shape
+/// without substance.
+///
+/// **Amortised, not allocation-free**, and the difference is worth stating rather than
+/// implying. The buffer grows only when a sample is wider than every sample this worker has
+/// met — measured over ten samples of 3, 7, 2, 11, 4, 25, 5, 9, 40 and 6 rows, five
+/// reallocations, and none at all on a second pass. Capacity never comes back down, so a
+/// worker ends up holding its widest sample's row count for its lifetime.
+#[derive(Default, Debug)]
+pub struct GenericEvidenceBuffer {
+    supported: Vec<GenericObservation>,
+}
+
+impl GenericEvidenceBuffer {
+    /// Narrow one sample's merge rows into the buffer under selection's mapping, and hand
+    /// back the rows together with the quality of the ones the mapping dropped.
+    ///
+    /// The dropped quality comes back rather than being folded in, because it is only *part*
+    /// of the pooled leftover the formula wants — selection pools its own, and the caller is
+    /// the one holding both halves.
+    ///
+    /// # Panics
+    ///
+    /// As [`GenericObservation::fill_from_supported_alleles`], on a mapping that does not
+    /// cover the merge's table.
+    pub fn narrow_supported(
+        &mut self,
+        rows: &[SupportedAllele],
+        candidate_of_merge_allele: &[Option<AlleleId>],
+    ) -> (&[GenericObservation], f64) {
+        let dropped = GenericObservation::fill_from_supported_alleles(
+            rows,
+            candidate_of_merge_allele,
+            &mut self.supported,
+        );
+        (&self.supported, dropped)
+    }
+}
+
+/// The buffers the STR row works in, held by the caller so the row allocates nothing.
+///
+/// **No borrow conflict here, unlike the generic path's**: the STR evidence borrows the locus
+/// generator's own observations, not anything of this type's, so a caller can hold the
+/// evidence and hand the row `&mut` this at the same time.
+///
+/// `ModelScratch` is the emission's own scratch — its placement buffer and its alignment
+/// matrix (spec §8) — which is an associated type on the emission seam because each model
+/// keeps its own shape. **The parameter is the model's scratch and not the model**, which is
+/// worth the longer name: a stateless model that happened to derive `Default` would satisfy
+/// `SsrRowScratch<ThatModel>` and compile, leaving the row with an empty model where its
+/// placement buffer should be and an allocation per call.
+///
+/// **`emissions` is the cache that decides what a row costs.** One entry per
+/// `(observation, candidate)`, filled once and read by every genotype that carries the
+/// candidate, so a row costs `observations × candidates` rather than
+/// `observations × genotypes` — a factor of ten at six candidates and a diploid. Spec §8
+/// calls that the design and not an optimisation, which is why the cache is a field of the
+/// scratch rather than a local inside whoever fills it.
+///
+/// **The observation axis is every observation, partials included.** That is the axis the two
+/// filters' positions are on — both enumerate the whole slice and then filter — so a cache
+/// sized over the complete observations alone is indexed past its end by the first complete
+/// observation sitting above a partial. [`prepare_emissions`](Self::prepare_emissions) takes
+/// the evidence rather than a count so that a caller cannot pick the wrong one, and
+/// [`emission_at`](Self::emission_at) is the only spelling of the index.
+///
+/// **Amortised, not allocation-free**: measured over twelve loci of 24 to 840 slots, six
+/// reallocations cold and none on a second pass, with capacity never coming back down.
+#[derive(Default, Debug)]
+pub struct SsrRowScratch<ModelScratch> {
+    emissions: Vec<f64>,
+    candidates: usize,
+    model: ModelScratch,
+}
+
+impl<ModelScratch> SsrRowScratch<ModelScratch> {
+    /// Size the emission cache for one locus and clear it to a stated value.
+    ///
+    /// **Cleared and not merely resized.** `Vec::resize` leaves the leading entries as they
+    /// were, so a locus with as many `(observation, candidate)` pairs as the last one would
+    /// silently reuse the last one's emissions — a wrong likelihood at every sample, with
+    /// nothing failing.
+    ///
+    /// **The fill value is the caller's, and it must not be zero.** An unwritten slot has to
+    /// hold something the row cannot mistake for a real score, and zero is exactly that
+    /// mistake: a slip the candidate cannot reach legitimately scores zero (spec §4.2), so a
+    /// cache pre-filled with zeros makes *never computed* and *computed as impossible* the
+    /// same value.
+    ///
+    /// **The observation count comes from the evidence rather than from the caller**, because
+    /// the caller has two plausible numbers to choose between and only one of them is right —
+    /// see the type's own documentation.
+    pub fn prepare_emissions(
+        &mut self,
+        evidence: &SsrSampleEvidence<'_>,
+        candidates: usize,
+        fill: f64,
+    ) {
+        self.candidates = candidates;
+        self.emissions.clear();
+        self.emissions
+            .resize(evidence.observations.len() * candidates, fill);
+    }
+
+    /// One cached emission, by the position the evidence's filters yield and the candidate.
+    ///
+    /// **The one spelling of the index**, so the stride cannot be written two ways. A dense
+    /// counter over the complete observations alone — the obvious thing to reach for inside a
+    /// filtered loop — addresses the wrong row for every observation above a partial, and
+    /// nothing about that fails.
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on a position or candidate past what the cache was
+    /// prepared for. Indexing past the end is what the wrong observation count produces, and
+    /// silently reading a neighbouring candidate's emission is worse than stopping.
+    pub fn emission_at(&self, observation: usize, candidate: usize) -> f64 {
+        self.emissions[self.slot(observation, candidate)]
+    }
+
+    /// Write one cached emission. See [`emission_at`](Self::emission_at) for the index.
+    pub fn set_emission(&mut self, observation: usize, candidate: usize, value: f64) {
+        let slot = self.slot(observation, candidate);
+        self.emissions[slot] = value;
+    }
+
+    /// How many slots the cache holds — one per `(observation, candidate)`.
+    pub fn emission_count(&self) -> usize {
+        self.emissions.len()
+    }
+
+    /// The whole cache, for a filler that walks it in order rather than by index.
+    pub fn emissions_mut(&mut self) -> &mut [f64] {
+        &mut self.emissions
+    }
+
+    /// The emission model's own scratch — its placement buffer and its alignment matrix.
+    pub fn model_scratch_mut(&mut self) -> &mut ModelScratch {
+        &mut self.model
+    }
+
+    fn slot(&self, observation: usize, candidate: usize) -> usize {
+        assert!(
+            candidate < self.candidates,
+            "candidate {candidate} is past the {} this cache was prepared for",
+            self.candidates
+        );
+        let slot = observation * self.candidates + candidate;
+        assert!(
+            slot < self.emissions.len(),
+            "observation {observation} addresses slot {slot}, past the {} this cache was \
+             prepared for — the cache was sized over the complete observations rather than \
+             over all of them",
+            self.emissions.len()
+        );
+        slot
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,6 +1160,21 @@ mod tests {
 
     /// The read group is the second half of the key, so rows ascending on the allele alone
     /// are not ascending — a check that compared only the allele would let them through.
+    /// **One `(allele, read group)` pair appearing twice is what concatenating two samples'
+    /// rows produces**, and the sum would then charge that evidence twice. The order check has
+    /// to be strict rather than merely non-decreasing, and both fixtures below are strictly
+    /// descending, so neither puts an equal pair in front of it.
+    #[test]
+    #[should_panic(expected = "not ascending")]
+    fn one_pair_appearing_twice_is_a_caller_bug() {
+        let duplicated = [
+            GenericObservation::of_supported_allele(&supported_row(1, 0, 3, -1.0), AlleleId(1)),
+            GenericObservation::of_supported_allele(&supported_row(1, 0, 5, -2.0), AlleleId(1)),
+        ];
+
+        let _ = GenericSampleEvidence::new(&duplicated, 0.0, &[]);
+    }
+
     #[test]
     #[should_panic(expected = "not ascending")]
     fn rows_out_of_read_group_order_within_one_allele_are_a_caller_bug() {
@@ -730,5 +1272,652 @@ mod tests {
         {
             assert_eq!(observation.num_obs, observations[at].num_obs);
         }
+    }
+
+    // ---- A2: the parameter views, the floors, the scratch ----
+
+    /// Both floors are inherited from production and the doc comments say so. Two spellings
+    /// of one model assumption are two things that can drift, and nothing else would notice:
+    /// a floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is
+    /// a plausible-looking number rather than a failure.
+    #[test]
+    fn the_floors_still_equal_productions() {
+        assert_eq!(
+            MIN_BASE_ERROR,
+            crate::var_calling::contamination_estimation::MIN_BASE_ERROR
+        );
+        assert_eq!(
+            MAX_BASE_ERROR,
+            crate::var_calling::contamination_estimation::MAX_BASE_ERROR
+        );
+    }
+
+    /// The two clamps are named here by re-export rather than copied.
+    ///
+    /// **The equality half of this cannot fail while the re-export stands** — it compares an
+    /// alias against its own source — and it is here for the day somebody replaces the
+    /// re-export with a local constant, which is the drift the tree already shows: production's
+    /// `ssr/cohort/read_model/hipstr.rs` holds a third private copy of these same two numbers
+    /// with nothing connecting it to either. The `const` block below is the half that does
+    /// independent work, and the distribution's own tests are what catch a moved value.
+    #[test]
+    fn the_geometric_clamps_are_the_stutter_distributions_own() {
+        assert_eq!(GEOM_MIN, crate::ng::alignment::stutter::GEOM_MIN);
+        assert_eq!(GEOM_MAX, crate::ng::alignment::stutter::GEOM_MAX);
+        // A geometric success probability held strictly inside (0, 1): both clamps must be
+        // in range and the low one below the high one, or the clamp inverts silently.
+        const { assert!(GEOM_MIN > 0.0 && GEOM_MIN < GEOM_MAX && GEOM_MAX < 1.0) };
+    }
+
+    /// A rate the pre-pass fitted from this read group's own sites, with the read count it
+    /// stood on. `observations` is deliberately not zero: it travels on the estimate and a
+    /// consumer reading it off the wrong field would be invisible against a zero.
+    fn fitted_rate(rate: f64) -> Estimate<ErrorRate> {
+        Estimate {
+            value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
+            provenance: Provenance::FittedHere,
+            observations: 84_113,
+        }
+    }
+
+    /// The same rate, borrowed from the sample's other read groups because this one had too
+    /// little data — the case the calibration must not launder into a measurement.
+    fn borrowed_rate(rate: f64) -> Estimate<ErrorRate> {
+        Estimate {
+            value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
+            provenance: Provenance::Borrowed,
+            observations: 311,
+        }
+    }
+
+    /// The log error of a read whose mapping quality is Phred 60, which is where BWA tops out.
+    /// Every base quality this file's fixtures use is worse than that, so the base quality is
+    /// what the mint returns — which is the ordinary case and the one worth exercising.
+    const MAPPING_QUALITY_60_LOG_ERROR: f64 = -6.0 * std::f64::consts::LN_10;
+
+    /// One read group's minted per-read errors, at the given base qualities, spread over two
+    /// orders of magnitude on purpose — Phred 40, 30 and 13 is the spread the calibration
+    /// exists to preserve. Returned as `(q_sum, num_reads)`, the shape the merge hands over.
+    ///
+    /// **It mints through the walk's own function rather than rolling the arithmetic**, which
+    /// is spec §3.2's second requirement: the quantity the accumulator averages and the
+    /// quantity the model charges must be computed by the same function, or the scale
+    /// calibrates against a different definition of *how wrong is this read* than the one it
+    /// is applied to. A local `10^(-q/10)` differs from the crate's table by one or two units
+    /// in the last place — harmless in size, and a second definition of the quantity all the
+    /// same.
+    fn minted_reads_at_phred(base_qualities: &[u8]) -> (f64, u32) {
+        let q_sum: f64 = base_qualities
+            .iter()
+            .map(|&quality| {
+                crate::ng::locus_generation::pileup::minted_ln_read_error(
+                    quality,
+                    MAPPING_QUALITY_60_LOG_ERROR,
+                )
+            })
+            .sum();
+        (q_sum, base_qualities.len() as u32)
+    }
+
+    /// **The property the scale exists for** (spec §12 test 10): after scaling, the average
+    /// error the model charges that read group's reads is the rate the fit measured.
+    ///
+    /// **To the accumulator's quantum, and not exactly** — and **both** bounds asserted below
+    /// are needed. In real arithmetic the identity is exact: scaling every read by one
+    /// multiplier multiplies their geometric mean by it, and the geometric mean is what both
+    /// the denominator and the charge are. What moves the last few digits is that the
+    /// denominator arrives rounded to units of `MintedReadErrors::LOG_ERROR_QUANTUM`, which
+    /// shifts the mean log error by at most half a unit and the charged rate by that relative
+    /// amount. Measured here: 4.7 × 10⁻¹⁰ against a rate of 4 × 10⁻³.
+    ///
+    /// **The derived bound alone would not have caught the accumulator getting coarser**,
+    /// because it scales with the quantum it is derived from — a review mutation making the
+    /// accumulator four times coarser left every test in this file and in `calibration.rs`
+    /// green while pushing the real gap past the figure this module's own documentation
+    /// quotes. So the absolute bound is asserted beside it, and it is the number in that
+    /// documentation.
+    #[test]
+    fn the_scale_makes_the_charged_average_the_fitted_rate() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[40, 30, 13]);
+        let fitted = fitted_rate(0.004);
+        let rate = fitted.value.get();
+        let calibration = ReadGroupCalibration::from_fitted_rate(
+            &fitted,
+            MintedReadErrors::of_observation(q_sum, num_reads),
+        )
+        .expect("three reads are a denominator");
+
+        let charged = calibration.calibrated_error(q_sum, num_reads);
+        let relative_gap = (charged - rate).abs() / rate;
+
+        assert!(
+            relative_gap <= MintedReadErrors::LOG_ERROR_QUANTUM,
+            "the calibrated average is {charged} and the fitted rate {}, {relative_gap} apart \
+             relatively, against the accumulator's own quantum",
+            rate
+        );
+        assert!(
+            relative_gap <= 5e-7,
+            "the module documents this as within five parts in ten million; it is \
+             {relative_gap}"
+        );
+        assert_eq!(calibration.provenance, Provenance::FittedHere);
+    }
+
+    /// The identity is about **a read group's** average, not about one observation's charge,
+    /// and those come apart the moment a group has more than one observation. Three
+    /// observations of one read group here, at three different qualities, folded into the
+    /// denominator the way the accumulator folds them — and it is the read-weighted geometric
+    /// mean of the three charges that has to come back as the fitted rate, not any one of
+    /// them.
+    ///
+    /// Nothing else in this file exercises that: the test above builds the calibration from a
+    /// single observation carrying the whole group, where "the group's mean is the rate" and
+    /// "this observation's charge is the rate" are the same sentence.
+    #[test]
+    fn the_average_is_the_groups_and_not_one_observations() {
+        let observations = [
+            minted_reads_at_phred(&[40, 40, 38]),
+            minted_reads_at_phred(&[30]),
+            minted_reads_at_phred(&[13, 15]),
+        ];
+        let mut group = MintedReadErrors::default();
+        for &(q_sum, num_reads) in &observations {
+            group.add(MintedReadErrors::of_observation(q_sum, num_reads));
+        }
+        let fitted = fitted_rate(0.004);
+        let rate = fitted.value.get();
+        let calibration = ReadGroupCalibration::from_fitted_rate(&fitted, group)
+            .expect("six reads are a denominator");
+
+        // The read-weighted geometric mean of the charges: Σ n·ln(charge) ÷ Σ n, exponentiated.
+        let mut weighted_log_sum = 0.0;
+        let mut reads = 0u32;
+        for &(q_sum, num_reads) in &observations {
+            let charge = calibration.calibrated_error(q_sum, num_reads);
+            weighted_log_sum += f64::from(num_reads) * charge.ln();
+            reads += num_reads;
+        }
+        let group_average = (weighted_log_sum / f64::from(reads)).exp();
+
+        let relative_gap = (group_average - rate).abs() / rate;
+        assert!(
+            relative_gap <= 5e-7,
+            "the group's charged average is {group_average}, the fitted rate {}",
+            rate
+        );
+        // …and no single observation's charge is the fitted rate, which is the point.
+        let single = calibration.calibrated_error(observations[1].0, observations[1].1);
+        assert!((single - rate).abs() > 1e-4);
+    }
+
+    /// The residual above is the accumulator's rounding and nothing else, and **a log sum the
+    /// fixed point can hold exactly closes it entirely**: −7 nats is a whole number of
+    /// quanta, so it survives the round trip through 2⁻²⁰ units unchanged and the charged
+    /// average is the fitted rate to the last bits of the double.
+    ///
+    /// That is what says the residual is quantisation rather than a mistake in the algebra.
+    #[test]
+    fn the_identity_is_exact_where_the_accumulators_rounding_does_not_bite() {
+        // e^−7 is about 9 in ten thousand — a read a shade better than Phred 30.
+        let q_sum = -7.0;
+        let fitted = fitted_rate(0.004);
+        let rate = fitted.value.get();
+        let calibration = ReadGroupCalibration::from_fitted_rate(
+            &fitted,
+            MintedReadErrors::of_observation(q_sum, 1),
+        )
+        .expect("one read is a denominator");
+
+        let charged = calibration.calibrated_error(q_sum, 1);
+
+        assert!(
+            (charged - rate).abs() <= f64::EPSILON * rate,
+            "the calibrated average is {charged}, the fitted rate {}",
+            rate
+        );
+    }
+
+    /// The scale preserves the *shape* — which is the half the fitted rate cannot supply.
+    /// Two observations of the same read group whose reads differ by 27 Phred must still
+    /// differ after calibration, and by the same ratio they differed by before: one
+    /// multiplier cannot flatten them.
+    #[test]
+    fn calibration_moves_the_size_and_leaves_the_ratio_between_reads_alone() {
+        let (group_q_sum, group_reads) = minted_reads_at_phred(&[40, 30, 13]);
+        let fitted = fitted_rate(0.004);
+        let calibration = ReadGroupCalibration::from_fitted_rate(
+            &fitted,
+            MintedReadErrors::of_observation(group_q_sum, group_reads),
+        )
+        .expect("three reads are a denominator");
+
+        let (good_q_sum, good_reads) = minted_reads_at_phred(&[40]);
+        let (poor_q_sum, poor_reads) = minted_reads_at_phred(&[13]);
+        let good = calibration.calibrated_error(good_q_sum, good_reads);
+        let poor = calibration.calibrated_error(poor_q_sum, poor_reads);
+
+        // Phred 13 against Phred 40 is a factor of 10^2.7 either side of the scale.
+        assert!(
+            (poor / good - 10f64.powf(2.7)).abs() < 1e-6,
+            "ratio {}",
+            poor / good
+        );
+        assert!(good < poor);
+        assert!(calibration.scale != 1.0);
+    }
+
+    /// A read group with no read behind it has no denominator, and a scale needs one. The
+    /// alternative — treating the absence as an average — divides the fitted rate by nothing.
+    #[test]
+    fn a_read_group_with_no_reads_yields_no_scale() {
+        let fitted = fitted_rate(0.004);
+
+        assert!(
+            ReadGroupCalibration::from_fitted_rate(&fitted, MintedReadErrors::default()).is_none()
+        );
+    }
+
+    /// **The other way a denominator can be useless: it underflowed to zero.** No real base
+    /// quality reaches a mean log error of −1,000 nats, but the accumulator's constructor is
+    /// public and a fixture can hand it one — and without the guard the scale comes back
+    /// infinite, which charges every read of the library the ceiling.
+    ///
+    /// The `no reads` test above cannot reach this branch, because it stops at the `?` one
+    /// line earlier.
+    #[test]
+    fn a_denominator_that_underflowed_to_zero_yields_no_scale() {
+        let fitted = fitted_rate(0.004);
+        let underflowed = MintedReadErrors::of_observation(-1000.0, 1);
+
+        assert_eq!(underflowed.mean_error_probability(), Some(0.0));
+        assert!(ReadGroupCalibration::from_fitted_rate(&fitted, underflowed).is_none());
+    }
+
+    /// **A fitted rate of zero is refused, and it is the numerator's turn to be guarded.** A
+    /// scale of zero charges every read of that library `MIN_BASE_ERROR` — maximal confidence
+    /// about every base, from a fit that says it found no errors at all. *Absent* and *zero*
+    /// are different answers here for the same reason they are on the contamination fraction.
+    #[test]
+    fn a_fitted_rate_of_zero_yields_no_scale_rather_than_a_scale_of_zero() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[30, 30]);
+        let zero = fitted_rate(0.0);
+
+        assert!(
+            ReadGroupCalibration::from_fitted_rate(
+                &zero,
+                MintedReadErrors::of_observation(q_sum, num_reads)
+            )
+            .is_none()
+        );
+    }
+
+    /// **The calibration's warrant is its rate's warrant, and stamping `FittedHere` on a
+    /// borrowed rate would launder it.** A read group with too little data of its own takes
+    /// the mean of the sample's other groups; chemistry differs between libraries, which is
+    /// the whole reason for the read-group grain, so that is a compromise and the output has
+    /// to be able to say so. The scale adds no warrant of its own — it is a ratio, exactly as
+    /// well founded as its numerator.
+    #[test]
+    fn a_borrowed_rate_makes_a_borrowed_calibration() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[40, 30, 13]);
+        let borrowed = borrowed_rate(0.004);
+
+        let calibration = ReadGroupCalibration::from_fitted_rate(
+            &borrowed,
+            MintedReadErrors::of_observation(q_sum, num_reads),
+        )
+        .expect("three reads are a denominator");
+
+        assert_eq!(calibration.provenance, Provenance::Borrowed);
+        // …and the scale itself is the same number either way: only the warrant differs.
+        let fitted = fitted_rate(0.004);
+        let from_fitted = ReadGroupCalibration::from_fitted_rate(
+            &fitted,
+            MintedReadErrors::of_observation(q_sum, num_reads),
+        )
+        .expect("three reads are a denominator");
+        assert_eq!(calibration.scale, from_fitted.scale);
+        assert_ne!(calibration.provenance, from_fitted.provenance);
+    }
+
+    /// **Held in every profile.** An observation with no reads behind it is a row the merge
+    /// does not build, and without the check a release build returns `NaN` at a zero `q_sum`
+    /// — which `f64::clamp` passes straight through the floors this module promises — or
+    /// `MIN_BASE_ERROR` at a negative one, which nothing downstream could tell from a real
+    /// charge.
+    #[test]
+    #[should_panic(expected = "has no average error")]
+    fn an_observation_with_no_reads_is_a_caller_bug() {
+        let _ = ReadGroupCalibration::defaulted().calibrated_error(-7.0, 0);
+    }
+
+    /// Where nothing was fitted the qualities are used as reported — and the run's output has
+    /// to be able to say so, which is what the provenance is for. A defaulted calibration
+    /// that claimed `FittedHere` would make a calibrated run and a trusting one look alike.
+    #[test]
+    fn a_defaulted_calibration_charges_the_reads_exactly_what_they_were_minted_with() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[30, 30]);
+        let defaulted = ReadGroupCalibration::defaulted();
+
+        assert_eq!(defaulted.scale, 1.0);
+        assert_eq!(defaulted.provenance, Provenance::Defaulted);
+        assert!((defaulted.calibrated_error(q_sum, num_reads) - 0.001).abs() < 1e-15);
+    }
+
+    /// A charge that could reach zero would reach negative infinity through the logarithm and
+    /// turn a sample's whole row into `NaN`. The floors are what stop it, at both ends.
+    #[test]
+    fn a_charge_is_floored_at_both_ends_before_it_can_reach_a_logarithm() {
+        let tiny = ReadGroupCalibration {
+            scale: 1e-30,
+            provenance: Provenance::Supplied,
+        };
+        let huge = ReadGroupCalibration {
+            scale: 1e30,
+            provenance: Provenance::Supplied,
+        };
+        let (q_sum, num_reads) = minted_reads_at_phred(&[30]);
+
+        assert_eq!(tiny.calibrated_error(q_sum, num_reads), MIN_BASE_ERROR);
+        assert_eq!(huge.calibrated_error(q_sum, num_reads), MAX_BASE_ERROR);
+        assert!(tiny.calibrated_error(q_sum, num_reads).ln().is_finite());
+    }
+
+    /// *Not identified* and *zero* are different answers, and a caller told "no
+    /// contamination" would act on it. At one sample there is no panel to be surprised by,
+    /// so the plain formula runs — absent, never a fitted zero.
+    #[test]
+    fn a_fraction_that_could_not_be_identified_is_absent_rather_than_zero() {
+        let refused = ContaminationEstimate::NotIdentified {
+            reason:
+                crate::ng::parameter_estimation::joint::contamination::NotIdentifiedReason::NoPanel,
+        };
+
+        assert!(ContaminationView::of_estimate(&refused).is_none());
+    }
+
+    /// The two libraries that must not look alike: one measured over 4,102 markers and found
+    /// clean, one that touched none. **Both carry a fraction of zero** — the search keeps
+    /// zero where the likelihood is flat — so the value alone cannot tell them apart and the
+    /// counts are the only thing that can.
+    #[test]
+    fn measured_clean_and_never_measured_carry_the_same_fraction_and_different_counts() {
+        let clean = ContaminationEstimate::Estimated {
+            alpha: 0.0,
+            source: crate::ng::parameter_estimation::joint::contamination::ContaminationSource::ThisReadGroupsReads,
+            panel_markers: 5_310,
+            markers_with_reads: 4_102,
+            reads_on_markers: 51_884,
+            leverage: 0.031,
+        };
+        let unmeasurable = ContaminationEstimate::Estimated {
+            alpha: 0.0,
+            source: crate::ng::parameter_estimation::joint::contamination::ContaminationSource::ThisReadGroupsReads,
+            panel_markers: 5_310,
+            markers_with_reads: 0,
+            reads_on_markers: 0,
+            leverage: 0.031,
+        };
+
+        let clean = ContaminationView::of_estimate(&clean).expect("an estimate is a view");
+        let unmeasurable =
+            ContaminationView::of_estimate(&unmeasurable).expect("an estimate is a view");
+
+        assert_eq!(clean.fraction, unmeasurable.fraction);
+        assert!(clean.was_measured());
+        assert!(!unmeasurable.was_measured());
+    }
+
+    /// **Both counts have to be non-zero, and the two fixtures above cannot show it** — in
+    /// each of them the counts move together, where *and* and *or* agree. A review mutation
+    /// swapping one for the other survived every test in this file.
+    ///
+    /// Neither half of the pair is reachable from the estimator today; they are here because
+    /// the fields are public and the predicate is what a consumer will trust.
+    #[test]
+    fn a_view_missing_either_count_was_not_measured() {
+        let markers_but_no_reads = ContaminationView {
+            fraction: 0.0,
+            markers_with_reads: 4_102,
+            reads_on_markers: 0,
+            source: ContaminationSource::ThisReadGroupsReads,
+        };
+        let reads_but_no_markers = ContaminationView {
+            fraction: 0.0,
+            markers_with_reads: 0,
+            reads_on_markers: 51_884,
+            source: ContaminationSource::ThisReadGroupsReads,
+        };
+
+        assert!(!markers_but_no_reads.was_measured());
+        assert!(!reads_but_no_markers.was_measured());
+    }
+
+    /// The fraction and the two counts are read off the estimate's own fields, and all three
+    /// are integers or a fraction that a transposition would carry silently — so the fixture
+    /// gives each a value nothing else here has.
+    #[test]
+    fn the_view_reads_the_fraction_and_both_counts_off_the_estimate() {
+        let estimate = ContaminationEstimate::Estimated {
+            alpha: 0.0628,
+            source: crate::ng::parameter_estimation::joint::contamination::ContaminationSource::ThisReadGroupsReads,
+            panel_markers: 5_310,
+            markers_with_reads: 4_102,
+            reads_on_markers: 51_884,
+            leverage: 0.031,
+        };
+
+        let view = ContaminationView::of_estimate(&estimate).expect("an estimate is a view");
+
+        assert_eq!(view.fraction, 0.0628);
+        assert_eq!(view.markers_with_reads, 4_102);
+        assert_eq!(view.reads_on_markers, 51_884);
+    }
+
+    /// The staging buffer belongs to the scratch, so a worker holds one across every sample.
+    /// Two samples through one scratch: the second must see its own rows and none of the
+    /// first's.
+    #[test]
+    fn one_buffer_narrows_two_samples_without_mixing_them() {
+        let mut buffer = GenericEvidenceBuffer::default();
+        let first = [supported_row(0, 1, 11, -3.5), supported_row(1, 1, 4, -19.0)];
+        let second = [supported_row(1, 1, 6, -8.25)];
+        let mapping = [Some(AlleleId(0)), Some(AlleleId(1))];
+
+        let (rows, dropped) = buffer.narrow_supported(&first, &mapping);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(dropped, 0.0);
+
+        let (rows, dropped) = buffer.narrow_supported(&second, &mapping);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].num_reads, 6);
+        assert_eq!(dropped, 0.0);
+    }
+
+    /// **The dropped quality has to come back through the wrapper too**, and the test above
+    /// cannot show it: its mapping keeps every allele, so `0.0` is the only answer it could
+    /// give and asserting it is a transcription. Here selection drops merge allele 1, and its
+    /// −19 is the quality of reads that are still evidence — they belong in the pooled
+    /// leftover the data likelihood compares between loci.
+    #[test]
+    fn the_wrapper_carries_the_dropped_quality_out() {
+        let mut buffer = GenericEvidenceBuffer::default();
+        let rows = [
+            supported_row(0, 1, 11, -3.5),
+            supported_row(1, 1, 4, -19.0),
+            supported_row(2, 1, 6, -8.25),
+        ];
+        let mapping = [Some(AlleleId(0)), None, Some(AlleleId(1))];
+
+        let (kept, dropped) = buffer.narrow_supported(&rows, &mapping);
+
+        assert_eq!(dropped, -19.0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// **The shape the row function needs, and the reason the evidence buffer is not the
+    /// row's scratch.** A caller narrows, builds the view over what came back, and then hands
+    /// the row its own scratch — which it can only do if the two are different objects,
+    /// because the view is still borrowing the first while the row wants `&mut` the second.
+    ///
+    /// This test is a compile-time check wearing a runtime test's clothes: with the buffer and
+    /// the row's scratch merged into one type, the third line is
+    /// `error[E0499]: cannot borrow as mutable more than once`, which is where the next
+    /// milestone would have discovered it.
+    #[test]
+    fn one_caller_holds_the_evidence_and_a_row_scratch_at_once() {
+        /// Stands in for the row function's signature: reads the evidence, writes a row,
+        /// scribbles in its own scratch.
+        fn stub_row(
+            evidence: &GenericSampleEvidence<'_>,
+            out: &mut [f64],
+            scratch: &mut SsrRowScratch<()>,
+        ) {
+            scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &ssr_detail()), 0, f64::NAN);
+            out[0] = f64::from(evidence.supported.len() as u32);
+        }
+
+        let mut buffer = GenericEvidenceBuffer::default();
+        let mut row_scratch: SsrRowScratch<()> = SsrRowScratch::default();
+        let rows = [supported_row(0, 1, 11, -3.5)];
+        let mapping = [Some(AlleleId(0))];
+        let mut out = [0.0];
+
+        let (supported, dropped) = buffer.narrow_supported(&rows, &mapping);
+        let evidence = GenericSampleEvidence::new(supported, dropped, &[]);
+        stub_row(&evidence, &mut out, &mut row_scratch);
+
+        assert_eq!(out[0], 1.0);
+    }
+
+    /// **Cleared, not resized.** A locus with as many `(observation, candidate)` pairs as the
+    /// last one would otherwise reuse the last one's emissions — a wrong likelihood at every
+    /// sample, and nothing failing. The fixture makes the two loci the same size on purpose,
+    /// because that is the only case where the defect is invisible.
+    #[test]
+    fn the_emission_cache_carries_nothing_over_between_two_loci_of_one_size() {
+        let three = [
+            ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
+            ssr_observation(b"ACAC", ran_out_after(4), 2),
+            ssr_observation(b"ACACACAC", ReadWitness::Complete, 5),
+        ];
+        let two = [
+            ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
+            ssr_observation(b"ACAC", ran_out_after(4), 2),
+        ];
+        let detail = ssr_detail();
+        let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
+
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&three, &detail), 2, f64::NAN);
+        for (at, slot) in scratch.emissions_mut().iter_mut().enumerate() {
+            *slot = at as f64 + 1.0;
+        }
+        assert_eq!(scratch.emission_count(), 6);
+
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&two, &detail), 3, -1.0);
+
+        assert_eq!(scratch.emission_count(), 6);
+        assert!(scratch.emissions_mut().iter().all(|&slot| slot == -1.0));
+    }
+
+    /// **The cache is sized over every observation, partials included**, because that is the
+    /// axis the two filters' positions are on — both enumerate the whole slice and then
+    /// filter. Sized over the complete ones alone it holds 8 slots here, and the complete
+    /// observation at position 2 addresses slot 8, past the end.
+    ///
+    /// The fixture puts a partial *between* two complete observations on purpose: with the
+    /// partials at the end, the complete half would write entirely in bounds and nothing would
+    /// fail until the censored half ran.
+    #[test]
+    fn the_cache_is_sized_by_the_positions_the_filters_yield() {
+        let observations = [
+            ssr_observation(b"ACACACAC", ReadWitness::Complete, 12),
+            ssr_observation(b"ACAC", ran_out_after(4), 5),
+            ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
+        ];
+        let detail = ssr_detail();
+        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
+
+        scratch.prepare_emissions(&evidence, 4, f64::NAN);
+
+        assert_eq!(evidence.complete_observations().count(), 2);
+        assert_eq!(scratch.emission_count(), 12);
+        // Every position either filter yields addresses a slot the cache holds.
+        for (at, _) in evidence
+            .complete_observations()
+            .chain(evidence.partial_observations())
+        {
+            scratch.set_emission(at, 3, at as f64);
+            assert_eq!(scratch.emission_at(at, 3), at as f64);
+        }
+    }
+
+    /// The index has one spelling, and a candidate past what the cache was prepared for is a
+    /// caller bug rather than a neighbouring candidate's emission read silently.
+    #[test]
+    #[should_panic(expected = "is past the")]
+    fn a_candidate_past_the_prepared_width_is_a_caller_bug() {
+        let observations = [ssr_observation(b"ACAC", ReadWitness::Complete, 4)];
+        let detail = ssr_detail();
+        let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 2, 0.0);
+
+        let _ = scratch.emission_at(0, 2);
+    }
+
+    /// An unwritten slot holds what the caller asked for. **Zero is the one value it must not
+    /// silently become**: a slip the candidate cannot reach legitimately scores zero, so a
+    /// cache pre-filled with zeros makes *never computed* and *computed as impossible* the
+    /// same number. A `prepare_emissions` that ignored its argument would pass every other
+    /// test here.
+    #[test]
+    fn an_unwritten_emission_slot_holds_the_value_the_caller_asked_for() {
+        let observations = [
+            ssr_observation(b"ACAC", ReadWitness::Complete, 4),
+            ssr_observation(b"ACACAC", ReadWitness::Complete, 2),
+        ];
+        let detail = ssr_detail();
+        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
+
+        scratch.prepare_emissions(&evidence, 2, f64::NAN);
+        assert!(scratch.emissions_mut().iter().all(|slot| slot.is_nan()));
+
+        scratch.prepare_emissions(&evidence, 2, -1.0);
+        assert!(scratch.emissions_mut().iter().all(|&slot| slot == -1.0));
+    }
+
+    /// A locus with no observations or no candidates sizes the cache to nothing rather than
+    /// leaving the previous locus's entries reachable.
+    #[test]
+    fn an_empty_locus_leaves_an_empty_emission_cache() {
+        let observations = [ssr_observation(b"ACAC", ReadWitness::Complete, 4)];
+        let detail = ssr_detail();
+        let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
+
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 4, 1.0);
+        assert_eq!(scratch.emission_count(), 4);
+
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &detail), 4, 1.0);
+        assert_eq!(scratch.emission_count(), 0);
+
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 0, 1.0);
+        assert_eq!(scratch.emission_count(), 0);
+    }
+
+    /// The model's own scratch — its placement buffer and its alignment matrix — is the other
+    /// half of what the caller holds, and it has to survive a locus so a worker allocates once.
+    /// Nothing else here touches it, and deleting the accessor leaves the tests green.
+    #[test]
+    fn the_models_own_scratch_is_reachable_and_survives_a_locus() {
+        let detail = ssr_detail();
+        let mut scratch: SsrRowScratch<Vec<u8>> = SsrRowScratch::default();
+
+        scratch.model_scratch_mut().extend_from_slice(b"ACGT");
+        scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &detail), 3, 0.0);
+
+        assert_eq!(scratch.model_scratch_mut().as_slice(), b"ACGT");
     }
 }

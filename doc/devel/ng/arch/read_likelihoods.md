@@ -63,7 +63,7 @@ to the loop's `GenotypeTable`. Contract, both paths:
 - every probability is floored before a logarithm: `MIN_BASE_ERROR = 1e-12`
   ([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)),
   geometric clamps `(0.01, 0.99)`
-  ([`alignment/stutter.rs:67`](../../../../src/ng/alignment/stutter.rs)) — imported as named
+  ([`alignment/stutter.rs:74`](../../../../src/ng/alignment/stutter.rs)) — imported as named
   constants with their reasons.
 
 ### 1.2 Correction to `ng_step_interfaces.md` §3 step 7 — recorded, not applied there
@@ -83,9 +83,22 @@ Spec §6.1's three tiers, as code obligations:
 
 | tier | parameters | code shape |
 |---|---|---|
-| frozen for the run | error rate + calibration scale, STR substitution rate, contamination | fields of the run-level parameter views (§2.3, §4.1) — nothing downstream may write them |
+| frozen for the run | error rate + calibration scale, STR substitution rate, the contamination **fraction** | fields of the run-level parameter views (§2.3, §4.1) — nothing downstream may write them |
 | **per-locus re-estimable** (off by default) | slippage level, direction split, fall-off | arrive **per call** inside `SsrScoringContext` (§4.1); the emission never asks where they came from. This is the seam that lets the EM loop re-fit them ([`calling_em_loop.md`](calling_em_loop.md) §6.1) with zero changes here — the one constraint spec §6.1 makes binding |
-| re-estimated every pass, invisible here | per-locus allele frequencies | enter the prior only; no term of §2.1 reads them |
+| re-estimated every pass | per-locus allele frequencies | mostly the prior's, and **one term here reads them too**: the contaminating population's frequency for the allele an observation shows (see below) |
+
+**Correction, 2026-08-24, made while A2 was built: the third row used to say "invisible here … no
+term of §2.1 reads them", and spec §3.6's correction of the same day makes that false.** The
+contamination mixture's second half is the frequency of the observation's own allele at the locus
+being called, over the samples in that sample's sequencing batch, recomputed every iteration — so
+one term of the SNP/indel row does read a per-locus frequency. The row above it is corrected in
+the same breath: it is the contamination **fraction** that is frozen, not contamination as a whole.
+
+**The two halves therefore sit in different tiers, and nothing about that reopens the ruling that
+contamination never enters the loop.** That ruling is about the fraction, which is a property of a
+library and of nothing else. The second half is a property of the locus, and a per-locus quantity
+is what a per-locus loop is for. What it costs is a lookup rather than a fit, because it is the
+same number the genotype prior already reads.
 
 ### 1.4 Provenance
 
@@ -399,7 +412,7 @@ Every row read on 2026-08-21.
 | generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/ng/run/cohort_merge/build.rs) | view over them; the `(allele × read group)` split **landed** in [`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1 — `SupportedAllele` carries `read_group` and the rows are one per pair, ascending |
 | STR evidence | `SequenceObservation`, [`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs) | reuse as-is; the read-group identity the contract needs is already there ([`:316`](../../../../src/ng/locus_generation/mod.rs)) |
 | contamination inputs | `ContaminationEstimate` [`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs), per-read-group grain [`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs) | consume as `ContaminationView`; the three allele-class frequencies are asked of the pre-pass's side-pass (spec §3.6) |
-| numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:67`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
+| numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:74`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
 | censored term (both paths) | — | **new**; production discards partials ([`locus_tally.rs:91`](../../../../src/ssr/pileup/locus_tally.rs)) |
 
 ## 6. Design decisions — decided

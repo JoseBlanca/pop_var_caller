@@ -64,9 +64,17 @@ pub const MAX_SLIP: u32 = 10;
 
 /// Lower bound on a geometric success probability, and the floor under
 /// [`StutterModel::equal`]. Production uses one constant for both, so this does too.
-const GEOM_MIN: f64 = 0.01;
-/// Upper bound on a geometric success probability. See [`GEOM_MIN`].
-const GEOM_MAX: f64 = 0.99;
+///
+/// **Public so the genotyping likelihood can name it rather than spell a second copy.** Its
+/// contract says every probability is floored before a logarithm and asks for the floors as
+/// named constants with their reasons (`doc/devel/ng/spec/read_likelihoods.md` §8); the
+/// clamp on a geometric is this one, and two spellings of one number are two things that can
+/// drift apart. The clamping itself stays here, where the distribution is — a consumer reads
+/// the value to document and to test against, never to apply.
+pub const GEOM_MIN: f64 = 0.01;
+/// Upper bound on a geometric success probability. See [`GEOM_MIN`], including why it is
+/// public.
+pub const GEOM_MAX: f64 = 0.99;
 
 /// The six stutter rates a [`StutterModel`] is built from, **named** rather than positional.
 ///

@@ -106,7 +106,8 @@ production); the two doc repointings spec §7 asks for.
   [`:82`](../../../../src/ng/alignment/stutter.rs),
   [`:300`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
   ([`:63`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
-  ([`:67`](../../../../src/ng/alignment/stutter.rs)); production's seam and comparator
+  ([`:74`](../../../../src/ng/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
+  rather than spelling a second copy); production's seam and comparator
   ([`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs),
   [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)); the placement enumeration
   ([`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs)); `MIN_BASE_ERROR`
@@ -144,10 +145,17 @@ Milestone C's kept rows, bases + witnessed run intact. `SsrSampleEvidence` — a
 ([`locus_generation/mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)). *Source:* arch
 §2.1, §2.2; spec §1.4, §2.3.
 
-**A2. Parameter views, floors, contract.**  ☐
+**A2. Parameter views, floors, contract.**  ✅ *(shipped with three departures, all recorded in the
+step's report: the row's scratch is **two** types, because the evidence view borrows the staging
+buffer and a row taking `&mut` the same object cannot be called — so `GenericEvidenceBuffer` holds
+the evidence and the generic row's own scratch arrives at D1 with the buffers it needs; the
+emission cache takes the evidence rather than an observation count, because "how many observations"
+had two reachable readings and one of them is silent; and the depth-cap question spec §3.2 hands
+to this step is decided — **the denominator stays unthinned** — with the owner's ruling invited)*
 `ReadGroupCalibration { scale, provenance }` (scale 1.0 + `Defaulted` where no rate was emitted —
-visible, never silent) and `ContaminationView` (fraction, `markers_with_reads`, `reads_at_markers` —
-"measured clean" vs "unmeasurable" told apart by the counts). **`ContaminationView` carries no
+visible, never silent) and `ContaminationView` (fraction, `markers_with_reads`, `reads_on_markers` —
+"measured clean" vs "unmeasurable" told apart by the counts; *the plan said `reads_at_markers`,
+which is not the field's name — corrected 2026-08-24*). **`ContaminationView` carries no
 allele-class frequencies**: the mixture's second half is per locus and per iteration, so it is read
 where the allele frequency is rather than frozen on this view (C2 below).
 
