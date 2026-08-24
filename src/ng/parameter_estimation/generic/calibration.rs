@@ -1,14 +1,20 @@
 //! **The denominator of the read likelihood's error-rate scale, per read group.**
 //!
-//! The caller charges each read the error probability the walk minted for it, rescaled by one
-//! number per read group so that the average over that read group's admitted reads comes out at
-//! the rate the pre-pass measured
-//! (`doc/devel/ng/spec/read_likelihoods.md` §3.2):
+//! **The caller holds one error probability per observation, not one per read.** The merge keeps,
+//! for each allele in each read group at each locus, how many reads support it and the sum of their
+//! log error probabilities; the reads are gone from there on. So the model charges
+//! `exp(q_sum / num_obs)` — the geometric mean of those reads' minted errors — and the scale is one
+//! addition in log space per observation, never a multiplication read by read
+//! (`doc/devel/ng/spec/read_likelihoods.md` §3.2, §3.3). *(§3.2 states the rule per read, and may:
+//! scaling every read and scaling their geometric mean are the same operation,
+//! `exp(Σ ln(s·ε) / n) = s · exp(Σ ln ε / n)`.)*
+//!
+//! The scale makes that charged average come out at the rate the pre-pass measured for the library:
 //!
 //! ```text
-//!                fitted error rate for this read group
-//! scale  =  ────────────────────────────────────────────────
-//!           average minted error over that group's own reads
+//!                     fitted error rate for this read group
+//! scale  =  ──────────────────────────────────────────────────────────
+//!           geometric mean of the minted error over that group's reads
 //! ```
 //!
 //! The pre-pass fits the numerator. This module carries the denominator, and nothing else.
@@ -29,8 +35,9 @@
 //! minted error probabilities, and the arithmetic mean cannot be recovered from it — the walk
 //! throws the individual reads away.
 //!
-//! **That is the right average anyway, and the reason is what the scale is applied to.** The model
-//! charges an observation `exp(q_sum / num_obs)`, and so does production
+//! **It is not that the arithmetic mean would have been a worse choice — there was no place to use
+//! it.** Nowhere in the model does a per-read `ε` survive to be averaged arithmetically; what the
+//! model charges is `exp(q_sum / num_obs)`, and so does production
 //! (`var_calling/posterior_engine.rs`, which has no recalibration at all — there is nothing to copy
 //! there but the quantity). A scale built from an arithmetic mean and applied to a geometric one
 //! would not make the calibrated property hold in the model's own terms, so supplying the
@@ -58,8 +65,10 @@
 //! 2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned first — **2.7%, or 0.12 Phred**.
 //! On the tomato cohort — 2.5× to 28.6× over 63 accessions — it is nothing: on the deepest of them
 //! 228,468,065 read-positions of 228,492,796 are under the cap and the mean moves by 1.0000.
-//! Whether to thin here too is the owner's, and nothing decides it until the scale has a consumer
-//! (spec §3.2).
+//! **This fold does not thin, and that is decided rather than pending** (owner, 2026-08-24): the
+//! scale is applied to every read at calling time, so the average it is built from is over every
+//! read. The 2.7% is carried knowingly, and it is a question about how the *fit* weights deep sites
+//! against shallow ones rather than about this average (spec §3.2).
 //!
 //! # One thing the numerator can be that this cannot
 //!
