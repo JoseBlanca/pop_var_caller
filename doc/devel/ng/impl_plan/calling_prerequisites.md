@@ -273,7 +273,7 @@ read off the fitted curve** rather than the cell
 gathers them, and the loop's `FrozenParameters` sketch names the missing wrapper `StratumFits`
 ([`../arch/calling_em_loop.md`](../arch/calling_em_loop.md) §2, open items).
 
-**F1. The gather.**  ☐
+**F1. The gather.**  ✅
 `StratumFits` in `parameter_estimation/joint/`: built once per run from the `StratumFit`s and the
 fitted curves; lookup by `(read group, period, repeat count)` returns the stratum's `Slippage`
 with `level` replaced by `blend_level`'s value for that cell and the `LevelSource` provenance

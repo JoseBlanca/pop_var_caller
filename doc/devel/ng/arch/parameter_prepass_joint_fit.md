@@ -281,6 +281,97 @@ declares it, is worth doing — GIAB's read names carry `HISEQ1:23:H9UD5ADXX:2:�
 says `unknown` — but **the user's `--sequenced-together` always wins**, because a declared `PU` is as
 untrustworthy as the `PL` this module already refuses to group by.
 
+### 1.7 `StratumFits` — the slippage lookup the caller borrows
+
+**Built 2026-08-24** ([`stratum_fits.rs`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)).
+[`calling_em_loop.md`](calling_em_loop.md) §2 records that `FrozenParameters` borrows one
+`(read group, stratum)` slippage lookup across the calling seam, and that this doc pins its type.
+It is this.
+
+```rust
+/// Every stratum's slippage numbers, indexed by the key the caller has. Built once per run
+/// from what `fit_strata` returned, then read unchanged for the whole of calling.
+pub struct StratumFits { /* … */ }
+
+/// What one `(read group, stratum)` cell answers with: the three emitted numbers, and where
+/// the level and the two shares each came from.
+pub struct FittedSlippage {
+    pub slippage: Slippage,
+    pub level: LevelProvenance,
+    pub shares: Option<SharesProvenance>,
+}
+
+/// Why a lookup has no numbers. Two of the four are ordinary; two say the map and the fit
+/// came from different runs.
+pub enum NoSlippage {
+    NoSuchStratum,
+    GroupPutNoReadHere { slippage_group: u32 },
+    UnknownReadGroup,
+    GroupNotInTheFit { slippage_group: u32, groups_fitted: usize },
+}
+
+impl StratumFits {
+    pub fn over(outcomes: &[StratumOutcome], slippage_group_of: BTreeMap<ReadGroupId, u32>) -> Self;
+    /// Panics when two outcomes name one stratum, or when an outcome's three per-group vectors
+    /// are not the same length.
+    pub fn at(&self, read_group: ReadGroupId, period: u8, candidate_repeats: u64)
+        -> Result<FittedSlippage, NoSlippage>;
+    pub fn slippage_group_of(&self, read_group: ReadGroupId) -> Option<u32>;
+    pub fn strata(&self) -> usize;
+}
+```
+
+**The two halves of the stratum are taken by name, and that is not cosmetic.**
+[`read_likelihoods.md`](read_likelihoods.md) §4.4 is explicit that the lookup is by the
+**candidate's** period and repeat count — "a read's chance of slipping is a property of the tract
+it was copied from, and that is the candidate allele, not the reference" — and that the parameters
+therefore cannot be hoisted out of the candidate loop. `Stratum`'s own field is
+`reference_repeats`, which is the right word on the fit's side of the seam and the wrong number
+here, so a caller handed a `Stratum` would pass the locus's and nothing would say so. At tomato
+dinucleotides that mistake scores a 12-repeat candidate at a 6-repeat tract's slippage: about 6 %
+of reads against about 15 %.
+
+**It is a lookup and not a derivation, and that distinction is the whole of its risk.**
+[`read_likelihoods.md`](read_likelihoods.md) §4.2 describes the level a caller reads as "read off
+the fitted curve blend", which is a statement about where the number comes from rather than an
+instruction to this type. A level on a `StratumOutcome` is already the emitted one by one of three
+routes — a fitted stratum has had `blend_level` applied in place after its period's curves were
+drawn, a stratum too thin to fit takes its curve whole and never goes through `blend_level` at
+all, and a run with curves switched off keeps its cell's own answer — and `LevelProvenance::source`
+says which. **Putting that level back through `blend_level` would weigh the curve against a number
+the curve is already inside.** `str_slippage_level_curve.md` §5.1 does not name this act; what it
+forbids in so many words is a *curve* fitted from blended values. This is the same circularity one
+step downstream, and it is worth a measurement rather than an argument: on a small real fit,
+re-blending the five blended strata moves their levels by 0.6 % to 4.1 % while leaving the
+`curve_weight` in their provenance unchanged — the number moves and the provenance does not say so.
+
+**The key carries a read group and the fit is indexed by slippage group**, so the type holds the
+run's `slippage_group_of` map and translates. One group per read group is the specified *grain*,
+not the default: the only builder of that map in this tree pools every read group into one set
+unless told otherwise. Two read groups a run declares alike get one answer, which is what a
+slippage group is for.
+
+**A refused stratum is left out rather than carried as an empty row.** `StratumOutcome::Refused`
+answers its three per-group accessors with empty slices, so a row built from one would tell every
+read group it put no read there — which says a library was silent where the truth is that the
+stratum has no answer for anybody. Left out, the lookup says `NoSuchStratum`, which is the honest
+one of the two. A **derived** stratum — one whose three numbers all came from its period's curves
+— is kept, and kept indistinguishable from a fitted one at the lookup, because the read likelihood
+reads three numbers and the provenance beside them and the difference is in the provenance.
+
+**Two open items this type does not settle**, both recorded in F1's implementation report:
+
+- **A candidate whose repeat count no kept reference tract occupies gets `NoSuchStratum`**, and
+  the curves that could have answered are thrown away — `over` keeps the per-group cells and not
+  the per-period curves, though every stratum that used one carries a copy in its
+  `LevelProvenance`. `str_slippage_level_curve.md` §6 designs a defined answer beyond the fitted
+  range; whether a repeat count with no tract behind it should be furnished at all needs the
+  spec's owner.
+- **The STR substitution rate sits at this same `(read group, stratum)` grain**
+  ([`read_likelihoods.md`](read_likelihoods.md) §6.1) and is not carried here. It lives on
+  `StratumEvidence`, not on `StratumOutcome`, so `over`'s signature as written cannot be extended
+  to reach it.
+
 ---
 
 ## 2. Interfaces

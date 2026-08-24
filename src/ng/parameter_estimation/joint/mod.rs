@@ -35,3 +35,4 @@ pub mod loci;
 pub mod share_curve;
 pub mod slippage_curve;
 pub mod ssr_fit;
+pub mod stratum_fits;
