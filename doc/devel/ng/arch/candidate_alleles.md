@@ -151,17 +151,35 @@ pub enum SelectionVerdict {
 /// One sample's reads whose sequence selection dropped, and the error mass they carry —
 /// `read_likelihoods.md` §2.1's `unmatched_q_sum`, with the count it was missing.
 ///
-/// **The count is not decoration: it is what makes truncation defensible.** The mass is the
-/// same under every genotype and cancels, so without the count a sample whose true allele was
-/// cut is scored confidently against a set that does not contain it, with nothing per-sample
-/// saying so (spec §5). Drop the count and refusing the locus becomes the correct policy again.
+/// **The second count is not decoration: it is what makes truncation defensible.** The mass is
+/// the same under every genotype and cancels, so without it a sample whose true allele was cut
+/// is scored confidently against a set that does not contain it and an invented genotype comes
+/// out (spec §4.1, §5). Drop it and refusing the locus becomes the correct policy again.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct UnmatchedSupport {
     pub num_reads: u32,
     /// Σ `ln P(error)` over them — summed straight from the merge's own per-row `q_sum`,
     /// so it is never re-derived. Zero (not negative) where nothing was dropped.
     pub q_sum: f64,
+    /// Of those reads, the ones on an allele that cleared the bar **for this sample** and was
+    /// then cut by the cap. **Non-zero means this sample's genotype is emitted as missing.**
+    pub earned_reads_cut_by_the_cap: u32,
 }
+
+impl UnmatchedSupport {
+    /// `earned_reads_cut_by_the_cap > 0`, named so the rule is greppable.
+    pub fn genotype_must_be_missing(&self) -> bool;
+}
+```
+
+**Why the second count and not `num_reads > 0`** (owner's decision, 2026-08-24). The bar drops
+alleles almost nobody showed — 13,166 of 15,474 alternatives on the GIAB trio at 300×, spec §3.3 —
+so nearly every sample has a non-zero pool at nearly every locus and a rule keyed on it would
+emit a missing genotype almost everywhere. The cap only ever cuts alleles that cleared the bar for
+*somebody*; asking whether it cleared for *this* sample is what makes the rule fire exactly where
+a real allele was taken from that sample.
+
+```rust
 
 /// For each allele of the merge's table, in that table's own index order: the id it now has
 /// among the candidates, or nothing where selection dropped it.

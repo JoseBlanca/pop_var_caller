@@ -242,6 +242,43 @@ pub struct UnmatchedSupport {
     /// `q_sum`**, never re-derived from a count and a rate. Zero, not negative, where
     /// nothing was dropped.
     pub q_sum: f64,
+    /// **Of those reads, the ones on a sequence *this sample itself* showed convincingly —
+    /// it cleared the support rule for this sample — which the cap then cut.** Non-zero
+    /// means this sample cannot be genotyped here; see
+    /// [`genotype_must_be_missing`](Self::genotype_must_be_missing).
+    ///
+    /// **Why this is separate from [`num_reads`](Self::num_reads), and it is the whole
+    /// point of the field.** Sequences are dropped two ways, and only one of them says
+    /// anything about a sample. The support rule drops sequences almost nobody showed,
+    /// which are overwhelmingly sequencing error — on the GIAB trio at 300× that is
+    /// 13,166 of the merge's 15,474 alternatives (spec §3.3). Every sample has a few
+    /// error reads at nearly every locus, so a rule keyed on `num_reads` would emit a
+    /// missing genotype almost everywhere. The cap is the other way, and it only ever
+    /// cuts sequences that already cleared the rule for *somebody* — but not necessarily
+    /// for the sample whose reads are being counted here, which is why "cleared it for
+    /// this sample" is the condition and not "the cap cut it".
+    pub earned_reads_cut_by_the_cap: u32,
+}
+
+impl UnmatchedSupport {
+    /// **Whether this sample's genotype must be emitted as missing at this locus.**
+    ///
+    /// True when the cap removed a sequence this sample's own reads had earned. The
+    /// sample carries something the locus is no longer called over, so every genotype the
+    /// caller can form for it is wrong — and the read likelihood cannot say so on its
+    /// own, because the pooled error mass is identical under every genotype and cancels
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §3.3). **Emitting a made-up genotype
+    /// instead is the behaviour this rule exists to prevent** (owner's decision,
+    /// 2026-08-24; spec §5).
+    ///
+    /// **This is what makes truncation defensible at all.** Without it the honest policy
+    /// would be to refuse the whole locus, which is what HipSTR does above 1,000
+    /// haplotypes and what the existing repeat-tract caller does above 24 candidates —
+    /// and refusing costs the other samples a locus they were called at perfectly well.
+    #[inline]
+    pub fn genotype_must_be_missing(&self) -> bool {
+        self.earned_reads_cut_by_the_cap > 0
+    }
 }
 
 /// **For each allele of the merge's table, in that table's own index order: the id it now
@@ -833,6 +870,44 @@ mod tests {
             empty.q_sum.is_sign_positive(),
             "an empty pool is zero, not negative zero, so a later sum cannot inherit a sign"
         );
+        assert_eq!(empty.earned_reads_cut_by_the_cap, 0);
+        assert!(
+            !empty.genotype_must_be_missing(),
+            "a sample that lost nothing keeps its genotype"
+        );
+    }
+
+    /// **Error reads in the pool must not cost a sample its genotype**, and this is the
+    /// assertion that separates the two ways a sequence leaves the table.
+    ///
+    /// The fixture is the ordinary case, not a corner: a sample with 40 reads of pooled
+    /// error mass, all of it on sequences the support rule rejected. On the GIAB trio at
+    /// 300× the support rule rejects 13,166 of 15,474 alternatives, so nearly every sample
+    /// at nearly every locus has a pool like this — a rule keyed on the pool's size would
+    /// emit a missing genotype almost everywhere.
+    #[test]
+    fn a_pool_of_rejected_error_reads_does_not_cost_a_sample_its_genotype() {
+        let error_only = UnmatchedSupport {
+            num_reads: 40,
+            q_sum: -123.5,
+            earned_reads_cut_by_the_cap: 0,
+        };
+        assert!(!error_only.genotype_must_be_missing());
+    }
+
+    /// **A sample that lost a sequence it had earned cannot be genotyped here**, however
+    /// little of its depth that sequence took — one read is enough, because the sequence
+    /// cleared the support rule for this sample before the cap removed it, and every
+    /// genotype the caller can now form for that sample is over a set that does not
+    /// contain what it carries.
+    #[test]
+    fn a_sample_whose_earned_sequence_the_cap_cut_is_emitted_as_missing() {
+        let truncated = UnmatchedSupport {
+            num_reads: 40,
+            q_sum: -123.5,
+            earned_reads_cut_by_the_cap: 1,
+        };
+        assert!(truncated.genotype_must_be_missing());
     }
 
     /// The verdict's two ordinary values are distinguishable, and `Truncated` carries how

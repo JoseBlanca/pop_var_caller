@@ -529,6 +529,36 @@ frozen before the first pass and stays frozen.
 | each sample's inbreeding coefficient | **no** — frozen by the parameter fit | [`calling_priors.md`](calling_priors.md) §7 |
 | the candidate alleles | **no while the loop runs** — a discovery round may add to them between whole runs of it, and ng ships with that off (§4.1) | candidate selection, plus discovery where switched on |
 
+### 5.0 A sample the candidate step could not call, and what the M-step does with it
+
+**Candidate selection can hand this loop a sample it has already declared uncallable at the locus.**
+When the allele cap cuts a sequence that a sample's own reads had earned, that sample carries
+something the locus is no longer called over, and
+[`candidate_alleles.md`](candidate_alleles.md) §4.1 fixes its genotype as **missing** rather than
+letting the caller invent one. The flag travels on the evidence as
+`GenericSampleEvidence::genotype_must_be_missing`
+([`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2.1); this loop does not re-derive
+it and could not, because the pooled error mass that would be the only trace is identical under
+every genotype and cancels.
+
+**The E-step is unaffected: such a sample is simply not scored, and emission writes its genotype as
+missing.**
+
+`OPEN:` **whether it also drops out of the M-step, and this is a real question, not bookkeeping.**
+The M-step sums every sample's expected allele copies into the cohort's, and that sum is what the
+next pass's prior is built from (§2). A sample whose true allele is absent from the table does not
+merely have an *uncertain* posterior — it has one over the wrong set, and it will put its mass on
+whichever surviving genotype its reads mismatch least, which is usually the homozygous reference.
+Including it therefore pulls the locus's allele frequencies toward the reference by exactly the
+samples that carry the rarest alleles. **Leaning: exclude it from the M-step too**, on the ground
+that a known-wrong contribution is worse than a smaller cohort — the loop already tolerates a
+sample contributing nothing, since a sample with no reads gives zero for every genotype and is
+decided by the prior alone (§7). *What would settle it:* the tomato panel at the 23 loci where the
+cap binds, comparing the fitted frequencies with the sample in and out. **Nothing measures it and
+nothing can until selection is wired into the builder** — which is
+[`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)'s work, and this paragraph is what
+that plan has to answer. *Raised 2026-08-24 with the owner's decision on the missing genotype.*
+
 **Why the slippage numbers get a clock of their own rather than joining the frequencies on the
 inner one.** Building the read-likelihood table takes `candidates × Σ_s (observations in sample s)`
 evaluations of a function whose per-entry cost against the loop's own per-genotype work is
@@ -722,7 +752,11 @@ they came from, and the run's skeleton already collects results per region
 revisited when emission fixes the shape of what a call is.
 
 **What it hands on** is, per locus: the allele table, and per sample the genotype posteriors, the
-most probable genotype, its confidence, and the cohort's expected allele copies. **The last of those
+most probable genotype, its confidence, and the cohort's expected allele copies — **plus, for a
+sample the candidate step declared uncallable (§5.0), the fact that its genotype is missing rather
+than any of the above.** Emission writes that sample's `GT` as missing; it is a decision taken
+before the reads were scored and not a low-confidence call, and the two must not be conflated in
+the output. **The last of those
 is not a by-product** — site filtering and emission read it, and recomputing it downstream from the
 called genotypes would give a different number, because a called genotype has thrown away the
 uncertainty the expected copies still carry.

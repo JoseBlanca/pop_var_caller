@@ -278,7 +278,7 @@ the drift the merge itself retired in August. There is no depth verdict
 `min_same_length_samples = 3` and `min_same_length_fraction = 0.10`. Two of the three read the
 cohort and the middle one is dead below three samples.
 
-**The cap of 24 and its refusal are dropped**, replaced by the inherited cap of six with
+**The cap of 24 and its refusal are dropped**, replaced by a cap of 32 with
 truncation ([`candidate_alleles.md`](candidate_alleles.md) §4). Production's is checked against a
 set that grows monotonically with cohort size and refuses the locus outright
 ([`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)), so at a large panel it
@@ -423,13 +423,30 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   periodic, and §4.1's measurements were all taken with the gate switched off, so nothing here
   constrains it. **Leaning: ship 10% and mark it soft.** *What would settle it:* on HG002, sweep
   it and count tracts refused against true heterozygous tracts lost, using the same rig as §5.
-- **Q2 — does the cap of six bind at a repeat tract in a large cohort?** A tract carries more real
-  alleles than a SNP does, and the ladder widens with the cohort, so this is where
-  [`candidate_alleles.md`](candidate_alleles.md) §4.2's extrapolation is most likely to come true.
-  Nothing measures it: the only STR benchmark with a truth set is one sample.
-  **Leaning: the inherited cap of six, with the truncation and ranking of the sibling document.**
-  *What would settle it:* the tomato panel's tracts routed through the merge once §2's field
-  exists, histogramming candidates per tract at 1, 4, 16 and 63 accessions.
+- **Q2 — how many alleles may a repeat tract be called over? SETTLED at 32** (owner's decision,
+  2026-08-24), against the sibling document's six. A tract carries more real alleles than a SNP
+  does and the ladder widens with the cohort, so this is where
+  [`candidate_alleles.md`](candidate_alleles.md) §4.2's extrapolation is most likely to come true;
+  six was inherited from a SNP/indel setting with nothing behind it for tracts.
+
+  **32 costs 528 diploid genotypes a sample a locus** — a locus over `A` alleles has `A(A+1)/2`,
+  so six is 21 and 32 is 528, and the calling loop scores every sample against every genotype.
+  That is the price, and it is the reason the number is 32 rather than HipSTR's effective ceiling:
+  64 alleles would be 2,080.
+
+  **What decided it is that HipSTR has no such limit at all.** Its `gen_candidate_seqs`
+  ([`HaplotypeGenerator.cpp:175-235`](../../../../HipSTR/src/SeqAlignment/HaplotypeGenerator.cpp))
+  keeps every tract sequence passing an admission test — one sample showing it with ≥2 reads *and*
+  ≥20% of that sample's reads, or a cohort-level 5% test — and **never ranks or truncates**. The
+  1,000 of `MAX_TOTAL_HAPLOTYPES` is a later safety check on the product across flank and repeat
+  blocks, and when it trips HipSTR abandons the locus. So HipSTR controls the count purely by
+  strict admission; 32 with truncation plus §4.1's missing-genotype rule keeps more loci callable
+  than either that or production's refusal at 24.
+
+  **Still not measured, and the measurement is still owed:** the only STR benchmark with a truth
+  set is one sample. *What would confirm 32:* the tomato panel's tracts routed through the merge
+  once §2's field exists, histogramming candidates per tract at 1, 4, 16 and 63 accessions. If
+  that histogram's tail reaches 32 at 63 accessions, the number is too low for a large panel.
 
   **What the other STR callers allow, since it is the one piece of evidence available before that
   run** (read 2026-08-24 from the vendored trees; the owner asked for it against this question):

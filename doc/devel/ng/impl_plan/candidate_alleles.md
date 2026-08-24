@@ -194,6 +194,18 @@ changes.
 dropped gets a zero pool with no branch taken to produce it.
 *Depends:* C2. *Source:* arch §2.3; spec §5, §5.1.
 
+**C3 also fills the second count, and it is a different question from the pool** (owner's
+decision, 2026-08-24; spec §4.1, §5): `earned_reads_cut_by_the_cap` is this sample's reads on an
+allele that **cleared the bar for this sample** and was then cut **by the cap** — not by the bar.
+Non-zero means emission writes a missing genotype for that sample. It needs B1's per-sample bar
+answers to still be reachable at C3, which the fold's per-allele summary does not carry, since
+"some sample cleared it" is not "this sample cleared it" — **so C3 asks the bar again, per
+`(sample, allele)`, over the alleles the cap cut**, and the cap cuts at 23 of 53,935 tomato loci
+and none of the trio's, so that second ask costs nothing at almost every locus.
+*Second oracle:* a locus above the cap where two samples earned the cut allele and a third had one
+error read on it — the two are missing, the third is genotyped, and the third's pool is non-zero
+so the test discriminates the count from the pool.
+
 > **Checkpoint C:** `select_generic` is complete and proven on hand-built loci, including the
 > reference-only and truncated outcomes. Pause for review.
 

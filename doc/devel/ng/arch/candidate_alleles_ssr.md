@@ -74,8 +74,15 @@ consumers want (§2.3) rather than the ladder itself.
 ```rust
 /// The repeat-tract path's own settings, beside the shared ones.
 pub struct SsrSelectionConfig {
-    /// The support rule and the cap — `candidate_alleles.md` §2.1, unchanged. The share is
-    /// 5 in 100 here too, which is why it is not a second field (spec §5).
+    /// The support rule and the cap — `candidate_alleles.md` §2.1's type, reused. The share
+    /// is 5 in 100 here too, which is why it is not a second field (spec §5).
+    ///
+    /// **The cap is not the sibling's.** This path builds it from
+    /// [`DEFAULT_MAX_CANDIDATE_ALLELES_SSR`] — **32**, against the ordinary path's six —
+    /// because a tract genuinely carries more alleles than a SNP does and HipSTR, the
+    /// nearest comparator, caps the count at nothing at all (spec §12, Q2, settled
+    /// 2026-08-24). The type is shared; only the number differs, and it costs 528 diploid
+    /// genotypes a sample a locus against six's 21.
     pub shared: CandidateSelectionConfig,
     /// The share of one sample's spanning reads that may sit off the motif grid before that
     /// sample is judged non-periodic (§3).
@@ -90,6 +97,18 @@ pub struct SsrSelectionConfig {
 /// in spec §4.1 and §5 were all taken with this gate switched off, so nothing there constrains
 /// it.
 pub const DEFAULT_MAX_OFF_GRID_SHARE: f64 = 0.10;
+
+/// **32 tract sequences including the reference**, where the ordinary path allows six
+/// (`candidate_alleles.md` §2.1). Settled by the owner 2026-08-24 on spec §12's Q2: a
+/// repeat tract carries more real alleles than a SNP does, six was inherited from a
+/// SNP/indel setting with nothing behind it for tracts, and HipSTR — the nearest
+/// comparator — has no allele limit at all, admitting every sequence that clears a
+/// per-sample test and abandoning the locus only if the haplotype product exceeds 1,000.
+/// **Soft, and still unmeasured**: 32 is a judgement bounded by cost, since a locus over
+/// `A` alleles has `A(A+1)/2` diploid genotypes and the loop scores every sample against
+/// every one — 528 here against 21 at six, and 2,080 at 64.
+pub const DEFAULT_MAX_CANDIDATE_ALLELES_SSR: MaxCandidateAlleles =
+    MaxCandidateAlleles::new_or_panic(32);
 ```
 
 ### 2.3 What this path returns beyond the shared bundle

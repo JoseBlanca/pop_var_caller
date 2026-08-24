@@ -303,11 +303,36 @@ obvious variants and six noise sequences is refused whole under production's rep
 (over 24 candidates, every sample no-called,
 [`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)) and under HipSTR's
 (over 1,000 haplotypes, the locus is abandoned). GATK, freebayes, bcftools' indel path and
-production's own ordinary path all truncate instead. **Truncation is only defensible because §5's
-leftover exists** — the cut alleles' reads keep their error mass in the arithmetic instead of
-being silently reassigned to the reference, which is what GATK does
+production's own ordinary path all truncate instead. The cut alleles' reads keep their error mass
+in the arithmetic instead of being silently reassigned to the reference, which is what GATK does
 (`AlleleLikelihoods.marginalize` takes a maximum over the collapsed alleles and drops the rest;
 `AlleleSubsettingUtils.subsetAlleles` deletes the genotype entries and subtracts the maximum).
+
+**But keeping the mass is not enough, and truncation alone was the wrong answer.** The pooled mass
+is identical under every genotype and cancels in genotyping (§5), so a sample whose own allele was
+cut is still scored — confidently — against a set that does not contain what it carries, and a
+genotype comes out. **That genotype is invented, and inventing one is worse than saying nothing.**
+
+**Decision (owner, 2026-08-24): a sample that lost an allele it had earned is emitted as missing at
+that locus.** "Earned" is this document's admission rule (§3) asked of that sample: the allele
+cleared the bar *for it*. The locus is still called, and every other sample is genotyped normally.
+
+**The condition is the cap, not the bar, and the difference is the whole rule.** The bar drops
+alleles almost nobody showed — 13,166 of 15,474 alternatives on the trio at 300× (§3.3) — which are
+overwhelmingly sequencing error, and every sample carries a few error reads at nearly every locus.
+A rule keyed on "this sample has reads in the pool" would emit a missing genotype almost
+everywhere. The cap only ever cuts alleles that already cleared the bar for somebody, and asking
+whether it cleared the bar *for this sample* is what makes the rule fire where a real allele was
+lost and nowhere else. **Measured, that is rare:** the cap binds at 23 of 53,935 tomato loci and 0
+of 7,478 trio loci at 300× (§4.2), and only the samples that earned a cut allele are affected at
+those.
+
+**Refusing the whole locus was the alternative and it loses more.** It is what HipSTR does above
+1,000 haplotypes and what production's repeat-tract path does above 24 candidates
+([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §10's table), and at 63 accessions it costs
+62 samples a locus they were called at perfectly well because one accession carried something rare.
+**§5's per-sample count is what makes the narrower answer available**, and it is why that count
+exists.
 
 **The ranking: the largest share of one sample's compared reads the allele took, maximised over
 samples.** Ties break on how many samples cleared the bar, then on the cohort's read total, then
@@ -389,13 +414,24 @@ group)` ([`build.rs:1245`](../../../../src/ng/run/cohort_merge/build.rs)), so a 
 is the sum over the alleles selection dropped. There is no new upstream producer and no second
 pass over anything.
 
-**Decision: the leftover carries a per-sample read count beside the mass, and that is what makes
-truncation defensible.** The mass alone is identical under every genotype, so a sample whose true
-allele was cut is scored confidently against a set that does not contain it, with nothing
-per-sample saying so. A count of that sample's reads in the pool is what lets a later step
-no-call it. It costs one integer per sample per locus. **Truncation (§4.1) and this count are one
-decision, not two: if the count is ever dropped, refusing the locus becomes the correct policy
-again.**
+**Decision: the leftover carries two per-sample counts beside the mass, and the second is what
+makes truncation defensible.** The mass alone is identical under every genotype, so a sample whose
+true allele was cut is scored confidently against a set that does not contain it, with nothing
+per-sample saying so. It costs two integers per sample per locus.
+
+| what it counts | what reads it | what it is for |
+|---|---|---|
+| **all this sample's reads on dropped alleles** | nobody, yet | the pool's own bookkeeping, and the emitted depth question §10 defers |
+| **of those, the reads on an allele that cleared the bar *for this sample* and was then cut by the cap** | emission | **non-zero means this sample's genotype is emitted as missing** (§4.1) |
+
+**The second count is not the first one narrowed for tidiness — the first cannot do the job.** The
+bar drops error at nearly every locus, so a sample's total pool is almost always non-zero and says
+nothing; the second is non-zero only where a real allele was taken away from that sample. §4.1
+carries the measurement.
+
+**Truncation (§4.1) and the second count are one decision, not two: if it is ever dropped, refusing
+the locus becomes the correct policy again**, because the alternative — emitting an invented
+genotype for a sample whose allele is missing from the table — is not one.
 
 **Production produces the same thing and shows the trap.** Its cap pools the dropped alleles'
 per-sample support into `other_scalars`, whose `q_sum` enters every genotype's likelihood
