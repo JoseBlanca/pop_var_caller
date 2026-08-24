@@ -251,6 +251,15 @@ read_likelihoods spec §3.2; arch §3.
 > **Checkpoint D:** the histogram route carries the accumulator, over the sites its own fit reads,
 > minted by nothing — the numbers come from the walk. The census route's is deferred to the
 > comparison that decides whether that route survives at all. Pause for review.
+>
+> **Reviewed 2026-08-24**, four ways, in
+> [`ng_prereq_closeout_d2_review`](../../reports/implementations/ng_prereq_closeout_d2_review_2026-08-24.md)
+> — the step had had none. Six defects, all fixed here except one, which is the owner's: **the
+> per-position depth cap does divide the two site sets**, by 2.7% on HG002 at 300× and by nothing on
+> tomato, where the spec said it does not. Both options are in
+> [`read_likelihoods.md`](../spec/read_likelihoods.md) §3.2. And **the two averages the choice of
+> mean is between are 25 to 44 times apart** on real reads, not close as the decision assumed —
+> [`ng_prereq_closeout_two_averages`](../../reports/implementations/ng_prereq_closeout_two_averages_2026-08-24.md).
 
 ### Milestone E — deleted: the contamination mixture's second half is not the pre-pass's (item 4)
 
@@ -323,7 +332,7 @@ read_likelihoods arch §4.2; calling_em_loop arch §2.
 | A | boundary tests both directions; the fitted-`1.0` clamp test |
 | B | **parity:** one-read-group fixtures byte-identical to today (existing merge suite); two-group fixture splits rows exactly |
 | C | hand-written partial fixture (stretch, bases, counts); existing suite green; locus-existence verdicts unchanged |
-| D | same-function check from both mint sites; hand-computed fixture mean; the totals equal the histogram's own read count, and merge in any shard order gives one answer |
+| D | same-function check from both mint sites; hand-computed fixture mean; merge in any shard order gives one answer; **on real reads, the totals count exactly the reads the walk emitted at the loci the histogram counts** — 172,616,054 on HG002 at 300×, both paths, `examples/ng_minted_error_means.rs`. *(Not "equals the histogram's own read count": the histogram thins every position to `MAX_BINNED_DEPTH` = 124 and these totals thin nothing, so above 124 reads a position the two numbers differ by design — §3.2's argument is that the cap is quality-blind, so the **mean** is unbiased, not that the counts match.)* |
 | E | deleted — nothing to verify here |
 | F | **the curve as oracle:** gathered level ≡ `blend_level` called directly; provenance carried |
 

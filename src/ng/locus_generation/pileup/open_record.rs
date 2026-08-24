@@ -842,6 +842,11 @@ impl OpenPileupRecord {
         // distinct allele × witness extent × read group); beyond that it spills and behaves
         // as the `Vec` did.
         let mut observation_alleles: SmallVec<[usize; 4]> = SmallVec::new();
+        // **Measurement scaffolding, and the check is hoisted out of the loop on purpose.**
+        // An unarmed walk pays one cached load per record against the ~90 reads that record
+        // folds; inside the loop it would pay one per read, ~113 M times over a whole-genome
+        // contig. See [`minted_error_census`](super::minted_error_census) for what it is for.
+        let census_armed = super::minted_error_census::enabled();
         // **In place, ascending by `read_id`** — see the note above on why that order is
         // the determinism guarantee and why it no longer costs a sort.
         for (_read_id, state) in self.folded_reads.iter() {
@@ -866,6 +871,18 @@ impl OpenPileupRecord {
                 }
             }
             let read_group = state.read_group;
+            // **The one place a read's own minted error still exists as one read's.** Below,
+            // `add_contribution` pools it into an observation's `q_sum` and the read is gone;
+            // `Σ ε` cannot be recovered from `Σ ln ε` afterwards, which is why the census sums
+            // both here. Complete witnesses only, because those are the reads the pre-pass's
+            // calibration accumulator sums over.
+            if census_armed && matches!(read_witness, ReadWitness::Complete) {
+                super::minted_error_census::record_read(
+                    u64::from(self.pos),
+                    read_group,
+                    state.contribution.q_sum,
+                );
+            }
             let existing = observations.iter().zip(&observation_alleles).position(
                 |(observation, &observation_allele)| {
                     observation_allele == state.allele_index
@@ -2711,36 +2728,48 @@ fn min_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> u8 {
 /// route** — `pileup/walker/open_record.rs:792`, over a byte-identical copy of the table below
 /// — and that is why §3.2 can say the per-read number "already contains mapping error".
 ///
-/// **This exists as a named function because two things will have to mint the same number and
-/// they are in different modules.** The generator's two column paths mint it here. The
-/// parameter pre-pass's calibration accumulator — **which does not exist yet; D2 builds it** —
-/// will sum it, and the scale it feeds is
-/// `fitted error rate ÷ mean minted error probability`
-/// (`doc/devel/ng/spec/read_likelihoods.md` §3.2). A numerator and a denominator computed by
-/// two definitions of "how wrong is this read" is not a calibration, which is the whole reason
-/// for the function.
+/// **This exists as a named function because the generator's two column paths would otherwise
+/// each have their own copy of the rule**, and the scale the pre-pass builds
+/// (`fitted error rate ÷ mean minted error`,
+/// `doc/devel/ng/spec/read_likelihoods.md` §3.2) is meaningless if its two halves come from two
+/// definitions of "how wrong is this read". The general fold mints here; so does the
+/// ordinary-column lane in `fast_column.rs`.
 ///
-/// **Note the units, because an observation's `q_sum` is the wrong sum for it.** §3.2's mean is
-/// over error *probabilities*; this function returns their logarithm, and `q_sum` accumulates
-/// these logarithms. So `exp(q_sum / n)` is the geometric mean and the scale wants the
-/// arithmetic one, which is not recoverable from it: one read at Phred 20 and one at Phred 40
-/// have arithmetic mean 0.00505 and geometric mean 0.001, a factor of 5. **The accumulator
-/// needs its own sum of `exp` of this answer, minted where this is** — which §12's ninth test
-/// exists to catch, and which is why the two numbers §3.2 asks the pre-pass for are new rather
-/// than derivable from what the walk already carries.
+/// **The pre-pass's calibration accumulator does not call this, and does not need to**
+/// ([`calibration`](crate::ng::parameter_estimation::generic::calibration), built 2026-08-24).
+/// It sums what the fold already wrote down: an observation's `q_sum` is this answer summed over
+/// that observation's own reads, so the accumulator adds up numbers that exist rather than
+/// minting a second time. **That is why this stayed `pub(crate)`** — there is no consumer
+/// outside `pileup` to open the path for.
 ///
-/// **The `pub(crate)` reaches no further than `pub(super)` today, and that is deliberate.**
-/// `mod open_record;` is private, so nothing outside `pileup` can name this however it is
-/// marked. Opening the path costs one line in `pileup/mod.rs`, and a re-export with no consumer
-/// is an unused import the `-D warnings` gate refuses — so it lands with the caller, in D2. The
-/// wider marking says which of the two this is meant to become.
+/// **Note the units: this returns a logarithm, and the average built from it is the geometric
+/// mean.** `exp(Σ q_sum / Σ num_obs)` is the mean of the per-read error *probabilities* in the
+/// geometric sense, and that is what §3.2 asks for — corrected on 2026-08-24 by the owner, after
+/// an earlier version of that section asked for the arithmetic mean, `Σ ε / n`. Nothing carries
+/// `Σ ε`: this function's answer is summed as a logarithm and the individual reads are discarded
+/// at the fold, so `Σ ε` is not recoverable. The geometric mean is also the quantity the model
+/// charges an observation, so building the scale from it is what makes the calibrated property
+/// hold in the model's own terms.
 ///
-/// **§12's tenth test is not written yet, and this function is only half of what it needs.**
-/// That test asks for the scaled probabilities' mean to come back as the fitted rate, and for
-/// the mint to be called from the pre-pass's side and the generator's side on one read; there
-/// is no pre-pass side until D2. What `the_two_column_paths_mint_one_reads_error_the_same_way`
-/// pins is the weaker property available today — that the generator's own two column paths
-/// agree on one read.
+/// **The two means are not close, and the size is measured.** Over 172,616,054 read-positions on
+/// HG002's 100 benchmark regions at 300×, the arithmetic mean of `ε` is **44.1 times** the
+/// geometric one — Phred 18.9 against Phred 35.4. Over 5,485,730,235 on the 63-accession tomato
+/// cohort at 2.5× to 28.6× it is **25.2 times**, and per read group the ratio runs 22.7 to 37.0.
+///
+/// **Most of that gap is this function's `max`, applied to a read the walk silenced.** The
+/// mate-overlap rule gives the losing mate of an overlapping pair base quality Phred 0, so
+/// `phred_to_ln_perr(0)` is `+0.0` and this returns `+0.0` — an error probability of exactly one,
+/// on a read that still counts. Such a read adds nothing to a sum of logarithms and a whole unit
+/// to a sum of probabilities: **9 read-positions in 1,000 on HG002 carry `ε = 1` and they are 73%
+/// of Σ ε**. So an arithmetic mean of what this returns is largely a count of overlapping mates.
+/// Measured by `examples/ng_minted_error_means.rs`, which sums both shapes where a read still
+/// exists.
+///
+/// **What pins this function today** is
+/// `the_two_column_paths_mint_one_reads_error_the_same_way` — that the generator's own two
+/// column paths agree on one read. §12's test asking for the *scaled* probabilities' mean to come
+/// back as the fitted rate belongs to the read likelihood, which is what applies the scale;
+/// nothing here does.
 pub(crate) fn minted_ln_read_error(base_quality: u8, mq_log_err: f64) -> f64 {
     phred_to_ln_perr(base_quality).max(mq_log_err)
 }
