@@ -118,5 +118,6 @@ writes one anywhere, so it lives beside the CRAMs at
 - **It is one cohort of one crop.** The spread across libraries of *different* preparations, or of a
   species with a worse reference, is unmeasured and could be wider.
 - **The `Supplied` rung is untested here**, because no run supplied a rate.
-- **The route comparison is not in this report.** The census route's answer on the same cohort is
-  being measured separately, and the two-class refusal above is what it should be judged on.
+- **The route comparison is not in this report**, and it is not settled either:
+  [`ng_error_rate_routes_2026-08-24.md`](ng_error_rate_routes_2026-08-24.md) records what the cohort
+  route gave on the same 63 accessions, and why the answer arrived as one number instead of 63.
