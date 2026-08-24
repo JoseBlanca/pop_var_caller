@@ -92,12 +92,13 @@
 //!   silently (`per_group_merger.rs:1963`).
 //! - **Every probability is floored before a logarithm**, so one impossible observation
 //!   yields a finite very negative number instead of turning a sample's whole row into
-//!   `NaN`. The floors are [`MIN_BASE_ERROR`] here and the geometric clamps in the stutter
-//!   distribution. **Floored and not capped**, which is the correction C1 made to this line
-//!   on 2026-08-24: [`MAX_BASE_ERROR`] exists and the row does not apply it, because a
-//!   ceiling that binds on a single read and not on the fold of that read with others is a
-//!   non-linear function of a per-read quality, which is exactly what the aggregation
-//!   contract forbids ([`ReadGroupCalibration::charged_error`] carries the size).
+//!   `NaN`. The floor is [`MIN_BASE_ERROR`] here, and the geometric clamps in the stutter
+//!   distribution. **Floored and not capped**, which C1 corrected on 2026-08-24 and the owner
+//!   settled the same day: production pairs that floor with a ceiling at a half, and a ceiling
+//!   binds on a single read and not on the fold of that read with others — a non-linear
+//!   function of a per-read quality, which is exactly what the aggregation contract forbids.
+//!   The ceiling and the method that applied it are deleted;
+//!   `tests::what_the_row_charges_a_poor_read_is_not_capped` is what stops them coming back.
 //!
 //! ## Three tiers of parameter, and only the middle one is open
 //!
@@ -138,13 +139,13 @@ use crate::ng::types::{
 
 /// The clamps a geometric success probability is held inside, **re-exported and not copied**.
 ///
-/// **Why these are re-exported where the two floors below are copied, which looks
+/// **Why these are re-exported where the floor below is copied, which looks
 /// inconsistent and is not.** These live in `alignment/stutter.rs`, which is ng's own code, so
 /// there is one implementation and one name and a consumer points at it — two spellings of one
 /// number are two things that can drift, and the tree already shows what that costs: production
 /// keeps a *third* private copy of these same two values in its own stutter model with nothing
-/// connecting it to either. The floors below come from `src/var_calling/`, which is frozen
-/// production that ng does not depend on, so they are copied deliberately and pinned by a test
+/// connecting it to either. The floor below comes from `src/var_calling/`, which is frozen
+/// production that ng does not depend on, so it is copied deliberately and pinned by a test
 /// — the same discipline `alignment/stutter.rs` uses for the slip cutoff it inherited.
 pub use crate::ng::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 
@@ -159,31 +160,6 @@ pub use crate::ng::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 /// rather than negative infinity, so one such read makes a genotype very unlikely instead of
 /// making the sample's whole row `NaN` (spec §8).
 pub const MIN_BASE_ERROR: f64 = 1e-12;
-
-/// Ceiling on the same quantity, `0.5` — inherited from production's `MAX_BASE_ERROR`
-/// alongside [`MIN_BASE_ERROR`], which is why they are named together.
-///
-/// **The row does not apply it** (C1, 2026-08-24), and that is the first thing to know about
-/// it: a ceiling binds on a single read and not on the fold of that read with others, which
-/// makes it a non-linear function of a per-read quality — exactly what spec §2.3's aggregation
-/// contract forbids. It survives on [`ReadGroupCalibration::charged_error_capped_at_half`],
-/// which nothing outside this module's tests reads, and whether it should survive at all is an
-/// open question for the owner. Everything below describes what the constant *means*, not
-/// something the likelihood does.
-///
-/// A read charged more than half is a read the model says is more often wrong than right, and
-/// production's own comment calls its ceiling a safety net rather than a modelling claim — a
-/// sample whose mean error came near one would not have passed the filter before it. **It is
-/// not the point at which a read stops being evidence for the base it reports**, which an
-/// earlier version of this sentence said: with the error mass spread over the three other
-/// bases, a read at an error of a half still favours the base it shows by 0.5 against a sixth
-/// each, and that crossing is at three-quarters. The ceiling is a guard, not a threshold.
-///
-/// **The `.clamp` that applies it is also what stops a `NaN` reaching a logarithm**, and it
-/// does not: `f64::clamp` passes `NaN` straight through. That is why the one input that can
-/// produce one — an observation with no reads behind it — is an assertion rather than a
-/// clamped value ([`ReadGroupCalibration::charged_error_capped_at_half`]).
-pub const MAX_BASE_ERROR: f64 = 0.5;
 
 /// §3.2's calibration: one multiplier per read group, so that the average error the model
 /// charges that group's reads is the rate the parameter fit measured.
@@ -367,13 +343,10 @@ impl ReadGroupCalibration {
     /// scale times the geometric mean of its reads' minted error, floored against zero and
     /// **not capped from above**.
     ///
-    /// # Why this exists beside [`charged_error_capped_at_half`](Self::charged_error_capped_at_half)
+    /// # Why it floors and does not cap
     ///
-    /// The two differ in what they do at the top of the range: that one clamps into
-    /// `[MIN_BASE_ERROR, MAX_BASE_ERROR]` and this one only floors — **and because it only
-    /// floors, it has to refuse inputs the other could pass on**, which is the second
-    /// difference and the reason for the assertions below. **The ceiling cannot be applied to
-    /// what the row charges**,
+    /// Production pairs its floor with a ceiling at a half, and ng adopted both at A2 before
+    /// anything consumed them. **The ceiling cannot be applied to what the row charges**,
     /// and the reason is a stated requirement rather than a preference: spec §2.3 asks that
     /// no term be a non-linear function of a per-read quality, because the merge hands the
     /// row a *fold* of reads and `q_sum` recovers only their geometric mean. `min(x, ½)` is
@@ -411,7 +384,7 @@ impl ReadGroupCalibration {
     ///   `x.max(y)` returns `y` when `x` is `NaN`, so **a `NaN` would come back as
     ///   `MIN_BASE_ERROR` — the most confident error probability this module admits** rather
     ///   than as a `NaN` anything downstream could see. That is the one place this differs
-    ///   from [`charged_error_capped_at_half`](Self::charged_error_capped_at_half), whose
+    ///   from [`charged_error`](Self::charged_error), whose
     ///   `f64::clamp` passes a `NaN` through, and it is why the check is here and not there.
     /// - **A scale that is not finite and positive.** [`scale`](Self::scale) is a public
     ///   field, so [`from_fitted_rate`](Self::from_fitted_rate)'s own guard can be bypassed
@@ -436,60 +409,6 @@ impl ReadGroupCalibration {
         );
         let mean_log_error = q_sum / f64::from(num_reads);
         (self.scale * mean_log_error.exp()).max(MIN_BASE_ERROR)
-    }
-
-    /// This read group's calibrated error probability for an observation, from the sum of
-    /// log errors over its reads.
-    ///
-    /// **Not what the row charges** — see [`charged_error`](Self::charged_error), which
-    /// floors alike and does not cap, and says why the cap disqualifies this one from the
-    /// likelihood. What is left here is a clamped-into-`[0, ½]` reading of the same
-    /// quantity, which nothing in the caller consumes.
-    ///
-    /// **The geometric mean of the observation's reads, times the scale.** That the two
-    /// compose exactly is what makes the calibrated property hold: scaling every read by one
-    /// multiplier multiplies their geometric mean by it, so a read group's calibrated average
-    /// *is* the fitted rate — **for every read whose calibrated error stays inside the
-    /// floors.**
-    ///
-    /// **Nothing outside this module's tests calls it, and the `dead_code` allowance below is
-    /// how that stays visible** rather than being hidden by leaving the method public. It is
-    /// here because the pair of floors is inherited from production and this half of the pair
-    /// is what we deliberately do not apply; whether that is worth a method is an open question
-    /// for the owner, recorded in C1's implementation report with a recommendation to delete
-    /// both it and [`MAX_BASE_ERROR`]. Deleting it retires an A2 decision, which is not
-    /// something a C1 commit should do quietly.
-    ///
-    /// Floored into `[MIN_BASE_ERROR, MAX_BASE_ERROR]` before it can reach a logarithm, and
-    /// **the ceiling is the one that binds in practice**: at a scale of 2.3 any read minted
-    /// worse than an error of about 1 in 5 — base Phred 7 or worse — is clamped, and its
-    /// charge stops tracking the fitted rate. Where the clamp binds, the group's charged
-    /// average is below the fitted rate by however much the clamp removed, and that is not
-    /// bounded here.
-    ///
-    /// # Panics
-    ///
-    /// **In release as well as debug**, on `num_reads == 0`. An observation with no reads
-    /// behind it is a row the merge does not build, so it is a caller bug — and the two
-    /// things this returns without the check are worse than a panic: `NaN` at a zero
-    /// `q_sum`, which `f64::clamp` passes straight through the floors the module promises,
-    /// and `MIN_BASE_ERROR` at a negative one, which is a plausible number nothing
-    /// downstream could tell from a real charge. The module's own contract puts structural
-    /// assertions in release (`per_group_merger.rs:1963` is the precedent), and the cost here
-    /// is one integer branch beside an `exp`.
-    #[must_use]
-    #[allow(
-        dead_code,
-        reason = "kept while its fate is an open question — see the doc above"
-    )]
-    pub(crate) fn charged_error_capped_at_half(&self, q_sum: f64, num_reads: u32) -> f64 {
-        assert!(
-            num_reads > 0,
-            "an observation with no reads behind it has no average error; the merge builds \
-             no such row"
-        );
-        let mean_log_error = q_sum / f64::from(num_reads);
-        (self.scale * mean_log_error.exp()).clamp(MIN_BASE_ERROR, MAX_BASE_ERROR)
     }
 }
 
@@ -1932,19 +1851,18 @@ mod tests {
 
     // ---- A2: the parameter views, the floors, the scratch ----
 
-    /// Both floors are inherited from production and the doc comments say so. Two spellings
-    /// of one model assumption are two things that can drift, and nothing else would notice:
-    /// a floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is
-    /// a plausible-looking number rather than a failure.
+    /// The floor is inherited from production and the doc comment says so. Two spellings of
+    /// one model assumption are two things that can drift, and nothing else would notice: a
+    /// floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is a
+    /// plausible-looking number rather than a failure.
+    ///
+    /// **Production's ceiling is deliberately not adopted and so is not pinned here** — see
+    /// `what_the_row_charges_a_poor_read_is_not_capped`.
     #[test]
-    fn the_floors_still_equal_productions() {
+    fn the_floor_still_equals_productions() {
         assert_eq!(
             MIN_BASE_ERROR,
             crate::var_calling::contamination_estimation::MIN_BASE_ERROR
-        );
-        assert_eq!(
-            MAX_BASE_ERROR,
-            crate::var_calling::contamination_estimation::MAX_BASE_ERROR
         );
     }
 
@@ -2097,7 +2015,7 @@ mod tests {
         let mut weighted_log_sum = 0.0;
         let mut reads = 0u32;
         for &(q_sum, num_reads) in &observations {
-            let charge = calibration.charged_error_capped_at_half(q_sum, num_reads);
+            let charge = calibration.charged_error(q_sum, num_reads);
             weighted_log_sum += f64::from(num_reads) * charge.ln();
             reads += num_reads;
         }
@@ -2110,7 +2028,7 @@ mod tests {
             rate
         );
         // …and no single observation's charge is the fitted rate, which is the point.
-        let single = calibration.charged_error_capped_at_half(observations[1].0, observations[1].1);
+        let single = calibration.charged_error(observations[1].0, observations[1].1);
         assert!((single - rate).abs() > 1e-4);
     }
 
@@ -2132,7 +2050,7 @@ mod tests {
         )
         .expect("one read is a denominator");
 
-        let charged = calibration.charged_error_capped_at_half(q_sum, 1);
+        let charged = calibration.charged_error(q_sum, 1);
 
         assert!(
             (charged - rate).abs() <= f64::EPSILON * rate,
@@ -2157,8 +2075,8 @@ mod tests {
 
         let (good_q_sum, good_reads) = minted_reads_at_phred(&[40]);
         let (poor_q_sum, poor_reads) = minted_reads_at_phred(&[13]);
-        let good = calibration.charged_error_capped_at_half(good_q_sum, good_reads);
-        let poor = calibration.charged_error_capped_at_half(poor_q_sum, poor_reads);
+        let good = calibration.charged_error(good_q_sum, good_reads);
+        let poor = calibration.charged_error(poor_q_sum, poor_reads);
 
         // Phred 13 against Phred 40 is a factor of 10^2.7 either side of the scale.
         assert!(
@@ -2252,7 +2170,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no average error")]
     fn an_observation_with_no_reads_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().charged_error_capped_at_half(-7.0, 0);
+        let _ = ReadGroupCalibration::defaulted().charged_error(-7.0, 0);
     }
 
     /// Where nothing was fitted the qualities are used as reported — and the run's output has
@@ -2265,13 +2183,19 @@ mod tests {
 
         assert_eq!(defaulted.scale, 1.0);
         assert_eq!(defaulted.provenance, Provenance::Defaulted);
-        assert!((defaulted.charged_error_capped_at_half(q_sum, num_reads) - 0.001).abs() < 1e-15);
+        assert!((defaulted.charged_error(q_sum, num_reads) - 0.001).abs() < 1e-15);
     }
 
     /// A charge that could reach zero would reach negative infinity through the logarithm and
-    /// turn a sample's whole row into `NaN`. The floors are what stop it, at both ends.
+    /// turn a sample's whole row into `NaN`. The floor is what stops it.
+    ///
+    /// **And nothing stops it from above, which is a decision rather than an omission**: a
+    /// ceiling binds on a single read and not on the fold of that read with others, and spec
+    /// §2.3 forbids any term that is a non-linear function of a per-read quality. So a scale of
+    /// `1e30` charges a great deal more than one — and §3.3's log-space form, which charges
+    /// `q_sum + n·log scale`, is positive under exactly the same conditions.
     #[test]
-    fn a_charge_is_floored_at_both_ends_before_it_can_reach_a_logarithm() {
+    fn a_charge_is_floored_from_below_and_deliberately_not_capped_from_above() {
         let tiny = ReadGroupCalibration {
             scale: 1e-30,
             provenance: Provenance::Supplied,
@@ -2282,18 +2206,12 @@ mod tests {
         };
         let (q_sum, num_reads) = minted_reads_at_phred(&[30]);
 
-        assert_eq!(
-            tiny.charged_error_capped_at_half(q_sum, num_reads),
-            MIN_BASE_ERROR
-        );
-        assert_eq!(
-            huge.charged_error_capped_at_half(q_sum, num_reads),
-            MAX_BASE_ERROR
-        );
+        assert_eq!(tiny.charged_error(q_sum, num_reads), MIN_BASE_ERROR);
+        assert!(tiny.charged_error(q_sum, num_reads).ln().is_finite());
         assert!(
-            tiny.charged_error_capped_at_half(q_sum, num_reads)
-                .ln()
-                .is_finite()
+            huge.charged_error(q_sum, num_reads) > 1.0,
+            "an uncapped charge at a scale of 1e30 is {}",
+            huge.charged_error(q_sum, num_reads)
         );
     }
 
@@ -3285,33 +3203,41 @@ mod tests {
 
     // ---- C1: what the row charges a wrong read ----
 
-    /// **The one thing that separates [`ReadGroupCalibration::charged_error`] from
-    /// [`ReadGroupCalibration::charged_error_capped_at_half`]**, pinned so that reuniting them is a test
-    /// failure rather than a genotype that quietly moved.
+    /// **A poor read is charged what it was minted with, past a half and all**, which is the
+    /// property a ceiling would break.
     ///
-    /// A read minted at Phred 1 is an error of 0.794. The capped reading returns 0.5 — 0.46
-    /// nats away — and the charged one returns the 0.794 the read was minted with, because
-    /// spec §2.3 forbids any term that is a non-linear function of a per-read quality: the
-    /// merge hands the row folds, and a cap that binds on a single read and not on the fold
-    /// of that read with others would make pooling change the answer.
+    /// A read minted at Phred 1 is an error of 0.794. Production's ceiling would return 0.5 —
+    /// 0.46 nats away — and spec §2.3 forbids it: the merge hands the row *folds* of reads and
+    /// `q_sum` recovers only their geometric mean, so no term may be a non-linear function of a
+    /// per-read quality, and `min(x, ½)` is exactly such a function. On the row's own
+    /// aggregation fixture that cap binds on every Phred-1 read taken singly and on none of the
+    /// folds, whose geometric mean over the 93/1 alternation is `2 × 10⁻⁵`; at the fixture's
+    /// 300-read end, 150 such reads, it would move the answer by 69 nats where the property is
+    /// pinned to a relative `2 × 10⁻¹⁴`.
+    ///
+    /// The ceiling and the method that applied it were deleted on the owner's decision
+    /// (2026-08-24) once nothing outside this module's tests read either. **This test is what
+    /// is left of them**, so that reintroducing a cap fails here rather than moving genotypes.
     #[test]
-    fn what_the_row_charges_is_not_capped_and_the_other_reading_is() {
+    fn what_the_row_charges_a_poor_read_is_not_capped() {
         let calibration = ReadGroupCalibration::defaulted();
         let minted_at_phred_1 = -1.0 / 10.0 * std::f64::consts::LN_10;
 
         let charged = calibration.charged_error(minted_at_phred_1, 1);
-        let capped = calibration.charged_error_capped_at_half(minted_at_phred_1, 1);
 
         assert!((charged - 0.794_328_2).abs() < 1e-6, "charged {charged}");
-        assert_eq!(capped, MAX_BASE_ERROR);
         assert!(
-            ((charged / capped).ln() - 0.462_89).abs() < 1e-4,
-            "the cap is worth {} nats on this read",
-            (charged / capped).ln()
+            charged > 0.5,
+            "a charge past a half is what a cap would have removed, and this is {charged}"
+        );
+        assert!(
+            ((charged / 0.5_f64).ln() - 0.462_89).abs() < 1e-4,
+            "production's ceiling would be worth {} nats on this read",
+            (charged / 0.5_f64).ln()
         );
     }
 
-    /// **The floor is the half of the pair that survives**, and it is not reached by any
+    /// **The floor is the half of production's pair that ng adopted**, and it is not reached by any
     /// quality the read preparation admits: Phred 93 at the smallest scale the row's fixtures
     /// use is 185 times it. So it changes no answer that can occur, and exists only so that a
     /// logarithm never sees a zero (spec §8).
@@ -3363,7 +3289,7 @@ mod tests {
     /// probability the module admits — and the row is finite, plausible and wrong.
     ///
     /// This is the one place [`ReadGroupCalibration::charged_error`] and
-    /// [`ReadGroupCalibration::charged_error_capped_at_half`] needed different guards:
+    /// [`ReadGroupCalibration::charged_error`] needed different guards:
     /// `f64::clamp` propagates a `NaN`, `f64::max` swallows it. Found by C1's review.
     #[test]
     #[should_panic(expected = "at or below zero")]
