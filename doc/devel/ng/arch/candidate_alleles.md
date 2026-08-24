@@ -292,6 +292,13 @@ pub struct SelectionScratch {
 `AlleleSummary` is private to the module — one allele's fold across samples: the largest share of
 one sample's reads it took, how many samples cleared the bar, and its cohort read total.
 
+**Two of its three fields are readable from outside as scalars**, through
+`SelectionScratch::best_within_sample_share_of` and `SelectionScratch::cohort_reads_of` (step D1).
+They exist for `examples/ng_candidate_selection_probe.rs`, which reports the ranking's own keys and
+would otherwise have to recompute them — the duplicate rule that step deletes. **Two scalars rather
+than the type**, so the shape of the computation stays inside the module and nothing outside can
+hold or build a summary; the third field has no reader and is not exported.
+
 **It does *not* carry the reads and mass it would contribute to the leftover**, which an earlier
 draft of this section asked for. Three reasons, and the third is the one that settles it:
 `AlleleSummary` is per allele with no sample axis while `LocusSelection::unmatched` is per
@@ -478,5 +485,12 @@ they assert; the two that pin *this* document's shapes rather than the spec's ru
 The regression anchor is spec §12's last entry: the GIAB trio and the tomato panel through the
 calling loop with real candidates, which is the blocker
 [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) records. The measurement harness
-already exists — `examples/ng_candidate_selection_probe.rs` — and produced every number the spec
-quotes.
+already exists — `examples/ng_candidate_selection_probe.rs` — and **calls this module rather than
+carrying a copy of it** (step D1, 2026-08-24), so the numbers the spec quotes are the shipped
+code's. It reproduced them: 4,177 and 7,478 built loci on the trio at 30× and 300×, 53,935 on the
+tomato panel, every bar's kept-alternative total, every cap's binding count, and the leftover at
+about 4 tomato reads in every 1,000 (143,712 of 39,589,086). **One figure changed with the code** —
+the two cap rankings keep different alleles at 19 tomato loci where the standalone copy found 17,
+because the within-sample share is now maximised over the samples that cleared the bar. **One was a
+slip in a table**, where the widest locus at 16 samples asked carries 10 alternatives and was
+written as 14. Spec §4.2 records both.

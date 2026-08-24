@@ -17,30 +17,73 @@
 //! both cost memory: every sample's observations over every interval are held at once, which is
 //! what the merge consumes.
 //!
-//! **The bar asked here is the merge's own keep rule, one level down.** The merge asks each
-//! sample whether its *non-reference reads* reach `max(floor, ceil(share × its compared
-//! reads))` and builds the locus if any one does (`MinAltReads`,
-//! `ng::run::cohort_merge`). This asks the identical question of each *alternative allele*
-//! separately: an alternative survives if some single sample lent it that many reads. Nothing
-//! new is introduced — the floor and the share are the merge's, so a sweep here and a sweep
-//! there move the same two knobs.
+//! **This runs the shipped rule rather than a copy of it.** Every allele question here is
+//! answered by [`select_generic`] — which alternatives clear the bar, which the cap keeps, and
+//! how many reads and how much error mass the dropped alleles carry — so a number printed here
+//! is a number the caller itself would produce. **One rule stays the probe's own, deliberately:**
+//! production's ranking by cohort read total, which is the rival the two-ranking comparison below
+//! measures the shipped ranking against.
+//!
+//! **The bar is the merge's own keep rule, one level down.** The merge asks each sample whether
+//! its *non-reference reads* reach `max(floor, ceil(share × its compared reads))` and builds the
+//! locus if any one does (`MinAltReads`, `ng::run::cohort_merge`). Selection asks the identical
+//! question of each *alternative allele* separately: an alternative survives if some single
+//! sample lent it that many reads. Nothing new is introduced — the floor and the share are the
+//! merge's, so a sweep here and a sweep there move the same two knobs.
 //!
 //! **The cap is applied after the bar and ranks by the largest within-sample share** — the
-//! allele's reads in one sample divided by that sample's compared reads, maximised over
-//! samples. Production ranks by the cohort's raw read total
-//! (`var_calling::per_group_merger::enforce_max_alleles`), which at large cohorts truncates
-//! away the private alleles first; this probe prints how often the two rankings disagree, so
-//! the difference is a number rather than an argument.
+//! allele's reads in one sample divided by that sample's compared reads, maximised over the
+//! samples that cleared the bar for it (`spec/candidate_alleles.md` §4.1). Production ranks by
+//! the cohort's raw read total (`var_calling::per_group_merger::enforce_max_alleles`), which at
+//! large cohorts truncates away the private alleles first; this probe prints how often the two
+//! rankings keep different alleles, so the difference is a number rather than an argument.
+//!
+//! **Three rules differ between that copy and the shipped module, and all three differences are
+//! deliberate.** The figures `spec/candidate_alleles.md` §3.3, §4.2 and §5 quote were taken with
+//! the copy, so each of the three is a reason a number here could legitimately differ from them.
+//!
+//! 1. **The bar was asked of each `(allele, read group)` row separately; the module pools a
+//!    sample's rows first.** The copy therefore applied a stricter rule to exactly the samples
+//!    carrying more than one library — 157 of 1,707 in a surveyed tomato archive
+//!    (`spec/read_groups.md` §1) — so its figures are a lower bound on what the module admits.
+//!    **Measured: it moves nothing on either benchmark.** Every bar total, every cap count and
+//!    the leftover are identical under the two rules on the 63-accession panel and on the trio.
+//! 2. **The within-sample share was maximised over every sample; the module maximises over the
+//!    samples that cleared the bar** (`spec/candidate_alleles.md` §4.1, the owner's decision of
+//!    2026-08-24). **Measured: this is the one difference the tomato panel exercises**, and it
+//!    is why the two cap rankings disagree at 19 loci where the copy found 17.
+//! 3. **The cap's last tie-break was the merge table's index; the module's is the allele's
+//!    bases** (`compare_best_first`). The merge interns alleles in first-seen order rather than
+//!    byte order, so these are genuinely different orders. **Measured: it cannot decide anything
+//!    on this panel.** The bases only speak when all three numeric keys tie, and at every
+//!    cap-binding tomato locus, at all five bars swept, no two surviving alternatives even share
+//!    a within-sample share and a cohort read total — so the tie-break is never reached and it
+//!    contributes none of the 17-to-19 move.
+//!
+//! **Any difference beyond these three is a defect in one of the two implementations, and is to
+//! be traced rather than accepted.**
+//!
+//! **The second difference also empties a column of the dump, which is a change in what the
+//! column means rather than in what the bar did** — so the column is renamed rather than left to
+//! change under its old name. `best_share_of_clearing_samples` is 0 for every allele the bar
+//! rejected, two rows in every three of the tomato dump (73,649 of 115,329), and it is smaller
+//! than the old `best_share` on admitted rows too, wherever the old maximum was lent by a sample
+//! that never cleared the bar.
 //!
 //! **Every allele the bar or the cap removes is counted with its summed error mass**, because
 //! the SNP/indel read likelihood needs that pool and nothing upstream produces it
-//! (`spec/read_likelihoods.md` §3.3's `q_sum_other`). Printing it here shows what it is made of
-//! before anything consumes it.
+//! (`spec/read_likelihoods.md` §3.3's `q_sum_other`). It is read straight off the module's
+//! per-sample leftover, which is the value the calling loop will consume.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
+use pop_var_caller::ng::calling::allele_candidates::{
+    CandidateSelectionConfig, DEFAULT_MAX_CANDIDATE_ALLELES, LocusSelection, MaxCandidateAlleles,
+    SelectionScratch, SelectionVerdict,
+};
 use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, SampleLocusObservations, SampleLocusObservationsIterator,
@@ -69,9 +112,30 @@ use reference_check_knob::reference_check_from_env;
 /// Allele index 0 is the reference, by the merge's own contract.
 const REFERENCE_ALLELE: usize = 0;
 
-/// The caps swept. 6 is production's `DEFAULT_MAX_ALLELES_PER_RECORD` and GATK's
-/// `--max-alternate-alleles` default; the rest bracket it.
+/// The caps swept, counting the reference. 6 is production's
+/// `DEFAULT_MAX_ALLELES_PER_RECORD` ([`PRODUCTION_CAP`]) and the rest bracket it.
+///
+/// **It is not GATK's number, though production's comment says it is**: GATK's
+/// `--max-alternate-alleles` defaults to 6 *alternates*, so seven alleles where these are six
+/// (`DEFAULT_MAX_CANDIDATE_ALLELES` sets that out).
 const CAPS: [usize; 4] = [3, 4, 6, 8];
+
+/// **The module's shipping default, which is production's `DEFAULT_MAX_ALLELES_PER_RECORD`** —
+/// the cap the two rankings are compared at, and the one the cohort-growth table reports loci
+/// above, so both questions are asked where a run would be asking them.
+///
+/// **Read from the module rather than written down**, because a step whose whole point is to
+/// stop copying the module's rules should not copy its number either: change the default and
+/// this run's two comparisons follow it.
+const PRODUCTION_CAP: usize = DEFAULT_MAX_CANDIDATE_ALLELES.get() as usize;
+
+/// **A cap that cannot bind**, so that a selection run under it reports the bar alone.
+///
+/// Not an `Option`: `MaxCandidateAlleles` refuses anything below two precisely because a
+/// cap is never absent, and the widest one the type can hold is 65,534 alternatives, where
+/// the widest allele table either benchmark builds carries 102 — one tomato locus; the
+/// trio reaches 19 at 300× and 4 at 30×.
+const WIDEST_CAP: MaxCandidateAlleles = MaxCandidateAlleles::new_or_panic(u16::MAX);
 
 /// What one setting of the bar did to one cohort's loci.
 #[derive(Default)]
@@ -95,7 +159,7 @@ struct Tally {
     over_cap: [u64; CAPS.len()],
     truncated: [u64; CAPS.len()],
     /// Loci where ranking by largest within-sample share and by cohort read total keep
-    /// different alleles at a cap of 6.
+    /// different alleles at [`PRODUCTION_CAP`].
     ranking_disagrees: u64,
 }
 
@@ -105,146 +169,143 @@ impl Tally {
     }
 }
 
-/// One alternative allele's support, folded across the cohort — what a bar and a cap read.
-struct AlleleSupportSummary {
-    allele: usize,
-    /// The largest share of one sample's compared reads this allele took.
-    best_within_sample_share: f64,
-    /// Reads over the whole cohort — production's ranking key.
-    cohort_reads: u64,
-    /// Samples whose reads reached the bar.
-    samples_clearing: u32,
-    /// Reads and summed error mass, over every sample, for the pool.
-    reads: u64,
-    q_sum: f64,
-    /// Whether some single sample's reads reached the bar.
-    passes: bool,
-}
-
-/// Fold one locus's table into per-allele summaries, asking the bar of each sample.
-fn summarise(observation: &CohortObservation, bar: MinAltReads) -> Vec<AlleleSupportSummary> {
-    summarise_over(observation, bar, usize::MAX)
-}
-
-/// The same fold, asking only the first `samples` samples of the run — how many alternatives
-/// clear the bar at a fixed allele table as the cohort grows.
-fn summarise_over(
+/// Narrow one locus with the shipped selection, under a given bar and cap.
+///
+/// **The scratch is handed back full**: it holds this locus's per-allele fold until the next
+/// call, so [`SelectionScratch::best_within_sample_share_of`] and
+/// [`SelectionScratch::cohort_reads_of`] answer for this locus until then. That is where the
+/// ranking keys this probe reports come from.
+fn select_under(
     observation: &CohortObservation,
     bar: MinAltReads,
-    samples: usize,
-) -> Vec<AlleleSupportSummary> {
-    let n_alleles = observation.alleles.len();
-    let mut out: Vec<AlleleSupportSummary> = (0..n_alleles)
-        .map(|allele| AlleleSupportSummary {
-            allele,
-            best_within_sample_share: 0.0,
-            cohort_reads: 0,
-            samples_clearing: 0,
-            reads: 0,
-            q_sum: 0.0,
-            passes: false,
-        })
-        .collect();
-    for sample in observation.per_sample.iter().filter(|s| s.sample < samples) {
-        // A sample's compared reads at this locus are its reads across the whole table: the
-        // merge admits only reads that spanned the locus, and every one lands on some allele.
-        let compared: u32 = sample
-            .supported
+    cap: MaxCandidateAlleles,
+    scratch: &mut SelectionScratch,
+) -> LocusSelection {
+    let config = CandidateSelectionConfig {
+        min_allele_support: bar,
+        max_candidate_alleles: cap,
+    };
+    select_generic(observation, &config, scratch)
+}
+
+/// The cap as the selection config wants it. Every value in [`CAPS`] is at least two, which
+/// is what `MaxCandidateAlleles` refuses to go below.
+fn cap_of(alleles: usize) -> MaxCandidateAlleles {
+    let alleles = u16::try_from(alleles).expect("a cap that fits a u16");
+    MaxCandidateAlleles::new(alleles).expect("a cap of at least two alleles")
+}
+
+/// **The alternatives a selection kept, as indices into the merge's table**, ascending —
+/// the same shape [`keep_by_cohort_reads`] returns, so the two can be compared directly.
+fn kept_alternative_indices(selection: &LocusSelection, table_len: usize) -> Vec<usize> {
+    (1..table_len)
+        .filter(|&index| selection.remap().candidate_for(index).is_some())
+        .collect()
+}
+
+/// **The cap ranked production's way: the cohort's raw read total**, over the alternatives
+/// that already cleared the bar. Each entry is a merge table index and that allele's reads
+/// across every covering sample.
+///
+/// **This is the one rule the probe still owns**, because it is production's and not this
+/// module's — it is what the shipped ranking is being compared against
+/// (`enforce_max_alleles`, `src/var_calling/per_group_merger.rs`, a stable sort on
+/// `Reverse(cohort_count)`).
+fn keep_by_cohort_reads(survivors: &[(usize, u64)], cap: usize) -> Vec<usize> {
+    let mut ranked = survivors.to_vec();
+    ranked.sort_by(|(left_allele, left_reads), (right_allele, right_reads)| {
+        right_reads
+            .cmp(left_reads)
+            .then(left_allele.cmp(right_allele))
+    });
+    ranked.truncate(cap.saturating_sub(1));
+    let mut kept: Vec<usize> = ranked.into_iter().map(|(allele, _)| allele).collect();
+    kept.sort_unstable();
+    kept
+}
+
+/// **Every read the merge attributed to an allele at this locus**, over every sample and
+/// every read group — the denominator the pool is reported as a share of.
+fn table_reads_of(observation: &CohortObservation) -> u64 {
+    observation
+        .per_sample
+        .iter()
+        .flat_map(|sample| sample.supported.iter())
+        .map(|row| u64::from(row.support.num_reads))
+        .sum()
+}
+
+/// **The same locus with only the first `samples` samples of the run covering it**, its
+/// allele table untouched — how the bar's answer moves as a cohort grows, with the table
+/// held fixed so that nothing but the number of samples asked can move it.
+fn restrict_to_first_samples(observation: &CohortObservation, samples: usize) -> CohortObservation {
+    CohortObservation {
+        region: observation.region,
+        alleles: observation.alleles.clone(),
+        per_sample: observation
+            .per_sample
             .iter()
-            .map(|supported| supported.support.num_reads)
-            .sum();
-        for supported in &sample.supported {
-            let entry = &mut out[supported.allele];
-            let reads = supported.support.num_reads;
-            entry.cohort_reads += u64::from(reads);
-            entry.reads += u64::from(reads);
-            entry.q_sum += supported.support.q_sum;
-            if compared > 0 {
-                let share = f64::from(reads) / f64::from(compared);
-                if share > entry.best_within_sample_share {
-                    entry.best_within_sample_share = share;
-                }
-            }
-            if bar.reached_by(reads, compared) {
-                entry.samples_clearing += 1;
-                entry.passes = true;
-            }
-        }
+            .filter(|sample| sample.sample < samples)
+            .cloned()
+            .collect(),
     }
-    out[REFERENCE_ALLELE].passes = true; // the reference is always present
-    out
 }
 
-/// The alleles a cap keeps, ranked by the largest within-sample share, then by how many
-/// samples cleared the bar, then by cohort reads. The reference is never prunable.
-fn keep_by_share(survivors: &[&AlleleSupportSummary], cap: usize) -> Vec<usize> {
-    let mut ranked: Vec<&&AlleleSupportSummary> = survivors
-        .iter()
-        .filter(|s| s.allele != REFERENCE_ALLELE)
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.best_within_sample_share
-            .total_cmp(&a.best_within_sample_share)
-            .then(b.samples_clearing.cmp(&a.samples_clearing))
-            .then(b.cohort_reads.cmp(&a.cohort_reads))
-            .then(a.allele.cmp(&b.allele))
-    });
-    ranked.truncate(cap.saturating_sub(1));
-    let mut kept: Vec<usize> = ranked.iter().map(|s| s.allele).collect();
-    kept.sort_unstable();
-    kept
-}
-
-/// The same cap, ranked production's way: the cohort's raw read total.
-fn keep_by_cohort_reads(survivors: &[&AlleleSupportSummary], cap: usize) -> Vec<usize> {
-    let mut ranked: Vec<&&AlleleSupportSummary> = survivors
-        .iter()
-        .filter(|s| s.allele != REFERENCE_ALLELE)
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.cohort_reads
-            .cmp(&a.cohort_reads)
-            .then(a.allele.cmp(&b.allele))
-    });
-    ranked.truncate(cap.saturating_sub(1));
-    let mut kept: Vec<usize> = ranked.iter().map(|s| s.allele).collect();
-    kept.sort_unstable();
-    kept
-}
-
-fn fold_locus(tally: &mut Tally, observation: &CohortObservation, bar: MinAltReads) {
-    let summaries = summarise(observation, bar);
-    let alts_before = observation.alleles.len().saturating_sub(1);
+fn fold_locus(
+    tally: &mut Tally,
+    observation: &CohortObservation,
+    bar: MinAltReads,
+    scratch: &mut SelectionScratch,
+) {
+    let table_len = observation.alleles.len();
+    let alts_before = table_len.saturating_sub(1);
     tally.loci += 1;
     tally.alts_before += alts_before as u64;
     Tally::bucket(&mut tally.hist_before, alts_before);
 
-    let survivors: Vec<&AlleleSupportSummary> =
-        summaries.iter().filter(|entry| entry.passes).collect();
-    let alts_after = survivors.len().saturating_sub(1);
+    // The bar on its own, under a cap that cannot bind: what survives here is exactly what
+    // some single sample's reads earned.
+    let admitted = select_under(observation, bar, WIDEST_CAP, scratch);
+    let alts_after = admitted.alternative_allele_count();
     tally.alts_after += alts_after as u64;
     Tally::bucket(&mut tally.hist_after, alts_after);
     if alts_after == 0 && alts_before > 0 {
         tally.emptied += 1;
     }
 
-    for entry in &summaries {
-        if entry.passes {
-            tally.kept_reads += entry.reads;
-        } else {
-            tally.dropped_reads += entry.reads;
-            tally.dropped_q_sum += entry.q_sum;
-        }
+    // The pool, read off the per-sample leftover the module produced — the same value the
+    // read likelihood will consume, rather than a second sum over the dropped alleles.
+    let mut dropped_reads = 0_u64;
+    for leftover in admitted.unmatched() {
+        dropped_reads += u64::from(leftover.num_reads);
+        tally.dropped_q_sum += leftover.q_sum;
     }
+    tally.dropped_reads += dropped_reads;
+    tally.kept_reads += table_reads_of(observation).saturating_sub(dropped_reads);
+
+    // The survivors and their cohort read totals, taken from the fold before the capped runs
+    // below overwrite it. Only the rival ranking needs them; the shipped one is asked by
+    // running the cap itself.
+    let survivors: Vec<(usize, u64)> = kept_alternative_indices(&admitted, table_len)
+        .into_iter()
+        .map(|allele| (allele, scratch.cohort_reads_of(allele)))
+        .collect();
 
     for (at, cap) in CAPS.iter().enumerate() {
-        if survivors.len() > *cap {
-            tally.over_cap[at] += 1;
-            tally.truncated[at] += (survivors.len() - cap) as u64;
+        let capped = select_under(observation, bar, cap_of(*cap), scratch);
+        // `SelectionVerdict` is `#[non_exhaustive]` and the repeat-tract path adds a variant,
+        // so this asks for the one it wants rather than matching exhaustively.
+        let SelectionVerdict::Truncated { dropped } = capped.verdict() else {
+            continue;
+        };
+        tally.over_cap[at] += 1;
+        tally.truncated[at] += u64::from(dropped);
+        if *cap == PRODUCTION_CAP
+            && kept_alternative_indices(&capped, table_len)
+                != keep_by_cohort_reads(&survivors, *cap)
+        {
+            tally.ranking_disagrees += 1;
         }
-    }
-    if survivors.len() > 6 && keep_by_share(&survivors, 6) != keep_by_cohort_reads(&survivors, 6) {
-        tally.ranking_disagrees += 1;
     }
 }
 
@@ -298,7 +359,7 @@ fn report(label: &str, bar: MinAltReads, tally: &Tally) {
         );
     }
     println!(
-        "loci where the two rankings keep different alleles at a cap of 6: {}",
+        "loci where the two rankings keep different alleles at a cap of {PRODUCTION_CAP}: {}",
         tally.ranking_disagrees
     );
 }
@@ -475,6 +536,9 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             .collect();
     println!("# loci the merge built: {}", built.len());
 
+    // One set of buffers for the whole run, as a worker would hold it.
+    let mut scratch = SelectionScratch::new();
+
     let bars: Vec<(String, MinAltReads)> =
         [(2u32, 0.0f64), (2, 0.02), (2, 0.05), (2, 0.10), (3, 0.02)]
             .iter()
@@ -494,7 +558,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     for (label, bar) in &bars {
         let mut tally = Tally::default();
         for observation in &built {
-            fold_locus(&mut tally, observation, *bar);
+            fold_locus(&mut tally, observation, *bar, &mut scratch);
         }
         report(label, *bar, &tally);
     }
@@ -508,9 +572,16 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     if let Ok(path) = std::env::var("NG_SELECT_DUMP") {
         use std::io::Write;
         let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        // **The seventh column is renamed rather than left to change meaning under its old
+        // name**, which is the one surface change this step makes deliberately. It used to be
+        // the largest within-sample share over *every* covering sample; the shipped fold
+        // raises the share only inside the bar's own branch, so it is now a maximum over the
+        // samples that cleared the bar — identically 0 on every rejected allele, which was two
+        // rows in three of the tomato dump. Under the old name a join against an older dump
+        // would keep working and compare two different quantities.
         writeln!(
             out,
-            "contig\tstart\tend\tref\talt\tpassed\tbest_share\tcohort_reads"
+            "contig\tstart\tend\tref\talt\tpassed\tbest_share_of_clearing_samples\tcohort_reads"
         )?;
         // `NG_SELECT_DUMP_FLOOR` / `NG_SELECT_DUMP_SHARE` set the bar the dump's `passed`
         // column reports, so the recall curve is one run per point rather than one guess.
@@ -529,10 +600,15 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             },
         };
         for observation in &built {
-            let summaries = summarise(observation, bar);
+            // The bar alone, so `passed` means the bar and not the cap; the two ranking keys
+            // are the module's own, read from the fold it just ran.
+            let admitted = select_under(observation, bar, WIDEST_CAP, &mut scratch);
             let reference =
                 String::from_utf8_lossy(&observation.alleles[REFERENCE_ALLELE]).into_owned();
-            for entry in summaries.iter().skip(1) {
+            // The fold answers for this locus's table in that table's own order, so a
+            // sequence and its ranking keys are the same index — walked together rather
+            // than indexed apart.
+            for (allele, bases) in observation.alleles.iter().enumerate().skip(1) {
                 writeln!(
                     out,
                     "{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
@@ -540,10 +616,10 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                     observation.region.start.get(),
                     observation.region.end.get(),
                     reference,
-                    String::from_utf8_lossy(&observation.alleles[entry.allele]),
-                    u8::from(entry.passes),
-                    entry.best_within_sample_share,
-                    entry.cohort_reads,
+                    String::from_utf8_lossy(bases),
+                    u8::from(admitted.remap().candidate_for(allele).is_some()),
+                    scratch.best_within_sample_share_of(allele),
+                    scratch.cohort_reads_of(allele),
                 )?;
             }
         }
@@ -565,7 +641,11 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     );
     println!(
         "{:>9}{:>14}{:>16}{:>16}{:>14}",
-        "samples", "alts/locus", "loci with none", "loci over 6", "max alts"
+        "samples",
+        "alts/locus",
+        "loci with none",
+        format!("loci over {PRODUCTION_CAP}"),
+        "max alts"
     );
     let n_samples = cram_paths.len();
     let mut sizes: Vec<usize> = vec![1];
@@ -576,14 +656,14 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     for size in sizes {
         let (mut alts, mut none, mut over, mut max) = (0u64, 0u64, 0u64, 0usize);
         for observation in &built {
-            let summaries = summarise_over(observation, bar, size);
-            let passing = summaries.iter().filter(|e| e.passes).count();
-            let a = passing.saturating_sub(1);
+            let asked = restrict_to_first_samples(observation, size);
+            let admitted = select_under(&asked, bar, WIDEST_CAP, &mut scratch);
+            let a = admitted.alternative_allele_count();
             alts += a as u64;
             if a == 0 {
                 none += 1;
             }
-            if passing > 6 {
+            if a + 1 > PRODUCTION_CAP {
                 over += 1;
             }
             max = max.max(a);

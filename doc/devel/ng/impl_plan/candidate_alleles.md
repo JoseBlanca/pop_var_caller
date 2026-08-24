@@ -212,7 +212,7 @@ so the test discriminates the count from the pool.
 
 ### Milestone D — real data, and the two external checks
 
-**D1. The probe calls the module.**  ☐
+**D1. The probe calls the module.**  ✅
 Rewrite `examples/ng_candidate_selection_probe.rs` to call `select_generic` instead of carrying its
 own `summarise`/`keep_by_share` copy, keeping its reporting and its `NG_SELECT_DUMP` /
 `NG_SELECT_DUMP_FLOOR` / `NG_SELECT_DUMP_SHARE` surface unchanged. **This is the measurement

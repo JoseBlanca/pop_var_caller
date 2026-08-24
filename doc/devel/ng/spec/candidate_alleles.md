@@ -452,7 +452,7 @@ is asked of:
 |---|---|---|---|---|
 | 1 | 0.02 | 98.1% | 0 | 2 |
 | 4 | 0.11 | 88.9% | 0 | 4 |
-| 16 | 0.22 | 78.9% | 3 | 14 |
+| 16 | 0.22 | 78.9% | 3 | 10 |
 | 63 | 0.77 | 27.4% | 23 | 14 |
 
 Part of that growth is real segregating variation, not error — [`cohort_merge.md`](cohort_merge.md)
@@ -461,9 +461,35 @@ cap has to be there. **Whether it becomes a working part at a thousand samples i
 extrapolation from this table, not a measurement** (§12, Q2).
 
 **And the ranking's advantage is, honestly, unmeasurable at these sizes.** Ranking by
-within-sample share and production's ranking by cohort read total keep different alleles at 17 of
+within-sample share and production's ranking by cohort read total keep different alleles at 19 of
 53,935 tomato loci and at none of the trio's. The argument for the share ranking is a
 thousand-sample argument and no thousand-sample cohort exists here (§12, Q2).
+
+*Two figures in this section were re-measured on 2026-08-24 when the shipped module replaced the
+measurement's standalone copy of the rule, and both are recorded rather than quietly overwritten.*
+
+**The 16-samples-asked row's "most at one locus" was 14 and is 10.** That is a slip in the table
+rather than a change: the standalone copy that produced the original row also prints 10, and 14 is
+the row below it.
+
+**The two rankings disagreed at 17 loci with the standalone copy and disagree at 19 with the
+module.** Not a slip, and the cause was traced rather than assumed, because **three rules differ
+between the copy and the module and two of them could move this figure**. The module maximises the
+within-sample share over the samples that cleared the bar rather than over every sample (§4.1, the
+owner's decision of the same date); and its last tie-break is the allele's bases where the copy's
+was the merge table's index, which are different orders because the merge interns alleles in
+first-seen order. **The tie-break is not the cause**: it decides only when all three numeric keys
+tie, and at every cap-binding tomato locus, at all five bars swept, no two surviving alternatives
+share even a within-sample share and a cohort read total. So the +2 is the share rule, and running
+the two implementations side by side the disagreement count is the single line of output that
+differs.
+
+**Everything else in §3.3 and §4.2 that a probe run produces was reproduced to the digit**: both
+benchmarks' built-locus counts, both merge tables' alternative totals, every bar's
+kept-alternative total at both depths, every cap's binding count, the loci-above-three counts,
+and §5's leftover at 0.36% of tomato's reads. **§3.3's other column was not re-derived** — "true
+alleles lost to the bar" is a join against the v4.2.1 truth VCFs rather than a probe run, and D2
+is where it gets a standing check.
 
 ---
 
@@ -724,7 +750,7 @@ repeat-tract path gets a differential instead
 - **Q2 — does the cap become a working part at a thousand samples, and does the ranking then
   matter?** §4.2's growth table says the admitted count rises with the cohort and extrapolates to
   the cap binding, but 63 accessions is as far as the measurement goes, and at that size the two
-  rankings disagree at 17 loci in 53,935. **Leaning: keep both as specified** — the cap costs
+  rankings disagree at 19 loci in 53,935. **Leaning: keep both as specified** — the cap costs
   almost nothing when it does not bind, and the ranking's tie-break order is what makes it degrade
   correctly with depth regardless. *What would settle it:* a cohort of several hundred samples, or
   a resampling study that holds the allele table fixed and grows the sample set past 63.
