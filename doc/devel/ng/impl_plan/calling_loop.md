@@ -218,10 +218,50 @@ A1. *Source:* arch §2, §7; [`../arch/read_likelihoods.md`](../arch/read_likeli
 
 **E2. `FrozenParameters` assembly.**  ☐
 One constructor per run from the pre-pass's outputs: calibration scales from the accumulator
-(scale 1 + `Defaulted` where no rate), contamination views with the class frequencies (absent at
-one sample — absent, not a fitted zero), per-sample `F` in run order, the seed from
-`project_spectrum_seed`, the `StratumFits` borrow, ploidy. *Depends:* A1. *Source:* arch §2;
-the three parameter sources' plans.
+(scale 1 + `Defaulted` where no rate), contamination views (absent at one sample — absent, not a
+fitted zero), per-sample `F` in run order, the seed from `project_spectrum_seed`, the
+`StratumFits` borrow, ploidy. **Not class frequencies** — the mixture's second half is per locus
+and is built inside the loop, at E2a. *Depends:* A1. *Source:* arch §2; the three parameter
+sources' plans.
+
+**E2a. The contaminant frequency, per locus and per sample.**  ☐
+Wire the two halves the read likelihood built: `fill_batch_allele_copies` once per locus per
+iteration from the loop's current expected copies, then `fill_contaminant_allele_frequencies`
+**once per sample**, leaving that sample's own copies out of its own batch, into the
+`ContaminationMixture` the row reads. Two buffers on `CallingScratch`, both
+`batches × alleles` — the copies, which are per locus, and the frequencies, which are per
+sample.
+
+**What this step owes beyond the wiring:** the batching itself. `SequencingBatches`
+([`../arch/parameter_prepass_joint_fit.md`](../arch/parameter_prepass_joint_fit.md) §1.6) is
+specified and unbuilt, and the loop needs two views of it — `BatchOfEachReadGroup` for the
+mixture and `BatchOfEachSample` for the fill. **Whoever builds it owes the rule for a sample
+whose libraries ran in different batches**, which the read likelihood deliberately did not
+invent (C2's report §6). Until it exists the default — every read group together — is what a run
+gets, and that is a complete answer rather than a stub. *Depends:* C1, E2. *Source:*
+[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6;
+[`calling_read_likelihoods.md`](calling_read_likelihoods.md) C2.
+
+**E2b. The run says what contamination it used, per sample.**  ☐
+**Spec §3.6 requires it and nothing owned it until now** (added 2026-08-24, on the owner's
+instruction, after C1's and C2's reviews both found it homeless): *the run's output must still
+carry the fraction used, per sample, because a genotype computed at `c = 0.03` and one at
+`c = 0` are otherwise indistinguishable.*
+
+What has to travel, and none of it is a summary: the fraction itself; **whose reads it was
+fitted from** (`ContaminationSource` — a library's own reads, or the whole sample's copied onto
+it, which are different claims); the two evidence counts beside it, because **a fraction near
+zero because nothing could be measured is not the same claim as one measured and found clean**
+and only the counts tell them apart; and whether the batching the frequencies were drawn against
+was declared or defaulted, which `SequencingBatches::is_default` exists to answer and which the
+dense `BatchOfEachReadGroup` the mixture holds cannot (C2's review).
+
+`ContaminationView` already carries the first three. **What is missing is a route from there to
+the output**, and a decision this step must take rather than inherit: per sample or per read
+group. The fraction is fitted per read group and a sample may hold several, so a per-sample line
+either picks one or summarises; §3.6 asks for per sample and the finer grain is what the fit
+produces. *Depends:* E2a, E3. *Source:*
+[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6.
 
 **E3. The integration fixture — ng calls genotypes.**  ☐
 End-to-end over a small fixture: reads → merge → E1's shaping → `call_locus` with a
@@ -229,7 +269,7 @@ End-to-end over a small fixture: reads → merge → E1's shaping → `call_locu
 `LocusInference` asserted against hand-derived genotypes, on both paths, at one sample and at
 several. Provenance and `seed_diversity_unreachable` reach the output. **This is the milestone
 where ng calls genotypes**; what it cannot yet do — select candidates on real data — is the
-recorded blocker, not a missing step here. *Depends:* D1, E1, E2. *Source:* spec §1, §9.
+recorded blocker, not a missing step here. *Depends:* D1, E1, E2, E2a. *Source:* spec §1, §9.
 
 > **Checkpoint E:** genotypes come out of real evidence over supplied candidates. Pause for
 > review.

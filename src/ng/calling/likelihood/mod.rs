@@ -126,6 +126,7 @@
 
 pub mod generic;
 
+use crate::ng::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
@@ -508,47 +509,34 @@ impl ContaminationView {
 /// natural shape, and it is a modelling decision this step did not take.
 pub const MIN_CONTAMINANT_FREQUENCY: f64 = 1e-12;
 
-/// Fill one locus's contaminant allele frequencies, per sequencing batch — spec §3.6's `q(o)`.
+/// Fill one locus's expected allele copies, added up per sequencing batch — the first half of
+/// spec §3.6's `q(o)`, and the half that does not depend on which sample is being scored.
 ///
-/// **This is a lookup and not a fit.** The caller's loop already estimates how many copies of
-/// each allele every sample carries; a batch's frequency is those copies added up over the
-/// samples that ran together, divided by the copies they hold in total. Nothing is estimated
-/// here that the loop has not estimated already, which is why it is recomputed every iteration
-/// rather than frozen beside the contamination fraction (spec §3.6, corrected 2026-08-24).
+/// **Split from the frequency because the two have different grains.** The copies a batch holds
+/// are a property of the locus, so they are summed once per locus per iteration; the frequency a
+/// given sample's contaminant is drawn against leaves that sample's own copies out, so it is a
+/// property of `(locus, sample)` and is filled by
+/// [`fill_contaminant_allele_frequencies`] below. This is the same split the genotype prior
+/// makes between the cohort's copies and the leave-one-out concentration it hands each sample.
 ///
-/// `expected_copies` is sample-major, `allele_count` to a sample, in the run's sample order —
-/// the shape the loop holds and the same layout `out` is written in, one row per batch.
-///
-/// # What a batch that shows nothing gets, and why the count comes back
-///
-/// A batch whose samples hold no copies at all — no coverage at this locus — cannot have a
-/// frequency, and dividing by its zero total would give `NaN`. It gets the reference allele and
-/// nothing else: **the honest statement of what a batch with no evidence says about a
-/// contaminant is what the reference says**, and it keeps every row a distribution. An allele
-/// some batch shows but this one does not gets [`MIN_CONTAMINANT_FREQUENCY`], never zero.
-///
-/// **The return is how many batches took that fallback**, because otherwise it is invisible: at
-/// a locus with one candidate allele a batch full of evidence and a batch with none are
-/// bit-identical, both `[1.0]`, and at any allele count the fallback row is a legal-looking
-/// frequency. A caller that wants to say *this locus was scored against a contaminant nobody
-/// measured* has no other way to know (C2's review). Nothing consumes it yet; the loop is where
-/// it belongs.
+/// `expected_copies_by_sample` is sample-major, `allele_count` to a sample, in the run's sample
+/// order — the shape the loop holds. `out` is batch-major, `allele_count` to a batch.
 ///
 /// # Panics
 ///
-/// **In release as well as debug**, on shapes that do not agree; on a batch no sample is in,
-/// **which is not a lookup reading rubbish but something worse** — the row is never written, so
-/// it leaves through the no-evidence fallback above and is indistinguishable from a batch that
-/// really was sequenced and really showed nothing; on a batch whose copies sum to something
-/// that is not finite; and on a copy count that is not finite and at or above zero — the check
-/// [`ExpectedAlleleCopies`](crate::ng::calling::ExpectedAlleleCopies) makes for the same
+/// **In release as well as debug**, on shapes that do not agree; on a sample in a batch the run
+/// did not declare; on a batch no sample is in — **which is not a lookup reading rubbish but
+/// something worse**, since the row would never be written and would leave through the
+/// frequency's no-evidence fallback, indistinguishable from a batch that really was sequenced
+/// and really showed nothing; and on a copy count that is not finite and at or above zero, the
+/// check [`ExpectedAlleleCopies`](crate::ng::calling::ExpectedAlleleCopies) makes for the same
 /// numbers, restated here because this is the other door they come through.
-pub fn fill_contaminant_allele_frequencies(
+pub fn fill_batch_allele_copies(
     expected_copies_by_sample: &[f64],
     batch_of_each_sample: BatchOfEachSample<'_>,
     allele_count: usize,
     out: &mut [f64],
-) -> usize {
+) {
     let BatchOfEachSample(batch_of_each_sample) = batch_of_each_sample;
     assert!(
         allele_count > 0,
@@ -565,7 +553,7 @@ pub fn fill_contaminant_allele_frequencies(
     assert_eq!(
         out.len() % allele_count,
         0,
-        "the frequency table is {} entries and a batch's row is {allele_count} alleles wide",
+        "the copy table is {} entries and a batch's row is {allele_count} alleles wide",
         out.len()
     );
     let batch_count = out.len() / allele_count;
@@ -573,28 +561,16 @@ pub fn fill_contaminant_allele_frequencies(
         batch_count > 0,
         "a run has at least one sequencing batch, the default being one that holds all of it"
     );
-    // **Every declared batch has to hold a sample, and the check runs in both directions.**
-    // The loop below catches a sample naming a batch the run did not declare. The other way
-    // round is the one that fails silently: a batch no sample is in is never written, so
-    // `out.fill(0.0)` leaves it at a zero total and it comes out through the no-evidence
-    // fallback below — **a row indistinguishable from a batch that really was sequenced and
-    // really showed nothing**. A run whose batching and whose frequency table disagree about
-    // how many batches there are would score a whole library against the reference with
-    // nothing said (C2's review).
     for batch in 0..batch_count {
         assert!(
             batch_of_each_sample
                 .iter()
                 .any(|declared| declared.get() as usize == batch),
-            "the frequency table holds {batch_count} batches and no sample ran in batch \
-             {batch}; a batch nobody was sequenced in is a batching that does not describe \
-             this run"
+            "the copy table holds {batch_count} batches and no sample ran in batch {batch}; a \
+             batch nobody was sequenced in is a batching that does not describe this run"
         );
     }
 
-    // **Summed in place, so nothing is allocated per locus.** `out` holds each batch's copies
-    // while they accumulate and its frequencies afterwards; the total a batch is divided by is
-    // that batch's own row summed, which is why no second buffer is needed for it.
     out.fill(0.0);
     for (sample, (batch, own_copies)) in batch_of_each_sample
         .iter()
@@ -616,12 +592,118 @@ pub fn fill_contaminant_allele_frequencies(
             *slot += copies;
         }
     }
+}
+
+/// Fill one sample's contaminant allele frequencies, per sequencing batch — spec §3.6's `q(o)`,
+/// **with this sample's own copies left out of its own batch**.
+///
+/// **This is a lookup and not a fit.** The caller's loop already estimates how many copies of
+/// each allele every sample carries; a batch's frequency is those copies added up over the
+/// samples that ran together, divided by the copies they hold in total. Nothing is estimated
+/// here that the loop has not estimated already, which is why it is recomputed every iteration
+/// rather than frozen beside the contamination fraction (spec §3.6, corrected 2026-08-24).
+///
+/// # Why the sample leaves itself out
+///
+/// **A contaminating read is somebody else's, by definition**, so the population it is drawn
+/// against must not include the individual being scored. Without the subtraction a sample's own
+/// alternative reads are partly explained by its own alternative allele — it is its own
+/// contaminant — and the effect scales with how much of its batch it is: one part in 63 in a
+/// tomato-sized cohort, and **all of it for a sample alone in its batch**, where an alternative
+/// homozygote would return `q(alt) = 1`.
+///
+/// The genotype prior faced this exactly and answered it the same way: `fill_sample_concentration`
+/// subtracts a sample's own expected copies before using the cohort's as that sample's prior.
+/// This is that subtraction, one axis over (owner, 2026-08-24; C2's review found the batch of one).
+///
+/// **A sample alone in its batch therefore has nothing left**, and takes the no-evidence
+/// fallback below — the reference, and the floor elsewhere. That is the conservative answer and
+/// the right one: a library with no neighbours has no contaminating population to speak of.
+///
+/// # What a batch with nothing left gets, and why the count comes back
+///
+/// A batch whose remaining samples hold no copies — no coverage at this locus, or only the
+/// sample being scored — cannot have a frequency, and dividing by its zero total would give
+/// `NaN`. It gets the reference allele and nothing else: **the honest statement of what a batch
+/// with no evidence says about a contaminant is what the reference says**, and it keeps every row
+/// a distribution. An allele the batch's other samples never show gets
+/// [`MIN_CONTAMINANT_FREQUENCY`], never zero.
+///
+/// **The return is how many batches took that fallback**, because otherwise it is invisible: at
+/// a locus with one candidate allele a batch full of evidence and a batch with none are
+/// bit-identical, both `[1.0]`, and at any allele count the fallback row is a legal-looking
+/// frequency. A caller that wants to say *this locus was scored against a contaminant nobody
+/// measured* has no other way to know (C2's review). Nothing consumes it yet; the loop is where
+/// it belongs.
+///
+/// # Panics
+///
+/// **In release as well as debug**, on shapes that do not agree; on a batch the copy table has no
+/// row for; and on a batch whose copies sum to something that is not finite. **In debug**, on a
+/// sample holding materially more copies than the batch it is part of — the sample's own copies
+/// are one addend of that sum, so the two count paths have gone out of step, which is
+/// `fill_sample_concentration`'s own check for the same subtraction.
+pub fn fill_contaminant_allele_frequencies(
+    batch_copies: &[f64],
+    own_copies: SampleAlleleCopies<'_>,
+    own_batch: BatchId,
+    allele_count: usize,
+    out: &mut [f64],
+) -> usize {
+    assert!(
+        allele_count > 0,
+        "a locus is called over at least its reference allele"
+    );
+    assert_eq!(
+        own_copies.get().len(),
+        allele_count,
+        "this sample's copies cover {} alleles and the locus is called over {allele_count}",
+        own_copies.get().len()
+    );
+    assert_eq!(
+        batch_copies.len() % allele_count,
+        0,
+        "the copy table is {} entries and a batch's row is {allele_count} alleles wide",
+        batch_copies.len()
+    );
+    assert_eq!(
+        out.len(),
+        batch_copies.len(),
+        "the frequency table is {} entries and the copy table it is built from is {}",
+        out.len(),
+        batch_copies.len()
+    );
+    let batch_count = batch_copies.len() / allele_count;
+    let own_batch = own_batch.get() as usize;
+    assert!(
+        own_batch < batch_count,
+        "this sample ran in batch {own_batch}, and the copy table holds {batch_count} batches"
+    );
+
+    out.copy_from_slice(batch_copies);
+    // **The subtraction, and only on this sample's own batch.** `max(0, ·)` for the reason the
+    // prior gives: the difference is exact algebra and inexact arithmetic, so a batch holding
+    // only this sample can come out a hair below zero.
+    for (allele, (slot, &own)) in out[own_batch * allele_count..(own_batch + 1) * allele_count]
+        .iter_mut()
+        .zip(own_copies.get())
+        .enumerate()
+    {
+        let leaving_this_sample_out = *slot - own;
+        debug_assert!(
+            leaving_this_sample_out > COUNT_PATH_DESYNC_THRESHOLD,
+            "this sample is expected to carry {own} copies of allele {allele} and its whole \
+             batch {slot}; the sample's own copies are one addend of the batch's, so the two \
+             count paths have gone out of step"
+        );
+        *slot = leaving_this_sample_out.max(0.0);
+    }
 
     let mut batches_with_no_evidence = 0;
     for (batch, row) in out.chunks_exact_mut(allele_count).enumerate() {
         let total: f64 = row.iter().sum();
         // **A total that is not finite is arithmetic that went wrong, not a deep batch.** Each
-        // slot is checked as it accumulates, so a row of finite copies whose *sum* overflows
+        // slot is checked as it accumulates, so a row of finite copies whose sum overflows
         // reaches here — and then every ratio is `finite / inf`, which is zero, and every
         // allele is lifted to the floor. The row would come back finite, plausible, and saying
         // the neighbours carry nothing (C2's review, which built the case: one sample holding
@@ -632,8 +714,9 @@ pub fn fill_contaminant_allele_frequencies(
              upstream rather than a batch with a great many samples in it"
         );
         if total <= 0.0 {
-            // Nothing was sequenced here, so there is no frequency to read off. The reference
-            // is what a batch with no evidence has to say.
+            // Nothing left to read a frequency off. The reference is what a batch with no
+            // evidence has to say — and for this sample's own batch, that is what a library
+            // with no neighbours gets.
             batches_with_no_evidence += 1;
             row.fill(MIN_CONTAMINANT_FREQUENCY);
             row[usize::from(AlleleId::REFERENCE.get())] =
@@ -648,8 +731,7 @@ pub fn fill_contaminant_allele_frequencies(
     // A postcondition rather than a check on the caller: every route above either divides by a
     // total already asserted finite and positive, or fills the row with constants. It is kept
     // because it is the one statement of what this function promises, and it is `debug` only
-    // because it sweeps the whole table once per locus per iteration to prove something no
-    // input can break.
+    // because it sweeps the whole table once per sample to prove something no input can break.
     debug_assert!(
         out.chunks_exact(allele_count)
             .all(|row| row.iter().all(|f| f.is_finite())),
@@ -684,8 +766,10 @@ pub fn fill_contaminant_allele_frequencies(
 /// cohort (spec §3.6). **The default batching is one batch holding the run**, so the table is
 /// a single row and every read group reads the cohort frequency; a run that declares no
 /// batching loses nothing it had, and nothing here branches on the batching's absence.
-/// [`fill_contaminant_allele_frequencies`] is what fills the table, once per locus per
-/// iteration.
+/// [`fill_batch_allele_copies`] sums each batch's copies once per locus per iteration, and
+/// [`fill_contaminant_allele_frequencies`] turns them into this table **once per sample**,
+/// leaving that sample's own copies out of its own batch — a contaminant is somebody else, so
+/// the individual being scored is not in the population its contaminant is drawn from.
 ///
 /// **What the default does cost is that it leaves no trace**, and that belongs beside the
 /// claim that it loses nothing. A defaulted `[ONLY, ONLY]` and a run that genuinely declared
@@ -925,9 +1009,9 @@ impl<'a> ContaminationMixture<'a> {
     /// cohort frequency.
     ///
     /// **Zero is unreachable from the producer and reachable in a test**, which is worth
-    /// keeping apart: [`fill_contaminant_allele_frequencies`] floors an allele its batch never
-    /// showed at [`MIN_CONTAMINANT_FREQUENCY`]. What this accessor promises is only that it
-    /// returns what it was given.
+    /// keeping apart: [`fill_contaminant_allele_frequencies`] floors an allele the batch's
+    /// *other* samples never showed at [`MIN_CONTAMINANT_FREQUENCY`]. What this accessor
+    /// promises is only that it returns what it was given.
     ///
     /// # Panics
     ///
@@ -2731,67 +2815,116 @@ mod tests {
         2.0, 0.0, // sample 3 — reference homozygote
     ];
 
-    /// **The default batching gives the cohort frequency, which is what makes it lose
-    /// nothing.** Across all four samples the locus holds five reference copies and three
-    /// alternative ones, so the contaminant is drawn against 5 in 8 and 3 in 8 — the same
-    /// number the genotype prior reads, which is the whole point of taking it from the loop
-    /// rather than fitting it (spec §3.6).
+    /// **Both stages, as the caller's loop will run them**: sum each batch's copies once for the
+    /// locus, then leave one sample out of its own batch and normalise. Returns how many batches
+    /// had nothing left to read a frequency off.
+    fn frequencies_leaving_out(
+        expected_copies_by_sample: &[f64],
+        batch_of_each_sample: &[BatchId],
+        allele_count: usize,
+        sample: usize,
+        out: &mut [f64],
+    ) -> usize {
+        let mut batch_copies = vec![f64::NAN; out.len()];
+        fill_batch_allele_copies(
+            expected_copies_by_sample,
+            BatchOfEachSample(batch_of_each_sample),
+            allele_count,
+            &mut batch_copies,
+        );
+        fill_contaminant_allele_frequencies(
+            &batch_copies,
+            SampleAlleleCopies::new(
+                &expected_copies_by_sample[sample * allele_count..(sample + 1) * allele_count],
+            ),
+            batch_of_each_sample[sample],
+            allele_count,
+            out,
+        )
+    }
+
+    /// **The default batching gives the frequency over the rest of the cohort**, which is what
+    /// makes it lose nothing: one batch, and every sample but the one being scored.
+    ///
+    /// Across all four samples the locus holds five reference copies and three alternative.
+    /// Scoring sample 0 — a reference homozygote — takes its two reference copies back out,
+    /// leaving three of each: **the contaminant is drawn against 1 in 2, not the cohort's 5 in
+    /// 8**, because a contaminant is somebody else and this sample is not somebody else.
     #[test]
-    fn one_batch_gives_the_frequency_over_the_whole_cohort() {
-        let batch_of_sample = [BatchId::ALL_TOGETHER; 4];
+    fn one_batch_gives_the_frequency_over_the_rest_of_the_cohort() {
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
-            &FOUR_DIPLOIDS,
-            BatchOfEachSample(&batch_of_sample),
-            2,
-            &mut out,
-        );
+        let no_evidence =
+            frequencies_leaving_out(&FOUR_DIPLOIDS, &[BatchId::ALL_TOGETHER; 4], 2, 0, &mut out);
 
-        assert_eq!(out, [0.625, 0.375]);
+        assert_eq!(out, [0.5, 0.5]);
+        assert_eq!(no_evidence, 0);
         // And it is a distribution, which every row has to be for `c · q` to be a probability.
         assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
     }
 
-    /// **Two batches at one locus, and the samples in each answer for their own.** Read groups
-    /// in the first batch see the alternative at 1 in 4; those in the second see it at 1 in 2.
-    /// A contaminant is a neighbour on the same run, so a library that ran beside two reference
-    /// homozygotes and a heterozygote must not be told the whole cohort's number.
+    /// **Leaving the sample out is not a rounding correction — it moves the frequency by how
+    /// much of its batch the sample is.** Scoring sample 1, the heterozygote, against the whole
+    /// cohort would give 3 in 8 for the alternative; against everyone else it is 2 in 6.
+    ///
+    /// At 63 samples that difference is one part in 63 and would not decide a call. **At four
+    /// it is 0.042 in absolute frequency, and at one sample in a batch it is everything** —
+    /// which is why this is the subtraction and not a nicety (owner, 2026-08-24).
+    #[test]
+    fn leaving_the_sample_out_moves_the_frequency_by_its_own_share() {
+        let mut out = [f64::NAN; 2];
+
+        frequencies_leaving_out(&FOUR_DIPLOIDS, &[BatchId::ALL_TOGETHER; 4], 2, 1, &mut out);
+
+        let over_everyone_else = out[1];
+        let over_the_whole_cohort = 3.0 / 8.0;
+        assert!((over_everyone_else - 2.0 / 6.0).abs() < 1e-15);
+        assert!(
+            (over_everyone_else - over_the_whole_cohort).abs() > 0.04,
+            "leaving one of four samples out moved the alternative's frequency from \
+             {over_the_whole_cohort} to {over_everyone_else}"
+        );
+    }
+
+    /// **Two batches at one locus, and the samples in each answer for their own.** Scoring
+    /// sample 1 — the heterozygote, in the first batch — its own batch has only a reference
+    /// homozygote left, while the second batch is untouched and half alternative.
+    ///
+    /// A contaminant is a neighbour on the same run, so a library that ran beside a reference
+    /// homozygote must not be told the other batch's number, nor the whole cohort's.
     #[test]
     fn two_batches_at_one_locus_give_two_different_frequencies() {
         // Samples 0 and 1 ran together; samples 2 and 3 ran together.
-        let batch_of_sample = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
+        let batches = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
         let mut out = [f64::NAN; 4];
 
-        fill_contaminant_allele_frequencies(
-            &FOUR_DIPLOIDS,
-            BatchOfEachSample(&batch_of_sample),
-            2,
-            &mut out,
-        );
+        frequencies_leaving_out(&FOUR_DIPLOIDS, &batches, 2, 1, &mut out);
 
-        // Batch 0 holds three reference copies and one alternative; batch 1, two of each.
-        assert_eq!(out, [0.75, 0.25, 0.5, 0.5]);
+        // Batch 0, less the sample being scored, is one reference homozygote; batch 1 is a
+        // reference homozygote and an alternative homozygote, untouched.
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], MIN_CONTAMINANT_FREQUENCY);
+        assert_eq!(out[2..], [0.5, 0.5]);
     }
 
-    /// **An allele its own batch never shows is floored, never zeroed.** Both samples of this
-    /// batch are reference homozygotes, so the alternative has no copies in it at all — and a
-    /// frequency of exactly zero would be the claim that the neighbouring libraries *cannot*
-    /// carry it, which two samples cannot establish.
+    /// **An allele its own batch never shows is floored, never zeroed.** Every other sample of
+    /// this batch is a reference homozygote, so the alternative has no copies among the
+    /// neighbours at all — and a frequency of exactly zero would be the claim that they
+    /// *cannot* carry it, which two samples cannot establish.
     ///
     /// The floor is [`MIN_CONTAMINANT_FREQUENCY`] and it is deliberately tiny; the constant's
     /// own documentation says why a statistical size would be the wrong direction to be wrong
     /// in, and [`the_frequency_floor_cannot_outweigh_a_misread`] measures what that buys.
     #[test]
     fn an_allele_the_batch_never_shows_is_floored_rather_than_zeroed() {
-        let two_reference_homozygotes = [2.0, 0.0, 2.0, 0.0];
-        let batch_of_sample = [BatchId::ALL_TOGETHER; 2];
+        let three_reference_homozygotes = [2.0, 0.0, 2.0, 0.0, 2.0, 0.0];
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
-            &two_reference_homozygotes,
-            BatchOfEachSample(&batch_of_sample),
+        frequencies_leaving_out(
+            &three_reference_homozygotes,
+            &[BatchId::ALL_TOGETHER; 3],
             2,
+            0,
             &mut out,
         );
 
@@ -2821,57 +2954,52 @@ mod tests {
         );
     }
 
-    /// A batch whose samples hold no copies at all has no frequency to read off, and dividing
-    /// by its zero total would give a row of `NaN` — which the row would take a logarithm of,
-    /// and a `NaN` makes every comparison in an argmax false. It gets the reference instead:
-    /// the honest statement of what a batch with no evidence says about a contaminant.
+    /// **A sample alone in its batch has no neighbours, and now says so.** Leaving it out of
+    /// its own batch leaves nothing, so the row takes the no-evidence fallback: the reference,
+    /// and the floor elsewhere.
+    ///
+    /// **Before the subtraction it returned its own genotype** — a lone heterozygote came back
+    /// `[0.5, 0.5]`, so its own alternative reads were half-explained as a neighbour's, which
+    /// is a sample acting as its own contaminant. C2's review found it; the owner settled it
+    /// the same day. This is the conservative answer and the right one: a library with nobody
+    /// beside it has no contaminating population to be drawn from.
     #[test]
-    fn a_batch_with_no_coverage_gets_the_reference_rather_than_a_nan() {
-        let nothing_sequenced = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let batch_of_sample = [BatchId::ALL_TOGETHER; 2];
-        let mut out = [f64::NAN; 3];
+    fn a_sample_alone_in_its_batch_has_no_neighbours_and_gets_the_reference() {
+        let one_heterozygote = [1.0, 1.0];
+        let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
-            &nothing_sequenced,
-            BatchOfEachSample(&batch_of_sample),
-            3,
-            &mut out,
+        let no_evidence =
+            frequencies_leaving_out(&one_heterozygote, &[BatchId::ALL_TOGETHER], 2, 0, &mut out);
+
+        assert_eq!(no_evidence, 1);
+        assert_eq!(
+            out,
+            [1.0 - MIN_CONTAMINANT_FREQUENCY, MIN_CONTAMINANT_FREQUENCY]
         );
-
-        assert!(out.iter().all(|f| f.is_finite()));
-        assert_eq!(out[1], MIN_CONTAMINANT_FREQUENCY);
-        assert_eq!(out[2], MIN_CONTAMINANT_FREQUENCY);
-        assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
     }
 
-    /// **A batch is divided by its own copies, not by how many samples are in it** — and every
-    /// other fixture here is blind to the difference, because every sample in them carries
-    /// exactly two copies. Mutation testing found it: a divisor of *two copies per sample*
-    /// passed all 127 module tests (C2's review).
+    /// **A batch is divided by its own copies, not by how many samples are in it** — and the
+    /// fixtures that came before this one were blind to the difference, because every sample in
+    /// them carried exactly two copies. Mutation testing found it: a divisor of *two copies per
+    /// sample* passed all 127 module tests (C2's review).
     ///
-    /// This cohort mixes ploidies, which is what separates the two. A tetraploid carrying three
-    /// reference copies and one alternative sits beside two diploids, so the batch holds five
-    /// reference copies and three alternative out of eight — `[0.625, 0.375]`. Counting samples
-    /// instead would divide by six and give `[0.833, 0.5]`, **a row summing to 1.33**, with the
-    /// alternative's `q` inflated by a third.
+    /// This cohort mixes ploidies, which is what separates the two. Scoring the alternative
+    /// homozygote leaves a tetraploid at 3:1 beside a diploid reference homozygote — five
+    /// reference copies and one alternative out of six, `[0.833, 0.167]`. Counting samples
+    /// instead would divide by four and give `[1.25, 0.25]`, clamped to `[1.0, 0.25]`, **a row
+    /// summing to 1.25**.
     #[test]
     fn a_batch_is_divided_by_its_copies_and_not_by_its_sample_count() {
-        // A tetraploid at 3:1, then two diploids — six copies against three samples.
         let mixed_ploidy = [
             3.0, 1.0, // a tetraploid carrying one alternative copy
             2.0, 0.0, // a diploid reference homozygote
-            0.0, 2.0, // a diploid alternative homozygote
+            0.0, 2.0, // a diploid alternative homozygote — the one being scored
         ];
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
-            &mixed_ploidy,
-            BatchOfEachSample(&[BatchId::ALL_TOGETHER; 3]),
-            2,
-            &mut out,
-        );
+        frequencies_leaving_out(&mixed_ploidy, &[BatchId::ALL_TOGETHER; 3], 2, 2, &mut out);
 
-        assert_eq!(out, [0.625, 0.375]);
+        assert!((out[0] - 5.0 / 6.0).abs() < 1e-15 && (out[1] - 1.0 / 6.0).abs() < 1e-15);
         assert!(
             (out.iter().sum::<f64>() - 1.0).abs() < 1e-15,
             "a frequency table's row is a distribution, and this one sums to {}",
@@ -2879,34 +3007,28 @@ mod tests {
         );
     }
 
-    /// **A sample alone in its batch is its own contaminant**, which this test pins as the
-    /// behaviour rather than endorsing it.
-    ///
-    /// `q(o)` is summed over the batch's samples *including the one being scored*, so a
-    /// heterozygote by itself returns `[0.5, 0.5]` — its own genotype — and its own alternative
-    /// reads are then partly explained as a neighbour's. At 63 samples its own contribution is
-    /// one part in 63 and the circularity is nothing; at one it is everything, and one sample
-    /// per batch is the low end of the range this caller commits to (`CLAUDE.md`).
-    ///
-    /// **The genotype prior already solves this and `q(o)` did not inherit the solution:**
-    /// `fill_sample_concentration` subtracts a sample's own copies before using the cohort as
-    /// that sample's prior. Doing the same here makes `q` per `(sample, batch, allele)`, and the
-    /// row deliberately carries no sample identity — so it is a design decision for the owner,
-    /// recorded in C2's report §8. Until it is taken, **this is what a batch of one does**, and
-    /// a test saying so is better than a gap.
+    /// A batch whose remaining samples hold no copies at all has no frequency to read off, and
+    /// dividing by its zero total would give `NaN` — which the row would take a logarithm of,
+    /// and a `NaN` makes every comparison in an argmax false, so a genotype would be picked in
+    /// silence. It gets the reference instead.
     #[test]
-    fn a_sample_alone_in_its_batch_is_scored_against_its_own_genotype() {
-        let one_heterozygote = [1.0, 1.0];
-        let mut out = [f64::NAN; 2];
+    fn a_batch_with_no_coverage_gets_the_reference_rather_than_a_nan() {
+        let nothing_sequenced = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut out = [f64::NAN; 3];
 
-        fill_contaminant_allele_frequencies(
-            &one_heterozygote,
-            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
-            2,
+        let no_evidence = frequencies_leaving_out(
+            &nothing_sequenced,
+            &[BatchId::ALL_TOGETHER; 2],
+            3,
+            0,
             &mut out,
         );
 
-        assert_eq!(out, [0.5, 0.5]);
+        assert_eq!(no_evidence, 1);
+        assert!(out.iter().all(|f| f.is_finite()));
+        assert_eq!(out[1], MIN_CONTAMINANT_FREQUENCY);
+        assert_eq!(out[2], MIN_CONTAMINANT_FREQUENCY);
+        assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
     }
 
     /// The loop's copies are expectations over genotype posteriors, not counts, so they need
@@ -2914,18 +3036,101 @@ mod tests {
     #[test]
     fn fractional_copies_are_a_frequency_like_any_other() {
         let two_uncertain_samples = [1.5, 0.5, 0.25, 1.75];
-        let batch_of_sample = [BatchId::ALL_TOGETHER; 2];
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
+        frequencies_leaving_out(
             &two_uncertain_samples,
-            BatchOfEachSample(&batch_of_sample),
+            &[BatchId::ALL_TOGETHER; 2],
             2,
+            0,
             &mut out,
         );
 
-        assert!((out[0] - 1.75 / 4.0).abs() < 1e-15 && (out[1] - 2.25 / 4.0).abs() < 1e-15);
+        // Only the second sample is left: a quarter of a reference copy against one and
+        // three-quarters of the alternative.
+        assert!((out[0] - 0.125).abs() < 1e-15 && (out[1] - 0.875).abs() < 1e-15);
     }
+
+    /// How many batches had nothing to read a frequency off, which is otherwise invisible: the
+    /// fallback row is a legal frequency, and at one candidate allele it is bit-identical to a
+    /// batch full of evidence.
+    #[test]
+    fn the_fill_says_how_many_batches_had_no_evidence() {
+        // Samples 0 and 1 ran together; sample 2 ran on its own.
+        let copies = [2.0, 0.0, 1.0, 1.0, 0.0, 2.0];
+        let batches = [BatchId(0), BatchId(0), BatchId(1)];
+        let mut out = [f64::NAN; 4];
+
+        // Scoring sample 0 leaves a heterozygote in its batch and sample 2 alone in the other.
+        assert_eq!(
+            frequencies_leaving_out(&copies, &batches, 2, 0, &mut out),
+            0
+        );
+        assert_eq!(out[..2], [0.5, 0.5]);
+
+        // Scoring sample 2 empties its own batch, since nobody else was sequenced with it.
+        assert_eq!(
+            frequencies_leaving_out(&copies, &batches, 2, 2, &mut out),
+            1
+        );
+        assert_eq!(out[..2], [0.75, 0.25]);
+        assert_eq!(out[2], 1.0 - MIN_CONTAMINANT_FREQUENCY);
+    }
+
+    /// **The two laws this producer obeys, over cohorts nobody chose.**
+    ///
+    /// Every row is a distribution — the frequencies of one batch sum to one, up to whatever
+    /// the never-seen floor lifted — and **the answer depends only on the ratios**, so
+    /// multiplying every copy in the cohort by the same positive number changes nothing. The
+    /// second is what says this is a frequency and not a count, and it is the law a divisor
+    /// taken from the wrong place breaks.
+    ///
+    /// Hand-built fixtures pin values; this pins the shape of the function over 3 to 20
+    /// samples, 1 to 5 alleles and 1 to 4 batches, which is the range around the corner the
+    /// benchmarks sit in.
+    #[test]
+    fn every_row_is_a_distribution_and_only_the_ratios_matter() {
+        use proptest::prelude::*;
+
+        proptest!(|(
+            sample_count in 3usize..20,
+            allele_count in 1usize..5,
+            batch_count in 1usize..4,
+            scored in 0usize..3,
+            copies in proptest::collection::vec(0.0f64..8.0, 3 * 5 * 20),
+            scale in 0.25f64..40.0,
+        )| {
+            // Every declared batch must hold a sample, so deal them round-robin.
+            let batches: Vec<BatchId> = (0..sample_count)
+                .map(|sample| BatchId((sample % batch_count) as u32))
+                .collect();
+            let copies = &copies[..sample_count * allele_count];
+
+            let mut out = vec![f64::NAN; batch_count * allele_count];
+            frequencies_leaving_out(copies, &batches, allele_count, scored, &mut out);
+
+            for row in out.chunks_exact(allele_count) {
+                let total: f64 = row.iter().sum();
+                prop_assert!(
+                    (total - 1.0).abs() < 1e-9,
+                    "a batch's frequencies sum to {total}, and a row is a distribution"
+                );
+                prop_assert!(row.iter().all(|&f| (0.0..=1.0).contains(&f)));
+            }
+
+            let scaled: Vec<f64> = copies.iter().map(|c| c * scale).collect();
+            let mut from_scaled = vec![f64::NAN; batch_count * allele_count];
+            frequencies_leaving_out(&scaled, &batches, allele_count, scored, &mut from_scaled);
+            for (plain, scaled) in out.iter().zip(&from_scaled) {
+                prop_assert!(
+                    (plain - scaled).abs() < 1e-12,
+                    "scaling every copy by {scale} moved a frequency from {plain} to {scaled}"
+                );
+            }
+        });
+    }
+
+    // ---- C2: what each half of the producer refuses ----
 
     /// A negative copy count is arithmetic that went wrong upstream, and the finiteness check
     /// alone does not catch it — mutation testing dropped the `>= 0.0` half and the module
@@ -2935,7 +3140,7 @@ mod tests {
     fn a_negative_copy_count_is_a_caller_bug() {
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
+        fill_batch_allele_copies(
             &[2.0, -1.0],
             BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
             2,
@@ -2943,15 +3148,28 @@ mod tests {
         );
     }
 
-    /// An `out` that is not a whole number of rows would leave the last batch short, and
+    #[test]
+    #[should_panic(expected = "copy count is finite and at or above zero")]
+    fn a_copy_count_that_is_not_a_number_is_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        fill_batch_allele_copies(
+            &[2.0, f64::NAN],
+            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
+            2,
+            &mut out,
+        );
+    }
+
+    /// A copy table that is not a whole number of rows would leave the last batch short, and
     /// `chunks_exact_mut` drops the remainder — so the row would keep whatever it held. The
     /// check is release-mode and had no test until mutation testing neutered it (C2's review).
     #[test]
     #[should_panic(expected = "a batch's row is 2 alleles wide")]
-    fn a_frequency_buffer_that_is_not_whole_rows_is_a_caller_bug() {
+    fn a_copy_buffer_that_is_not_whole_rows_is_a_caller_bug() {
         let mut out = [f64::NAN; 3];
 
-        fill_contaminant_allele_frequencies(
+        fill_batch_allele_copies(
             &[2.0, 0.0],
             BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
             2,
@@ -2964,7 +3182,7 @@ mod tests {
     fn copies_that_are_not_one_row_per_sample_are_a_caller_bug() {
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
+        fill_batch_allele_copies(
             &[2.0, 0.0, 1.0],
             BatchOfEachSample(&[BatchId::ALL_TOGETHER; 2]),
             2,
@@ -2977,7 +3195,7 @@ mod tests {
     fn a_sample_in_a_batch_the_run_did_not_declare_is_a_caller_bug() {
         let mut out = [f64::NAN; 2];
 
-        fill_contaminant_allele_frequencies(
+        fill_batch_allele_copies(
             &[2.0, 0.0, 1.0, 1.0],
             BatchOfEachSample(&[BatchId(0), BatchId(1)]),
             2,
@@ -2985,21 +3203,80 @@ mod tests {
         );
     }
 
-    /// A `NaN` copy count is arithmetic that went wrong upstream, and it must not become a
-    /// `NaN` frequency — which would reach a logarithm and make every genotype comparison
-    /// false. Same check `ExpectedAlleleCopies` makes; this is the other door.
+    /// **A batch nobody was sequenced in is not a thin batch, and without this check the two
+    /// are the same row.** The sum never writes a batch no sample names, so `out.fill(0.0)`
+    /// leaves it at a zero total and it leaves through the frequency's no-evidence fallback —
+    /// coming back as a legal-looking frequency that says the neighbours carry the reference.
+    /// C2's review built it: a table sized for three batches against a batching naming only the
+    /// first returned `[0.999999999999, 1e-12]` for the other two, with nothing raised.
     #[test]
-    #[should_panic(expected = "copy count is finite and at or above zero")]
-    fn a_copy_count_that_is_not_a_number_is_a_caller_bug() {
-        let mut out = [f64::NAN; 2];
+    #[should_panic(expected = "no sample ran in batch 1")]
+    fn a_declared_batch_nobody_was_sequenced_in_is_a_caller_bug() {
+        let mut out = [f64::NAN; 4];
 
-        fill_contaminant_allele_frequencies(
-            &[2.0, f64::NAN],
+        fill_batch_allele_copies(
+            &[2.0, 0.0],
             BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
             2,
             &mut out,
         );
     }
+
+    /// **Every slot is checked as it accumulates and the total is not**, so a row of finite
+    /// copies whose sum overflows would reach the division — where `finite / inf` is zero, every
+    /// allele is lifted to the floor, and the row comes back finite and plausible and says the
+    /// neighbours carry nothing. C2's review built it with one sample holding `1e308` copies of
+    /// each of two alleles.
+    #[test]
+    #[should_panic(expected = "arithmetic that went wrong upstream")]
+    fn a_batch_whose_copies_overflow_their_sum_is_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        frequencies_leaving_out(
+            &[1e308, 1e308, 1e308, 1e308],
+            &[BatchId::ALL_TOGETHER; 2],
+            2,
+            0,
+            &mut out,
+        );
+    }
+
+    /// A sample that claims more copies than the batch it is one addend of means the two count
+    /// paths have gone out of step — the check `fill_sample_concentration` makes for the same
+    /// subtraction, at the same threshold.
+    #[test]
+    #[should_panic(expected = "count paths have gone out of step")]
+    fn a_sample_carrying_more_than_its_whole_batch_is_a_caller_bug() {
+        let batch_copies = [2.0, 0.0];
+        let impossible = [4.0, 0.0];
+        let mut out = [f64::NAN; 2];
+
+        let _ = fill_contaminant_allele_frequencies(
+            &batch_copies,
+            SampleAlleleCopies::new(&impossible),
+            BatchId::ALL_TOGETHER,
+            2,
+            &mut out,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the copy table holds 1 batches")]
+    fn a_sample_in_a_batch_the_copy_table_lacks_is_a_caller_bug() {
+        let batch_copies = [2.0, 0.0];
+        let own = [1.0, 0.0];
+        let mut out = [f64::NAN; 2];
+
+        let _ = fill_contaminant_allele_frequencies(
+            &batch_copies,
+            SampleAlleleCopies::new(&own),
+            BatchId(1),
+            2,
+            &mut out,
+        );
+    }
+
+    // ---- C2: what the mixture refuses ----
 
     /// A mixture whose batching names a batch its frequency table has no row for would read
     /// another batch's frequencies, or past the end. Checked at construction, so the row's
@@ -3036,134 +3313,6 @@ mod tests {
             &frequencies,
             2,
         );
-    }
-
-    /// **A batch nobody was sequenced in is not a thin batch, and without this check the two
-    /// are the same row.** The producer never writes a batch no sample names, so `out.fill(0.0)`
-    /// leaves it at a zero total and it leaves through the no-evidence fallback — coming back
-    /// as a legal-looking frequency that says the neighbours carry the reference. C2's review
-    /// built it: a table sized for three batches against a batching naming only the first
-    /// returned `[0.999999999999, 1e-12]` for the other two, with nothing raised.
-    #[test]
-    #[should_panic(expected = "no sample ran in batch 1")]
-    fn a_declared_batch_nobody_was_sequenced_in_is_a_caller_bug() {
-        let mut out = [f64::NAN; 4];
-
-        fill_contaminant_allele_frequencies(
-            &[2.0, 0.0],
-            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
-            2,
-            &mut out,
-        );
-    }
-
-    /// **Every slot is checked as it accumulates and the total is not**, so a row of finite
-    /// copies whose sum overflows would reach the division — where `finite / inf` is zero, every
-    /// allele is lifted to the floor, and the row comes back finite and plausible and says the
-    /// neighbours carry nothing. C2's review built it with one sample holding `1e308` copies of
-    /// each of two alleles.
-    #[test]
-    #[should_panic(expected = "arithmetic that went wrong upstream")]
-    fn a_batch_whose_copies_overflow_their_sum_is_a_caller_bug() {
-        let mut out = [f64::NAN; 2];
-
-        fill_contaminant_allele_frequencies(
-            &[1e308, 1e308],
-            BatchOfEachSample(&[BatchId::ALL_TOGETHER]),
-            2,
-            &mut out,
-        );
-    }
-
-    /// How many batches had nothing to read a frequency off, which is otherwise invisible: the
-    /// fallback row is a legal frequency, and at one candidate allele it is bit-identical to a
-    /// batch full of evidence.
-    #[test]
-    fn the_fill_says_how_many_batches_had_no_evidence() {
-        let one_sample_each = [2.0, 0.0, 0.0, 0.0];
-        let mut out = [f64::NAN; 4];
-
-        let with_nothing = fill_contaminant_allele_frequencies(
-            &one_sample_each,
-            BatchOfEachSample(&[BatchId(0), BatchId(1)]),
-            2,
-            &mut out,
-        );
-
-        assert_eq!(with_nothing, 1);
-        // And the second batch's row is a frequency like any other, which is the point.
-        assert_eq!(out[2], 1.0 - MIN_CONTAMINANT_FREQUENCY);
-        assert_eq!(
-            fill_contaminant_allele_frequencies(
-                &[2.0, 0.0, 1.0, 1.0],
-                BatchOfEachSample(&[BatchId(0), BatchId(1)]),
-                2,
-                &mut out
-            ),
-            0
-        );
-    }
-
-    /// **The two laws this producer obeys, over cohorts nobody chose.**
-    ///
-    /// Every row is a distribution — the frequencies of one batch sum to one, up to whatever
-    /// the never-seen floor lifted — and **the answer depends only on the ratios**, so
-    /// multiplying every copy in the cohort by the same positive number changes nothing. The
-    /// second is what says this is a frequency and not a count, and it is the law a divisor
-    /// taken from the wrong place breaks.
-    ///
-    /// Hand-built fixtures pin values; this pins the shape of the function over 3 to 20
-    /// samples, 1 to 5 alleles and 1 to 4 batches, which is the range around the corner the
-    /// benchmarks sit in.
-    #[test]
-    fn every_row_is_a_distribution_and_only_the_ratios_matter() {
-        use proptest::prelude::*;
-
-        proptest!(|(
-            sample_count in 3usize..20,
-            allele_count in 1usize..5,
-            batch_count in 1usize..4,
-            copies in proptest::collection::vec(0.0f64..8.0, 3 * 5 * 20),
-            scale in 0.25f64..40.0,
-        )| {
-            // Every declared batch must hold a sample, so deal them round-robin.
-            let batches: Vec<BatchId> = (0..sample_count)
-                .map(|sample| BatchId((sample % batch_count) as u32))
-                .collect();
-            let copies = &copies[..sample_count * allele_count];
-
-            let mut out = vec![f64::NAN; batch_count * allele_count];
-            fill_contaminant_allele_frequencies(
-                copies,
-                BatchOfEachSample(&batches),
-                allele_count,
-                &mut out,
-            );
-
-            for row in out.chunks_exact(allele_count) {
-                let total: f64 = row.iter().sum();
-                prop_assert!(
-                    (total - 1.0).abs() < 1e-9,
-                    "a batch's frequencies sum to {total}, and a row is a distribution"
-                );
-                prop_assert!(row.iter().all(|&f| (0.0..=1.0).contains(&f)));
-            }
-
-            let scaled: Vec<f64> = copies.iter().map(|c| c * scale).collect();
-            let mut from_scaled = vec![f64::NAN; batch_count * allele_count];
-            fill_contaminant_allele_frequencies(
-                &scaled,
-                BatchOfEachSample(&batches),
-                allele_count,
-                &mut from_scaled,
-            );
-            for (plain, scaled) in out.iter().zip(&from_scaled) {
-                prop_assert!(
-                    (plain - scaled).abs() < 1e-12,
-                    "scaling every copy by {scale} moved a frequency from {plain} to {scaled}"
-                );
-            }
-        });
     }
 
     /// **A mixture whose batching names fewer batches than its table has rows scores every

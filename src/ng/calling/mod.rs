@@ -62,7 +62,8 @@ pub use likelihood::generic::{
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
     GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY, ReadGroupCalibration,
-    SsrRowScratch, SsrSampleEvidence, fill_contaminant_allele_frequencies,
+    SsrRowScratch, SsrSampleEvidence, fill_batch_allele_copies,
+    fill_contaminant_allele_frequencies,
 };
 
 use crate::ng::locus_generation::LocusKind;

@@ -169,6 +169,34 @@ buffer that is not a whole number of rows, and `BatchId`'s own rendering.
 genotype — a lone heterozygote gets `[0.5, 0.5]` — which is §8's open question, and a test saying
 so is better than a gap. It pins the behaviour without endorsing it.
 
+## 7b. What the owner settled, the same day
+
+**Three of the four questions above and in C1's report were taken on 2026-08-24, and the code
+in this branch is what they decided.**
+
+**`q(o)` now leaves the sample out of its own batch.** The producer is split in two:
+`fill_batch_allele_copies` sums each batch's expected copies once per locus, and
+`fill_contaminant_allele_frequencies` subtracts the scored sample's own copies from its own
+batch and normalises, once per sample. It is the same shape and the same `max(0, ·)` the
+genotype prior's `fill_sample_concentration` already used for the same reason, sharing its
+`COUNT_PATH_DESYNC_THRESHOLD` rather than restating it. **The row's signature is untouched and it
+still carries no sample identity** — the loop refills the table between samples, which is what
+keeps that true. Measured on the four-diploid fixture: leaving one of four samples out moves the
+alternative's frequency from 3 in 8 to 2 in 6, and **a sample alone in its batch now returns the
+reference instead of its own genotype** — the conservative answer, since a library with no
+neighbours has no contaminating population to be drawn from.
+
+**The ceiling and the capped reading are deleted**, not kept behind a `dead_code` allowance; a
+test is what survives them, so reintroducing a cap fails there rather than moving genotypes.
+
+**The error-spread table stores `m`**, so the row divides by 3 rather than by `exp(ln 3)`, and
+the log form has no consumer to keep.
+
+**The floor's size is the one still open**, and §4 states the choice.
+
+**And §3.6's reporting requirement has a home**: [`calling_loop.md`](../../ng/impl_plan/calling_loop.md)
+E2b, added the same day, together with E2a which owns the batching itself.
+
 ## 8. Two questions this step raises and does not answer
 
 **A batch of one sample makes `q(o)` the sample's own genotype.** The frequency is summed over
@@ -189,11 +217,7 @@ contamination fraction rather than trusting the frequency. That is a third optio
 cheapest.
 
 **Recommendation: subtract the sample's own copies, and pay for it in the loop rather than in the
-row.** The loop knows which sample it is scoring, so it can fill a per-sample row of the
-frequency table before calling the row — the table is `batches × alleles` and would become
-`1 × alleles` per sample, refilled per sample. That keeps the row's signature and its
-sample-blindness intact. But it is a modelling decision with a genotype effect at small batches,
-so it is the owner's, and it should be settled before the loop plan fixes the calling order.
+row.** *Taken by the owner on 2026-08-24 and built — §7b.*
 
 **The second question is the floor's size**, carried from §4: defensive at `1e-12`, or a
 pseudocount over the batch's copies. The two are the same question at different ends — what a
@@ -207,5 +231,5 @@ All in the container, on the committed tree:
 - `cargo clippy --lib --all-features --tests -- -D warnings`: clean. The repo-wide
   `--all-targets --all-features` run is red on `main`, in `examples/ng_duplicated_class_harness.rs`
   and `benches/freebayes_bookkeeping.rs` — pre-existing and out of scope.
-- `cargo test`: **4,330 passed, 0 failed, 14 ignored**; 138 of them in
+- `cargo test`: **4,333 passed, 0 failed, 14 ignored**; 141 of them in
   `ng::calling::likelihood`, against 113 at C1.
