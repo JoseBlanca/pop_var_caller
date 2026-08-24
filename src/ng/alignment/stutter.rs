@@ -1194,6 +1194,100 @@ mod tests {
         }
     }
 
+    /// **Spec §12's fourth test: the distribution sums to one over its whole support.**
+    ///
+    /// Sum `probability` over every length change the model scores, for periods 2 to 6 and
+    /// direction splits from symmetric to five-to-one, and the total must be one. **No
+    /// production test pins this**, and it is the test that catches three silent failures at
+    /// once: a one-step share read as its complement, a mis-set same-length share, and a
+    /// part-repeat re-indexing off by one.
+    ///
+    /// **How each of the three shows up as a shortfall.** A complemented one-step share is
+    /// the loud one: at a fitted 0.95 read as 0.05, the ten scored steps hold only
+    /// `1 − 0.95^10`, four tenths of a branch's mass, so six tenths of every slip vanishes. A
+    /// same-length share that is not the remainder moves the total by exactly its own error.
+    /// And a part-repeat geometric indexed by `Δ` rather than by the compressed rank skips
+    /// the multiples of the period, so its weights sum to less than one.
+    ///
+    /// **Period 1 is excluded and gets its own assertion below**, because there the
+    /// part-repeat branch is unreachable by construction and the total is *supposed* to fall
+    /// short by exactly that branch's mass — which
+    /// `a_mononucleotide_candidate_loses_the_whole_part_repeat_mass` already pins.
+    ///
+    /// The tolerance is the cutoffs' own tail, `(1 − one_step)^10`, which is what an
+    /// untruncated sum would recover. At the fitted-like shares swept here it is below
+    /// `1e-9`; the second assertion states the exact form, cross-checking this sum against
+    /// [`StutterModel::truncated_mass_lost`], which is derived a completely different way.
+    #[test]
+    fn the_distribution_sums_to_one_over_its_whole_support() {
+        // Symmetric, then two-to-one, then five-to-one toward contraction.
+        for shorter_of_the_slips in [0.5, 2.0 / 3.0, 5.0 / 6.0] {
+            for level in [0.02, 0.2] {
+                for one_step in [0.9, 0.95, 0.99] {
+                    let model = StutterModel::new(StutterRates {
+                        whole_repeat_longer_share: level * (1.0 - shorter_of_the_slips),
+                        whole_repeat_shorter_share: level * shorter_of_the_slips,
+                        whole_repeat_one_step_share: one_step,
+                        part_repeat_longer_share: level * 0.05 * (1.0 - shorter_of_the_slips),
+                        part_repeat_shorter_share: level * 0.05 * shorter_of_the_slips,
+                        part_repeat_one_step_share: one_step,
+                    });
+                    for period_bases in 2..=6u8 {
+                        let period = period(period_bases);
+                        // A tract long enough that no contraction is out of reach, so the
+                        // only thing missing is the cutoffs' tail.
+                        let repeat_count = 200u32;
+                        let total = reachable_mass(&model, period, repeat_count);
+
+                        assert!(
+                            (total - 1.0).abs() < 1e-9,
+                            "period {period_bases}, level {level}, one-step {one_step}, \
+                             split {shorter_of_the_slips}: summed to {total}"
+                        );
+
+                        // Exactly, against the model's own account of what it discards.
+                        let lost = model.truncated_mass_lost(period, repeat_count);
+                        assert!(
+                            (total - (1.0 - lost)).abs() < 1e-12,
+                            "period {period_bases}: summed {total}, reported loss {lost}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A complemented one-step share is what the sums-to-one test is for.** Reading a
+    /// fitted fall-off as a one-step share — the trap spec §4.2 names first — leaves the ten
+    /// scored steps holding four tenths of each branch's mass instead of all of it, so the
+    /// distribution sums visibly short. Measured here rather than asserted: this is the
+    /// shortfall the tripwire above would report.
+    #[test]
+    fn a_complemented_one_step_share_makes_the_distribution_sum_short() {
+        let level = 0.2;
+        let complemented = StutterModel::new(StutterRates {
+            whole_repeat_longer_share: level * 0.17,
+            whole_repeat_shorter_share: level * 0.83,
+            whole_repeat_one_step_share: 0.05, // the fitted 0.95, read backwards
+            part_repeat_longer_share: level * 0.05 * 0.17,
+            part_repeat_shorter_share: level * 0.05 * 0.83,
+            part_repeat_one_step_share: 0.05,
+        });
+        let total = reachable_mass(&complemented, period(3), 200);
+        let short_by = 1.0 - total;
+
+        // `1 − 0.95^10` of each branch survives, so 0.95^10 of the whole slip mass is gone:
+        // 0.2 × 1.05 × 0.5987 ≈ 0.1257.
+        assert!(
+            (short_by - 0.125_74).abs() < 1e-4,
+            "a complemented share left the total short by {short_by}"
+        );
+        assert!(
+            short_by > 1e-9,
+            "the tripwire's tolerance must be far below this"
+        );
+    }
+
     /// **The copied cutoffs must not drift from production's.** Both are inherited from its
     /// single provisional 10, and their docs say so; this makes that true rather than
     /// aspirational. A **test-only** reference, so shipping ng code still depends on nothing

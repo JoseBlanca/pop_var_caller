@@ -363,7 +363,7 @@ the loss is computed and surfaced, not that it is small** (spec §12 test 5; its
 2 in a million to 2 in a thousand). **Own commit, do not bundle** — an unreported loss compares
 candidates on different scales silently. *Depends:* E1. *Source:* spec §4.2; arch §4.2.
 
-**E3. `stutter_rates_for(&Slippage)` + the sums-to-one tripwire.**  ☐
+**E3. `stutter_rates_for(&Slippage)` + the sums-to-one tripwire.**  ✅
 Seven shares from the fit's three numbers, the placeholders named as placeholders:
 `PART_REPEAT_SHARE_OF_WHOLE = 0.05` (production's `OUT_FRAME_REL`) and the two one-step shares
 tied to one value — both awaiting an owner (spec §10). Test: **the distribution sums to one**

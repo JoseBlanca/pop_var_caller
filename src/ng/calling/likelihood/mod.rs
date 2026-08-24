@@ -125,6 +125,7 @@
 //! a per-locus loop is for.
 
 pub mod generic;
+pub mod ssr_emission;
 
 use crate::ng::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
