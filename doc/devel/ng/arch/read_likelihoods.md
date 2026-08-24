@@ -51,11 +51,18 @@ where both consumers reach it.
 One call computes **one sample's whole `Lg` row** — one `LogProb` per candidate genotype, parallel
 to the loop's `GenotypeTable`. Contract, both paths:
 
-- pure function of (evidence, candidates, frozen parameters); bit-identical at any thread count,
-  any observation order sorted as the merge sorts (spec §8);
-- fills caller scratch, allocates nothing per sample (spec §8). The scratch shapes
-  (`GenericRowScratch`, `SsrRowScratch`) are this doc's; they live as one section inside the
-  loop's `CallingScratch` ([`calling_em_loop.md`](calling_em_loop.md) §2);
+- pure function of (evidence, candidates, frozen parameters); **reproducible** at any thread count,
+  with the observations summed in the one order the merge sorts them into (spec §8). *Not
+  "bit-identical at any observation order": permuting the observations is permuting a
+  floating-point sum, and spec §2.3 carries the measurement — a relative 2 × 10⁻¹⁴, corrected
+  2026-08-24 at B2. What the row must not do is impose an order of its own;*
+- fills caller scratch, allocates nothing per sample (spec §8). The scratch shapes are this doc's
+  and live as one section inside the loop's `CallingScratch`
+  ([`calling_em_loop.md`](calling_em_loop.md) §2). **Two types on the generic side and not one**
+  (A2, 2026-08-24): `GenericEvidenceBuffer` holds the narrowed merge rows the evidence *borrows*,
+  and the row's own scratch is separate and arrives at Milestone D — a row taking `&mut` the same
+  object the evidence borrows cannot be called at all. `SsrRowScratch<ModelScratch>` has no such
+  split, because the STR evidence borrows the locus generator rather than the scratch;
 - an empty evidence row is all-zeros — the prior decides, no branch (spec §3.3);
 - a mis-shaped input (row length ≠ genotype count, a candidate with no stratum entry, a non-finite
   parameter) is a caller bug → assertion, structural ones held in release
@@ -238,24 +245,24 @@ pub fn genotype_log_likelihood_row(
     genotypes: &GenotypeTableView<'_>,          // flat views from the loop's table
     calibration: &[ReadGroupCalibration],       // indexed by ReadGroupId
     contamination: &[ContaminationView],        // indexed by ReadGroupId; empty = §3.3 exactly
-    error_spread_divisors: &[f64],              // m(a, g), precomputed per (allele, genotype)
+    log_error_spreads: LogErrorSpreadTable<'_>, // log m(a, g), per (allele, genotype)
     out: &mut [LogProb],
-    scratch: &mut GenericRowScratch,
-);
+);   // no contamination and no scratch yet — see the note below
 
 /// m(a, g): 3.0 where the observation differs from every allele the genotype carries by
 /// a substitution at exactly one position, 1.0 otherwise. A property of the allele pair,
 /// computed once per locus over the projected sequences (spec §3.5).
-pub fn fill_error_spread_divisors(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
+pub fn fill_log_error_spreads(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
 
 /// The filled buffer, carrying the stride it was filled at. A bare `(values, allele_count)`
 /// pair cannot check that the count is the stride the buffer really has, and reading a
 /// three-allele table at a stride of two returns a real divisor from the wrong row on half
 /// the lookups — measured, six of twelve, with nothing to panic about (B1, 2026-08-24).
-pub struct DivisorTable<'a> { /* values, allele_count */ }
-impl<'a> DivisorTable<'a> {
+pub struct LogErrorSpreadTable<'a> { /* values, allele_count */ }
+impl<'a> LogErrorSpreadTable<'a> {
     pub fn over(values: &'a [f64], genotypes: &GenotypeTableView<'_>) -> Self;
-    pub fn row_of(&self, genotype: GenotypeIdx) -> Option<&'a [f64]>;   // the row shape the row function walks
+    pub fn row_of(&self, genotype: GenotypeIdx) -> Option<&'a [f64]>;
+    pub fn column_of(&self, allele: AlleleId) -> impl Iterator<Item = f64>;  // what the row walks
     pub fn at(&self, genotype: GenotypeIdx, allele: AlleleId) -> f64;
 }
 ```
@@ -265,19 +272,25 @@ rediscover them. The filler is a **verb** — it writes into `out` — where thi
 noun. And the divisor table's **owner is `CallingScratch`**
 ([`calling_em_loop.md`](calling_em_loop.md) §2), as an eighth field sized
 `genotype_count × allele_count`: it is per **locus**, and `CallingScratch` is the type documented
-as allocated once per worker and reused per locus. It must **not** live in `GenericRowScratch`,
-which is per sample — putting it there would invite a refill per sample of a quantity that does not
+as allocated once per worker and reused per locus. It must **not** live in the generic row's own
+scratch, which is per sample — putting it there would invite a refill per sample of a quantity that does not
 vary by sample. It is refilled **once per locus and not once per pass** (on the generic path both
 outer rounds are structurally inert, so a per-pass refill would be 3–5× the work for an identical
 answer), and it is **generic-path only**.
 
-`OPEN: the table stores `m`, and every consumer wants `log m`.` Spec §3.3 charges
-`q_sum_o + n_o·(log scale − log m)`, once per `(observation, genotype)` in the row's inner loop, so
-as it stands B2 calls `.ln()` on every term. Measured at 21 genotypes × 100 observations: **1.392 ns
-a term against 0.553 ns** if the table held the logarithm — a factor of 2.5 on that lookup, about 26
-seconds single-threaded over a high-depth sample's 15 M loci. **B2's to decide, and it has to be
-decided there rather than later**, because storing `log m` makes *divisor* the wrong word: nobody
-divides by 1.0986. Spec §3.5's `m = 3` framing stays in the doc comment either way.
+**Decided at B2 (2026-08-24): the table stores `log m`.** The argument is not the 2.5× the lookup
+measured but that **spec §3.3's closed form takes no logarithm at all inside its loop** — every
+logarithm it needs belongs to the read group, the copy count or the allele pair, and is computed
+before the observation walk. A table of `m` would have put one back into the one place the formula
+was shaped to keep clear of. So the filler is `fill_log_error_spreads`, the reader is
+`LogErrorSpreadTable`, and *divisor* is retired: nobody divides by 1.0986. Spec §3.5's `m = 3`
+framing stays in the doc comments.
+
+**The row's signature as built**, and the two departures from the sketch above. It takes
+`log_error_spreads: LogErrorSpreadTable<'_>` rather than a bare slice, for the reason that type
+exists. It takes **no `contamination` and no scratch**: the mixture is Milestone C and the generic
+row's own scratch is Milestone D, which is the step that first has buffers to put in it (a
+compatibility cache per `(partial, allele)`, and a gather buffer for a witness with holes).
 
 **Contract.** No multinomial coefficient (spec §3.4 — a genotype-changing decision, measured by
 the change measurement below, not asserted). A read the genotype explains is charged `log(k_a/P)`
@@ -285,8 +298,10 @@ only; a read it cannot explain is charged `q_sum + n·(log scale − log m)`; th
 added as a genotype-independent constant and kept for emission (spec §3.3). **Partials** enter by
 spec §5.3's compatibility rule: an allele is compatible when its projection restricted to the witnessed
 run equals the partial's bases; a partial compatible with none is charged as an error with
-`m = 1` (spec §5.3). The aggregation identity — reads looped individually versus the merge's
-aggregate, bit for bit — is spec §12 test 9 and is the reason the formula has this shape.
+`m = 1` (spec §5.3). The aggregation identity — reads looped individually against the merge's
+aggregate — is spec §12 test 9 and is the reason the formula has this shape. **It holds to a
+relative 2 × 10⁻¹⁴ and not bit for bit**; §2.3 carries the measurement and why the distinction
+matters (corrected 2026-08-24 at B2).
 
 **What asks something of the pre-pass:** the calibration's numerator/denominator accumulator (two
 scalars per read group, per surviving route) — recorded there, consumed here as

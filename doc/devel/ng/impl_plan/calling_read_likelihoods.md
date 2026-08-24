@@ -189,7 +189,13 @@ bundle** — a wrong divisor is `log 3` (4.8 Phred) per wrong read in the wrong 
 nothing crashes; the oracle is a hand-built fixture per class (one-substitution, multi-position,
 indel). *Depends:* A2. *Source:* spec §3.5; arch §3.
 
-**B2. `genotype_log_likelihood_row`, plain form.**  ☐
+**B2. `genotype_log_likelihood_row`, plain form.**  ✅ *(shipped with the error-spread table
+storing `log m` — the decision this step owed — and with the production differential reconciling
+**three** differences rather than two: production has no calibration, so ng's `n·log scale` comes
+back out too, and at a defaulted calibration that term is exactly zero, which is how a mutation
+deleting it outright survived every test at a cost of 1,620 Phred. Two specification claims were
+found false and corrected: the aggregation identity is not bitwise and neither is order
+independence — §12 tests 8 and 9, §2.3, and the architecture's own row contract.)*
 Spec §3.3 exactly, with an empty contamination slice: explained reads charged `n·log(k_a/P)`;
 unexplained charged `q_sum + n·(log scale − log m)`; `unmatched_q_sum` added as the
 genotype-independent constant (kept for emission). Tests: **the aggregation identity, bit for
@@ -222,8 +228,11 @@ floating-point tolerance — every difference attributed to the two recorded cha
   (../../../../src/var_calling/per_group_merger.rs)) — it is a private `fn` and the differential
   cannot reach it. Visibility only, which is the one production change the freeze allows.
 
-> **Checkpoint B:** the closed form matches production term-for-term once the two recorded
-> changes are reconciled, and aggregation is exact. Pause for review.
+> **Checkpoint B — reached 2026-08-24.** The closed form matches production term-for-term once the
+> **three** recorded changes are reconciled — the dropped coefficient, the error spread, and ng's
+> calibration scale, which production has no counterpart for and which this line used to leave out.
+> *Aggregation is exact in the model and not in the arithmetic: a relative 2 × 10⁻¹⁴, spec §2.3.*
+> Pause for review.
 
 ### Milestone C — the generic contamination mixture
 

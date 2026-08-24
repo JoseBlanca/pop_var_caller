@@ -289,9 +289,47 @@ between them is their quality — which is why this contract is about quality an
    carries is the one that was corrected here, and it is corrected there too.
 2. **Anything else that varies read by read must enter as a term that is exactly additive in
    `q_sum`, or not at all.** §3.3's formula is built to satisfy this and §12's ninth test pins it:
-   compute the likelihood from a list of made-up reads and from the aggregate of those same reads
-   and require the two to agree **bit for bit**. This one *is* bitwise: §3.3's formula sums the same
-   terms in the same order either way, with no round trip through probability space.
+   compute the likelihood from a list of made-up reads and from the aggregate of those same reads,
+   and require the two to agree.
+
+   > **They agree to a relative 2 × 10⁻¹⁴, not bit for bit — corrected 2026-08-24, measured while
+   > building the row** ([`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md)
+   > B2). This paragraph used to say *"This one **is** bitwise: §3.3's formula sums the same terms in
+   > the same order either way"*, and the second half is what is wrong: the two forms are **not** the
+   > same sequence of additions. A read at a time accumulates `q_r + log scale − log m`, where the
+   > fold accumulates `Σ q_r + n·log scale − n·log m` once, and floating-point addition is not
+   > associative.
+   >
+   > **The disagreement grows with depth, so a unit-in-the-last-place count is the wrong bound.** A
+   > first version of this correction quoted 2 ulps from a sweep that stopped at seven reads. Widened
+   > to the depths this caller commits to, the count goes past a hundred at 300 reads a position —
+   > it is repeated summation, so it grows with how much is summed. What does not grow is the
+   > *relative* size, and that is what the specification and the test now bound: **2 × 10⁻¹⁴ over 864
+   > combinations**, read counts from 2 to 300, four quality profiles including all-equal at Phred 93,
+   > three read-group scales and two ploidies.
+   >
+   > **The requirement itself is untouched, and the two claims are worth keeping apart.** What this
+   > contract asks is that pooling not change the answer *because of the model* — that no term be a
+   > non-linear function of a per-read quality, since `q_sum` recovers only the geometric mean
+   > (§1.4). §3.3's formula satisfies that exactly, and that is the thing worth testing. What is not
+   > exact is the summation order, and nothing in genotyping can see it: 2 × 10⁻¹⁴ relative is
+   > 10⁻¹⁰ Phred at the depths where it is largest.
+   >
+   > **A shape does exist that would make the single-observation case exact, and it is refused for a
+   > stated reason.** Accumulating the read *counts* — integers, so their sums are exact — per
+   > `(read group, spread class)` and per copy count, then multiplying each logarithm in once at the
+   > end, is bitwise exact wherever each `(allele, read group)` has one observation; a reviewer
+   > implemented it and measured zero disagreement over four million comparisons. **It buys nothing
+   > beyond that corner**: with two or more observations the per-read form sums flat where the fold
+   > sums a tree, and the row cannot recover a grouping the fold has already consumed — the merge's
+   > own `q_sum` is itself a tree sum. And it costs `genotypes × read groups × 2` accumulators held
+   > across the observation walk, which is scratch §8's no-allocation contract does not provide. **So
+   > the exactness is not available in general, and buying it in the corner is not worth the
+   > contract.**
+   >
+   > **A single fixture will often agree to the last bit**, which is why this was stated too strongly
+   > in the first place: the row's first aggregation test does, and it took a sweep to show that was
+   > luck rather than arithmetic.
 
 **What this contract costs, stated plainly.** A read's mapping quality cannot enter as its own
 `λ` — the natural and correct treatment, since a mismapped read is exactly a read that came from
@@ -595,11 +633,14 @@ case.
 - **A read that the genotype explains is not charged for being right.** The exact term is
   `log(k_a/P) + log(1 − ε)` and the second half is dropped, because recovering it needs the
   *arithmetic* mean of `ε` over the observation's reads and `q_sum` gives the geometric mean (§1.4).
-  The omission is at most `n·ε` nats for a genotype explaining `n` reads at rate `ε`, and what
-  matters is the *difference* between two genotypes, which is the difference in how many reads each
-  explains. At 20 reads with 2 of them alternative, at an error rate of 1 in a thousand, that
+  The omission is `−n·ln(1 − ε)` nats for a genotype explaining `n` reads at rate `ε` — which is
+  `n·ε` **and a little more**, not `n·ε` at most; this said "at most" and had the inequality the
+  wrong way round until 2026-08-24. What matters is the *difference* between two genotypes, which
+  is the difference in how many reads each explains. At 20 reads with 2 of them alternative, at an error rate of 1 in a thousand, that
   difference is 0.002 nats — a hundredth of a Phred. At 300 reads and a poor library at 1 in 20, comparing a heterozygote
-  explaining all 300 against a reference homozygote explaining 285, it is 0.75 nats, about 3 Phred.
+  explaining all 300 against a reference homozygote explaining 285, it is **0.77 nats, 3.3 Phred**
+  — the 0.75 this used to quote is the linearisation `15 × 0.05`, and the exact value is 2.6%
+  larger.
   **So it is negligible at good chemistry and small but real at bad chemistry and high depth**, and
   it always favours the genotype that explains more reads.
 - **Every read supporting one allele is charged the same, whatever its own quality**, once it is on
@@ -2167,13 +2208,23 @@ production already tests and ng's port should carry across
    on each allele, emission 0.9 on a match and 0.001 otherwise, gives the mixed genotype −1.59 nats
    against −7.01 for either homozygote. Pin both cases; the second is the one a wrong copy weighting
    breaks.
-8. **Order independence.** Permuting the observations, and permuting the candidates, changes no
-   genotype's log-likelihood by a single bit.
-9. **The aggregation contract holds exactly.** Build a list of individual reads with different error
+8. **Order independence.** Permuting the observations, and permuting the candidates, moves no
+   genotype's log-likelihood by more than the summation order costs — the same relative bound as
+   test 9. *This said "by a single bit" until 2026-08-24, and it is false for the same reason test 9's
+   claim was: permuting the observations **is** changing the summation order, measured at one unit in
+   the last place on the row's own fixture.* **What the property is really about is that the row
+   imposes no order of its own** — it must not sort, bucket or re-group behind the caller, because
+   the caller always hands it the merge's order and that is what makes a run reproducible at any
+   worker count.
+9. **The aggregation contract holds.** Build a list of individual reads with different error
    probabilities; compute the SNP/indel likelihood by looping over those reads; compute it again from
-   the counts and summed logs the merge would have produced; require the two to agree **bit for
-   bit**. This is the test that would have caught §1.4's geometric-mean substitution, and it is the
-   reason §3.3's formula is shaped the way it is.
+   the counts and summed logs the merge would have produced; require the two to agree **to within
+   two units in the last place**, and **sweep rather than take one fixture** — over several read
+   counts, quality spreads, read-group scales and ploidies, because a single fixture will often agree
+   to the last bit and that is luck rather than arithmetic. *This asked for bitwise agreement until
+   2026-08-24; §2.3 carries the correction and the measurement.* This is the test that would have
+   caught §1.4's geometric-mean substitution, and it is the reason §3.3's formula is shaped the way
+   it is.
 10. **The calibration scale reproduces the fitted rate.** Given a read group's minted per-read error
     probabilities and the pre-pass's fitted rate, the scaled probabilities' mean equals the fitted
     rate to floating-point tolerance. A second assertion checks the definitional requirement of §3.2:

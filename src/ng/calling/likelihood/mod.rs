@@ -324,6 +324,20 @@ impl ReadGroupCalibration {
         }
     }
 
+    /// The scale in log space — **what the SNP/indel row actually adds**, once per observation.
+    ///
+    /// Spec §3.3 charges an unexplained observation `q_sum + n·(log scale − log m)`, so the
+    /// multiplier never appears as a multiplier there: it is one addition per observation, and
+    /// the row hoists this out of its genotype loop because it is a property of the read group.
+    ///
+    /// **Exactly zero for a defaulted calibration**, since `ln 1 = 0` — so a read group the
+    /// pre-pass emitted no rate for is charged exactly what its reads were minted with, with no
+    /// arithmetic in between that could round.
+    #[must_use]
+    pub fn log_scale(&self) -> f64 {
+        self.scale.ln()
+    }
+
     /// This read group's calibrated error probability for an observation, from the sum of
     /// log errors over its reads.
     ///
@@ -332,6 +346,8 @@ impl ReadGroupCalibration {
     /// multiplier multiplies their geometric mean by it, so a read group's calibrated average
     /// *is* the fitted rate — **for every read whose calibrated error stays inside the
     /// floors.**
+    ///
+    /// See [`log_scale`](Self::log_scale) for what the row actually adds.
     ///
     /// Floored into `[MIN_BASE_ERROR, MAX_BASE_ERROR]` before it can reach a logarithm, and
     /// **the ceiling is the one that binds in practice**: at a scale of 2.3 any read minted

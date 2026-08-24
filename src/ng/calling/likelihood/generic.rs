@@ -6,25 +6,43 @@
 
 use crate::ng::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
 use crate::ng::locus_generation::LocusKind;
-use crate::ng::types::AlleleId;
+use crate::ng::types::{AlleleId, LogProb};
 
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
 /// than a tuning choice**: three bases to go wrong into, one to come back to.
 ///
 /// Named because it is kept in sync with three other places: spec §3.5, the parameter
-/// pre-pass's own noise model, and whatever the row function does with `log` of it.
+/// pre-pass's own noise model, and [`LOG_ERROR_SPREAD`], which is what the row actually reads.
 pub const ERROR_SPREAD_BASES: f64 = 3.0;
 
-/// The divisor where the model has nothing to say — **one, meaning the error mass is left
-/// unspread**, which is the conservative direction and favours the reference.
-pub const NO_ERROR_SPREAD: f64 = 1.0;
+/// What the row subtracts from a wrong read's charge where the error mass spreads three ways —
+/// `ln 3`, about 1.0986 nats or 4.77 Phred.
+///
+/// **The table stores this and not the 3 it is the logarithm of** (decided at B2). Spec §3.3
+/// charges an unexplained observation `q_sum + n·(log scale − log m)`, so `log m` is what the
+/// inner loop wants, once per `(observation, genotype)` — and the whole shape of that formula
+/// is that **no logarithm is taken inside it**: every logarithm it needs is a property of the
+/// allele, the genotype or the read group, and is computed before the loop starts. A table
+/// holding `m` would put an `ln` back in, measured at 1.392 ns a term against 0.553 ns.
+///
+/// It also means *divisor* stops being the right word for what is stored — nobody divides by
+/// 1.0986 — which is why the table is [`LogErrorSpreadTable`].
+pub const LOG_ERROR_SPREAD: f64 = 1.098_612_288_668_109_7;
 
-/// How many things a read could have shown, given that it is wrong — `m(a, g)` in spec §3.5.
+/// What it subtracts where the model has nothing to say — **nothing, because the error mass is
+/// left unspread.** `ln 1 = 0`, which is the conservative direction and favours the reference.
+pub const NO_LOG_ERROR_SPREAD: f64 = 0.0;
+
+/// `log m(a, g)` — how much a wrong read's charge is reduced because the error could have gone
+/// several ways (spec §3.5).
 ///
-/// `3.0` where the observation differs from **every** allele the genotype carries by a
-/// substitution at exactly one position, `1.0` otherwise.
+/// [`LOG_ERROR_SPREAD`] where the observation differs from **every** allele the genotype
+/// carries by a substitution at exactly one position, [`NO_LOG_ERROR_SPREAD`] otherwise. In
+/// spec §3.5's own terms `m` is `3` and `1`; the table holds their logarithms, because that is
+/// what the row's inner loop subtracts and taking the logarithm there would be the one place
+/// spec §3.3's closed form has none.
 ///
-/// # Why a divisor at all
+/// # Why a spread at all
 ///
 /// A read the genotype cannot produce is wrong. **But wrong how?** If the individual carries
 /// `A` at this base and the read shows `C`, the chance of *that particular* misread is not the
@@ -65,8 +83,8 @@ pub const NO_ERROR_SPREAD: f64 = 1.0;
 ///
 /// `out` is `genotype_count × allele_count`, **row-major by genotype** — the same shape and the
 /// same order as [`GenotypeTableView::genotype_allele_counts`], so a reader holding one row of
-/// counts holds the matching row of divisors at the same offset. [`DivisorTable`] is the one
-/// way to read it, and it carries the stride so that no caller has to supply one.
+/// counts holds the matching row of spreads at the same offset. [`LogErrorSpreadTable`] is
+/// the one way to read it, and it carries the stride so no caller has to supply one.
 ///
 /// # Panics
 ///
@@ -79,20 +97,20 @@ pub const NO_ERROR_SPREAD: f64 = 1.0;
 ///
 /// **The length check is an equality and not "at least enough", which matters twice over.** A
 /// longer buffer leaves its tail unwritten, so every genotype past the first reads a slot the
-/// fill never touched — a real number and a wrong one. And it is what makes [`DivisorTable`]'s
-/// own bound meaningful: a longer table admits a genotype index that should have been out of
-/// range.
-pub fn fill_error_spread_divisors(
+/// fill never touched — a real number and a wrong one. And it is what makes
+/// [`LogErrorSpreadTable`]'s own bound meaningful: a longer table admits a genotype index that
+/// should have been out of range.
+pub fn fill_log_error_spreads(
     alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     out: &mut [f64],
 ) {
     // **A repeat tract has no business here.** Its substitution term is a different rate on a
-    // different model (spec §4.3), and this divisor describes neither — so a table filled for
+    // different model (spec §4.3), and this spread describes neither — so a table filled for
     // one would be a number with no meaning quietly reaching the wrong row builder.
     assert!(
         matches!(alleles.kind(), LocusKind::Generic),
-        "the error-spread divisor is the SNP/indel path's; this locus is {:?}",
+        "the error spread is the SNP/indel path's; this locus is {:?}",
         alleles.kind()
     );
     let allele_count = alleles.len();
@@ -107,7 +125,7 @@ pub fn fill_error_spread_divisors(
     assert_eq!(
         out.len(),
         genotypes.genotype_count() * allele_count,
-        "the divisor table needs one entry per (genotype, allele) — {} genotypes × {} alleles \
+        "the error-spread table needs one entry per (genotype, allele) — {} genotypes × {} alleles \
          = {}, not {}",
         genotypes.genotype_count(),
         allele_count,
@@ -131,7 +149,7 @@ pub fn fill_error_spread_divisors(
         for observed_allele in 0..allele_count {
             // An allele the genotype carries differs from itself at zero positions, never at
             // exactly one, so it falls out of the `all` below without a special case — and the
-            // divisor is never read for an observation the genotype explains anyway.
+            // spread is never read for an observation the genotype explains anyway.
             let every_carried_is_one_substitution_away = carried_copies
                 .iter()
                 .enumerate()
@@ -141,20 +159,20 @@ pub fn fill_error_spread_divisors(
                 });
             out[genotype * allele_count + observed_allele] =
                 if every_carried_is_one_substitution_away {
-                    ERROR_SPREAD_BASES
+                    LOG_ERROR_SPREAD
                 } else {
-                    NO_ERROR_SPREAD
+                    NO_LOG_ERROR_SPREAD
                 };
         }
     }
 }
 
-/// A filled divisor table, with the stride it was filled at.
+/// A filled error-spread table, with the stride it was filled at.
 ///
 /// **The stride travels with the buffer rather than being handed in at each lookup, and that
 /// is the whole reason this type exists.** An accessor taking `(values, allele_count, genotype,
 /// allele)` cannot check that `allele_count` is the stride the buffer was actually filled at —
-/// so reading a three-allele table at a stride of two returns a real divisor from the wrong
+/// so reading a three-allele table at a stride of two returns a real spread from the wrong
 /// row, on half the lookups, with nothing to panic about. Measured on one three-allele diploid
 /// locus: six of twelve lookups silently disagree.
 ///
@@ -167,13 +185,13 @@ pub fn fill_error_spread_divisors(
 ///
 /// [`CandidateAlleles::bases_of`]: super::super::CandidateAlleles::bases_of
 #[derive(Copy, Clone, Debug)]
-pub struct DivisorTable<'a> {
+pub struct LogErrorSpreadTable<'a> {
     values: &'a [f64],
     allele_count: usize,
 }
 
-impl<'a> DivisorTable<'a> {
-    /// Wrap a buffer [`fill_error_spread_divisors`] filled, against the genotype table it was
+impl<'a> LogErrorSpreadTable<'a> {
+    /// Wrap a buffer [`fill_log_error_spreads`] filled, against the genotype table it was
     /// filled for.
     ///
     /// **The genotype view is the argument rather than a bare stride**, so the two dimensions
@@ -189,7 +207,7 @@ impl<'a> DivisorTable<'a> {
         assert_eq!(
             values.len(),
             genotypes.genotype_count() * genotypes.allele_count(),
-            "a divisor table for {} genotypes over {} alleles holds {} entries, not {}",
+            "an error-spread table for {} genotypes over {} alleles holds {} entries, not {}",
             genotypes.genotype_count(),
             genotypes.allele_count(),
             genotypes.genotype_count() * genotypes.allele_count(),
@@ -201,7 +219,7 @@ impl<'a> DivisorTable<'a> {
         }
     }
 
-    /// One genotype's whole row of divisors — one entry per allele, in allele order.
+    /// One genotype's whole row of log spreads — one entry per allele, in allele order.
     ///
     /// **The shape the row function wants**, because its inner loop already holds the matching
     /// row of copy counts as a slice and walks the two together.
@@ -215,7 +233,7 @@ impl<'a> DivisorTable<'a> {
         self.values.get(start..start + self.allele_count)
     }
 
-    /// The divisor for one `(genotype, allele)` pair.
+    /// The log spread for one `(genotype, allele)` pair.
     ///
     /// # Panics
     ///
@@ -238,6 +256,30 @@ impl<'a> DivisorTable<'a> {
             )
         });
         row[allele]
+    }
+
+    /// One allele's column of log spreads — its entry for every genotype, in genotype order.
+    ///
+    /// **The shape the row's inner loop wants**, because for a fixed observation the allele is
+    /// fixed and what varies is the genotype. Walking a column checks the allele once and then
+    /// strides; calling [`at`](Self::at) per genotype would put a bounds check, a
+    /// `checked_mul` and a formatting closure inside a loop whose whole stated shape is a
+    /// multiply and an add.
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on an allele this locus is not called over.
+    pub fn column_of(&self, allele: AlleleId) -> impl Iterator<Item = f64> + use<'a> {
+        let allele = usize::from(allele.get());
+        assert!(
+            allele < self.allele_count,
+            "allele {allele} is past the {} this locus is called over",
+            self.allele_count
+        );
+        self.values[allele..]
+            .iter()
+            .step_by(self.allele_count)
+            .copied()
     }
 
     /// How many alleles the locus is called over — the table's stride.
@@ -275,6 +317,159 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
     differing == 1
 }
 
+/// One sample's whole `Lg` row at an ordinary site — one log-probability per candidate
+/// genotype, spec §3.3 exactly.
+///
+/// ```text
+/// log Lg(g)  =   Σ         n_o · log( k_{a(o)} / P )              ← the reads it explains
+///             o : k_{a(o)} > 0
+///
+///             +  Σ         [ q_sum_o + n_o · ( log scale − log m ) ]
+///             o : k_{a(o)} = 0                                     ← the reads it calls errors
+///
+///             +  q_sum_other                                       ← the pooled leftover
+/// ```
+///
+/// **A read either shows something the genotype can produce, in which case it is charged only
+/// for which copy it came from, or it does not, in which case it is charged for being wrong.**
+/// That is the whole formula. `q_sum_other` is the same number in every row so it cancels when
+/// the caller normalises, and it is kept because the data likelihood also feeds emission and
+/// QUAL, where an absolute value is compared between loci.
+///
+/// # No logarithm is taken in the loop, and that is the shape rather than an optimisation
+///
+/// Every logarithm the formula needs is a property of something that does not vary per term:
+/// `log(k/P)` of the copy count and the ploidy, `log scale` of the read group, `log m` of the
+/// `(allele, genotype)` pair. All three are computed before the observation walk — the copy
+/// weights into a `ploidy + 1` array, the scales once per read group, the spreads once per
+/// locus by [`fill_log_error_spreads`]. What is left inside is a multiply and an add.
+///
+/// # Two approximations live in this formula and both have a size
+///
+/// **A read the genotype explains is not charged for being right.** The exact term is
+/// `log(k_a/P) + log(1 − ε)` and the second half is dropped, because recovering it needs the
+/// *arithmetic* mean of `ε` over the observation's reads and the evidence carries the geometric
+/// one. The omission is at most `n·ε` nats for a genotype explaining `n` reads at rate `ε`, and
+/// what matters is the *difference* between two genotypes — 0.002 nats at 20 reads and 1 error
+/// in a thousand, 0.75 nats at 300 reads and a poor library at 1 in 20. **Negligible at good
+/// chemistry, small but real at bad chemistry and high depth**, and it always favours the
+/// genotype that explains more reads.
+///
+/// **Every read supporting one allele is charged the same, whatever its own quality**, once it
+/// is on the error side. That is exactly what `q_sum` encodes and is not an approximation at
+/// all: the sum of logs is the log of the product, which is what a labelled-read likelihood
+/// wants.
+///
+/// # What is not here
+///
+/// **No multinomial coefficient** — production carries one and this does not (spec §3.4), which
+/// is a genotype-changing decision the plan measures rather than asserts. **No contamination
+/// mixture**: that is Milestone C, and until it lands this is spec §3.3 exactly. **No partial
+/// observations**: [`GenericSampleEvidence::partials`] is not read here, and Milestone D adds
+/// the compatibility rule that scores it.
+///
+/// # Panics
+///
+/// **In release as well as debug**, on a caller bug (spec §8): an `out` whose length is not the
+/// genotype count, a read group with no calibration, or an observation naming an allele the
+/// locus is not called over. Production holds the analogous assertion in release because a
+/// scratch array too short for the allele count would otherwise be indexed out of bounds
+/// silently.
+///
+/// [`GenericSampleEvidence::partials`]: super::GenericSampleEvidence::partials
+pub fn genotype_log_likelihood_row(
+    evidence: &super::GenericSampleEvidence<'_>,
+    genotypes: &GenotypeTableView<'_>,
+    calibration: &[super::ReadGroupCalibration],
+    log_error_spreads: LogErrorSpreadTable<'_>,
+    out: &mut [LogProb],
+) {
+    let genotype_count = genotypes.genotype_count();
+    let allele_count = genotypes.allele_count();
+    assert_eq!(
+        out.len(),
+        genotype_count,
+        "a row holds one entry per candidate genotype — {genotype_count}, not {}",
+        out.len()
+    );
+    assert_eq!(
+        log_error_spreads.allele_count(),
+        allele_count,
+        "the error-spread table is for {} alleles and this genotype table for {allele_count}, so \
+         one of them belongs to a different locus",
+        log_error_spreads.allele_count()
+    );
+
+    // **The pooled leftover seeds every genotype**, which is what makes it cancel: it is the
+    // same number in every row. An empty evidence row therefore leaves the row at zero without
+    // a branch, because `empty()` carries a zero leftover — the prior decides, which is the
+    // right answer rather than a special case (spec §3.3).
+    for slot in out.iter_mut() {
+        *slot = LogProb(evidence.unmatched_q_sum);
+    }
+
+    // `log(k / P)` for every copy count a genotype can carry. `k = 0` is never read — that is
+    // the error side — and is filled with a value that would be visible if it ever were.
+    let copies_of_the_genome = usize::from(genotypes.ploidy().get());
+    assert!(
+        copies_of_the_genome <= MAX_PLOIDY_COPIES,
+        "a sample with {copies_of_the_genome} copies of its genome is past the \
+         {MAX_PLOIDY_COPIES} this row builds a copy-share table for"
+    );
+    let ploidy = f64::from(genotypes.ploidy().get());
+    let mut log_copy_share = [f64::NAN; MAX_PLOIDY_COPIES + 1];
+    for (copies, share) in log_copy_share.iter_mut().enumerate().skip(1) {
+        *share = (copies as f64 / ploidy).ln();
+    }
+
+    let counts = genotypes.genotype_allele_counts();
+    for observation in evidence.supported {
+        let allele = usize::from(observation.allele.get());
+        assert!(
+            allele < allele_count,
+            "an observation names allele {allele}, past the {allele_count} this locus is called \
+             over"
+        );
+        let read_group = observation.read_group.get() as usize;
+        let scale = calibration.get(read_group).unwrap_or_else(|| {
+            panic!(
+                "read group {read_group} has no calibration; the run supplied {}",
+                calibration.len()
+            )
+        });
+        // Hoisted out of the genotype loop: both are properties of the observation and of the
+        // read group it came from, not of the genotype being scored.
+        let reads = f64::from(observation.num_reads);
+        let error_charge = observation.q_sum + reads * scale.log_scale();
+
+        // **Two columns, walked together.** For a fixed observation the allele is fixed, so
+        // what the genotype loop needs is this allele's column of copy counts and its column of
+        // log spreads — both strided by the allele count, both checked once here rather than
+        // per term. The row's stated shape is a multiply and an add inside, and a bounds-checked
+        // accessor per `(observation, genotype)` would not be that.
+        let carried_copies = counts[allele..].iter().step_by(allele_count);
+        let spreads = log_error_spreads.column_of(observation.allele);
+
+        for ((slot, &copies), spread) in out.iter_mut().zip(carried_copies).zip(spreads) {
+            slot.0 += if copies > 0 {
+                reads * log_copy_share[copies as usize]
+            } else {
+                // The one term that depends on the genotype: how many things this wrong read
+                // could have shown, given what this genotype carries.
+                error_charge - reads * spread
+            };
+        }
+    }
+}
+
+/// The widest ploidy the row builds a copy-share table for.
+///
+/// **`Ploidy::try_new` rejects only zero**, so seventeen copies is constructible and would index
+/// past the array. The row asserts on it, in release as well as debug, rather than panicking with
+/// `index out of bounds` — every other caller bug in this file says in a sentence what went
+/// wrong, and this one used to be the exception.
+const MAX_PLOIDY_COPIES: usize = 16;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,18 +490,18 @@ mod tests {
         GenotypeTable::build(Ploidy::try_new(2).expect("two is a ploidy"), allele_count)
     }
 
-    /// Fill the table, so a test reads it through [`DivisorTable`] rather than open-coding the
-    /// stride.
-    fn divisors(alleles: &CandidateAlleles, table: &GenotypeTable) -> Vec<f64> {
+    /// Fill the table, so a test reads it through [`LogErrorSpreadTable`] rather than
+    /// open-coding the stride.
+    fn spreads(alleles: &CandidateAlleles, table: &GenotypeTable) -> Vec<f64> {
         let view = table.view();
         let mut out = vec![0.0; view.genotype_count() * alleles.len()];
-        fill_error_spread_divisors(alleles, &view, &mut out);
+        fill_log_error_spreads(alleles, &view, &mut out);
         out
     }
 
     /// The filled buffer, read through the type that carries its stride.
-    fn table_over<'a>(out: &'a [f64], table: &GenotypeTable) -> DivisorTable<'a> {
-        DivisorTable::over(out, &table.view())
+    fn table_over<'a>(out: &'a [f64], table: &GenotypeTable) -> LogErrorSpreadTable<'a> {
+        LogErrorSpreadTable::over(out, &table.view())
     }
 
     /// Which genotype index carries exactly these copies, so a test can name a genotype by what
@@ -392,10 +587,13 @@ mod tests {
     fn a_read_one_substitution_from_the_only_carried_allele_gets_the_three_way_spread() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0]);
 
-        assert_eq!(table_over(&out, &table).at(hom_ref, AlleleId(1)), 3.0);
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(1)),
+            LOG_ERROR_SPREAD
+        );
     }
 
     /// **The multi-position class.** Two alleles the same length differing at two positions have
@@ -404,10 +602,13 @@ mod tests {
     fn a_read_differing_at_two_positions_gets_no_spread() {
         let alleles = locus(&[b"ACGT", b"ATCT"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0]);
 
-        assert_eq!(table_over(&out, &table).at(hom_ref, AlleleId(1)), 1.0);
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(1)),
+            NO_LOG_ERROR_SPREAD
+        );
     }
 
     /// **The indel class.** A deletion has no finite set of things a wrong read could have
@@ -417,10 +618,13 @@ mod tests {
     fn a_read_carrying_an_indel_gets_no_spread() {
         let alleles = locus(&[b"ACGT", b"AT"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0]);
 
-        assert_eq!(table_over(&out, &table).at(hom_ref, AlleleId(1)), 1.0);
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(1)),
+            NO_LOG_ERROR_SPREAD
+        );
     }
 
     /// **Every carried allele, not some** — the case that distinguishes the rule from the
@@ -434,18 +638,21 @@ mod tests {
     fn a_genotype_carrying_an_indel_refuses_the_spread_for_every_observation() {
         let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
         let table = diploid(3);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let het_ref_and_deletion = genotype_carrying(&table, &[1, 0, 1]);
         let hom_ref = genotype_carrying(&table, &[2, 0, 0]);
 
         // Allele 1 is one substitution from allele 0 and a different length from allele 2.
         assert_eq!(
             table_over(&out, &table).at(het_ref_and_deletion, AlleleId(1)),
-            1.0
+            NO_LOG_ERROR_SPREAD
         );
         // …and against the reference homozygote alone it does get the spread, so the fixture is
         // not simply one where nothing ever would.
-        assert_eq!(table_over(&out, &table).at(hom_ref, AlleleId(1)), 3.0);
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(1)),
+            LOG_ERROR_SPREAD
+        );
     }
 
     /// A heterozygote whose two alleles are *both* one substitution from the observation does
@@ -456,14 +663,17 @@ mod tests {
         // `C`.
         let alleles = locus(&[b"A", b"C", b"G"]);
         let table = diploid(3);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let het = genotype_carrying(&table, &[1, 1, 0]);
 
-        assert_eq!(table_over(&out, &table).at(het, AlleleId(2)), 3.0);
+        assert_eq!(
+            table_over(&out, &table).at(het, AlleleId(2)),
+            LOG_ERROR_SPREAD
+        );
     }
 
     /// An allele the genotype carries never gets the spread, because it differs from itself at
-    /// zero positions rather than at one. The divisor is not read for such an observation — it
+    /// zero positions rather than at one. The spread is not read for such an observation — it
     /// is on the explained side of the formula — but a table that gave it 3.0 would mean the
     /// predicate had been written as *at most* one rather than *exactly* one, which would also
     /// give an identical pair of alleles the spread.
@@ -471,13 +681,22 @@ mod tests {
     fn an_allele_the_genotype_carries_is_not_one_substitution_from_itself() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0]);
         let het = genotype_carrying(&table, &[1, 1]);
 
-        assert_eq!(table_over(&out, &table).at(hom_ref, AlleleId(0)), 1.0);
-        assert_eq!(table_over(&out, &table).at(het, AlleleId(0)), 1.0);
-        assert_eq!(table_over(&out, &table).at(het, AlleleId(1)), 1.0);
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(0)),
+            NO_LOG_ERROR_SPREAD
+        );
+        assert_eq!(
+            table_over(&out, &table).at(het, AlleleId(0)),
+            NO_LOG_ERROR_SPREAD
+        );
+        assert_eq!(
+            table_over(&out, &table).at(het, AlleleId(1)),
+            NO_LOG_ERROR_SPREAD
+        );
     }
 
     // ---- shape and layout ----
@@ -492,7 +711,7 @@ mod tests {
         let alleles = locus(&[b"A", b"C", b"AT"]);
         let table = diploid(3);
         let view = table.view();
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
 
         assert_eq!(out.len(), 6 * 3);
         for genotype in 0..view.genotype_count() {
@@ -512,9 +731,9 @@ mod tests {
                                 .expect("an allele"),
                         )
                     }) {
-                    3.0
+                    LOG_ERROR_SPREAD
                 } else {
-                    1.0
+                    NO_LOG_ERROR_SPREAD
                 };
                 assert_eq!(
                     table_over(&out, &table)
@@ -523,7 +742,7 @@ mod tests {
                     "genotype {genotype}, allele {observed}"
                 );
                 // …and the row accessor agrees with the pair accessor, which is what lets the
-                // row function walk a genotype's divisors beside its copy counts.
+                // row function walk a genotype's spreads beside its copy counts.
                 assert_eq!(
                     table_over(&out, &table)
                         .row_of(GenotypeIdx(genotype as u32))
@@ -543,20 +762,23 @@ mod tests {
         let tetraploid = GenotypeTable::build(Ploidy::try_new(4).expect("four is a ploidy"), 3);
         let view = tetraploid.view();
         let mut out = vec![0.0; view.genotype_count() * 3];
-        fill_error_spread_divisors(&alleles, &view, &mut out);
+        fill_log_error_spreads(&alleles, &view, &mut out);
 
         let three_ref_one_deletion = genotype_carrying(&tetraploid, &[3, 0, 1]);
         let four_ref = genotype_carrying(&tetraploid, &[4, 0, 0]);
 
         assert_eq!(
             table_over(&out, &tetraploid).at(three_ref_one_deletion, AlleleId(1)),
-            1.0
+            NO_LOG_ERROR_SPREAD
         );
-        assert_eq!(table_over(&out, &tetraploid).at(four_ref, AlleleId(1)), 3.0);
+        assert_eq!(
+            table_over(&out, &tetraploid).at(four_ref, AlleleId(1)),
+            LOG_ERROR_SPREAD
+        );
     }
 
     /// **A locus with only its reference**, which is what `CandidateAlleles::new` produces and
-    /// the commonest shape in a genome. One genotype at any ploidy, one entry, and the divisor
+    /// the commonest shape in a genome. One genotype at any ploidy, one entry, and the spread
     /// is 1.0 — the reference is not one substitution from itself. Nothing else here goes below
     /// two alleles.
     #[test]
@@ -568,11 +790,11 @@ mod tests {
             assert_eq!(view.genotype_count(), 1);
 
             let mut out = vec![0.0; 1];
-            fill_error_spread_divisors(&alleles, &view, &mut out);
+            fill_log_error_spreads(&alleles, &view, &mut out);
 
             assert_eq!(
                 table_over(&out, &table).at(GenotypeIdx(0), AlleleId::REFERENCE),
-                1.0
+                NO_LOG_ERROR_SPREAD
             );
         }
     }
@@ -600,26 +822,26 @@ mod tests {
             let view = table.view();
             let mut out = vec![f64::NAN; view.genotype_count() * allele_count];
 
-            fill_error_spread_divisors(&alleles, &view, &mut out);
+            fill_log_error_spreads(&alleles, &view, &mut out);
 
-            let divisors_table = table_over(&out, &table);
-            assert_eq!(divisors_table.allele_count(), allele_count);
+            let spread_table = table_over(&out, &table);
+            assert_eq!(spread_table.allele_count(), allele_count);
             // A homozygote's own allele is never one substitution from itself; every other
             // allele is one substitution from it, so every other allele gets the spread.
             let hom_ref_counts: Vec<u32> = std::iter::once(2)
                 .chain(std::iter::repeat_n(0, allele_count - 1))
                 .collect();
             let hom_ref = genotype_carrying(&table, &hom_ref_counts);
-            let row = divisors_table
+            let row = spread_table
                 .row_of(hom_ref)
                 .expect("a genotype the table holds");
-            assert_eq!(row[0], 1.0);
-            assert!(row[1..].iter().all(|&divisor| divisor == 3.0));
+            assert_eq!(row[0], NO_LOG_ERROR_SPREAD);
+            assert!(row[1..].iter().all(|&spread| spread == LOG_ERROR_SPREAD));
         }
     }
 
     /// **Every cell is written, whatever the buffer held.** The other tests all pass a freshly
-    /// zeroed buffer, where a cell the fill skipped reads as `0.0` — neither divisor, so it
+    /// zeroed buffer, where a cell the fill skipped reads as the unspread value, so it
     /// would be caught, but by luck rather than on purpose. Poisoning the buffer with `NaN`
     /// makes a skipped cell fail deliberately, and the buffer is caller scratch reused across
     /// loci, so what it held is the previous locus's answer rather than zero.
@@ -630,11 +852,11 @@ mod tests {
         let view = table.view();
         let mut out = vec![f64::NAN; view.genotype_count() * 3];
 
-        fill_error_spread_divisors(&alleles, &view, &mut out);
+        fill_log_error_spreads(&alleles, &view, &mut out);
 
         for (cell, value) in out.iter().enumerate() {
             assert!(
-                *value == 1.0 || *value == 3.0,
+                *value == NO_LOG_ERROR_SPREAD || *value == LOG_ERROR_SPREAD,
                 "cell {cell} was left holding {value}"
             );
         }
@@ -647,14 +869,14 @@ mod tests {
         let table = diploid(2);
         let mut out = vec![0.0; 5];
 
-        fill_error_spread_divisors(&alleles, &table.view(), &mut out);
+        fill_log_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// **A buffer that is too long is a caller bug too, and only this test says so.** The
     /// check has to be an equality rather than "at least enough": the trailing entries would
     /// never be written, and every genotype past the first would then read a slot the fill
     /// left alone — which is a real number and a wrong one. It is also what makes
-    /// [`DivisorTable`]'s bound meaningful, since a longer table admits a genotype index that
+    /// [`LogErrorSpreadTable`]'s bound meaningful, since a longer table admits a genotype
     /// should have been out of range.
     #[test]
     #[should_panic(expected = "one entry per (genotype, allele)")]
@@ -664,11 +886,11 @@ mod tests {
         let needed = table.view().genotype_count() * 2;
         let mut out = vec![0.0; needed + 1];
 
-        fill_error_spread_divisors(&alleles, &table.view(), &mut out);
+        fill_log_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// A repeat tract's substitution term is a different rate on a different model, so a
-    /// divisor table filled for one would be a number with no meaning reaching the wrong row
+    /// spread table filled for one would be a number with no meaning reaching the wrong row
     /// builder.
     #[test]
     #[should_panic(expected = "the SNP/indel path's")]
@@ -683,7 +905,7 @@ mod tests {
         let table = diploid(1);
         let mut out = vec![0.0; table.view().genotype_count()];
 
-        fill_error_spread_divisors(&alleles, &table.view(), &mut out);
+        fill_log_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// An allele id from another locus, or a genotype index past what the table holds, is
@@ -694,7 +916,7 @@ mod tests {
     fn an_allele_the_locus_does_not_have_is_a_caller_bug() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
 
         let _ = table_over(&out, &table).at(GenotypeIdx(0), AlleleId(2));
     }
@@ -707,7 +929,7 @@ mod tests {
     fn a_genotype_the_table_was_not_filled_for_is_a_caller_bug() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
 
         // Three genotypes over two alleles: six entries, and no row 3.
         assert_eq!(out.len(), 6);
@@ -720,12 +942,12 @@ mod tests {
     fn the_row_accessor_refuses_a_genotype_the_table_does_not_hold() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let out = divisors(&alleles, &table);
-        let divisors_table = table_over(&out, &table);
+        let out = spreads(&alleles, &table);
+        let spread_table = table_over(&out, &table);
 
-        assert!(divisors_table.row_of(GenotypeIdx(2)).is_some());
-        assert!(divisors_table.row_of(GenotypeIdx(3)).is_none());
-        assert_eq!(divisors_table.allele_count(), 2);
+        assert!(spread_table.row_of(GenotypeIdx(2)).is_some());
+        assert!(spread_table.row_of(GenotypeIdx(3)).is_none());
+        assert_eq!(spread_table.allele_count(), 2);
     }
 
     #[test]
@@ -735,7 +957,7 @@ mod tests {
         let table = diploid(3);
         let mut out = vec![0.0; table.view().genotype_count() * 2];
 
-        fill_error_spread_divisors(&alleles, &table.view(), &mut out);
+        fill_log_error_spreads(&alleles, &table.view(), &mut out);
     }
 
     /// The size the divisor is worth, **taken from a filled table rather than from a literal**:
@@ -751,11 +973,11 @@ mod tests {
         // Allele 1 is one substitution from the reference; allele 2 is a deletion.
         let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
         let table = diploid(3);
-        let out = divisors(&alleles, &table);
+        let out = spreads(&alleles, &table);
         let hom_ref = genotype_carrying(&table, &[2, 0, 0]);
 
-        let spread = table_over(&out, &table).at(hom_ref, AlleleId(1)).ln()
-            - table_over(&out, &table).at(hom_ref, AlleleId(2)).ln();
+        let spread = table_over(&out, &table).at(hom_ref, AlleleId(1))
+            - table_over(&out, &table).at(hom_ref, AlleleId(2));
 
         assert!(
             (spread - 1.0986).abs() < 5e-5,
@@ -765,6 +987,801 @@ mod tests {
             (spread * 10.0 / std::f64::consts::LN_10 - 4.77).abs() < 5e-3,
             "the spread is {} Phred",
             spread * 10.0 / std::f64::consts::LN_10
+        );
+    }
+
+    // ---- B2: the closed form ----
+
+    use super::super::{GenericObservation, GenericSampleEvidence, ReadGroupCalibration};
+    use crate::ng::parameter_estimation::Provenance;
+    use crate::ng::types::{LogProb, ReadGroupId};
+
+    /// An observation of `num_reads` reads on one allele from one read group, carrying the
+    /// summed log error the merge would have folded.
+    fn observation(allele: u16, read_group: u32, num_reads: u32, q_sum: f64) -> GenericObservation {
+        GenericObservation {
+            allele: AlleleId(allele),
+            read_group: ReadGroupId(read_group),
+            num_reads,
+            q_sum,
+        }
+    }
+
+    /// A calibration whose scale is one, so `log scale` is exactly zero and the arithmetic a
+    /// test hand-computes has nothing in it but the terms under examination.
+    fn uncalibrated() -> Vec<ReadGroupCalibration> {
+        vec![ReadGroupCalibration::defaulted(); 4]
+    }
+
+    /// A calibration with a scale that is not one.
+    ///
+    /// **On its own this catches nothing**, and an earlier version of this comment claimed it
+    /// caught a dropped `log scale`: every fixture that used it compared the row against itself
+    /// under a fold or a permutation, where the scale cancels. What catches that is
+    /// `at_a_scale_of_three_the_calibration_cancels_the_spread` and the production differential,
+    /// which now runs at a scale of 2.5.
+    fn calibrated(scale: f64) -> Vec<ReadGroupCalibration> {
+        vec![
+            ReadGroupCalibration {
+                scale,
+                provenance: Provenance::FittedHere,
+            };
+            4
+        ]
+    }
+
+    fn row(
+        evidence: &GenericSampleEvidence<'_>,
+        alleles: &CandidateAlleles,
+        table: &GenotypeTable,
+        calibration: &[ReadGroupCalibration],
+    ) -> Vec<f64> {
+        let view = table.view();
+        let spreads = spreads(alleles, table);
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        genotype_log_likelihood_row(
+            evidence,
+            &view,
+            calibration,
+            LogErrorSpreadTable::over(&spreads, &view),
+            &mut out,
+        );
+        out.into_iter().map(LogProb::get).collect()
+    }
+
+    /// **A hand-computed biallelic diploid case**, every term written out.
+    ///
+    /// Two reads showing the reference with a summed log error of −6, one read showing the
+    /// alternative at −7; the two alleles differ at one position, so a wrong read's charge is
+    /// reduced by `ln 3`. With the scale at one:
+    ///
+    /// - **reference homozygote**: the two reference reads are explained and charged
+    ///   `2·ln(2/2) = 0`; the alternative read is an error, charged `−7 + 1·(0 − ln 3)`.
+    /// - **heterozygote**: every read is explained, at `ln(1/2)` each — `3·(−ln 2)`.
+    /// - **alternative homozygote**: the alternative read is explained at `ln(2/2) = 0`; the two
+    ///   reference reads are errors, charged `−6 + 2·(0 − ln 3)`.
+    #[test]
+    fn a_biallelic_diploid_row_is_what_the_formula_says_term_by_term() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let scored = row(&evidence, &alleles, &table, &uncalibrated());
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        let half = 0.5_f64.ln();
+
+        assert!((scored[hom_ref] - (-7.0 - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((scored[het] - 3.0 * half).abs() < 1e-12);
+        assert!((scored[hom_alt] - (-6.0 - 2.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+
+        // The heterozygote wins here, which is the answer two reads against one should give.
+        assert!(scored[het] > scored[hom_ref] && scored[het] > scored[hom_alt]);
+
+        // **And again with a scale that is not one**, because `log scale` is exactly zero at a
+        // defaulted calibration — so every assertion above is blind to what the row does with
+        // it. At a scale of 2.5 each error-side read is charged `ln 2.5` more.
+        let calibrated_scored = row(&evidence, &alleles, &table, &calibrated(2.5));
+        let log_scale = 2.5_f64.ln();
+        assert!((calibrated_scored[hom_ref] - (-7.0 + log_scale - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!(
+            (calibrated_scored[hom_alt] - (-6.0 + 2.0 * log_scale - 2.0 * LOG_ERROR_SPREAD)).abs()
+                < 1e-12
+        );
+        // The heterozygote explains every read, so no scale reaches it at all.
+        assert_eq!(calibrated_scored[het], scored[het]);
+    }
+
+    /// **The pooled leftover is added to every genotype alike**, so it cancels when the caller
+    /// normalises and survives for the data likelihood, which compares loci. A row that dropped
+    /// it would move no genotype call and every QUAL.
+    #[test]
+    fn the_pooled_leftover_shifts_every_genotype_by_the_same_amount() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
+
+        let without = row(
+            &GenericSampleEvidence::new(&supported, 0.0, &[]),
+            &alleles,
+            &table,
+            &uncalibrated(),
+        );
+        let with = row(
+            &GenericSampleEvidence::new(&supported, -4.25, &[]),
+            &alleles,
+            &table,
+            &uncalibrated(),
+        );
+
+        for (bare, pooled) in without.iter().zip(&with) {
+            assert!((pooled - bare - (-4.25)).abs() < 1e-12);
+        }
+    }
+
+    /// **A sample that showed nothing scores every genotype at zero, and no branch makes it
+    /// so** — an empty sum is zero, so the prior decides alone (spec §3.3).
+    #[test]
+    fn a_sample_with_no_evidence_scores_every_genotype_at_zero() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+
+        let scored = row(
+            &GenericSampleEvidence::empty(),
+            &alleles,
+            &table,
+            &uncalibrated(),
+        );
+
+        assert!(scored.iter().all(|&value| value == 0.0));
+    }
+
+    /// **The aggregation contract, and the reason the formula has this shape** (spec §12 test 9).
+    ///
+    /// The merge folds every read showing one allele from one read group into a single
+    /// observation with a count and a summed log error. That fold must not change the answer —
+    /// a likelihood that treated an observation's reads as interchangeable when their qualities
+    /// differ would be wrong by an amount nobody measured.
+    ///
+    /// So: five reads at five *different* error probabilities, scored as five observations of
+    /// one read each, and again as the one observation the merge would have built. The reads
+    /// are deliberately spread from Phred 40 to Phred 9, because a fixture where they all carry
+    /// the same quality cannot tell the two forms apart.
+    ///
+    /// **The per-read form is built by struct literal rather than through `new`**, because the
+    /// constructor requires strictly ascending `(allele, read group)` pairs and five reads on
+    /// one allele are five rows sharing a pair. That is the merge's invariant, not the
+    /// formula's, and this test is about the formula.
+    ///
+    /// **The tolerance is [`WORST_AGGREGATION_RELATIVE`] and not zero, though this fixture
+    /// happens to agree to the last bit.** Its exactness is a property of five reads at these
+    /// qualities, not of the formula: `how_far_the_bitwise_aggregation_claim_reaches` sweeps
+    /// wider and finds the two forms apart. Asserting equality here would pin a fixture-specific
+    /// accident and break on a change that costs nothing.
+    #[test]
+    fn pooling_an_observations_reads_does_not_change_the_answer() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let calibration = calibrated(2.5);
+
+        let per_read_errors: Vec<f64> = [40u8, 31, 22, 15, 9]
+            .iter()
+            .map(|&phred| {
+                (-f64::from(phred) / 10.0 * std::f64::consts::LN_10)
+                    .exp()
+                    .ln()
+            })
+            .collect();
+
+        let one_at_a_time: Vec<GenericObservation> = per_read_errors
+            .iter()
+            .map(|&q| observation(1, 0, 1, q))
+            .collect();
+        let per_read = GenericSampleEvidence {
+            supported: &one_at_a_time,
+            unmatched_q_sum: 0.0,
+            partials: &[],
+        };
+
+        let folded = [observation(1, 0, 5, per_read_errors.iter().sum())];
+        let aggregate = GenericSampleEvidence::new(&folded, 0.0, &[]);
+
+        let from_reads = row(&per_read, &alleles, &table, &calibration);
+        let from_fold = row(&aggregate, &alleles, &table, &calibration);
+
+        for (genotype, (reads, fold)) in from_reads.iter().zip(&from_fold).enumerate() {
+            // The hom-alt genotype scores exactly zero here — every read is explained at
+            // `ln(2/2)` — so the denominator is floored rather than dividing zero by zero.
+            let relative =
+                (reads - fold).abs() / reads.abs().max(fold.abs()).max(f64::MIN_POSITIVE);
+            assert!(
+                relative <= WORST_AGGREGATION_RELATIVE,
+                "genotype {genotype}: {reads} from the reads, {fold} from the fold, a relative \
+                 {relative} apart"
+            );
+        }
+    }
+
+    /// **How far the bitwise claim actually reaches**, swept rather than asserted from one
+    /// fixture — because a single set of qualities agreeing to the last bit could be luck.
+    ///
+    /// Spec §2.3 says the aggregation identity "*is* bitwise: §3.3's formula sums the same terms
+    /// in the same order either way". The sweep below is what that sentence is worth: **144
+    /// `(quality set, scale, ploidy, genotype)` combinations** — six quality sets from two to
+    /// seven reads and Phred 45 down to 3, three read-group scales including one that is not
+    /// one, and ploidy 2 and 4.
+    ///
+    /// **The two forms disagree, and the specification's sentence was therefore too strong**
+    /// (measured 2026-08-24; spec §2.3 is corrected to match). They are not the same sequence of
+    /// additions — a read at a time accumulates `q_r + log scale − log m`, where the fold
+    /// accumulates `Σ q_r + n·log scale − n·log m` once — so they round differently, and the
+    /// sibling test above happens to land on a fixture where they do not. **One fixture agreeing
+    /// to the last bit is luck, and this sweep is what tells the two apart.**
+    ///
+    /// **The bound is relative and not a unit-in-the-last-place count, because the count grows
+    /// with depth.** A first version of this sweep stopped at seven reads and put the worst at
+    /// two ulps; widening it to the depths this caller commits to — up to 300 reads a position —
+    /// takes that past a hundred, because the disagreement is repeated summation and grows with
+    /// how much is summed. What does *not* grow is the relative size, which is what
+    /// [`WORST_AGGREGATION_RELATIVE`] bounds, and a caller comparing genotypes cares about the
+    /// relative one.
+    ///
+    /// **What the contract actually requires is untouched**, and it is worth separating the two
+    /// claims. Spec §2.3's requirement is that pooling must not change the answer *because of
+    /// the model* — that no term is a non-linear function of a per-read quality, since `q_sum`
+    /// recovers only the geometric mean. The formula's shape guarantees that exactly, and it is
+    /// what the test above pins. What is *not* exact is the floating-point summation order.
+    const WORST_AGGREGATION_RELATIVE: f64 = 2.0e-14;
+
+    /// How far the aggregation identity holds, measured rather than claimed — see
+    /// [`WORST_AGGREGATION_ULPS`].
+    #[test]
+    fn how_far_the_bitwise_aggregation_claim_reaches() {
+        let alleles = locus(&[b"A", b"C"]);
+
+        let mut worst_relative = 0.0_f64;
+        let mut worst_ulps = 0u64;
+        let mut worst_where = String::new();
+        let mut disagreeing = 0usize;
+        let mut compared = 0usize;
+
+        for reads in [2usize, 3, 5, 8, 13, 20, 50, 120, 300] {
+            for profile in QUALITY_PROFILES {
+                let qualities: Vec<u8> = (0..reads).map(|at| profile(at, reads)).collect();
+                let errors: Vec<f64> = qualities
+                    .iter()
+                    .map(|&phred| -f64::from(phred) / 10.0 * std::f64::consts::LN_10)
+                    .collect();
+                let one_at_a_time: Vec<GenericObservation> =
+                    errors.iter().map(|&q| observation(1, 0, 1, q)).collect();
+                let folded = [observation(1, 0, reads as u32, errors.iter().sum())];
+
+                for scale in [1.0_f64, 2.5, 0.37] {
+                    let calibration = calibrated(scale);
+                    for copies in [2u8, 4] {
+                        let table = GenotypeTable::build(
+                            Ploidy::try_new(copies).expect("a fixture ploidy"),
+                            2,
+                        );
+                        let from_reads = row(
+                            &GenericSampleEvidence {
+                                supported: &one_at_a_time,
+                                unmatched_q_sum: 0.0,
+                                partials: &[],
+                            },
+                            &alleles,
+                            &table,
+                            &calibration,
+                        );
+                        let from_fold = row(
+                            &GenericSampleEvidence::new(&folded, 0.0, &[]),
+                            &alleles,
+                            &table,
+                            &calibration,
+                        );
+
+                        for (genotype, (from_read, from_sum)) in
+                            from_reads.iter().zip(&from_fold).enumerate()
+                        {
+                            let ulps = from_read.to_bits().abs_diff(from_sum.to_bits());
+                            let relative = (from_read - from_sum).abs()
+                                / from_read.abs().max(from_sum.abs()).max(f64::MIN_POSITIVE);
+                            if ulps > 0 {
+                                disagreeing += 1;
+                            }
+                            worst_ulps = worst_ulps.max(ulps);
+                            if relative > worst_relative {
+                                worst_relative = relative;
+                                worst_where = format!(
+                                    "{reads} reads, scale {scale}, ploidy {copies}, genotype \
+                                     {genotype}: {from_read} from the reads, {from_sum} from the \
+                                     fold, {ulps} ulps"
+                                );
+                            }
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 9 read counts × 4 profiles × 3 scales × (3 diploid + 5 tetraploid genotypes) = 864.
+        assert_eq!(compared, 864, "the sweep covers 864 comparisons");
+
+        // **The sweep must actually disagree somewhere**, or it is measuring a number against
+        // itself and the bound below means nothing. This is also what pins the row's summation
+        // *shape*: an accumulation that summed the read counts as integers and multiplied each
+        // logarithm in once at the end is bitwise exact here, so it would drive this to zero —
+        // and that would be a different formula from the one spec §2.3 now describes.
+        assert!(
+            disagreeing > 0,
+            "no comparison disagreed, so this sweep pins nothing"
+        );
+
+        assert!(
+            worst_relative <= WORST_AGGREGATION_RELATIVE,
+            "the aggregation identity is off by a relative {worst_relative}, past the \
+             {WORST_AGGREGATION_RELATIVE} this sweep measured ({worst_ulps} ulps at worst) — \
+             worst at {worst_where}"
+        );
+    }
+
+    /// Four quality shapes, as a function of a read's position and how many reads there are:
+    /// all reads at Phred 30, all at Phred 93 (the highest the read preparation admits), a
+    /// 93/1 alternation, and a monotone fall from 45 to 3. The all-equal profiles matter
+    /// because they are where repeated addition of one value is least forgiving.
+    const QUALITY_PROFILES: [fn(usize, usize) -> u8; 4] = [
+        |_, _| 30,
+        |_, _| 93,
+        |at, _| if at % 2 == 0 { 93 } else { 1 },
+        |at, reads| {
+            let span = (reads - 1).max(1) as f64;
+            (45.0 - 42.0 * (at as f64 / span)).round() as u8
+        },
+    ];
+
+    /// **Order independence** (spec §12 test 8): permuting the observations must not move a
+    /// genotype's log-likelihood by more than the summation order costs.
+    ///
+    /// **Not "by a single bit", which is what §12 test 8 says and what this test used to be
+    /// named for.** Permuting the observations *is* changing the summation order, so the two
+    /// runs round differently — measured on this fixture, one unit in the last place at genotype
+    /// 1. The specification is corrected.
+    ///
+    /// **The property that matters is that the row imposes no order of its own**, which is what
+    /// makes a run reproducible at any worker count: the caller always hands it the merge's
+    /// order, and the row must not sort, bucket or re-group behind that.
+    #[test]
+    fn permuting_the_observations_moves_a_row_only_by_what_the_order_costs() {
+        let alleles = locus(&[b"A", b"C", b"AT"]);
+        let table = diploid(3);
+        let calibration = calibrated(1.7);
+
+        let forward = [
+            observation(0, 0, 3, -0.3),
+            observation(1, 0, 7, -19.25),
+            observation(2, 1, 2, -1e-9),
+        ];
+        let mut reversed = forward;
+        reversed.reverse();
+
+        let scored = row(
+            &GenericSampleEvidence::new(&forward, -2.5, &[]),
+            &alleles,
+            &table,
+            &calibration,
+        );
+        let permuted = row(
+            &GenericSampleEvidence {
+                supported: &reversed,
+                unmatched_q_sum: -2.5,
+                partials: &[],
+            },
+            &alleles,
+            &table,
+            &calibration,
+        );
+
+        // The bound is the same relative one the aggregation sweep measured, so the two
+        // properties are quoted on one scale rather than two.
+        for (genotype, (a, b)) in scored.iter().zip(&permuted).enumerate() {
+            let relative = (a - b).abs() / a.abs().max(b.abs()).max(f64::MIN_POSITIVE);
+            assert!(
+                relative <= WORST_AGGREGATION_RELATIVE,
+                "genotype {genotype}: {a} forward, {b} reversed, a relative {relative} apart"
+            );
+        }
+    }
+
+    /// **The production differential** — the whole of Milestone B's claim, and the reason this
+    /// step is not merely "a formula that looks right".
+    ///
+    /// ng's row and production's `standard_log_likelihood` are the same closed form with two
+    /// recorded changes: production carries a multinomial coefficient that ng drops (spec §3.4),
+    /// and ng divides a wrong read's error mass by three where production divides by nothing
+    /// (spec §3.5). Add the coefficient back and take the spread out, and the two must agree —
+    /// **every difference attributed, none unexplained.**
+    ///
+    /// **Three differences, not two**, and the third is why this runs at a scale that is not
+    /// one: production has no calibration at all, so ng's `n·log scale` on the error side has to
+    /// come back out too. At a defaulted calibration that term is exactly zero and the whole
+    /// reconciliation is blind to it — which is how a mutation deleting `log scale` outright
+    /// survived every test in this file, at a cost of 372.84 nats on a four-allele fixture.
+    ///
+    /// **The spread comes out of the table rather than out of a literal `n · ln 3`**, and the
+    /// coefficient's `ln(n!)` is written here rather than borrowed from production's table.
+    /// Either shortcut would let the comparison agree with itself: the first passes with the
+    /// whole error-spread step deleted and the value hardcoded, which is the shape of test B1
+    /// shipped and had to repair; the second cancels a wrong table entry on both sides.
+    #[test]
+    fn ng_and_production_agree_once_the_two_recorded_changes_are_undone() {
+        use crate::pileup_record::AlleleSupportStats;
+        use crate::var_calling::per_group_merger::standard_log_likelihood;
+
+        /// `ln(n!)`, written here rather than borrowed from production's table.
+        ///
+        /// Production's own `ln_factorial` would cancel on both sides of the comparison, so a
+        /// wrong entry in its table would be invisible to this test — which is the whole thing
+        /// a differential is for.
+        fn ln_factorial(n: u64) -> f64 {
+            (2..=n).map(|i| (i as f64).ln()).sum()
+        }
+
+        let alleles = locus(&[b"A", b"C", b"G"]);
+        let table = diploid(3);
+        let view = table.view();
+
+        // One read group, so ng's per-(allele, read group) rows line up with production's
+        // per-allele ones. Awkward counts and qualities on purpose.
+        let supported = [
+            observation(0, 0, 11, -3.5),
+            observation(1, 0, 4, -19.0),
+            observation(2, 0, 2, -8.25),
+        ];
+        let unmatched = -1.75;
+        let evidence = GenericSampleEvidence::new(&supported, unmatched, &[]);
+
+        // **A read-group scale that is not one**, because production has none and a row that
+        // dropped `log scale` altogether would otherwise reconcile perfectly: at a defaulted
+        // calibration `log scale` is exactly zero, so three of this file's hand-computed tests
+        // used to be blind to it. Measured worst case for that mutation, on a four-allele
+        // fixture at scale 0.37: 372.84 nats, about 1,620 Phred, with every test green.
+        let scale = 2.5_f64;
+        let log_scale = scale.ln();
+        let spread_values = spreads(&alleles, &table);
+        let spread_table = LogErrorSpreadTable::over(&spread_values, &view);
+        let mut ours = vec![LogProb(f64::NAN); view.genotype_count()];
+        genotype_log_likelihood_row(
+            &evidence,
+            &view,
+            &calibrated(scale),
+            spread_table,
+            &mut ours,
+        );
+
+        let stats: Vec<AlleleSupportStats> = supported
+            .iter()
+            .map(|o| AlleleSupportStats {
+                num_obs: o.num_reads,
+                q_sum: o.q_sum,
+                fwd: 0,
+                placed_left: 0,
+                placed_start: 0,
+                mapq_sum: 0,
+                mapq_sum_sq: 0,
+            })
+            .collect();
+        let other = AlleleSupportStats {
+            num_obs: 0,
+            q_sum: unmatched,
+            fwd: 0,
+            placed_left: 0,
+            placed_start: 0,
+            mapq_sum: 0,
+            mapq_sum_sq: 0,
+        };
+
+        let mut compared = 0usize;
+        for (genotype, ours) in ours.iter().enumerate() {
+            let counts = &view.genotype_allele_counts()[genotype * 3..(genotype + 1) * 3];
+            // Production takes the genotype as a multiset of allele indices, one per copy.
+            let as_copies: Vec<u8> = counts
+                .iter()
+                .enumerate()
+                .flat_map(|(allele, &copies)| std::iter::repeat_n(allele as u8, copies as usize))
+                .collect();
+            let theirs = standard_log_likelihood(&stats, &other, &as_copies, 3, 2);
+
+            // The coefficient production carries and ng drops, in closed form.
+            let carried_reads: u64 = counts
+                .iter()
+                .enumerate()
+                .filter(|&(_, &copies)| copies > 0)
+                .map(|(allele, _)| u64::from(supported[allele].num_reads))
+                .sum();
+            let coefficient = ln_factorial(carried_reads)
+                - counts
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &copies)| copies > 0)
+                    .map(|(allele, _)| ln_factorial(u64::from(supported[allele].num_reads)))
+                    .sum::<f64>();
+
+            // The spread ng subtracts and production does not — taken from the table.
+            let spread_effect: f64 = supported
+                .iter()
+                .filter(|o| counts[usize::from(o.allele.get())] == 0)
+                .map(|o| {
+                    f64::from(o.num_reads) * spread_table.at(GenotypeIdx(genotype as u32), o.allele)
+                })
+                .sum();
+
+            // Production charges a wrong read its bare `q_sum`; ng charges it
+            // `q_sum + n·log scale`. Taking the scale back out is the third and last difference.
+            let scale_effect: f64 = supported
+                .iter()
+                .filter(|o| counts[usize::from(o.allele.get())] == 0)
+                .map(|o| f64::from(o.num_reads) * log_scale)
+                .sum();
+
+            let reconciled = ours.get() + coefficient + spread_effect - scale_effect;
+            assert!(
+                (reconciled - theirs).abs() < 1e-9,
+                "genotype {genotype} ({as_copies:?}): ng {} + coefficient {coefficient} + \
+                 spread {spread_effect} − scale {scale_effect} = {reconciled}, production \
+                 {theirs}",
+                ours.get()
+            );
+            compared += 1;
+        }
+        assert_eq!(
+            compared, 6,
+            "a diploid over three alleles has six genotypes"
+        );
+    }
+
+    /// The spread is not zero in that fixture, so the reconciliation is moving a real number.
+    ///
+    /// **It does not follow that the differential would fail if the fill returned zero
+    /// everywhere**, and an earlier version of this comment claimed it would: the differential
+    /// adds back the same table value it subtracts, so a uniformly zero table cancels on both
+    /// sides. What catches a constant fill is B1's own class tests, and
+    /// `a_wrong_read_that_could_not_be_a_misread_takes_no_spread` above.
+    #[test]
+    fn the_spread_is_not_zero_in_the_production_differentials_fixture() {
+        let alleles = locus(&[b"A", b"C", b"G"]);
+        let table = diploid(3);
+        let out = spreads(&alleles, &table);
+        let hom_ref = genotype_carrying(&table, &[2, 0, 0]);
+
+        assert_eq!(
+            table_over(&out, &table).at(hom_ref, AlleleId(1)),
+            LOG_ERROR_SPREAD
+        );
+    }
+
+    /// **The named constant is the logarithm of the named count**, so a transcribed digit in one
+    /// cannot drift from the other. Nothing else ties them together — [`ERROR_SPREAD_BASES`] is
+    /// read by no code at all — and the size test below admits any value within 5 × 10⁻⁵ of
+    /// 1.0986, a band a typo in the fifth decimal fits inside.
+    #[test]
+    fn the_log_spread_is_the_logarithm_of_the_bases_it_is_named_for() {
+        assert_eq!(LOG_ERROR_SPREAD, ERROR_SPREAD_BASES.ln());
+        assert_eq!(NO_LOG_ERROR_SPREAD, 1.0_f64.ln());
+    }
+
+    /// **At a scale of three the calibration and the spread cancel exactly**, so a wrongly
+    /// explained read is charged its `q_sum` and nothing else. That is a term-by-term statement
+    /// about `log scale` which does not restate `f64::ln`.
+    ///
+    /// A row that dropped `log scale` charges `q_sum − n·ln 3` here instead. Every fixture with a
+    /// scale other than one that came before this compared the row against *itself* under a fold
+    /// or a permutation, where the scale cancels — so a review mutation deleting the term outright
+    /// survived the whole file.
+    #[test]
+    fn at_a_scale_of_three_the_calibration_cancels_the_spread() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let scored = row(&evidence, &alleles, &table, &calibrated(3.0));
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+
+        assert!(
+            (scored[hom_ref] - -7.0).abs() < 1e-12,
+            "the wrongly explained read is charged {}, not its own q_sum",
+            scored[hom_ref]
+        );
+        assert!(
+            (scored[hom_alt] - -6.0).abs() < 1e-12,
+            "the two wrongly explained reads are charged {}, not their own q_sum",
+            scored[hom_alt]
+        );
+    }
+
+    /// **Two read groups a hundredfold apart, and which one the wrong reads came from changes the
+    /// genotype called.** Five reference reads from a group at scale 0.01 and six alternative
+    /// reads from a group at one: the reference homozygote wins, and a row ignoring `log scale`
+    /// calls the alternative homozygote instead.
+    #[test]
+    fn which_read_group_the_wrong_reads_came_from_changes_the_call() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 5, -1.0), observation(1, 1, 6, -1.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+        let calibration = vec![
+            ReadGroupCalibration {
+                scale: 0.01,
+                provenance: Provenance::FittedHere,
+            },
+            ReadGroupCalibration::defaulted(),
+        ];
+
+        let scored = row(&evidence, &alleles, &table, &calibration);
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+
+        assert!((scored[hom_ref] - (-1.0 - 6.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((scored[het] - 11.0 * 0.5_f64.ln()).abs() < 1e-12);
+        assert!(
+            (scored[hom_alt] - (-1.0 + 5.0 * 0.01_f64.ln() - 5.0 * LOG_ERROR_SPREAD)).abs() < 1e-12
+        );
+        assert!(
+            scored[hom_ref] > scored[het] && scored[hom_ref] > scored[hom_alt],
+            "the reference homozygote should win: {scored:?}"
+        );
+    }
+
+    /// **The copy share is the genotype's own ploidy**, term by term at four copies — the one
+    /// thing a diploid fixture cannot say, because `ln(k/P)` at `k = P` is zero at every ploidy
+    /// and the heterozygote's `ln(1/2)` is all a diploid row constrains.
+    ///
+    /// A row reading the copy share off a hardcoded ploidy of two returns **positive**
+    /// log-probabilities here and reorders the genotypes. The aggregation sweep does not see it,
+    /// because it compares a tetraploid row against another tetraploid row.
+    #[test]
+    fn the_copy_share_is_the_genotypes_own_ploidy() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = GenotypeTable::build(Ploidy::try_new(4).expect("four is a ploidy"), 2);
+        let supported = [observation(0, 0, 3, -6.0), observation(1, 0, 1, -7.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let scored = row(&evidence, &alleles, &table, &uncalibrated());
+        let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
+
+        assert!((at(&[4, 0]) - (-7.0 - LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!((at(&[3, 1]) - (3.0 * 0.75_f64.ln() + 0.25_f64.ln())).abs() < 1e-12);
+        assert!((at(&[2, 2]) - 4.0 * 0.5_f64.ln()).abs() < 1e-12);
+        assert!((at(&[1, 3]) - (3.0 * 0.25_f64.ln() + 0.75_f64.ln())).abs() < 1e-12);
+        assert!((at(&[0, 4]) - (-6.0 - 3.0 * LOG_ERROR_SPREAD)).abs() < 1e-12);
+        assert!(
+            scored.iter().all(|&value| value < 0.0),
+            "a log-probability cannot be positive: {scored:?}"
+        );
+    }
+
+    /// **A wrongly explained read that could not have been a misread takes no spread, and the row
+    /// has to read that out of the table.** Every row fixture before this one used single-base
+    /// alleles, where every pair is one substitution apart — so the whole table could be replaced
+    /// by the constant `LOG_ERROR_SPREAD` and every test still passed. **That is the gate this
+    /// step set for the production differential, still open one level down in the row itself.**
+    ///
+    /// Here the locus carries a deletion. Against the reference homozygote the substitution allele
+    /// takes `ln 3` and the deletion takes nothing; against the deletion homozygote *neither*
+    /// wrong read is one substitution away, so the charge is the two `q_sum`s alone.
+    #[test]
+    fn a_wrong_read_that_could_not_be_a_misread_takes_no_spread() {
+        let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
+        let table = diploid(3);
+        let supported = [observation(1, 0, 2, -4.0), observation(2, 0, 3, -5.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let scored = row(&evidence, &alleles, &table, &uncalibrated());
+        let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
+
+        assert!((at(&[2, 0, 0]) - (-4.0 - 2.0 * LOG_ERROR_SPREAD - 5.0)).abs() < 1e-12);
+        assert!(
+            (at(&[0, 0, 2]) - -4.0).abs() < 1e-12,
+            "a genotype whose every wrong read is an indel away is charged {}, not −4",
+            at(&[0, 0, 2])
+        );
+    }
+
+    /// An error-spread table filled at another locus's stride must not reach the row: its lookups
+    /// would return real numbers off the wrong rows.
+    #[test]
+    #[should_panic(expected = "belongs to a different locus")]
+    fn an_error_spread_table_from_another_locus_is_a_caller_bug() {
+        let wide = locus(&[b"A", b"C", b"G"]);
+        let wide_table = diploid(3);
+        let wide_view = wide_table.view();
+        let spread_values = spreads(&wide, &wide_table);
+
+        let narrow_table = diploid(2);
+        let narrow_view = narrow_table.view();
+        let mut out = vec![LogProb(f64::NAN); narrow_view.genotype_count()];
+
+        genotype_log_likelihood_row(
+            &GenericSampleEvidence::empty(),
+            &narrow_view,
+            &uncalibrated(),
+            LogErrorSpreadTable::over(&spread_values, &wide_view),
+            &mut out,
+        );
+    }
+
+    /// An observation naming an allele the locus is not called over reaches the copy counts before
+    /// it reaches the table, and would index a neighbouring genotype's count — a real number and a
+    /// wrong one. The row says so first.
+    #[test]
+    #[should_panic(expected = "an observation names allele 3, past the 3")]
+    fn an_observation_naming_an_allele_the_locus_lacks_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C", b"G"]);
+        let table = diploid(3);
+        let supported = [observation(3, 0, 4, -3.0)];
+
+        let _ = row(
+            &GenericSampleEvidence {
+                supported: &supported,
+                unmatched_q_sum: 0.0,
+                partials: &[],
+            },
+            &alleles,
+            &table,
+            &uncalibrated(),
+        );
+    }
+
+    /// A buffer longer than the table it is wrapped against admits a genotype index that should
+    /// have been out of range — the case [`LogErrorSpreadTable`]'s own documentation names, and
+    /// which only the *fill*'s length check was tested for.
+    #[test]
+    #[should_panic(expected = "holds 6 entries, not 8")]
+    fn a_buffer_longer_than_its_table_cannot_be_wrapped() {
+        let table = diploid(2);
+        let values = vec![0.0; 8];
+
+        let _ = LogErrorSpreadTable::over(&values, &table.view());
+    }
+
+    #[test]
+    #[should_panic(expected = "a row holds one entry per candidate genotype")]
+    fn a_row_of_the_wrong_length_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let mut out = vec![LogProb(0.0); 2];
+
+        genotype_log_likelihood_row(
+            &GenericSampleEvidence::empty(),
+            &view,
+            &uncalibrated(),
+            LogErrorSpreadTable::over(&spread_values, &view),
+            &mut out,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has no calibration")]
+    fn an_observation_from_an_uncalibrated_read_group_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(1, 9, 1, -7.0)];
+
+        let _ = row(
+            &GenericSampleEvidence::new(&supported, 0.0, &[]),
+            &alleles,
+            &table,
+            &uncalibrated(),
         );
     }
 }
