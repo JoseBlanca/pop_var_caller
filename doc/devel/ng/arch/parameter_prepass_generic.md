@@ -1421,6 +1421,33 @@ pub enum ParameterEstimationError {
 3. **Supplied**, if the run was given one.
 4. **Defaulted** to `DEFAULT_ERROR_RATE`, when *every* group is thin and nothing was supplied.
 
+**Borrowing is deliberate, and here is what it costs** (measured 2026-08-24 on the 63-accession
+tomato cohort — 63 preparations of one crop on one instrument, which is the friendliest case
+borrowing will ever get; `examples/ng_histogram_error_rates.rs`, report
+[`ng_error_rate_spread_2026-08-24.md`](../reports/ng_error_rate_spread_2026-08-24.md)).
+
+Libraries differ more than the grain's existence already implied: their fitted rates span
+**15.6-fold**, 6.0 in ten thousand to 9.3 in a thousand, median 3.0 in a thousand. Hand each one the
+unweighted mean of the other 62 — exactly what rung 2 does — and it lands a median factor of
+**1.51** from its own rate, worst 6.06; **17 of the 63 would be off by more than a factor of two.**
+
+**That is still the best of the four rungs, and the comparison is what makes it so.** What the rate
+governs is the calibration scale the read likelihood divides into a read's own error
+([`read_likelihoods.md`](../spec/read_likelihoods.md) §3.2), so the question is how far the average
+charged error ends up from the library's own measured rate. In those terms:
+
+| rung | how far the charged average lands from the library's own rate |
+|---|---|
+| **Borrowed** | **1.51×**, median over the 63 |
+| **Defaulted** to 0.001 | 2.99×, against the cohort's median fitted rate |
+| *not rescaling at all* — scale 1, not a rung here | ≈ **5×** |
+
+The last row is why rung 2 stays: read qualities systematically overstate quality — the cohort's
+median fitted rate is 3.0 in a thousand against a mean minted per-read error of 6.0 in ten thousand
+— so a library left unrescaled charges errors about five times too small, and in the direction that
+makes reads look cleaner than they are. **Refusing to borrow does not avoid an error of half again;
+it takes one three times larger.**
+
 That is what gives `Provenance::Borrowed` and `Defaulted` producers on this path; before this section
 they were declared and unreachable. **A consumer that treats all four alike is the failure the
 provenance exists to prevent** — a defaulted error rate is a guess, and a caller that cannot tell it
