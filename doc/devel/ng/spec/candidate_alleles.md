@@ -138,7 +138,7 @@ count at low depth and a share of that sample's own reads at high depth.**
 an alternative allele a survives  ⟺  ∃ sample s :
         reads_s(a)  ≥  max( floor,  ceil( share × compared_reads_s ) )
 
-floor = 2 reads          share = 5 in 100 of that sample's compared reads
+floor = 2 reads          share = 10 in 100 of that sample's compared reads
 ```
 
 **This is the merge's own keep rule, asked one level down.** The merge asks each sample whether
@@ -226,8 +226,8 @@ At **30×** — 5,777 alternatives in the merge's tables:
 |---|---|---|
 | 2 reads, no share | 3,091 | 1 |
 | 2 reads or 2% | 3,091 | 1 |
-| **2 reads or 5%** | **2,977** | **1** |
-| 2 reads or 10% | 1,601 | 2 |
+| 2 reads or 5% | 2,977 | 1 |
+| **2 reads or 10%** | **1,601** | **2** |
 | 3 reads or 2% | 1,539 | **5** |
 
 At **300×** — 15,474 alternatives:
@@ -236,8 +236,8 @@ At **300×** — 15,474 alternatives:
 |---|---|---|
 | 2 reads, no share | 10,793 | 2 |
 | 2 reads or 2% | 5,596 | 2 |
-| **2 reads or 5%** | **2,308** | **2** |
-| 2 reads or 10% | 1,273 | 4 |
+| 2 reads or 5% | 2,308 | 2 |
+| **2 reads or 10%** | **1,273** | **4** |
 
 **The two the bar "loses" at 300× are not losses, and the column overstates what the bar costs**
 (traced 2026-08-24, on the owner's question about why a real allele would sit below a tenth of a
@@ -253,26 +253,28 @@ what it looks for is a haplotype the sample does not carry.
 - **chr1:224085951-224085957**, reference `CTATATA`, with `CTA→C` and `A→C` both **0/1** and in
   phase: the span reads `CTCTA`, held at 108 reads and kept.
 
-**So the recall cost of the 5-in-100 share at 300× is zero true alleles, not two.** The two that
-move at 10 in 100 are real: `chr1:193718424` `T→C` at 6 of one sample's 107 compared reads, and
-`chr1:120579074` `C→A` at 4 of 42 — single-base loci where the true allele is the only
-alternative, kept at 5 in 100 and dropped at 10.
+**So a 5-in-100 share would cost zero true alleles at 300×, not the two the column shows.** The
+two the shipped 10 in 100 does cost are real: `chr1:193718424` `T→C` at 6 of one sample's 107
+compared reads, and `chr1:120579074` `C→A` at 4 of 42 — single-base loci where the true allele is
+the only alternative. **That is the price §11 Q3 records the share being set at, and it was set
+against this measurement rather than by it.**
 
 **The 30× floor column is not affected and its claim stands.** Of the five the floor of 3 loses,
 four are single-base loci whose true allele has exactly two reads — the case the floor is
 choosing against — and the fifth is an 11-bp deletion in a `CCCTT` tract with one read against a
 kept 4-read neighbour.
 
-**Two things follow.** The share is free up to 5 in 100 at both depths while removing three
-quarters of the table at 300×, which is why the share here is 5% where the merge's is 2% — and it
-changes nothing below about 40 compared reads a sample, so a tomato-depth run sees the identical
-rule it would have seen at 2%. And **the floor is the expensive knob**: raising it from 2 to 3
-loses five true alleles where raising the share to 10% loses two for the same reduction in table
-size. **The floor stays at 2 and should be defended there.**
+**Two things follow.** The share removes the great majority of the table at 300× — 15,474
+alternatives to 1,273 at the shipped 10 in 100 — which is why the share here is 10% where the
+merge's is 2%, and it changes nothing below 21 compared reads a sample, so a tomato-depth run sees
+the identical rule it would have seen at 2%. And **the floor is the expensive knob**: at 30×,
+raising it from 2 to 3 loses five true alleles to keep 1,539 alternatives, where the share at 10
+in 100 loses two to keep 1,601. **The floor stays at 2 and should be defended there.**
 
 **The share is what controls the allele count at depth, not the cap.** On the same 300× trio, a
 count-only bar leaves 471 of 7,478 loci carrying more than three alternatives — 6.3% — while a
-2-in-100 share brings that to 16 loci, 0.2%, and 5 in 100 to a single locus. The cap of §4 is
+2-in-100 share brings that to 16 loci, 0.2%, 5 in 100 to a single locus and the shipped 10 in 100
+to none at all. The cap of §4 is
 therefore guarding against something the share has already almost eliminated at that depth.
 
 **At tomato depth the share is inert and the bar is a count**, which is worth stating plainly
@@ -651,7 +653,7 @@ gives at each end rather than about four rules.
 
 **At three reads a position the bar is a count and nothing can repair that inside selection.**
 There is no fraction of three reads between one third and two thirds, so every conjunctive bar in
-every caller here is inert at that depth: freebayes' 5%, HipSTR's 20%, ours at 5%. The count is 2,
+every caller here is inert at that depth: freebayes' 5%, HipSTR's 20%, ours at 10%. The count is 2,
 and a heterozygous carrier at 3 compared reads shows two or more alternative reads half the time —
 so **half of that sample's heterozygous sites are not offered as candidates from that sample**.
 
@@ -713,7 +715,7 @@ order it would inherit is the order samples were walked in.
 
 | what | existing code | how ng reuses it |
 |---|---|---|
-| the two-part support rule and its constants | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs) | **the type itself, unchanged**, with a different numerator. The share moves from 2% to 5% for this rule only; the merge keeps its own (§3.3) |
+| the two-part support rule and its constants | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs) | **the type itself, unchanged**, with a different numerator. The share moves from 2% to 10% for this rule only; the merge keeps its own (§3.3) |
 | the allele table and its reference invariant | [`CandidateAlleles`, `calling/mod.rs:86`](../../../../src/ng/calling/mod.rs) | built and merged; selection fills it through `admit` |
 | the evidence | [`CohortObservation`, `cohort_merge/build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs) | read, not changed |
 | the cap's value | [`DEFAULT_MAX_ALLELES_PER_RECORD`, `per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs) | the number is inherited and declared inherited; the ranking is **not** ported (§4.1) |
@@ -749,7 +751,7 @@ repeat-tract path gets a differential instead
 
 **Resolved.**
 
-1. **The bar** — `max(2 reads, 5% of that sample's compared reads)`, asked per sample, one sample
+1. **The bar** — `max(2 reads, 10% of that sample's compared reads)`, asked per sample, one sample
    suffices (§3). It beat a cohort-total bar (drifts with cohort size, measured) and a
    two-sample bar (cannot admit a private allele).
 2. **The cap** — six alleles including the reference, truncate rather than refuse, ranked by the
@@ -779,10 +781,16 @@ repeat-tract path gets a differential instead
   almost nothing when it does not bind, and the ranking's tie-break order is what makes it degrade
   correctly with depth regardless. *What would settle it:* a cohort of several hundred samples, or
   a resampling study that holds the allele table fixed and grows the sample set past 63.
-- **Q3 — the share of 5% is measured on one human trio over 572 kb.** It is free there at both 30×
-  and 300× and it is inert below about 40 compared reads a sample, so no low-coverage run is
-  exposed to it. **Leaning: ship 5%.** *What would settle it:* the same scoring on a second
-  high-depth cohort, or on the trio over a wider region set.
+- **Q3 — the share is 10 in 100, and it is the one constant here set against its own measurement**
+  (owner's decision, 2026-08-24). Recall on this trio says 5 in 100 is free at both depths and 10
+  in 100 costs two true alleles at 300× (§3.3). It ships at 10 because **recall is one side of the
+  trade and the count of candidates is the other, and nothing has measured the second yet**: an
+  allele one sample shows at a twentieth of its reads is far likelier to be error than variation,
+  and each one admitted is a column in every genotype table at every sample for the life of the
+  locus. **It is inert below 21 compared reads a sample**, so no low-coverage run is exposed to it
+  and the whole decision lands at depth. *What would settle it:* the calling loop and emission
+  existing, so the memory and wall-clock cost of the admitted candidates can be measured against
+  the two alleles — which is the comparison this was decided on and the one nobody can yet run.
 
 ---
 

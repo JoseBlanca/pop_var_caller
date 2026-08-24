@@ -81,13 +81,13 @@ pub struct CandidateSelectionConfig {
 /// `new` returns `None` below two, `new_or_panic` is its `const` path.
 pub struct MaxCandidateAlleles(u16);
 
-/// Floor 2 reads, share 5 in 100. **The floor is the merge's own and is defended there**
-/// (`MinAltObs::DEFAULT`); the share is 5 in 100 where the merge's keep rule uses 2, because
-/// the allele-level question tolerates a stricter share at depth and is unchanged below 41
-/// reads a sample (spec §3.3, measured).
+/// Floor 2 reads, share 10 in 100. **The floor is the merge's own and is defended there**
+/// (`MinAltObs::DEFAULT`); the share is 10 in 100 where the merge's keep rule uses 2 (owner's
+/// decision, 2026-08-24), set against a recall measurement rather than by it and unchanged
+/// below 21 compared reads a sample (spec §3.3, §11 Q3).
 pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
     floor: MinAltObs::DEFAULT,
-    share: MinAltReadShare::new_or_panic(0.05),
+    share: MinAltReadShare::new_or_panic(0.10),
 };
 
 /// Six alleles including the reference — production's `DEFAULT_MAX_ALLELES_PER_RECORD`.
@@ -412,9 +412,10 @@ from a clean one. *That is an edit to that document and is not made here.*
   swap in. — spec §1, module home above.
 - **The support rule is `MinAltReads`, reused.** One home for the contract so the merge's rule and
   the allele rule cannot become different rules. — spec §3.
-- **The share is 5 in 100 and the floor is 2.** The floor is the expensive knob: raising it to 3
-  loses five true alleles where raising the share to 10% loses two, for the same reduction in
-  table size. — spec §3.3, measured.
+- **The share is 10 in 100 and the floor is 2.** The floor is the expensive knob: at 30×, raising
+  it to 3 loses five true alleles to keep 1,539 alternatives where the share at 10 in 100 loses
+  two to keep 1,601. The share's own two are the price the owner set it at, against the recall
+  measurement rather than by it. — spec §3.3, §11 Q3.
 - **Truncate, ranked by the largest within-sample share.** Production ranks by the cohort read
   total and truncates private alleles first at scale; refusal loses the good alleles with the bad.
   — spec §4.1.

@@ -778,9 +778,16 @@ mod tests {
         assert_eq!(selection.verdict(), SelectionVerdict::Selected);
         assert_eq!(selection.alleles().len(), 6);
 
+        // **Every alternative here has to clear the bar comfortably, or this stops being a
+        // test of the cap.** An earlier version gave the weakest alternative 2 reads of a
+        // sample's 29, and when the shipped share moved from 5 in 100 to 10 the bar — not the
+        // cap — removed it: six alternatives became five, five fit, and the verdict came back
+        // `Selected` at a fixture whose whole purpose is a cap that bites. Every alternative
+        // below takes at least 5 of the sample's 47 reads, where the rule asks for
+        // `max(2, ceil(0.10 × 47)) = 5`, so all six reach the cap and the cap is what cuts one.
         let seven = locus_of(
             &[b"A", b"C", b"G", b"T", b"AA", b"AC", b"AG"],
-            one_sample_showing(&[2, 2, 6, 5, 4, 3, 7]),
+            one_sample_showing(&[2, 5, 8, 7, 6, 9, 10]),
         );
         let selection = select_generic(
             &seven,
@@ -799,7 +806,7 @@ mod tests {
         assert_eq!(
             selection.remap().candidate_for(1),
             None,
-            "the 2-read alternative is what the cap cut, and it is the table's first rather \
+            "the 5-read alternative is what the cap cut, and it is the table's first rather \
              than its last — so keeping the table's leading prefix fails here"
         );
     }

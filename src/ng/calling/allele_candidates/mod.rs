@@ -16,7 +16,7 @@
 //! config, the verdict, the leftover, the remapping and the ranking.
 //!
 //! **The rule, in one line.** An alternative survives if *some single sample's* reads
-//! lent it at least `max(2 reads, 5 in 100 of that sample's reads at the locus)`, and a
+//! lent it at least `max(2 reads, 10 in 100 of that sample's reads at the locus)`, and a
 //! locus is called over at most six alleles counting the reference. **No term of the bar
 //! reads the cohort** — one sample reaching it admits the sequence for everyone —
 //! because otherwise a sample's candidate list would depend on who else is in the run
@@ -131,7 +131,7 @@ impl Default for MaxCandidateAlleles {
     }
 }
 
-/// **Two reads, or 5 in 100 of that sample's reads at the locus, whichever is more.**
+/// **Two reads, or 10 in 100 of that sample's reads at the locus, whichever is more.**
 ///
 /// **The floor is the merge's own** ([`MinAltObs::DEFAULT`], production's number) **and
 /// should stay at 2**: measured against the GIAB trio's v4.2.1 truth set over 572 kb on
@@ -139,23 +139,37 @@ impl Default for MaxCandidateAlleles {
 /// where raising the share to 10 in 100 loses two for the same reduction in table size —
 /// 1,539 alternatives kept against 1,601. The floor is the expensive knob (spec §3.3).
 ///
-/// **The share is 5 in 100 where the merge's keep rule uses 2**, because the
-/// allele-level question tolerates a stricter share at depth. On the same trio **at
-/// 300×** it cuts the merge's 15,474 alternatives to 2,308, where a bar of 2 reads alone
-/// keeps 10,793 — and it loses the same two true alleles the 2-in-100 share loses.
+/// **The share is 10 in 100 where the merge's keep rule uses 2** (owner's decision,
+/// 2026-08-24), **and it is set against the recall measurement rather than by it.** On
+/// this trio **at 300×** it cuts the merge's 15,474 alternatives to 1,273 where a bar of
+/// 2 reads alone keeps 10,793, and **it costs two true alleles that 5 in 100 keeps** —
+/// `chr1:193718424` `T→C` at 6 of one sample's 107 compared reads, and `chr1:120579074`
+/// `C→A` at 4 of 42.
 ///
-/// **It is inert below 41 compared reads a sample**, which is the arithmetic rather than
-/// a measurement: `ceil(0.05 × 40) = 2` is the floor, and 41 is the first count at which
+/// **The reason it is 10 and not 5 is the axis recall does not measure.** An allele one
+/// sample shows at a twentieth of its reads is far likelier to be error than variation,
+/// and every one admitted is a column in every genotype table, at every sample, for the
+/// life of the locus — memory and wall time spent on candidates that are mostly not real.
+/// Two true alleles in 913, at loci whose local depth is 107 and 42 reads rather than the
+/// run's nominal 300, is the price accepted for that. **Provisional in the strict sense:
+/// it is to be re-decided once the calling loop and emission exist and the cost can be
+/// measured** rather than reasoned about — recall is only one side of it, and nothing here
+/// yet weighs the other.
+///
+/// **It is inert below 21 compared reads a sample**, which is the arithmetic rather than
+/// a measurement: `ceil(0.10 × 20) = 2` is the floor, and 21 is the first count at which
 /// the share asks for more. So a tomato-depth run — about 11 compared reads a sample at a
-/// locus — sees the identical rule it would have seen at 2 in 100. What was measured on
-/// that panel is the neighbouring comparison: turning the share off entirely against the
-/// merge's 2 in 100 moves 4 loci in 53,935 (spec §3.3).
+/// locus — sees the identical rule it would have seen at 2 in 100, and **the whole of this
+/// decision lands at depth and nowhere else.** What was measured on that panel is the
+/// neighbouring comparison: turning the share off entirely against the merge's 2 in 100
+/// moves 4 loci in 53,935 (spec §3.3).
 ///
-/// **Soft.** Measured on one human trio over 572 kb (spec §11, Q3); what would move it is
-/// the same scoring on a second high-depth cohort.
+/// **Soft, and the softest constant in this module.** Measured for recall on one human trio
+/// over 572 kb (spec §11, Q3); the candidate-count argument that decided it is not measured
+/// at all yet.
 pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
     floor: MinAltObs::DEFAULT,
-    share: MinAltReadShare::new_or_panic(0.05),
+    share: MinAltReadShare::new_or_panic(0.10),
 };
 
 /// **Six alleles including the reference** — production's `DEFAULT_MAX_ALLELES_PER_RECORD`
@@ -177,10 +191,10 @@ pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
 /// table fixed and asking the bar of 1, 4, 16 and 63 samples gives 0, 0, 3 and 23 loci
 /// above six alleles.
 ///
-/// **Those counts were taken with the merge's 2-in-100 share, not the 5 in 100 this
+/// **Those counts were taken with the merge's 2-in-100 share, not the 10 in 100 this
 /// module ships**, which spec §4.2 states in its own header and a reader of this constant
 /// would otherwise not know. The direction is safe: at tomato depth the two shares are
-/// provably the same rule (see [`DEFAULT_MIN_ALLELE_SUPPORT`]), and everywhere else 5 in 100
+/// provably the same rule (see [`DEFAULT_MIN_ALLELE_SUPPORT`]), and everywhere else 10 in 100
 /// admits fewer alternatives, so the cap binds no more often than these numbers say.
 ///
 /// **Soft, and never measured at its own value.** Whether it becomes load-bearing past a
@@ -1092,7 +1106,7 @@ pub(super) mod fixtures {
     /// A support rule of `floor` reads or `share` of a sample's compared reads.
     ///
     /// Written out rather than taken from [`DEFAULT_MIN_ALLELE_SUPPORT`] because the
-    /// shipped share of 5 in 100 is inert below 41 compared reads, so a fixture of a
+    /// shipped share of 10 in 100 is inert below 21 compared reads, so a fixture of a
     /// handful of reads built on it could not tell a right denominator from a wrong one:
     /// the floor would decide either way. **Raising the share is not by itself enough to
     /// make it decide** — the fixture also has to be deep enough that
@@ -1198,40 +1212,39 @@ mod tests {
     /// rather than to the digit 2 — the doc comment says the floor *is* the merge's own,
     /// and only the second assertion holds that.
     #[test]
-    fn the_default_bar_is_two_reads_or_five_in_a_hundred() {
+    fn the_default_bar_is_two_reads_or_ten_in_a_hundred() {
         assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.floor.get(), 2);
         assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.floor, MinAltObs::DEFAULT);
-        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.share.get(), 0.05);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.share.get(), 0.10);
     }
 
     /// The two ends of the committed depth range, as spec §3 states them: at 3 compared
-    /// reads the rule asks 2, and at 300 it asks 15.
+    /// reads the rule asks 2, and at 300 it asks 30.
     ///
-    /// The third count is there because the first two cannot see the rounding: `0.05 ×
-    /// 300` is exactly 15, so rounding the share *down* would answer 15 as well. At 301
-    /// the share is 15.05, and up and down are 16 and 15.
+    /// The third count is there because the first two cannot see the rounding: `0.10 ×
+    /// 300` is exactly 30, so rounding the share *down* would answer 30 as well. At 301
+    /// the share is 30.1, and up and down are 31 and 30.
     #[test]
     fn the_floor_decides_at_three_reads_and_the_share_at_three_hundred() {
         assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(3), 2);
-        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(300), 15);
-        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(301), 16);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(300), 30);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(301), 31);
     }
 
     /// The share is stricter than the merge's own at depth and **indistinguishable from
-    /// it below 41 compared reads** — the claim [`DEFAULT_MIN_ALLELE_SUPPORT`]'s
+    /// it below 21 compared reads** — the claim [`DEFAULT_MIN_ALLELE_SUPPORT`]'s
     /// documentation makes, held against the merge's constant rather than against a
     /// number retyped here.
     ///
-    /// **40 and 41 are the fixture, and stopping short of them is what makes this test
-    /// vacuous.** With the equality arm ending at 20 compared reads, a share of 10 in 100
-    /// also passes — `ceil(0.10 × 20) = 2` is still the floor — so the test would admit a
-    /// bar twice as strict as the one shipped, which spec §3.3 measures losing two more
-    /// true alleles at 300×. Carrying the pair to 40 and 41 pins the share to **more than
-    /// 2/41 — about 0.0488 — and no more than 0.05**, which is the narrowest window the
-    /// rule's own integer arithmetic can express.
+    /// **20 and 21 are the fixture, and they are what stops this test being vacuous.**
+    /// Equal up to 20 and strictly greater at 21 pins the share to **more than 2/21 —
+    /// about 0.0952 — and no more than 2/20, which is 0.10**, the narrowest window the
+    /// rule's own integer arithmetic can express. Both neighbours the project has argued
+    /// over fail it: at 5 in 100, `ceil(0.05 × 21) = 2` is still the floor and the strict
+    /// arm fails; at 20 in 100, `ceil(0.20 × 20) = 4` and the equality arm fails.
     #[test]
-    fn the_allele_share_binds_only_above_forty_compared_reads() {
-        for compared_reads in [1_u32, 3, 11, 20, 40] {
+    fn the_allele_share_binds_only_above_twenty_compared_reads() {
+        for compared_reads in [1_u32, 3, 11, 20] {
             assert_eq!(
                 DEFAULT_MIN_ALLELE_SUPPORT.required_of(compared_reads),
                 MinAltReads::DEFAULT.required_of(compared_reads),
@@ -1239,8 +1252,8 @@ mod tests {
             );
         }
         assert!(
-            DEFAULT_MIN_ALLELE_SUPPORT.required_of(41) > MinAltReads::DEFAULT.required_of(41),
-            "41 compared reads is where the allele rule first asks for more than the merge's"
+            DEFAULT_MIN_ALLELE_SUPPORT.required_of(21) > MinAltReads::DEFAULT.required_of(21),
+            "21 compared reads is where the allele rule first asks for more than the merge's"
         );
         assert!(
             DEFAULT_MIN_ALLELE_SUPPORT.required_of(300) > MinAltReads::DEFAULT.required_of(300),
@@ -1295,9 +1308,9 @@ mod tests {
     ///
     /// Both names are in scope in this file and both are a `MinAltReads`, so writing
     /// `MinAltReads::DEFAULT` here is a one-token slip that nothing else would catch: the
-    /// type is right, the floor is right, and only the share moves — from 5 in 100 to 2 in
+    /// type is right, the floor is right, and only the share moves — from 10 in 100 to 2 in
     /// 100. It is invisible at tomato depth, where the two are the same rule, and on the
-    /// GIAB trio at 300× it is the difference between keeping 2,308 alternatives and
+    /// GIAB trio at 300× it is the difference between keeping 1,273 alternatives and
     /// keeping 5,596 (spec §3.3), each of which the genotype prior divides its
     /// concentration by. The last assertion is what makes the test about the *number* and
     /// not merely about the type.
@@ -1682,16 +1695,19 @@ mod tests {
     }
 
     /// **The share half of the rule, in the regime where it is the half that decides** —
-    /// which no other fixture here enters, because below 41 compared reads the floor
-    /// decides for any share up to 5 in 100.
+    /// which no other fixture here enters, because below 21 compared reads the floor
+    /// decides for any share up to the shipped 10 in 100.
     ///
     /// One sample with 100 compared reads shows 3 on the alternative, against 2 reads or 5
     /// in 100: the floor would admit it and the share asks for 5, so it is refused; at 5
-    /// reads it is admitted. **Without this pair the whole share term could be deleted and
+    /// reads it is admitted. **The 5 in 100 here is the fixture's own and not the shipped
+    /// number** ([`DEFAULT_MIN_ALLELE_SUPPORT`] is 10 in 100), for the reason
+    /// [`support_rule_of`] gives: a rule written out is a rule a reader can check against
+    /// the counts beside it. **Without this pair the whole share term could be deleted and
     /// every other test here would still pass**, and a fold applying the floor alone admits
     /// sequencing error as a candidate allele at 300× — the depth at which the share is the
-    /// only half of the rule doing any work (spec §3.3: a 5-in-100 share cuts the GIAB
-    /// trio's 15,474 alternatives to 2,308 where a count-only bar keeps 10,793).
+    /// only half of the rule doing any work (spec §3.3: the shipped 10-in-100 share cuts the
+    /// GIAB trio's 15,474 alternatives to 1,273 where a count-only bar keeps 10,793).
     ///
     /// It also pins the **denominator** the share is taken of: asked against the allele's
     /// own 3 reads instead of the sample's 100, `ceil(0.05 × 3) = 1` and the alternative
