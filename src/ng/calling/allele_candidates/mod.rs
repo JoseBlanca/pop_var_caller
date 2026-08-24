@@ -26,6 +26,7 @@ use crate::ng::calling::CandidateAlleles;
 use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
 use crate::ng::types::AlleleId;
+use std::cmp::Ordering;
 
 /// **The support one sample must lend one sequence for it to be called over, and the cap
 /// on how many sequences a locus is called over at all** — the two halves of the
@@ -201,10 +202,10 @@ pub enum SelectionVerdict {
     /// in four, and the fraction is the same on both benchmarks — 27.4% on the 63-accession
     /// tomato panel, 27.3% on the GIAB trio at 30× and 28.0% at 300× (spec §6.2).
     Selected,
-    /// The cap bound, and `dropped` alternatives were cut — the lowest-ranked first, by
-    /// the ranking `ranks_above` will define at step B2: the largest share of one sample's
-    /// compared reads, then how many samples cleared the bar, then the cohort's read
-    /// total, then the bases. The reference is never among them (spec §4.1).
+    /// The cap bound, and `dropped` alternatives were cut — the lowest-ranked first, by the
+    /// ranking [`compare_best_first`] defines: the largest share of one sample's compared
+    /// reads, then how many samples cleared the bar, then the cohort's read total, then the
+    /// bases. The reference is never among them (spec §4.1).
     Truncated {
         /// How many alternatives the cap removed. Not how many were dropped in total: an
         /// alternative that failed the bar was never a candidate for the cap.
@@ -543,8 +544,14 @@ impl LocusSelection {
 pub struct SelectionScratch {
     /// One entry per allele of the merge's table, in that table's index order.
     per_allele: Vec<AlleleSummary>,
-    /// Merge table indices, ordered by the cap's ranking. Only the alternatives that
-    /// cleared the bar ever enter it.
+    /// Merge table indices. Only the alternatives that cleared the bar ever enter it.
+    ///
+    /// **It holds two orders in turn, and the second is not decoration.** While the cap
+    /// chooses, the indices are ordered by [`compare_best_first`]; once it has, the survivors
+    /// are sorted back into the merge table's own index order, because that is the order they
+    /// are admitted to [`CandidateAlleles`] in (arch §3.1). So the ranking decides *which*
+    /// alleles survive and the merge decides what order they appear in — which is the order
+    /// that reaches the VCF's `ALT` column.
     ranked_table_indices: Vec<u32>,
 }
 
@@ -793,9 +800,97 @@ fn summarise_alleles(
     }
 }
 
+/// **One alternative as the cap's ranking reads it** — the fold [`summarise_alleles`] filled
+/// for it, and the bases that break the last tie.
+///
+/// **The two travel together so that a call site cannot pair one allele's summary with
+/// another's bases**, which is the whole reason the type exists. The comparison used to take
+/// four positional arguments — two summaries and two base slices — and a review swapped the
+/// two slices at a call site: it compiled, `clippy` was silent, and the test still passed,
+/// because the bases only decide when all three numeric keys tie. The mis-pairing is
+/// therefore invisible at exactly the loci where the ranking does its work, and the caller
+/// this is built for is worse than the test — step C2 sorts a buffer of table indices, so
+/// every argument is an index expression.
+#[derive(Clone, Copy, Debug)]
+struct RankedAlternative<'bases> {
+    /// What the fold recorded for this allele across the cohort's samples.
+    summary: AlleleSummary,
+    /// The allele's own sequence, from `CohortObservation::alleles`.
+    bases: &'bases [u8],
+}
+
+/// **Order two alternatives best-first for the cap** — the largest share of one sample's
+/// compared reads, then how many samples cleared the rule, then the cohort's read total,
+/// then the bases (spec §4.1; arch §2.5).
+///
+/// **The name says the direction because the return cannot.** `Ordering::Less` means `left`
+/// belongs earlier in a best-first list, so the three ranking keys are compared
+/// right-against-left and only the bases, the last, are compared the way they read. Sorting
+/// with it gives best-first, and `min_by` gives the best allele — **`max_by` gives the
+/// worst**, which is the one idiom that compiles and means the opposite of what it looks
+/// like. *(Arch §2.5 names this `ranks_above`; renamed here because a third-person `-s` verb
+/// is the shape Rust reserves for `-> bool`, and answering it with `Less` for "yes" is a trap
+/// a doc comment can only paper over.)*
+///
+/// **The first key is a share of one sample's reads, not of the cohort's, and that is the
+/// design.** Production ranks by the cohort's raw read total
+/// (`enforce_max_alleles`, `src/var_calling/per_group_merger.rs`, a stable sort on
+/// `Reverse(cohort_count)`), and at scale that truncates the *private* alleles first: an
+/// allele one sample really carries, heterozygous at 30×, scores 15 reads, where a systematic
+/// mismapping artefact at 1 read in 100 across 800 samples at 30× scores 240. As
+/// within-sample shares the same two are 0.5 and 0.01. bcftools divides each sample's quality
+/// sums by that sample's total before adding across the cohort (`bam2bcf.c`), and HipSTR pools
+/// `count/sample_reads` rather than counts (`HaplotypeGenerator.cpp`), for the same reason.
+///
+/// **The tie-break order is what makes the ranking degrade across the depth range without a
+/// branch.** At 300 reads a sample the shares separate and the first key decides. At about 3
+/// reads a position every admitted allele takes two of them, so the shares all sit near two
+/// thirds, the first key ties, and how many samples cleared the rule is the only signal there
+/// is (spec §4.1). Production's key is this ranking's third.
+///
+/// **What it does in a cohort of mixed depth is not covered by that argument**, and is worth
+/// knowing before reading a truncated locus: a homozygous alternative scores 1.0 whatever its
+/// depth, and a heterozygote scores about 0.5 whatever its depth, so a sample sequenced at 3
+/// reads outranks every sample sequenced at 300 that is heterozygous — three agreeing reads
+/// beat 150. Raised with the owner at Checkpoint B rather than decided here.
+///
+/// **The bases are the tie-break that cannot tie**, which is why they are here rather than a
+/// stable sort of the rows. The merge's table keys its alleles by their own bytes
+/// (`AlleleTable`, `src/ng/run/cohort_merge/build.rs`), so two entries always differ and the
+/// order can never fall through to however the samples were walked — which spec §8 requires,
+/// since the output must be byte-identical at any worker count. Production's ranking rests on
+/// a stable sort of equal keys, which is deterministic but arbitrary.
+///
+/// **Shares compare with [`f64::total_cmp`]**, a total order, so there is no `NaN` branch and
+/// no partial-order footgun. Nothing here can be handed a `NaN`: [`summarise_alleles`] asserts
+/// a non-zero denominator for every sample that has rows, so every share is one `u32` over
+/// another.
+#[allow(
+    dead_code,
+    reason = "its shipping caller is the cap of step C2; until then the tests are its only \
+              callers, which `expect` cannot express — the expectation would be unfulfilled \
+              in the test build and satisfied in the library one"
+)]
+fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>) -> Ordering {
+    right
+        .summary
+        .best_within_sample_share
+        .total_cmp(&left.summary.best_within_sample_share)
+        .then(
+            right
+                .summary
+                .samples_clearing_the_bar
+                .cmp(&left.summary.samples_clearing_the_bar),
+        )
+        .then(right.summary.cohort_reads.cmp(&left.summary.cohort_reads))
+        .then(left.bases.cmp(right.bases))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
     use crate::ng::locus_generation::{LocusKind, WitnessedLocusPositions};
     use crate::ng::run::cohort_merge::build::{AlleleSupport, PartialObservation, SupportedAllele};
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
@@ -1733,5 +1828,335 @@ mod tests {
             "and the second locus's four reads are four, not eight"
         );
         assert_eq!(scratch.per_allele[1].samples_clearing_the_bar, 1);
+    }
+
+    // ---- the cap's ranking (step B2) ---------------------------------------------------
+
+    /// One alternative for the ranking: its three folded numbers, spelled in the order the
+    /// ranking reads them, and its bases.
+    fn alternative(
+        best_within_sample_share: f64,
+        samples_clearing_the_bar: u32,
+        cohort_reads: u64,
+        bases: &[u8],
+    ) -> RankedAlternative<'_> {
+        RankedAlternative {
+            summary: AlleleSummary {
+                best_within_sample_share,
+                samples_clearing_the_bar,
+                cohort_reads,
+            },
+            bases,
+        }
+    }
+
+    /// `alternatives` sorted best-first by [`compare_best_first`], as their bases, so a
+    /// failure names the alleles rather than their positions.
+    fn ranked_bases<'bases>(alternatives: &[RankedAlternative<'bases>]) -> Vec<&'bases [u8]> {
+        let mut ranked = alternatives.to_vec();
+        ranked.sort_unstable_by(|left, right| compare_best_first(*left, *right));
+        ranked.into_iter().map(|entry| entry.bases).collect()
+    }
+
+    /// **Every pairwise fixture below sets the bases *against* the expected answer**, and
+    /// that is deliberate rather than decorative. The bases are the last key, so a fixture
+    /// whose winner also sorts first alphabetically is passed by a comparator that consults
+    /// nothing else: a review replaced the whole function body with `left.bases.cmp(right.bases)`
+    /// and seven of the eight tests here still passed. With the bases opposed, that comparator
+    /// fails every one of them.
+    ///
+    /// The one exception is the test about the bases themselves, where they have to decide.
+    #[test]
+    fn the_better_ranked_allele_compares_less() {
+        let better = alternative(0.6, 1, 10, b"G");
+        let worse = alternative(0.2, 1, 10, b"C");
+        assert_eq!(compare_best_first(better, worse), Ordering::Less);
+        assert_eq!(compare_best_first(worse, better), Ordering::Greater);
+    }
+
+    /// **The first key: the largest share one sample gave the allele** — and here it decides
+    /// *against* all three of the other keys at once. The allele one sample showed at 3 of
+    /// its 4 reads outranks the one 40 samples showed at a fiftieth of theirs, which has
+    /// eighty times the cohort reads and forty times the carriers.
+    ///
+    /// **That inversion is the reason the key is a within-sample share** (spec §4.1). At a
+    /// thousand samples, ranking by the cohort total keeps a systematic mismapping artefact
+    /// present at 1 read in 100 everywhere and truncates the private allele a single carrier
+    /// really has.
+    #[test]
+    fn the_largest_within_sample_share_decides_first_against_every_other_key() {
+        let private = alternative(0.75, 1, 3, b"G");
+        let widespread = alternative(0.02, 40, 240, b"C");
+        assert_eq!(
+            ranked_bases(&[widespread, private]),
+            vec![b"G".as_slice(), b"C".as_slice()]
+        );
+    }
+
+    /// **The second key, in the regime spec §4.1 says it is the only signal there is.** At
+    /// about 3 reads a sample every admitted allele takes two of them, so all the shares are
+    /// 2/3 and the first key ties; how many samples cleared the rule then decides.
+    ///
+    /// The remaining two keys are set against the answer — the allele two samples cleared
+    /// has 4 cohort reads where the other has 9, and its bases sort later — so a ranking
+    /// that skipped this key and fell through to the cohort total, which is production's
+    /// key, would return the other order.
+    #[test]
+    fn how_many_samples_cleared_the_rule_decides_when_the_shares_tie() {
+        let two_carriers = alternative(2.0 / 3.0, 2, 4, b"G");
+        let one_carrier = alternative(2.0 / 3.0, 1, 9, b"C");
+        assert_eq!(
+            ranked_bases(&[one_carrier, two_carriers]),
+            vec![b"G".as_slice(), b"C".as_slice()]
+        );
+    }
+
+    /// **The third key**, reached only when the share and the sample count both tie: the
+    /// cohort's read total, which is production's *first* key and this ranking's last
+    /// numeric one. The bases are set against it, so deleting the key does not leave the
+    /// fourth one quietly producing the same answer.
+    #[test]
+    fn the_cohort_read_total_decides_when_the_share_and_the_sample_count_both_tie() {
+        let deeper = alternative(0.5, 2, 30, b"G");
+        let shallower = alternative(0.5, 2, 12, b"C");
+        assert_eq!(
+            ranked_bases(&[shallower, deeper]),
+            vec![b"G".as_slice(), b"C".as_slice()]
+        );
+    }
+
+    /// **The fourth key, which cannot tie.** The merge's table keys its alleles by their own
+    /// bytes, so two entries always differ, no two ever compare `Equal`, and the order cannot
+    /// fall through to however the samples happened to be walked. Spec §8 requires the output
+    /// to be byte-identical at any worker count, and this is what closes it.
+    #[test]
+    fn the_bases_decide_when_all_three_numbers_tie() {
+        let earlier = alternative(0.5, 2, 20, b"AC");
+        let later = alternative(0.5, 2, 20, b"AG");
+        assert_eq!(
+            compare_best_first(earlier, later),
+            Ordering::Less,
+            "the lexicographically smaller sequence ranks above"
+        );
+        assert_eq!(
+            ranked_bases(&[later, earlier]),
+            vec![b"AC".as_slice(), b"AG".as_slice()]
+        );
+    }
+
+    /// **The whole ranking on one table, and the same table fed in reverse order** — the
+    /// plan's oracle for this step. Six alternatives make five adjacent pairs, and each of
+    /// the four keys decides at least one of them.
+    ///
+    /// Reading the expected list against the fixture: `TT` wins on the share alone (0.9).
+    /// `AC` and `AG` both sit at 0.5, `AC` cleared the rule in 3 samples against 2 — **and
+    /// `AG` carries the larger cohort total, 30 against 8, so a ranking that consulted the
+    /// totals before the sample count would swap them.** `AG` then beats `GG` on the share
+    /// again (0.5 against 0.4). `GG` beats `CC` on the cohort total with both other numbers
+    /// tied. And `CA` and `CC` tie on all three, so the bases decide and `CA` — the
+    /// lexicographically smaller — comes first.
+    ///
+    /// **That one number is what makes this the key-*order* oracle it claims to be.** A
+    /// review swapped the second and third keys in the comparator and this test still passed,
+    /// because `AC` and `AG` then had equal cohort totals and the third key was a no-op on
+    /// the only pair the second key was meant to decide.
+    #[test]
+    fn every_key_decides_a_pair_and_the_row_order_does_not_matter() {
+        let table = [
+            alternative(0.9, 1, 5, b"TT"),
+            alternative(0.5, 3, 8, b"AC"),
+            alternative(0.5, 2, 30, b"AG"),
+            alternative(0.4, 2, 30, b"GG"),
+            alternative(0.4, 2, 12, b"CC"),
+            alternative(0.4, 2, 12, b"CA"),
+        ];
+        let expected = vec![
+            b"TT".as_slice(),
+            b"AC".as_slice(),
+            b"AG".as_slice(),
+            b"GG".as_slice(),
+            b"CA".as_slice(),
+            b"CC".as_slice(),
+        ];
+        assert_eq!(ranked_bases(&table), expected);
+
+        let mut reversed = table;
+        reversed.reverse();
+        assert_eq!(
+            ranked_bases(&reversed),
+            expected,
+            "the ranking must not inherit the order the rows arrived in (spec §8)"
+        );
+    }
+
+    /// **At 300 reads a sample the first key decides on its own** — the deep end of the
+    /// committed range, against the 3-read fixture above. A heterozygote showing 151 of one
+    /// sample's 300 reads outranks an error-level allele at 16 in 300, although the second
+    /// allele was seen in 3 samples against 1, carries 250 cohort reads against 151, and
+    /// sorts first by bases. All three lower keys point the other way, so only the share can
+    /// produce this answer.
+    #[test]
+    fn at_three_hundred_reads_a_sample_the_share_alone_decides() {
+        let heterozygous = alternative(151.0 / 300.0, 1, 151, b"G");
+        let error_level = alternative(16.0 / 300.0, 3, 250, b"C");
+        assert_eq!(
+            ranked_bases(&[error_level, heterozygous]),
+            vec![b"G".as_slice(), b"C".as_slice()]
+        );
+    }
+
+    /// **At one sample this ranking and production's are the same ranking**, which is worth
+    /// pinning because it bounds what spec §4.1's argument buys: every allele's share has the
+    /// same denominator — that one sample's compared reads — so ordering by share and
+    /// ordering by the cohort read total agree exactly, and the second and third keys never
+    /// come into it.
+    ///
+    /// **The argument for the within-sample share is a cohort-size argument**, and at the
+    /// thin end of the range it is worth nothing. It starts paying as soon as two samples of
+    /// different depth are present, which is what the next test shows.
+    #[test]
+    fn at_one_sample_the_share_ranking_and_the_cohort_total_ranking_agree() {
+        let half = alternative(0.5, 1, 50, b"AA");
+        let three_tenths = alternative(0.3, 1, 30, b"CC");
+        let a_fifth = alternative(0.2, 1, 20, b"GG");
+        assert_eq!(
+            ranked_bases(&[a_fifth, half, three_tenths]),
+            vec![b"AA".as_slice(), b"CC".as_slice(), b"GG".as_slice()]
+        );
+        let mut by_cohort_reads = [a_fifth, half, three_tenths];
+        by_cohort_reads.sort_unstable_by(|left, right| {
+            right.summary.cohort_reads.cmp(&left.summary.cohort_reads)
+        });
+        assert_eq!(
+            by_cohort_reads
+                .iter()
+                .map(|entry| entry.bases)
+                .collect::<Vec<_>>(),
+            vec![b"AA".as_slice(), b"CC".as_slice(), b"GG".as_slice()],
+            "at one sample the two rankings cannot disagree"
+        );
+    }
+
+    /// **A cohort of mixed depth, which spec §4.1's range argument does not cover** — its two
+    /// halves each describe a cohort at one depth, and here the two regimes meet inside one
+    /// comparison.
+    ///
+    /// A sample sequenced at 3 reads, homozygous for its allele, scores a share of 1.0 on
+    /// three reads in the whole cohort. A sample sequenced at 300, heterozygous, scores 0.5
+    /// on 150. **The shallow sample's allele outranks the deep one**, and at a binding cap it
+    /// is the last thing cut. Recorded as a test rather than argued about: three agreeing
+    /// reads are genuinely evidence, and whether they should outrank 150 is the owner's call
+    /// at Checkpoint B — but the behaviour should not be a surprise to whoever reads a
+    /// truncated locus.
+    #[test]
+    fn a_shallow_homozygote_outranks_a_deep_heterozygote_on_the_first_key() {
+        let three_of_three = alternative(1.0, 1, 3, b"G");
+        let one_hundred_fifty_of_three_hundred = alternative(0.5, 1, 150, b"C");
+        assert_eq!(
+            ranked_bases(&[one_hundred_fifty_of_three_hundred, three_of_three]),
+            vec![b"G".as_slice(), b"C".as_slice()]
+        );
+    }
+
+    /// **A table wider than the cap**, which every other fixture here is not: the largest is
+    /// exactly six rows and the default cap is six *counting the reference*, so the cap first
+    /// bites at seven. What the cap will keep is the first five of this list, and what it
+    /// cuts is the last two — the ordering C2 will `truncate` on.
+    #[test]
+    fn a_table_above_the_cap_ranks_its_survivors_into_the_front() {
+        let table = [
+            alternative(0.10, 1, 6, b"AAAAAA"),
+            alternative(0.90, 3, 60, b"CCCCCC"),
+            alternative(0.05, 1, 3, b"GGGGGG"),
+            alternative(0.70, 2, 40, b"TTTTTT"),
+            alternative(0.60, 5, 90, b"ACACAC"),
+            alternative(0.80, 1, 20, b"AGAGAG"),
+            alternative(0.65, 1, 15, b"ATATAT"),
+        ];
+        let ranked = ranked_bases(&table);
+        assert_eq!(
+            &ranked[..usize::from(DEFAULT_MAX_CANDIDATE_ALLELES.alternatives())],
+            &[
+                b"CCCCCC".as_slice(),
+                b"AGAGAG".as_slice(),
+                b"TTTTTT".as_slice(),
+                b"ATATAT".as_slice(),
+                b"ACACAC".as_slice(),
+            ],
+            "the five alternatives the default cap leaves room for, best first"
+        );
+        assert_eq!(
+            &ranked[usize::from(DEFAULT_MAX_CANDIDATE_ALLELES.alternatives())..],
+            &[b"AAAAAA".as_slice(), b"GGGGGG".as_slice()],
+            "and the two the cap would cut, still ordered among themselves"
+        );
+    }
+
+    /// Two shares that are equal to the bit fall through to the next key rather than holding
+    /// their input order.
+    ///
+    /// **No fixture here can separate [`f64::total_cmp`] from `partial_cmp`, and saying so is
+    /// more use than a test that pretends otherwise:** the two differ only on `NaN`, and a
+    /// `NaN` share cannot reach this function, because [`summarise_alleles`] asserts a
+    /// non-zero denominator for every sample that has rows. Substituting
+    /// `partial_cmp(..).unwrap()` leaves every test in this module green. `total_cmp` is
+    /// still the right call — it is the spelling that cannot panic if that assertion is ever
+    /// relaxed — but its value here is a guarantee, not a behaviour any fixture observes.
+    #[test]
+    fn two_shares_equal_to_the_bit_fall_through_to_the_next_key() {
+        let from_a_quarter = alternative(2.0 / 4.0, 3, 10, b"G");
+        let from_a_half = alternative(1.0 / 2.0, 1, 10, b"C");
+        assert_eq!(
+            from_a_quarter.summary.best_within_sample_share,
+            from_a_half.summary.best_within_sample_share
+        );
+        assert_eq!(
+            compare_best_first(from_a_quarter, from_a_half),
+            Ordering::Less,
+            "the shares tie, so the sample count decides"
+        );
+    }
+
+    proptest! {
+        /// **The comparison is a strict weak ordering**, which `sort_unstable_by` requires and
+        /// does not check: given a comparator that is not one, the standard library is
+        /// entitled to leave the slice in any order at all, and spec §8 requires the output to
+        /// be byte-identical at any worker count.
+        ///
+        /// Asserted over triples drawn across the shares, sample counts and read totals a
+        /// locus can produce, plus two-byte alleles so the last key both ties and decides:
+        /// the relation is asymmetric, and it is transitive on both `Less` and on the
+        /// equivalence `Equal` induces.
+        #[test]
+        fn the_ranking_is_a_strict_weak_ordering(
+            shares in prop::collection::vec(0.0_f64..=1.0, 3),
+            counts in prop::collection::vec(0_u32..8, 3),
+            reads in prop::collection::vec(0_u64..40, 3),
+            bases in prop::collection::vec("[ACGT]{2}", 3),
+        ) {
+            let entries: Vec<RankedAlternative<'_>> = (0..3)
+                .map(|i| alternative(shares[i], counts[i], reads[i], bases[i].as_bytes()))
+                .collect();
+            for left in &entries {
+                for right in &entries {
+                    prop_assert_eq!(
+                        compare_best_first(*left, *right),
+                        compare_best_first(*right, *left).reverse(),
+                        "the comparison must be asymmetric"
+                    );
+                }
+            }
+            let (a, b, c) = (entries[0], entries[1], entries[2]);
+            if compare_best_first(a, b) == Ordering::Less
+                && compare_best_first(b, c) == Ordering::Less
+            {
+                prop_assert_eq!(compare_best_first(a, c), Ordering::Less);
+            }
+            if compare_best_first(a, b) == Ordering::Equal
+                && compare_best_first(b, c) == Ordering::Equal
+            {
+                prop_assert_eq!(compare_best_first(a, c), Ordering::Equal);
+            }
+        }
     }
 }

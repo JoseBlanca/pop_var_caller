@@ -145,7 +145,7 @@ partials, a silent read and one allele shown from two read groups — the denomi
 first and the two group rows must sum rather than the larger winning.
 *Depends:* A2. *Source:* arch §3.1; spec §1.3, §3.
 
-**B2. The per-allele summary and the ranking. — own commit, do not bundle.**  ☐
+**B2. The per-allele summary and the ranking. — own commit, do not bundle.**  ✅
 The private `AlleleSummary` (largest within-sample share, samples clearing the bar, cohort read
 total) filled by B1's pass, and `ranks_above`: share first by
 `f64::total_cmp`, then samples clearing, then cohort reads, then the bases.

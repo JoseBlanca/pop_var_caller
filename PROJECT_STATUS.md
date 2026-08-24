@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **the rule that decides which sequences a locus is called
+> - **Last completed task (2026-08-24):** **the order the cap keeps alleles in, and an oracle that
+> did not test the thing it was written for** (step B2 of
+> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`; **Milestone B complete, at Checkpoint B**). A locus is called over at
+> most six sequences counting the reference, and above that the list is cut to the best six rather
+> than the locus refused. B2 is the comparison that decides which are best: the largest share of
+> one sample's reads the allele took, then how many samples cleared the admission rule, then the
+> cohort's read total, then the bases. The first key is a within-sample share and not a cohort
+> total because at a thousand samples a cohort total truncates the *private* alleles first — an
+> allele one sample really carries scores 15 reads at 30×, where a mismapping artefact at 1 read in
+> 100 across 800 samples scores 240; as shares the two are 0.5 and 0.01.
+> **The oracle did not test the key order it was written to test.** The plan gives this step its
+> own commit because a mis-ordered tie-break is a different truncation at a few loci and nothing
+> fails — and with the second and third keys swapped, the test written to catch that still passed.
+> One pair in its fixture had equal cohort totals, so the third key was a no-op on the only pair
+> the second key was there to decide. **And the base tie-break silently agreed with every numeric
+> key**: in all seven pairwise fixtures the winner's bases also sorted first, so a comparator with
+> no numeric keys at all passed seven of the eight tests. Both fixed; eight mutations, eight
+> killed, where two had survived.
+> **Four claims in the new prose were wrong, and every one was about my own fixture** — while every
+> figure quoted from the design documents was right. That is the second milestone running with
+> that same split.
+> **Two argument slots could be swapped invisibly.** The comparison took two summaries and two base
+> slices positionally; a reviewer mis-paired them and the suite stayed green, because the bases
+> only decide when all three numeric keys tie — invisible at exactly the loci where the ranking
+> works. It now takes one value pairing each allele's summary with its own bases.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_b2_2026-08-24.md).
+> - **Previously (2026-08-24):** **the rule that decides which sequences a locus is called
 > over, and four properties of it that nothing was pinning** (step B1 of
 > [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`). Selection now has its arithmetic. For each sample covering a locus, its
