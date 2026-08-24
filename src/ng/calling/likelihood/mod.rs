@@ -132,7 +132,7 @@ use crate::ng::parameter_estimation::joint::contamination::{
 };
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::run::cohort_merge::build::{PartialObservation, SupportedAllele};
-use crate::ng::types::{AlleleId, ErrorRate, ReadGroupId};
+use crate::ng::types::{AlleleId, BatchId, ErrorRate, ReadGroupId};
 
 /// The clamps a geometric success probability is held inside, **re-exported and not copied**.
 ///
@@ -565,6 +565,133 @@ impl ContaminationView {
     }
 }
 
+/// Floor under a contaminant allele frequency, `1e-12`.
+///
+/// **It is defensive, not statistical, and the difference decides its size.** A batch that
+/// never shows an allele is not proof the contaminating population lacks it — with 63 diploid
+/// samples an unseen allele could still sit near 1 in 40 — but **expressing that uncertainty
+/// here would be the wrong direction to be wrong in.** Spec §3.6 names the one failure to
+/// watch: contamination attributed too readily suppresses real heterozygotes, by explaining
+/// their alternative reads as somebody else's. A floor large enough to encode "we might just
+/// have missed it" does exactly that at every candidate the cohort is thin on, which is most
+/// of them.
+///
+/// So this floor's whole job is to keep a frequency strictly positive, and it is set where it
+/// **cannot compete with the route it sits beside**: at a 3% contamination fraction it
+/// contributes `3 × 10⁻¹⁴` against a misread's `ε̄/m`, which is `3 × 10⁻⁷` even at Phred 40 —
+/// seven orders below. `tests::the_frequency_floor_cannot_outweigh_a_misread` pins that.
+///
+/// **A caller wanting the statistical reading should say so and choose its own number**, and
+/// it belongs in the producer rather than here: a pseudocount over the batch's copies is the
+/// natural shape, and it is a modelling decision this step did not take.
+pub const MIN_CONTAMINANT_FREQUENCY: f64 = 1e-12;
+
+/// Fill one locus's contaminant allele frequencies, per sequencing batch — spec §3.6's `q(o)`.
+///
+/// **This is a lookup and not a fit.** The caller's loop already estimates how many copies of
+/// each allele every sample carries; a batch's frequency is those copies added up over the
+/// samples that ran together, divided by the copies they hold in total. Nothing is estimated
+/// here that the loop has not estimated already, which is why it is recomputed every iteration
+/// rather than frozen beside the contamination fraction (spec §3.6, corrected 2026-08-24).
+///
+/// `expected_copies` is sample-major, `allele_count` to a sample, in the run's sample order —
+/// the shape the loop holds and the same layout `out` is written in, one row per batch.
+///
+/// # What a batch that shows nothing gets
+///
+/// A batch whose samples hold no copies at all — no coverage at this locus — cannot have a
+/// frequency, and dividing by its zero total would give `NaN`. It gets the reference allele and
+/// nothing else: **the honest statement of what a batch with no evidence says about a
+/// contaminant is what the reference says**, and it keeps every row a distribution. An allele
+/// some batch shows but this one does not gets [`MIN_CONTAMINANT_FREQUENCY`], never zero.
+///
+/// # Panics
+///
+/// **In release as well as debug**, on shapes that do not agree, on a batch no sample is in
+/// (which would leave a row unwritten and a lookup reading whatever was there), and on a copy
+/// count that is not finite and at or above zero — the check
+/// [`ExpectedAlleleCopies`](crate::ng::calling::ExpectedAlleleCopies) makes for the same
+/// numbers, restated here because this is the other door they come through.
+pub fn fill_contaminant_allele_frequencies(
+    expected_copies: &[f64],
+    batch_of_sample: &[BatchId],
+    allele_count: usize,
+    out: &mut [f64],
+) {
+    assert!(
+        allele_count > 0,
+        "a locus is called over at least its reference allele"
+    );
+    assert_eq!(
+        expected_copies.len(),
+        batch_of_sample.len() * allele_count,
+        "the copies are {} entries for {} samples at {allele_count} alleles each, which is not \
+         a whole cohort",
+        expected_copies.len(),
+        batch_of_sample.len()
+    );
+    assert_eq!(
+        out.len() % allele_count,
+        0,
+        "the frequency table is {} entries and a batch's row is {allele_count} alleles wide",
+        out.len()
+    );
+    let batch_count = out.len() / allele_count;
+    assert!(
+        batch_count > 0,
+        "a run has at least one sequencing batch, the default being one that holds all of it"
+    );
+
+    // **Summed in place, so nothing is allocated per locus.** `out` holds each batch's copies
+    // while they accumulate and its frequencies afterwards; the total a batch is divided by is
+    // that batch's own row summed, which is why no second buffer is needed for it.
+    out.fill(0.0);
+    for (sample, batch) in batch_of_sample.iter().enumerate() {
+        let batch = batch.get() as usize;
+        assert!(
+            batch < batch_count,
+            "sample {sample} says it ran in batch {batch}, and the run declared {batch_count}"
+        );
+        let row = &expected_copies[sample * allele_count..(sample + 1) * allele_count];
+        for (slot, &copies) in out[batch * allele_count..(batch + 1) * allele_count]
+            .iter_mut()
+            .zip(row)
+        {
+            assert!(
+                copies.is_finite() && copies >= 0.0,
+                "sample {sample} is expected to carry {copies} copies of an allele, and a copy \
+                 count is finite and at or above zero"
+            );
+            *slot += copies;
+        }
+    }
+
+    for batch in 0..batch_count {
+        let row = &mut out[batch * allele_count..(batch + 1) * allele_count];
+        let total: f64 = row.iter().sum();
+        if total <= 0.0 {
+            // Nothing was sequenced here, so there is no frequency to read off. The reference
+            // is what a batch with no evidence has to say.
+            row.fill(MIN_CONTAMINANT_FREQUENCY);
+            row[0] = 1.0 - MIN_CONTAMINANT_FREQUENCY * (allele_count - 1) as f64;
+            continue;
+        }
+        for slot in row.iter_mut() {
+            *slot = (*slot / total).clamp(MIN_CONTAMINANT_FREQUENCY, 1.0);
+        }
+    }
+
+    assert!(
+        (0..batch_count).all(
+            |batch| !out[batch * allele_count..(batch + 1) * allele_count]
+                .iter()
+                .any(|f| !f.is_finite())
+        ),
+        "a contaminant frequency came out as an infinity or a `NaN`, which is arithmetic that \
+         went wrong rather than a thin batch"
+    );
+}
+
 /// **Both halves of spec §3.6's mixture, for one locus** — how much of each read group came
 /// from somebody else, and what that somebody else's DNA would have shown here.
 ///
@@ -583,6 +710,16 @@ impl ContaminationView {
 /// Holding them together is what lets one construction check that they describe the same run,
 /// instead of the row rediscovering it per observation.
 ///
+/// **The two halves are also indexed differently, and that is the shape to know.** The
+/// fraction is one number per read group. The frequency is one *row* per sequencing batch,
+/// `allele_count` wide, and which row a read group reads is what the batching says — because
+/// the population a contaminant is drawn from is the samples that ran beside it, not the
+/// cohort (spec §3.6). **The default batching is one batch holding the run**, so the table is
+/// a single row and every read group reads the cohort frequency; a run that declares no
+/// batching loses nothing it had, and nothing here branches on the batching's absence.
+/// [`fill_contaminant_allele_frequencies`] is what fills the table, once per locus per
+/// iteration.
+///
 /// **[`uncontaminated`](Self::uncontaminated) is the uncontaminated case and is not a special path.** With no
 /// fractions the mixture collapses to `own(o | g)` and the row computes spec §3.3 — to a few
 /// units in the last place, because §8 evaluates in probability space and §3.3 in log space, so
@@ -596,7 +733,11 @@ impl ContaminationView {
 #[derive(Copy, Clone, Debug)]
 pub struct ContaminationMixture<'a> {
     fractions: &'a [ContaminationView],
+    batch_of_read_group: &'a [BatchId],
+    /// Batch-major, one row of `allele_count` per batch — the same shape, and for the same
+    /// reason, as the error-spread table the row reads beside it.
     contaminant_allele_frequencies: &'a [f64],
+    allele_count: usize,
 }
 
 impl<'a> ContaminationMixture<'a> {
@@ -608,17 +749,28 @@ impl<'a> ContaminationMixture<'a> {
     pub fn uncontaminated() -> Self {
         Self {
             fractions: &[],
+            batch_of_read_group: &[],
             contaminant_allele_frequencies: &[],
+            allele_count: 0,
         }
     }
 
-    /// A fraction per read group and a frequency per candidate allele of the locus being
-    /// called.
+    /// A fraction per read group, the batch each read group ran in, and one frequency per
+    /// candidate allele **per batch** — batch-major, `allele_count` to a row.
+    ///
+    /// **The batch is the population a contaminant is drawn from**, which is why the
+    /// frequencies have a second axis and the fractions do not. A contaminating read is far
+    /// likelier to have come from a neighbour on the same run than from a random member of the
+    /// species (spec §3.6), so `q(o)` is the allele's frequency among the samples sequenced
+    /// beside this one. **The default batching puts every read group in [`BatchId::ONLY`]**, so
+    /// the table is one row and every read group reads the cohort frequency — a run that
+    /// declares no batching loses nothing it had, and nothing here branches on that.
     ///
     /// # Panics
     ///
-    /// On a fraction outside `[0, 1)` or a frequency outside `[0, 1]`, and on either slice
-    /// being empty while the other is not. **These are checked once here rather than per
+    /// On a fraction outside `[0, 1)` or a frequency outside `[0, 1]`; on the three slices not
+    /// agreeing about how many read groups, batches and alleles there are; and on any of them
+    /// being empty while the others are not. **These are checked once here rather than per
     /// observation**, which is spec §8's rule for a parameter outside its declared range: the
     /// model has no failure mode of its own that is not a caller bug.
     ///
@@ -632,7 +784,9 @@ impl<'a> ContaminationMixture<'a> {
     #[must_use]
     pub fn new(
         fractions: &'a [ContaminationView],
+        batch_of_read_group: &'a [BatchId],
         contaminant_allele_frequencies: &'a [f64],
+        allele_count: usize,
     ) -> Self {
         assert_eq!(
             fractions.is_empty(),
@@ -648,6 +802,38 @@ impl<'a> ContaminationMixture<'a> {
              is spelled `ContaminationMixture::uncontaminated` — one named way to say it, so \
              that a caller reaches the decision rather than the shortest thing that compiles"
         );
+        assert_eq!(
+            batch_of_read_group.len(),
+            fractions.len(),
+            "every read group runs in exactly one batch, so the batching holds {} entries \
+             against {} read-group fractions",
+            batch_of_read_group.len(),
+            fractions.len()
+        );
+        assert!(
+            allele_count > 0,
+            "a locus is called over at least its reference allele, so a mixture cannot be for \
+             none"
+        );
+        assert_eq!(
+            contaminant_allele_frequencies.len() % allele_count,
+            0,
+            "the frequency table is {} entries and a batch's row is {allele_count} alleles \
+             wide, so it is not a whole number of batches",
+            contaminant_allele_frequencies.len()
+        );
+        // **Every batch a read group names must have a row**, checked here so that the row's
+        // per-observation lookup cannot reach past the table. A batching that names three
+        // batches against a two-row table would otherwise read one read group's contaminant
+        // frequency from another batch, or from nothing.
+        let batch_count = contaminant_allele_frequencies.len() / allele_count;
+        for (read_group, batch) in batch_of_read_group.iter().enumerate() {
+            assert!(
+                (batch.get() as usize) < batch_count,
+                "read group {read_group} says it ran in batch {batch}, and the frequency table \
+                 holds {batch_count} batches"
+            );
+        }
         for (read_group, view) in fractions.iter().enumerate() {
             assert!(
                 (0.0..1.0).contains(&view.fraction),
@@ -667,7 +853,9 @@ impl<'a> ContaminationMixture<'a> {
         }
         Self {
             fractions,
+            batch_of_read_group,
             contaminant_allele_frequencies,
+            allele_count,
         }
     }
 
@@ -685,7 +873,17 @@ impl<'a> ContaminationMixture<'a> {
     /// the row checks against the locus it is calling.
     #[must_use]
     pub fn allele_count(&self) -> usize {
-        self.contaminant_allele_frequencies.len()
+        self.allele_count
+    }
+
+    /// How many sequencing batches the run declared — `1` under the default batching, and `0`
+    /// where there is no mixture.
+    #[must_use]
+    pub fn batch_count(&self) -> usize {
+        if self.allele_count == 0 {
+            return 0;
+        }
+        self.contaminant_allele_frequencies.len() / self.allele_count
     }
 
     /// How many read groups this mixture holds a fraction for — the count the row checks
@@ -726,34 +924,48 @@ impl<'a> ContaminationMixture<'a> {
             .fraction
     }
 
-    /// `q(o)` — the contaminating population's frequency for one candidate allele, zero where
-    /// there is no mixture.
+    /// `q(o)` — **how often the samples sequenced beside this read group carry the allele this
+    /// observation showed**; zero where there is no mixture.
     ///
-    /// **Zero here is unreachable in a run and reachable in a test**, which is worth keeping
-    /// apart. The producer this frequency comes from floors an allele the batch never showed,
-    /// because a contaminant read of an allele nobody carries must not collapse the term
-    /// (that floor is the next step's, spec §3.6). What this accessor promises is only that it
+    /// **Both of its arguments do work.** The allele is what the read showed; the read group
+    /// decides *whose* frequency is read, because the batching says which samples ran beside
+    /// it. Under the default batching every read group lands on the same row and this is the
+    /// cohort frequency.
+    ///
+    /// **Zero is unreachable from the producer and reachable in a test**, which is worth
+    /// keeping apart: [`fill_contaminant_allele_frequencies`] floors an allele its batch never
+    /// showed at [`MIN_CONTAMINANT_FREQUENCY`]. What this accessor promises is only that it
     /// returns what it was given.
     ///
     /// # Panics
     ///
-    /// On an allele the mixture has no frequency for, once there is a mixture — the row
-    /// already checks the count against the locus, so reaching this means the two disagree.
+    /// On a read group or an allele the mixture has no entry for, once there is a mixture. The
+    /// row checks both counts before its observation walk, so reaching either from a run means
+    /// the row and the mixture disagree about the locus.
     #[must_use]
-    pub fn contaminant_frequency_of(&self, allele: AlleleId) -> f64 {
+    pub fn contaminant_frequency_of(&self, read_group: ReadGroupId, allele: AlleleId) -> f64 {
         if self.contaminant_allele_frequencies.is_empty() {
             return 0.0;
         }
-        let at = usize::from(allele.get());
-        *self
-            .contaminant_allele_frequencies
-            .get(at)
+        let group = read_group.get() as usize;
+        let batch = self
+            .batch_of_read_group
+            .get(group)
             .unwrap_or_else(|| {
                 panic!(
-                    "allele {at} has no contaminant frequency; this mixture holds {}",
-                    self.contaminant_allele_frequencies.len()
+                    "read group {group} is in no sequencing batch; the run batched {}",
+                    self.batch_of_read_group.len()
                 )
             })
+            .get() as usize;
+        let allele = usize::from(allele.get());
+        assert!(
+            allele < self.allele_count,
+            "allele {allele} has no contaminant frequency; this mixture is for \
+             {} alleles",
+            self.allele_count
+        );
+        self.contaminant_allele_frequencies[batch * self.allele_count + allele]
     }
 }
 
@@ -2281,6 +2493,24 @@ mod tests {
 
     // ---- C1: the contamination mixture's two halves ----
 
+    /// Enough entries that any fixture's read groups fit; a mixture takes the prefix it needs.
+    static ALL_IN_ONE_BATCH: [BatchId; 16] = [BatchId::ONLY; 16];
+
+    /// A mixture under **the default batching** — one batch holding every read group, so every
+    /// observation reads the same contaminant frequencies. That is what a run which declares no
+    /// batching gets, and it is the shape all but the batch-specific fixtures want.
+    fn one_batch<'a>(
+        fractions: &'a [ContaminationView],
+        frequencies: &'a [f64],
+    ) -> ContaminationMixture<'a> {
+        ContaminationMixture::new(
+            fractions,
+            &ALL_IN_ONE_BATCH[..fractions.len()],
+            frequencies,
+            frequencies.len(),
+        )
+    }
+
     fn a_read_group_contaminated_at(fraction: f64) -> ContaminationView {
         ContaminationView {
             fraction,
@@ -2299,7 +2529,10 @@ mod tests {
 
         assert_eq!(mixture.allele_count(), 0);
         assert_eq!(mixture.fraction_of(ReadGroupId(7)), 0.0);
-        assert_eq!(mixture.contaminant_frequency_of(AlleleId(3)), 0.0);
+        assert_eq!(
+            mixture.contaminant_frequency_of(ReadGroupId(7), AlleleId(3)),
+            0.0
+        );
     }
 
     #[test]
@@ -2309,11 +2542,14 @@ mod tests {
             a_read_group_contaminated_at(0.04),
         ];
         let frequencies = [0.7, 0.25, 0.05];
-        let mixture = ContaminationMixture::new(&fractions, &frequencies);
+        let mixture = one_batch(&fractions, &frequencies);
 
         assert_eq!(mixture.allele_count(), 3);
         assert_eq!(mixture.fraction_of(ReadGroupId(1)), 0.04);
-        assert_eq!(mixture.contaminant_frequency_of(AlleleId(2)), 0.05);
+        assert_eq!(
+            mixture.contaminant_frequency_of(ReadGroupId(1), AlleleId(2)),
+            0.05
+        );
     }
 
     /// **A fraction of exactly one is the one bound that does arithmetic**: `1 − c` underflows
@@ -2326,7 +2562,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(1.0)];
         let frequencies = [1.0];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 
     #[test]
@@ -2335,7 +2571,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(-0.01)];
         let frequencies = [1.0];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 
     #[test]
@@ -2344,7 +2580,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.4, 1.6];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 
     /// **The lower half of the same bound, which had no test until C1's review widened the
@@ -2361,7 +2597,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [1.4, -1.0];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 
     #[test]
@@ -2370,7 +2606,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.5, f64::NAN];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 
     /// Half a mixture is not a mixture: fractions with no frequencies would read every allele
@@ -2381,7 +2617,7 @@ mod tests {
     fn fractions_without_frequencies_are_refused() {
         let fractions = [a_read_group_contaminated_at(0.02)];
 
-        let _ = ContaminationMixture::new(&fractions, &[]);
+        let _ = ContaminationMixture::new(&fractions, &ALL_IN_ONE_BATCH[..1], &[], 1);
     }
 
     #[test]
@@ -2389,7 +2625,7 @@ mod tests {
     fn frequencies_without_fractions_are_refused() {
         let frequencies = [0.5, 0.5];
 
-        let _ = ContaminationMixture::new(&[], &frequencies);
+        let _ = ContaminationMixture::new(&[], &[], &frequencies, 2);
     }
 
     /// **One named way to say uncontaminated.** Two empty slices satisfy every other check in
@@ -2399,7 +2635,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is spelled `ContaminationMixture::uncontaminated`")]
     fn two_empty_halves_are_refused_because_that_case_has_a_name() {
-        let _ = ContaminationMixture::new(&[], &[]);
+        let _ = ContaminationMixture::new(&[], &[], &[], 1);
     }
 
     /// The two accessors' own panics, which the row's eager checks make unreachable from a
@@ -2410,7 +2646,7 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.9, 0.1];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies).fraction_of(ReadGroupId(4));
+        let _ = one_batch(&fractions, &frequencies).fraction_of(ReadGroupId(4));
     }
 
     #[test]
@@ -2419,8 +2655,196 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.9, 0.1];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies)
-            .contaminant_frequency_of(AlleleId(5));
+        let _ = one_batch(&fractions, &frequencies)
+            .contaminant_frequency_of(ReadGroupId(0), AlleleId(5));
+    }
+
+    // ---- C2: the frequency the contaminant is drawn against ----
+
+    /// Four diploids at a two-allele locus: two carrying the reference twice, one
+    /// heterozygous, one carrying the alternative twice.
+    const FOUR_DIPLOIDS: [f64; 8] = [
+        2.0, 0.0, // sample 0 — reference homozygote
+        1.0, 1.0, // sample 1 — heterozygote
+        0.0, 2.0, // sample 2 — alternative homozygote
+        2.0, 0.0, // sample 3 — reference homozygote
+    ];
+
+    /// **The default batching gives the cohort frequency, which is what makes it lose
+    /// nothing.** Across all four samples the locus holds five reference copies and three
+    /// alternative ones, so the contaminant is drawn against 5 in 8 and 3 in 8 — the same
+    /// number the genotype prior reads, which is the whole point of taking it from the loop
+    /// rather than fitting it (spec §3.6).
+    #[test]
+    fn one_batch_gives_the_frequency_over_the_whole_cohort() {
+        let batch_of_sample = [BatchId::ONLY; 4];
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(&FOUR_DIPLOIDS, &batch_of_sample, 2, &mut out);
+
+        assert_eq!(out, [0.625, 0.375]);
+        // And it is a distribution, which every row has to be for `c · q` to be a probability.
+        assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
+    }
+
+    /// **Two batches at one locus, and the samples in each answer for their own.** Read groups
+    /// in the first batch see the alternative at 1 in 4; those in the second see it at 1 in 2.
+    /// A contaminant is a neighbour on the same run, so a library that ran beside two reference
+    /// homozygotes and a heterozygote must not be told the whole cohort's number.
+    #[test]
+    fn two_batches_at_one_locus_give_two_different_frequencies() {
+        // Samples 0 and 1 ran together; samples 2 and 3 ran together.
+        let batch_of_sample = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
+        let mut out = [f64::NAN; 4];
+
+        fill_contaminant_allele_frequencies(&FOUR_DIPLOIDS, &batch_of_sample, 2, &mut out);
+
+        // Batch 0 holds three reference copies and one alternative; batch 1, two of each.
+        assert_eq!(out, [0.75, 0.25, 0.5, 0.5]);
+    }
+
+    /// **An allele its own batch never shows is floored, never zeroed.** Both samples of this
+    /// batch are reference homozygotes, so the alternative has no copies in it at all — and a
+    /// frequency of exactly zero would be the claim that the neighbouring libraries *cannot*
+    /// carry it, which two samples cannot establish.
+    ///
+    /// The floor is [`MIN_CONTAMINANT_FREQUENCY`] and it is deliberately tiny; the constant's
+    /// own documentation says why a statistical size would be the wrong direction to be wrong
+    /// in, and [`the_frequency_floor_cannot_outweigh_a_misread`] measures what that buys.
+    #[test]
+    fn an_allele_the_batch_never_shows_is_floored_rather_than_zeroed() {
+        let two_reference_homozygotes = [2.0, 0.0, 2.0, 0.0];
+        let batch_of_sample = [BatchId::ONLY; 2];
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(
+            &two_reference_homozygotes,
+            &batch_of_sample,
+            2,
+            &mut out,
+        );
+
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], MIN_CONTAMINANT_FREQUENCY);
+        assert!(out[1] > 0.0, "a floored frequency is still a frequency");
+    }
+
+    /// **The floor's whole job is to stay out of the way**, and this is the measurement its
+    /// documentation rests on. At a 3% contamination fraction a floored allele contributes
+    /// `3 × 10⁻¹⁴` to the mixture, where the route it sits beside — the read simply being a
+    /// misread — contributes `ε̄/m`, which is `3 × 10⁻⁷` even at a middling Phred 40. **Seven
+    /// orders of magnitude below**, so a floored allele cannot make a read look like
+    /// contamination.
+    #[test]
+    fn the_frequency_floor_cannot_outweigh_a_misread() {
+        let from_the_contaminant = 0.03 * MIN_CONTAMINANT_FREQUENCY;
+        let from_a_misread_at_phred_40 = 1e-4 / 3.0;
+
+        assert!(
+            from_a_misread_at_phred_40 / from_the_contaminant > 1e6,
+            "the misread route is {} times the floored contaminant route, and the floor is \
+             only defensive if that is large",
+            from_a_misread_at_phred_40 / from_the_contaminant
+        );
+    }
+
+    /// A batch whose samples hold no copies at all has no frequency to read off, and dividing
+    /// by its zero total would give a row of `NaN` — which the row would take a logarithm of,
+    /// and a `NaN` makes every comparison in an argmax false. It gets the reference instead:
+    /// the honest statement of what a batch with no evidence says about a contaminant.
+    #[test]
+    fn a_batch_with_no_coverage_gets_the_reference_rather_than_a_nan() {
+        let nothing_sequenced = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let batch_of_sample = [BatchId::ONLY; 2];
+        let mut out = [f64::NAN; 3];
+
+        fill_contaminant_allele_frequencies(&nothing_sequenced, &batch_of_sample, 3, &mut out);
+
+        assert!(out.iter().all(|f| f.is_finite()));
+        assert_eq!(out[1], MIN_CONTAMINANT_FREQUENCY);
+        assert_eq!(out[2], MIN_CONTAMINANT_FREQUENCY);
+        assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-15);
+    }
+
+    /// The loop's copies are expectations over genotype posteriors, not counts, so they need
+    /// not be whole — and the frequency is still the ratio.
+    #[test]
+    fn fractional_copies_are_a_frequency_like_any_other() {
+        let two_uncertain_samples = [1.5, 0.5, 0.25, 1.75];
+        let batch_of_sample = [BatchId::ONLY; 2];
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(&two_uncertain_samples, &batch_of_sample, 2, &mut out);
+
+        assert!((out[0] - 1.75 / 4.0).abs() < 1e-15 && (out[1] - 2.25 / 4.0).abs() < 1e-15);
+    }
+
+    #[test]
+    #[should_panic(expected = "which is not a whole cohort")]
+    fn copies_that_are_not_one_row_per_sample_are_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(&[2.0, 0.0, 1.0], &[BatchId::ONLY; 2], 2, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "and the run declared 1")]
+    fn a_sample_in_a_batch_the_run_did_not_declare_is_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(
+            &[2.0, 0.0, 1.0, 1.0],
+            &[BatchId(0), BatchId(1)],
+            2,
+            &mut out,
+        );
+    }
+
+    /// A `NaN` copy count is arithmetic that went wrong upstream, and it must not become a
+    /// `NaN` frequency — which would reach a logarithm and make every genotype comparison
+    /// false. Same check `ExpectedAlleleCopies` makes; this is the other door.
+    #[test]
+    #[should_panic(expected = "copy count is finite and at or above zero")]
+    fn a_copy_count_that_is_not_a_number_is_a_caller_bug() {
+        let mut out = [f64::NAN; 2];
+
+        fill_contaminant_allele_frequencies(&[2.0, f64::NAN], &[BatchId::ONLY], 2, &mut out);
+    }
+
+    /// A mixture whose batching names a batch its frequency table has no row for would read
+    /// another batch's frequencies, or past the end. Checked at construction, so the row's
+    /// per-observation lookup cannot reach it.
+    #[test]
+    #[should_panic(expected = "the frequency table holds 1 batches")]
+    fn a_batching_past_the_frequency_table_is_a_caller_bug() {
+        let fractions = [
+            a_read_group_contaminated_at(0.02),
+            a_read_group_contaminated_at(0.02),
+        ];
+        let frequencies = [0.9, 0.1];
+
+        let _ = ContaminationMixture::new(&fractions, &[BatchId(0), BatchId(1)], &frequencies, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "every read group runs in exactly one batch")]
+    fn a_batching_that_misses_a_read_group_is_a_caller_bug() {
+        let fractions = [
+            a_read_group_contaminated_at(0.02),
+            a_read_group_contaminated_at(0.02),
+        ];
+        let frequencies = [0.9, 0.1];
+
+        let _ = ContaminationMixture::new(&fractions, &[BatchId::ONLY], &frequencies, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a whole number of batches")]
+    fn a_frequency_table_that_is_not_whole_rows_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frequencies = [0.9, 0.1, 0.5];
+
+        let _ = ContaminationMixture::new(&fractions, &[BatchId::ONLY], &frequencies, 2);
     }
 
     // ---- C1: what the row charges a wrong read ----
@@ -2543,6 +2967,6 @@ mod tests {
         let fractions = [a_read_group_contaminated_at(f64::NAN)];
         let frequencies = [1.0];
 
-        let _ = ContaminationMixture::new(&fractions, &frequencies);
+        let _ = one_batch(&fractions, &frequencies);
     }
 }

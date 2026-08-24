@@ -561,8 +561,12 @@ pub fn genotype_log_likelihood_row(
         // The whole of the mixture's second half for this observation: `c · q(o)` does not
         // depend on the genotype at all, because what the contaminant would have shown is a
         // property of the allele and of the batch, never of what this sample carries.
-        let from_somebody_else_carrying_this_allele =
-            contamination_fraction * contamination.contaminant_frequency_of(observation.allele);
+        // **The read group decides whose frequency this is, not only how much of it.** The
+        // batching says which samples ran beside this library, and the contaminant is drawn
+        // from those (spec §3.6). Under the default batching every read group reads the same
+        // row and this is the cohort frequency.
+        let from_somebody_else_carrying_this_allele = contamination_fraction
+            * contamination.contaminant_frequency_of(observation.read_group, observation.allele);
         // `(1 − c) · ε̄` — this individual's share of what a read of this observation is charged
         // for being wrong, before the spread divides it. `ε̄` is floored and deliberately not
         // capped; [`ReadGroupCalibration::charged_error`] says why.
@@ -1141,7 +1145,7 @@ mod tests {
     };
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
-    use crate::ng::types::{LogProb, ReadGroupId};
+    use crate::ng::types::{BatchId, LogProb, ReadGroupId};
 
     /// An observation of `num_reads` reads on one allele from one read group, carrying the
     /// summed log error the merge would have folded.
@@ -1213,6 +1217,24 @@ mod tests {
             &mut out,
         );
         out.into_iter().map(LogProb::get).collect()
+    }
+
+    /// Enough entries that any fixture's read groups fit; a mixture takes the prefix it needs.
+    static ALL_IN_ONE_BATCH: [BatchId; 16] = [BatchId::ONLY; 16];
+
+    /// A mixture under **the default batching** — one batch holding every read group, so every
+    /// observation reads the same contaminant frequencies. That is what a run which declares no
+    /// batching gets, and it is the shape all but the batch-specific fixtures want.
+    fn one_batch<'a>(
+        fractions: &'a [ContaminationView],
+        frequencies: &'a [f64],
+    ) -> ContaminationMixture<'a> {
+        ContaminationMixture::new(
+            fractions,
+            &ALL_IN_ONE_BATCH[..fractions.len()],
+            frequencies,
+            frequencies.len(),
+        )
     }
 
     /// A contamination fraction for every read group the fixtures use, with the counts that
@@ -2183,7 +2205,7 @@ mod tests {
             &alleles,
             &table,
             &uncalibrated(),
-            ContaminationMixture::new(&fractions, &frequencies),
+            one_batch(&fractions, &frequencies),
         );
 
         let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
@@ -2261,7 +2283,7 @@ mod tests {
                     &alleles,
                     &table,
                     &uncalibrated(),
-                    ContaminationMixture::new(&fractions, &frequencies),
+                    one_batch(&fractions, &frequencies),
                 ))
             })
             .collect();
@@ -2330,7 +2352,7 @@ mod tests {
                 &alleles,
                 &table,
                 &uncalibrated(),
-                ContaminationMixture::new(&fractions, &frequencies),
+                one_batch(&fractions, &frequencies),
             );
             contaminated[hom_ref] - clean[hom_ref]
         };
@@ -2372,13 +2394,98 @@ mod tests {
             &alleles,
             &table,
             &uncalibrated(),
-            ContaminationMixture::new(&fractions, &frequencies),
+            one_batch(&fractions, &frequencies),
         );
 
         // Two reads the genotype explains at a quarter share, each charged
         // `ln(0.95 · 0.25 + 0.05 · 0.2)`.
         let expected = 2.0 * (0.95_f64 * 0.25 + 0.05 * 0.2).ln();
         assert!((scored[one_copy] - expected).abs() < 1e-12);
+    }
+
+    /// **The batch decides whose frequency a read is scored against, and two libraries at one
+    /// locus get different answers.**
+    ///
+    /// The same three alternative reads, once from a library that ran beside samples where the
+    /// alternative is common (1 in 2) and once from one that ran beside samples where it is
+    /// rare (1 in 1,000). Under a reference homozygote the first library's reads are far less
+    /// surprising, because a neighbour on that run plausibly carries the allele — **measured,
+    /// 12.34 nats, 54 Phred, between two libraries of the same cohort at the same locus with
+    /// the same reads and the same contamination fraction.** Per read that is `ln(0.0203 /
+    /// 0.000332)`: in the first batch the contaminant route contributes `0.04 × 0.5`, which
+    /// swamps the misread's `0.96 × e⁻⁷/3`; in the second it contributes `0.04 × 0.001`, which
+    /// does not.
+    ///
+    /// **A row that ignored the batching would give both the same number**, and that is the
+    /// whole of what this step added: the frequency was one vector for the locus and is now one
+    /// per batch. It is also why the default batching is safe — with one batch both libraries
+    /// land on the same row and the answer is the cohort frequency, which is what
+    /// `an_explicit_zero_fraction_is_the_same_as_no_mixture` and the sweep rest on.
+    #[test]
+    fn two_libraries_of_one_cohort_are_scored_against_their_own_neighbours() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+
+        let fractions = every_read_group_contaminated_at(0.04);
+        // Read groups 0 and 1 ran in a batch where the alternative is common; 2 and 3 in one
+        // where it is rare. Batch-major, two alleles to a row.
+        let batching = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
+        let frequencies = [0.5, 0.5, 0.999, 0.001];
+        let mixture = ContaminationMixture::new(&fractions, &batching, &frequencies, 2);
+
+        let scored_from = |read_group: u32| {
+            let supported = [observation(1, read_group, 3, -21.0)];
+            contaminated_row(
+                &GenericSampleEvidence::new(&supported, 0.0, &[]),
+                &alleles,
+                &table,
+                &uncalibrated(),
+                mixture,
+            )[hom_ref]
+        };
+
+        let beside_carriers = scored_from(0);
+        let beside_non_carriers = scored_from(2);
+
+        assert!(
+            beside_carriers > beside_non_carriers,
+            "the library that ran beside carriers should find three alternative reads less \
+             surprising under a reference homozygote — {beside_carriers} against \
+             {beside_non_carriers}"
+        );
+        let gap = beside_carriers - beside_non_carriers;
+        assert!(
+            (gap - 12.340).abs() < 1e-3,
+            "the two libraries differ by {gap} nats"
+        );
+    }
+
+    /// **One batch is the default and it must lose nothing**: every read group lands on the
+    /// same row, so the batching cannot change an answer no matter which read group an
+    /// observation came from.
+    #[test]
+    fn under_one_batch_the_read_group_does_not_change_the_frequency() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let fractions = every_read_group_contaminated_at(0.04);
+        let frequencies = [0.7, 0.3];
+        let mixture = one_batch(&fractions, &frequencies);
+
+        let scored_from = |read_group: u32| {
+            let supported = [observation(1, read_group, 3, -21.0)];
+            contaminated_row(
+                &GenericSampleEvidence::new(&supported, 0.0, &[]),
+                &alleles,
+                &table,
+                &uncalibrated(),
+                mixture,
+            )
+        };
+
+        // Not merely close: the same row, since the same frequency and the same fraction reach
+        // the same arithmetic.
+        assert_eq!(scored_from(0), scored_from(3));
     }
 
     /// A fraction of zero is not a special case, but it must also not be a *different* case
@@ -2402,7 +2509,7 @@ mod tests {
             &alleles,
             &table,
             &calibrated(1.8),
-            ContaminationMixture::new(&fractions, &frequencies),
+            one_batch(&fractions, &frequencies),
         );
         let absent = row(&evidence, &alleles, &table, &calibrated(1.8));
 
@@ -2436,7 +2543,7 @@ mod tests {
         let mut fractions = every_read_group_contaminated_at(0.0);
         fractions[1].fraction = 0.05;
         let frequencies = [0.9, 0.1];
-        let mixture = ContaminationMixture::new(&fractions, &frequencies);
+        let mixture = one_batch(&fractions, &frequencies);
 
         let clean_group = contaminated_row(
             &GenericSampleEvidence::new(&from_group_0, 0.0, &[]),
@@ -2534,7 +2641,7 @@ mod tests {
             &alleles,
             &table,
             &uncalibrated(),
-            ContaminationMixture::new(&fractions, &frequencies),
+            one_batch(&fractions, &frequencies),
         );
     }
 
@@ -2590,7 +2697,7 @@ mod tests {
             &alleles,
             &table,
             &calibration,
-            ContaminationMixture::new(&fractions, &frequencies),
+            one_batch(&fractions, &frequencies),
         );
     }
 }

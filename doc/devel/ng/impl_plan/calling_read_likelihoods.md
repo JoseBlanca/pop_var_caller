@@ -256,7 +256,17 @@ extra `(1 − ε)` factor or its allele-count divisor into `own`. A second test 
 contaminated case (`c = 0.03`, contaminant frequency 1 in 1,000). *Depends:* B2. *Source:* spec
 §3.6; arch §3.
 
-**C2. `q(o)` — the contaminating population's frequency for the allele the observation shows.**  ☐
+**C2. `q(o)` — the contaminating population's frequency for the allele the observation shows.**  ✅
+*(shipped as `fill_contaminant_allele_frequencies` — a batch's copies summed over its samples and
+divided by their total — plus a batch axis on the mixture's frequency table, read through the
+observation's own read group. **The row needs no sample identity for this**, which is what made it
+fit: batches are over read groups, and every observation already carries one. `SequencingBatches`
+is still unbuilt and is not built here; the mixture takes the batching as a dense `&[BatchId]`,
+which that type produces trivially when it lands. **Two things are owed and named in the step's
+report:** which batch a sample belongs to when its libraries ran in different ones — that rule
+belongs with `SequencingBatches`, so the producer takes the sample's batch as an argument — and
+whether the never-seen floor should stay defensive at `1e-12` or become a statistical pseudocount,
+which is a modelling decision with a genotype effect.)*
 **New here on 2026-08-24 (owner); this used to arrive from the pre-pass as three allele-class
 frequencies and does not.** `q(o)` is the frequency of the observation's own allele at the locus
 being called, over the samples in this sample's **sequencing batch** — the grain

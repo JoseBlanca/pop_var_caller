@@ -228,6 +228,46 @@ impl fmt::Display for ReadGroupId {
     }
 }
 
+/// Which set of read groups ran together — an index into the run's declared batching.
+///
+/// A **sequencing batch** is the group of libraries that were sequenced beside one another,
+/// as the run was *told*: a flowcell, a plate, a submission. It matters because **a
+/// contaminating read is far likelier to come from a neighbour on the same run than from a
+/// random member of the species**, so the population a contaminant's genotype is drawn against
+/// is the batch and not the cohort (`doc/devel/ng/spec/read_likelihoods.md` §3.6,
+/// `doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
+///
+/// **It is stated, never inferred.** The grouping is absent from both benchmark cohorts'
+/// alignments — the tomato archive's `@RG` lines carry no platform unit, and SRA rewrote the
+/// read names — and a pipeline that guessed it from what survives would be wrong in silence.
+///
+/// **The default is one batch holding the whole run**, which is `BatchId(0)` for every read
+/// group. So a run that declares no batching gets the cohort frequency and loses nothing it
+/// had, and no consumer branches on the batching's absence.
+///
+/// Unconstrained for [`ReadGroupId`]'s reason: it indexes a table, an out-of-range value is
+/// caught at lookup, and `u32` rather than `u64` because it is an index and not a position.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct BatchId(pub u32);
+
+impl BatchId {
+    /// The batch every read group is in when a run declares no batching.
+    pub const ONLY: Self = Self(0);
+
+    #[inline]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Just the index, for [`ReadGroupId`]'s reason: a message naming a batch supplies its own
+/// word for it.
+impl fmt::Display for BatchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A probability held as its natural logarithm — the number stored is `ln(p)`, not
 /// `p` itself.
 ///
