@@ -282,6 +282,34 @@ impl<'a> LogErrorSpreadTable<'a> {
             .copied()
     }
 
+    /// The same column as [`column_of`](Self::column_of), read as `m` rather than as `log m`.
+    ///
+    /// **This is what the row reads**, and [`column_of`](Self::column_of) is what it read
+    /// before the contamination mixture arrived. Spec §3.6 evaluates the mixture in
+    /// probability space and takes one logarithm of the result (spec §8), so `(1 − c)·ε̄/m`
+    /// needs the spread as the number the spec calls `m` — 3 or 1 — and not as its logarithm.
+    ///
+    /// **So the table's stored form now costs an `exp` per error-side term**, one for every
+    /// `(observation, genotype)` pair the genotype cannot explain. The reason it is stored the
+    /// other way is recorded and was right when it was taken: spec §3.3's closed form takes no
+    /// logarithm inside its loop, so a table of `m` would have put one there (B2, 2026-08-24).
+    /// The mixture takes a logarithm inside that loop by specification, which is what makes the
+    /// argument no longer hold. Two cheaper shapes are available and neither belongs to this
+    /// step: the filler could write `m` (a `log` moves to whoever still wants one, and nothing
+    /// in the caller does), or the table could carry both at twice a buffer of
+    /// `genotypes × alleles` — about 1 kB at a six-allele diploid locus.
+    ///
+    /// `exp(0)` is exactly `1.0`, so the spread that does not apply costs nothing in accuracy;
+    /// `tests::the_linear_column_is_the_bases_the_log_column_is_the_logarithm_of` pins the
+    /// other one against [`ERROR_SPREAD_BASES`].
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on an allele this locus is not called over.
+    pub fn spreads_of(&self, allele: AlleleId) -> impl Iterator<Item = f64> + use<'a> {
+        self.column_of(allele).map(f64::exp)
+    }
+
     /// How many alleles the locus is called over — the table's stride.
     #[must_use]
     pub fn allele_count(&self) -> usize {
@@ -318,31 +346,47 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 }
 
 /// One sample's whole `Lg` row at an ordinary site — one log-probability per candidate
-/// genotype, spec §3.3 exactly.
+/// genotype: spec §3.6's contamination mixture, which is spec §3.3 wherever nothing is
+/// contaminated.
 ///
 /// ```text
-/// log Lg(g)  =   Σ         n_o · log( k_{a(o)} / P )              ← the reads it explains
-///             o : k_{a(o)} > 0
-///
-///             +  Σ         [ q_sum_o + n_o · ( log scale − log m ) ]
-///             o : k_{a(o)} = 0                                     ← the reads it calls errors
+/// log Lg(g)  =   Σ  n_o · log[ (1 − c_{r(o)}) · own(o | g)  +  c_{r(o)} · q(o) ]
+///                o
 ///
 ///             +  q_sum_other                                       ← the pooled leftover
 /// ```
 ///
 /// **A read either shows something the genotype can produce, in which case it is charged only
-/// for which copy it came from, or it does not, in which case it is charged for being wrong.**
-/// That is the whole formula. `q_sum_other` is the same number in every row so it cancels when
-/// the caller normalises, and it is kept because the data likelihood also feeds emission and
-/// QUAL, where an absolute value is compared between loci.
+/// for which copy it came from, or it does not, in which case it is charged for being wrong** —
+/// that is `own(o | g)`, `k_a/P` on the first branch and `ε̄/m` on the second. Beside it sits the
+/// chance the read is not this individual's at all: `c` of this read group's reads came from
+/// somebody else, and `q(o)` is how often that somebody else shows the allele this observation
+/// shows. `q_sum_other` is the same number in every row so it cancels when the caller
+/// normalises, and it is kept because the data likelihood also feeds emission and QUAL, where an
+/// absolute value is compared between loci.
 ///
-/// # No logarithm is taken in the loop, and that is the shape rather than an optimisation
+/// # There is no `c == 0` branch, and that is a decision rather than an omission
 ///
-/// Every logarithm the formula needs is a property of something that does not vary per term:
-/// `log(k/P)` of the copy count and the ploidy, `log scale` of the read group, `log m` of the
-/// `(allele, genotype)` pair. All three are computed before the observation walk — the copy
-/// weights into a `ploidy + 1` array, the scales once per read group, the spreads once per
-/// locus by [`fill_log_error_spreads`]. What is left inside is a multiply and an add.
+/// With [`ContaminationMixture::none`] the mixture is `1 · own(o | g) + 0`, which is
+/// `own(o | g)` bit for bit, and the row computes spec §3.3. It does not compute it *bitwise*:
+/// §3.3 charges a wrong read `q_sum + n·(log scale − log m)` in log space where this takes one
+/// logarithm of `ε̄/m` in probability space, and `ε̄` is `exp(q_sum/n)` by construction — so the
+/// two forms differ by an `exp`/`log` round trip, a few units in the last place.
+/// `tests::the_mixture_at_no_contamination_is_the_plain_formula` measures it across the sweep.
+/// **Production does keep such a branch and can afford to**: its own two forms differ
+/// algebraically, by an extra `(1 − ε)` factor and an allele-count divisor, so it has a real
+/// discontinuity to jump rather than a rounding one (spec §3.6).
+///
+/// # One logarithm per term, and what it costs
+///
+/// Spec §8 puts exactly one logarithm on each `(observation, genotype)` pair, which is where
+/// §3.3's shape — every logarithm hoisted out of the loop — stops applying. Two things are still
+/// hoisted, because they can be. The **explained** side depends on the genotype only through its
+/// copy count, so its logarithm is taken once per copy count per observation, into a
+/// `ploidy + 1` array, rather than once per genotype. The **error** side has one logarithm per
+/// term and an `exp` beside it, the second because the spread table stores `log m` where the
+/// mixture needs `m` — [`LogErrorSpreadTable::spreads_of`] carries that and what it would take
+/// to remove it.
 ///
 /// # Two approximations live in this formula and both have a size
 ///
@@ -360,27 +404,43 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// all: the sum of logs is the log of the product, which is what a labelled-read likelihood
 /// wants.
 ///
+/// # What contamination costs the aggregation contract, with its size
+///
+/// Once `c` is above zero the logarithm sits outside a sum, so the reads pooled into one
+/// observation can no longer each carry their own error probability and the geometric mean is
+/// substituted for them (spec §1.4). Spec §3.6 measures it: on 20 reads none of which the
+/// genotype explains, half at Phred 30 and half at Phred 20, at `c = 0.03` with the contaminant
+/// carrying that allele at 1 in 1,000, **0.14 nats — six-tenths of a Phred**. It is zero at
+/// `c = 0`, it grows with `c`, and it grows with the contaminant's own frequency for the allele:
+/// 1.13 nats at 1 in 100 and 1.89 at 1 in 2. **So it is small where a contaminant allele is rare
+/// and not where it is common**, and the aggregation identity spec §12 test 9 pins is a property
+/// of the uncontaminated row.
+///
 /// # What is not here
 ///
 /// **No multinomial coefficient** — production carries one and this does not (spec §3.4), which
-/// is a genotype-changing decision the plan measures rather than asserts. **No contamination
-/// mixture**: that is Milestone C, and until it lands this is spec §3.3 exactly. **No partial
-/// observations**: [`GenericSampleEvidence::partials`] is not read here, and Milestone D adds
-/// the compatibility rule that scores it.
+/// is a genotype-changing decision the plan measures rather than asserts. **No producer for
+/// `q(o)`**: the frequencies arrive as a parameter, and computing them from the batch the sample
+/// was sequenced in is the next step (C2). **No partial observations**:
+/// [`GenericSampleEvidence::partials`] is not read here, and Milestone D adds the compatibility
+/// rule that scores it.
 ///
 /// # Panics
 ///
 /// **In release as well as debug**, on a caller bug (spec §8): an `out` whose length is not the
-/// genotype count, a read group with no calibration, or an observation naming an allele the
-/// locus is not called over. Production holds the analogous assertion in release because a
-/// scratch array too short for the allele count would otherwise be indexed out of bounds
+/// genotype count, a read group with no calibration or no contamination fraction, an observation
+/// naming an allele the locus is not called over, or a mixture holding a frequency per allele for
+/// a different locus's allele table. Production holds the analogous assertion in release because
+/// a scratch array too short for the allele count would otherwise be indexed out of bounds
 /// silently.
 ///
+/// [`ContaminationMixture::none`]: super::ContaminationMixture::none
 /// [`GenericSampleEvidence::partials`]: super::GenericSampleEvidence::partials
 pub fn genotype_log_likelihood_row(
     evidence: &super::GenericSampleEvidence<'_>,
     genotypes: &GenotypeTableView<'_>,
     calibration: &[super::ReadGroupCalibration],
+    contamination: super::ContaminationMixture<'_>,
     log_error_spreads: LogErrorSpreadTable<'_>,
     out: &mut [LogProb],
 ) {
@@ -399,6 +459,16 @@ pub fn genotype_log_likelihood_row(
          one of them belongs to a different locus",
         log_error_spreads.allele_count()
     );
+    // A mixture holds one frequency per candidate allele of the locus being called, or is
+    // absent. Checking it here and not per observation is what makes `frequency_of`'s own
+    // panic unreachable in a run: an allele the observation names is already known to be one
+    // this locus has.
+    assert!(
+        contamination.allele_count() == 0 || contamination.allele_count() == allele_count,
+        "the mixture holds a contaminant frequency for {} alleles and this locus is called over \
+         {allele_count}, so one of them belongs to a different locus",
+        contamination.allele_count()
+    );
 
     // **The pooled leftover seeds every genotype**, which is what makes it cancel: it is the
     // same number in every row. An empty evidence row therefore leaves the row at zero without
@@ -408,8 +478,9 @@ pub fn genotype_log_likelihood_row(
         *slot = LogProb(evidence.unmatched_q_sum);
     }
 
-    // `log(k / P)` for every copy count a genotype can carry. `k = 0` is never read — that is
-    // the error side — and is filled with a value that would be visible if it ever were.
+    // `k / P` for every copy count a genotype can carry — the probability a read came from a
+    // copy carrying this observation's allele. `k = 0` is never read — that is the error side —
+    // and is filled with a value that would be visible if it ever were.
     let copies_of_the_genome = usize::from(genotypes.ploidy().get());
     assert!(
         copies_of_the_genome <= MAX_PLOIDY_COPIES,
@@ -417,10 +488,16 @@ pub fn genotype_log_likelihood_row(
          {MAX_PLOIDY_COPIES} this row builds a copy-share table for"
     );
     let ploidy = f64::from(genotypes.ploidy().get());
-    let mut log_copy_share = [f64::NAN; MAX_PLOIDY_COPIES + 1];
-    for (copies, share) in log_copy_share.iter_mut().enumerate().skip(1) {
-        *share = (copies as f64 / ploidy).ln();
+    let mut copy_share = [f64::NAN; MAX_PLOIDY_COPIES + 1];
+    for (copies, share) in copy_share.iter_mut().enumerate().skip(1) {
+        *share = copies as f64 / ploidy;
     }
+
+    // The explained side's logarithms, one per copy count, refilled per observation because both
+    // halves of the mixture change with the read group and the allele. Declared here so the row
+    // writes into one array rather than standing a fresh one up per observation — the same
+    // discipline the caller's own scratch follows, at a scale small enough to live on the stack.
+    let mut log_explained = [f64::NAN; MAX_PLOIDY_COPIES + 1];
 
     let counts = genotypes.genotype_allele_counts();
     for observation in evidence.supported {
@@ -437,27 +514,50 @@ pub fn genotype_log_likelihood_row(
                 calibration.len()
             )
         });
-        // Hoisted out of the genotype loop: both are properties of the observation and of the
-        // read group it came from, not of the genotype being scored.
+        // Hoisted out of the genotype loop: every one of these is a property of the observation
+        // and of the read group it came from, not of the genotype being scored.
         let reads = f64::from(observation.num_reads);
-        let error_charge = observation.q_sum + reads * scale.log_scale();
+        let contaminated = contamination.fraction_of(observation.read_group);
+        let from_this_individual = 1.0 - contaminated;
+        // The whole of the mixture's second half for this observation: `c · q(o)` does not
+        // depend on the genotype at all, because what the contaminant would have shown is a
+        // property of the allele and of the batch, never of what this sample carries.
+        let from_somebody_else = contaminated * contamination.frequency_of(observation.allele);
+        // `(1 − c) · ε̄` — this individual's share of what a read of this observation is charged
+        // for being wrong, before the spread divides it. `ε̄` is floored and deliberately not
+        // capped; [`ReadGroupCalibration::charged_error`] says why.
+        let wrong_and_this_individuals =
+            from_this_individual * scale.charged_error(observation.q_sum, observation.num_reads);
+
+        // **The explained side varies with the genotype only through its copy count**, so its
+        // logarithm is taken here — at most `ploidy` of them per observation — rather than once
+        // per genotype. At a six-allele diploid that is 2 logarithms against 21.
+        for (copies, log_mixture) in log_explained
+            .iter_mut()
+            .enumerate()
+            .take(copies_of_the_genome + 1)
+            .skip(1)
+        {
+            *log_mixture = (from_this_individual * copy_share[copies] + from_somebody_else).ln();
+        }
 
         // **Two columns, walked together.** For a fixed observation the allele is fixed, so
         // what the genotype loop needs is this allele's column of copy counts and its column of
-        // log spreads — both strided by the allele count, both checked once here rather than
-        // per term. The row's stated shape is a multiply and an add inside, and a bounds-checked
-        // accessor per `(observation, genotype)` would not be that.
+        // spreads — both strided by the allele count, both checked once here rather than per
+        // term. A bounds-checked accessor per `(observation, genotype)` would put a
+        // `checked_mul` and a formatting closure inside the loop.
         let carried_copies = counts[allele..].iter().step_by(allele_count);
-        let spreads = log_error_spreads.column_of(observation.allele);
+        let spreads = log_error_spreads.spreads_of(observation.allele);
 
         for ((slot, &copies), spread) in out.iter_mut().zip(carried_copies).zip(spreads) {
-            slot.0 += if copies > 0 {
-                reads * log_copy_share[copies as usize]
-            } else {
-                // The one term that depends on the genotype: how many things this wrong read
-                // could have shown, given what this genotype carries.
-                error_charge - reads * spread
-            };
+            slot.0 += reads
+                * if copies > 0 {
+                    log_explained[copies as usize]
+                } else {
+                    // The one thing that depends on the genotype: how many things this wrong
+                    // read could have shown, given what this genotype carries.
+                    (wrong_and_this_individuals / spread + from_somebody_else).ln()
+                };
         }
     }
 }
@@ -992,8 +1092,12 @@ mod tests {
 
     // ---- B2: the closed form ----
 
-    use super::super::{GenericObservation, GenericSampleEvidence, ReadGroupCalibration};
+    use super::super::{
+        ContaminationMixture, ContaminationView, GenericObservation, GenericSampleEvidence,
+        ReadGroupCalibration,
+    };
     use crate::ng::parameter_estimation::Provenance;
+    use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
     use crate::ng::types::{LogProb, ReadGroupId};
 
     /// An observation of `num_reads` reads on one allele from one read group, carrying the
@@ -1030,11 +1134,29 @@ mod tests {
         ]
     }
 
+    /// The row on an uncontaminated sample — spec §3.3, which is what most of these fixtures
+    /// are about.
     fn row(
         evidence: &GenericSampleEvidence<'_>,
         alleles: &CandidateAlleles,
         table: &GenotypeTable,
         calibration: &[ReadGroupCalibration],
+    ) -> Vec<f64> {
+        contaminated_row(
+            evidence,
+            alleles,
+            table,
+            calibration,
+            ContaminationMixture::none(),
+        )
+    }
+
+    fn contaminated_row(
+        evidence: &GenericSampleEvidence<'_>,
+        alleles: &CandidateAlleles,
+        table: &GenotypeTable,
+        calibration: &[ReadGroupCalibration],
+        contamination: ContaminationMixture<'_>,
     ) -> Vec<f64> {
         let view = table.view();
         let spreads = spreads(alleles, table);
@@ -1043,10 +1165,25 @@ mod tests {
             evidence,
             &view,
             calibration,
+            contamination,
             LogErrorSpreadTable::over(&spreads, &view),
             &mut out,
         );
         out.into_iter().map(LogProb::get).collect()
+    }
+
+    /// A contamination fraction for every read group the fixtures use, with the counts that
+    /// say it was measured rather than shrugged at.
+    fn contaminated_at(fraction: f64) -> Vec<ContaminationView> {
+        vec![
+            ContaminationView {
+                fraction,
+                markers_with_reads: 5_000,
+                reads_on_markers: 40_000,
+                source: ContaminationSource::ThisReadGroupsReads,
+            };
+            4
+        ]
     }
 
     /// **A hand-computed biallelic diploid case**, every term written out.
@@ -1458,6 +1595,7 @@ mod tests {
             &evidence,
             &view,
             &calibrated(scale),
+            ContaminationMixture::none(),
             spread_table,
             &mut ours,
         );
@@ -1713,6 +1851,7 @@ mod tests {
             &GenericSampleEvidence::empty(),
             &narrow_view,
             &uncalibrated(),
+            ContaminationMixture::none(),
             LogErrorSpreadTable::over(&spread_values, &wide_view),
             &mut out,
         );
@@ -1765,6 +1904,7 @@ mod tests {
             &GenericSampleEvidence::empty(),
             &view,
             &uncalibrated(),
+            ContaminationMixture::none(),
             LogErrorSpreadTable::over(&spread_values, &view),
             &mut out,
         );
@@ -1782,6 +1922,468 @@ mod tests {
             &alleles,
             &table,
             &uncalibrated(),
+        );
+    }
+
+    // ---- C1: the contamination mixture ----
+
+    /// How far the mixture at no contamination may sit from spec §3.3's own arithmetic,
+    /// **relative**, over the sweep below.
+    ///
+    /// **A relative bound and not a unit-in-the-last-place count**, for the reason spec §2.3
+    /// gives about the aggregation identity: the departure is a rounding of a sum that grows
+    /// with depth, so a ulp count grows with it and a relative size does not. Measured worst
+    /// across the sweep's 3,552 comparisons: **`2.9 × 10⁻¹⁶`**, at three alleles, 300 reads and
+    /// a scale of 2.5 — a log-likelihood of −1592.6682015614529 from the mixture against
+    /// −1592.6682015614524 from §3.3. This bound is 3.5 times that. In the units a genotype is
+    /// decided in, the worst disagreement is `2 × 10⁻¹²` Phred.
+    const MIXTURE_AT_ZERO_RELATIVE: f64 = 1e-15;
+
+    /// **Spec §3.3's closed form, written out again in log space and independently of the
+    /// row** — the oracle the mixture is checked against at zero contamination.
+    ///
+    /// This is the formula the row *used* to be, before spec §3.6's mixture replaced it: every
+    /// logarithm outside the observation walk, an explained read charged `n·log(k/P)` and a
+    /// wrong one `q_sum + n·(log scale − log m)`. It is deliberately not a call into the row
+    /// under a flag — a shared implementation would agree with itself whatever either of them
+    /// did.
+    ///
+    /// **It reads its spreads from [`fill_log_error_spreads`]** rather than from a literal
+    /// `ln 3`, so deleting that filler is a compile error here rather than a quiet subtraction
+    /// (the gate B1's review put on this file).
+    fn plain_log_likelihood_row(
+        evidence: &GenericSampleEvidence<'_>,
+        alleles: &CandidateAlleles,
+        table: &GenotypeTable,
+        calibration: &[ReadGroupCalibration],
+    ) -> Vec<f64> {
+        let view = table.view();
+        let allele_count = view.allele_count();
+        let ploidy = f64::from(view.ploidy().get());
+        let spread_values = spreads(alleles, table);
+        let spread_table = LogErrorSpreadTable::over(&spread_values, &view);
+        let counts = view.genotype_allele_counts();
+
+        (0..view.genotype_count())
+            .map(|genotype| {
+                let mut total = evidence.unmatched_q_sum;
+                for observation in evidence.supported {
+                    let allele = usize::from(observation.allele.get());
+                    let copies = counts[genotype * allele_count + allele];
+                    let reads = f64::from(observation.num_reads);
+                    total += if copies > 0 {
+                        reads * (f64::from(copies) / ploidy).ln()
+                    } else {
+                        let scale = calibration[observation.read_group.get() as usize];
+                        let log_spread =
+                            spread_table.at(GenotypeIdx(genotype as u32), observation.allele);
+                        observation.q_sum + reads * (scale.log_scale() - log_spread)
+                    };
+                }
+                total
+            })
+            .collect()
+    }
+
+    /// **Spec §12's eleventh test: the mixture is the plain formula at zero, and there is no
+    /// `c == 0` branch making it so.**
+    ///
+    /// The row runs its one shipped code path with every fraction at zero; the oracle runs spec
+    /// §3.3 in log space. They agree to [`MIXTURE_AT_ZERO_RELATIVE`], which is what lets
+    /// contamination default on: a clean cohort is untouched by the default.
+    ///
+    /// **Not bitwise, and the sweep is what shows it.** §3.6's identity is exact algebra — `ε̄`
+    /// is `exp(q_sum/n)` by construction, so `n·log ε̄` *is* `q_sum` — but §8 evaluates the
+    /// mixture in probability space, which puts an `exp`/`log` round trip between the two forms.
+    ///
+    /// **What this test fails on, beyond a wrong number.** It fails the moment anyone
+    /// reintroduces production's extra `(1 − ε)` factor into `own` (which would move every
+    /// explained read) or its allele-count divisor (which would move every wrong one), because
+    /// the oracle has neither. It also fails if the mixture is given a ceiling: the
+    /// `93/1` quality profile puts single reads past an error of a half, where a clamp would
+    /// bind on the row and not on the oracle.
+    #[test]
+    fn the_mixture_at_no_contamination_is_the_plain_formula() {
+        let loci = [
+            &[&b"ACGT"[..], &b"ACCT"[..]][..],
+            &[&b"ACGT"[..], &b"ACCT"[..], &b"AGGT"[..]][..],
+            &[&b"ACGT"[..], &b"ACCT"[..], &b"AT"[..], &b"ACGTT"[..]][..],
+        ];
+
+        let mut worst_relative = 0.0_f64;
+        let mut worst_where = String::new();
+        let mut disagreeing = 0usize;
+        let mut compared = 0usize;
+
+        for bases in loci {
+            let alleles = locus(bases);
+            let allele_count = bases.len();
+            for reads in [1usize, 4, 37, 300] {
+                for profile in QUALITY_PROFILES {
+                    let q_sum: f64 = (0..reads)
+                        .map(|at| -f64::from(profile(at, reads)) / 10.0 * std::f64::consts::LN_10)
+                        .sum();
+                    // One observation on the reference and one on the last alternative, so
+                    // every genotype has both an explained and a wrong read to charge.
+                    let supported = [
+                        observation(0, 0, reads as u32, q_sum),
+                        observation((allele_count - 1) as u16, 1, reads as u32, q_sum),
+                    ];
+                    let evidence = GenericSampleEvidence::new(&supported, -1.75, &[]);
+
+                    for scale in [1.0_f64, 2.5, 0.37] {
+                        let calibration = calibrated(scale);
+                        for copies in [2u8, 4] {
+                            let table = GenotypeTable::build(
+                                Ploidy::try_new(copies).expect("a fixture ploidy"),
+                                allele_count,
+                            );
+                            let mixed = row(&evidence, &alleles, &table, &calibration);
+                            let plain =
+                                plain_log_likelihood_row(&evidence, &alleles, &table, &calibration);
+
+                            for (genotype, (from_mixture, from_plain)) in
+                                mixed.iter().zip(&plain).enumerate()
+                            {
+                                let relative = (from_mixture - from_plain).abs()
+                                    / from_mixture
+                                        .abs()
+                                        .max(from_plain.abs())
+                                        .max(f64::MIN_POSITIVE);
+                                if relative > 0.0 {
+                                    disagreeing += 1;
+                                }
+                                if relative > worst_relative {
+                                    worst_relative = relative;
+                                    worst_where = format!(
+                                        "{allele_count} alleles, {reads} reads, scale {scale}, \
+                                         ploidy {copies}, genotype {genotype}: {from_mixture} \
+                                         from the mixture, {from_plain} from §3.3"
+                                    );
+                                }
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4 read counts × 4 profiles × 3 scales, over (3 + 5) genotypes at two alleles,
+        // (6 + 15) at three and (10 + 35) at four: 48 × 74 = 3,552.
+        assert_eq!(compared, 3_552, "the sweep covers 3,552 comparisons");
+
+        // **The sweep must actually disagree somewhere**, or the row and the oracle are the
+        // same arithmetic and this bound means nothing. The explained side *is* bitwise — the
+        // mixture multiplies the copy share by one and adds zero — so what has to disagree is
+        // the error side, and it is the round trip that makes it.
+        assert!(
+            disagreeing > 0,
+            "no comparison disagreed, so this sweep pins nothing: either the row grew a \
+             `c == 0` branch or the oracle is calling it"
+        );
+
+        assert!(
+            worst_relative <= MIXTURE_AT_ZERO_RELATIVE,
+            "the mixture at zero contamination is off from §3.3 by a relative \
+             {worst_relative}, past the {MIXTURE_AT_ZERO_RELATIVE} this sweep measured, on \
+             {disagreeing} of {compared} comparisons — worst at {worst_where}"
+        );
+    }
+
+    /// **One contaminated case, every term written out** (spec §3.6, the plan's second C1 test).
+    ///
+    /// A diploid at a two-allele locus: two reads showing the reference at a summed log error of
+    /// −6, one showing the alternative at −7, and the read groups 3% contaminated. The
+    /// contaminating population carries the reference at 999 in 1,000 and the alternative at 1 in
+    /// 1,000 — a rare contaminant allele, which is where §3.6 says the mixture costs least and
+    /// where the reference homozygote has most to gain.
+    ///
+    /// For the **reference homozygote**, at a scale of one:
+    ///
+    /// - the two reference reads are explained, `own = 2/2 = 1`, so each is charged
+    ///   `log(0.97 · 1 + 0.03 · 0.999)`;
+    /// - the alternative read is not, and the two alleles differ at one position so its error is
+    ///   spread three ways: `own = e⁻⁷/3`, charged `log(0.97 · e⁻⁷/3 + 0.03 · 0.001)`.
+    ///
+    /// **What the second term shows is the whole point of the mixture.** `0.97 · e⁻⁷/3` is
+    /// `2.9 × 10⁻⁴` and the contaminant's own contribution is `3.0 × 10⁻⁵` — a tenth as much
+    /// again — so a read the genotype cannot explain stops being quite as damning as it was.
+    #[test]
+    fn a_contaminated_biallelic_diploid_row_is_what_the_mixture_says_term_by_term() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let fractions = contaminated_at(0.03);
+        let frequencies = [0.999, 0.001];
+        let scored = contaminated_row(
+            &evidence,
+            &alleles,
+            &table,
+            &uncalibrated(),
+            ContaminationMixture::new(&fractions, &frequencies),
+        );
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+
+        let (own, other) = (0.97_f64, 0.03_f64);
+        let (q_ref, q_alt) = (0.999_f64, 0.001_f64);
+        let (error_ref, error_alt) = ((-6.0_f64 / 2.0).exp(), (-7.0_f64).exp());
+
+        // The reference homozygote: both reference reads explained at a full copy share, the
+        // alternative read wrong with its error spread three ways.
+        let expected_hom_ref = 2.0 * (own * 1.0 + other * q_ref).ln()
+            + (own * error_alt / ERROR_SPREAD_BASES + other * q_alt).ln();
+        // The heterozygote explains every read at half a copy share, so no error term at all.
+        let expected_het =
+            2.0 * (own * 0.5 + other * q_ref).ln() + (own * 0.5 + other * q_alt).ln();
+        // The alternative homozygote: the alternative read explained, both reference reads
+        // wrong — and `q_sum` is −6 over two reads, so each is charged the geometric mean e⁻³.
+        let expected_hom_alt = 2.0 * (own * error_ref / ERROR_SPREAD_BASES + other * q_ref).ln()
+            + (own * 1.0 + other * q_alt).ln();
+
+        assert!((scored[hom_ref] - expected_hom_ref).abs() < 1e-12);
+        assert!((scored[het] - expected_het).abs() < 1e-12);
+        assert!((scored[hom_alt] - expected_hom_alt).abs() < 1e-12);
+    }
+
+    /// **What contamination is for: it stops one stray read making a heterozygote — and how much
+    /// it does that depends almost entirely on how common the stray allele is in the
+    /// contaminant.**
+    ///
+    /// The same fixture as the hand-computed case above — two reference reads and one
+    /// alternative read at a 3% fraction — scored against a rising contaminant frequency for the
+    /// alternative allele. What is measured is the gap the heterozygote holds over the reference
+    /// homozygote, which is what decides the call:
+    ///
+    /// | the contaminant shows the alternative at | the heterozygote leads by |
+    /// |---|---|
+    /// | never (no mixture) | 6.019 nats |
+    /// | 1 in 1,000 | 5.981 |
+    /// | 1 in 100 | 5.376 |
+    /// | 1 in 2 | 2.131 |
+    ///
+    /// **So a rare contaminant allele buys almost nothing and a common one buys 3.9 nats, 17
+    /// Phred.** That is the same lever spec §3.6 measures for what the mixture costs the
+    /// aggregation contract — 0.14 nats at 1 in 1,000 against 1.89 at 1 in 2 — and it points the
+    /// same way, which is worth knowing: the fixture where contamination changes a call most is
+    /// the fixture where pooling reads costs most.
+    ///
+    /// **The monotone fall is the assertion and the sizes are recorded beside it**, because the
+    /// sizes belong to this fixture — one wrong read at a summed log error of −7, three copies
+    /// against a diploid — and not to the model. §3.6 names the direction to watch: an
+    /// overestimated fraction suppresses real heterozygotes by attributing their alternative
+    /// reads to the contaminant, and the last row is what that looks like.
+    #[test]
+    fn a_contaminated_sample_is_pulled_away_from_the_heterozygote() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let gap = |scored: &[f64]| scored[het] - scored[hom_ref];
+
+        let clean = gap(&row(&evidence, &alleles, &table, &uncalibrated()));
+
+        let fractions = contaminated_at(0.03);
+        let contaminated: Vec<f64> = [0.001_f64, 0.01, 0.5]
+            .into_iter()
+            .map(|alternative| {
+                let frequencies = [1.0 - alternative, alternative];
+                gap(&contaminated_row(
+                    &evidence,
+                    &alleles,
+                    &table,
+                    &uncalibrated(),
+                    ContaminationMixture::new(&fractions, &frequencies),
+                ))
+            })
+            .collect();
+
+        assert!(
+            contaminated[0] < clean,
+            "contamination should move the reference homozygote toward the heterozygote, and \
+             the gap went from {clean} to {} nats",
+            contaminated[0]
+        );
+        assert!(
+            contaminated.windows(2).all(|pair| pair[1] < pair[0]),
+            "a commoner contaminant allele should close the gap further, and the gaps are \
+             {contaminated:?} nats"
+        );
+
+        let measured = [clean, contaminated[0], contaminated[1], contaminated[2]];
+        for (found, recorded) in measured.into_iter().zip([6.019, 5.981, 5.376, 2.131]) {
+            assert!(
+                (found - recorded).abs() < 1e-3,
+                "the gaps are {measured:?} nats, and the table above says \
+                 [6.019, 5.981, 5.376, 2.131]"
+            );
+        }
+    }
+
+    /// A fraction of zero is not a special case, but it must also not be a *different* case
+    /// from having no mixture at all — the two ways a caller can say *nothing is contaminated*
+    /// have to give one answer.
+    #[test]
+    fn an_explicit_zero_fraction_is_the_same_as_no_mixture() {
+        let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
+        let table = diploid(3);
+        let supported = [
+            observation(0, 0, 5, -14.0),
+            observation(1, 1, 2, -9.5),
+            observation(2, 0, 1, -3.25),
+        ];
+        let evidence = GenericSampleEvidence::new(&supported, -0.5, &[]);
+
+        let fractions = contaminated_at(0.0);
+        let frequencies = [0.6, 0.3, 0.1];
+        let explicit = contaminated_row(
+            &evidence,
+            &alleles,
+            &table,
+            &calibrated(1.8),
+            ContaminationMixture::new(&fractions, &frequencies),
+        );
+        let absent = row(&evidence, &alleles, &table, &calibrated(1.8));
+
+        assert_eq!(explicit, absent);
+    }
+
+    /// Two read groups of one sample, one contaminated and one not: the row must charge each
+    /// observation the fraction of the group it came from, and not the sample's.
+    ///
+    /// **This is the whole reason the fraction takes the read-group grain** (spec §3.6): a
+    /// second seedling in the tube contaminates every library alike, an index hop contaminates
+    /// one, and only the finer grain can say the second. A row that averaged the two, or read
+    /// the first group's fraction for every observation, passes every other test in this file.
+    ///
+    /// Three alternative reads at a summed log error of −21, against a contaminant carrying that
+    /// allele at 1 in 10 and a library 5% contaminated. **The reference homozygote finds them
+    /// 8.57 nats — 37 Phred — less surprising in the contaminated library**: a read from the
+    /// contaminant explains one at `0.05 × 0.1`, 1 in 200, where a misread explains it at
+    /// `e⁻⁷/3`, 3 in 10,000 — so the route the mixture opens is 16 times the likelier of the
+    /// two, and the three reads together are worth `3 × ln 16`. The heterozygote explains them
+    /// either way and moves 0.12 nats the *other* way, since the contaminant shows the allele at
+    /// 1 in 10 where a carried copy shows it at 1 in 2.
+    #[test]
+    fn each_read_group_is_charged_its_own_fraction() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        // The same wrong read, once from read group 0 and once from read group 1.
+        let from_group_0 = [observation(1, 0, 3, -21.0)];
+        let from_group_1 = [observation(1, 1, 3, -21.0)];
+
+        let mut fractions = contaminated_at(0.0);
+        fractions[1].fraction = 0.05;
+        let frequencies = [0.9, 0.1];
+        let mixture = ContaminationMixture::new(&fractions, &frequencies);
+
+        let clean_group = contaminated_row(
+            &GenericSampleEvidence::new(&from_group_0, 0.0, &[]),
+            &alleles,
+            &table,
+            &uncalibrated(),
+            mixture,
+        );
+        let dirty_group = contaminated_row(
+            &GenericSampleEvidence::new(&from_group_1, 0.0, &[]),
+            &alleles,
+            &table,
+            &uncalibrated(),
+            mixture,
+        );
+
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+
+        let on_the_error_side = dirty_group[hom_ref] - clean_group[hom_ref];
+        let on_the_explained_side = dirty_group[het] - clean_group[het];
+
+        assert!(
+            on_the_error_side > 0.0 && on_the_explained_side < 0.0,
+            "the contaminated library should find three alternative reads less surprising under \
+             a reference homozygote and slightly more so under a heterozygote, and it moved \
+             {on_the_error_side} and {on_the_explained_side} nats"
+        );
+        assert!(
+            (on_the_error_side - 8.569).abs() < 1e-3
+                && (on_the_explained_side + 0.1225).abs() < 1e-4,
+            "the two moves are {on_the_error_side} and {on_the_explained_side} nats, against the \
+             8.569 and −0.1225 this test records"
+        );
+    }
+
+    /// The linear column is the bases the log column is the logarithm of.
+    ///
+    /// **`exp(0)` is exactly one**, so the spread that does not apply costs no accuracy at all;
+    /// the one that does comes back within a unit in the last place of
+    /// [`ERROR_SPREAD_BASES`], which is what the mixture divides by.
+    #[test]
+    fn the_linear_column_is_the_bases_the_log_column_is_the_logarithm_of() {
+        let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
+        let table = diploid(3);
+        let values = spreads(&alleles, &table);
+        let read = table_over(&values, &table);
+
+        for allele in [AlleleId(0), AlleleId(1), AlleleId(2)] {
+            for (log_spread, spread) in read.column_of(allele).zip(read.spreads_of(allele)) {
+                if log_spread == NO_LOG_ERROR_SPREAD {
+                    assert_eq!(spread, 1.0, "exp(0) has to be exactly one");
+                } else {
+                    assert!(
+                        (spread - ERROR_SPREAD_BASES).abs() <= f64::EPSILON * ERROR_SPREAD_BASES,
+                        "the spread came back as {spread}, not {ERROR_SPREAD_BASES}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A mixture built for a locus with a different number of alleles would read a real
+    /// frequency from the wrong allele, or run off the end — the same failure shape the spread
+    /// table's own stride check exists for.
+    #[test]
+    #[should_panic(expected = "belongs to a different locus")]
+    fn a_mixture_from_another_locus_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let fractions = contaminated_at(0.02);
+        let frequencies = [0.5, 0.3, 0.2];
+
+        let _ = contaminated_row(
+            &GenericSampleEvidence::empty(),
+            &alleles,
+            &table,
+            &uncalibrated(),
+            ContaminationMixture::new(&fractions, &frequencies),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has no contamination fraction")]
+    fn an_observation_from_a_read_group_with_no_fraction_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let supported = [observation(1, 9, 1, -7.0)];
+        let fractions = contaminated_at(0.02);
+        let frequencies = [0.9, 0.1];
+        // Wide enough that the calibration covers read group 9 and only the mixture does not,
+        // so this fails on the fraction rather than on the calibration checked before it.
+        let calibration = [ReadGroupCalibration::defaulted(); 10];
+
+        let _ = contaminated_row(
+            &GenericSampleEvidence::new(&supported, 0.0, &[]),
+            &alleles,
+            &table,
+            &calibration,
+            ContaminationMixture::new(&fractions, &frequencies),
         );
     }
 }

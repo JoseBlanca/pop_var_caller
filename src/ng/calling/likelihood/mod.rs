@@ -92,8 +92,12 @@
 //!   silently (`per_group_merger.rs:1963`).
 //! - **Every probability is floored before a logarithm**, so one impossible observation
 //!   yields a finite very negative number instead of turning a sample's whole row into
-//!   `NaN`. The floors are [`MIN_BASE_ERROR`] and [`MAX_BASE_ERROR`] here, and the geometric
-//!   clamps in the stutter distribution.
+//!   `NaN`. The floors are [`MIN_BASE_ERROR`] here and the geometric clamps in the stutter
+//!   distribution. **Floored and not capped**, which is the correction C1 made to this line
+//!   on 2026-08-24: [`MAX_BASE_ERROR`] exists and the row does not apply it, because a
+//!   ceiling that binds on a single read and not on the fold of that read with others is a
+//!   non-linear function of a per-read quality, which is exactly what the aggregation
+//!   contract forbids ([`ReadGroupCalibration::charged_error`] carries the size).
 //!
 //! ## Three tiers of parameter, and only the middle one is open
 //!
@@ -106,6 +110,12 @@
 //! | **frozen for the whole run** | the per-read-group error rate and its calibration scale, the STR substitution rate, the contamination **fraction** | fields of the run-level views — [`ReadGroupCalibration`], [`ContaminationView`] — which nothing downstream may write |
 //! | **re-estimable per locus, off by default** | the slippage level, the direction split, the fall-off | per call, inside the STR scoring context, so the caller's loop can re-fit them with no change here. This is the one constraint spec §6.1 makes binding |
 //! | **re-estimated every iteration** | the per-locus allele frequencies | the prior reads them — and so does one term here: the contaminating population's frequency for the allele an observation shows, which moves with the loop (spec §3.6, corrected 2026-08-24) |
+//!
+//! [`ContaminationMixture`] is where the first and third tiers meet: it holds the frozen
+//! fraction beside the frequency that moves, so a caller cannot hand the row one without the
+//! other. **What follows for the loop is that a row cannot be cached across iterations
+//! wherever contamination is on** — the emission reads no frequency and is still computed
+//! once per `(sample, observation, candidate)`, but the row's own arithmetic moves.
 //!
 //! **The two halves of the contamination mixture sit in different tiers, and that is the
 //! whole of what changed on 2026-08-24.** How contaminated a library is is a property of
@@ -338,8 +348,62 @@ impl ReadGroupCalibration {
         self.scale.ln()
     }
 
+    /// **The error probability the row actually charges an observation** — this read group's
+    /// scale times the geometric mean of its reads' minted error, floored against zero and
+    /// **not capped from above**.
+    ///
+    /// # Why this exists beside [`calibrated_error`](Self::calibrated_error)
+    ///
+    /// The two differ in one thing: that one clamps into `[MIN_BASE_ERROR, MAX_BASE_ERROR]`
+    /// and this one only floors. **The ceiling cannot be applied to what the row charges**,
+    /// and the reason is a stated requirement rather than a preference: spec §2.3 asks that
+    /// no term be a non-linear function of a per-read quality, because the merge hands the
+    /// row a *fold* of reads and `q_sum` recovers only their geometric mean. `min(x, ½)` is
+    /// exactly such a function. **Measured on the row's own aggregation fixture**, which
+    /// alternates reads between Phred 93 and Phred 1: a Phred-1 read is minted at an error of
+    /// 0.794, so the ceiling replaces it with 0.5 and charges that read 0.46 nats less. It
+    /// binds on every one of those reads taken singly and on none of the folds — a fold's
+    /// geometric mean over the alternation is `2 × 10⁻⁵` — so at the 300-read end of that
+    /// fixture, 150 such reads, pooling would move the answer by 69 nats where the property
+    /// being pinned is agreement to a relative 2 × 10⁻¹⁴.
+    ///
+    /// **The floor is different in kind, which is why it stays.** It is not reached by any
+    /// quality the read preparation admits — Phred 93 is an error of `5.0 × 10⁻¹⁰`, and at the
+    /// smallest scale the row's fixtures use, 0.37, that is `1.9 × 10⁻¹⁰`, 185 times the floor
+    /// — so it changes no answer that can occur and exists only so a logarithm never sees a
+    /// zero (spec §8).
+    ///
+    /// **So this may return a number above one**, where a poor read is scaled up. Spec §3.3's
+    /// log-space form does the same thing: it charges `q_sum + n·log scale`, which is
+    /// positive under exactly the same conditions. That is a property of the model as
+    /// specified, not something introduced here, and a row that clamped it would silently
+    /// disagree with §3.3 wherever the clamp bit.
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on `num_reads == 0`, for
+    /// [`calibrated_error`](Self::calibrated_error)'s reasons: an observation with no reads
+    /// behind it has no average error, and the two numbers this would otherwise return — a
+    /// `NaN` at a zero `q_sum`, the floor at a negative one — are both things nothing
+    /// downstream could tell from a real charge.
+    #[must_use]
+    pub fn charged_error(&self, q_sum: f64, num_reads: u32) -> f64 {
+        assert!(
+            num_reads > 0,
+            "an observation with no reads behind it has no average error; the merge builds \
+             no such row"
+        );
+        let mean_log_error = q_sum / f64::from(num_reads);
+        (self.scale * mean_log_error.exp()).max(MIN_BASE_ERROR)
+    }
+
     /// This read group's calibrated error probability for an observation, from the sum of
     /// log errors over its reads.
+    ///
+    /// **Not what the row charges** — see [`charged_error`](Self::charged_error), which
+    /// floors alike and does not cap, and says why the cap disqualifies this one from the
+    /// likelihood. What is left here is a clamped-into-`[0, ½]` reading of the same
+    /// quantity, which nothing in the caller consumes.
     ///
     /// **The geometric mean of the observation's reads, times the scale.** That the two
     /// compose exactly is what makes the calibrated property hold: scaling every read by one
@@ -449,6 +513,162 @@ impl ContaminationView {
     #[must_use]
     pub fn was_measured(&self) -> bool {
         self.markers_with_reads > 0 && self.reads_on_markers > 0
+    }
+}
+
+/// **Both halves of spec §3.6's mixture, for one locus** — how much of each read group came
+/// from somebody else, and what that somebody else's DNA would have shown here.
+///
+/// The mixture the row evaluates is
+///
+/// ```text
+///     n_o · log[ (1 − c) · own(o | g)  +  c · q(o) ]
+/// ```
+///
+/// and the two halves reach the row from different places, which is the reason they are
+/// gathered into one type rather than passed as two loose slices. **`c` is a property of the
+/// library**: fitted before calling and frozen for the whole run, one per read group. **`q(o)`
+/// is a property of the locus**: the frequency, among the samples sequenced in the same batch,
+/// of the allele this observation shows — the caller's own estimate, which moves every
+/// iteration (spec §3.6, corrected 2026-08-24; §6.1's first tier holds the fraction only).
+/// Holding them together is what lets one construction check that they describe the same run,
+/// instead of the row rediscovering it per observation.
+///
+/// **[`none`](Self::none) is the uncontaminated case and is not a special path.** With no
+/// fractions the mixture collapses to `own(o | g)` and the row computes spec §3.3 — to a few
+/// units in the last place, because §8 evaluates in probability space and §3.3 in log space, so
+/// there is an `exp`/`log` round trip between the two forms. That is why the row has **no
+/// `c == 0` branch**: the two are the same algebra, and production keeps such a branch only
+/// because its own two forms genuinely differ (spec §3.6).
+///
+/// **At one sample there is no mixture at all.** Contamination is a comparison between samples,
+/// so a single-sample run has nothing to estimate `c` from and gets [`none`](Self::none) — *emit
+/// it as absent*, not a fitted zero.
+#[derive(Copy, Clone, Debug)]
+pub struct ContaminationMixture<'a> {
+    fractions: &'a [ContaminationView],
+    allele_frequencies: &'a [f64],
+}
+
+impl<'a> ContaminationMixture<'a> {
+    /// Nothing is contaminated, so the row computes spec §3.3.
+    ///
+    /// This is what a run whose parameter fit emitted no fraction gets, and what a
+    /// single-sample run gets.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            fractions: &[],
+            allele_frequencies: &[],
+        }
+    }
+
+    /// A fraction per read group and a frequency per candidate allele of the locus being
+    /// called.
+    ///
+    /// # Panics
+    ///
+    /// On a fraction outside `[0, 1)` or a frequency outside `[0, 1]`, and on either slice
+    /// being empty while the other is not. **These are checked once here rather than per
+    /// observation**, which is spec §8's rule for a parameter outside its declared range: the
+    /// model has no failure mode of its own that is not a caller bug.
+    ///
+    /// **A fraction of exactly one is refused rather than floored**, and it is the one bound
+    /// that does arithmetic rather than documentation. `own(o | g)` is positive — the copy
+    /// share is at least `1/P` and the charged error is floored — so the mixture can only
+    /// reach zero, and its logarithm negative infinity, when `1 − c` underflows to zero and
+    /// the contaminant's frequency for that allele is zero as well. A library that is
+    /// *entirely* another individual's DNA is not a sample of the individual it is labelled
+    /// with, and no estimator here can return it.
+    #[must_use]
+    pub fn new(fractions: &'a [ContaminationView], allele_frequencies: &'a [f64]) -> Self {
+        assert_eq!(
+            fractions.is_empty(),
+            allele_frequencies.is_empty(),
+            "a mixture needs both halves or neither: {} read-group fractions against {} allele \
+             frequencies",
+            fractions.len(),
+            allele_frequencies.len()
+        );
+        for (read_group, view) in fractions.iter().enumerate() {
+            assert!(
+                (0.0..1.0).contains(&view.fraction),
+                "read group {read_group} is {} contaminated, and a fraction is a share of that \
+                 group's reads that came from somebody else — a whole library of another \
+                 individual's DNA is not a sample of this one",
+                view.fraction
+            );
+        }
+        for (allele, &frequency) in allele_frequencies.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&frequency),
+                "the contaminating population shows allele {allele} at a frequency of \
+                 {frequency}, which is not a frequency"
+            );
+        }
+        Self {
+            fractions,
+            allele_frequencies,
+        }
+    }
+
+    /// How many candidate alleles this mixture was built for — `0` when there is none, which
+    /// is how the row tells [`none`](Self::none) from a mixture belonging to another locus.
+    #[must_use]
+    pub fn allele_count(&self) -> usize {
+        self.allele_frequencies.len()
+    }
+
+    /// `c` for one read group — zero where there is no mixture at all.
+    ///
+    /// # Panics
+    ///
+    /// On a read group the mixture has no entry for, once there is a mixture. A row scoring a
+    /// read group the parameters do not cover is the same caller bug as a row scoring one the
+    /// calibration does not cover, and silently reading it as clean would be a genotype quietly
+    /// moved rather than a run that stopped.
+    #[must_use]
+    pub fn fraction_of(&self, read_group: ReadGroupId) -> f64 {
+        if self.fractions.is_empty() {
+            return 0.0;
+        }
+        let at = read_group.get() as usize;
+        self.fractions
+            .get(at)
+            .unwrap_or_else(|| {
+                panic!(
+                    "read group {at} has no contamination fraction; the run supplied {}",
+                    self.fractions.len()
+                )
+            })
+            .fraction
+    }
+
+    /// `q(o)` — the contaminating population's frequency for one candidate allele, zero where
+    /// there is no mixture.
+    ///
+    /// **Zero here is unreachable in a run and reachable in a test**, which is worth keeping
+    /// apart. The producer this frequency comes from floors an allele the batch never showed,
+    /// because a contaminant read of an allele nobody carries must not collapse the term
+    /// (that floor is the next step's, spec §3.6). What this accessor promises is only that it
+    /// returns what it was given.
+    ///
+    /// # Panics
+    ///
+    /// On an allele the mixture has no frequency for, once there is a mixture — the row
+    /// already checks the count against the locus, so reaching this means the two disagree.
+    #[must_use]
+    pub fn frequency_of(&self, allele: AlleleId) -> f64 {
+        if self.allele_frequencies.is_empty() {
+            return 0.0;
+        }
+        let at = usize::from(allele.get());
+        *self.allele_frequencies.get(at).unwrap_or_else(|| {
+            panic!(
+                "allele {at} has no contaminant frequency; this mixture holds {}",
+                self.allele_frequencies.len()
+            )
+        })
     }
 }
 
@@ -1955,5 +2175,164 @@ mod tests {
         scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &detail), 3, 0.0);
 
         assert_eq!(scratch.model_scratch_mut().as_slice(), b"ACGT");
+    }
+
+    // ---- C1: the contamination mixture's two halves ----
+
+    fn a_fraction_of(fraction: f64) -> ContaminationView {
+        ContaminationView {
+            fraction,
+            markers_with_reads: 1_000,
+            reads_on_markers: 9_000,
+            source: ContaminationSource::ThisReadGroupsReads,
+        }
+    }
+
+    /// **Nothing contaminated reads as nothing contaminated from both accessors**, which is
+    /// what makes the row's single code path spec §3.3: `1 − 0` times the sample's own term,
+    /// plus `0` times whatever the contaminant would have shown.
+    #[test]
+    fn no_mixture_gives_a_zero_fraction_and_a_zero_frequency() {
+        let mixture = ContaminationMixture::none();
+
+        assert_eq!(mixture.allele_count(), 0);
+        assert_eq!(mixture.fraction_of(ReadGroupId(7)), 0.0);
+        assert_eq!(mixture.frequency_of(AlleleId(3)), 0.0);
+    }
+
+    #[test]
+    fn a_mixture_hands_back_the_fraction_and_frequency_it_was_given() {
+        let fractions = [a_fraction_of(0.0), a_fraction_of(0.04)];
+        let frequencies = [0.7, 0.25, 0.05];
+        let mixture = ContaminationMixture::new(&fractions, &frequencies);
+
+        assert_eq!(mixture.allele_count(), 3);
+        assert_eq!(mixture.fraction_of(ReadGroupId(1)), 0.04);
+        assert_eq!(mixture.frequency_of(AlleleId(2)), 0.05);
+    }
+
+    /// **A fraction of exactly one is the one bound that does arithmetic**: `1 − c` underflows
+    /// to zero, and an allele the contaminant never shows would take the mixture to zero and
+    /// its logarithm to negative infinity — the one input that could, since every other term
+    /// is floored or is a copy share.
+    #[test]
+    #[should_panic(expected = "is not a sample of this one")]
+    fn a_library_that_is_entirely_somebody_else_is_refused() {
+        let fractions = [a_fraction_of(1.0)];
+        let frequencies = [1.0];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a sample of this one")]
+    fn a_negative_fraction_is_refused() {
+        let fractions = [a_fraction_of(-0.01)];
+        let frequencies = [1.0];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
+    }
+
+    #[test]
+    #[should_panic(expected = "which is not a frequency")]
+    fn a_frequency_past_one_is_refused() {
+        let fractions = [a_fraction_of(0.02)];
+        let frequencies = [0.4, 1.6];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
+    }
+
+    /// Half a mixture is not a mixture: fractions with no frequencies would read every allele
+    /// as one the contaminant never shows, and frequencies with no fractions would be a table
+    /// nothing multiplies. Either is a caller that built one half and forgot the other.
+    #[test]
+    #[should_panic(expected = "needs both halves or neither")]
+    fn fractions_without_frequencies_are_refused() {
+        let fractions = [a_fraction_of(0.02)];
+
+        let _ = ContaminationMixture::new(&fractions, &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "needs both halves or neither")]
+    fn frequencies_without_fractions_are_refused() {
+        let frequencies = [0.5, 0.5];
+
+        let _ = ContaminationMixture::new(&[], &frequencies);
+    }
+
+    // ---- C1: what the row charges a wrong read ----
+
+    /// **The one thing that separates [`ReadGroupCalibration::charged_error`] from
+    /// [`ReadGroupCalibration::calibrated_error`]**, pinned so that reuniting them is a test
+    /// failure rather than a genotype that quietly moved.
+    ///
+    /// A read minted at Phred 1 is an error of 0.794. The capped reading returns 0.5 — 0.46
+    /// nats away — and the charged one returns the 0.794 the read was minted with, because
+    /// spec §2.3 forbids any term that is a non-linear function of a per-read quality: the
+    /// merge hands the row folds, and a cap that binds on a single read and not on the fold
+    /// of that read with others would make pooling change the answer.
+    #[test]
+    fn what_the_row_charges_is_not_capped_and_the_other_reading_is() {
+        let calibration = ReadGroupCalibration::defaulted();
+        let minted_at_phred_1 = -1.0 / 10.0 * std::f64::consts::LN_10;
+
+        let charged = calibration.charged_error(minted_at_phred_1, 1);
+        let capped = calibration.calibrated_error(minted_at_phred_1, 1);
+
+        assert!((charged - 0.794_328_2).abs() < 1e-6, "charged {charged}");
+        assert_eq!(capped, MAX_BASE_ERROR);
+        assert!(
+            ((charged / capped).ln() - 0.462_89).abs() < 1e-4,
+            "the cap is worth {} nats on this read",
+            (charged / capped).ln()
+        );
+    }
+
+    /// **The floor is the half of the pair that survives**, and it is not reached by any
+    /// quality the read preparation admits: Phred 93 at the smallest scale the row's fixtures
+    /// use is 185 times it. So it changes no answer that can occur, and exists only so that a
+    /// logarithm never sees a zero (spec §8).
+    #[test]
+    fn the_floor_holds_and_sits_far_below_the_best_read_there_is() {
+        let calibration = ReadGroupCalibration {
+            scale: 0.37,
+            provenance: Provenance::FittedHere,
+        };
+        let minted_at_phred_93 = -9.3 * std::f64::consts::LN_10;
+
+        let best_there_is = calibration.charged_error(minted_at_phred_93, 1);
+        assert!(
+            (best_there_is / MIN_BASE_ERROR - 185.4).abs() < 0.1,
+            "the best read there is sits {} times the floor",
+            best_there_is / MIN_BASE_ERROR
+        );
+
+        // And the floor does hold, for a q_sum no read could carry.
+        assert_eq!(calibration.charged_error(-1_000.0, 1), MIN_BASE_ERROR);
+    }
+
+    /// The charge scales exactly with the read group's multiplier, which is what makes the
+    /// mixture's error half agree with spec §3.3's `q_sum + n·log scale` to a round trip
+    /// rather than to a tolerance chosen by hand.
+    #[test]
+    fn the_charge_is_the_scale_times_the_geometric_mean() {
+        let q_sum = -6.0;
+        let reads = 2;
+        let scaled = ReadGroupCalibration {
+            scale: 2.5,
+            provenance: Provenance::FittedHere,
+        };
+
+        let charged = scaled.charged_error(q_sum, reads);
+        let by_hand = 2.5 * (-3.0_f64).exp();
+
+        assert!((charged - by_hand).abs() <= f64::EPSILON * by_hand);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no average error")]
+    fn a_charge_for_an_observation_with_no_reads_is_a_caller_bug() {
+        let _ = ReadGroupCalibration::defaulted().charged_error(-7.0, 0);
     }
 }
