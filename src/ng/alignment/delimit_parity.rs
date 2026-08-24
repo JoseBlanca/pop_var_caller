@@ -27,7 +27,7 @@
 //!
 //! It is **ng's test**: its subject is ng's aligner, and production is only the yardstick.
 //! `src/ssr/` is frozen (owner, 2026-07-16) and is read here, never written — the same shape
-//! as [`scanner_parity`](crate::ng::scanner_parity), and the same shape as the `MAX_SLIP`
+//! as [`scanner_parity`](crate::ng::scanner_parity), and the same shape as the slip-cutoff
 //! cross-check in [`stutter`](super::stutter). It is `#[cfg(test)]`, so **shipping ng code
 //! still depends on nothing in production**.
 

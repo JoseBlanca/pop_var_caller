@@ -43,7 +43,7 @@
 //! (Milestone D) must score an indel *of the repeat's own base* separately from an indel of
 //! a different base, or the two effects cancel in the average (the alignment spec §4.2).
 
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 
 /// Largest **whole-repeat** slip this model scores at all, counted in **repeats**; anything
 /// past it is **zero**, so an implausibly large change is not explained away as stutter —
@@ -61,12 +61,18 @@ use std::num::NonZeroU8;
 /// than trusting this sentence.
 ///
 /// **What should eventually set it is the mass it discards**, which
-/// [`StutterModel::truncated_mass_lost`] now computes per candidate.
+/// [`StutterModel::unreachable_mass`] now computes per candidate.
 pub const MAX_WHOLE_REPEAT_SLIP: u32 = 10;
 
-/// Largest **part-repeat** change this model scores at all, counted in **base pairs** — on
-/// the re-indexed scale of `Δ − Δ/period`, which is what makes the geometric's support
-/// gapless (see [`StutterModel::probability`]).
+/// Largest **part-repeat** change this model scores at all, counted in **re-indexed steps**
+/// — the scale `Δ − Δ/period`, which is what makes the geometric's support gapless (see
+/// [`StutterModel::probability`]).
+///
+/// **A step is not a base pair, and saying so is this constant's whole point.** Removing the
+/// multiples of the period compresses the ranks, so ten steps admit about
+/// `10 · period/(period − 1)` base pairs — roughly 13 at period 4, 20 at period 2. Spec §4.2
+/// calls this "`max_part_repeat_slip = 10` base pairs"; that is the unit the split exists to
+/// stop conflating, and the correction is owed to that document.
 ///
 /// # Why this is a second constant and not the same one
 ///
@@ -79,10 +85,8 @@ pub const MAX_WHOLE_REPEAT_SLIP: u32 = 10;
 /// is behaviour-preserving — but it makes the two independently settable by whoever measures
 /// them, which one shared constant did not. What the split costs today, kept here because it
 /// is the thing a measurement would move: a part-repeat change is cut off about
-/// `period − 1` times sooner in real terms, since a cutoff of 10 re-indexed steps admits
-/// roughly `10 · period/(period − 1)` base pairs against `10 · period` in whole repeats. At
-/// period 4 that is about 13 bp against 40 bp; **at period 2 the effect vanishes** (about 20
-/// against 20), and it grows with the period.
+/// `period − 1` times sooner in real terms — about 13 bp against 40 bp at period 4; **at
+/// period 2 the effect vanishes** (about 20 against 20), and it grows with the period.
 ///
 /// Inherited on the same terms as [`MAX_WHOLE_REPEAT_SLIP`] — see there.
 pub const MAX_PART_REPEAT_SLIP: u32 = 10;
@@ -439,6 +443,23 @@ impl StutterModel {
     ///    defect. It is a property of the model, and reporting it is what keeps a
     ///    mononucleotide candidate comparable with a dinucleotide one.
     ///
+    /// # Why `repeat_count` is a [`NonZeroU32`]
+    ///
+    /// **A candidate with no repeats is not a candidate**, and the rule above says why: a
+    /// read of this candidate must still show a repeat, so a tract holding none can show
+    /// nothing at all and there is no distribution to account for. As a plain `u32` the
+    /// arithmetic answered for zero exactly as it does for one — `saturating_sub(1)` makes
+    /// them the same input — and the two are nothing like the same answer: at HipSTR's
+    /// shipped values, period 3, one repeat loses **1.68 in 100** while a zero-repeat tract
+    /// under this function's own rule leaves **99.6 in 100** unreachable. That is the largest
+    /// mis-scaling this function can produce, and it would have arrived silently.
+    ///
+    /// The same reasoning as [`Self::probability`]'s period: the illegal state is cheap to
+    /// make **unrepresentable**, which is better than making it testable — there is no
+    /// release path to get wrong and no guard that compiles out.
+    ///
+    /// [`NonZeroU32`]: std::num::NonZeroU32
+    ///
     /// # The floor case
     ///
     /// [`Self::same_length_share`] is floored, so a hostile parameter row can make the five
@@ -456,17 +477,14 @@ impl StutterModel {
     /// checking it by enumeration is the point — a version that enumerated would make that
     /// test compare a thing with itself.
     #[must_use]
-    pub fn truncated_mass_lost(&self, period: NonZeroU8, repeat_count: u32) -> f64 {
+    pub fn unreachable_mass(&self, period: NonZeroU8, repeat_count: NonZeroU32) -> f64 {
         let period_bases = u32::from(period.get());
+        let repeat_count = repeat_count.get();
 
-        // A geometric's first `steps` terms: `1 − (1 − one_step)^steps`, and zero at no
-        // steps at all.
+        // A geometric's first `steps` terms, `1 − (1 − one_step)^steps` — which is already
+        // `0.0` at no steps at all, since `powi(0)` is one.
         let reached = |one_step: f64, steps: u32| -> f64 {
-            if steps == 0 {
-                0.0
-            } else {
-                1.0 - (1.0 - one_step).powi(steps.min(i32::MAX as u32) as i32)
-            }
+            1.0 - (1.0 - one_step).powi(i32::try_from(steps).unwrap_or(i32::MAX))
         };
 
         // How far a read of this candidate can contract: the tract keeps at least one
@@ -476,9 +494,9 @@ impl StutterModel {
 
         // Whole repeats: expansion is unbounded above, contraction stops at the tract's own
         // length.
-        let whole_up = self.whole_repeat_longer_share
+        let whole_longer = self.whole_repeat_longer_share
             * reached(self.whole_repeat_one_step_share, MAX_WHOLE_REPEAT_SLIP);
-        let whole_down = self.whole_repeat_shorter_share
+        let whole_shorter = self.whole_repeat_shorter_share
             * reached(
                 self.whole_repeat_one_step_share,
                 MAX_WHOLE_REPEAT_SLIP.min(contractable_repeats),
@@ -488,7 +506,7 @@ impl StutterModel {
         // number of repeats. Otherwise the reachable contractions are the non-multiples of
         // the period inside the contractable part of the tract — `(period - 1)` of them per
         // repeat, the same count the whole-repeat rule leaves.
-        let (part_up_steps, part_down_steps) = if period_bases == 1 {
+        let (part_longer_steps, part_shorter_steps) = if period_bases == 1 {
             (0, 0)
         } else {
             (
@@ -496,12 +514,13 @@ impl StutterModel {
                 MAX_PART_REPEAT_SLIP.min(contractable_repeats.saturating_mul(period_bases - 1)),
             )
         };
-        let part_up =
-            self.part_repeat_longer_share * reached(self.part_repeat_one_step_share, part_up_steps);
-        let part_down = self.part_repeat_shorter_share
-            * reached(self.part_repeat_one_step_share, part_down_steps);
+        let part_longer = self.part_repeat_longer_share
+            * reached(self.part_repeat_one_step_share, part_longer_steps);
+        let part_shorter = self.part_repeat_shorter_share
+            * reached(self.part_repeat_one_step_share, part_shorter_steps);
 
-        let reachable = self.same_length_share + whole_up + whole_down + part_up + part_down;
+        let reachable =
+            self.same_length_share + whole_longer + whole_shorter + part_longer + part_shorter;
         (1.0 - reachable).max(0.0)
     }
 
@@ -555,7 +574,7 @@ impl StutterModel {
 /// compiler *and* to a reader, which is the hazard [`StutterRates`]'s own doc argues about
 /// thirty lines above. Built as a literal at each of the two call sites, a crossed pair reads
 /// as two disagreeing words on one line (`longer_share: self.whole_repeat_shorter_share`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct Regime {
     /// The share of reads longer than the allele in this regime, at any size.
     longer_share: f64,
@@ -650,6 +669,12 @@ mod tests {
     /// A repeat period, which the type system requires to be non-zero.
     fn period(bases: u8) -> NonZeroU8 {
         NonZeroU8::new(bases).expect("a test period is never zero")
+    }
+
+    /// A candidate's repeat count, which the type system requires to be non-zero — a tract
+    /// holding no repeats is not a candidate ([`StutterModel::unreachable_mass`]).
+    fn repeats(count: u32) -> NonZeroU32 {
+        NonZeroU32::new(count).expect("a test candidate always holds a repeat")
     }
 
     /// A fixture whose six rates are **all different**, so a transposition of any pair
@@ -942,7 +967,7 @@ mod tests {
     ///
     /// **What no test here can check while both constants hold 10.** Which constant feeds
     /// which branch is not observable when they are equal — measured: wiring the part-repeat
-    /// regime to [`MAX_WHOLE_REPEAT_SLIP`] leaves all 24 tests in this module green. That is
+    /// regime to [`MAX_WHOLE_REPEAT_SLIP`] leaves every test in this module green. That is
     /// inherent rather than a gap to fill: the split is about making the two *settable*
     /// apart, and the moment a measurement moves either one, the boundaries asserted below
     /// become the check. Named here so a later reader does not mistake the silence for
@@ -1192,6 +1217,50 @@ mod tests {
                 );
             }
         }
+
+        /// **The reported loss equals what an enumeration measures, for every row of rates**
+        /// — not only the eleven the fixed sweep names.
+        ///
+        /// The sweep is thorough where it looks, but it looks at two hand-built rows. The
+        /// consumer that arrives at plan step E3 hands this type **fitted** numbers, and a
+        /// fitted row has never been through a fixed list. This is also the shape of test
+        /// that would have found the zero-repeat case without anyone thinking to write it.
+        ///
+        /// **The direction ranges stay under a half each so the same-length floor does not
+        /// bind**, which is what makes the equality exact rather than clamped; the floored
+        /// case is `a_floored_model_reports_no_loss_rather_than_a_negative_one`'s.
+        #[test]
+        fn any_rates_report_the_loss_an_enumeration_measures(
+            longer in 0.0f64..=0.4,
+            shorter in 0.0f64..=0.4,
+            whole_one_step in GEOM_MIN..=GEOM_MAX,
+            part_longer in 0.0f64..=0.05,
+            part_shorter in 0.0f64..=0.05,
+            part_one_step in GEOM_MIN..=GEOM_MAX,
+            repeat_count in 1u32..=40,
+            period_bases in 1u8..=6,
+        ) {
+            let model = StutterModel::new(StutterRates {
+                whole_repeat_longer_share: longer,
+                whole_repeat_shorter_share: shorter,
+                whole_repeat_one_step_share: whole_one_step,
+                part_repeat_longer_share: part_longer,
+                part_repeat_shorter_share: part_shorter,
+                part_repeat_one_step_share: part_one_step,
+            });
+            let period = period(period_bases);
+            let repeat_count = repeats(repeat_count);
+            let reported = model.unreachable_mass(period, repeat_count);
+            let enumerated = (1.0 - reachable_mass(&model, period, repeat_count)).max(0.0);
+            proptest::prop_assert!(
+                (reported - enumerated).abs() < 1e-12,
+                "period {} at {} repeats: reported {}, enumerated {}",
+                period_bases,
+                repeat_count,
+                reported,
+                enumerated
+            );
+        }
     }
 
     /// **Spec §12's fourth test: the distribution sums to one over its whole support.**
@@ -1217,7 +1286,7 @@ mod tests {
     /// The tolerance is the cutoffs' own tail, `(1 − one_step)^10`, which is what an
     /// untruncated sum would recover. At the fitted-like shares swept here it is below
     /// `1e-9`; the second assertion states the exact form, cross-checking this sum against
-    /// [`StutterModel::truncated_mass_lost`], which is derived a completely different way.
+    /// [`StutterModel::unreachable_mass`], which is derived a completely different way.
     #[test]
     fn the_distribution_sums_to_one_over_its_whole_support() {
         // Symmetric, then two-to-one, then five-to-one toward contraction.
@@ -1236,7 +1305,7 @@ mod tests {
                         let period = period(period_bases);
                         // A tract long enough that no contraction is out of reach, so the
                         // only thing missing is the cutoffs' tail.
-                        let repeat_count = 200u32;
+                        let repeat_count = repeats(200);
                         let total = reachable_mass(&model, period, repeat_count);
 
                         assert!(
@@ -1246,7 +1315,7 @@ mod tests {
                         );
 
                         // Exactly, against the model's own account of what it discards.
-                        let lost = model.truncated_mass_lost(period, repeat_count);
+                        let lost = model.unreachable_mass(period, repeat_count);
                         assert!(
                             (total - (1.0 - lost)).abs() < 1e-12,
                             "period {period_bases}: summed {total}, reported loss {lost}"
@@ -1273,7 +1342,7 @@ mod tests {
             part_repeat_shorter_share: level * 0.05 * 0.83,
             part_repeat_one_step_share: 0.05,
         });
-        let total = reachable_mass(&complemented, period(3), 200);
+        let total = reachable_mass(&complemented, period(3), repeats(200));
         let short_by = 1.0 - total;
 
         // `1 − 0.95^10` of each branch survives, so 0.95^10 of the whole slip mass is gone:
@@ -1314,10 +1383,10 @@ mod tests {
     /// actually show: the tract keeps at least one repeat, so the deepest contraction is
     /// `repeat_count − 1` repeats, and nothing beyond either cutoff is scored. Written as an
     /// enumeration, deliberately — it is the oracle for
-    /// [`StutterModel::truncated_mass_lost`], which uses a closed form.
-    fn reachable_mass(model: &StutterModel, period: NonZeroU8, repeat_count: u32) -> f64 {
+    /// [`StutterModel::unreachable_mass`], which uses a closed form.
+    fn reachable_mass(model: &StutterModel, period: NonZeroU8, repeat_count: NonZeroU32) -> f64 {
         let period_bases = i64::from(period.get());
-        let deepest_contraction = i64::from(repeat_count.saturating_sub(1)) * period_bases;
+        let deepest_contraction = i64::from(repeat_count.get() - 1) * period_bases;
         // Far past both cutoffs on either scale, so the sum is complete.
         let widest = period_bases * i64::from(MAX_WHOLE_REPEAT_SLIP + MAX_PART_REPEAT_SLIP + 4)
             + deepest_contraction;
@@ -1357,8 +1426,8 @@ mod tests {
                 });
                 for period_bases in 1..=6u8 {
                     let period = period(period_bases);
-                    for repeat_count in [1u32, 2, 4, 5, 9, 10, 11, 30] {
-                        let reported = model.truncated_mass_lost(period, repeat_count);
+                    for repeat_count in [1u32, 2, 3, 4, 5, 6, 9, 10, 11, 30].map(repeats) {
+                        let reported = model.unreachable_mass(period, repeat_count);
                         let enumerated = 1.0 - reachable_mass(&model, period, repeat_count);
                         assert!(
                             (reported - enumerated).abs() < 1e-12,
@@ -1405,7 +1474,7 @@ mod tests {
     /// as much as a guard on the arithmetic.
     #[test]
     fn the_shortest_admissible_tract_loses_the_size_the_specification_states() {
-        let at_fall_off = |one_step: f64| {
+        let at_one_step_share = |one_step: f64| {
             StutterModel::new(StutterRates {
                 whole_repeat_longer_share: 0.004,
                 whole_repeat_shorter_share: 0.016,
@@ -1414,24 +1483,24 @@ mod tests {
                 part_repeat_shorter_share: 0.0008,
                 part_repeat_one_step_share: one_step,
             })
-            .truncated_mass_lost(period(6), 4)
+            .unreachable_mass(period(6), repeats(4))
         };
 
-        let shipped_fall_off = at_fall_off(0.95);
+        let at_shipped_share = at_one_step_share(0.95);
         assert!(
-            (shipped_fall_off - 2.0e-6).abs() < 1e-14,
-            "expected 2 parts in a million, got {shipped_fall_off}"
+            (at_shipped_share - 2.0e-6).abs() < 1e-14,
+            "expected 2 parts in a million, got {at_shipped_share}"
         );
 
-        let slow_fall_off = at_fall_off(0.5);
+        let at_slow_share = at_one_step_share(0.5);
         assert!(
-            (slow_fall_off - 2.0e-3).abs() < 1e-5,
-            "expected 2 parts in a thousand, got {slow_fall_off}"
+            (at_slow_share - 2.0e-3).abs() < 1e-5,
+            "expected 2 parts in a thousand, got {at_slow_share}"
         );
 
         // A thousandfold range over one fitted parameter — the reason the step chance is
         // fitted rather than defaulted.
-        assert!(slow_fall_off / shipped_fall_off > 900.0);
+        assert!(at_slow_share / at_shipped_share > 900.0);
     }
 
     /// **At period 1 the whole part-repeat branch is unreachable**, because every length
@@ -1444,7 +1513,7 @@ mod tests {
         let model = StutterModel::hipstr_shipped();
         // Long enough that no contraction is out of reach, so the part-repeat branch is the
         // only thing missing.
-        let lost = model.truncated_mass_lost(period(1), 40);
+        let lost = model.unreachable_mass(period(1), repeats(40));
         let part_repeat_mass = model.part_repeat_longer_share() + model.part_repeat_shorter_share();
         assert!(
             (lost - part_repeat_mass).abs() < 1e-12,
@@ -1454,7 +1523,7 @@ mod tests {
 
         // The same model at period 2 loses essentially nothing: the branch is reachable
         // there, and both cutoffs' tails are 0.05^10.
-        assert!(model.truncated_mass_lost(period(2), 40) < 1e-11);
+        assert!(model.unreachable_mass(period(2), repeats(40)) < 1e-11);
     }
 
     /// **A short tract loses the contractions it cannot reach**, and that is the term that
@@ -1464,8 +1533,8 @@ mod tests {
     #[test]
     fn a_short_tract_loses_more_than_a_long_one() {
         let model = StutterModel::hipstr_shipped();
-        let short = model.truncated_mass_lost(period(3), 1);
-        let long = model.truncated_mass_lost(period(3), 30);
+        let short = model.unreachable_mass(period(3), repeats(1));
+        let long = model.unreachable_mass(period(3), repeats(30));
         assert!(
             short > long,
             "a one-repeat tract lost {short}, a thirty-repeat one {long}"
@@ -1501,14 +1570,39 @@ mod tests {
             part_repeat_shorter_share: 0.1,
             part_repeat_one_step_share: 0.95,
         });
+        // **Against the enumeration, not against a range.** `lost >= 0.0 && lost.is_finite()`
+        // is satisfied by a constant, by an absolute value, and by any of the five terms
+        // being wrong; comparing with the oracle pins the clamp exactly and everything else
+        // with it.
+        let mut clamped_cells = 0;
         for period_bases in 1..=6u8 {
             for repeat_count in [1u32, 5, 30] {
-                let lost = hostile.truncated_mass_lost(period(period_bases), repeat_count);
+                let period = period(period_bases);
+                let repeat_count = repeats(repeat_count);
+                let lost = hostile.unreachable_mass(period, repeat_count);
+                let raw = 1.0 - reachable_mass(&hostile, period, repeat_count);
                 assert!(
-                    lost >= 0.0 && lost.is_finite(),
-                    "period {period_bases}, {repeat_count} repeats reported {lost}"
+                    (lost - raw.max(0.0)).abs() < 1e-12,
+                    "period {period_bases}, {repeat_count} repeats reported {lost} \
+                     against {raw}"
                 );
+                if raw < 0.0 {
+                    clamped_cells += 1;
+                    assert_eq!(lost, 0.0);
+                }
             }
         }
+
+        // **The clamp must actually fire somewhere in this sweep**, or the test has stopped
+        // covering what it is named for — and it must not fire everywhere, or the sweep has
+        // stopped covering the honest answer. **Measured: 12 of the 18 cells clamp.** The six
+        // that do not are the ones where genuinely unreachable mass exceeds this row's
+        // over-allocation: at period 1 with a single repeat the model can place only 0.51 —
+        // no contraction is reachable and the part-repeat branch does not exist — so 0.49 is
+        // a real loss rather than a negative one to clamp away.
+        assert_eq!(
+            clamped_cells, 12,
+            "the clamp fired at {clamped_cells} of 18 cells"
+        );
     }
 }

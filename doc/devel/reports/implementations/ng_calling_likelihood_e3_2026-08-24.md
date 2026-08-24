@@ -61,7 +61,7 @@ of the silent failures spec §12 test 4 names were injected here and caught:
 
 | the mutation | what it does | caught by |
 |---|---|---|
-| the one-step share read as its complement | the ten scored steps hold `1 − 0.95^10`, four tenths of a branch's mass, so six tenths of every slip vanishes | the tripwire, plus 1 other |
+| the one-step share read as its complement, **in the model's own shares** | the ten scored steps hold `1 − 0.95^10`, four tenths of a branch's mass, so six tenths of every slip vanishes | the tripwire, plus 1 other |
 | the same-length share not the remainder (`+1e-4`) | the total moves by exactly that error | the tripwire, plus 7 others |
 | the part-repeat geometric indexed by `Δ` rather than the compressed rank | its weights skip the multiples of the period and sum short | the tripwire, plus 6 others |
 
@@ -73,15 +73,24 @@ A second test measures the complement's cost rather than asserting it: a complem
 the distribution short by **0.1257 at a slippage level of 0.2**, against the tripwire's tolerance of
 1e-9 — eight orders of margin.
 
+**One correction, from this milestone's review.** The row above is about a complemented share
+reaching the *model*. It is **not** about `stutter_rates_for` dropping the complement, and an
+earlier version of this report and of that function's doc comment said the tripwire would catch
+that too. It does not: the tripwire builds its rates from literals, so it re-spells the conversion
+rather than calling it. Measured — dropping the complement fails exactly **two** tests, both in the
+conversion's own module, and leaves the tripwire green.
+`a_fitted_row_yields_a_distribution_that_sums_to_one` was added on that side of the boundary so the
+invariant has a guard that can fail on its behalf.
+
 The tripwire also cross-checks E2: alongside "the total is one to 1e-9" it requires the total to
-equal `1 − truncated_mass_lost(...)` to 1e-12. Two pieces of machinery derived completely
+equal `1 − unreachable_mass(...)` to 1e-12. Two pieces of machinery derived completely
 differently, agreeing.
 
 ## 5. One deviation: where `stutter_rates_for` lives
 
 The plan puts Milestone E's three changes in
 [`alignment/stutter.rs`](../../../../src/ng/alignment/stutter.rs). **The conversion is in
-[`calling/likelihood/ssr_emission.rs`](../../../../src/ng/calling/likelihood/ssr_emission.rs)
+[`calling/likelihood/stutter_rates.rs`](../../../../src/ng/calling/likelihood/stutter_rates.rs)
 instead** (a new file, which the plan's scope line already names as this plan's).
 
 The reason is a module edge. `alignment` and `parameter_estimation` are siblings and **neither
@@ -103,8 +112,11 @@ The sums-to-one tripwire stayed in `stutter.rs`, where the distribution is.
 | `cargo fmt --check` | exit 0 |
 
 **26 tests** in `ng::alignment::stutter` (24 at E2) and **5** in
-`ng::calling::likelihood::ssr_emission`. Each of the three mutations in §4 was injected and
+`ng::calling::likelihood::stutter_rates`. Each of the three mutations in §4 was injected and
 restored from a byte-compared copy.
+
+*(After this milestone's review: **27** and **7**, and the file is `stutter_rates.rs` — it holds no
+emission, and F1 builds the real `ssr_emission.rs` beside it.)*
 
 ## 7. Deferred for the owner
 
@@ -115,4 +127,11 @@ Carried forward from E2, plus one new:
 2. **`stutter_rates_for` has no production caller yet** — F1's `SsrScoringContext` is the consumer.
    It is exercised only by its own tests.
 3. **The plan says Milestone E's three changes are in `alignment/stutter.rs`**; one of them is not,
-   for the module-edge reason in §5. If that reasoning is wrong, moving it is a two-line change.
+   for the module-edge reason in §5. The review verified the sibling claim in both directions across
+   the whole crate, test-only imports included, and endorsed the placement — but flagged that
+   **`arch/read_likelihoods.md` §4.2 still sketches `stutter_rates_for` beside the distribution**,
+   which is the placement this step rejected. The architecture is owed that repointing.
+4. **Spec §12's fourth test asks for periods 1 to 6; the tripwire runs 2 to 6.** Period 1 is
+   excluded because the part-repeat branch is unreachable there by construction, so the total is
+   *supposed* to fall short — and a separate test pins by how much. The reasoning is sound and
+   recorded, but it is a departure from a specified test and the spec should say so itself.

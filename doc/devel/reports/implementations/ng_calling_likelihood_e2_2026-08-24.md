@@ -17,9 +17,11 @@ whole-repeat branch and to the re-indexed base-pair count on the part-repeat bra
 inherited from production's provisional 10 rather than fitted. **Both are still 10, so no score
 moves** — what changes is that the two are separately settable by whoever measures them.
 
-**And the model now reports what it cannot place.** `StutterModel::truncated_mass_lost(period,
+**And the model now reports what it cannot place.** `StutterModel::unreachable_mass(period,
 repeat_count)` returns one minus the total the distribution puts on everything a read of that
-candidate could show.
+candidate could show. *(It was `truncated_mass_lost` until this milestone's review: only the
+cutoffs are truncation, and they are the smallest of the three causes — the adjective pointed away
+from the largest one, which §2 calls the one most easily mistaken for a defect.)*
 
 ## 2. Why the loss has to be reported, and how big it actually is
 
@@ -60,7 +62,7 @@ the spec is not this step's to edit.
 
 ## 4. Closed form, checked by enumeration
 
-`truncated_mass_lost` sums five geometric tails, because it is called once per candidate per read
+`unreachable_mass` sums five geometric tails, because it is called once per candidate per read
 group. The test enumerates instead — it walks every length a read could show, calling
 `probability` for each, and requires the two to agree to 1e-12 across **six one-step shares × three
 part-repeat one-step shares × six periods × eight repeat counts, 864 combinations**.
@@ -72,7 +74,7 @@ Two routes to one number is the point. A version that enumerated inside the mode
 
 | command | result |
 |---|---|
-| `./scripts/dev.sh cargo test` — library target | **4,369 passed, 0 failed, 14 ignored** (4,358 before) |
+| `./scripts/dev.sh cargo test` — library target | **4,369 passed, 0 failed, 14 ignored** — against **4,364** at the parent `44c39a83`, so E2 adds the five tests it lists. *(An earlier draft said 4,358, which is the count two commits back: `44c39a83` had added six of its own.)* |
 | `./scripts/dev.sh cargo test --all-features` — every target | 4,463 / 0 / 18 |
 | `clippy --lib --all-features --tests -- -D warnings` | exit 0 |
 | `cargo check --examples --all-features` | exit 0 |
@@ -95,5 +97,13 @@ floored-model case.
 1. **Spec §4.2's prose and its figures disagree about whether a tract can lose its last repeat**
    (§3). This step follows the figures. The prose should be corrected to match, or the figures
    recomputed — either way it is a one-line edit to a document this step does not own.
-2. **`truncated_mass_lost` has no consumer yet.** It feeds `SsrScoringContext.truncated_mass_lost`,
-   which F1 builds. Until then it is exercised only by its own tests.
+   **The review re-derived both readings independently and the argument holds**: the two differ
+   twentyfold at a one-step share of 0.95, and only one of them lands on the two sizes §4.2 states.
+2. **Spec §4.2 calls the part-repeat cutoff "10 base pairs".** It is applied to `Δ − Δ/period`, a
+   compressed rank, and ten of those admit about 13 base pairs at period 4 — which the spec's own
+   text also says. The unit is wrong by the same argument the spec makes against production's single
+   constant. The doc comments here now say *re-indexed steps*; the spec is the source and is owed
+   the correction.
+3. **`unreachable_mass` has no consumer yet.** It feeds `SsrScoringContext`'s corresponding field,
+   which F1 builds; the architecture sketches that field as `truncated_mass_lost` and should be
+   repointed with it. Until then the method is exercised only by its own tests.
