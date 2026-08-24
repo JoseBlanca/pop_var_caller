@@ -169,10 +169,27 @@ Nineteen, up from thirteen before the review.
   is now closed for this citation; the other four `§8` references in that file point at the **spec**
   sibling, whose §8 does exist.
 - **Doc links to `#[cfg(test)]` test functions do not resolve**, which a reviewer found on the
-  first draft of this step. They are written here as plain code spans instead, so this step adds
-  none. `cargo doc --no-deps` on the branch now reports **12 warnings, all "redundant explicit link
-  target", and no unresolved links at all** — so the handoff's note of "17 pre-existing unresolved
-  intra-doc links" is stale and there is nothing outstanding to inherit.
+  first draft of this step. They are written here as plain code spans instead.
+
+  **Correction, 2026-08-23, twice.** This report first claimed `cargo doc --no-deps` showed "no
+  unresolved links at all" and that the handoff's note of pre-existing ones was stale. **Both
+  halves were wrong, and the cause was the grep rather than the tree**: rustdoc reports an
+  unresolved link as `error:`, not `warning:`, and the check counted only warnings.
+
+  The first correction then got the attribution wrong in the other direction, saying 23 of the 24
+  predate this work. **They do not.** Counted on `ee62a518`, the commit both calling branches were
+  cut from, there are **16**; on the merged `main` there are **24**. The eight the merge added are
+  this work's own: five in `calling/genotype_prior/`, two in `src/ng/mod.rs` from the foundations
+  plan's step C2, and the one already fixed here. **So seven broken links in this work's own
+  documentation remain**, all of the same kind — a bracketed link to a `#[cfg(test)]` item, which
+  cannot resolve because the item does not exist in a doc build.
+
+  They are **not fixed here on purpose**: four of the seven sit in two files the calling
+  prerequisites branch is editing right now, and three more merge conflicts to repair seven links
+  that block nothing is a bad trade. `cargo doc` is not one of this project's gates. **Owed once
+  that branch merges**, and the check that finds them is
+  `cargo doc --no-deps 2>&1 | grep -c '^error: unresolved link'` — not a grep for `warning`, which
+  is what produced both wrong numbers above.
 - **Spec §5.1 says production "carries the question as a deferred re-tune"** with a quoted label
   that appears nowhere in production. Flagged for whoever owns the spec; the code quotes the spec
   faithfully.

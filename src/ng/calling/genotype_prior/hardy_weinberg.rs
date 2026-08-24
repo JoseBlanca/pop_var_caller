@@ -46,7 +46,7 @@
 //! that mattered; marginalizing over that same concentration gives 20:1 — the same wrong answer,
 //! computed more expensively. **So the comparator runs on the same concentration as the default
 //! and supplies no pseudocount of its own**, and
-//! [`tests::the_row_is_hardy_weinberg_at_the_handed_concentration_and_nothing_else`] is what holds
+//! `tests::the_row_is_hardy_weinberg_at_the_handed_concentration_and_nothing_else` is what holds
 //! that: it checks the row against a closed form evaluated at exactly the frequencies handed in,
 //! which any hidden pseudocount would break.
 

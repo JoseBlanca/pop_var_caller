@@ -227,16 +227,27 @@ impl GenotypePriorModel for MarginalizedDirichletPrior {
 /// The mixture on a bare coefficient rather than on the newtype.
 ///
 /// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model and a case
-/// no caller here can reach: [`InbreedingF`](crate::ng::types::InbreedingF) is half-open `[0, 1)`
-/// since `calling_prerequisites.md` A1, so the trait above cannot deliver the limit at all. This
-/// is the only spelling that reaches it, and the limit is worth pinning: at `F = 1` every
-/// heterozygote becomes impossible, and the two homozygotes must stand in the ratio
-/// `α_ref : α_alt` (spec §7, §12 test 3).
+/// no caller here can reach. **What keeps it away is the type, and nothing weaker**:
+/// [`InbreedingF`](crate::ng::types::InbreedingF) is half-open `[0, 1)` — the tightening the
+/// prerequisites plan owed, **done 2026-08-23**, so
+/// [`InbreedingF::try_new(1.0)`](crate::ng::types::InbreedingF::try_new) now returns an error and a
+/// coefficient of exactly 1 cannot be represented. The trait above therefore cannot deliver the
+/// limit at all, and this is the only spelling that reaches it.
 ///
-/// **The type is what makes that true, not a clamp.** Production clamps a *fitted* coefficient at
-/// 0.99 and still reaches its caller at `F = 1` through `--inbreeding-coefficient`, whose parser
-/// admits the closed `[0, 1]`; a cap inside one estimator is not a guarantee about the value the
-/// prior reads. Here the value is unrepresentable, which is a stronger thing (spec §7).
+/// The limit is worth pinning either way: at `F = 1` every heterozygote becomes impossible, and the
+/// two homozygotes must stand in the ratio `α_ref : α_alt` (spec §7, §12 test 3).
+///
+/// **An earlier version of this comment credited production's estimator clamp of 0.99 with that
+/// guarantee, and the clamp does not provide it** (corrected 2026-08-23, alongside spec §7). The
+/// clamp is a line inside one estimator; production's own command line takes the closed `[0, 1]`
+/// and a test pins that it accepts exactly 1
+/// (`parse_inbreeding_coefficient`, `src/pop_var_caller/cli/parsers.rs`), so in production a
+/// coefficient of 1 reaches the engine whenever someone passes one. **ng has no such door, and now
+/// cannot have one by accident** — every construction from a raw `f64` outside test code goes
+/// through the checked constructor, the fitted path clamps at 0.99 before it, and
+/// `InbreedingMode::Supplied` carries an already-built value. Whoever eventually gives ng a command
+/// line still owes it not to open one, because a validated type is a guarantee and a clamp beside a
+/// flag is not.
 ///
 /// **This is not a test-only path**, whatever its reason for existing: the trait implementation
 /// above routes every caller through it, which is why the coefficient is checked here rather than
