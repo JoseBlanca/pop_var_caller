@@ -251,14 +251,38 @@ impl fmt::Display for ReadGroupId {
 pub struct BatchId(pub u32);
 
 impl BatchId {
-    /// The batch every read group is in when a run declares no batching.
-    pub const ONLY: Self = Self(0);
+    /// The batch every read group is in when a run declares no batching — **the name the
+    /// architecture already uses for it**, `SequencingBatches::all_together`
+    /// (`doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
+    pub const ALL_TOGETHER: Self = Self(0);
 
     #[inline]
     pub fn get(self) -> u32 {
         self.0
     }
 }
+
+/// A run's batching **keyed by read group** — entry *i* is [`ReadGroupId`] *i*'s batch.
+///
+/// **A wrapper rather than a bare `&[BatchId]`, because the sample-keyed batching is the same
+/// slice type and means something else.** The two agree in length whenever a run has one
+/// library per sample — which is every sample of every benchmark cohort here — so transposing
+/// them passes both shape checks and comes back as a wrong contaminant frequency rather than a
+/// panic. Sample order and read-group order are minted by different rules, so the mis-key is
+/// only invisible, never harmless: the frequency it produces is worth up to 12 nats a read
+/// between batches.
+///
+/// **The same argument the allele-copy views already won here.**
+/// `CohortAlleleCopies` and `SampleAlleleCopies` are two types for one shape for exactly this
+/// reason, and the measurement recorded there is that the flat-slice version, swapped, silently
+/// returned the bare seed at every allele with nothing raised.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct BatchOfEachReadGroup<'a>(pub &'a [BatchId]);
+
+/// A run's batching **keyed by sample** — entry *i* is sample *i*'s batch, in the run's sample
+/// order. [`BatchOfEachReadGroup`] says why this is a wrapper and not a slice.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct BatchOfEachSample<'a>(pub &'a [BatchId]);
 
 /// Just the index, for [`ReadGroupId`]'s reason: a message naming a batch supplies its own
 /// word for it.

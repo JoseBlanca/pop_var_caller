@@ -261,12 +261,15 @@ contaminated case (`c = 0.03`, contaminant frequency 1 in 1,000). *Depends:* B2.
 divided by their total — plus a batch axis on the mixture's frequency table, read through the
 observation's own read group. **The row needs no sample identity for this**, which is what made it
 fit: batches are over read groups, and every observation already carries one. `SequencingBatches`
-is still unbuilt and is not built here; the mixture takes the batching as a dense `&[BatchId]`,
-which that type produces trivially when it lands. **Two things are owed and named in the step's
+is still unbuilt and is not built here; the mixture takes the batching as a
+`BatchOfEachReadGroup`, which that type produces trivially when it lands. **Two things are owed and named in the step's
 report:** which batch a sample belongs to when its libraries ran in different ones — that rule
 belongs with `SequencingBatches`, so the producer takes the sample's batch as an argument — and
 whether the never-seen floor should stay defensive at `1e-12` or become a statistical pseudocount,
-which is a modelling decision with a genotype effect.)*
+which is a modelling decision with a genotype effect. **The review added a third, and it is the
+one to settle first:** the frequency is summed over the batch's samples *including the one being
+scored*, so a sample alone in a batch explains its own alternative reads as its own contaminant —
+the leave-one-out the genotype prior already does and this does not.)*
 **New here on 2026-08-24 (owner); this used to arrive from the pre-pass as three allele-class
 frequencies and does not.** `q(o)` is the frequency of the observation's own allele at the locus
 being called, over the samples in this sample's **sequencing batch** — the grain

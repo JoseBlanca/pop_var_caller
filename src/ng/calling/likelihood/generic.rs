@@ -1139,13 +1139,14 @@ mod tests {
 
     // ---- B2: the closed form ----
 
+    use super::super::test_batching::one_batch;
     use super::super::{
         ContaminationMixture, ContaminationView, GenericObservation, GenericSampleEvidence,
         ReadGroupCalibration,
     };
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
-    use crate::ng::types::{BatchId, LogProb, ReadGroupId};
+    use crate::ng::types::{BatchId, BatchOfEachReadGroup, LogProb, ReadGroupId};
 
     /// An observation of `num_reads` reads on one allele from one read group, carrying the
     /// summed log error the merge would have folded.
@@ -1217,24 +1218,6 @@ mod tests {
             &mut out,
         );
         out.into_iter().map(LogProb::get).collect()
-    }
-
-    /// Enough entries that any fixture's read groups fit; a mixture takes the prefix it needs.
-    static ALL_IN_ONE_BATCH: [BatchId; 16] = [BatchId::ONLY; 16];
-
-    /// A mixture under **the default batching** — one batch holding every read group, so every
-    /// observation reads the same contaminant frequencies. That is what a run which declares no
-    /// batching gets, and it is the shape all but the batch-specific fixtures want.
-    fn one_batch<'a>(
-        fractions: &'a [ContaminationView],
-        frequencies: &'a [f64],
-    ) -> ContaminationMixture<'a> {
-        ContaminationMixture::new(
-            fractions,
-            &ALL_IN_ONE_BATCH[..fractions.len()],
-            frequencies,
-            frequencies.len(),
-        )
     }
 
     /// A contamination fraction for every read group the fixtures use, with the counts that
@@ -2430,9 +2413,14 @@ mod tests {
         let fractions = every_read_group_contaminated_at(0.04);
         // Read groups 0 and 1 ran in a batch where the alternative is common; 2 and 3 in one
         // where it is rare. Batch-major, two alleles to a row.
-        let batching = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
+        let batch_of_each_read_group = [BatchId(0), BatchId(0), BatchId(1), BatchId(1)];
         let frequencies = [0.5, 0.5, 0.999, 0.001];
-        let mixture = ContaminationMixture::new(&fractions, &batching, &frequencies, 2);
+        let mixture = ContaminationMixture::new(
+            &fractions,
+            BatchOfEachReadGroup(&batch_of_each_read_group),
+            &frequencies,
+            2,
+        );
 
         let scored_from = |read_group: u32| {
             let supported = [observation(1, read_group, 3, -21.0)];
