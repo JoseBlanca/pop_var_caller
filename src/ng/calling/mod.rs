@@ -60,8 +60,9 @@ pub use likelihood::generic::{
     fill_log_error_spreads, genotype_log_likelihood_row,
 };
 pub use likelihood::{
-    ContaminationView, GenericEvidenceBuffer, GenericObservation, GenericSampleEvidence,
-    MAX_BASE_ERROR, MIN_BASE_ERROR, ReadGroupCalibration, SsrRowScratch, SsrSampleEvidence,
+    ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
+    GenericSampleEvidence, MAX_BASE_ERROR, MIN_BASE_ERROR, ReadGroupCalibration, SsrRowScratch,
+    SsrSampleEvidence,
 };
 
 use crate::ng::locus_generation::LocusKind;

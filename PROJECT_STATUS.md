@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-23):** **the comparator, and the arm nothing could name**
+> - **Last completed task (2026-08-24):** **some of a sample's reads came from somebody else, and
+> the likelihood now says so** (step C1 of
+> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
+> `ng-calling-likelihoods`). A read is scored as either something this individual's genotype can
+> produce or something a contaminating neighbour's DNA showed, mixed by how contaminated that
+> library is. **There is no separate path for a clean sample** — with nothing contaminated the
+> formula is the old one, and that had to be measured rather than asserted: over 3,552
+> comparisons the two agree to a relative 2.9 × 10⁻¹⁶, which is 2 × 10⁻¹² Phred where the
+> numbers are largest. On a diploid showing one alternative read, a 3% fraction moves the
+> heterozygote's lead over the reference homozygote from 6.019 nats to 5.981 where the
+> contaminant carries that allele at 1 in 1,000, and to 2.131 at 1 in 2 — **so it is the
+> contaminant's own frequency, not the fraction, that decides whether contamination changes a
+> call.**
+> **One decision taken two steps ago had to be reversed to get here.** The calibrated error the
+> row was built to charge was clamped at one half, and a clamp that binds on a single read but
+> not on the fold of that read with others breaks the property the whole formula is shaped
+> around: that pooling reads must not change the answer. On the row's own fixture the clamp
+> would have moved the result by 69 nats where the property is pinned to a relative 2 × 10⁻¹⁴.
+> **The reviews found two ways to get a confident wrong answer with nothing crashing:** a
+> not-a-number summed error came back as the most confident read the model can express, because
+> `f64::max` returns the other operand; and a spread table from the wrong ploidy truncated the
+> genotype walk in silence, leaving an unscored genotype the winner.
+> [What was built, what the reviews changed, and two questions for the owner](doc/devel/reports/implementations/ng_calling_likelihood_c1_2026-08-24.md).
+> - **Previously (2026-08-23):** **the comparator, and the arm nothing could name**
 > (step F1 of [the genotype prior](doc/devel/ng/impl_plan/calling_prior.md), branch
 > `ng-calling-prior`; **Milestone F complete, at Checkpoint F — step 8 is now a complete set of
 > pure functions**). The caller can now build its genotype prior two ways behind one seam: the

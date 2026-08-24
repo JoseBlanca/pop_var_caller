@@ -161,6 +161,14 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// Ceiling on the same quantity, `0.5` — inherited from production's `MAX_BASE_ERROR`
 /// alongside [`MIN_BASE_ERROR`], which is why they are named together.
 ///
+/// **The row does not apply it** (C1, 2026-08-24), and that is the first thing to know about
+/// it: a ceiling binds on a single read and not on the fold of that read with others, which
+/// makes it a non-linear function of a per-read quality — exactly what spec §2.3's aggregation
+/// contract forbids. It survives on [`ReadGroupCalibration::charged_error_capped_at_half`],
+/// which nothing outside this module's tests reads, and whether it should survive at all is an
+/// open question for the owner. Everything below describes what the constant *means*, not
+/// something the likelihood does.
+///
 /// A read charged more than half is a read the model says is more often wrong than right, and
 /// production's own comment calls its ceiling a safety net rather than a modelling claim — a
 /// sample whose mean error came near one would not have passed the filter before it. **It is
@@ -172,7 +180,7 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// **The `.clamp` that applies it is also what stops a `NaN` reaching a logarithm**, and it
 /// does not: `f64::clamp` passes `NaN` straight through. That is why the one input that can
 /// produce one — an observation with no reads behind it — is an assertion rather than a
-/// clamped value ([`ReadGroupCalibration::calibrated_error`]).
+/// clamped value ([`ReadGroupCalibration::charged_error_capped_at_half`]).
 pub const MAX_BASE_ERROR: f64 = 0.5;
 
 /// §3.2's calibration: one multiplier per read group, so that the average error the model
@@ -334,11 +342,16 @@ impl ReadGroupCalibration {
         }
     }
 
-    /// The scale in log space — **what the SNP/indel row actually adds**, once per observation.
+    /// The scale in log space — what spec §3.3's log-space form adds, once per observation.
     ///
-    /// Spec §3.3 charges an unexplained observation `q_sum + n·(log scale − log m)`, so the
-    /// multiplier never appears as a multiplier there: it is one addition per observation, and
-    /// the row hoists this out of its genotype loop because it is a property of the read group.
+    /// §3.3 charges an unexplained observation `q_sum + n·(log scale − log m)`, so the
+    /// multiplier never appears as a multiplier there: it is one addition per observation.
+    ///
+    /// **The row no longer takes this route** (C1, 2026-08-24). Spec §3.6's mixture is
+    /// evaluated in probability space, so the row multiplies by the scale rather than adding
+    /// its logarithm — through [`charged_error`](Self::charged_error). What still reads this
+    /// is the independent §3.3 oracle the row's own tests check the mixture against at zero
+    /// contamination, which is the one place the log-space form has to be spelled out.
     ///
     /// **Exactly zero for a defaulted calibration**, since `ln 1 = 0` — so a read group the
     /// pre-pass emitted no rate for is charged exactly what its reads were minted with, with no
@@ -352,7 +365,7 @@ impl ReadGroupCalibration {
     /// scale times the geometric mean of its reads' minted error, floored against zero and
     /// **not capped from above**.
     ///
-    /// # Why this exists beside [`calibrated_error`](Self::calibrated_error)
+    /// # Why this exists beside [`charged_error_capped_at_half`](Self::charged_error_capped_at_half)
     ///
     /// The two differ in one thing: that one clamps into `[MIN_BASE_ERROR, MAX_BASE_ERROR]`
     /// and this one only floors. **The ceiling cannot be applied to what the row charges**,
@@ -381,17 +394,40 @@ impl ReadGroupCalibration {
     ///
     /// # Panics
     ///
-    /// **In release as well as debug**, on `num_reads == 0`, for
-    /// [`calibrated_error`](Self::calibrated_error)'s reasons: an observation with no reads
-    /// behind it has no average error, and the two numbers this would otherwise return — a
-    /// `NaN` at a zero `q_sum`, the floor at a negative one — are both things nothing
-    /// downstream could tell from a real charge.
+    /// **In release as well as debug**, on three caller mistakes, and the first two are
+    /// checked here because `f64::max` cannot be trusted to carry them (spec §8 puts a
+    /// parameter outside its declared range on the assertion side):
+    ///
+    /// - **`num_reads == 0`.** An observation with no reads behind it is a row the merge does
+    ///   not build, and it has no average error to take.
+    /// - **A `q_sum` that is not a finite number at or below zero.** `q_sum` is a sum of
+    ///   logarithms of probabilities, so it cannot be positive; a positive one returns a
+    ///   *positive* log-likelihood, measured at `+48.90` on the row's own fixture. And
+    ///   `x.max(y)` returns `y` when `x` is `NaN`, so **a `NaN` would come back as
+    ///   `MIN_BASE_ERROR` — the most confident error probability this module admits** rather
+    ///   than as a `NaN` anything downstream could see. That is the one place this differs
+    ///   from [`charged_error_capped_at_half`](Self::charged_error_capped_at_half), whose
+    ///   `f64::clamp` passes a `NaN` through, and it is why the check is here and not there.
+    /// - **A scale that is not finite and positive.** [`scale`](Self::scale) is a public
+    ///   field, so [`from_fitted_rate`](Self::from_fitted_rate)'s own guard can be bypassed
+    ///   by building the struct literally, which the tests in this file do.
     #[must_use]
     pub fn charged_error(&self, q_sum: f64, num_reads: u32) -> f64 {
         assert!(
             num_reads > 0,
             "an observation with no reads behind it has no average error; the merge builds \
              no such row"
+        );
+        assert!(
+            q_sum.is_finite() && q_sum <= 0.0,
+            "an observation's summed log error is {q_sum}, and a sum of logarithms of \
+             probabilities is a finite number at or below zero"
+        );
+        assert!(
+            self.scale.is_finite() && self.scale > 0.0,
+            "this read group's calibration scale is {}, and a scale is a finite positive \
+             multiplier",
+            self.scale
         );
         let mean_log_error = q_sum / f64::from(num_reads);
         (self.scale * mean_log_error.exp()).max(MIN_BASE_ERROR)
@@ -411,7 +447,13 @@ impl ReadGroupCalibration {
     /// *is* the fitted rate — **for every read whose calibrated error stays inside the
     /// floors.**
     ///
-    /// See [`log_scale`](Self::log_scale) for what the row actually adds.
+    /// **Nothing outside this module's tests calls it, and the `dead_code` allowance below is
+    /// how that stays visible** rather than being hidden by leaving the method public. It is
+    /// here because the pair of floors is inherited from production and this half of the pair
+    /// is what we deliberately do not apply; whether that is worth a method is an open question
+    /// for the owner, recorded in C1's implementation report with a recommendation to delete
+    /// both it and [`MAX_BASE_ERROR`]. Deleting it retires an A2 decision, which is not
+    /// something a C1 commit should do quietly.
     ///
     /// Floored into `[MIN_BASE_ERROR, MAX_BASE_ERROR]` before it can reach a logarithm, and
     /// **the ceiling is the one that binds in practice**: at a scale of 2.3 any read minted
@@ -431,7 +473,11 @@ impl ReadGroupCalibration {
     /// assertions in release (`per_group_merger.rs:1963` is the precedent), and the cost here
     /// is one integer branch beside an `exp`.
     #[must_use]
-    pub fn calibrated_error(&self, q_sum: f64, num_reads: u32) -> f64 {
+    #[allow(
+        dead_code,
+        reason = "kept while its fate is an open question — see the doc above"
+    )]
+    pub(crate) fn charged_error_capped_at_half(&self, q_sum: f64, num_reads: u32) -> f64 {
         assert!(
             num_reads > 0,
             "an observation with no reads behind it has no average error; the merge builds \
@@ -534,7 +580,7 @@ impl ContaminationView {
 /// Holding them together is what lets one construction check that they describe the same run,
 /// instead of the row rediscovering it per observation.
 ///
-/// **[`none`](Self::none) is the uncontaminated case and is not a special path.** With no
+/// **[`uncontaminated`](Self::uncontaminated) is the uncontaminated case and is not a special path.** With no
 /// fractions the mixture collapses to `own(o | g)` and the row computes spec §3.3 — to a few
 /// units in the last place, because §8 evaluates in probability space and §3.3 in log space, so
 /// there is an `exp`/`log` round trip between the two forms. That is why the row has **no
@@ -542,12 +588,12 @@ impl ContaminationView {
 /// because its own two forms genuinely differ (spec §3.6).
 ///
 /// **At one sample there is no mixture at all.** Contamination is a comparison between samples,
-/// so a single-sample run has nothing to estimate `c` from and gets [`none`](Self::none) — *emit
+/// so a single-sample run has nothing to estimate `c` from and gets [`uncontaminated`](Self::uncontaminated) — *emit
 /// it as absent*, not a fitted zero.
 #[derive(Copy, Clone, Debug)]
 pub struct ContaminationMixture<'a> {
     fractions: &'a [ContaminationView],
-    allele_frequencies: &'a [f64],
+    contaminant_allele_frequencies: &'a [f64],
 }
 
 impl<'a> ContaminationMixture<'a> {
@@ -556,10 +602,10 @@ impl<'a> ContaminationMixture<'a> {
     /// This is what a run whose parameter fit emitted no fraction gets, and what a
     /// single-sample run gets.
     #[must_use]
-    pub fn none() -> Self {
+    pub fn uncontaminated() -> Self {
         Self {
             fractions: &[],
-            allele_frequencies: &[],
+            contaminant_allele_frequencies: &[],
         }
     }
 
@@ -581,25 +627,35 @@ impl<'a> ContaminationMixture<'a> {
     /// *entirely* another individual's DNA is not a sample of the individual it is labelled
     /// with, and no estimator here can return it.
     #[must_use]
-    pub fn new(fractions: &'a [ContaminationView], allele_frequencies: &'a [f64]) -> Self {
+    pub fn new(
+        fractions: &'a [ContaminationView],
+        contaminant_allele_frequencies: &'a [f64],
+    ) -> Self {
         assert_eq!(
             fractions.is_empty(),
-            allele_frequencies.is_empty(),
+            contaminant_allele_frequencies.is_empty(),
             "a mixture needs both halves or neither: {} read-group fractions against {} allele \
              frequencies",
             fractions.len(),
-            allele_frequencies.len()
+            contaminant_allele_frequencies.len()
+        );
+        assert!(
+            !fractions.is_empty(),
+            "a mixture with no fractions and no frequencies is the uncontaminated case, and it \
+             is spelled `ContaminationMixture::uncontaminated` — one named way to say it, so \
+             that a caller reaches the decision rather than the shortest thing that compiles"
         );
         for (read_group, view) in fractions.iter().enumerate() {
             assert!(
                 (0.0..1.0).contains(&view.fraction),
-                "read group {read_group} is {} contaminated, and a fraction is a share of that \
-                 group's reads that came from somebody else — a whole library of another \
+                "read group {read_group} has a contamination fraction of {}, and a fraction is \
+                 a share of that group's reads that came from somebody else: a number at or \
+                 above zero, below one, and not a `NaN`. A whole library of another \
                  individual's DNA is not a sample of this one",
                 view.fraction
             );
         }
-        for (allele, &frequency) in allele_frequencies.iter().enumerate() {
+        for (allele, &frequency) in contaminant_allele_frequencies.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&frequency),
                 "the contaminating population shows allele {allele} at a frequency of \
@@ -608,15 +664,38 @@ impl<'a> ContaminationMixture<'a> {
         }
         Self {
             fractions,
-            allele_frequencies,
+            contaminant_allele_frequencies,
         }
     }
 
-    /// How many candidate alleles this mixture was built for — `0` when there is none, which
-    /// is how the row tells [`none`](Self::none) from a mixture belonging to another locus.
+    /// Whether this is the uncontaminated case, in which the row computes spec §3.3.
+    ///
+    /// **The branch that decides which formula runs deserves a name.** The row used to ask
+    /// this as `allele_count() == 0`, which announces at the call site only that a table is
+    /// empty (C1's review).
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        self.fractions.is_empty()
+    }
+
+    /// How many candidate alleles this mixture holds a contaminant frequency for — the count
+    /// the row checks against the locus it is calling.
     #[must_use]
     pub fn allele_count(&self) -> usize {
-        self.allele_frequencies.len()
+        self.contaminant_allele_frequencies.len()
+    }
+
+    /// How many read groups this mixture holds a fraction for — the count the row checks
+    /// against the calibration the run supplied.
+    ///
+    /// **A mixture is dense over read groups**, because [`fraction_of`](Self::fraction_of)
+    /// indexes it by [`ReadGroupId`]. Without this the row could only discover a mixture built
+    /// for a different run *lazily*, when some observation happened to name a read group past
+    /// the end — so a locus whose reads all came from the first few groups would pass, and the
+    /// mismatch would surface at whichever locus first reached further, or never (C1's review).
+    #[must_use]
+    pub fn read_group_count(&self) -> usize {
+        self.fractions.len()
     }
 
     /// `c` for one read group — zero where there is no mixture at all.
@@ -658,17 +737,20 @@ impl<'a> ContaminationMixture<'a> {
     /// On an allele the mixture has no frequency for, once there is a mixture — the row
     /// already checks the count against the locus, so reaching this means the two disagree.
     #[must_use]
-    pub fn frequency_of(&self, allele: AlleleId) -> f64 {
-        if self.allele_frequencies.is_empty() {
+    pub fn contaminant_frequency_of(&self, allele: AlleleId) -> f64 {
+        if self.contaminant_allele_frequencies.is_empty() {
             return 0.0;
         }
         let at = usize::from(allele.get());
-        *self.allele_frequencies.get(at).unwrap_or_else(|| {
-            panic!(
-                "allele {at} has no contaminant frequency; this mixture holds {}",
-                self.allele_frequencies.len()
-            )
-        })
+        *self
+            .contaminant_allele_frequencies
+            .get(at)
+            .unwrap_or_else(|| {
+                panic!(
+                    "allele {at} has no contaminant frequency; this mixture holds {}",
+                    self.contaminant_allele_frequencies.len()
+                )
+            })
     }
 }
 
@@ -1643,7 +1725,14 @@ mod tests {
         )
         .expect("three reads are a denominator");
 
-        let charged = calibration.calibrated_error(q_sum, num_reads);
+        // **Through `charged_error`, which is what the row charges** — not through the capped
+        // reading beside it. Spec §3.2's calibrated property is *the average charged error
+        // equals the measured rate*, and the cap is what breaks it, so pinning the property on
+        // the capped function tests a claim only the other one makes. This fixture's reads sit
+        // well inside the cap, so both return the same number here and the test passed either
+        // way; that is exactly why it had to be moved rather than left to fail one day. (C1,
+        // 2026-08-24 — the row stopped using the capped reading and this test did not follow.)
+        let charged = calibration.charged_error(q_sum, num_reads);
         let relative_gap = (charged - rate).abs() / rate;
 
         assert!(
@@ -1690,7 +1779,7 @@ mod tests {
         let mut weighted_log_sum = 0.0;
         let mut reads = 0u32;
         for &(q_sum, num_reads) in &observations {
-            let charge = calibration.calibrated_error(q_sum, num_reads);
+            let charge = calibration.charged_error_capped_at_half(q_sum, num_reads);
             weighted_log_sum += f64::from(num_reads) * charge.ln();
             reads += num_reads;
         }
@@ -1703,7 +1792,7 @@ mod tests {
             rate
         );
         // …and no single observation's charge is the fitted rate, which is the point.
-        let single = calibration.calibrated_error(observations[1].0, observations[1].1);
+        let single = calibration.charged_error_capped_at_half(observations[1].0, observations[1].1);
         assert!((single - rate).abs() > 1e-4);
     }
 
@@ -1725,7 +1814,7 @@ mod tests {
         )
         .expect("one read is a denominator");
 
-        let charged = calibration.calibrated_error(q_sum, 1);
+        let charged = calibration.charged_error_capped_at_half(q_sum, 1);
 
         assert!(
             (charged - rate).abs() <= f64::EPSILON * rate,
@@ -1750,8 +1839,8 @@ mod tests {
 
         let (good_q_sum, good_reads) = minted_reads_at_phred(&[40]);
         let (poor_q_sum, poor_reads) = minted_reads_at_phred(&[13]);
-        let good = calibration.calibrated_error(good_q_sum, good_reads);
-        let poor = calibration.calibrated_error(poor_q_sum, poor_reads);
+        let good = calibration.charged_error_capped_at_half(good_q_sum, good_reads);
+        let poor = calibration.charged_error_capped_at_half(poor_q_sum, poor_reads);
 
         // Phred 13 against Phred 40 is a factor of 10^2.7 either side of the scale.
         assert!(
@@ -1845,7 +1934,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no average error")]
     fn an_observation_with_no_reads_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().calibrated_error(-7.0, 0);
+        let _ = ReadGroupCalibration::defaulted().charged_error_capped_at_half(-7.0, 0);
     }
 
     /// Where nothing was fitted the qualities are used as reported — and the run's output has
@@ -1858,7 +1947,7 @@ mod tests {
 
         assert_eq!(defaulted.scale, 1.0);
         assert_eq!(defaulted.provenance, Provenance::Defaulted);
-        assert!((defaulted.calibrated_error(q_sum, num_reads) - 0.001).abs() < 1e-15);
+        assert!((defaulted.charged_error_capped_at_half(q_sum, num_reads) - 0.001).abs() < 1e-15);
     }
 
     /// A charge that could reach zero would reach negative infinity through the logarithm and
@@ -1875,9 +1964,19 @@ mod tests {
         };
         let (q_sum, num_reads) = minted_reads_at_phred(&[30]);
 
-        assert_eq!(tiny.calibrated_error(q_sum, num_reads), MIN_BASE_ERROR);
-        assert_eq!(huge.calibrated_error(q_sum, num_reads), MAX_BASE_ERROR);
-        assert!(tiny.calibrated_error(q_sum, num_reads).ln().is_finite());
+        assert_eq!(
+            tiny.charged_error_capped_at_half(q_sum, num_reads),
+            MIN_BASE_ERROR
+        );
+        assert_eq!(
+            huge.charged_error_capped_at_half(q_sum, num_reads),
+            MAX_BASE_ERROR
+        );
+        assert!(
+            tiny.charged_error_capped_at_half(q_sum, num_reads)
+                .ln()
+                .is_finite()
+        );
     }
 
     /// *Not identified* and *zero* are different answers, and a caller told "no
@@ -2179,7 +2278,7 @@ mod tests {
 
     // ---- C1: the contamination mixture's two halves ----
 
-    fn a_fraction_of(fraction: f64) -> ContaminationView {
+    fn a_read_group_contaminated_at(fraction: f64) -> ContaminationView {
         ContaminationView {
             fraction,
             markers_with_reads: 1_000,
@@ -2193,22 +2292,25 @@ mod tests {
     /// plus `0` times whatever the contaminant would have shown.
     #[test]
     fn no_mixture_gives_a_zero_fraction_and_a_zero_frequency() {
-        let mixture = ContaminationMixture::none();
+        let mixture = ContaminationMixture::uncontaminated();
 
         assert_eq!(mixture.allele_count(), 0);
         assert_eq!(mixture.fraction_of(ReadGroupId(7)), 0.0);
-        assert_eq!(mixture.frequency_of(AlleleId(3)), 0.0);
+        assert_eq!(mixture.contaminant_frequency_of(AlleleId(3)), 0.0);
     }
 
     #[test]
     fn a_mixture_hands_back_the_fraction_and_frequency_it_was_given() {
-        let fractions = [a_fraction_of(0.0), a_fraction_of(0.04)];
+        let fractions = [
+            a_read_group_contaminated_at(0.0),
+            a_read_group_contaminated_at(0.04),
+        ];
         let frequencies = [0.7, 0.25, 0.05];
         let mixture = ContaminationMixture::new(&fractions, &frequencies);
 
         assert_eq!(mixture.allele_count(), 3);
         assert_eq!(mixture.fraction_of(ReadGroupId(1)), 0.04);
-        assert_eq!(mixture.frequency_of(AlleleId(2)), 0.05);
+        assert_eq!(mixture.contaminant_frequency_of(AlleleId(2)), 0.05);
     }
 
     /// **A fraction of exactly one is the one bound that does arithmetic**: `1 − c` underflows
@@ -2218,7 +2320,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is not a sample of this one")]
     fn a_library_that_is_entirely_somebody_else_is_refused() {
-        let fractions = [a_fraction_of(1.0)];
+        let fractions = [a_read_group_contaminated_at(1.0)];
         let frequencies = [1.0];
 
         let _ = ContaminationMixture::new(&fractions, &frequencies);
@@ -2227,7 +2329,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is not a sample of this one")]
     fn a_negative_fraction_is_refused() {
-        let fractions = [a_fraction_of(-0.01)];
+        let fractions = [a_read_group_contaminated_at(-0.01)];
         let frequencies = [1.0];
 
         let _ = ContaminationMixture::new(&fractions, &frequencies);
@@ -2236,7 +2338,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "which is not a frequency")]
     fn a_frequency_past_one_is_refused() {
-        let fractions = [a_fraction_of(0.02)];
+        let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.4, 1.6];
 
         let _ = ContaminationMixture::new(&fractions, &frequencies);
@@ -2248,7 +2350,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "needs both halves or neither")]
     fn fractions_without_frequencies_are_refused() {
-        let fractions = [a_fraction_of(0.02)];
+        let fractions = [a_read_group_contaminated_at(0.02)];
 
         let _ = ContaminationMixture::new(&fractions, &[]);
     }
@@ -2261,10 +2363,41 @@ mod tests {
         let _ = ContaminationMixture::new(&[], &frequencies);
     }
 
+    /// **One named way to say uncontaminated.** Two empty slices satisfy every other check in
+    /// `new`, so without this a caller building both halves from a fit that returned nothing
+    /// lands on the clean case through a constructor whose name says the opposite — and never
+    /// reads the paragraph where the decision is written down (C1's review).
+    #[test]
+    #[should_panic(expected = "is spelled `ContaminationMixture::uncontaminated`")]
+    fn two_empty_halves_are_refused_because_that_case_has_a_name() {
+        let _ = ContaminationMixture::new(&[], &[]);
+    }
+
+    /// The two accessors' own panics, which the row's eager checks make unreachable from a
+    /// run — so this is the only place they are exercised.
+    #[test]
+    #[should_panic(expected = "has no contamination fraction")]
+    fn a_read_group_the_mixture_does_not_cover_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frequencies = [0.9, 0.1];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies).fraction_of(ReadGroupId(4));
+    }
+
+    #[test]
+    #[should_panic(expected = "has no contaminant frequency")]
+    fn an_allele_the_mixture_does_not_cover_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frequencies = [0.9, 0.1];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies)
+            .contaminant_frequency_of(AlleleId(5));
+    }
+
     // ---- C1: what the row charges a wrong read ----
 
     /// **The one thing that separates [`ReadGroupCalibration::charged_error`] from
-    /// [`ReadGroupCalibration::calibrated_error`]**, pinned so that reuniting them is a test
+    /// [`ReadGroupCalibration::charged_error_capped_at_half`]**, pinned so that reuniting them is a test
     /// failure rather than a genotype that quietly moved.
     ///
     /// A read minted at Phred 1 is an error of 0.794. The capped reading returns 0.5 — 0.46
@@ -2278,7 +2411,7 @@ mod tests {
         let minted_at_phred_1 = -1.0 / 10.0 * std::f64::consts::LN_10;
 
         let charged = calibration.charged_error(minted_at_phred_1, 1);
-        let capped = calibration.calibrated_error(minted_at_phred_1, 1);
+        let capped = calibration.charged_error_capped_at_half(minted_at_phred_1, 1);
 
         assert!((charged - 0.794_328_2).abs() < 1e-6, "charged {charged}");
         assert_eq!(capped, MAX_BASE_ERROR);
@@ -2334,5 +2467,53 @@ mod tests {
     #[should_panic(expected = "has no average error")]
     fn a_charge_for_an_observation_with_no_reads_is_a_caller_bug() {
         let _ = ReadGroupCalibration::defaulted().charged_error(-7.0, 0);
+    }
+
+    /// **`f64::max` returns the other operand when one is `NaN`**, so without the check a
+    /// `NaN` summed log error comes back as [`MIN_BASE_ERROR`] — the most confident error
+    /// probability the module admits — and the row is finite, plausible and wrong.
+    ///
+    /// This is the one place [`ReadGroupCalibration::charged_error`] and
+    /// [`ReadGroupCalibration::charged_error_capped_at_half`] needed different guards:
+    /// `f64::clamp` propagates a `NaN`, `f64::max` swallows it. Found by C1's review.
+    #[test]
+    #[should_panic(expected = "at or below zero")]
+    fn a_summed_log_error_that_is_not_a_number_is_a_caller_bug() {
+        let _ = ReadGroupCalibration::defaulted().charged_error(f64::NAN, 3);
+    }
+
+    /// A `q_sum` above zero is not a sum of logarithms of probabilities, and it yields a
+    /// *positive* log-likelihood contribution — measured at `+48.90` on the row's own fixture
+    /// before the check went in.
+    #[test]
+    #[should_panic(expected = "at or below zero")]
+    fn a_positive_summed_log_error_is_a_caller_bug() {
+        let _ = ReadGroupCalibration::defaulted().charged_error(3.0, 3);
+    }
+
+    /// `scale` is a public field, so `from_fitted_rate`'s own guard is bypassable by building
+    /// the struct literally — which every fixture in this file does.
+    #[test]
+    #[should_panic(expected = "a finite positive multiplier")]
+    fn a_scale_that_is_not_a_positive_number_is_a_caller_bug() {
+        let broken = ReadGroupCalibration {
+            scale: -1.0,
+            provenance: Provenance::FittedHere,
+        };
+
+        let _ = broken.charged_error(-7.0, 3);
+    }
+
+    /// A `NaN` fraction is refused with a message that says what a fraction is, not only that
+    /// a whole library of somebody else's DNA is not a sample — the three mistakes this bound
+    /// catches are `NaN`, negative, and at-or-above one, and a reader hitting the first
+    /// should not be told about the third.
+    #[test]
+    #[should_panic(expected = "not a `NaN`")]
+    fn a_fraction_that_is_not_a_number_is_refused() {
+        let fractions = [a_read_group_contaminated_at(f64::NAN)];
+        let frequencies = [1.0];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
     }
 }
