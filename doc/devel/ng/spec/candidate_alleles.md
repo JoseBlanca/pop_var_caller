@@ -278,13 +278,23 @@ here.
 **A locus is called over at most six alleles including the reference. Above that the list is cut
 to the best six; the locus is never refused.**
 
-**Six is inherited.** It is production's `DEFAULT_MAX_ALLELES_PER_RECORD`
-([`per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs)) and GATK's
-`--max-alternate-alleles` default
-([`GenotypeCalculationArgumentCollection.java:29`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper/GenotypeCalculationArgumentCollection.java)),
-and ng's own documents already do their arithmetic at that width — "21 at six alleles"
+**Six is inherited from production**, whose `DEFAULT_MAX_ALLELES_PER_RECORD`
+([`per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs)) counts a record's
+whole allele set the same way — `enforce_max_alleles` compares `unified.alleles.len()` and
+protects the reference from pruning
+([`:1434`](../../../../src/var_calling/per_group_merger.rs)). ng's own documents already do their
+arithmetic at that width — "21 at six alleles"
 ([`calling_em_loop.md`](calling_em_loop.md) §1.3). **It has never been measured and is soft.**
 §4.2 says how often it binds, which is the fact that decides whether its value matters.
+
+**It is not GATK's six, and an earlier draft of this paragraph said it was.** GATK's
+`--max-alternate-alleles` defaults to six **alternates** — `DEFAULT_MAX_ALTERNATE_ALLELES = 6`,
+documented "Maximum number of alternate alleles to genotype"
+([`GenotypeCalculationArgumentCollection.java:29`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper/GenotypeCalculationArgumentCollection.java))
+— so GATK genotypes over seven alleles where ng genotypes over six, and **ng's cap is the tighter
+of the two by one allele**: 21 genotypes against 28 at diploid. Production's own comment makes
+the same equation ([`:53-57`](../../../../src/var_calling/per_group_merger.rs)) and ng inherited
+it; *corrected 2026-08-24, checked against the vendored tree.*
 
 ### 4.1 Truncate, never refuse — and the ranking
 
@@ -438,7 +448,7 @@ Truncated { dropped: u16 }  the cap bound; `dropped` alternatives were cut
 
 **There is no depth verdict, and its absence is a decision.** The architecture sketched
 `Admission { Ok, LowDepth, NotPeriodic, TooManyAlleles }`
-([`../arch/ng_step_interfaces.md`](../arch/ng_step_interfaces.md) §3) and it was never built —
+([`../arch/ng_step_interfaces.md`](../arch/ng_step_interfaces.md) §2) and it was never built —
 today's `CandidateAlleles` has no verdict field at all. Two of those four do not survive what this
 document settles. `TooManyAlleles` named a refusal and §4.1 chose truncation. **`LowDepth` would
 re-ask the merge's keep rule with a different denominator**, and production's version of it is a

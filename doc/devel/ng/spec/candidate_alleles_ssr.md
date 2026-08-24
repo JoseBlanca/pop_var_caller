@@ -430,6 +430,35 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   **Leaning: the inherited cap of six, with the truncation and ranking of the sibling document.**
   *What would settle it:* the tomato panel's tracts routed through the merge once §2's field
   exists, histogramming candidates per tract at 1, 4, 16 and 63 accessions.
+
+  **What the other STR callers allow, since it is the one piece of evidence available before that
+  run** (read 2026-08-24 from the vendored trees; the owner asked for it against this question):
+
+  | caller | budget at one tract | above it |
+  |---|---|---|
+  | **ng, as specified** | **6 alleles counting the reference — 5 alternatives** | truncate to the best six (§4.1) |
+  | production's repeat-tract path | 24 candidates ([`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)) | **refuse the locus**, every sample no-called |
+  | **HipSTR** | **1,000 haplotypes** (`MAX_TOTAL_HAPLOTYPES`, [`genotyper_bam_processor.h:110`](../../../../HipSTR/src/genotyper_bam_processor.h)) | **abandon the locus** — "Aborting genotyping of the locus as too many candidate haplotypes were found" ([`seq_stutter_genotyper.cpp:609`](../../../../HipSTR/src/seq_stutter_genotyper.cpp)) |
+
+  **HipSTR's thousand is not a thousand tract lengths, and the conversion is the useful part.** Its
+  haplotype is a combination across blocks — left flank × the repeat block × right flank — and the
+  cap is on the product (`ncombs_` is `nopts_` multiplied over the blocks,
+  [`Haplotype.cpp:124-140`](../../../../HipSTR/src/SeqAlignment/Haplotype.cpp)). Each flank
+  contributes at most `MAX_FLANK_HAPLOTYPES = 4` and contributes 1 when the flank is invariant, so
+  the repeat block's own budget runs from **1,000 tract sequences** where both flanks are fixed
+  down to **62** where both are maximally variable. **So ng's five alternatives sit somewhere
+  between 12 and 200 times tighter than HipSTR's**, and roughly four times tighter than
+  production's 24.
+
+  **That comparison is weaker than it looks in one direction and stronger in another.** Weaker:
+  HipSTR's cap and production's are both set where they are *never meant to bind* — both refuse the
+  locus when they do, which is the behaviour §4.1 rejects, so their numbers are safety valves and
+  not statements about how many alleles a tract carries. Stronger: ng's six is a **working part**
+  at a tract in a way it is not at a SNP, and it is the only one of the three that stays useful
+  when it binds. **The number still has to be chosen against a measurement rather than against
+  these three**, and the measurement above is what would do it. *The cap's value is a field of
+  `SsrSelectionConfig::shared`, so a different default for this path costs no code — only a second
+  constant and a reason.*
 - **Q3 — everything in §4.1 and §5 is one human sample.** The cohort axis is untested on this path
   entirely, because `benchmarks/ssr_hg002/` is single-sample by construction and the tomato panel
   has no repeat-tract truth set. **Leaning: ship as specified** — every rule here is per-sample by

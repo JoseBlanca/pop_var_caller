@@ -20,7 +20,7 @@ and tomato regressions the sibling specs name as their definition of done stop b
 **In:**
 
 - `src/ng/run/cohort_merge/mod.rs` — a `const` path for `MinAltReadShare`, so
-  `DEFAULT_ALLELE_SUPPORT` can be a `pub const`; and one doc-comment widening on
+  `DEFAULT_MIN_ALLELE_SUPPORT` can be a `pub const`; and one doc-comment widening on
   `MinAltReads::reached_by` saying the numerator is the caller's.
 - `src/ng/calling/allele_candidates/mod.rs` — `CandidateSelectionConfig` with its two named
   defaults, `SelectionVerdict`, `UnmatchedSupport`, `AlleleRemap`, `LocusSelection`,
@@ -112,10 +112,10 @@ and tomato regressions the sibling specs name as their definition of done stop b
 **A1. The rule's constants, and a `const` path for the share.**  ✅
 `MinAltReadShare` gains a `const` constructor beside its fallible `new`
 ([`cohort_merge/mod.rs:366-380`](../../../../src/ng/run/cohort_merge/mod.rs)) — its field is
-private, so `DEFAULT_ALLELE_SUPPORT` cannot be a `pub const` without one; it panics on a value
+private, so `DEFAULT_MIN_ALLELE_SUPPORT` cannot be a `pub const` without one; it panics on a value
 outside `0..=1`, which is a compile-time failure for a `const` and so is the right severity.
 Then, in the new `calling/allele_candidates/mod.rs`: `CandidateSelectionConfig`,
-`DEFAULT_ALLELE_SUPPORT` (floor 2 from `MinAltObs::DEFAULT`, share 5 in 100) and
+`DEFAULT_MIN_ALLELE_SUPPORT` (floor 2 from `MinAltObs::DEFAULT`, share 5 in 100) and
 `DEFAULT_MAX_CANDIDATE_ALLELES = 6`, each with a doc comment carrying its source and marking it
 soft. Widen `reached_by`'s doc comment: the numerator is the caller's, and selection and a
 discovery round pass different ones. *Depends:* none. *Source:* arch §2.1; spec §3.3, §4.
@@ -147,8 +147,13 @@ first and the two group rows must sum rather than the larger winning.
 
 **B2. The per-allele summary and the ranking. — own commit, do not bundle.**  ☐
 The private `AlleleSummary` (largest within-sample share, samples clearing the bar, cohort read
-total, reads and mass for the leftover) filled by B1's pass, and `ranks_above`: share first by
+total) filled by B1's pass, and `ranks_above`: share first by
 `f64::total_cmp`, then samples clearing, then cohort reads, then the bases.
+*Corrected at Checkpoint A: this step originally also asked the summary for "the reads and mass it
+would contribute to the leftover", and it cannot hold them — the summary is per allele where the
+leftover is per sample, survival is not known during B1's pass, and **a cohort total is a sum in
+allele-major order where C3's oracle demands the per-sample rows' own sum**, so C3's bitwise check
+would fail by construction if the total were its source. Arch §2.4 carries the same correction.*
 **Why this one is isolated:** a mis-ordered tie-break or a `partial_cmp` in place of `total_cmp` is
 a different truncation at a minority of loci and nothing fails.
 *Oracle:* a table built so that each tie-break level in turn is the one that decides, plus the same

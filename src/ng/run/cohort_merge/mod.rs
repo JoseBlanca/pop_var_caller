@@ -400,7 +400,7 @@ impl MinAltReadShare {
     /// declarations of a rule the whole run is judged against, where a value outside
     /// `0..=1` fails the compile rather than the run and there is nobody to hand an
     /// `Option` to. Written for
-    /// [`DEFAULT_ALLELE_SUPPORT`](crate::ng::calling::allele_candidates::DEFAULT_ALLELE_SUPPORT),
+    /// [`DEFAULT_MIN_ALLELE_SUPPORT`](crate::ng::calling::allele_candidates::DEFAULT_MIN_ALLELE_SUPPORT),
     /// which needs a share of 5 in 100 and cannot reach this type's private field.
     ///
     /// **Called at runtime it aborts the process** — `[profile.release]` sets
@@ -408,7 +408,7 @@ impl MinAltReadShare {
     /// is an ordinary function too. **A share that is not a literal in this source tree —
     /// one an operator typed, one read from a file, one computed — goes through
     /// [`new`](Self::new)**, which refuses rather than aborts.
-    pub const fn new_const(share: f64) -> Self {
+    pub const fn new_or_panic(share: f64) -> Self {
         assert!(
             Self::is_a_fraction_of_one(share),
             "a minimum non-reference read share is a fraction of one"
@@ -764,7 +764,7 @@ mod tests {
     /// which is the whole claim `is_a_fraction_of_one` exists to make true — one test,
     /// both constructors, over the same ten values.
     ///
-    /// `new_const` panics where `new` returns `None`, so the two are compared through
+    /// `new_or_panic` panics where `new` returns `None`, so the two are compared through
     /// [`std::panic::catch_unwind`] rather than by reading them side by side. The values
     /// that matter here are the ones no earlier fixture reached: **a negative share**,
     /// which does not crash anything downstream but silently deletes the share half of
@@ -786,10 +786,10 @@ mod tests {
             f64::NAN,
         ] {
             let accepted_by_new = MinAltReadShare::new(share).is_some();
-            let accepted_by_new_const =
-                std::panic::catch_unwind(|| MinAltReadShare::new_const(share)).is_ok();
+            let accepted_by_new_or_panic =
+                std::panic::catch_unwind(|| MinAltReadShare::new_or_panic(share)).is_ok();
             assert_eq!(
-                accepted_by_new, accepted_by_new_const,
+                accepted_by_new, accepted_by_new_or_panic,
                 "the two constructors disagree about a share of {share}"
             );
         }
@@ -805,26 +805,26 @@ mod tests {
     #[test]
     #[should_panic(expected = "a fraction of one")]
     fn a_const_share_below_zero_fails_rather_than_clamping() {
-        let _ = MinAltReadShare::new_const(-0.05);
+        let _ = MinAltReadShare::new_or_panic(-0.05);
     }
 
     #[test]
     #[should_panic(expected = "a fraction of one")]
     fn a_const_share_above_one_fails_rather_than_clamping() {
-        let _ = MinAltReadShare::new_const(1.5);
+        let _ = MinAltReadShare::new_or_panic(1.5);
     }
 
     #[test]
     #[should_panic(expected = "a fraction of one")]
     fn a_const_share_that_is_not_a_number_fails() {
-        let _ = MinAltReadShare::new_const(f64::NAN);
+        let _ = MinAltReadShare::new_or_panic(f64::NAN);
     }
 
     /// Both ends of the closed range are legal shares — no read at all, and every read.
     #[test]
     fn a_const_share_may_sit_on_either_end_of_the_range() {
-        assert_eq!(MinAltReadShare::new_const(0.0).get(), 0.0);
-        assert_eq!(MinAltReadShare::new_const(1.0).get(), 1.0);
+        assert_eq!(MinAltReadShare::new_or_panic(0.0).get(), 0.0);
+        assert_eq!(MinAltReadShare::new_or_panic(1.0).get(), 1.0);
     }
 
     /// **A share of one at the largest read count lands on `u32::MAX` and does not

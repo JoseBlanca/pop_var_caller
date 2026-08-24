@@ -189,6 +189,44 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-24 — an abstract argument-about-an-argument, built on an undefined project verb
+
+Comparing what three callers allow as candidate alleles at one repeat tract, a reply ended a
+paragraph with:
+
+> ❌ "ng's six is a working part at a tract in a way it is not at a SNP, and it is the only one of
+> the three that stays useful when it binds — truncation keeps the good alleles and pushes the rest
+> into the leftover with their error mass, where the other two throw the locus away. That is an
+> argument for our number being *allowed* to bind, but not for it being six."
+>
+> Owner: *"Terrible writting, I don't understand."*
+
+> ✅ "When ng hits its cap it cuts the lowest-ranked alleles and still calls the locus — the cut
+> alleles' reads keep their error mass in the arithmetic. When HipSTR or the existing caller hit
+> theirs, they throw the whole locus away and every sample there is no-called. So ng can afford a
+> cap that is reached often and they cannot. **That is a reason we may set a low cap. It is not a
+> reason to set it at six** — nothing here says whether the right number is 6, 12 or 30."
+
+Three failures:
+
+1. **A project verb used as if it were English.** *Bind* — as in "how often the cap binds" — is
+   the spec's word (§4.2's own heading) and had been used four times in the conversation without
+   ever being said in plain terms. It means *the cap is reached, so alleles get cut*. This is the
+   2026-08-10 "worlds" failure in a new guise: the ⚠ in *Context before the name* warns about type
+   names, and a **verb** lifted from a document is just as opaque and easier to miss, because it
+   reads as ordinary English rather than as jargon.
+2. **An argument about an argument.** "That is an argument for X but not for Y" makes the reader
+   reconstruct which claim X and Y are before they can judge anything. The fix is to state the
+   consequence — what ng does, what the others do — and then say plainly what that does and does
+   not license.
+3. **The load-bearing half was the negative one and it arrived last, in the vaguest words.** The
+   point worth carrying is *this comparison does not tell you the number*. It was six words at the
+   end of a sentence whose first half was doing something else.
+
+**The check that catches it:** the noun test of *Answer first*, extended to verbs. Circle every
+verb in a sentence that is doing argumentative work; if it came from a design document rather than
+from the reader's message or plain English, it has to be replaced by what it means, not glossed.
+
 ### 2026-08-23 — a benchmark number with no direction, and credited to the wrong caller
 
 Reporting a finished milestone, a reply justified keeping a comparator with:

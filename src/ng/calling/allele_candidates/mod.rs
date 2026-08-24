@@ -38,34 +38,81 @@ pub struct CandidateSelectionConfig {
     /// **The merge's own type, reused rather than copied**, so the rule that decides
     /// whether a locus is built and the rule that decides which of its alleles are
     /// called over cannot drift apart — a sweep of one is a sweep of both. Only the
-    /// number differs; see [`DEFAULT_ALLELE_SUPPORT`].
-    pub support: MinAltReads,
+    /// number differs; see [`DEFAULT_MIN_ALLELE_SUPPORT`].
+    pub min_allele_support: MinAltReads,
     /// How many alleles a locus may be called over, **counting the reference**. Above it
     /// the list is cut to the best-ranked and the locus is still called; it is never
     /// refused (spec §4.1).
-    ///
-    /// **A bare `u16`, so 0 and 1 are representable and neither is a legal cap** — at
-    /// either value the reference is the only survivor and every alternative becomes a
-    /// truncation, which is refusal under another name and is what spec §4.1 rules out.
-    /// Nothing validates it here, and that is an obligation this field hands to the fold:
-    /// **`select_generic` asserts a cap of at least 2** when it lands (plan step C2). The
-    /// alternative — a newtype refusing anything below 2, the shape
-    /// [`MinAltObs`](crate::ng::run::cohort_merge::MinAltObs) and its neighbours already
-    /// have — changes what arch §2.1 declares and is raised at Checkpoint A rather than
-    /// taken here.
-    pub max_candidate_alleles: u16,
+    pub max_candidate_alleles: MaxCandidateAlleles,
 }
 
 impl CandidateSelectionConfig {
-    /// [`DEFAULT_ALLELE_SUPPORT`] and [`DEFAULT_MAX_CANDIDATE_ALLELES`] — both soft, and
-    /// both carrying their source in their own documentation.
+    /// [`DEFAULT_MIN_ALLELE_SUPPORT`] and [`DEFAULT_MAX_CANDIDATE_ALLELES`] — both soft,
+    /// and both carrying their source in their own documentation.
     pub const DEFAULT: Self = Self {
-        support: DEFAULT_ALLELE_SUPPORT,
+        min_allele_support: DEFAULT_MIN_ALLELE_SUPPORT,
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES,
     };
 }
 
 impl Default for CandidateSelectionConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// **How many alleles a locus may be called over, counting the reference** — at least
+/// two, because a cap below that could not admit a single alternative.
+///
+/// **A cap of 0 or 1 is refusal under another name**, and spec §4.1 rules refusal out: a
+/// locus carrying two obvious variants and six noise sequences must keep the two, not lose
+/// them with the six. At either value the reference is the only survivor and every
+/// alternative becomes a truncation, so the type refuses them rather than leaving a
+/// later step to discover it.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct MaxCandidateAlleles(u16);
+
+impl MaxCandidateAlleles {
+    /// The default cap, [`DEFAULT_MAX_CANDIDATE_ALLELES`].
+    pub const DEFAULT: Self = DEFAULT_MAX_CANDIDATE_ALLELES;
+
+    /// The smallest cap that is a cap rather than a refusal: the reference and one
+    /// alternative.
+    pub const SMALLEST: u16 = 2;
+
+    /// The cap, or `None` below [`SMALLEST`](Self::SMALLEST). Refusing rather than
+    /// clamping, for the reason [`MinAltReadShare::new`] gives about its own range: a
+    /// mistyped cap is a run whose output looks ordinary.
+    pub fn new(alleles: u16) -> Option<Self> {
+        (alleles >= Self::SMALLEST).then_some(Self(alleles))
+    }
+
+    /// The same cap, for a `const` that has to name one — and it **panics** where
+    /// [`new`](Self::new) returns `None`, for the reason
+    /// [`MinAltReadShare::new_or_panic`] gives.
+    pub const fn new_or_panic(alleles: u16) -> Self {
+        assert!(
+            alleles >= Self::SMALLEST,
+            "a locus is called over at least the reference and one alternative"
+        );
+        Self(alleles)
+    }
+
+    /// The cap, counting the reference.
+    #[inline]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// How many *alternatives* fit under it — one fewer, and never negative because the
+    /// constructors refuse a cap below two.
+    #[inline]
+    pub const fn alternatives(self) -> u16 {
+        self.0 - 1
+    }
+}
+
+impl Default for MaxCandidateAlleles {
     fn default() -> Self {
         Self::DEFAULT
     }
@@ -93,14 +140,22 @@ impl Default for CandidateSelectionConfig {
 ///
 /// **Soft.** Measured on one human trio over 572 kb (spec §11, Q3); what would move it is
 /// the same scoring on a second high-depth cohort.
-pub const DEFAULT_ALLELE_SUPPORT: MinAltReads = MinAltReads {
+pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
     floor: MinAltObs::DEFAULT,
-    share: MinAltReadShare::new_const(0.05),
+    share: MinAltReadShare::new_or_panic(0.05),
 };
 
 /// **Six alleles including the reference** — production's `DEFAULT_MAX_ALLELES_PER_RECORD`
-/// (`src/var_calling/per_group_merger.rs`) and GATK's `--max-alternate-alleles` default,
-/// inherited and declared inherited.
+/// (`src/var_calling/per_group_merger.rs`), inherited and declared inherited.
+///
+/// **It is not GATK's number, though production's comment says it is.** GATK's
+/// `--max-alternate-alleles` defaults to 6 *alternates*
+/// (`DEFAULT_MAX_ALTERNATE_ALLELES = 6`, documented "Maximum number of alternate alleles
+/// to genotype"), so GATK genotypes over seven alleles where ng genotypes over six.
+/// Production's constant counts a record's whole allele set — `enforce_max_alleles`
+/// compares `unified.alleles.len()` and protects the reference from pruning — and its own
+/// doc comment nonetheless claims to match GATK's. **ng is the tighter of the two by one
+/// allele**, which is 21 genotypes against 28 at diploid.
 ///
 /// **Measured to be a safety valve rather than a working part at the cohort sizes we
 /// have** (spec §4.2, 2026-08-24): it binds at 23 of 53,935 tomato loci — one in 2,300 —
@@ -112,13 +167,13 @@ pub const DEFAULT_ALLELE_SUPPORT: MinAltReads = MinAltReads {
 /// **Those counts were taken with the merge's 2-in-100 share, not the 5 in 100 this
 /// module ships**, which spec §4.2 states in its own header and a reader of this constant
 /// would otherwise not know. The direction is safe: at tomato depth the two shares are
-/// provably the same rule (see [`DEFAULT_ALLELE_SUPPORT`]), and everywhere else 5 in 100
+/// provably the same rule (see [`DEFAULT_MIN_ALLELE_SUPPORT`]), and everywhere else 5 in 100
 /// admits fewer alternatives, so the cap binds no more often than these numbers say.
 ///
 /// **Soft, and never measured at its own value.** Whether it becomes load-bearing past a
 /// few hundred samples is an extrapolation from that table, not a measurement
 /// (spec §11, Q2).
-pub const DEFAULT_MAX_CANDIDATE_ALLELES: u16 = 6;
+pub const DEFAULT_MAX_CANDIDATE_ALLELES: MaxCandidateAlleles = MaxCandidateAlleles::new_or_panic(6);
 
 /// **What selection did at one locus, beyond the list itself** — whether the list is
 /// everything that cleared the bar, or was cut to fit the cap.
@@ -306,13 +361,17 @@ impl AlleleRemap {
 /// **Everything selection produces at one locus**: the narrowed table, what it did, the
 /// per-sample leftover, and the correspondence between the merge's allele indices and the
 /// new ids.
+/// **The fields are private and [`new`](Self::new) is the only way to build one**, so the
+/// two invariants below cannot be written around. That is a departure from arch §2.4's
+/// `pub` fields, taken at Checkpoint A: a bypassable check on a value whose defect is a
+/// wrong genotype rather than a crash is not a check.
 #[derive(Clone, PartialEq, Debug)]
 pub struct LocusSelection {
     /// The surviving sequences, the reference at [`AlleleId::REFERENCE`].
-    pub alleles: CandidateAlleles,
+    alleles: CandidateAlleles,
     /// What selection did beyond the list — everything that cleared the bar, or a list cut
     /// to fit the cap. See [`SelectionVerdict`].
-    pub verdict: SelectionVerdict,
+    verdict: SelectionVerdict,
     /// **Parallel to `CohortObservation::per_sample`** — same length, same order, so entry
     /// `i` is the leftover of the sample that `per_sample[i]` describes.
     ///
@@ -322,9 +381,9 @@ pub struct LocusSelection {
     /// 4 entries. Indexing this by the run's order would put four leftovers at four
     /// scattered positions and 59 zeroed rows between them, and a zeroed row is
     /// indistinguishable from a covering sample that dropped nothing.
-    pub unmatched: Vec<UnmatchedSupport>,
+    unmatched: Vec<UnmatchedSupport>,
     /// The merge table's indices mapped onto the surviving ids — see [`AlleleRemap`].
-    pub remap: AlleleRemap,
+    remap: AlleleRemap,
 }
 
 impl LocusSelection {
@@ -375,6 +434,44 @@ impl LocusSelection {
         }
     }
 
+    /// The surviving sequences, the reference at [`AlleleId::REFERENCE`].
+    #[inline]
+    pub fn alleles(&self) -> &CandidateAlleles {
+        &self.alleles
+    }
+
+    /// What selection did beyond the list.
+    #[inline]
+    pub fn verdict(&self) -> SelectionVerdict {
+        self.verdict
+    }
+
+    /// One leftover per covering sample, in `CohortObservation::per_sample`'s order.
+    #[inline]
+    pub fn unmatched(&self) -> &[UnmatchedSupport] {
+        &self.unmatched
+    }
+
+    /// The merge table's indices mapped onto the surviving ids.
+    #[inline]
+    pub fn remap(&self) -> &AlleleRemap {
+        &self.remap
+    }
+
+    /// The four parts, by value — what the calling loop's input edge needs, since it takes
+    /// ownership of the table and builds its evidence views from the remapping.
+    #[inline]
+    pub fn into_parts(
+        self,
+    ) -> (
+        CandidateAlleles,
+        SelectionVerdict,
+        Vec<UnmatchedSupport>,
+        AlleleRemap,
+    ) {
+        (self.alleles, self.verdict, self.unmatched, self.remap)
+    }
+
     /// How many alternatives survived — the number the genotype prior divides its
     /// alternative concentration by (`doc/devel/ng/spec/calling_priors.md` §4, which
     /// spells the same quantity `alternative_allele_count`).
@@ -410,7 +507,7 @@ pub struct SelectionScratch {
     per_allele: Vec<AlleleSummary>,
     /// Merge table indices, ordered by the cap's ranking. Only the alternatives that
     /// cleared the bar ever enter it.
-    ranked: Vec<u32>,
+    ranked_table_indices: Vec<u32>,
 }
 
 impl SelectionScratch {
@@ -437,11 +534,14 @@ impl SelectionScratch {
     /// (`doc/devel/ng/arch/candidate_alleles_ssr.md` §5) — fails to compile here instead
     /// of silently carrying the previous locus's values into the next.
     pub fn reset_for(&mut self, table_len: usize) {
-        let Self { per_allele, ranked } = self;
+        let Self {
+            per_allele,
+            ranked_table_indices,
+        } = self;
         per_allele.clear();
         per_allele.resize(table_len, AlleleSummary::default());
-        ranked.clear();
-        ranked.reserve(table_len);
+        ranked_table_indices.clear();
+        ranked_table_indices.reserve(table_len);
     }
 
     /// How many alleles the buffers are currently sized for.
@@ -505,9 +605,9 @@ mod tests {
     /// and only the second assertion holds that.
     #[test]
     fn the_default_bar_is_two_reads_or_five_in_a_hundred() {
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.floor.get(), 2);
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.floor, MinAltObs::DEFAULT);
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.share.get(), 0.05);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.floor.get(), 2);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.floor, MinAltObs::DEFAULT);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.share.get(), 0.05);
     }
 
     /// The two ends of the committed depth range, as spec §3 states them: at 3 compared
@@ -518,13 +618,13 @@ mod tests {
     /// the share is 15.05, and up and down are 16 and 15.
     #[test]
     fn the_floor_decides_at_three_reads_and_the_share_at_three_hundred() {
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.required_of(3), 2);
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.required_of(300), 15);
-        assert_eq!(DEFAULT_ALLELE_SUPPORT.required_of(301), 16);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(3), 2);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(300), 15);
+        assert_eq!(DEFAULT_MIN_ALLELE_SUPPORT.required_of(301), 16);
     }
 
     /// The share is stricter than the merge's own at depth and **indistinguishable from
-    /// it below 41 compared reads** — the claim [`DEFAULT_ALLELE_SUPPORT`]'s
+    /// it below 41 compared reads** — the claim [`DEFAULT_MIN_ALLELE_SUPPORT`]'s
     /// documentation makes, held against the merge's constant rather than against a
     /// number retyped here.
     ///
@@ -539,28 +639,61 @@ mod tests {
     fn the_allele_share_binds_only_above_forty_compared_reads() {
         for compared_reads in [1_u32, 3, 11, 20, 40] {
             assert_eq!(
-                DEFAULT_ALLELE_SUPPORT.required_of(compared_reads),
+                DEFAULT_MIN_ALLELE_SUPPORT.required_of(compared_reads),
                 MinAltReads::DEFAULT.required_of(compared_reads),
                 "at {compared_reads} compared reads the floor decides for both rules"
             );
         }
         assert!(
-            DEFAULT_ALLELE_SUPPORT.required_of(41) > MinAltReads::DEFAULT.required_of(41),
+            DEFAULT_MIN_ALLELE_SUPPORT.required_of(41) > MinAltReads::DEFAULT.required_of(41),
             "41 compared reads is where the allele rule first asks for more than the merge's"
         );
         assert!(
-            DEFAULT_ALLELE_SUPPORT.required_of(300) > MinAltReads::DEFAULT.required_of(300),
+            DEFAULT_MIN_ALLELE_SUPPORT.required_of(300) > MinAltReads::DEFAULT.required_of(300),
             "at 300 compared reads the allele rule must ask for more than the merge's"
         );
     }
 
     #[test]
     fn the_cap_default_is_six_and_the_config_carries_it() {
-        assert_eq!(DEFAULT_MAX_CANDIDATE_ALLELES, 6);
+        assert_eq!(DEFAULT_MAX_CANDIDATE_ALLELES.get(), 6);
+        assert_eq!(
+            DEFAULT_MAX_CANDIDATE_ALLELES.alternatives(),
+            5,
+            "six counting the reference is five alternatives — the number GATK's own \
+             default of six names, which is why ng's cap is the tighter of the two"
+        );
         assert_eq!(
             CandidateSelectionConfig::default().max_candidate_alleles,
             DEFAULT_MAX_CANDIDATE_ALLELES
         );
+    }
+
+    /// **A cap below two is refused rather than clamped**, because at 0 or 1 the reference
+    /// is the only survivor and every alternative becomes a truncation — refusal under
+    /// another name, which spec §4.1 rules out.
+    #[test]
+    fn a_cap_that_cannot_hold_one_alternative_is_refused() {
+        assert!(MaxCandidateAlleles::new(0).is_none(), "no allele at all");
+        assert!(
+            MaxCandidateAlleles::new(1).is_none(),
+            "the reference and nothing else"
+        );
+        assert_eq!(
+            MaxCandidateAlleles::new(2).map(MaxCandidateAlleles::get),
+            Some(2),
+            "the reference and one alternative is the smallest cap that is a cap"
+        );
+        assert_eq!(
+            MaxCandidateAlleles::new(2).map(MaxCandidateAlleles::alternatives),
+            Some(1)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "at least the reference and one alternative")]
+    fn a_const_cap_below_two_fails_the_build() {
+        let _ = MaxCandidateAlleles::new_or_panic(1);
     }
 
     /// **The config a run gets by default is the two announced constants, and its support
@@ -578,10 +711,10 @@ mod tests {
     fn the_default_config_is_the_two_announced_constants_and_not_the_merges_rule() {
         let config = CandidateSelectionConfig::default();
         assert_eq!(config, CandidateSelectionConfig::DEFAULT);
-        assert_eq!(config.support, DEFAULT_ALLELE_SUPPORT);
+        assert_eq!(config.min_allele_support, DEFAULT_MIN_ALLELE_SUPPORT);
         assert_eq!(config.max_candidate_alleles, DEFAULT_MAX_CANDIDATE_ALLELES);
         assert_ne!(
-            config.support,
+            config.min_allele_support,
             MinAltReads::DEFAULT,
             "the allele rule and the merge's keep rule share a type, not a share"
         );
@@ -736,7 +869,7 @@ mod tests {
             samples_clearing_the_bar: 7,
             cohort_reads: 42,
         };
-        scratch.ranked.push(1);
+        scratch.ranked_table_indices.push(1);
 
         scratch.reset_for(4);
 
@@ -748,7 +881,7 @@ mod tests {
                 .all(|summary| *summary == AlleleSummary::default()),
             "a reset locus must not see the previous locus's fold"
         );
-        assert!(scratch.ranked.is_empty());
+        assert!(scratch.ranked_table_indices.is_empty());
     }
 
     /// Resetting to a *smaller* table shrinks the visible buffer.
