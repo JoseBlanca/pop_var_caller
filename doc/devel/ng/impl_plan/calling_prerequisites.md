@@ -208,7 +208,7 @@ of minted per-read error probabilities and the count of reads summed — with tw
 minted quantity is **the same function the locus generator mints with**, and the sum runs over
 **exactly the sites the surviving error-rate estimate was fitted from**, per route.
 
-**D1. One mint function.**  ☐
+**D1. One mint function.**  ✅
 Hoist the per-read error mint — worse of the window's base quality and the mapping quality, in log
 space — into one named `pub(crate)` function beside its current home, and call it from both mint
 sites ([`pileup/open_record.rs:2047`](../../../../src/ng/locus_generation/pileup/open_record.rs),
