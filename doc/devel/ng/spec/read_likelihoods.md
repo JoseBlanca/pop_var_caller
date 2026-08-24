@@ -547,11 +547,20 @@ what biases the estimate, and stops being true of **the caller**. The edit is no
 **At the ends of the range.** The fitted rate is pooled over hundreds of millions of base
 observations, so it is equally well determined at 3 reads a position and at 300, and it exists at
 one sample as readily as at a thousand — it is a property of a read group, and one sample has read
-groups. **Where the pre-pass emits no rate** — too little data, or a sample whose noise is off the
-end of its ladder, which two of five real alignments were
-([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1) — the scale is 1 and the
-qualities are used as reported. **That must be visible in the run's output**, because a run
-calibrated against a measurement and a run trusting the instrument are otherwise indistinguishable.
+groups. **Where the pre-pass emits no rate** — too little data — the scale is 1 and the qualities
+are used as reported. **That must be visible in the run's output**, because a run calibrated against
+a measurement and a run trusting the instrument are otherwise indistinguishable.
+
+**A sample whose noise is off the end of the ladder is not that case, and this paragraph used to
+say it was** *(corrected 2026-08-24, owner, while the read likelihood's A2 was building the scale
+against this section)*. Two of five real alignments ask for a noisier class than the pre-pass's
+model covers and are refused it — tomato SRR7279482 and SRR7279483, at 0.42% and 0.49% of sites —
+and what they get is **the one-rate answer**, not no answer
+([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1: *"such a sample gets the
+one-rate answer it would have had before this milestone, and the caller can see that it did"*).
+What is `None` for them is `site_noise`, and `site_noise_off_the_ladder` says which kind of `None`
+it is. So their calibration is built from a measurement and its provenance is a fitted one; **what
+is open about them is what that measurement is worth, which is Q1 (§11) and not this paragraph.**
 
 ### 3.3 The formula
 
@@ -1619,10 +1628,31 @@ should happen to a read that saw too little to say anything.
 
 ### 5.3 Scoring a read that saw only part of an ordinary locus
 
-A partial observation here covers a run of positions inside the locus span and nothing outside it.
-Its bases cannot be compared against a whole-span allele — that comparison would report a read
+A partial observation here covers **a set of positions** inside the locus span and nothing outside
+it. Its bases cannot be compared against a whole-span allele — that comparison would report a read
 agreeing with the reference over everything it saw as non-reference, which is the trap the evidence
 type's own documentation names.
+
+> **A set of runs, not one run, and this section used to say the singular throughout** *(corrected
+> 2026-08-24, owner; found while the read likelihood's Milestone A was built against it)*. The
+> generic fold mints witnesses **with holes in them**, so `WitnessedLocusPositions`
+> ([`witness.rs`](../../../../src/ng/locus_generation/witness.rs)) is a *set* of half-open runs and
+> not an offset and a length — its own documentation says two numbers "can only describe a hole by
+> swallowing it".
+>
+> **Two consequences a coder must not miss.** The restricted projection is a **gather** and cannot
+> be a subslice of the allele's bases, so scoring needs a buffer sized by the widest witness rather
+> than a range — a buffer §8's no-allocation contract makes the caller's, and which
+> [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) D1 owes a home. And
+> **the two axes are not interchangeable**: the witness counts *locus positions* while the
+> observation's bases are what the read showed over them, so the two lengths differ by the net indel
+> the read carried — a read carrying a two-base insertion and a two-base deletion inside the stretch
+> comes back with as many bases as positions and is still not a positional match for any of them
+> (`PartialObservation::bases`).
+>
+> The aggregation argument below is unaffected: a *set* of runs is part of the observation's
+> identity exactly as a single run would be, so every read pooled into one observation witnessed the
+> same positions and gets the same verdict.
 
 **The rule: an allele is compatible with a partial observation when the allele's projection,
 restricted to the positions the read witnessed, equals the read's bases.** Then, for genotype `g`:
@@ -1634,10 +1664,11 @@ term(o | g)  =  Σ  ( k_a / P )   over the alleles a in g that are compatible wi
 and if no allele in `g` is compatible, the observation is charged as an error exactly as in §3.3,
 with `m = 1`, because a multi-position difference has no finite set of wrong outcomes to divide by.
 
-**This is exactly aggregable**, which is why it is the rule chosen: the witnessed run is already part
-of an observation's identity ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)
-— `read_witness` carries the offset and the number of positions covered), so every read pooled into
-one observation witnessed the same stretch and gets the same compatibility verdict.
+**This is exactly aggregable**, which is why it is the rule chosen: the witnessed positions are
+already part of an observation's identity
+([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs) — `read_witness` carries
+them, as a canonical set of runs), so every read pooled into one observation witnessed the same
+positions and gets the same compatibility verdict.
 
 **What it gives up.** A partial that is compatible with two of the genotype's alleles contributes
 `(k_a + k_b)/P`, which is 1 for a diploid heterozygote — no information, correctly. A read that

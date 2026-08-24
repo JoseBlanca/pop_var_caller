@@ -140,7 +140,7 @@ correction)*
 (`supported: &[GenericObservation]`, `unmatched_q_sum`, `partials`) and `GenericObservation`
 (`allele`, `read_group`, `num_reads`, `q_sum`) as **views over the merge's rows** — one entry per
 `(allele, read group)`, which prerequisites Milestone B made real; `PartialObservation` over
-Milestone C's kept rows, bases + witnessed run intact. `SsrSampleEvidence` — a slice of
+Milestone C's kept rows, bases + witnessed positions intact. `SsrSampleEvidence` — a slice of
 `SequenceObservation` plus the locus's `SsrDetail`
 ([`locus_generation/mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)). *Source:* arch
 §2.1, §2.2; spec §1.4, §2.3.
@@ -169,8 +169,10 @@ row = all zeros (the prior decides, no branch), mis-shaped input = assertion hel
 Scratch shells `GenericRowScratch`, `SsrRowScratch<S>`. *Depends:* A1. *Source:* arch §1.1, §2.3;
 spec §3.2, §3.6, §8.
 
-> **Checkpoint A:** the vocabulary compiles; the tier table (frozen / per-call / invisible) is
-> documented on the types that enforce it. Pause for review.
+> **Checkpoint A — reached 2026-08-24.** The vocabulary compiles; the tier table is documented on
+> the types. *Its three tiers are **frozen / per-call / per-iteration**, not "frozen / per-call /
+> invisible" as this line said: spec §3.6's correction of 2026-08-24 gives the third tier a reader
+> in this module, and the spec's own §6.1 is corrected to match at A2.* Pause for review.
 
 ### Milestone B — the SNP/indel closed form
 
@@ -235,12 +237,23 @@ first tier holds the fraction only.
 ### Milestone D — partial observations on the generic path
 
 **D1. The compatibility rule.**  ☐
-An allele is compatible with a partial when its projection **restricted to the witnessed run**
-equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the genotype's
-compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly aggregable
-by construction (the witnessed run is part of the observation's identity). Tests: a partial
-compatible with both of a diploid heterozygote's alleles contributes 1 — no information,
-correctly; the no-compatible error charge; verdicts identical for pooled reads. *Depends:* B2;
+An allele is compatible with a partial when its projection **restricted to the positions the read
+witnessed** equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the
+genotype's compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly
+aggregable by construction (the witnessed positions are part of the observation's identity).
+
+**Those positions are a *set of runs with holes*, not one run** (spec §5.3, corrected 2026-08-24),
+and this step owns the two consequences. The restricted projection is a **gather**, so it needs a
+buffer sized by the widest witness — the generic row's own scratch, which A2 deliberately did not
+invent and which lands here. And the witness counts *locus positions* while the partial's bases are
+what the read showed over them, so **their lengths are not interchangeable** and neither may index
+the other. This step also needs a compatibility cache per `(partial, allele)`, for the reason the
+STR path caches emissions: the verdict is read by every genotype.
+
+Tests: a partial compatible with both of a diploid heterozygote's alleles contributes 1 — no
+information, correctly; the no-compatible error charge; verdicts identical for pooled reads; **and a
+witness with a hole in it, against an allele whose bases differ only inside the hole** — the case a
+contiguous-range implementation gets wrong and no single-run fixture can see. *Depends:* B2;
 prerequisites C. *Source:* spec §5.3; arch §3.
 
 > **Checkpoint C/D:** the generic path is complete — plain, contaminated, and censored evidence

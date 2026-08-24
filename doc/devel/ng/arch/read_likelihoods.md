@@ -121,8 +121,10 @@ pub struct GenericSampleEvidence<'a> {
     /// alleles that candidate selection dropped, folded here by that selection. Cancels
     /// in genotyping, kept for the data likelihood (spec §3.3's q_sum_other).
     pub unmatched_q_sum: f64,
-    /// The partial observations, bases + witnessed run intact — §3's compatibility
-    /// rule (spec §5.3) needs the run, so they are NOT folded onto alleles.
+    /// The partial observations, bases + witnessed positions intact — §3's compatibility
+    /// rule (spec §5.3) needs them, so they are NOT folded onto alleles. **A set of runs
+    /// with holes in it, not one run** (spec §5.3, corrected 2026-08-24), which makes the
+    /// restricted projection a gather rather than a subslice.
     pub partials: &'a [PartialObservation<'a>],
 }
 
