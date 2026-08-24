@@ -372,6 +372,11 @@ withheld. **That is what makes this section's preference for truncation sound**,
 two decisions have to be read together: cutting the allele list is only better than refusing the
 locus if the samples that lost an earned allele stop shaping the locus's numbers.
 
+**This is the SNP/indel path's rule and does not travel to a repeat tract** (owner, 2026-08-24).
+There the calling loop can add candidates back while the locus is being called, so a length the cap
+cut is not gone for the rest of it and no sample is set aside —
+[`calling_em_loop.md`](calling_em_loop.md) §5.0.1 states it and gives the condition it rests on.
+
 **The ranking: the largest share of one sample's compared reads the allele took, maximised over
 the samples that cleared the bar for it.** Ties break on how many samples cleared the bar, then on
 the cohort's read total, then on the bases themselves so the result is deterministic at any worker

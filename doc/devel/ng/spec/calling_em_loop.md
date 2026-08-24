@@ -531,6 +531,9 @@ frozen before the first pass and stays frozen.
 
 ### 5.0 A sample the candidate step could not call, and what the M-step does with it
 
+**This whole section is the SNP/indel path's, and the repeat-tract path sets no sample aside**
+(owner, 2026-08-24). §5.0.1 is why the two differ; everything before it describes the generic path.
+
 **Candidate selection can hand this loop a sample it has already declared uncallable at the locus.**
 When the allele cap cuts a sequence that a sample's own reads had earned, that sample carries
 something the locus is no longer called over, and
@@ -575,6 +578,36 @@ fitted frequencies, which is the right denominator: the samples the locus was ac
 where the cap binds, comparing the fitted frequencies with the samples in and out — it would say
 how large the bias would have been. Not measurable until selection is wired into the builder, which
 is [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)'s work.
+
+#### 5.0.1 Why the repeat-tract path does not need this
+
+**At a repeat tract the loop can put back what selection cut, so no sample is set aside** (owner's
+decision, 2026-08-24). A discovery round between whole runs of the loop looks at what the converged
+posteriors are explaining as slippage, nominates the tract lengths that recur too often in one
+sample to be slippage, and **adds them to the candidate set** (§4, §4.1). A length one sample's
+reads earned and the cap removed is therefore not gone for the rest of the locus's calling, which is
+the fact the generic path does not have: there the candidate set is settled before the first pass
+and stays settled to the end (§4, §5's table). So the repeat-tract path scores every covering sample
+on every pass, and `genotype_must_be_missing` is a flag the generic evidence carries and the
+repeat-tract evidence does not.
+
+**What separates the two paths is what happens to the cut allele's reads, not the cap itself.** On
+the SNP/indel path a read whose sequence is no longer a candidate contributes only the pooled error
+mass `q_sum_other` ([`read_likelihoods.md`](read_likelihoods.md) §3.3) — the same number under every
+genotype, so it cancels, and the sample's posterior comes out confident over a set that cannot
+represent what it carries with nothing in the arithmetic saying so. That is what the paragraphs
+above answer. At a tract, a length off the candidate set is still **reached by the stutter model
+from a candidate** ([`read_likelihoods.md`](read_likelihoods.md) §4, and §4.5 for what happens
+beyond the slip cutoff), so those reads have a likelihood that differs between genotypes rather than
+one that cancels.
+
+**One condition, and it is stated because §4 makes it necessary.** The discovery round this rests on
+**ships off**, and §12's Q3 is the measurement that would default it on. With it off, a repeat
+tract's candidate set is as fixed during the loop as the generic path's, and the whole weight falls
+on that path's selection admitting enough rungs to begin with — which is why its cap is 32 against
+the generic path's six ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §12). **That
+document's §12 argues for 32 partly from this section's missing-genotype rule and so needs
+re-reading against this ruling**; the ruling is not in doubt, the sentence resting on it is.
 
 **Why the slippage numbers get a clock of their own rather than joining the frequencies on the
 inner one.** Building the read-likelihood table takes `candidates × Σ_s (observations in sample s)`
@@ -769,16 +802,18 @@ they came from, and the run's skeleton already collects results per region
 revisited when emission fixes the shape of what a call is.
 
 **What it hands on** is, per locus: the allele table, and per sample the genotype posteriors, the
-most probable genotype, its confidence, and the cohort's expected allele copies — **plus, for a
-sample the candidate step declared uncallable (§5.0), the fact that its genotype is missing rather
-than any of the above.** Emission writes that sample's `GT` as missing; it is a decision taken
-before the reads were scored and not a low-confidence call, and the two must not be conflated in
-the output. **Such a sample has no posteriors and no expected copies at all** — §5.0 sets it aside
-before the first pass — so this is an absence rather than a value with a flag beside it, and the
-cohort's expected copies are a sum over the samples the locus was called on. **The last of those
-is not a by-product** — site filtering and emission read it, and recomputing it downstream from the
-called genotypes would give a different number, because a called genotype has thrown away the
-uncertainty the expected copies still carry.
+most probable genotype, its confidence, and the cohort's expected allele copies — **plus, on the
+SNP/indel path only, for a sample the candidate step declared uncallable (§5.0), the fact that its
+genotype is missing rather than any of the above.** Emission writes that sample's `GT` as missing;
+it is a decision taken before the reads were scored and not a low-confidence call, and the two must
+not be conflated in the output. **Such a sample has no posteriors and no expected copies at all** —
+§5.0 sets it aside before the first pass — so this is an absence rather than a value with a flag
+beside it, and the cohort's expected copies are a sum over the samples the locus was called on.
+**A repeat tract never produces such a sample** (§5.0.1): every covering sample there is handed on
+with posteriors, and the expected copies are a sum over all of them. **The cohort's expected allele
+copies are not a by-product** — site filtering and emission read them, and recomputing them
+downstream from the called genotypes would give a different number, because a called genotype has
+thrown away the uncertainty the expected copies still carry.
 
 ---
 
