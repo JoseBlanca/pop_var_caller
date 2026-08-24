@@ -304,9 +304,15 @@ between them is their quality — which is why this contract is about quality an
    > first version of this correction quoted 2 ulps from a sweep that stopped at seven reads. Widened
    > to the depths this caller commits to, the count goes past a hundred at 300 reads a position —
    > it is repeated summation, so it grows with how much is summed. What does not grow is the
-   > *relative* size, and that is what the specification and the test now bound: **2 × 10⁻¹⁴ over 864
-   > combinations**, read counts from 2 to 300, four quality profiles including all-equal at Phred 93,
-   > three read-group scales and two ploidies.
+   > *relative* size, and that is what the specification and the test now bound: **2 × 10⁻¹⁴ over
+   > 1,080 combinations**, read counts from 2 to 300, five quality profiles including all-equal at
+   > Phred 93, three read-group scales and two ploidies. *(Widened at C1, 2026-08-24, from 864
+   > combinations over four profiles: the fifth is every read at Phred 1, which is the only one
+   > whose **fold** is charged an error above a half — every other profile's geometric mean sits far
+   > below it however poor its single reads are. Without it no fixture could tell a capped charge
+   > from an uncapped one, and the ceiling §3.6 forbids could be reintroduced with the suite green.
+   > The worst measured disagreement over the widened sweep is 1.0 × 10⁻¹⁴, so the bound is
+   > unchanged.)*
    >
    > **The requirement itself is untouched, and the two claims are worth keeping apart.** What this
    > contract asks is that pooling not change the answer *because of the model* — that no term be a

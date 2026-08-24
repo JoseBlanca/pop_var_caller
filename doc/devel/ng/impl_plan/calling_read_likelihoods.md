@@ -240,7 +240,7 @@ floating-point tolerance — every difference attributed to the two recorded cha
 `ContaminationMixture` holding both halves rather than the sketch's bare
 `&[ContaminationView]` — the fraction and the frequency sit in different tiers, and one
 construction is where they can be checked against each other. The `c = 0` agreement is a
-relative 2.9 × 10⁻¹⁶ over 3,552 comparisons, and the sweep kills both defects this step names:
+relative 7.3 × 10⁻¹⁵ over 4,440 comparisons, and the sweep kills both defects this step names:
 production's extra `(1 − ε)` factor disagrees on 3,172 of them, its allele-count divisor on
 2,336. **One A2 decision had to be reversed to get here** — `calibrated_error`'s ceiling is a
 non-linear function of a per-read quality, which spec §2.3 forbids outright, so what the row

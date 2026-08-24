@@ -367,8 +367,11 @@ impl ReadGroupCalibration {
     ///
     /// # Why this exists beside [`charged_error_capped_at_half`](Self::charged_error_capped_at_half)
     ///
-    /// The two differ in one thing: that one clamps into `[MIN_BASE_ERROR, MAX_BASE_ERROR]`
-    /// and this one only floors. **The ceiling cannot be applied to what the row charges**,
+    /// The two differ in what they do at the top of the range: that one clamps into
+    /// `[MIN_BASE_ERROR, MAX_BASE_ERROR]` and this one only floors — **and because it only
+    /// floors, it has to refuse inputs the other could pass on**, which is the second
+    /// difference and the reason for the assertions below. **The ceiling cannot be applied to
+    /// what the row charges**,
     /// and the reason is a stated requirement rather than a preference: spec §2.3 asks that
     /// no term be a non-linear function of a per-read quality, because the merge hands the
     /// row a *fold* of reads and `q_sum` recovers only their geometric mean. `min(x, ½)` is
@@ -2340,6 +2343,32 @@ mod tests {
     fn a_frequency_past_one_is_refused() {
         let fractions = [a_read_group_contaminated_at(0.02)];
         let frequencies = [0.4, 1.6];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
+    }
+
+    /// **The lower half of the same bound, which had no test until C1's review widened the
+    /// range to `NEG_INFINITY..=1.0` and watched the whole module stay green.**
+    ///
+    /// `new` is public and this assertion is the only guard. A negative frequency reaches the
+    /// row as `c · q(o)` below zero, which can drive the mixture negative — and `ln` of a
+    /// negative number is `NaN`, which makes every comparison in an argmax false, so a
+    /// genotype is picked with nothing to say it was picked from garbage. Measured under the
+    /// widened range at a frequency of −1.0: a row of `[NaN, NaN, -inf]`.
+    #[test]
+    #[should_panic(expected = "which is not a frequency")]
+    fn a_negative_frequency_is_refused() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frequencies = [1.4, -1.0];
+
+        let _ = ContaminationMixture::new(&fractions, &frequencies);
+    }
+
+    #[test]
+    #[should_panic(expected = "which is not a frequency")]
+    fn a_frequency_that_is_not_a_number_is_refused() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frequencies = [0.5, f64::NAN];
 
         let _ = ContaminationMixture::new(&fractions, &frequencies);
     }

@@ -1488,8 +1488,8 @@ mod tests {
             }
         }
 
-        // 9 read counts × 4 profiles × 3 scales × (3 diploid + 5 tetraploid genotypes) = 864.
-        assert_eq!(compared, 864, "the sweep covers 864 comparisons");
+        // 9 read counts × 5 profiles × 3 scales × (3 diploid + 5 tetraploid genotypes) = 1,080.
+        assert_eq!(compared, 1_080, "the sweep covers 1,080 comparisons");
 
         // **The sweep must actually disagree somewhere**, or it is measuring a number against
         // itself and the bound below means nothing. This is also what pins the row's summation
@@ -1513,7 +1513,7 @@ mod tests {
     /// all reads at Phred 30, all at Phred 93 (the highest the read preparation admits), a
     /// 93/1 alternation, and a monotone fall from 45 to 3. The all-equal profiles matter
     /// because they are where repeated addition of one value is least forgiving.
-    const QUALITY_PROFILES: [fn(usize, usize) -> u8; 4] = [
+    const QUALITY_PROFILES: [fn(usize, usize) -> u8; 5] = [
         |_, _| 30,
         |_, _| 93,
         |at, _| if at % 2 == 0 { 93 } else { 1 },
@@ -1521,6 +1521,14 @@ mod tests {
             let span = (reads - 1).max(1) as f64;
             (45.0 - 42.0 * (at as f64 / span)).round() as u8
         },
+        // **Every read at Phred 1**, which is the only profile here whose *fold* is charged
+        // more than an error of a half — 0.794 at a scale of one, 1.99 at 2.5. Every other
+        // profile's geometric mean sits far below the ceiling even when single reads do not
+        // (the 93/1 alternation folds to 2 × 10⁻⁵), so without this one no fixture in either
+        // sweep can tell a capped charge from an uncapped one, and the zero-contamination
+        // sweep's claim to catch a reintroduced ceiling was false. Found by C1's review, which
+        // reintroduced the cap and watched that sweep pass.
+        |_, _| 1,
     ];
 
     /// **Order independence** (spec §12 test 8): permuting the observations must not move a
@@ -1976,11 +1984,17 @@ mod tests {
     /// **A relative bound and not a unit-in-the-last-place count**, for the reason spec §2.3
     /// gives about the aggregation identity: the departure is a rounding of a sum that grows
     /// with depth, so a ulp count grows with it and a relative size does not. Measured worst
-    /// across the sweep's 3,552 comparisons: **`2.9 × 10⁻¹⁶`**, at three alleles, 300 reads and
-    /// a scale of 2.5 — a log-likelihood of −1592.6682015614529 from the mixture against
-    /// −1592.6682015614524 from §3.3. This bound is 3.5 times that. In the units a genotype is
-    /// decided in, the worst disagreement is `2 × 10⁻¹²` Phred.
-    const MIXTURE_AT_ZERO_RELATIVE_TOLERANCE: f64 = 1e-15;
+    /// across the sweep's 4,440 comparisons: **`7.3 × 10⁻¹⁵`**, at three alleles, 300 reads and
+    /// a scale of 2.5 — a log-likelihood of −3.8844873955582386 from the mixture against
+    /// −3.884487395558267 from §3.3. This bound is 2.7 times that, the same margin its sibling
+    /// [`WORST_AGGREGATION_RELATIVE`] carries. In the units a genotype is decided in, the worst
+    /// disagreement is `1 × 10⁻¹³` Phred.
+    ///
+    /// **The worst case is a small log-likelihood, not a large one**, which is what a relative
+    /// bound is for: it arises on the all-Phred-1 profile, where the genotype explains nearly
+    /// everything and the row lands near −3.9 rather than near −1,600. The absolute gap there
+    /// is `2.8 × 10⁻¹⁴` nats.
+    const MIXTURE_AT_ZERO_RELATIVE_TOLERANCE: f64 = 2.0e-14;
 
     /// **Spec §3.3's closed form, written out again in log space and independently of the
     /// row** — the oracle the mixture is checked against at zero contamination.
@@ -2042,9 +2056,12 @@ mod tests {
     /// **What this test fails on, beyond a wrong number.** It fails the moment anyone
     /// reintroduces production's extra `(1 − ε)` factor into `own` (which would move every
     /// explained read) or its allele-count divisor (which would move every wrong one), because
-    /// the oracle has neither. It also fails if the mixture is given a ceiling: the
-    /// `93/1` quality profile puts single reads past an error of a half, where a clamp would
-    /// bind on the row and not on the oracle.
+    /// the oracle has neither. **And it fails if the mixture is given a ceiling**, which took
+    /// a fifth quality profile to make true: every read at Phred 1 folds to a charged error of
+    /// 0.794 at a scale of one and 1.99 at 2.5, so a clamp binds on the row and not on the
+    /// log-space oracle. Until that profile was added the claim was false — every other
+    /// profile's *fold* sits far below the ceiling however poor its single reads are, and C1's
+    /// review reintroduced the cap and watched this sweep pass.
     #[test]
     fn the_mixture_at_no_contamination_is_the_plain_formula() {
         let loci = [
@@ -2112,9 +2129,9 @@ mod tests {
             }
         }
 
-        // 4 read counts × 4 profiles × 3 scales, over (3 + 5) genotypes at two alleles,
-        // (6 + 15) at three and (10 + 35) at four: 48 × 74 = 3,552.
-        assert_eq!(compared, 3_552, "the sweep covers 3,552 comparisons");
+        // 4 read counts × 5 profiles × 3 scales, over (3 + 5) genotypes at two alleles,
+        // (6 + 15) at three and (10 + 35) at four: 60 × 74 = 4,440.
+        assert_eq!(compared, 4_440, "the sweep covers 4,440 comparisons");
 
         // **The sweep must actually disagree somewhere**, or the row and the oracle are the
         // same arithmetic and this bound means nothing. The explained side *is* bitwise — the
@@ -2271,6 +2288,99 @@ mod tests {
         }
     }
 
+    /// **What the mixture does at 300 reads a position, which is the end of the range this
+    /// caller commits to and where every other contaminated fixture here stops short.**
+    ///
+    /// Reads showing the alternative at Phred 60, a 3% fraction, the contaminant carrying that
+    /// allele at 1 in 100, scored under a reference homozygote — the genotype that has to
+    /// explain them all as errors. Per read, a misread costs `e⁻¹³·⁸/3`, 3 in ten million,
+    /// against `0.03 × 0.01`, 3 in ten thousand from the contaminant: **the contaminant route
+    /// is 900 times the likelier, so each wrong read is 6.80 nats cheaper than it was.**
+    ///
+    /// **That is a per-read constant, so it grows linearly with depth** — 20.4 nats at 3 reads
+    /// and 2,041 at 300 — and the mechanism is worth stating because it is not the mechanism
+    /// the shallow fixtures show. Once `c·q(o)` exceeds `(1 − c)·ε̄/m`, the mixture *floors what
+    /// a wrong read can cost*, so evidence against a homozygote stops accumulating at the rate
+    /// the read qualities would give. At three reads that is a nudge; at three hundred it is
+    /// what decides the call.
+    ///
+    /// **So an overestimated fraction is worse at depth, not merely as bad**, which is the
+    /// direction spec §3.6 names as the one to watch.
+    #[test]
+    fn the_mixture_floors_what_a_wrong_read_costs_and_that_grows_with_depth() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let per_read_log_error = -6.0 * std::f64::consts::LN_10;
+
+        let fractions = every_read_group_contaminated_at(0.03);
+        let frequencies = [0.99, 0.01];
+
+        let gain_at = |reads: u32| {
+            let supported = [observation(
+                1,
+                0,
+                reads,
+                per_read_log_error * f64::from(reads),
+            )];
+            let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+            let clean = row(&evidence, &alleles, &table, &uncalibrated());
+            let contaminated = contaminated_row(
+                &evidence,
+                &alleles,
+                &table,
+                &uncalibrated(),
+                ContaminationMixture::new(&fractions, &frequencies),
+            );
+            contaminated[hom_ref] - clean[hom_ref]
+        };
+
+        let (shallow, deep) = (gain_at(3), gain_at(300));
+
+        assert!(
+            (shallow - 20.41).abs() < 5e-2 && (deep - 2041.0).abs() < 5.0,
+            "the reference homozygote gains {shallow} nats at 3 reads and {deep} at 300"
+        );
+        // **Linear in depth, because the saving is per read** — the property that makes the
+        // shallow fixtures an understatement rather than a smaller version of the same thing.
+        assert!(
+            (deep / shallow - 100.0).abs() < 1e-6,
+            "a hundred times the reads should be a hundred times the gain, and it is \
+             {}",
+            deep / shallow
+        );
+    }
+
+    /// A contaminated locus at a ploidy above two, since every other contaminated fixture here
+    /// is a diploid and the copy share is the one term that varies with ploidy.
+    ///
+    /// A tetraploid carrying one copy of the alternative explains a read of it at `1/4`; the
+    /// mixture adds the contaminant's own `c · q`, so the reads it explains move too — which a
+    /// diploid fixture also shows, but not at a copy share this far from a half.
+    #[test]
+    fn the_copy_share_and_the_contaminant_mix_at_a_tetraploid_too() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = GenotypeTable::build(Ploidy::try_new(4).expect("a fixture ploidy"), 2);
+        let one_copy = genotype_carrying(&table, &[3, 1]).get() as usize;
+        let supported = [observation(1, 0, 2, -14.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let fractions = every_read_group_contaminated_at(0.05);
+        let frequencies = [0.8, 0.2];
+        let scored = contaminated_row(
+            &evidence,
+            &alleles,
+            &table,
+            &uncalibrated(),
+            ContaminationMixture::new(&fractions, &frequencies),
+        );
+
+        // Two reads the genotype explains at a quarter share, each charged
+        // `ln(0.95 · 0.25 + 0.05 · 0.2)`.
+        let expected = 2.0 * (0.95_f64 * 0.25 + 0.05 * 0.2).ln();
+        assert!((scored[one_copy] - expected).abs() < 1e-12);
+    }
+
     /// A fraction of zero is not a special case, but it must also not be a *different* case
     /// from having no mixture at all — the two ways a caller can say *nothing is contaminated*
     /// have to give one answer.
@@ -2361,6 +2471,25 @@ mod tests {
             "the two moves are {on_the_error_side} and {on_the_explained_side} nats, against the \
              8.569 and −0.1225 this test records"
         );
+    }
+
+    /// **The allele-range check both column readers rest on**, which had no test until C1's
+    /// review disabled it and watched the module stay green.
+    ///
+    /// It is not a bounds check standing in for a panic that would happen anyway: a stride walk
+    /// starting past the first row returns a *shorter* column, not an out-of-range one — three
+    /// alleles read at a two-allele stride gives two entries where three genotypes want three —
+    /// and the row's `zip` then drops a genotype's term in silence. The row's own assertion
+    /// makes this unreachable from `genotype_log_likelihood_row`; the table is public, so the
+    /// check has to hold on its own.
+    #[test]
+    #[should_panic(expected = "past the 2 this locus is called over")]
+    fn a_column_for_an_allele_the_table_lacks_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let values = spreads(&alleles, &table);
+
+        let _ = table_over(&values, &table).spreads_of(AlleleId(2)).count();
     }
 
     /// The linear column is the bases the log column is the logarithm of.

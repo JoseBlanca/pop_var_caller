@@ -35,12 +35,12 @@ easy to be wrong about, so it is measured.
   space; §8 requires the mixture be evaluated in probability space and logged once, so the two
   forms are separated by an `exp`/`log` round trip.
 
-Measured across **3,552 comparisons** — three loci of two, three and four alleles, four quality
+Measured across **4,440 comparisons** — three loci of two, three and four alleles, five quality
 profiles, read counts from 1 to 300, three read-group scales, ploidies 2 and 4, every genotype —
-the worst relative disagreement is **2.9 × 10⁻¹⁶**, at three alleles and 300 reads: −1592.6682015614529
-from the mixture against −1592.6682015614524 from an independent log-space oracle. In the units a
-genotype is decided in that is **2 × 10⁻¹² Phred**. The test's named tolerance is 3.5 times the
-measurement.
+the worst relative disagreement is **7.3 × 10⁻¹⁵**, at three alleles and 300 reads:
+−3.8844873955582386 from the mixture against −3.884487395558267 from an independent log-space
+oracle. In the units a genotype is decided in that is **1 × 10⁻¹³ Phred**. The test's named
+tolerance is 2.7 times the measurement, the same margin the aggregation sweep beside it carries.
 
 **The oracle is written out again rather than being the row under a flag** — a shared
 implementation would agree with itself whatever either of them did — and it reads its spreads
@@ -56,6 +56,8 @@ its allele-count divisor into `own`. Both were injected and measured:
 |---|---|---|
 | production's `(1 − ε)` factor on explained reads | 3,172 of 3,552 | 0.014 |
 | production's allele-count divisor on the error mass | 2,336 of 3,552 | 0.19 |
+
+*(Both measured on the four-profile sweep, before §5's review widened it to five.)*
 
 The first also failed eleven other tests in the module, the second two. Both files were restored
 from a byte-identical copy and the checksum re-checked afterwards.
@@ -104,8 +106,8 @@ one there by specification. The change is one accessor wide and is raised rather
 
 ## 5. What the reviews changed
 
-Four review agents ran on the committed step, each in its own worktree, covering reliability,
-errors, naming, idiomatic, smells, refactor safety and defaults. What they found, and what it
+Five review agents ran on the committed step, each in its own worktree, covering reliability (with
+mutation testing, §5a), errors, naming, idiomatic, smells, refactor safety and defaults. What they found, and what it
 changed:
 
 **Two silently-wrong-answer hazards, both fixed.**
@@ -164,9 +166,42 @@ every pair of the row's six parameters is a distinct type, so no transposition c
 even offers `help: swap these arguments`; and `ContaminationMixture` has no `Default` impl, which
 is the right call for a type whose empty value is a modelling claim.
 
+## 5a. What mutation testing found, including a test that claimed coverage it did not have
+
+**Nineteen mutations run, two survived, none changed no behaviour.** The two that survived were
+both missing tests rather than wrong code, and both are now covered:
+
+- **The frequency guard was tested on its upper half only.** Widening it to accept everything
+  below one left the module green. A negative contaminant frequency drives the mixture negative,
+  `ln` of a negative number is `NaN`, and **a `NaN` makes every comparison in an argmax false** —
+  so a genotype is picked with nothing to say it was picked from garbage. Measured under the
+  widened guard at a frequency of −1.0: a row of `[NaN, NaN, -inf]`. The constructor is public
+  and that assertion is its only guard.
+- **The allele-range check on a spread column had no test.** Disabling it left the suite green.
+  It is not a bounds check standing in for a panic that would happen anyway: a stride walk
+  starting past the first row returns a *shorter* column, not an out-of-range one, and the row's
+  `zip` then drops a genotype's term in silence.
+
+**And one of this step's own tests documented a failure it could not detect.** The
+zero-contamination sweep claimed to catch a reintroduced ceiling. It did not: the review put the
+cap back and watched the sweep pass. **Every fixture in it folds its reads into one observation,
+so the charge is always a geometric mean** — and no profile's *fold* exceeded half however poor
+its single reads were, the 93/1 alternation folding to 2 × 10⁻⁵. A fifth profile fixes it: every
+read at Phred 1, which folds to 0.794 at a scale of one and 1.99 at 2.5. With it, reintroducing
+the cap fails five tests including both sweeps. The sweep is now 4,440 comparisons, and its
+sibling — the aggregation identity — 1,080; spec §2.3's own count is corrected to match, its
+bound unchanged because the widened sweep's worst is 1.0 × 10⁻¹⁴ against the 2 × 10⁻¹⁴ it
+already carried.
+
+**Where the mutation coverage is thin, recorded rather than fixed.** Reading a stale entry from
+the per-copy-count logarithms is killed by exactly two tests, both contaminated fixtures with
+more than one observation. That is correct rather than thin — at zero contamination the array is
+identical for every observation, so no uncontaminated fixture can reach the hazard — but it means
+those two fixtures are load-bearing and should not be simplified.
+
 ## 6. What the tests pin
 
-108 tests in the module, against 81 at B2 — 27 added. Beyond the sweep and the injected defects
+113 tests in the module, against 81 at B2 — 32 added. Beyond the sweep and the injected defects
 of §2:
 
 - **A hand-computed contaminated case**, every term written out: a diploid, two reference reads
@@ -187,6 +222,18 @@ of §2:
 - **An explicit zero fraction and no mixture at all give bit-identical rows.**
 - **The linear column is the bases the log column is the logarithm of** — `exp(0)` exactly `1.0`,
   and the other within a unit in the last place of `ERROR_SPREAD_BASES`.
+- **What happens at 300 reads**, which is the end of the range this caller commits to and where
+  every contaminated fixture stopped short until the review said so. Reads showing the
+  alternative at Phred 60, a 3% fraction, the contaminant carrying that allele at 1 in 100: a
+  misread costs 3 in ten million against 3 in ten thousand from the contaminant, so **the
+  contaminant route is 900 times the likelier and each wrong read is 6.80 nats cheaper**. That is
+  a per-read constant, so it grows linearly — 20.4 nats at 3 reads, 2,041 at 300. **The mechanism
+  is not the one the shallow fixtures show:** once `c·q(o)` exceeds `(1 − c)·ε̄/m`, the mixture
+  *floors what a wrong read can cost*, so evidence against a homozygote stops accumulating at the
+  rate the qualities would give. So an overestimated fraction is worse at depth rather than
+  equally bad — which is the direction spec §3.6 names as the one to watch.
+- **A contaminated locus above ploidy two**, since the copy share is the one term that varies
+  with ploidy and every other contaminated fixture was a diploid.
 
 ## 7. Open for the owner — two questions, neither blocking C2
 
