@@ -8,7 +8,7 @@
 
 use super::{
     AlleleRemap, CandidateSelectionConfig, LocusSelection, RankedAlternative, SelectionScratch,
-    SelectionVerdict, UnmatchedSupport, compare_best_first, summarise_alleles,
+    SelectionVerdict, compare_best_first, leftover_of, summarise_alleles,
 };
 use crate::ng::calling::CandidateAlleles;
 use crate::ng::locus_generation::LocusKind;
@@ -30,10 +30,7 @@ use crate::ng::types::AlleleId;
 /// admission needs to know which alleles survived it, and the leftover has to run *after*,
 /// because it is per sample where admission is per allele and it reads the finished remapping.
 /// So the shape is: fold the rows, cap the survivor list (step C2), admit, then walk the rows
-/// again for the leftover (step C3).
-///
-/// **The leftover is still a placeholder** — one zeroed entry per covering sample, the right
-/// length in the right order, which is what step C3 fills.
+/// again for the leftover — which is what [`leftover_of`] does, per sample.
 ///
 /// **Above the cap the list is cut and the locus is still called; it is never refused**
 /// (spec §4.1). What is cut is the worst-evidenced by [`compare_best_first`], and the count is
@@ -152,19 +149,28 @@ pub fn select_generic(
         remap.admit(table_index, candidate);
     }
 
+    // The leftover, last: it is per sample where everything above is per allele, and it reads
+    // the finished remapping to know what was dropped.
     let covering_samples = observation.per_sample.len();
-    LocusSelection::new(
-        alleles,
-        verdict,
-        vec![UnmatchedSupport::default(); covering_samples],
-        remap,
-        covering_samples,
-    )
+    let leftovers = observation
+        .per_sample
+        .iter()
+        .map(|sample| {
+            leftover_of(
+                sample,
+                observation.region,
+                &remap,
+                config.min_allele_support,
+            )
+        })
+        .collect();
+    LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::MaxCandidateAlleles;
+    use super::super::UnmatchedSupport;
     use super::super::fixtures::*;
     use super::*;
     use crate::ng::run::cohort_merge::MinAltReads;
@@ -832,19 +838,29 @@ mod tests {
     /// the verdict counts the 395 it cut.
     ///
     /// **What that costs is not the alleles, it is the samples** — each of the 395 earned the
-    /// allele the cap took away, so step C3's second count will mark every one of them for a
-    /// missing genotype. Spec §4.1 measures the cap binding at 23 of 53,935 tomato loci and
-    /// reassures that "only the samples that earned a cut allele are affected"; at several
-    /// hundred samples that sentence means almost everybody. Raised with the owner at
-    /// Checkpoint C; asserted here so the behaviour is not a surprise.
+    /// allele the cap took away, so **395 of the 400 come back with a missing genotype**, which
+    /// this test asserts rather than leaves to be discovered. Spec §4.1 measures the cap binding
+    /// at 23 of 53,935 tomato loci and reassures that "only the samples that earned a cut allele
+    /// are affected"; at several hundred samples that sentence means almost everybody. Raised
+    /// with the owner at Checkpoint C.
     #[test]
     fn four_hundred_private_alleles_are_cut_to_the_cap_and_the_locus_is_still_called() {
+        // A sequence nobody earns, shown once by every sample, so that all 400 have a non-empty
+        // pool while only 395 lose an allele the cap took. Without it, "has a pool" and "the cap
+        // cost it something" pick out the same 395 samples and the assertion below cannot tell
+        // the two rules apart at the cohort size where the claim is weakest.
         let bases: Vec<Vec<u8>> = std::iter::once(b"A".to_vec())
             .chain((0..400).map(|i| format!("{i:03}").into_bytes()))
+            .chain(std::iter::once(b"NOISE".to_vec()))
             .collect();
         let table: Vec<&[u8]> = bases.iter().map(Vec::as_slice).collect();
         let per_sample = (0..400)
-            .map(|sample| sample_showing(sample, vec![row(0, 4, -4.0), row(sample + 1, 6, -6.0)]))
+            .map(|sample| {
+                sample_showing(
+                    sample,
+                    vec![row(0, 4, -4.0), row(sample + 1, 6, -6.0), row(401, 1, -0.5)],
+                )
+            })
             .collect();
         let observation = locus_of(&table, per_sample);
         let selection = select_generic(
@@ -855,7 +871,8 @@ mod tests {
         assert_eq!(
             selection.verdict(),
             SelectionVerdict::Truncated { dropped: 395 },
-            "400 alternatives cleared the rule and five fit under the default cap"
+            "400 alternatives cleared the rule and five fit under the default cap; the noise \
+             sequence never cleared it and was never a candidate for the cap"
         );
         assert_eq!(selection.alleles().len(), 6);
         assert_eq!(
@@ -868,11 +885,31 @@ mod tests {
                 b"003".to_vec(),
                 b"004".to_vec(),
             ],
-            "every alternative ties on all three numeric keys — a share of six in ten, one \
+            "every alternative ties on all three numeric keys — a share of six in eleven, one \
              clearing sample, six cohort reads — so the bases are the only thing separating 400 \
              of them, and the five kept are the five the bases rank first"
         );
         assert_eq!(selection.unmatched().len(), 400);
+        assert_eq!(
+            selection
+                .unmatched()
+                .iter()
+                .filter(|leftover| leftover.num_reads > 0)
+                .count(),
+            400,
+            "every sample has a non-empty pool, because every sample showed the noise sequence"
+        );
+        let missing = selection
+            .unmatched()
+            .iter()
+            .filter(|leftover| leftover.genotype_must_be_missing())
+            .count();
+        assert_eq!(
+            missing, 395,
+            "but only the 395 whose own allele the cap cut are emitted as missing — the five \
+             whose alleles survived keep their genotypes although their pools are non-empty, \
+             which is what separates the cap rule from the pool rule at this cohort size"
+        );
     }
 
     /// **The first ranking key is a share of one sample's reads, not the cohort's total** (spec
@@ -1001,5 +1038,491 @@ mod tests {
             "the second locus's own alleles, and nothing left over from the first"
         );
         assert_eq!(second.remap().table_len(), 2);
+    }
+
+    // ---- the leftover (step C3) ----------------------------------------------------------
+
+    /// **The plan's first oracle: the pool is the sum of the dropped rows' own `q_sum`, to the
+    /// bit** — never re-derived from a count and a rate, which is why the assertion is an
+    /// equality against the rows written out in the order the walk visits them.
+    ///
+    /// One sample, five sequences. A rule of three reads keeps `C` and drops `G`, `T` and `AA`;
+    /// `AA` is shown from two read groups, so the pool has to add both of its rows. The
+    /// reference is never dropped and its mass is never in the pool.
+    ///
+    /// **What this equality does and does not pin.** It pins the *set* of rows summed — that the
+    /// reference is out, that both of `AA`'s lanes are in, that nothing was scaled — and it
+    /// pins the value to the bit. It does **not** pin the addition order, and an earlier version
+    /// of this comment claimed it did: the four masses here are exact binary fractions, so every
+    /// ordering gives exactly −5.25. Pinning the order would need masses that do not sum
+    /// associatively, and there is nothing this step does differently at those.
+    #[test]
+    fn the_pool_is_the_dropped_rows_own_quality_mass_and_not_a_rate() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G", b"T", b"AA"],
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 6, -6.0),
+                    row(1, 4, -4.0),
+                    row(2, 1, -3.0),
+                    row(3, 1, -1.5),
+                    row_from_group(4, ReadGroupId(0), 1, -0.5),
+                    row_from_group(4, ReadGroupId(1), 1, -0.25),
+                ],
+            )],
+        );
+        let selection = selection_of(&observation, support_rule_of(3, 0.0));
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"C".to_vec()],
+            "only C reaches three reads — AA's two lanes pool to two, which is one short"
+        );
+        let leftover = selection.unmatched()[0];
+        assert_eq!(
+            leftover.num_reads, 4,
+            "one read each on G and T, and two on AA across its two read groups"
+        );
+        assert_eq!(leftover.q_sum, -3.0 + -1.5 + (-0.5 + -0.25));
+        assert_eq!(
+            leftover.earned_reads_cut_by_the_cap, 0,
+            "the rule dropped these, not the cap, so the sample is still callable"
+        );
+        assert!(!leftover.genotype_must_be_missing());
+    }
+
+    /// **A sample with nothing dropped gets a zero pool**, which is the default value and not a
+    /// computed one: the walk skips every row, so nothing is added and nothing is rounded.
+    /// Every allele it showed survived, so the walk skips every row and the leftover is the
+    /// default — which matters because a non-zero third field would emit the sample as missing.
+    #[test]
+    fn a_sample_whose_alleles_all_survived_has_an_untouched_leftover() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 4, -4.0), row(1, 4, -4.0)]),
+                sample_showing(1, vec![row(0, 9, -9.0), row(1, 1, -1.0)]),
+            ],
+        );
+        let selection = selection_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(selection.unmatched()[0], UnmatchedSupport::default());
+        assert_eq!(
+            selection.unmatched()[1].num_reads,
+            0,
+            "the second sample's one read is on an allele the first sample's reads admitted, \
+             so nothing of its is in the pool either"
+        );
+    }
+
+    /// **The plan's second oracle, and the one that separates the count from the pool.**
+    ///
+    /// A locus above the cap. Two samples earned `C` on their own reads — 6 of their 10 each —
+    /// and a third had a single error read on it. `G`, which one deeply-sampled accession shows
+    /// at 9 of its 10 reads, outranks `C` on the largest within-sample share, so at a cap of one
+    /// alternative the cap cuts `C`.
+    ///
+    /// **The two carriers must come back missing and the third must not.** All three have a
+    /// non-zero pool — the third's is its one error read — so a rule keyed on the pool would
+    /// no-call all three, and at nearly every locus in a real run it would no-call everybody:
+    /// the admission rule drops sequencing error at 13,166 of 15,474 alternatives on the GIAB
+    /// trio at 300× (spec §3.3), and every sample carries a few error reads almost everywhere.
+    /// **The condition is the cap and not the pool** (spec §4.1, §5).
+    #[test]
+    fn only_the_samples_that_earned_the_cut_allele_are_emitted_as_missing() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            vec![
+                sample_showing(0, vec![row(0, 4, -4.0), row(1, 6, -6.0)]),
+                sample_showing(1, vec![row(0, 4, -4.0), row(1, 6, -6.5)]),
+                sample_showing(2, vec![row(0, 9, -9.0), row(1, 1, -1.25)]),
+                sample_showing(3, vec![row(0, 1, -1.0), row(2, 9, -9.0)]),
+            ],
+        );
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.0),
+            max_candidate_alleles: cap_of(2),
+        };
+        let selection = select_generic(&observation, &config, &mut SelectionScratch::new());
+        assert_eq!(
+            selection.verdict(),
+            SelectionVerdict::Truncated { dropped: 1 }
+        );
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "G takes nine tenths of one sample's reads and C only six tenths, so the cap keeps G"
+        );
+
+        let leftovers = selection.unmatched();
+        assert_eq!(
+            leftovers[0],
+            UnmatchedSupport {
+                num_reads: 6,
+                q_sum: -6.0,
+                earned_reads_cut_by_the_cap: 6,
+            }
+        );
+        assert_eq!(
+            leftovers[1],
+            UnmatchedSupport {
+                num_reads: 6,
+                q_sum: -6.5,
+                earned_reads_cut_by_the_cap: 6,
+            }
+        );
+        assert_eq!(
+            leftovers[2],
+            UnmatchedSupport {
+                num_reads: 1,
+                q_sum: -1.25,
+                earned_reads_cut_by_the_cap: 0,
+            }
+        );
+        assert_eq!(leftovers[3], UnmatchedSupport::default());
+
+        let missing: Vec<bool> = leftovers
+            .iter()
+            .map(UnmatchedSupport::genotype_must_be_missing)
+            .collect();
+        assert_eq!(
+            missing,
+            vec![true, true, false, false],
+            "the two that earned the cut allele are missing; the one with an error read on it \
+             is genotyped although its pool is non-zero, and so is the carrier of the survivor"
+        );
+    }
+
+    /// **Partial reads are not in the pool** (spec §5.1). A read that stopped inside the locus
+    /// does not say what the sample carries, it says the sample carries *at least* this, and it
+    /// is scored on its own axis — it is not a read matching no candidate, it is a read matching
+    /// a *set* of candidates.
+    ///
+    /// **Nor are the merge's other two counts**: reads that covered the locus and showed nothing,
+    /// and reads it removed as evidence. Neither carries a quality sum and neither was ever in
+    /// the allele table, so neither can join a pool of error mass.
+    #[test]
+    fn the_pool_holds_no_partial_no_silent_and_no_removed_read() {
+        let mut sample = sample_showing(0, vec![row(0, 6, -6.0), row(1, 1, -1.5)]);
+        sample.partials = vec![partial_of(7)];
+        sample.reads_without_observation = 5;
+        sample.reads_removed_as_evidence = 3;
+        let selection = selection_of(
+            &locus_of(&[b"A", b"C"], vec![sample]),
+            support_rule_of(2, 0.0),
+        );
+        assert_eq!(
+            selection.unmatched()[0],
+            UnmatchedSupport {
+                num_reads: 1,
+                q_sum: -1.5,
+                earned_reads_cut_by_the_cap: 0,
+            },
+            "the one dropped read and its mass, and nothing from the other three axes"
+        );
+    }
+
+    /// **The reference's reads are never in the pool**, because the reference is never dropped
+    /// (spec §5.1, §6.1) — asserted at a locus where the reference carries far more mass than
+    /// anything else, so including it would be unmissable.
+    #[test]
+    fn the_references_own_reads_are_never_in_the_pool() {
+        let selection = selection_of(
+            &locus_of(
+                &[b"A", b"C"],
+                vec![sample_showing(0, vec![row(0, 90, -90.0), row(1, 1, -1.0)])],
+            ),
+            support_rule_of(2, 0.0),
+        );
+        assert_eq!(selection.unmatched()[0].num_reads, 1);
+        assert_eq!(selection.unmatched()[0].q_sum, -1.0);
+    }
+
+    /// **A sample's two read groups are pooled before the rule is asked of the leftover, exactly
+    /// as they are in the fold.** Here the sample shows the cut allele 3 reads from one lane and
+    /// 2 from another: pooled that is 5 and it clears a rule of five, so the sample is missing;
+    /// asked per row it would be 3 and 2 and the sample would be genotyped against a table that
+    /// does not hold what it carries.
+    ///
+    /// The two walks must agree because they ask the same rule of the same reads —
+    /// `one_run_per_allele` is shared for that reason, and this is the fixture that would notice
+    /// if they came apart.
+    #[test]
+    fn the_leftover_pools_a_samples_read_groups_before_asking_the_rule() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            vec![
+                sample_showing(
+                    0,
+                    vec![
+                        row(0, 5, -5.0),
+                        row_from_group(1, ReadGroupId(0), 3, -3.0),
+                        row_from_group(1, ReadGroupId(1), 2, -2.0),
+                    ],
+                ),
+                sample_showing(1, vec![row(0, 1, -1.0), row(2, 9, -9.0)]),
+            ],
+        );
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.5),
+            max_candidate_alleles: cap_of(2),
+        };
+        let selection = select_generic(&observation, &config, &mut SelectionScratch::new());
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "G takes nine tenths of its sample's reads and C a half, so the cap keeps G"
+        );
+        assert_eq!(
+            selection.unmatched()[0],
+            UnmatchedSupport {
+                num_reads: 5,
+                q_sum: -5.0,
+                earned_reads_cut_by_the_cap: 5,
+            },
+            "five reads across two lanes clear a rule of five; asked per lane, three and two \
+             would clear nothing and the sample would be genotyped against a table missing \
+             what it carries"
+        );
+        assert!(selection.unmatched()[0].genotype_must_be_missing());
+    }
+    /// **The rule the leftover re-asks is asked against the sample's *compared reads*, not
+    /// against the allele's own** — the same denominator the fold used, which is the whole point
+    /// of asking the same rule twice.
+    ///
+    /// A cut allele, and two samples that show it very differently. The first has 300 compared
+    /// reads and 10 on it: a share of 5 in 100 asks for 15, so that sample never earned it and
+    /// **must still be genotyped**. The second has 20 compared reads and 15 on it, earns it, and
+    /// must come back missing.
+    ///
+    /// **Asked against the allele's own reads the first sample would be missing too** — 10 reads
+    /// against `max(2, ceil(0.05 × 10)) = 2` clears easily — and every other fixture here is
+    /// built at a share of zero or a depth where the two denominators agree, so this is the only
+    /// one that separates them. At the GIAB trio's 30× and 300× that wrong denominator would
+    /// no-call every sample with a handful of error reads on a cut allele.
+    #[test]
+    fn the_leftover_asks_the_rule_against_the_samples_compared_reads() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            vec![
+                sample_showing(0, vec![row(0, 290, -290.0), row(1, 10, -10.0)]),
+                sample_showing(1, vec![row(0, 5, -5.0), row(1, 15, -15.0)]),
+                sample_showing(2, vec![row(0, 1, -1.0), row(2, 19, -19.0)]),
+            ],
+        );
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.05),
+            max_candidate_alleles: cap_of(2),
+        };
+        let selection = select_generic(&observation, &config, &mut SelectionScratch::new());
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "G takes 19 of its sample's 20 reads and C 15 of 20, so the cap keeps G"
+        );
+        assert_eq!(
+            selection.unmatched()[0],
+            UnmatchedSupport {
+                num_reads: 10,
+                q_sum: -10.0,
+                earned_reads_cut_by_the_cap: 0,
+            },
+            "ten reads in three hundred miss the share's fifteen, so this sample never earned \
+             the cut allele and keeps its genotype"
+        );
+        assert_eq!(
+            selection.unmatched()[1].earned_reads_cut_by_the_cap,
+            15,
+            "fifteen reads in twenty is an allele this sample really carries"
+        );
+        let missing: Vec<bool> = selection
+            .unmatched()
+            .iter()
+            .map(UnmatchedSupport::genotype_must_be_missing)
+            .collect();
+        assert_eq!(missing, vec![false, true, false]);
+    }
+
+    /// **A quality mass that is not a number is refused** — the third of the three caller bugs
+    /// spec §8 names as assertions this step holds in release, and the one that only becomes
+    /// reachable here, because nothing before C3 read `q_sum` at all.
+    ///
+    /// It is not a crash waiting to happen, which is why it has to be caught rather than left:
+    /// the mass flows into the pool, the pool into every genotype's data likelihood, and a
+    /// non-finite likelihood prefers no genotype over any other. The locus would come out called
+    /// with nothing chosen and nothing failed.
+    #[test]
+    #[should_panic(expected = "which is not a number the arithmetic can carry")]
+    fn a_dropped_allele_whose_quality_mass_is_not_a_number_is_refused() {
+        selection_of(
+            &locus_of(
+                &[b"A", b"C", b"G"],
+                vec![sample_showing(
+                    0,
+                    vec![row(0, 6, -6.0), row(1, 4, -4.0), row(2, 1, f64::NAN)],
+                )],
+            ),
+            support_rule_of(2, 0.0),
+        );
+    }
+
+    /// **Adding a sample that shows only reference reads changes no other sample's leftover** —
+    /// the second half of the plan's standing scale-freedom property, which only became
+    /// checkable at C3. The first half, that it changes neither the surviving list nor the
+    /// remapping, is asserted at
+    /// [`a_sample_showing_only_reference_reads_changes_neither_the_list_nor_the_remapping`].
+    ///
+    /// It is the property that fails first if a cohort term ever creeps into the leftover — if
+    /// the pool were shared, or the missing-genotype condition asked anything about the cohort
+    /// rather than about this sample.
+    #[test]
+    fn a_sample_showing_only_reference_reads_changes_no_other_samples_leftover() {
+        let carriers = || {
+            vec![
+                sample_showing(0, vec![row(0, 6, -6.0), row(1, 4, -4.0), row(2, 1, -1.5)]),
+                sample_showing(1, vec![row(0, 8, -8.0), row(2, 1, -0.5)]),
+            ]
+        };
+        let alone = selection_of(
+            &locus_of(&[b"A", b"C", b"G"], carriers()),
+            support_rule_of(2, 0.0),
+        );
+        let mut with_a_bystander_samples = carriers();
+        with_a_bystander_samples.push(sample_showing(2, vec![row(0, 60, -60.0)]));
+        let with_a_bystander = selection_of(
+            &locus_of(&[b"A", b"C", b"G"], with_a_bystander_samples),
+            support_rule_of(2, 0.0),
+        );
+        assert_eq!(
+            alone.unmatched(),
+            &with_a_bystander.unmatched()[..2],
+            "the two carriers' leftovers are what they were before the third sample arrived"
+        );
+        assert_eq!(
+            with_a_bystander.unmatched()[2],
+            UnmatchedSupport::default(),
+            "and the bystander showed only the reference, which is never dropped"
+        );
+    }
+
+    /// **The pool and the earned count are two different numbers, and this is the only fixture
+    /// where they differ.** The sample carries one error read on `T`, which the admission rule
+    /// drops, and six on `C`, which it earns and the cap cuts: its pool is seven reads and the
+    /// reads the cap took from it are six.
+    ///
+    /// Every other leftover fixture gives the affected sample **exactly one** dropped allele,
+    /// where the two totals coincide — so without this one the earned count could be the running
+    /// pool total and nothing would fail. And `T` sits *before* `C` in the merge table on
+    /// purpose: after `C` the running total and the right answer coincide again.
+    #[test]
+    fn the_earned_count_is_this_alleles_reads_and_not_the_pool_so_far() {
+        let observation = locus_of(
+            &[b"A", b"T", b"C", b"G"],
+            vec![
+                sample_showing(0, vec![row(0, 4, -4.0), row(1, 1, -1.0), row(2, 6, -6.0)]),
+                sample_showing(1, vec![row(0, 1, -1.0), row(3, 9, -9.0)]),
+            ],
+        );
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.0),
+            max_candidate_alleles: cap_of(2),
+        };
+        let selection = select_generic(&observation, &config, &mut SelectionScratch::new());
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "G takes nine tenths of its sample's reads and C six elevenths, so the cap keeps G"
+        );
+        assert_eq!(
+            selection.unmatched()[0],
+            UnmatchedSupport {
+                num_reads: 7,
+                q_sum: -7.0,
+                earned_reads_cut_by_the_cap: 6,
+            },
+            "seven reads in the pool, six of them on the allele this sample earned"
+        );
+    }
+
+    /// **The leftover is parallel to `per_sample` by position, and a partial-only sample holds
+    /// its place.** The samples either side drop the same one read of `C` but carry different
+    /// error mass, so a leftover that slid by one position shows up in the values.
+    ///
+    /// **The length assertion in `LocusSelection::new` cannot see that**, because a fill that
+    /// skips a sample and pads the tail is still the right length — and the failure it hides is
+    /// the wrong sample emitted as missing while the sample that lost an allele is genotyped
+    /// against a table that does not hold it.
+    #[test]
+    fn the_leftover_stays_aligned_when_a_partial_only_sample_sits_between_two_others() {
+        let observation = locus_of(
+            &[b"A", b"C"],
+            vec![
+                sample_showing(0, vec![row(0, 5, -5.0), row(1, 1, -1.0)]),
+                sample_with_only_partials(1, 4),
+                sample_showing(2, vec![row(0, 5, -5.0), row(1, 1, -7.0)]),
+            ],
+        );
+        let selection = selection_of(&observation, support_rule_of(2, 0.0));
+        assert_eq!(
+            selection.unmatched(),
+            &[
+                UnmatchedSupport {
+                    num_reads: 1,
+                    q_sum: -1.0,
+                    earned_reads_cut_by_the_cap: 0,
+                },
+                UnmatchedSupport::default(),
+                UnmatchedSupport {
+                    num_reads: 1,
+                    q_sum: -7.0,
+                    earned_reads_cut_by_the_cap: 0,
+                },
+            ],
+            "the middle sample has only partials and drops nothing, and the third sample's mass \
+             must not slide onto it"
+        );
+    }
+
+    /// **The denominator is every compared read, the cut allele's own included.** The first
+    /// sample holds 6 reads of `C` in 16 compared and the rule asks 8, so it never earned `C`
+    /// and keeps its genotype. Against the 10 reads it has *left* after `C` is cut, the same
+    /// share asks only 5 and the sample would be no-called.
+    ///
+    /// **That wrong denominator is systematically smaller than the right one** — it is the right
+    /// one minus whatever selection dropped — so it asks less of every sample and no-calls
+    /// samples the rule never meant to touch. Every other leftover fixture is built at a share of
+    /// zero or at a depth where the two denominators give the same answer.
+    #[test]
+    fn the_leftover_asks_the_rule_against_every_compared_read_including_the_cut_alleles_own() {
+        let observation = locus_of(
+            &[b"A", b"C", b"G"],
+            vec![
+                sample_showing(0, vec![row(0, 10, -10.0), row(1, 6, -6.0)]),
+                sample_showing(1, vec![row(0, 2, -2.0), row(1, 8, -8.0)]),
+                sample_showing(2, vec![row(0, 1, -1.0), row(2, 9, -9.0)]),
+            ],
+        );
+        let config = CandidateSelectionConfig {
+            min_allele_support: support_rule_of(2, 0.5),
+            max_candidate_alleles: cap_of(2),
+        };
+        let selection = select_generic(&observation, &config, &mut SelectionScratch::new());
+        assert_eq!(
+            surviving_bases(&selection),
+            vec![b"A".to_vec(), b"G".to_vec()],
+            "G takes nine tenths of its sample's reads and C four fifths, so the cap keeps G"
+        );
+        assert_eq!(
+            selection.unmatched()[0],
+            UnmatchedSupport {
+                num_reads: 6,
+                q_sum: -6.0,
+                earned_reads_cut_by_the_cap: 0,
+            },
+            "six reads in sixteen compared misses the share's eight"
+        );
+        assert!(
+            selection.unmatched()[1].genotype_must_be_missing(),
+            "eight reads in ten earns it, and the cap took it away"
+        );
     }
 }

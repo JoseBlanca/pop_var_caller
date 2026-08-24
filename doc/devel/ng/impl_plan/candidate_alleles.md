@@ -183,7 +183,7 @@ Above `max_candidate_alleles`, keep the best by B2's ranking, reference always, 
 `Truncated { dropped }`. Below it, `Selected`. The reference is exempt from both the bar and the
 cap. *Depends:* C1. *Source:* arch §2.2, §2.5; spec §4.1.
 
-**C3. The leftover. — own commit, do not bundle.**  ☐
+**C3. The leftover. — own commit, do not bundle.**  ✅
 Per sample, sum the merge's own per-row `q_sum` and read count over the alleles that did not
 survive — bar or cap — into `LocusSelection::unmatched`. Nothing is re-derived from counts and a
 rate. What is *not* in it: partials, reads that produced no observation, reads removed as

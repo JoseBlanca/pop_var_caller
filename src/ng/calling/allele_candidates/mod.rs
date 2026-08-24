@@ -21,13 +21,22 @@
 //! reads the cohort** — one sample reaching it admits the sequence for everyone —
 //! because otherwise a sample's candidate list would depend on who else is in the run
 //! (spec §3.2).
+//!
+//! **"The bar" and "the admission rule" are the same thing here, and this file uses both.**
+//! The identifiers say *bar* — `cleared_the_bar`, `samples_clearing_the_bar` — and the prose
+//! says whichever reads better in the sentence; the spec does the same (§3 is "The admission
+//! rule" and its paragraphs say "the bar"). **The cap is a different thing**: the bar decides
+//! which sequences are *worth* calling over, one sample at a time, and the cap decides how
+//! many a locus may be called over at all. Which of the two dropped an allele is what decides
+//! whether a sample keeps its genotype (§5), so the two words are never interchangeable.
 
 pub mod generic;
 
 use crate::ng::calling::CandidateAlleles;
+use crate::ng::run::cohort_merge::build::SupportedAllele;
 use crate::ng::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
-use crate::ng::types::AlleleId;
+use crate::ng::types::{AlleleId, GenomeRegion};
 use std::cmp::Ordering;
 
 /// **The support one sample must lend one sequence for it to be called over, and the cap
@@ -268,7 +277,7 @@ pub struct UnmatchedSupport {
     /// 13,166 of the merge's 15,474 alternatives (spec §3.3). Every sample has a few
     /// error reads at nearly every locus, so a rule keyed on `num_reads` would emit a
     /// missing genotype almost everywhere. The cap is the other way, and it only ever
-    /// cuts sequences that already cleared the rule for *somebody* — but not necessarily
+    /// cuts sequences that already cleared the bar for *somebody* — but not necessarily
     /// for the sample whose reads are being counted here, which is why "cleared it for
     /// this sample" is the condition and not "the cap cut it".
     pub earned_reads_cut_by_the_cap: u32,
@@ -686,6 +695,139 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
         .fold(0, |total, row| total.saturating_add(row.support.num_reads))
 }
 
+/// **What selection dropped for one sample, and what it costs that sample** (spec §5).
+///
+/// Every allele the admission rule or the cap removed keeps its reads' error mass in the
+/// arithmetic: the SNP/indel genotype likelihood carries a term for reads matching no candidate
+/// (`doc/devel/ng/spec/read_likelihoods.md` §3.3's `q_sum_other`). **Nothing upstream produces it,
+/// because nothing upstream drops anything** — selection creates the pool, so selection owes it.
+/// It costs no new producer: the merge already stores `q_sum` per `(allele, read group)`, and this
+/// is a sum over the rows whose allele is no longer in the table.
+///
+/// **The mass is summed straight from the merge's rows and never re-derived from a count and a
+/// rate**, which is why this walks the rows rather than multiplying anything.
+///
+/// **What is not in it** (spec §5.1): partial reads, which say the sample carries *at least* this
+/// and are scored on their own axis; reads that produced no observation and reads removed as
+/// evidence, neither of which carries a quality sum and neither of which was ever in the allele
+/// table; and the reference's own reads, since the reference is never dropped and so always has a
+/// candidate id.
+///
+/// # The second count, and why it is not the first one narrowed
+///
+/// [`UnmatchedSupport::earned_reads_cut_by_the_cap`] is this sample's reads on an allele **this
+/// sample's own reads earned** and the **cap** then cut. Non-zero means the sample carries
+/// something the locus is no longer called over, so every genotype the caller can form for it is
+/// wrong, and emission writes a missing genotype (spec §4.1, §5; the owner's decision of
+/// 2026-08-24).
+///
+/// **Keying it on the pool instead would no-call almost everybody.** The rule drops alleles almost
+/// nobody showed — 13,166 of 15,474 alternatives on the GIAB trio at 300× (spec §3.3) — which are
+/// overwhelmingly sequencing error, and every sample carries a few error reads at nearly every
+/// locus, so a sample's pool is almost always non-zero and says nothing. The cap is the other way,
+/// and it only ever cuts alleles that already cleared the bar for *somebody* — but not necessarily
+/// for the sample being counted, which is why "cleared it for this sample" is the condition.
+///
+/// **And asking that needs no list of what the cap cut.** A sample that cleared the bar for an
+/// allele is, by construction, a sample that put that allele among the cap's candidates — so an
+/// allele this sample earned and the remapping no longer holds can only have been cut by the cap.
+/// The test is therefore `dropped && this sample reached the bar`, asked with the same pooled
+/// reads and the same denominator the fold used, which is what [`one_run_per_allele`] and
+/// [`compared_reads_of`] exist to guarantee.
+///
+/// # Panics
+///
+/// On a dropped allele whose quality mass is not finite, and on a sample's rows out of ascending
+/// allele order (see [`one_run_per_allele`]). Both are caller bugs held in release, which spec §8
+/// names — **this is the third of the three it lists, and this step is where it becomes
+/// reachable**, because nothing before C3 read `q_sum` at all. A non-finite mass is not a crash
+/// waiting to happen: it flows into the pool, the pool into every genotype's data likelihood, and
+/// a non-finite likelihood prefers no genotype over any other, so the locus comes out called with
+/// nothing chosen and nothing failed.
+fn leftover_of(
+    sample: &SampleSupport,
+    locus: GenomeRegion,
+    remap: &AlleleRemap,
+    min_allele_support: MinAltReads,
+) -> UnmatchedSupport {
+    let compared_reads = compared_reads_of(sample);
+    let mut leftover = UnmatchedSupport::default();
+    for rows in one_run_per_allele(sample, locus) {
+        let allele = rows[0].allele;
+        if remap.candidate_for(allele).is_some() {
+            continue;
+        }
+        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
+            total.saturating_add(row.support.num_reads)
+        });
+        leftover.num_reads = leftover.num_reads.saturating_add(pooled_reads);
+        let mass = rows.iter().map(|row| row.support.q_sum).sum::<f64>();
+        assert!(
+            mass.is_finite(),
+            "sample {}'s rows for allele {allele} at {locus} sum to a quality mass of {mass}, \
+             which is not a number the arithmetic can carry: it flows into the pool, the pool \
+             into every genotype's data likelihood, and a non-finite likelihood prefers no \
+             genotype at all — so the locus comes out called with nothing chosen and nothing \
+             failed",
+            sample.sample
+        );
+        leftover.q_sum += mass;
+        if min_allele_support.reached_by(pooled_reads, compared_reads) {
+            leftover.earned_reads_cut_by_the_cap = leftover
+                .earned_reads_cut_by_the_cap
+                .saturating_add(pooled_reads);
+        }
+    }
+    leftover
+}
+
+/// **One sample's support rows, grouped so each allele's read-group rows arrive together** —
+/// the one place this module decides what "a sample's reads for this allele" means, and it is
+/// shared so that the two walks over these rows cannot come to disagree.
+///
+/// The merge writes the rows in ascending `(allele, read group)` order, so one allele's rows are
+/// one contiguous run and `chunk_by` groups exactly the read groups. **A read is a read whichever
+/// lane produced it**, and asking a rule of each row separately would be a stricter rule applied
+/// to exactly the samples that carry more than one read group (`doc/devel/ng/spec/read_groups.md`
+/// §1 — 157 of 1,707 in a surveyed tomato archive carry more than one).
+///
+/// **Both walks of a locus go through here**: [`summarise_alleles`], which asks the admission
+/// rule, and the leftover, which sums what selection dropped and asks the same bar again per
+/// sample. If those two pooled differently, a sample with two libraries could clear the bar in
+/// one walk and not the other, and its genotype would be emitted as missing for no reason.
+///
+/// # Panics
+///
+/// On rows out of ascending allele order. Out of order, one allele's rows split into two runs and
+/// each asks the bar with part of the sample's reads, so a sequence the sample really did earn
+/// quietly fails.
+///
+/// **The check runs as the iterator is advanced, not when it is built**, so a caller that stops
+/// early can walk past a disorder it never reaches — `.next()` alone on rows ordered 1, 0, 1
+/// returns without panicking. Both callers here exhaust it, which is what makes the guarantee
+/// hold today; a caller that does not must not treat this as a validation.
+fn one_run_per_allele(
+    sample: &SampleSupport,
+    locus: GenomeRegion,
+) -> impl Iterator<Item = &[SupportedAllele]> {
+    let mut previous_allele: Option<usize> = None;
+    sample
+        .supported
+        .chunk_by(|left, right| left.allele == right.allele)
+        .inspect(move |rows| {
+            let allele = rows[0].allele;
+            assert!(
+                previous_allele.is_none_or(|previous| previous < allele),
+                "sample {}'s rows must be in ascending allele order, and allele {allele} \
+                 follows {previous_allele:?} at {locus}: out of order, one allele's rows split \
+                 into two runs and each asks the bar with part of the sample's reads, so a \
+                 sequence the sample really did earn quietly fails",
+                sample.sample
+            );
+            previous_allele = Some(allele);
+        })
+}
+
 /// **Fold one locus's rows into one summary per allele, asking the bar of each sample
 /// separately** — the pass that decides which sequences are worth calling over
 /// (spec §3; arch §3.1).
@@ -739,7 +881,6 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// - **a sample that has rows and no reads on any of them.** A sample with *no* rows is a
 ///   different thing and is legitimate — it covers the locus and every one of its reads
 ///   stopped inside it, so all it has is partials — and that one is stepped over.
-///
 fn summarise_alleles(
     observation: &CohortObservation,
     min_allele_support: MinAltReads,
@@ -773,24 +914,8 @@ fn summarise_alleles(
             sample.sample,
             sample.supported.len()
         );
-        // The merge writes the rows in ascending `(allele, read group)` order, so one
-        // allele's rows are one contiguous run and `chunk_by` pools exactly the read
-        // groups.
-        let mut previous_allele: Option<usize> = None;
-        for rows in sample
-            .supported
-            .chunk_by(|left, right| left.allele == right.allele)
-        {
+        for rows in one_run_per_allele(sample, locus) {
             let allele = rows[0].allele;
-            assert!(
-                previous_allele.is_none_or(|previous| previous < allele),
-                "sample {}'s rows must be in ascending allele order, and allele {allele} \
-                 follows {previous_allele:?} at {locus}: out of order, one allele's rows \
-                 split into two runs and each asks the bar with part of the sample's reads, \
-                 so a sequence the sample really did earn quietly fails",
-                sample.sample
-            );
-            previous_allele = Some(allele);
             let pooled_reads = rows.iter().fold(0_u32, |total, row| {
                 total.saturating_add(row.support.num_reads)
             });
