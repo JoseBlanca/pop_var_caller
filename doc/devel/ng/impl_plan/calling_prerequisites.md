@@ -216,7 +216,41 @@ sites ([`pileup/open_record.rs:2047`](../../../../src/ng/locus_generation/pileup
 byte-identical `q_sum` on the existing pileup fixtures. *Source:* read_likelihoods spec §3.2,
 §12 test 10 ("checked by calling it from both sides on the same read").
 
-**D2. The accumulator, both routes.**  ☐
+**D2. The accumulator, both routes.**  ⛔ **blocked — this step rests on two things that are not
+true, found while building D1 (2026-08-24; measurements in
+[`ng_calling_prerequisites_d1_2026-08-24.md`](../../reports/implementations/ng_calling_prerequisites_d1_2026-08-24.md)
+§4).**
+
+**First, neither route can call D1's function, because neither has a read.** The census route's
+per-position unit is depth and allele counts
+([`joint/fit.rs:467`](../../../../src/ng/parameter_estimation/joint/fit.rs)) and the histogram
+route reads pooled observations, not reads. The last place either sees per-read qualities is the
+walk itself.
+
+**Second, an observation's `q_sum` is the wrong sum.** §3.2 asks for "a running sum of the per-read
+error **probability**"; `q_sum` accumulates the *logarithms*, so `exp(q_sum / n)` is the geometric
+mean and Σ ε is not recoverable from it. At §3.2's own example — one read at Phred 20 and one at
+Phred 40 — the arithmetic mean is 0.00505 and the geometric 0.001, so a scale built from `q_sum`
+comes out **five times wrong**. §12's ninth test exists to catch exactly this substitution.
+
+**So the step is three, and one of them is a decision:**
+
+1. **The walk accumulates Σ `exp(minted)` alongside `q_sum`** and carries it on
+   `SequenceObservation`. Certain under every design, because the quantity is unrecoverable
+   afterwards. About 89 construction sites, most of them fixtures.
+2. **The histogram route sums it over the sites its histogram counts** — and **over the kept
+   subsample, not the raw observation**: every site is thinned to `MAX_BINNED_DEPTH = 124`
+   ([`generic/depth_bins.rs:77`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs)),
+   so above about 124 reads a position a denominator taken from `num_obs` covers reads the fitted
+   rate never saw. That fires on the GIAB trio and never on the tomato cohort at about 3×.
+3. **The census route's accumulator is a file-format change**, not an addition: `GenericEvidence`
+   gains a field, the section encoding gains bytes, and `census_file.rs`'s `VERSION` moves from 2
+   to 3, which makes every existing census file a rebuild. The format's own doc calls that the
+   designed answer — "a census is a cache with a pileup behind it, so the answer to a version this
+   build does not know is to rebuild rather than to interpret" — but it is the owner's call, not a
+   build-order consequence.
+
+*(Original text follows, kept because 1 and 2 are still what it asks for.)*
 `ReadGroupErrorRateFit`
 ([`read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs))
 gains the two fields, summed over the sites its histogram counts; the census route's fit
@@ -255,7 +289,7 @@ about **how much** contaminant there is. The class frequencies say **what** the 
 carries, and a run's contaminant is one population however many libraries it entered through. So
 they are fitted once per run and copied into each read group's view.
 
-**E1. The three frequencies.**  ☐
+**E1. The three frequencies.**  ⛔ **blocked — see the note below.**
 A side-pass over the census evidence the contamination fit already reads: classify each site's
 alternative alleles into the three classes, average the fitted frequencies per class, and carry
 the triple beside the run's contamination output (one triple per run — the frequencies describe
@@ -264,6 +298,34 @@ copies them in, [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2
 absent where contamination itself is not estimated (one sample). Test: a fixture census with
 hand-classified sites gives the hand-computed averages. *Source:* read_likelihoods spec §3.6;
 arch §2.3.
+
+> ⛔ **Blocked 2026-08-24: "average the fitted frequencies per class" does not name an estimator
+> this plan is allowed to choose.**
+>
+> **What the caller needs is a simplex, not three averages.** §3.6 puts `q(o)` inside
+> `(1 − c)·own(o | g) + c·q(o)`, so it is *what a contaminant read shows at this observation* — a
+> probability over the three classes summing to one, which is production's `q_b`
+> ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs)
+> §`q_b_per_batch`, validated as a simplex). A mean of per-site allele frequencies within a class is
+> a different object and does not sum to one.
+>
+> **Production's estimator cannot be ported, because ng's contamination fit produces none of its
+> inputs.** Production fits `q_b` by a Dirichlet-smoothed M-step over
+> `S_b[a] = Σ over reads r of class a of γ_r`, where `γ_r` is a **per-read posterior responsibility
+> that the read came from the contaminant**. ng fits its fraction per read group from marker read
+> shares against ancestry-predicted dosages
+> ([`joint/contamination.rs`](../../../../src/ng/parameter_estimation/joint/contamination.rs)) and
+> never computes a per-read responsibility, so there is nothing to smooth.
+>
+> **Two further questions the plan's sentence leaves open**, and both change the answer: over which
+> sites — the contamination fit's *selected markers*, which are chosen inside a frequency band and
+> are overwhelmingly substitutions, or every census position; and what the reference class's entry
+> is, since the census's fifth allele code lumps indels with `N` and spanning deletions
+> ([`joint/census.rs`](../../../../src/ng/parameter_estimation/joint/census.rs) `ObservedAllele::Other`)
+> so the "insertion-or-deletion" class cannot be read off it cleanly.
+>
+> Choosing among these is new design, which this plan says in its own header it is not a place for.
+> **Owner's call.**
 
 ### Milestone F — the `StratumFits` gather (item 5)
 
@@ -283,9 +345,10 @@ the shape numbers equal the stratum's own, and provenance survives. Update
 type, per the em-loop arch's instruction that the parameter-prepass arch doc pins it. *Source:*
 read_likelihoods arch §4.2; calling_em_loop arch §2.
 
-> **Checkpoint E/F:** the class frequencies and the gather exist with their tests; the pre-pass's
-> own outputs are otherwise untouched. **This plan is complete — the read-likelihoods plan's
-> preconditions (items 1–5) all hold.** Pause for review.
+> **Checkpoint E/F:** the gather exists with its tests and the pre-pass's own outputs are
+> otherwise untouched. **The plan is not complete: D2 and E1 are blocked on decisions the plan is
+> not allowed to take** (see their notes). Of the read-likelihoods plan's preconditions, items 1,
+> 2 and 5 hold; item 3 holds only as far as the shared mint, and item 4 not at all.
 
 ---
 
