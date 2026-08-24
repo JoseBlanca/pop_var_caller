@@ -41,8 +41,10 @@ the deepest accession, 228,468,065 of 228,492,796 read-positions are under the c
 moves by a factor of 1.0000.
 
 **Done:** §3.2 and the module doc now state the divergence with its size, in place of the sentence
-that denied it. **Not done, and the owner's:** whether to thin the accumulator at the same cap.
-Both options and their costs are in §3.2. Nothing decides it until the scale has a consumer.
+that denied it. **And decided (owner, 2026-08-24): the accumulator does not thin, and the average
+stays over every read** — because that is the population the scale is applied to at calling time.
+The 2.7% is carried knowingly; §3.2 records both options and why this one. Revisiting costs one
+multiply per site.
 
 ### 1.2 An `i64` running sum would have saturated on one ordinary deep sample, not on four hundred
 
@@ -214,7 +216,7 @@ likelihood's error-rate scale, in
 
 ## 8. What the reviews leave open
 
-- **The depth-cap decision** (§1.1) — the owner's.
+- ~~**The depth-cap decision** (§1.1)~~ — **settled 2026-08-24: the accumulator does not thin.**
 - **A read group with a borrowed error rate.** Below 10,000 sites a group gets the mean of the
   other groups' rates rather than its own, while its denominator stays its own reads. §3.2's
   sentence about one site set does not describe that case; the module doc now names it, and whether
