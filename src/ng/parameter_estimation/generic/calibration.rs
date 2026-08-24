@@ -75,11 +75,17 @@
 //! A read group standing on fewer than [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) sites — ten
 //! thousand — does not get its own fitted rate:
 //! [`resolve_error_rates`](super::fallback::resolve_error_rates) hands it the mean of the other
-//! groups' rates, or a supplied one, or a default. **Its denominator is still its own reads**, so for such a group the
-//! scale is "make this library's average charged error come out at somebody else's measured rate".
-//! That may be exactly right — it is what borrowing a rate means — but §3.2's sentence about one
-//! site set does not describe it, and a capture panel or a minor library in a multi-library sample
-//! reaches it.
+//! groups' rates, or a supplied one, or a default. **Its denominator is still its own reads**, so
+//! for such a group the scale is "make this library's average charged error come out at somebody
+//! else's measured rate". §3.2's sentence about one site set does not describe that case, and a
+//! capture panel or a minor library in a multi-library sample reaches it.
+//!
+//! **It is the least wrong of the available answers, and the sizes are measured** (2026-08-24, 63
+//! tomato libraries; `arch/parameter_prepass_generic.md` §5 carries the table). A borrowed rate
+//! leaves the average charged error a median factor of **1.51** from the library's own; the default
+//! of 0.001 leaves it at 2.99; and not rescaling at all leaves it at about **5**, because read
+//! qualities overstate quality by roughly that much. Borrowing is a compromise with a size, not a
+//! placeholder.
 
 use std::collections::BTreeMap;
 
@@ -132,27 +138,29 @@ const PARTS_OF_ONE: f64 = (1_u64 << 20) as f64;
 /// regions at 300×: 172,616,054 over 571,984 bases, which is 301.8 a base
 /// (`examples/ng_minted_error_means.rs`). So:
 ///
-/// - a human genome at 30× is about 9.3 × 10¹⁰ of these, and at the mean log error measured on
-///   that same sample (8.145 nats) that is 7.9 × 10¹⁷ scaled units — an `i64` holds **twelve**
-///   such samples, not four hundred;
-/// - **the same genome at 300× is 7.9 × 10¹⁸ scaled units on its own, which is 86% of
-///   `i64::MAX`.** One sample.
+/// **The largest one of these can get is one sample's whole genome**, because a read group belongs
+/// to exactly one sample — `build_read_groups` mints one entry per declared read group per file and
+/// `group_by_sample` files each under the single sample its header names, so an identifier cannot
+/// span samples. So the bound to clear is a single deep library, not a cohort:
+///
+/// - a human genome at 30× is about 9.3 × 10¹⁰ read-positions, and at the mean log error measured
+///   on that sample (8.145 nats) that is 7.9 × 10¹⁷ scaled units — an `i64` has 11.6× headroom;
+/// - **the same genome at 300× is 7.9 × 10¹⁸, which is 86% of `i64::MAX` — 1.16× headroom, for one
+///   library.** A deeper run, a larger genome or a noisier library goes over.
 ///
 /// **A single read's contribution is bounded by the *smaller* of its two qualities, not the
 /// larger**, which is easy to get backwards: the mint takes `max(ln ε_BQ, ln ε_MQ)` of two
 /// negative numbers, so it returns the one nearer zero. Over every `(base quality, mapping
 /// quality)` byte pair the most negative value the mint can return is −58.716 — `phred_to_ln_perr`
 /// at 255 — and on BWA output, where mapping quality tops out at 60, the real ceiling is
-/// **−13.816**. At that ceiling a 30× human genome needs 1.3 × 10¹⁸ scaled units and an `i64`
-/// holds seven samples.
+/// **−13.816**. **At that ceiling one 300× human library needs 1.35 × 10¹⁹ scaled units, which an
+/// `i64` does not hold at all.**
 ///
-/// `saturating_add` pins rather than panicking, so the symptom would have been a mean that was
-/// merely wrong. Nothing merges two samples' accumulators **today** — [`merge`] runs across
-/// region shards of one sample — but the run-level fold the scale needs is across samples, and at
-/// `i64` it would have saturated inside a single ordinary cohort rather than beyond any
-/// conceivable one. `i128` puts it past 10²⁰ such samples. It costs 16 bytes a read group and not
-/// 8, because `i128` also aligns the struct to 16 — 32 bytes against `i64`'s 16 — and the map
-/// holds one entry per read group.
+/// So `i64` is not comfortably enough for a single deep library, and `saturating_add` pins rather
+/// than panicking — the symptom would have been a mean that was merely wrong rather than a run that
+/// stopped. `i128` puts it beyond any depth. It costs 16 bytes a read group and not 8, because
+/// `i128` also aligns the struct to 16 — 32 bytes against `i64`'s 16 — and the map holds one entry
+/// per read group.
 ///
 /// [`merge`]: super::accumulators::GenericAccumulators::merge
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
@@ -228,16 +236,16 @@ impl MintedReadErrors {
             .then(|| self.log_error_sum_scaled as f64 / PARTS_OF_ONE / self.reads as f64)
     }
 
-    /// Fold another shard's totals for the same read group into these.
+    /// Fold another region shard's totals for the same read group into these.
     ///
     /// Exact, and therefore independent of the order the folds happen in.
     ///
-    /// **It is written to take another *sample*'s too, and today nothing hands it one.** A read
-    /// group is a library and a library can hold more than one plant, so the run-level
-    /// denominator the scale wants is a group's totals over every sample it covers — which is why
-    /// the scale is per read group and not per sample. The pre-pass merges region shards within
-    /// one sample and stops there; the fold across samples belongs to whoever assembles the
-    /// frozen parameters, and this method is what it will use.
+    /// **Shards of one sample, and there is nothing else to fold.** A read group belongs to
+    /// exactly one sample: `build_read_groups` mints one entry per declared read group per file
+    /// and `group_by_sample` files each identifier under the single sample its header names, so
+    /// two samples cannot share one. The scale is per read group rather than per sample because
+    /// chemistry belongs to the library — a sample sequenced twice has two of these — not because
+    /// a library spans samples.
     pub fn add(&mut self, other: Self) {
         self.log_error_sum_scaled = self
             .log_error_sum_scaled

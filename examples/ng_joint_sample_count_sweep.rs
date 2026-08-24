@@ -152,7 +152,8 @@ fn main() {
                 drawn,
                 fitted,
                 fitted / drawn,
-                fit.noise[&ReadGroupId(0)].value.clean,
+                // The mean over the libraries: one a sample, since a library belongs to one plant.
+                fit.noise.values().map(|n| n.value.clean).sum::<f64>() / fit.noise.len() as f64,
                 fit.noisy_share,
                 if fit.converged { "" } else { "RAN OUT, " },
                 at.elapsed().as_secs_f64()
@@ -286,7 +287,7 @@ fn draw(
                 format!("s{s:02}"),
                 terms.clone(),
                 BTreeMap::from([(
-                    SectionKey::Generic(ReadGroupId(0)),
+                    SectionKey::Generic(ReadGroupId(s as u32)),
                     Section::Generic(GenericEvidence::from_parts(
                         std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),

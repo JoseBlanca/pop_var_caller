@@ -1654,13 +1654,15 @@ mod tests {
         };
         (0..samples)
             .map(|s| {
-                // Library `k` of every plant is read group `k`, so one error rate is fitted per
-                // library slot across the whole panel — see `ContaminationGrain`.
+                // **Plant `s`'s library `k` is a read group of its own**, because a library is
+                // one plant's DNA preparation and no two plants ever share one. So the panel's
+                // identifiers run `s * libraries + k` and the cohort's door — which refuses two
+                // samples that claim one read group — has nothing to catch here.
                 let held = (0..libraries.len())
                     .map(|k| {
                         let here = slot(s, k);
                         (
-                            SectionKey::Generic(ReadGroupId(k as u32)),
+                            SectionKey::Generic(read_group_of(s, k, libraries.len())),
                             Section::Generic(GenericEvidence::from_parts(
                                 std::mem::replace(
                                     &mut codes[here],
@@ -1676,10 +1678,22 @@ mod tests {
             .collect()
     }
 
-    /// One error rate for each library slot the drawn panel uses.
-    fn error_rates(libraries: usize, rate: f64) -> BTreeMap<ReadGroupId, f64> {
-        (0..libraries)
-            .map(|k| (ReadGroupId(k as u32), rate))
+    /// Plant `s`'s library slot `k`, as the read group the drawn panel gives it.
+    fn read_group_of(s: usize, k: usize, libraries: usize) -> ReadGroupId {
+        ReadGroupId(u32::try_from(s * libraries + k).expect("a drawn panel fits in u32"))
+    }
+
+    /// Which library slot a read group is, whichever plant it belongs to — what an assertion
+    /// about "the thin library" is really about.
+    fn library_slot(group: ReadGroupId, libraries: usize) -> usize {
+        group.get() as usize % libraries
+    }
+
+    /// One error rate for every read group the drawn panel uses — **one per plant per library
+    /// slot**, since each of those is a library of its own.
+    fn error_rates(samples: usize, libraries: usize, rate: f64) -> BTreeMap<ReadGroupId, f64> {
+        (0..samples)
+            .flat_map(|s| (0..libraries).map(move |k| (read_group_of(s, k, libraries), rate)))
             .collect()
     }
 
@@ -1727,7 +1741,7 @@ mod tests {
                 &fit_contamination(
                     &mut as_cohort(&panel),
                     &DepthBinEdges::for_census(),
-                    &error_rates(1, 0.002),
+                    &error_rates(samples, 1, 0.002),
                     &vec![0.0; samples],
                     &[],
                     &ContaminationConfig {
@@ -1746,7 +1760,7 @@ mod tests {
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
             &DepthBinEdges::for_census(),
-            &error_rates(1, 0.002),
+            &error_rates(samples, 1, 0.002),
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
@@ -1781,7 +1795,7 @@ mod tests {
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
             &DepthBinEdges::for_census(),
-            &error_rates(1, 0.002),
+            &error_rates(samples, 1, 0.002),
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
@@ -1816,7 +1830,7 @@ mod tests {
                 &fit_contamination(
                     &mut as_cohort(&panel),
                     &DepthBinEdges::for_census(),
-                    &error_rates(1, 0.002),
+                    &error_rates(samples, 1, 0.002),
                     &vec![0.0; samples],
                     &[],
                     &ContaminationConfig {
@@ -1868,7 +1882,7 @@ mod tests {
             fit_contamination(
                 &mut as_cohort(&panel),
                 &DepthBinEdges::for_census(),
-                &error_rates(2, 0.002),
+                &error_rates(samples, 2, 0.002),
                 &vec![0.0; samples],
                 &[],
                 &ContaminationConfig {
@@ -1951,7 +1965,7 @@ mod tests {
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
             &DepthBinEdges::for_census(),
-            &error_rates(2, 0.002),
+            &error_rates(samples, 2, 0.002),
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
@@ -1969,7 +1983,7 @@ mod tests {
                     ..
                 } = estimate
                 {
-                    if *group == ReadGroupId(1) {
+                    if library_slot(*group, 2) == 1 {
                         worst_thin = worst_thin.max(*alpha);
                         fewest = fewest.min(*markers_with_reads);
                     } else {

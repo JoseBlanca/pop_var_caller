@@ -281,7 +281,8 @@ fn main() {
             "  the fit: {} of positions booked mismapped against {planted} planted, error rate \
              {:.5} against {CLEAN}, {} passes, {:.0} s",
             format_args!("{:.4}", fit.noisy_share),
-            fit.noise[&ReadGroupId(0)].value.clean,
+            // The mean over the libraries: one a sample, since a library belongs to one plant.
+            fit.noise.values().map(|n| n.value.clean).sum::<f64>() / fit.noise.len() as f64,
             fit.passes,
             at.elapsed().as_secs_f64()
         );
@@ -393,8 +394,8 @@ struct Arm {
 
 /// One arm: how many markers survived, and every library's fraction.
 fn run(samples: &[SampleCensusEvidence], fit: &JointFit, settings: &ContaminationConfig) -> Arm {
-    // **One error rate per read group**, which is the grain the fit produced them at. Library
-    // slot `k` is read group `k` for every plant, so this is one rate a slot.
+    // **One error rate per read group**, which is the grain the fit produced them at — and a
+    // read group here is one plant's one library, so this is one rate per plant per library.
     let error: BTreeMap<ReadGroupId, f64> = fit
         .noise
         .iter()
@@ -605,16 +606,15 @@ fn draw(
     Drawn {
         samples: (0..samples)
             .map(|s| {
-                // **Library `k` of every plant is read group `k`**, shared across the panel
-                // rather than one identifier per plant per library. Real read groups are unique
-                // to a plant, but sharing them here keeps the error rate fitted from the whole
-                // panel exactly as it is today, so a difference in the fraction is the split of
-                // the fraction and not a change in how well the error rate is determined.
+                // **Plant `s`'s library `k` is a read group of its own**, running
+                // `s * libraries + k`. A read group is one plant's DNA preparation, so no two
+                // plants share one, and a cohort whose samples claim the same identifier is
+                // refused at the door.
                 let sections = (0..libraries.len())
                     .map(|k| {
                         let here = slot(s, k);
                         (
-                            SectionKey::Generic(ReadGroupId(k as u32)),
+                            SectionKey::Generic(ReadGroupId((s * libraries.len() + k) as u32)),
                             Section::Generic(GenericEvidence::from_parts(
                                 std::mem::replace(
                                     &mut codes[here],

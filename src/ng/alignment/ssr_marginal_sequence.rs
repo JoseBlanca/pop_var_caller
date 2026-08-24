@@ -306,6 +306,25 @@ mod tests {
         SsrSequenceMarginal::try_new(eps).expect("eps in [0, 1]")
     }
 
+    /// **How many representable `f64` values lie between `a` and `b`** — the scale-free way
+    /// to say "the same number, to within rounding", where an absolute epsilon is not.
+    ///
+    /// A fixed bound like `1e-18` means different things at different magnitudes: it is
+    /// thousands of steps near `1e-15` and *finer than the type can represent* near `1e-2`,
+    /// where consecutive `f64`s are about 1.7e-18 apart. Counting steps says the same thing
+    /// everywhere, so a bound of four means four roundings whatever the values are.
+    ///
+    /// Finite `f64` bit patterns of one sign are monotone as integers, which is what makes
+    /// the subtraction meaningful; both callers compare same-signed finite values, and the
+    /// assertion says so rather than trusting it.
+    fn ulps_apart(a: f64, b: f64) -> u64 {
+        assert!(
+            a.is_finite() && b.is_finite() && a.is_sign_negative() == b.is_sign_negative(),
+            "a step count is only meaningful between finite values of one sign: {a}, {b}"
+        );
+        a.to_bits().abs_diff(b.to_bits())
+    }
+
     /// An exact match scores `(1 − ε)^len` — the single-term sum with every column a match,
     /// taken through the fast path.
     #[test]
@@ -361,8 +380,16 @@ mod tests {
         let one = aligner(1.0);
         assert_eq!(one.equal_length_probability(b"ACGT", b"ACGT"), 0.0);
         let all_mismatch = one.equal_length_probability(b"AAAA", b"CCCC");
+        // **A few representable values apart, not an absolute epsilon.** The bound here
+        // was `1e-18`, which is *smaller than one `f64` step* at this magnitude — the
+        // values are near 0.0123, where consecutive `f64`s are about 1.7e-18 apart — so it
+        // demanded agreement finer than the type can express and passed only because an
+        // unoptimised build happened to evaluate both sides in the same order. Four
+        // repeated multiplications against `powi(4)` may legitimately differ in the last
+        // bit; a port that got the arithmetic *wrong* would be out by far more than four
+        // steps.
         assert!(
-            (all_mismatch - (1.0f64 / 3.0).powi(4)).abs() < 1e-18,
+            ulps_apart(all_mismatch, (1.0f64 / 3.0).powi(4)) <= 4,
             "got {all_mismatch}"
         );
         // A mismatch outscores a match at ε = 1: (1/3)^4 > 0 = 0^4.
@@ -623,6 +650,16 @@ mod tests {
     /// `align_subst` *logarithm*. The two bit-exact tests above (linear parity, and the
     /// marginal is one `.ln()` of the linear) already imply this transitively, but stating it
     /// as a single assertion documents the contract the module actually offers a caller.
+    ///
+    /// **This one compares within a few representable values where the two above compare
+    /// bits, and the difference is deliberate.** Both sides are compiled together, and the
+    /// optimiser is free to fuse a multiply and an add in one and not the other; at
+    /// `opt-level = 2` the two ends of this chain came out 9 `f64` steps apart while the
+    /// linear parity above stayed bit-identical. What this test is for is that ng's marginal
+    /// *is* production's logarithm and not, say, a linear probability typed as a log or a
+    /// doubled one — errors of that class are out by a factor, not by nine steps in the last
+    /// place. The stronger same-operation-order claim is still made, bit for bit, by the two
+    /// tests above (owner's decision, 2026-08-24, on adopting an optimised test profile).
     #[test]
     fn the_marginal_is_the_logarithm_of_production_align_subst() {
         use crate::ssr::cohort::pair_hmm::{HmmScratch, align_subst};
@@ -637,7 +674,11 @@ mod tests {
             let mut prod = HmmScratch::new();
             let marginal = a.marginal_probability(read, reference, (), &mut ours);
             let prod_log = align_subst(read, reference, EPS, &mut prod).ln();
-            assert_eq!(marginal.get().to_bits(), prod_log.to_bits());
+            assert!(
+                ulps_apart(marginal.get(), prod_log) <= 16,
+                "{read:?} against {reference:?}: {} against {prod_log}",
+                marginal.get()
+            );
         }
     }
 

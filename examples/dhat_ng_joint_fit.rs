@@ -228,7 +228,9 @@ fn main() {
                 },
             );
             let (mut cohort, strata) = built;
-            let groups = BTreeMap::from([(ReadGroupId(0), 0_u32)]);
+            let groups: BTreeMap<ReadGroupId, u32> = (0..samples)
+                .map(|s| (ReadGroupId(s as u32), 0_u32))
+                .collect();
             let (gathered, _) = measured(
                 &format!(
                     "gather_strata, {samples} samples x {} tracts",
@@ -565,7 +567,7 @@ fn drawn_generic_cohort(
                 format!("s{s}"),
                 terms.clone(),
                 BTreeMap::from([(
-                    SectionKey::Generic(ReadGroupId(0)),
+                    SectionKey::Generic(ReadGroupId(s as u32)),
                     Section::Generic(GenericEvidence::from_parts(
                         std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),
@@ -619,7 +621,8 @@ fn drawn_ssr_cohort(
                         }
                     }
                     (
-                        SectionKey::Ssr(ReadGroupId(0), *stratum),
+                        // One read group a sample: a library belongs to one plant.
+                        SectionKey::Ssr(ReadGroupId(s as u32), *stratum),
                         Section::Ssr(SsrEvidence::from_parts(
                             offsets,
                             0,

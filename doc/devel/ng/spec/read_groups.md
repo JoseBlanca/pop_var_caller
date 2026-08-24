@@ -181,6 +181,15 @@ two read groups with two identifiers. Whether they should be *treated* as one th
 about their library names, answered later by whoever cares. Keeping the two apart is what stops an
 ambiguity in the data becoming an ambiguity in the identifier.
 
+**A tool that ignores the run-wide space is caught downstream, not here.** The pre-pass promises
+identifiers unique across *the paths it was given*, and a caller that hands it one file at a time
+gets nothing from that promise: every sample's first read group comes back as identifier `0`. The
+pre-pass cannot see this — it is one call per file, each correct on its own — so the refusal belongs
+where the samples meet. A cohort refuses two samples that claim one identifier, naming both
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §7 check 10); a cohort tool
+must call the pre-pass once over every alignment and then open one `SampleReads` per entry of the
+by-sample view, which is what the run-wide space is for.
+
 **Assignment order is fixed and does not depend on scheduling**: input-file order, then header
 order within a file. Files may still be opened concurrently; the identifiers are assigned in a
 serial pass. Two runs over the same input list produce the same identifiers, which is what lets any
