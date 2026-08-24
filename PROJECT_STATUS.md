@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **the first whole answer selection returns, and a rule two
+> - **Last completed task (2026-08-24):** **candidate selection is complete on the SNP/indel path**
+> (steps C2 and C3 of [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`; **Milestone C complete, at Checkpoint C**). `select_generic` now takes one
+> assembled cohort locus and returns everything the calling loop needs: the narrowed allele list,
+> what selection did, the map from the merge's allele indices onto the new dense ids, and per
+> covering sample the reads and error mass selection dropped. **C2** is the cap — above six
+> sequences counting the reference the list is cut to the best and the locus is still called, never
+> refused. **C3** is the leftover, and the count that decides whether a sample is genotyped at all:
+> its reads on an allele **it** earned and the **cap** cut.
+> **Eleven Blockers across the six steps, and not one of them was wrong code.** Every one was a
+> test that could not fail, and they share a shape precise enough to check for: **a fixture built
+> at a size, depth or cohort where the term under test is not the term that decides.** Shallow
+> enough that the rule's floor decided and its share never did; single-sample enough that a cohort
+> sum matched a per-sample rule and a cohort total matched a within-sample share; one dropped allele
+> per sample, so a per-allele count matched a running total. One question would have caught all
+> eleven: at this size, would the simplest wrong rule give the same answer here?
+> **Spec §8 names three assertions this module holds in release and only two were implemented** —
+> the third, a non-finite quality mass, first becomes reachable at C3, which is the first step to
+> read `q_sum` at all. It is not a crash waiting to happen: the mass flows into the pool, the pool
+> into every genotype's data likelihood, and a non-finite likelihood prefers no genotype over any
+> other, so the locus comes out called with nothing chosen and nothing failed.
+> **The measurement that matters for the owner: the cap stops being a safety valve well before 400
+> samples**, where it binds at essentially every locus with merge tables of 145 to 1,953 alleles.
+> Spec §4.1's "measured, that is rare: 23 of 53,935 tomato loci" is a fact about 63 accessions and
+> does not carry — and the cap's by-catch is the samples, not the alleles: between 1 sample in 20
+> and 1 in 8 comes back missing at 400 samples and 30 reads a position.
+> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_c3_2026-08-24.md).
+> - **Previously (2026-08-24):** **the first whole answer selection returns, and a rule two
 > tests could not tell from a cohort sum** (step C1 of
 > [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`). `select_generic` now takes one assembled cohort locus and returns the
