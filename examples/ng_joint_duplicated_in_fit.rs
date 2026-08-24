@@ -368,7 +368,7 @@ fn draw(
                     format!("s{s:02}"),
                     terms.clone(),
                     BTreeMap::from([(
-                        SectionKey::Generic(ReadGroupId(0)),
+                        SectionKey::Generic(ReadGroupId(s as u32)),
                         Section::Generic(GenericEvidence::from_parts(
                             std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
                             std::mem::take(&mut sparse[s]),

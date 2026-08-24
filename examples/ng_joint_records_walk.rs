@@ -66,7 +66,9 @@ use pop_var_caller::ng::parameter_estimation::joint::loci::{
 use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
+use pop_var_caller::ng::read::input::read_groups::{
+    ReadGroups, SampleReadGroups, build_read_groups,
+};
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
@@ -216,15 +218,21 @@ fn main() {
     )
     .expect("typed regions are disjoint");
     // ---- one walk per sample -------------------------------------------------------------
+    // **The read groups are identified once, over every alignment at once**, and never per
+    // walk. A read group's identifier is the position its `@RG` record takes in the run's flat
+    // list of them, so identifying them a file at a time would give every sample's first read
+    // group the identifier `0` and the fit would pool every library into one.
+    let read_groups = build_read_groups(&alignments).expect("the headers declare read groups");
     let mut cohort: Vec<SampleCensusEvidence> = Vec::new();
-    for alignment in &alignments {
+    for sample in read_groups.read_groups_per_sample() {
         let at = Instant::now();
         let mut records = walk_one(
             &fasta,
             &info,
             &contigs,
             &index,
-            alignment,
+            sample,
+            &read_groups,
             &typed,
             &generic_domain,
             &kept,
@@ -997,31 +1005,25 @@ fn walk_one(
     info: &Arc<ReferenceInfo>,
     contigs: &Arc<ContigList>,
     index: &Arc<noodles_fasta::fai::Index>,
-    alignment: &Path,
+    sample: &SampleReadGroups,
+    read_groups: &ReadGroups,
     typed: &[TypedRegion],
     _generic_domain: &SelectableRegions,
     kept: &pop_var_caller::ng::parameter_estimation::joint::loci::CensusLoci,
     terms: &SelectionTerms,
 ) -> SampleCensusEvidence {
-    let read_groups =
-        build_read_groups(&[alignment.to_path_buf()]).expect("the header declares read groups");
-    let sample = match read_groups.read_groups_per_sample() {
-        [only] => only.clone(),
-        other => panic!(
-            "{} holds {} samples; this walk is per sample",
-            alignment.display(),
-            other.len()
-        ),
-    };
     let reference = OpenReference::new(Arc::clone(info));
+    // **The run's table, not this sample's**: the open takes the whole table and picks out the
+    // files this sample's read groups name, so the identifiers it writes into the census are
+    // the run-wide ones.
     let sample_reads = SampleReads::open(
-        &sample,
-        &read_groups,
+        sample,
+        read_groups,
         &reference,
         ReadFilterConfig::default(),
         true,
     )
-    .expect("the alignment file opens against this reference");
+    .expect("the alignment files open against this reference");
 
     // Owned captures, because the generator outlives this function's borrows and keeps the
     // maker to mint a fresh view of the reference whenever it evicts one.

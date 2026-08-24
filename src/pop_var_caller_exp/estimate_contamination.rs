@@ -36,7 +36,7 @@
 //! the truth rather than an estimate of it.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -56,7 +56,7 @@ use crate::ng::locus_generation::{
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::joint::census::{
-    CensusWriter, CohortCensusEvidence, DepthCap, ReadCap, SampleCensusEvidence, TermsDisagreement,
+    CensusWriter, CohortCensusEvidence, CohortRefusal, DepthCap, ReadCap, SampleCensusEvidence,
 };
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, ContaminationSource, DEFAULT_COMPONENTS,
@@ -68,7 +68,9 @@ use crate::ng::parameter_estimation::joint::loci::{
 };
 use crate::ng::read::ReadFilterConfig;
 use crate::ng::read::input::SampleReads;
-use crate::ng::read::input::read_groups::{ReadGroupError, build_read_groups};
+use crate::ng::read::input::read_groups::{
+    ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
+};
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::left_align::LeftAlignPreparer;
 use crate::ng::ref_seq::WindowedRefSeq;
@@ -256,14 +258,11 @@ pub enum EstimateContaminationCliError {
     #[error("the locus generators could not be built")]
     Generators(#[source] PileupGeneratorConfigError),
 
-    /// The samples did not record the same thing, so they cannot be one cohort. **Naming the
-    /// value they differ on is the whole point**: they all fail the same way, silently, and
-    /// only the name says what to fix.
-    #[error(
-        "{} and {} recorded different things and cannot be pooled — they differ on {}",
-        .0.first, .0.second, .0.field
-    )]
-    Cohort(TermsDisagreement),
+    /// The samples do not fit together as one cohort — either they did not record the same
+    /// thing, or two of them claim one read group. **Naming what they differ on is the whole
+    /// point**: both fail the same way, silently, and only the name says what to fix.
+    #[error("the samples cannot be pooled: {0}")]
+    Cohort(CohortRefusal),
 
     #[error("the cohort could not be fitted")]
     Fit(#[source] JointFitError),
@@ -404,14 +403,43 @@ pub fn run_estimate_contamination(
     //
     // **The cost is one open view of the reference a thread.** At a hundred samples on a
     // machine with many cores that is the thing to watch, and `--threads` is what bounds it.
+
+    // **The read groups are identified once, over every alignment at once.** Their identifiers
+    // are positions in the run's flat list of `@RG` records, so a table built one file at a time
+    // would hand every sample's first read group the identifier `0`; the cohort would then merge
+    // every library into one and the fit would report a single sequencing-error rate for all of
+    // them. `CohortCensusEvidence::new` refuses that, and this is what keeps it from arising.
+    let read_groups = build_read_groups(&args.alignments).map_err(|source| {
+        EstimateContaminationCliError::ReadGroups {
+            // Which file failed is in the source; this names the run, and the argument is
+            // `required = true`, so there is always one.
+            path: args.alignments.first().cloned().unwrap_or_default(),
+            source,
+        }
+    })?;
+    // One file per sample is this run's contract, and the table is where it is now checked: a
+    // file whose read groups name two samples puts two entries here against one path.
+    for path in &args.alignments {
+        let samples = read_groups
+            .iter()
+            .filter(|(_, group)| group.file.as_ref() == path.as_path())
+            .map(|(_, group)| group.sample.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if samples.len() > 1 {
+            return Err(EstimateContaminationCliError::NotOneSample {
+                path: path.clone(),
+                samples: samples.len(),
+            });
+        }
+    }
     let done = AtomicUsize::new(0);
-    let total = args.alignments.len();
-    let walked: Vec<(SampleCensusEvidence, Vec<LibraryName>)> = args
-        .alignments
+    let total = read_groups.read_groups_per_sample().len();
+    let walked: Vec<(SampleCensusEvidence, Vec<LibraryName>)> = read_groups
+        .read_groups_per_sample()
         .par_iter()
-        .map(|alignment| {
+        .map(|sample| {
             let at = Instant::now();
-            let (sample, names) = walk_one_sample(alignment, &prepared)?;
+            let (sample, names) = walk_one_sample(sample, &read_groups, &prepared)?;
             // The order lines appear in is the order walks *finish*, which is not the order
             // the samples were given — so each line names its sample, and the count is how
             // many are done rather than which one this is.
@@ -450,8 +478,9 @@ pub fn run_estimate_contamination(
     let at = Instant::now();
     let fit = fit_jointly(&mut cohort, &config).map_err(EstimateContaminationCliError::Fit)?;
     eprintln!(
-        "fitted {} samples in {} passes, {:.0} s",
-        args.alignments.len(),
+        "fitted {} samples over {} read groups in {} passes, {:.0} s",
+        cohort.len(),
+        fit.noise.len(),
         fit.passes,
         at.elapsed().as_secs_f64()
     );
@@ -666,36 +695,34 @@ fn prepare(args: &EstimateContaminationArgs) -> Result<Prepared, EstimateContami
 }
 
 /// One sample: one walk over the ordinary stretches, filling that sample's census.
+///
+/// **Takes the run's read-group table, never a path to build one from.** A read group's
+/// identifier is the position its `@RG` record takes in the run's flat list of them, so a walk
+/// that built its own table would give every sample's first read group the identifier `0` and
+/// the fit — which keys its sequencing-error rates on the read group alone — would fit one rate
+/// over every sample's library.
 fn walk_one_sample(
-    alignment: &Path,
+    sample: &SampleReadGroups,
+    read_groups: &ReadGroups,
     prepared: &Prepared,
 ) -> Result<(SampleCensusEvidence, Vec<LibraryName>), EstimateContaminationCliError> {
-    let read_groups =
-        build_read_groups(std::slice::from_ref(&alignment.to_path_buf())).map_err(|source| {
-            EstimateContaminationCliError::ReadGroups {
-                path: alignment.to_path_buf(),
-                source,
-            }
-        })?;
-    let sample = match read_groups.read_groups_per_sample() {
-        [only] => only.clone(),
-        other => {
-            return Err(EstimateContaminationCliError::NotOneSample {
-                path: alignment.to_path_buf(),
-                samples: other.len(),
-            });
-        }
-    };
+    // The file this sample's first read group came from, for the messages below: the open picks
+    // out every file it needs from the run's table itself.
+    let alignment = sample
+        .read_groups
+        .first()
+        .map(|id| read_groups.get(*id).file.to_path_buf())
+        .unwrap_or_default();
     let reference = OpenReference::new(Arc::clone(&prepared.info));
     let sample_reads = SampleReads::open(
-        &sample,
-        &read_groups,
+        sample,
+        read_groups,
         &reference,
         ReadFilterConfig::default(),
         true,
     )
     .map_err(|source| EstimateContaminationCliError::OpenAlignment {
-        path: alignment.to_path_buf(),
+        path: alignment.clone(),
         source,
     })?;
 
@@ -765,7 +792,7 @@ fn walk_one_sample(
         SampleLocusObservationsIterator::new(regions.into_iter(), sample_reads, generators);
     for locus in &mut stream {
         let locus = locus.map_err(|source| EstimateContaminationCliError::Walk {
-            path: alignment.to_path_buf(),
+            path: alignment.clone(),
             source,
         })?;
         writer.add_locus(&locus);

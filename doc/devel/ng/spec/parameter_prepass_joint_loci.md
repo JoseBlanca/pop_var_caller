@@ -860,3 +860,14 @@ asserted. They are not restated here. What follows is this consumer's own.*
    digest must change, the per-megabase digest must name the block, and the parameters fit must refuse. **Then
    check the check**: a digest re-derived by running the selection again passes this test unchanged,
    which is why §5.1 requires it to be computed where the records are written.
+10. **Two samples claiming one read group are refused, and the two are named.** A read group is one
+    library preparation of one plant's DNA, so no two samples ever hold the same identifier — a
+    cohort where they do is one whose samples had their read groups identified separately, each walk
+    numbering its own file's records from zero. Nothing in the evidence looks wrong afterwards: the
+    fit keys its sequencing-error rates on the read group alone, so *N* libraries all claiming
+    identifier `0` are fitted as one and reported as one rate, with nothing saying the *N* were
+    pooled. Measured on the 63-accession tomato panel, whose libraries' own rates span 15.6-fold,
+    the pooled answer was a marginal error rate of 3.9813 × 10⁻³ against the per-sample route's
+    read-weighted mean of 3.9721 × 10⁻³ — two parts in a thousand apart, which is to say
+    indistinguishable from a correct answer. So the refusal is at the cohort's door, before a
+    section is decoded, and it names both samples and the identifier they share.

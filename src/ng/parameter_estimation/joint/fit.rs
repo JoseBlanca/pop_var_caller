@@ -49,8 +49,7 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
 use super::census::{
-    CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
-    TermsDisagreement,
+    CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
 };
 use super::contamination::{
     ContaminationConfig, SampleContaminationEstimates, fit_contamination_over,
@@ -287,6 +286,24 @@ pub enum JointFitError {
         second: String,
         field: &'static str,
     },
+    /// Samples whose read groups were identified separately, so two of them claim one read
+    /// group. **Refuses rather than merging**: the fit keys a sequencing-error rate on the read
+    /// group alone, so a cohort that merged sixty-three libraries into one would report one
+    /// rate and say nothing about the sixty-three.
+    ///
+    /// **Raised where the cohort is built, not here.**
+    /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new) makes the check
+    /// before a single section is read, and a caller turns its refusal into this with `?`.
+    #[error(
+        "samples {first} and {second} both claim read group {read_group}; a read group belongs \
+         to one sample, so these censuses had their read groups minted separately and their \
+         libraries would be fitted as one"
+    )]
+    SharedReadGroup {
+        first: String,
+        second: String,
+        read_group: ReadGroupId,
+    },
     /// A sample whose census is a file the fit could not read. **The estimator's own failure to
     /// obtain evidence, not a property of the evidence** — see [`CensusError`].
     #[error("a sample's census could not be read")]
@@ -494,15 +511,23 @@ const MAX_RECORDED_SPREAD: usize = 32;
 ///
 /// **The check belongs to the census and the name belongs to the fit.**
 /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new) compares the twelve
-/// recording terms before a section is decoded; the variant a caller sees is the one
+/// recording terms and the samples' read groups before a section is decoded; the terms variant
+/// a caller sees is the one
 /// [`parameter_prepass_joint_loci.md`](../../../doc/devel/ng/spec/parameter_prepass_joint_loci.md)
 /// specifies.
-impl From<TermsDisagreement> for JointFitError {
-    fn from(refusal: TermsDisagreement) -> Self {
-        Self::IdentityMismatch {
-            first: refusal.first,
-            second: refusal.second,
-            field: refusal.field,
+impl From<CohortRefusal> for JointFitError {
+    fn from(refusal: CohortRefusal) -> Self {
+        match refusal {
+            CohortRefusal::Terms(refusal) => Self::IdentityMismatch {
+                first: refusal.first,
+                second: refusal.second,
+                field: refusal.field,
+            },
+            CohortRefusal::SharedReadGroup(refusal) => Self::SharedReadGroup {
+                first: refusal.first,
+                second: refusal.second,
+                read_group: refusal.read_group,
+            },
         }
     }
 }
@@ -2961,8 +2986,15 @@ pub mod bench_fixtures {
     /// A drawn cohort's records, beside the parameters they were drawn at.
     pub struct DrawnCohort {
         pub samples: Vec<SampleCensusEvidence>,
+        /// The rate every library was drawn at, where they were drawn alike; the middle of the
+        /// spread where they were not.
         pub clean: f64,
         pub noisy: f64,
+        /// **Sample `s`'s own library's rates**, which are what the fit estimates: a library
+        /// belongs to one sample, so every one of these is fitted from that sample's reads
+        /// alone.
+        pub per_library_clean: Vec<f64>,
+        pub per_library_noisy: Vec<f64>,
         pub noisy_share: f64,
         pub density: FrequencyDensity,
         pub hom_excess: Vec<f64>,
@@ -3003,6 +3035,49 @@ pub mod bench_fixtures {
         seed: u64,
     ) -> DrawnCohort {
         let (clean, noisy, noisy_share) = truth;
+        draw_cohort_with_library_rates(
+            &vec![clean; samples],
+            &vec![noisy; samples],
+            noisy_share,
+            positions,
+            mean_depth,
+            density,
+            hom_excess,
+            duplicated_share,
+            seed,
+        )
+    }
+
+    /// The same, with **a rate of its own for every library**.
+    ///
+    /// A cohort whose libraries all misread at one rate cannot tell a fit that keeps them apart
+    /// from one that pooled them — and pooling them is exactly the defect
+    /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new)'s read-group
+    /// check exists to refuse. On the 63-accession tomato panel the libraries' own rates span
+    /// 15.6-fold, so a spread is the ordinary case rather than an awkward one.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the drawn cohort's own parameters"
+    )]
+    pub fn draw_cohort_with_library_rates(
+        per_library_clean: &[f64],
+        per_library_noisy: &[f64],
+        noisy_share: f64,
+        positions: usize,
+        mean_depth: f64,
+        density: FrequencyDensity,
+        hom_excess: f64,
+        duplicated_share: f64,
+        seed: u64,
+    ) -> DrawnCohort {
+        assert_eq!(
+            per_library_clean.len(),
+            per_library_noisy.len(),
+            "one clean rate and one mismapped rate a library"
+        );
+        let samples = per_library_clean.len();
+        let clean = per_library_clean.iter().sum::<f64>() / samples as f64;
+        let noisy = per_library_noisy.iter().sum::<f64>() / samples as f64;
         let mut draw = Draw(seed);
         let excess = vec![hom_excess; samples];
         let mut depth: Vec<PackedDepthCodes> = (0..samples)
@@ -3013,11 +3088,10 @@ pub mod bench_fixtures {
         let edges = DepthBinEdges::for_census();
 
         for index in 0..positions {
-            let rate = if draw.uniform() < noisy_share {
-                noisy
-            } else {
-                clean
-            };
+            // **Whether a position is mismapped is a property of the position**, so it is drawn
+            // once and every sample shares it; *how often a read misreads there* is a property
+            // of the library, so it is looked up per sample below.
+            let mismapped = draw.uniform() < noisy_share;
             let branch = draw.pick(&[
                 density.p_invariant,
                 density.p_fixed_alt,
@@ -3038,6 +3112,11 @@ pub mod bench_fixtures {
                 (false, 0.0)
             };
             for sample in 0..samples {
+                let rate = if mismapped {
+                    per_library_noisy[sample]
+                } else {
+                    per_library_clean[sample]
+                };
                 let copies = if duplicated && draw.uniform() < carrier_frequency {
                     2.0
                 } else {
@@ -3107,7 +3186,15 @@ pub mod bench_fixtures {
                     format!("s{s}"),
                     terms.clone(),
                     BTreeMap::from([(
-                        SectionKey::Generic(ReadGroupId(0)),
+                        // **One read group a sample, because that is the only shape a real run
+                        // can have**: a read group is one library preparation of one plant's
+                        // DNA, so no two samples ever share one. A drawn cohort that gave every
+                        // sample read group `0` would ask the fit to pool every library into a
+                        // single error rate — the very thing
+                        // `CohortCensusEvidence::new` now refuses.
+                        SectionKey::Generic(ReadGroupId(
+                            u32::try_from(s).expect("a drawn cohort fits in u32"),
+                        )),
                         Section::Generic(GenericEvidence::from_parts(
                             std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
                             std::mem::take(&mut sparse[s]),
@@ -3120,6 +3207,8 @@ pub mod bench_fixtures {
             samples: records,
             clean,
             noisy,
+            per_library_clean: per_library_clean.to_vec(),
+            per_library_noisy: per_library_noisy.to_vec(),
             noisy_share,
             density,
             hom_excess: excess,
@@ -3139,9 +3228,24 @@ pub mod bench_fixtures {
 /// unchanged.
 #[cfg(test)]
 mod whole_fit_tests {
-    use super::bench_fixtures::{as_cohort, draw_cohort, draw_cohort_with_duplications};
+    use super::bench_fixtures::{
+        as_cohort, draw_cohort, draw_cohort_with_duplications, draw_cohort_with_library_rates,
+    };
     use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCap;
+
+    /// The mean of one of the two rates over every library the fit produced.
+    ///
+    /// **The average and not one library's**, because a library belongs to one sample: a cohort
+    /// of ten samples has ten of them and each rate is fitted from a tenth of the reads. Their
+    /// mean is what carries the precision the drawn truth can be checked against.
+    fn mean_over_libraries(fit: &JointFit, of: impl Fn(&SiteClassNoise) -> f64) -> f64 {
+        fit.noise
+            .values()
+            .map(|noise| of(&noise.value))
+            .sum::<f64>()
+            / fit.noise.len() as f64
+    }
 
     /// **The test that says whether any of this works.** A cohort drawn at known parameters
     /// must come back at them.
@@ -3189,9 +3293,9 @@ mod whole_fit_tests {
 
         eprintln!(
             "clean {:.5} (drawn {:.5})  noisy {:.4} (drawn {:.4})  share {:.4} (drawn {:.4})",
-            fit.noise[&ReadGroupId(0)].value.clean,
+            mean_over_libraries(&fit, |noise| noise.clean),
             cohort.clean,
-            fit.noise[&ReadGroupId(0)].value.noisy,
+            mean_over_libraries(&fit, |noise| noise.noisy),
             cohort.noisy,
             fit.noisy_share,
             cohort.noisy_share
@@ -3217,7 +3321,11 @@ mod whole_fit_tests {
             fit.passes,
             fit.converged
         );
-        let clean = fit.noise[&ReadGroupId(0)].value.clean;
+        // **One rate a library, and ten libraries** — a library is one plant's DNA preparation,
+        // so ten samples are ten of them and each rate is fitted from its own sample's reads.
+        // What the ten together have to recover is the rate they were all drawn at.
+        assert_eq!(fit.noise.len(), cohort.samples.len(), "one rate a library");
+        let clean = mean_over_libraries(&fit, |noise| noise.clean);
         assert!(
             (clean / cohort.clean - 1.0).abs() < 0.20,
             "clean error rate {clean} against {}",
@@ -3247,7 +3355,7 @@ mod whole_fit_tests {
         // **The two classes must stay apart.** A fit that collapsed them would report
         // convergence with one emptied, which is the failure the starting points exist to
         // avoid, and every number above would still look reasonable.
-        let noisy = fit.noise[&ReadGroupId(0)].value.noisy;
+        let noisy = mean_over_libraries(&fit, |noise| noise.noisy);
         assert!(
             noisy > 5.0 * clean && (noisy / cohort.noisy - 1.0).abs() < 0.35,
             "noisy rate {noisy} against the drawn {} and the clean {clean}",
@@ -3457,6 +3565,80 @@ mod whole_fit_tests {
             (clean / cohort.clean - 1.0).abs() < 0.35,
             "the error rate is still fitted at one sample: {clean} against {}",
             cohort.clean
+        );
+    }
+
+    /// **Libraries that misread at different rates must come back apart.**
+    ///
+    /// This is what a cohort whose read groups were identified separately would destroy: every
+    /// sample's library claiming the identifier `0` merges them, and the fit reports one rate
+    /// where the libraries' own rates differ. On the 63-accession tomato panel they span
+    /// 15.6-fold; here six libraries are drawn over a 6-fold range, 0.002 to 0.012, and each
+    /// has to come back nearer its own rate than the panel's average.
+    #[test]
+    fn libraries_drawn_at_different_rates_come_back_at_their_own() {
+        let density = FrequencyDensity {
+            p_invariant: 0.92,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let drawn_clean = vec![0.002, 0.003, 0.004, 0.006, 0.009, 0.012];
+        let drawn_noisy = vec![0.06; drawn_clean.len()];
+        let cohort = draw_cohort_with_library_rates(
+            &drawn_clean,
+            &drawn_noisy,
+            0.02,
+            8_000,
+            12.0,
+            density,
+            0.0,
+            0.0,
+            0x5DEE_CE66_D5DE_ECE6,
+        );
+        let fit = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                quadrature_nodes: 12,
+                max_passes: 40,
+                duplicated_positions: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("the drawn libraries are identified apart");
+
+        assert_eq!(fit.noise.len(), drawn_clean.len(), "one rate a library");
+        let fitted: Vec<f64> = (0..drawn_clean.len())
+            .map(|library| {
+                fit.noise[&ReadGroupId(u32::try_from(library).expect("six libraries"))]
+                    .value
+                    .clean
+            })
+            .collect();
+        for (library, (fitted, drawn)) in fitted.iter().zip(&drawn_clean).enumerate() {
+            eprintln!("library {library}: fitted {fitted:.5}, drawn {drawn:.5}");
+            assert!(
+                (fitted / drawn - 1.0).abs() < 0.25,
+                "library {library} came back at {fitted} against the {drawn} it was drawn at"
+            );
+        }
+        // **The two checks a pooled fit could not pass.** Pooling returns one number for all
+        // six, so its spread would be 1.0 and its order flat; the drawn spread is 6-fold and
+        // the drawn order rises.
+        let spread = fitted.iter().copied().fold(f64::MIN, f64::max)
+            / fitted.iter().copied().fold(f64::MAX, f64::min);
+        let drawn_spread = drawn_clean.iter().copied().fold(f64::MIN, f64::max)
+            / drawn_clean.iter().copied().fold(f64::MAX, f64::min);
+        eprintln!("spread: fitted {spread:.2}-fold, drawn {drawn_spread:.2}-fold");
+        assert!(
+            (spread / drawn_spread - 1.0).abs() < 0.20,
+            "the libraries came back {spread}-fold apart against the {drawn_spread}-fold they \
+             were drawn at; a pooled fit would give 1"
+        );
+        assert!(
+            fitted.windows(2).all(|pair| pair[0] < pair[1]),
+            "the fitted rates do not rise with the drawn ones: {fitted:?}"
         );
     }
 

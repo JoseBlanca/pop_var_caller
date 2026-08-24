@@ -1337,7 +1337,10 @@ mod tests {
                     format!("s{s}"),
                     terms.clone(),
                     BTreeMap::from([(
-                        SectionKey::Generic(ReadGroupId(0)),
+                        // **One read group a sample**: a library is one plant's DNA
+                        // preparation, so a cohort's samples never share one, and the cohort's
+                        // door refuses a set that does.
+                        SectionKey::Generic(ReadGroupId(s)),
                         Section::Generic(GenericEvidence::from_parts(depth, sparse)),
                     )]),
                 )

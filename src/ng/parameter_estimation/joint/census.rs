@@ -1645,6 +1645,72 @@ impl std::fmt::Display for TermsDisagreement {
     }
 }
 
+/// Two samples that claim the same read group.
+///
+/// **A read group belongs to exactly one sample**, because the run's read-group table files
+/// every identifier under the single sample its `@RG SM` names
+/// (`src/ng/read/input/read_groups.rs`). So two samples holding one identifier is never a cohort
+/// that happens to overlap — it is a cohort whose samples had their identifiers minted
+/// separately, each walk calling `build_read_groups` with its own file and each getting
+/// identifiers that start again at zero.
+///
+/// What that costs is silent: the fit keys its sequencing-error rates on the read group alone,
+/// so sixty-three libraries all claiming identifier `0` are fitted as one library and reported
+/// as one rate, with nothing in the output saying the sixty-three were pooled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedReadGroup {
+    pub first: String,
+    pub second: String,
+    pub read_group: ReadGroupId,
+}
+
+impl std::fmt::Display for SharedReadGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "samples {} and {} both claim read group {}; a read group belongs to one sample, so \
+             these censuses had their read groups minted separately and their libraries would be \
+             fitted as one",
+            self.first, self.second, self.read_group
+        )
+    }
+}
+
+/// Why a cohort could not be assembled out of the samples it was given.
+///
+/// Both refusals are made **before a single section is decoded**, and both are about the
+/// samples not fitting together rather than about any one of them being unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CohortRefusal {
+    /// Two samples wrote their evidence down under different terms.
+    Terms(TermsDisagreement),
+    /// Two samples claim one read group, so their identifiers were minted separately.
+    SharedReadGroup(SharedReadGroup),
+}
+
+impl std::fmt::Display for CohortRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Terms(refusal) => refusal.fmt(f),
+            Self::SharedReadGroup(refusal) => refusal.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CohortRefusal {}
+
+impl From<TermsDisagreement> for CohortRefusal {
+    fn from(refusal: TermsDisagreement) -> Self {
+        Self::Terms(refusal)
+    }
+}
+
+impl From<SharedReadGroup> for CohortRefusal {
+    fn from(refusal: SharedReadGroup) -> Self {
+        Self::SharedReadGroup(refusal)
+    }
+}
+
 /// Every sample's census, however each one is held.
 ///
 /// **This is what the parameters fit reads, and it reads it a band at a time.** A tract's length
@@ -1670,14 +1736,15 @@ pub struct CohortCensusEvidence {
 
 impl CohortCensusEvidence {
     /// Adopt each sample's census, refusing the cohort if two of them did not record the same
-    /// thing.
+    /// thing, or if two of them claim the same read group.
     ///
     /// # Errors
     ///
-    /// [`TermsDisagreement`], naming the first sample that disagrees with the first and the
-    /// value they differ on. **Checked before any section is decoded**, which is what makes the
-    /// refusal free.
-    pub fn new(samples: Vec<SampleCensusEvidence>) -> Result<Self, TermsDisagreement> {
+    /// [`CohortRefusal::Terms`], naming the first sample that disagrees with the first and the
+    /// value they differ on; or [`CohortRefusal::SharedReadGroup`], naming the two samples that
+    /// claim one read group. **Both are checked before any section is decoded**, which is what
+    /// makes the refusal free.
+    pub fn new(samples: Vec<SampleCensusEvidence>) -> Result<Self, CohortRefusal> {
         if let Some(first) = samples.first() {
             for other in &samples[1..] {
                 if let Some(field) = first.terms.first_disagreement(&other.terms) {
@@ -1685,16 +1752,12 @@ impl CohortCensusEvidence {
                         first: first.sample.clone(),
                         second: other.sample.clone(),
                         field,
-                    });
+                    }
+                    .into());
                 }
             }
         }
-        let read_groups = samples
-            .iter()
-            .flat_map(|sample| sample.read_groups())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let read_groups = Self::read_groups_of(&samples)?;
         let strata = samples
             .iter()
             .flat_map(|sample| sample.strata())
@@ -1706,6 +1769,36 @@ impl CohortCensusEvidence {
             read_groups,
             strata,
         })
+    }
+
+    /// The union of the samples' read groups, refusing the cohort where two samples claim one.
+    ///
+    /// **This is the whole of the check that a cohort's libraries were identified once.** A
+    /// read group's identifier is the position its `@RG` record took in the run's flat list of
+    /// records, so a run that mints its identifiers once over every alignment file gives every
+    /// read group a different one, and a run that mints them a file at a time gives every
+    /// sample's first read group the identifier `0`. The first of those cannot collide and the
+    /// second always does, at `0`, as soon as there are two samples — which is why an index is
+    /// all the evidence has to carry for this to be answerable here.
+    ///
+    /// The one thing it cannot see is a cohort of **one** sample, where there is nothing to
+    /// merge and nothing to catch.
+    fn read_groups_of(
+        samples: &[SampleCensusEvidence],
+    ) -> Result<Vec<ReadGroupId>, SharedReadGroup> {
+        let mut claimed: BTreeMap<ReadGroupId, &str> = BTreeMap::new();
+        for sample in samples {
+            for group in sample.read_groups() {
+                if let Some(first) = claimed.insert(group, sample.sample.as_str()) {
+                    return Err(SharedReadGroup {
+                        first: first.to_string(),
+                        second: sample.sample.clone(),
+                        read_group: group,
+                    });
+                }
+            }
+        }
+        Ok(claimed.into_keys().collect())
     }
 
     pub fn len(&self) -> usize {
@@ -2848,16 +2941,18 @@ mod tests {
         lent.expect("a resident census has no file to fail on")
     }
 
-    /// Two samples over the same one-tract selection, so a cohort can be built from them.
+    /// Two samples over the same one-tract selection, so a cohort can be built from them —
+    /// **each with its own read group**, because a run that identifies its read groups once
+    /// over every file gives no two samples the same one.
     fn two_sample_cohort() -> Vec<SampleCensusEvidence> {
         ["a", "b"]
             .iter()
-            .map(|name| {
-                let mut writer = ssr_writer();
-                writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
-                let mut evidence = writer.finish();
-                evidence.sample = (*name).to_string();
-                evidence
+            .enumerate()
+            .map(|(index, name)| {
+                let group = u32::try_from(index).expect("two samples");
+                let mut writer = ssr_writer_for(name, ReadGroupId(group));
+                writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", group, 2)]));
+                writer.finish()
             })
             .collect()
     }
@@ -2871,9 +2966,54 @@ mod tests {
         samples[1].terms.depth_ladder = DepthLadderDigest([0; 16]);
         let refusal =
             CohortCensusEvidence::new(samples).expect_err("two ladders is two kinds of evidence");
+        let CohortRefusal::Terms(refusal) = refusal else {
+            panic!("two ladders is a disagreement about terms, not about read groups");
+        };
         assert_eq!(refusal.first, "a");
         assert_eq!(refusal.second, "b");
         assert_eq!(refusal.field, "depth ladder edges");
+    }
+
+    /// **The refusal this whole check exists for.** A driver that identifies each sample's read
+    /// groups on its own — one call per alignment file — gives every sample's first read group
+    /// the identifier `0`, and a cohort that took them would fit one sequencing-error rate over
+    /// every sample's library and report it as one library's.
+    ///
+    /// The two samples here are otherwise perfect: same selection, same ladder, same units.
+    /// Only the identifiers collide, and that alone must be enough to refuse.
+    #[test]
+    fn a_cohort_refuses_two_samples_whose_read_groups_were_identified_separately() {
+        let separately_minted: Vec<SampleCensusEvidence> = ["a", "b"]
+            .iter()
+            .map(|name| {
+                let mut writer = ssr_writer_for(name, ReadGroupId(0));
+                writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
+                writer.finish()
+            })
+            .collect();
+        let refusal = CohortCensusEvidence::new(separately_minted)
+            .expect_err("two samples cannot share one read group");
+        let CohortRefusal::SharedReadGroup(refusal) = refusal else {
+            panic!("a collision of identifiers is not a disagreement about terms");
+        };
+        assert_eq!(refusal.first, "a");
+        assert_eq!(refusal.second, "b");
+        assert_eq!(refusal.read_group, ReadGroupId(0));
+        assert!(
+            refusal
+                .to_string()
+                .contains("a read group belongs to one sample"),
+            "the refusal has to say what it caught: {refusal}"
+        );
+    }
+
+    /// A cohort whose read groups **were** identified once is taken, and its union is the two
+    /// identifiers rather than one — the fit then has a rate to estimate per library.
+    #[test]
+    fn a_cohort_whose_read_groups_were_identified_once_keeps_them_apart() {
+        let cohort = CohortCensusEvidence::new(two_sample_cohort())
+            .expect("no two samples claim one read group");
+        assert_eq!(cohort.read_groups(), &[ReadGroupId(0), ReadGroupId(1)]);
     }
 
     /// A cohort lends every sample's section for the band asked for, and **one row a sample**
@@ -2883,7 +3023,8 @@ mod tests {
         let mut cohort =
             CohortCensusEvidence::new(two_sample_cohort()).expect("both recorded the same thing");
         assert_eq!(cohort.len(), 2);
-        assert_eq!(cohort.read_groups(), &[ReadGroupId(0)]);
+        // One read group a sample, so the cohort's union is both of them.
+        assert_eq!(cohort.read_groups(), &[ReadGroupId(0), ReadGroupId(1)]);
         assert_eq!(cohort.strata(), &[AT_SIX_REPEATS]);
 
         let crossing = lent_ok(cohort.with_strata(&[AT_SIX_REPEATS], |lent| {
@@ -2906,10 +3047,19 @@ mod tests {
         }));
         assert_eq!(empty, 0);
 
-        let positions = lent_ok(cohort.with_generic(&[ReadGroupId(0)], |lent| {
+        let positions = lent_ok(
+            cohort.with_generic(&[ReadGroupId(0), ReadGroupId(1)], |lent| {
+                lent.iter().map(|sample| sample.len()).sum::<usize>()
+            }),
+        );
+        assert_eq!(positions, 2, "one ordinary-position section a sample");
+
+        // A band naming only the first sample's read group lends only that sample's section:
+        // the second sample holds no section under an identifier that is not its own.
+        let only_the_first = lent_ok(cohort.with_generic(&[ReadGroupId(0)], |lent| {
             lent.iter().map(|sample| sample.len()).sum::<usize>()
         }));
-        assert_eq!(positions, 2, "one ordinary-position section a sample");
+        assert_eq!(only_the_first, 1);
     }
 
     // ---- the twelve values ----------------------------------------------
@@ -3400,6 +3550,12 @@ mod tests {
 
     /// A twelve-base `AT` tract, kept, with the writer over it.
     fn ssr_writer() -> CensusWriter {
+        ssr_writer_for("sample", ReadGroupId(0))
+    }
+
+    /// The same, for a named sample and its own read group — **a read group belongs to one
+    /// sample**, so a fixture with two samples in it has to mint two.
+    fn ssr_writer_for(sample_name: &str, group: ReadGroupId) -> CensusWriter {
         use crate::ng::region_typing::segment_criteria::SsrSegment;
         use crate::ng::repeat_catalog::strata::StratumSampler;
 
@@ -3416,9 +3572,9 @@ mod tests {
         let (counts, sample) = sampler.finish();
         let loci = CensusLoci::from_parts(Vec::new(), sample, counts);
         CensusWriter::new(
-            "sample".to_string(),
+            sample_name.to_string(),
             &loci,
-            vec![ReadGroupId(0)],
+            vec![group],
             &|_| Some(ContigId(0)),
             selection_terms(),
             DepthBinEdges::for_census(),
