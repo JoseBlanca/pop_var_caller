@@ -21,7 +21,7 @@
 #       --out-dir  <where results go>       \
 #       [--n-samples 50] [--threads 4]      \
 #       [--windows 5000,20000,80000]        \
-#       [--keep-rechunked]
+#       [--keep-rechunked] [--reuse-rechunked]
 #
 # Portability, because this runs on more than one machine:
 #   - every path is an argument; nothing is hard-coded;
@@ -44,6 +44,12 @@ N_SAMPLES=50
 THREADS=4
 WINDOWS="5000,20000,80000"
 KEEP_RECHUNKED=0
+# Rewriting is expensive, so reusing a staged directory is tempting. It is off by
+# default because a staged directory says nothing about which build of the
+# rewriting tool made it: an earlier one here dropped the per-sample summary, and
+# reusing its output would have measured the wrong files without a word of
+# warning. Opt in with --reuse-rechunked only when you know what wrote them.
+REUSE_RECHUNKED=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --threads)        THREADS="$2"; shift 2 ;;
         --windows)        WINDOWS="$2"; shift 2 ;;
         --keep-rechunked) KEEP_RECHUNKED=1; shift ;;
+        --reuse-rechunked) REUSE_RECHUNKED=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -147,12 +154,16 @@ echo ">> results: $RESULTS" >&2
 IFS=',' read -ra WINDOW_LIST <<< "$WINDOWS"
 for window in "${WINDOW_LIST[@]}"; do
     stage="$OUT_DIR/psp_${window}"
-    if [[ ! -d "$stage" ]]; then
+    if [[ -d "$stage" ]] && (( REUSE_RECHUNKED )); then
+        echo ">> reusing existing $stage (--reuse-rechunked)" >&2
+    elif [[ -d "$stage" ]]; then
+        echo "$stage already exists. Remove it, point --out-dir elsewhere, or pass" >&2
+        echo "--reuse-rechunked if you are sure the current tool wrote it." >&2
+        exit 1
+    else
         echo ">> rechunking $N_SAMPLES samples at ${window} bp ..." >&2
         mkdir -p "$stage"
         "$RECHUNK" "$window" "$stage" "${SUBSET[@]}" >"$OUT_DIR/rechunk_${window}.log" 2>&1
-    else
-        echo ">> reusing existing $stage" >&2
     fi
 
     psp_mb=$(du -sk "$stage" | awk '{printf "%.1f", $1 / 1024}')
