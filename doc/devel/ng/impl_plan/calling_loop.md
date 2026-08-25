@@ -243,7 +243,7 @@ that applies it are that plan's, not this one's. *Depends:* C2. *Source:* spec �
 
 ### Milestone D — the `Lg` table and the inert outer skeleton
 
-**D1. The table, built once; the outer rounds, structurally off.**  ☐
+**D1. The table, built once; the outer rounds, structurally off.**  ✅
 `summarise_condition.rs` assembles the whole of spec §2's pseudocode: the `Lg` table built once
 per set of slippage numbers by the sibling row builders (contexts per `(read group, candidate)`
 looked up from `StratumFits`, hoisted lookup, unhoisted values); the slippage round and

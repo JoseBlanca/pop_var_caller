@@ -148,14 +148,6 @@ pub struct ArtifactTestCounts {
 ///   because `NaN` survives addition — and it catches a row that does not sum to one, which
 ///   is the other way a posterior can arrive wrong.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "step C3 of the calling-loop plan calls this from the loop's final pass, \
-                  which is the next commit"
-    )
-)]
 pub(crate) fn score_best_genotype(posterior_row: &[f64]) -> (GenotypeIdx, Phred) {
     assert!(
         !posterior_row.is_empty(),
@@ -313,14 +305,6 @@ pub(crate) struct SiteQualityBuffers<'a> {
 /// and the quality that comes out must not be a `NaN`, which is the only outcome of this
 /// arithmetic that is a bug in it rather than an answer.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "step C3 of the calling-loop plan calls this once the loop has stopped, \
-                  which is the next commit"
-    )
-)]
 pub(crate) fn score_uncorrected_site_quality(
     buffers: SiteQualityBuffers<'_>,
     genotypes: &GenotypeTableView<'_>,

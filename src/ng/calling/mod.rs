@@ -340,6 +340,22 @@ pub struct GenericLocusSample<'a> {
     pub genotype_must_be_missing: bool,
 }
 
+impl GenericLocusSample<'_> {
+    /// Whether the locus can be called on this sample at all — the negation of
+    /// [`genotype_must_be_missing`](Self::genotype_must_be_missing), and **the one spelling
+    /// of it**.
+    ///
+    /// The predicate is asked in three places — when the scratch's rows are counted, when they
+    /// are claimed, and when the artifact summary decides whose reads to pool — and a fourth
+    /// site that wrote it out again would be invisible to anyone changing what *callable*
+    /// means.
+    #[inline]
+    #[must_use]
+    pub fn is_callable(&self) -> bool {
+        !self.genotype_must_be_missing
+    }
+}
+
 /// One locus's evidence, per sample, in whichever shape its path uses.
 ///
 /// **This enum is the only place the two calling paths meet.** Below it everything is
@@ -758,6 +774,33 @@ impl<'a> FrozenParameters<'a> {
 /// argument `SsrRowScratch::prepare_emissions` makes for its own fill value.
 pub const UNWRITTEN_SCRATCH_VALUE: f64 = f64::NAN;
 
+/// **What building one locus's genotype-likelihood table cost** — the instrument
+/// `doc/devel/ng/spec/calling_em_loop.md` §13's test 5 reads.
+///
+/// **The property it exists to pin is that the cost does not grow with the pass count.** The
+/// table is built once per set of slippage numbers and read by every pass of the frequency
+/// loop; a version that rebuilt it per pass would give identical genotypes, only slower, so
+/// nothing but a counter can tell the two apart (§2, §8).
+///
+/// **`emission_evaluations` is accumulated per row build from the shapes that build was
+/// handed, not counted inside the emission.** The repeat-tract path has an emission seam a
+/// counting model could wrap; the SNP/indel path has none — its per-read term is inside the
+/// row function. So this counts what the driver *asked for*, which is what catches a rebuild,
+/// and does not catch a row function that evaluates the wrong number of terms. Saying which
+/// is which is the point of the field names.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct EmissionCost {
+    /// How many times the whole `rows × genotypes` table was built. **One** at the shipped
+    /// configuration, whatever the pass count.
+    pub(crate) table_builds: u64,
+    /// How many times a sibling row builder was called — one per sample per table build.
+    pub(crate) row_builds: u64,
+    /// Summed over those calls, `observations × candidates`: the emission evaluations the
+    /// builders were asked for. **`Σ_s`, not a three-way product** — a fixture whose samples
+    /// hold equal observation counts is the one shape that hides the difference (§13 test 5).
+    pub(crate) emission_evaluations: u64,
+}
+
 /// Every buffer one locus's calling fills — **allocated once per worker and reused at every
 /// locus**, so calling a locus costs no allocation of its own.
 ///
@@ -849,12 +892,45 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// real answer — an allele no read reached — which is why nothing downstream may treat
     /// it as *unwritten*.
     pooled_allele_reads: Vec<u64>,
+    /// `genotypes × alleles`, genotype-major: how far each allele's own error mass is spread
+    /// across the locus's others under each genotype — the SNP/indel row's
+    /// `fill_error_spreads` table.
+    ///
+    /// **Filled once per locus rather than once per sample**: how many alleles a wrong read
+    /// could have shown is a property of the candidate sequences and of the genotype being
+    /// scored, and of nothing a sample showed.
+    error_spreads: Vec<f64>,
+    /// One entry per **scratch row**: which sample of the run that row holds.
+    ///
+    /// **The scratch is sized for the samples the locus is called on, not for the run**, so
+    /// this is the map back. A sample the candidate step ruled uncallable takes no part in
+    /// the loop at all (`doc/devel/ng/spec/calling_em_loop.md` §5.0) and has no row here —
+    /// which is what makes the cohort's expected copies, the convergence denominator and the
+    /// site quality's count axis all run over the same cohort without any of them being told
+    /// to skip anything (§9).
+    run_sample_of_each_row: Vec<usize>,
+    /// One entry per scratch row: that sample's inbreeding coefficient, in run order.
+    ///
+    /// A compacted copy of [`FrozenParameters::inbreeding_coefficient_by_sample`], because
+    /// the loop walks one coefficient per row and the run's slice has an entry for every
+    /// sample including the ones with no row.
+    inbreeding_coefficient_by_row: Vec<InbreedingF>,
+    /// What the last `prepare_for_locus` reset and the table build has counted since — spec
+    /// §13 test 5's instrument.
+    emission_cost: EmissionCost,
     /// The SNP/indel row's own scratch.
     generic_row: GenericRowScratch,
     /// The repeat-tract row's own scratch, including the emission model's.
     ssr_row: SsrRowScratch<SsrEmissionScratch>,
-    /// How many samples the buffers above are sized for. Zero means never prepared.
-    sample_count: usize,
+    /// How many **rows** the buffers above are sized for. Zero means never prepared.
+    ///
+    /// **Rows, not the run's samples, and the difference is this type's whole shape**: a
+    /// locus is prepared for the samples it is *called on*, which is the run's samples minus
+    /// the ones the candidate step ruled uncallable
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0). `LocusEvidence::sample_count` and
+    /// `FrozenParameters::sample_count` both answer the other question, and the two numbers
+    /// appear within a few lines of each other in the final pass.
+    row_count: usize,
     /// How many genotypes they are sized for.
     genotype_count: usize,
     /// How many alleles they are sized for.
@@ -880,13 +956,16 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// for the old count and the locus is called over a set that silently excludes the
     /// allele just admitted.
     ///
-    /// If `sample_count` is zero. A cohort has at least one sample, so a locus prepared for
-    /// none is a run whose sample order went missing rather than a locus nobody covered.
+    /// If `row_count` is zero. Every locus is called on at least one sample, so a locus
+    /// prepared for no rows is a run whose sample order went missing rather than a locus
+    /// nobody covered.
     ///
-    /// If `samples × genotypes` or `samples × alleles` overflows a `usize`.
+    /// If `rows × genotypes` or `rows × alleles` overflows a `usize`.
+    /// `row_count` is **one row per sample this locus is called on** — not the run's sample
+    /// count, which at a locus with an uncallable sample is larger.
     pub fn prepare_for_locus(
         &mut self,
-        sample_count: usize,
+        row_count: usize,
         alleles: &CandidateAlleles,
         genotypes: &GenotypeTableView<'_>,
     ) {
@@ -900,21 +979,21 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             alleles.len()
         );
         assert!(
-            sample_count > 0,
-            "a cohort has at least one sample, so a locus prepared for none is a run whose \
-             sample order went missing"
+            row_count > 0,
+            "every locus is called on at least one sample, so a locus prepared for no rows is \
+             a run whose sample order went missing"
         );
         let genotype_count = genotypes.genotype_count();
         let allele_count = genotypes.allele_count();
-        let table_len = sample_count.checked_mul(genotype_count).unwrap_or_else(|| {
+        let table_len = row_count.checked_mul(genotype_count).unwrap_or_else(|| {
             panic!(
-                "a locus of {sample_count} samples over {genotype_count} genotypes needs a \
+                "a locus of {row_count} rows over {genotype_count} genotypes needs a \
                  genotype-likelihood table longer than a usize can index"
             )
         });
-        let copies_len = sample_count.checked_mul(allele_count).unwrap_or_else(|| {
+        let copies_len = row_count.checked_mul(allele_count).unwrap_or_else(|| {
             panic!(
-                "a locus of {sample_count} samples over {allele_count} alleles needs a \
+                "a locus of {row_count} rows over {allele_count} alleles needs a \
                  per-sample copies table longer than a usize can index"
             )
         });
@@ -962,15 +1041,15 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         // is the one place this locus's ploidy is stated, so they cannot disagree with the
         // table the fold walks (`doc/devel/ng/spec/calling_quality.md` §5.2, §9).
         let ploidy = usize::from(genotypes.ploidy().get());
-        let copy_count_table_len = sample_count.checked_mul(ploidy + 1).unwrap_or_else(|| {
+        let copy_count_table_len = row_count.checked_mul(ploidy + 1).unwrap_or_else(|| {
             panic!(
-                "a locus of {sample_count} samples at ploidy {ploidy} needs a copy-count log-likelihood \
+                "a locus of {row_count} rows at ploidy {ploidy} needs a copy-count log-likelihood \
                  table longer than a usize can index"
             )
         });
-        let largest_count = sample_count.checked_mul(ploidy).unwrap_or_else(|| {
+        let largest_count = row_count.checked_mul(ploidy).unwrap_or_else(|| {
             panic!(
-                "a cohort of {sample_count} samples at ploidy {ploidy} carries more \
+                "a cohort of {row_count} rows at ploidy {ploidy} carries more \
                  chromosomes than a usize can count"
             )
         });
@@ -999,17 +1078,31 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         // The artifact summary's per-allele read totals. **Zero rather than a sentinel** —
         // see the field's own comment: its only reader zeroes it in the same call.
         resize_and_fill(&mut self.pooled_allele_reads, allele_count, 0);
+        let spread_len = genotype_count.checked_mul(allele_count).unwrap_or_else(|| {
+            panic!(
+                "a locus of {genotype_count} genotypes over {allele_count} alleles needs an \
+                 error-spread table longer than a usize can index"
+            )
+        });
+        resize_and_fill(&mut self.error_spreads, spread_len, UNWRITTEN_SCRATCH_VALUE);
+        // **The two per-row maps are cleared, not resized.** Their length is what says how
+        // many rows the caller has claimed so far, and it claims them one at a time after this
+        // call — so a resize here would be a length nothing yet means.
+        self.run_sample_of_each_row.clear();
+        self.inbreeding_coefficient_by_row.clear();
+        self.emission_cost = EmissionCost::default();
 
-        self.sample_count = sample_count;
+        self.row_count = row_count;
         self.genotype_count = genotype_count;
         self.allele_count = allele_count;
     }
 
-    /// How many samples the buffers are currently sized for.
+    /// How many **rows** the buffers are currently sized for — one per sample this locus is
+    /// called on, which at a locus with an uncallable sample is fewer than the run's samples.
     #[inline]
     #[must_use]
-    pub fn sample_count(&self) -> usize {
-        self.sample_count
+    pub fn row_count(&self) -> usize {
+        self.row_count
     }
 
     /// How many genotypes the buffers are currently sized for.
@@ -1269,6 +1362,116 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.candidate_selection
     }
 
+    /// The three buffers the SNP/indel row builder needs, for one scratch row.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, and on a row past the ones it was prepared for.
+    #[must_use]
+    pub(crate) fn generic_row_buffers_mut(&mut self, row: usize) -> GenericRowBuffers<'_> {
+        let range = self.genotype_row_range(row);
+        GenericRowBuffers {
+            error_spreads: &self.error_spreads,
+            row_scratch: &mut self.generic_row,
+            genotype_likelihoods: &mut self.genotype_likelihoods[range],
+        }
+    }
+
+    /// The SNP/indel row's per-allele error-spread table, to fill once per locus.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub(crate) fn error_spreads_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.error_spreads
+    }
+
+    /// Claim a scratch row for one run sample, with its inbreeding coefficient.
+    ///
+    /// Called once per sample the locus is **called on**, in the run's sample order, and
+    /// **after** [`prepare_for_locus`](Self::prepare_for_locus), which clears the previous
+    /// locus's map. Claiming first throws the claims away and leaves the locus with none,
+    /// which the map's first reader then refuses by name — measured, "0 of them were
+    /// claimed", at the first locus.
+    pub(crate) fn claim_row_for(&mut self, run_sample: usize, inbreeding: InbreedingF) {
+        self.run_sample_of_each_row.push(run_sample);
+        self.inbreeding_coefficient_by_row.push(inbreeding);
+    }
+
+    /// Which run sample each scratch row holds, in row order.
+    ///
+    /// # Panics
+    ///
+    /// If the claimed rows are not one per prepared row. **The check is here rather than at
+    /// the claim**, because a caller that prepared for one shape and claimed for another has
+    /// a map whose every entry is a different sample's — and the symptom would be one
+    /// sample's reads scored against another's likelihoods rather than an index out of range.
+    #[inline]
+    #[must_use]
+    pub(crate) fn run_sample_of_each_row(&self) -> &[usize] {
+        self.assert_rows_claimed();
+        &self.run_sample_of_each_row
+    }
+
+    /// The claimed rows' inbreeding coefficients, one per row — what the loop walks.
+    ///
+    /// # Panics
+    ///
+    /// As [`run_sample_of_each_row`](Self::run_sample_of_each_row).
+    #[inline]
+    #[must_use]
+    pub(crate) fn inbreeding_coefficient_by_row(&self) -> &[InbreedingF] {
+        self.assert_rows_claimed();
+        &self.inbreeding_coefficient_by_row
+    }
+
+    /// Refuse a scratch whose per-row map is not one entry per prepared row.
+    #[inline]
+    fn assert_rows_claimed(&self) {
+        self.assert_prepared();
+        assert_eq!(
+            self.run_sample_of_each_row.len(),
+            self.row_count,
+            "this scratch was prepared for {} rows and {} of them were claimed, so the map \
+             from rows back to the run's samples describes a different locus",
+            self.row_count,
+            self.run_sample_of_each_row.len()
+        );
+    }
+
+    /// What this locus's table build has cost so far — the instrument spec §13's test 5 reads.
+    ///
+    /// **Nothing in a run reads it**, and that is what it is for: the cost it records is
+    /// invisible in the output, because a table rebuilt every pass gives the same genotypes.
+    /// Step D2 of the calling loop's plan is what asserts on it.
+    #[inline]
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "an instrument: what it measures — a table built once rather than once \
+                      per pass — is invisible in a run's output, so its readers are step D2's \
+                      tests and the bakeoffs plan's benches"
+        )
+    )]
+    pub(crate) fn emission_cost(&self) -> EmissionCost {
+        self.emission_cost
+    }
+
+    /// Record one row build over `observations` observations and `candidates` candidates.
+    pub(crate) fn charge_row_build(&mut self, observations: usize, candidates: usize) {
+        self.emission_cost.row_builds += 1;
+        self.emission_cost.emission_evaluations += (observations * candidates) as u64;
+    }
+
+    /// Record that the whole `samples × genotypes` table was built once more.
+    pub(crate) fn charge_table_build(&mut self) {
+        self.emission_cost.table_builds += 1;
+    }
+
     /// The SNP/indel row's own scratch, which owns its own sizing.
     #[inline]
     pub fn generic_row_mut(&mut self) -> &mut GenericRowScratch {
@@ -1306,14 +1509,6 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// [`prepare_for_locus`](Self::prepare_for_locus) was given.
     #[inline]
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its only caller is `score_one_sample`, which step D1 of the \
-                      calling-loop plan is the first to call from outside a test"
-        )
-    )]
     pub(crate) fn sample_scoring_buffers_mut(&mut self, sample: usize) -> SampleScoringBuffers<'_> {
         let genotype_row = self.genotype_row_range(sample);
         let allele_row = self.allele_row_range(sample);
@@ -1347,18 +1542,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// On an unprepared scratch.
     #[inline]
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its only caller is `sum_cohort_expected_copies`, which step D1 of the \
-                      calling-loop plan is the first to call from outside a test"
-        )
-    )]
     pub(crate) fn cohort_summing_buffers_mut(&mut self) -> CohortSummingBuffers<'_> {
         self.assert_prepared();
         CohortSummingBuffers {
-            sample_count: self.sample_count,
+            sample_count: self.row_count,
             per_sample_expected_copies: &self.per_sample_expected_copies,
             cohort_expected_copies: &mut self.cohort_expected_copies,
         }
@@ -1400,18 +1587,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// On an unprepared scratch.
     #[inline]
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its only caller is `score_uncorrected_site_quality`, which step C3 of the \
-                      calling-loop plan is the first to call from outside a test"
-        )
-    )]
     pub(crate) fn site_quality_buffers_mut(&mut self) -> SiteQualityBuffers<'_> {
         self.assert_prepared();
         SiteQualityBuffers {
-            sample_count: self.sample_count,
+            sample_count: self.row_count,
             genotype_likelihoods: &self.genotype_likelihoods,
             copy_count_log_likelihoods: &mut self.copy_count_log_likelihoods,
             allele_count_distribution: &mut self.allele_count_distribution,
@@ -1433,7 +1612,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     #[inline]
     fn assert_prepared(&self) {
         assert!(
-            self.sample_count > 0,
+            self.row_count > 0,
             "this scratch has not been prepared for a locus: call prepare_for_locus first"
         );
     }
@@ -1467,10 +1646,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     fn row_range(&self, sample: usize, width: usize, table: &str) -> std::ops::Range<usize> {
         self.assert_prepared();
         assert!(
-            sample < self.sample_count,
+            sample < self.row_count,
             "sample {sample} is past the {} this scratch was prepared for, indexing the \
              {table} table",
-            self.sample_count
+            self.row_count
         );
         let start = sample * width;
         start..start + width
@@ -1524,6 +1703,22 @@ pub(crate) struct SampleScoringBuffers<'a> {
     /// One entry per allele: this sample's own expected allele copies — **read first** as
     /// the leave-one-out term, then **overwritten** with this pass's answer.
     pub sample_expected_copies: &'a mut [f64],
+}
+
+/// The three buffers the **SNP/indel row builder** reads and writes, borrowed from one
+/// [`CallingScratch`] in one call.
+///
+/// **A bundle for the reason the other three are**: they are three fields of one scratch, and
+/// reaching for them an accessor at a time does not compile. The error spreads are shared by
+/// every sample and filled once per locus; the other two are this row's.
+#[derive(Debug)]
+pub(crate) struct GenericRowBuffers<'a> {
+    /// The locus's per-allele error-spread table, filled once before the first row.
+    pub(crate) error_spreads: &'a [f64],
+    /// The row builder's own partial-compatibility cache, which it sizes itself.
+    pub(crate) row_scratch: &'a mut GenericRowScratch,
+    /// This sample's row of the genotype-likelihood table, to fill.
+    pub(crate) genotype_likelihoods: &'a mut [LogProb],
 }
 
 /// The two buffers the **M-step** works between, borrowed from one [`CallingScratch`] at once.
@@ -1718,11 +1913,17 @@ pub struct LocusInference {
     /// consumer that treats a defaulted error rate like a fitted one is the failure this
     /// exists to prevent.
     ///
-    /// **Which warrant is weakest is not yet decided.** [`Provenance`] defines no
-    /// ordering — `FittedHere`, `Borrowed`, `Defaulted` and `Supplied` are four names,
-    /// not a scale — and in particular where a value the run *supplied* sits against one
-    /// the caller *fitted* is an open question. The step that first has to compare two
-    /// of them is the one that must settle it.
+    /// **Which warrant is weakest is settled**, and this field is the first consumer of the
+    /// answer: [`Provenance::weaker_of`] combines two along the ladder
+    /// `parameter_estimation`'s own documentation states — fitted here, borrowed from the
+    /// sample's other read groups, supplied, defaulted — so a value the run *supplied* ranks
+    /// below a borrowed fit, on the ground that a handed-in number says nothing about this
+    /// data where a borrowed one is at least a measurement of a neighbouring grain.
+    ///
+    /// **What the loop folds today is the calibrations of the read groups whose reads reached
+    /// the locus**, and nothing else: the prior's fitted spectrum carries no provenance at
+    /// all, and a repeat tract's slippage warrants travel on scoring contexts the loop does
+    /// not yet assemble.
     pub weakest_provenance: Provenance,
     /// Set when the STR prior's seed could not be scaled to reproduce the measured gene
     /// diversity at this locus — the geometry has a ceiling and the measurement was
@@ -1983,8 +2184,8 @@ impl LocusInference {
         expect(
             dead_code,
             reason = "its caller is the ordered output stage that applies the artifact \
-                      correction (spec/calling_quality.md §3.4), which is step 11's plan \
-                      and not this one's"
+                      correction (spec/calling_quality.md §3.4), which is step 11's plan and \
+                      not this one's"
         )
     )]
     pub(crate) fn uncorrected_site_quality(&self) -> Phred {
@@ -3052,7 +3253,7 @@ mod tests {
 
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(3, &alleles, &view);
-        assert_eq!(scratch.sample_count(), 3);
+        assert_eq!(scratch.row_count(), 3);
         assert_eq!(scratch.genotype_count(), 3);
         assert_eq!(scratch.allele_count(), 2);
 
@@ -3214,10 +3415,12 @@ mod tests {
         assert_eq!(scratch.cohort_expected_copies(), [1.5, 0.5]);
     }
 
-    /// A locus prepared for no samples at all is a run whose sample order went missing.
+    /// A locus prepared for no rows at all is a run whose sample order went missing. **Rows
+    /// rather than samples**: the scratch is sized for the samples the locus is *called on*,
+    /// so zero here is a locus nobody can be called at rather than a cohort of nobody.
     #[test]
-    #[should_panic(expected = "a locus prepared for none")]
-    fn a_scratch_prepared_for_no_samples_is_refused() {
+    #[should_panic(expected = "a locus prepared for no rows")]
+    fn a_scratch_prepared_for_no_rows_is_refused() {
         let (alleles, table) = biallelic_locus();
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(0, &alleles, &table.view());
@@ -3484,7 +3687,7 @@ mod tests {
         let mut scratch =
             CallingScratch::<likelihood::ssr_emission::StutterSubstitutionScratch>::default();
         scratch.prepare_for_locus(2, &alleles, &table.view());
-        assert_eq!(scratch.sample_count(), 2);
+        assert_eq!(scratch.row_count(), 2);
 
         // The three sub-scratches are reachable, and are the worker's rather than a locus's.
         let _ = scratch.candidate_selection_mut();

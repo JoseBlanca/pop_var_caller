@@ -25,23 +25,26 @@
 //! [`SampleScoringBuffers`] rather than returning anything.
 
 use crate::ng::calling::GenotypeTableView;
+use crate::ng::calling::genotype_prior::seed_generic::{VariantClass, fill_locus_concentration};
 use crate::ng::calling::genotype_prior::{
     CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
     fill_sample_concentration,
 };
+use crate::ng::calling::likelihood::ssr_emission::SsrEmissionModel;
 use crate::ng::calling::quality::{
     ArtifactTestCounts, score_best_genotype, score_uncorrected_site_quality,
 };
 use crate::ng::calling::{
-    CallingScratch, CandidateAlleles, CohortSummingBuffers, ExpectedAlleleCopies, FrozenParameters,
-    GenericLocusSample, GenericSampleEvidence, LocusEvidence, LocusInference, SampleGenotypeCall,
-    SampleScoringBuffers,
+    CallingScratch, CandidateAlleles, CohortSummingBuffers, ErrorSpreadTable, ExpectedAlleleCopies,
+    FrozenParameters, GenericLocusSample, GenericSampleEvidence, GenotypeTable, LocusEvidence,
+    LocusInference, ReadGroupParameters, SampleGenotypeCall, SampleScoringBuffers,
+    fill_error_spreads, genotype_log_likelihood_row,
 };
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
 
-use super::RunnableCallingLoopConfig;
+use super::{LocusGenotyper, RunnableCallingLoopConfig};
 
 /// Which prior one pass scores against — **a value, not a code path**.
 ///
@@ -85,14 +88,6 @@ use super::RunnableCallingLoopConfig;
 /// panel's corner at three reads a position, and hardly at all at 300. Spec §12's question 7 is
 /// the measurement.
 #[derive(Clone, Copy)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the first to build one is `run_frequency_loop`, which is itself \
-                  unreached until step C3 of the calling-loop plan"
-    )
-)]
 pub(crate) enum PassPrior<'a> {
     /// **No prior at all** — every candidate genotype equally likely, and no concentration
     /// built, so nothing reads the cohort's expected copies. The first pass of every round.
@@ -199,22 +194,11 @@ impl PassPrior<'_> {
 ///
 /// The remaining shapes are checked by [`fill_sample_concentration`] and [`PriorRow::new`],
 /// which is why they are not repeated here.
-// **`pub(crate)` with the dead-code lint expected, rather than `pub`.**
-// [`run_frequency_loop`] calls this, but that function is itself unreached outside this
-// module's tests until step C3 of `doc/devel/ng/impl_plan/calling_loop.md` mints a
-// `LocusInference` from it — so the whole chain is still dead in a non-test build. Widening
-// the visibility to silence the lint would be an accident dressed as a decision. `expect`
-// rather than `allow`, and only outside the test build where the lint genuinely fires, so
-// that the first real caller turns this line into a compile error and whoever writes it
-// deletes the expectation.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
-                  step C3 of the calling-loop plan mints a `LocusInference` from it"
-    )
-)]
+// **`pub(crate)` rather than `pub`**: the chain from here up to `SummariseConditionLoop` is
+// this module's, and the arm is the only thing outside it a run needs. Until D1 wrote that arm
+// the whole chain was dead in a non-test build and carried a `cfg_attr(not(test),
+// expect(dead_code))` for it — the expectation rather than an `allow`, so that the first real
+// caller would turn the line into a compile error. It did, and the line is gone.
 pub(crate) fn score_one_sample(
     buffers: SampleScoringBuffers<'_>,
     genotypes: &GenotypeTableView<'_>,
@@ -470,14 +454,6 @@ pub(crate) fn score_one_sample(
 ///   catch.
 ///
 /// Nothing allocates.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
-                  step C3 of the calling-loop plan mints a `LocusInference` from it"
-    )
-)]
 pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
     let CohortSummingBuffers {
         sample_count,
@@ -666,14 +642,6 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
 ///   the `is_finite()` half is there for an infinity, which would report every locus settled on
 ///   its first pass.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
-                  step C3 of the calling-loop plan mints a `LocusInference` from it"
-    )
-)]
 fn cohort_expected_copies_have_settled(
     previous_expected_copies: &[f64],
     current_expected_copies: &[f64],
@@ -724,14 +692,6 @@ fn cohort_expected_copies_have_settled(
 /// weaker claim than one from a loop that did and nothing downstream can tell them apart.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "step C3 of the calling-loop plan is the first to read these two fields \
-                  into a `LocusInference`"
-    )
-)]
 pub(crate) struct FrequencyLoopOutcome {
     /// How many seeded passes ran. **At least one, and the prior-free initialisation is not
     /// one of them** — it produces the estimate pass 1 is compared against, so a locus that
@@ -787,15 +747,21 @@ pub(crate) struct FrequencyLoopOutcome {
 /// # Panics
 ///
 /// Every check is **held in release** (`doc/devel/ng/spec/calling_em_loop.md` §8). This
-/// function adds one — that `inbreeding_by_sample` holds one coefficient per sample of the
-/// prepared scratch, **in both directions**. It is load-bearing rather than defensive: the
-/// seeded E-step walks the coefficients, so a slice one coefficient short at a three-sample
-/// locus would score two samples and leave the third holding the prior-free initialisation's
-/// copies, which the M-step then sums as though this pass had produced them — finite,
-/// plausible, wrong, and silent. One coefficient too many is the same run-shape bug, and
-/// without the check it surfaces as a scratch-indexing panic two modules away rather than as
-/// a message naming the cohort. The rest of the checks belong to the two halves this drives
-/// and to [`cohort_expected_copies_have_settled`].
+/// function adds none of its own: the inbreeding coefficients now live on the scratch, one
+/// per prepared row, and
+/// [`CallingScratch::inbreeding_coefficient_by_row`](crate::ng::calling::CallingScratch)
+/// refuses a scratch whose row map is not one entry per prepared row. It is the same check the
+/// old slice argument carried, moved onto the scratch, where it fires at the **first read** of
+/// the row map rather than in this function's preamble.
+///
+/// **The two directions fail differently, which is why the check covers both, and neither
+/// fails the way this paragraph used to say** (measured with the check downgraded, C3b's
+/// review). A map one entry **short** panics at the walk's last read — `index out of bounds:
+/// the len is 2 but the index is 2` — which is loud, but names a slice where the reader needs
+/// the cohort. A map one entry **long** is the silent one: the walk is over the prepared row
+/// count, so the surplus entry is never read at all and a scratch claimed for a different
+/// locus runs to completion. The rest of the checks belong to the two halves this drives and
+/// to [`cohort_expected_copies_have_settled`].
 ///
 /// **The ploidy is the genotype table's, and there is no second source of it.** The table was
 /// built for a `(ploidy, allele count)` shape and `prepare_for_locus` already refuses a scratch
@@ -804,38 +770,21 @@ pub(crate) struct FrequencyLoopOutcome {
 /// `ploidy` argument of 64 returned `passes: 2, converged: true` against the true
 /// `passes: 4`, identically in debug and release, with nothing asserting — a too-large ploidy
 /// loosens the threshold by the ratio and claims convergence it did not reach.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "step C3 of the calling-loop plan adds the final pass that turns this \
-                  loop's result into a `LocusInference`, and D1 assembles the rounds \
-                  around it"
-    )
-)]
 pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
     scratch: &mut CallingScratch<SsrEmissionScratch>,
     genotypes: &GenotypeTableView<'_>,
     model: &dyn GenotypePriorModel,
-    inbreeding_by_sample: &[InbreedingF],
     config: &RunnableCallingLoopConfig,
 ) -> FrequencyLoopOutcome {
-    let sample_count = scratch.sample_count();
-    assert_eq!(
-        inbreeding_by_sample.len(),
-        sample_count,
-        "the inbreeding coefficients are one per sample in the run's sample order: this \
-         locus is prepared for {sample_count} samples and {} coefficients arrived",
-        inbreeding_by_sample.len()
-    );
+    let row_count = scratch.row_count();
 
     // The initialisation: one E-step on the reads alone, then the M-step, which together
     // mint the expected copies the first seeded pass's prior is built from. It is **not**
     // counted as a pass — `passes` counts the passes that had a prior — and it runs at the
     // start of every outer round, not only the very first (§3).
-    for sample in 0..sample_count {
+    for row in 0..row_count {
         score_one_sample(
-            scratch.sample_scoring_buffers_mut(sample),
+            scratch.sample_scoring_buffers_mut(row),
             genotypes,
             PassPrior::Flat,
         );
@@ -845,13 +794,17 @@ pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
     let max_passes = config.max_passes.get();
     let mut passes = 0;
     loop {
-        // Walking the coefficients rather than the sample indices is what makes the run's
-        // sample order the *only* order either half of the pass can be in — and the length
-        // check above is what makes it a walk over every sample rather than over as many as
-        // happened to arrive.
-        for (sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
+        // **Every row, in row order, and the row order is the fixed one spec §8 requires**:
+        // the rows are the run's sample order with the uncallable samples' gaps closed up.
+        // The coefficient is read one row at a time rather than walked as a slice, because it
+        // lives on the same scratch as the buffers the scoring writes — and
+        // `inbreeding_coefficient_by_row` refuses a row map that is not one entry per prepared row, which
+        // is what makes this a walk over every row rather than over as many as happened to
+        // arrive.
+        for row in 0..row_count {
+            let inbreeding = scratch.inbreeding_coefficient_by_row()[row];
             score_one_sample(
-                scratch.sample_scoring_buffers_mut(sample),
+                scratch.sample_scoring_buffers_mut(row),
                 genotypes,
                 PassPrior::LeaveOneOut { model, inbreeding },
             );
@@ -864,7 +817,7 @@ pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
             scratch.previous_cohort_expected_copies(),
             scratch.cohort_expected_copies(),
             genotypes.ploidy(),
-            sample_count,
+            row_count,
             config.convergence_threshold,
         ) {
             return FrequencyLoopOutcome {
@@ -1012,7 +965,7 @@ fn pool_reads_and_pick_primary_alternative(
 ) -> Option<AlleleId> {
     pooled_reads.fill(0);
     for (sample, locus_sample) in per_sample.iter().enumerate() {
-        if locus_sample.genotype_must_be_missing {
+        if !locus_sample.is_callable() {
             continue;
         }
         for observation in locus_sample.evidence.supported {
@@ -1105,15 +1058,13 @@ fn pool_reads_and_pick_primary_alternative(
 /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0). Such a sample is in neither the artifact
 /// counts nor the expectation they are compared against (§6.3).
 ///
-/// **It is not yet out of the site quality, and that is D1's to finish.** The site quality's
-/// fold runs over the scratch's whole likelihood table, so its cohort is whichever samples
-/// the scratch was prepared for — and this branch has not yet decided whether a set-aside
-/// sample gets a row there or is left out of the scratch entirely
-/// ([`sum_cohort_expected_copies`]'s own note owns the same choice). **Nothing wrong reaches
-/// a run today**: such a sample's likelihood row is never written, so the **loop's prior-free
-/// first pass** refuses the locus loudly on the scratch's `NaN` sentinel — the E-step finds no
-/// usable score in a row of `NaN`s ([`score_one_sample`]'s own check), before any M-step has
-/// run — and the only way to reach the mismatch is a test that fills the row by hand.
+/// **And it has no scratch row at all**, which is what keeps every cohort-shaped quantity over
+/// one cohort: the rows are the run's sample order with such a sample's gap closed up, so the
+/// M-step sums the rows there are, the convergence delta divides by the chromosomes those rows
+/// carry, and the site quality's count axis runs over the same samples — none of them having
+/// to be told to skip anything. This pass walks the run's samples against a **row cursor**,
+/// and the cursor is the whole of the map back (spec §5.0, §9; the choice was D1's, and B2 and
+/// C3b both recorded it as open until then).
 ///
 /// # One sample, and a thousand
 ///
@@ -1135,13 +1086,14 @@ fn pool_reads_and_pick_primary_alternative(
 /// function adds two, and both are the same class as the one
 /// [`run_frequency_loop`] carries — a positional join between two per-sample lists:
 ///
-/// - **the evidence must cover the samples the scratch was prepared for.** This pass pairs
-///   evidence row *i* with scratch row *i*, so two lists of different lengths are two
-///   different sample orders and every pairing past the first difference is a sample's reads
-///   read against another sample's likelihoods.
-/// - **the inbreeding coefficients must be one per sample**, in both directions, for the
-///   reason [`run_frequency_loop`] gives: the walk is over the coefficients, so a short
-///   slice would call some samples and silently leave the rest without a call at all.
+/// - **the inbreeding coefficients must be one per sample of the run**, in both directions.
+///   The walk is over the coefficients, so a short slice would call some samples and silently
+///   leave the rest without a call at all.
+/// - **the callable samples must be exactly the rows the scratch was prepared for.** The
+///   cursor and the table are kept in step by construction rather than by a stored map, and
+///   this is what says the construction held: a table filled for one set of samples and read
+///   against another would score one sample's reads against another's likelihoods, which is a
+///   wrong genotype rather than a crash.
 ///
 /// The rest belong to the four functions this drives: [`score_one_sample`],
 /// [`score_best_genotype`], [`score_uncorrected_site_quality`] and
@@ -1155,14 +1107,6 @@ fn pool_reads_and_pick_primary_alternative(
               locus carries, all of which D1 has in hand when it calls this; a bundle \
               invented to satisfy the lint would be a type nothing else names"
 )]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its caller is step D1 of the calling-loop plan, which assembles the \
-                  likelihood table and the two outer rounds around the loop and this pass"
-    )
-)]
 pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     scratch: &mut CallingScratch<SsrEmissionScratch>,
     genotypes: &GenotypeTableView<'_>,
@@ -1174,22 +1118,14 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     weakest_provenance: Provenance,
     seed_diversity_unreachable: bool,
 ) -> LocusInference {
-    let sample_count = scratch.sample_count();
-    assert_eq!(
-        evidence.sample_count(),
-        sample_count,
-        "the evidence at {} covers {} samples and the scratch was prepared for {}, so one \
-         of them is indexed by a different sample order",
-        evidence.region(),
-        evidence.sample_count(),
-        sample_count
-    );
     let inbreeding_by_sample = parameters.inbreeding_coefficient_by_sample();
     assert_eq!(
         inbreeding_by_sample.len(),
-        sample_count,
-        "the inbreeding coefficients are one per sample in the run's sample order: this \
-         locus is prepared for {sample_count} samples and {} coefficients arrived",
+        evidence.sample_count(),
+        "the inbreeding coefficients are one per sample of the run: the evidence at {} covers \
+         {} samples and {} coefficients arrived",
+        evidence.region(),
+        evidence.sample_count(),
         inbreeding_by_sample.len()
     );
 
@@ -1223,18 +1159,46 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     // below can be handed a zero.
     let ploidy = genotypes.ploidy();
     let mut pooled = PooledArtifactCounts::default();
-    let mut per_sample = Vec::with_capacity(sample_count);
+    let mut calls = Vec::with_capacity(evidence.sample_count());
 
-    // Walking the coefficients rather than the sample indices is what makes the run's sample
-    // order the only order this pass can be in — the same walk, for the same reason, as the
-    // loop's own.
-    for (sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
-        if generic_samples.is_some_and(|per_sample| per_sample[sample].genotype_must_be_missing) {
-            per_sample.push(SampleGenotypeCall::Missing);
+    // **The run's sample order against a row cursor.** The scratch holds one row per sample
+    // the locus is called on, in this same order with the uncallable samples' gaps closed up
+    // (spec §5.0), so the cursor *is* the map from a row back to the sample that filled it —
+    // there is nothing else to keep in step, and a sample with no row never reaches the
+    // scoring at all.
+    let mut row = 0_usize;
+    for (run_sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
+        // **The map the table build read, not the predicate it was built from.** Deriving
+        // "which samples have rows" a second way and comparing only the two counts would let a
+        // *permutation* through — the table filled for one sample and read for another — which
+        // is a wrong genotype rather than a crash. Asking the map whose row this is joins them
+        // at every sample, and asserting that against the candidate step's own ruling catches
+        // the two coming apart in either direction.
+        let this_sample_owns_the_next_row = scratch
+            .run_sample_of_each_row()
+            .get(row)
+            .is_some_and(|&claimed_by| claimed_by == run_sample);
+        let callable = is_callable(evidence, run_sample);
+        assert_eq!(
+            this_sample_owns_the_next_row,
+            callable,
+            "sample {run_sample} at {} is {} by the candidate step and {} row {row} of the \
+             likelihood table, so the table this pass reads was filled for a different set of \
+             samples",
+            evidence.region(),
+            if callable { "callable" } else { "ruled out" },
+            if this_sample_owns_the_next_row {
+                "holds"
+            } else {
+                "does not hold"
+            }
+        );
+        if !callable {
+            calls.push(SampleGenotypeCall::Missing);
             continue;
         }
         score_one_sample(
-            scratch.sample_scoring_buffers_mut(sample),
+            scratch.sample_scoring_buffers_mut(row),
             genotypes,
             PassPrior::LeaveOneOut { model, inbreeding },
         );
@@ -1246,17 +1210,28 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
             .expect("the winner is an index into the row this table's own width sized");
         if let Some((locus_samples, primary)) = artifact_pool {
             pooled.add_called_sample(
-                &locus_samples[sample].evidence,
+                &locus_samples[run_sample].evidence,
                 primary,
                 copies_of_each_allele[usize::from(primary.get())],
                 ploidy,
             );
         }
-        per_sample.push(SampleGenotypeCall::Called {
+        calls.push(SampleGenotypeCall::Called {
             genotype: mint_genotype(copies_of_each_allele),
             genotype_quality,
         });
+        row += 1;
     }
+    assert_eq!(
+        row,
+        scratch.row_count(),
+        "the evidence at {} names {row} callable samples and the scratch was prepared for {} \
+         rows, so the table this pass read was filled for a different set of them. The \
+         per-sample check above catches every disagreement but this one: rows claimed past the \
+         end of the run are never asked whose they are",
+        evidence.region(),
+        scratch.row_count()
+    );
 
     // **After the samples, and it could as well have been before them**: the fold reads the
     // genotype likelihood table, which the loop built and this pass only reads
@@ -1272,7 +1247,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     LocusInference::new(
         evidence.region(),
         candidates,
-        per_sample,
+        calls,
         cohort_expected_copies,
         outcome.converged,
         outcome.passes,
@@ -1300,6 +1275,400 @@ fn mint_genotype(copies_of_each_allele: &[u32]) -> Genotype {
         alleles.extend(repeat_n(allele, copies as usize));
     }
     Genotype::new(alleles)
+}
+
+/// Which class of variant this locus is, for the prior's seed.
+///
+/// **Read off the candidate sequences and nowhere else.** A locus every one of whose
+/// alternatives is the reference's own length is a substitution; anything else carries an
+/// insertion or a deletion. The two classes take the same seed today — the projection reads
+/// the shape of variation off allele counts the pre-pass does not separate by class — so this
+/// moves no number yet. It is derived rather than defaulted so that the day the split arrives
+/// it arrives at every locus at once (`doc/devel/ng/spec/calling_priors.md` §4.2, settled
+/// 2026-08-22).
+fn variant_class_of(candidates: &CandidateAlleles) -> VariantClass {
+    let reference_length = candidates.reference().len();
+    if candidates
+        .iter()
+        .all(|allele| allele.len() == reference_length)
+    {
+        VariantClass::Substitution
+    } else {
+        VariantClass::InsertionOrDeletion
+    }
+}
+
+/// Whether the locus can be called on this run sample, or the candidate step ruled it out.
+///
+/// **A repeat tract rules no sample out** (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1): a
+/// discovery round there can put back a length the cap cut, so no sample is locked out of the
+/// locus for the rest of its calling.
+fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
+    match evidence {
+        LocusEvidence::Generic {
+            region: _,
+            per_sample,
+        } => per_sample[run_sample].is_callable(),
+        LocusEvidence::Ssr { .. } => true,
+    }
+}
+
+/// **The weakest warrant behind any parameter that reached this locus** — what the record is
+/// entitled to claim about how well founded its genotypes are.
+///
+/// **Combined, never branched on** (`doc/devel/ng/spec/read_likelihoods.md` §4.4): a call
+/// resting on one fitted parameter and one defaulted one is a defaulted call, and saying
+/// otherwise launders the weaker of the two. [`Provenance::weaker_of`] is the ladder, and it
+/// is the ladder `parameter_estimation` already states rather than one invented here.
+///
+/// **Only the read groups whose reads are actually here.** A run's other libraries contributed
+/// nothing to this locus, and charging it for a library that sent no read would make a locus's
+/// warrant a property of the run rather than of the evidence. Both a sample's whole-span
+/// observations and its partial ones name a read group, and both are scored, so both count.
+///
+/// **What is not in it yet, and it is not nothing.** The prior's fitted spectrum carries no
+/// provenance at all ([`SpectrumSeed`](crate::ng::calling::genotype_prior::SpectrumSeed) is
+/// three numbers), and at a repeat tract the slippage numbers' warrants live on the scoring
+/// contexts step E2 gathers. So this is the weakest of *the calibrations*, which is the whole
+/// of what a SNP/indel locus reads today.
+///
+/// **A locus no read reached comes back [`Provenance::FittedHere`]**, because nothing weaker
+/// entered it: every sample is decided by the prior alone, and the prior has no warrant to
+/// report. That is the fold's identity rather than a claim, and it is the one answer here that
+/// would change the day the seed carries one.
+fn weakest_warrant_at_the_locus(
+    evidence: &LocusEvidence<'_>,
+    parameters: &FrozenParameters<'_>,
+) -> Provenance {
+    let calibration = parameters.calibration_by_read_group();
+    let mut weakest = Provenance::FittedHere;
+    match evidence {
+        LocusEvidence::Generic {
+            region: _,
+            per_sample,
+        } => {
+            for locus_sample in per_sample.iter().filter(|sample| sample.is_callable()) {
+                let read_groups = locus_sample
+                    .evidence
+                    .supported
+                    .iter()
+                    .map(|observation| observation.read_group)
+                    .chain(
+                        locus_sample
+                            .evidence
+                            .partials
+                            .iter()
+                            .map(|partial| partial.read_group),
+                    );
+                for read_group in read_groups {
+                    let at = read_group.get() as usize;
+                    let warrant = calibration
+                        .get(at)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "read group {at} has no calibration; the run supplied {}",
+                                calibration.len()
+                            )
+                        })
+                        .provenance;
+                    weakest = weakest.weaker_of(warrant);
+                }
+            }
+        }
+        // Unreachable: a repeat tract is refused at the seam's front door until step E2, and
+        // its warrants travel on the scoring contexts that step gathers rather than on the
+        // calibrations read above.
+        LocusEvidence::Ssr { .. } => {}
+    }
+    weakest
+}
+
+/// **Fill the whole `samples × genotypes` genotype-likelihood table**, one row per claimed
+/// scratch row, by the sibling row builder this locus's path names.
+///
+/// **Once per set of slippage numbers, and at the shipped configuration that is once per
+/// locus** — every pass of the frequency loop then reads the same table
+/// (`doc/devel/ng/spec/calling_em_loop.md` §2, §8). What makes that checkable rather than
+/// merely true is [`EmissionCost`](crate::ng::calling::EmissionCost), which this charges as it
+/// goes: a version that rebuilt the table on every pass would give identical genotypes, only
+/// slower, so nothing but a counter can tell the two apart.
+///
+/// # The repeat-tract half is refused rather than approximated
+///
+/// The repeat-tract row exists and is shipped (`likelihood::ssr`), but what it takes is a
+/// per-locus **scoring context per `(read group, candidate)`** holding two fitted parameters
+/// beside the motif — the stutter model and the STR substitution rate — and one of the two is
+/// neither on [`FrozenParameters`] nor in `StratumFits`: the pre-pass emits it as a map of its
+/// own
+/// (`parameter_estimation::ssr::substitution_rates`), and gathering the pre-pass's outputs is
+/// step E2's. Assembling it here would mean inventing that field, the outlier weight's source
+/// and the reachable-length buffer's shape, each of which E2 and E2a settle against real
+/// inputs. **So a repeat tract is refused loudly rather than scored against invented
+/// parameters** — the same rule the two unbuilt loop settings follow.
+///
+/// # Panics
+///
+/// Held in release (`doc/devel/ng/spec/calling_em_loop.md` §8).
+///
+/// - **on a repeat tract**, for the reason above.
+/// - **where the run fitted a contamination fraction anywhere.** The mixture has two halves:
+///   the per-read-group fractions, which [`FrozenParameters`] carries, and the per-locus
+///   contaminant allele frequencies, which are built inside the loop from its own current
+///   expected copies and are step E2a's. Scoring against the fractions with no frequencies
+///   would be a different model rather than a smaller one, so a contaminated run is stopped
+///   instead of quietly given the uncontaminated formula.
+fn build_genotype_likelihood_table<Model: SsrEmissionModel>(
+    _emission: &Model,
+    evidence: &LocusEvidence<'_>,
+    parameters: &FrozenParameters<'_>,
+    candidates: &CandidateAlleles,
+    genotypes: &GenotypeTableView<'_>,
+    scratch: &mut CallingScratch<Model::Scratch>,
+) {
+    // **The two things this cannot do yet are refused at the seam's front door**, in
+    // `call_locus`, before any of the worker's scratch is touched — that is where the
+    // release-held guards are and where the tests point. These two say the same thing for a
+    // reader of this function alone, and are held in debug only, because a release check no
+    // test can reach is one the suite cannot keep honest.
+    debug_assert!(
+        parameters.contamination_is_absent(),
+        "the contaminant allele frequencies are step E2a's, and `call_locus` refuses a \
+         contaminated run before reaching here"
+    );
+    let per_sample = match evidence {
+        LocusEvidence::Generic {
+            region: _,
+            per_sample,
+        } => *per_sample,
+        LocusEvidence::Ssr { region, .. } => unreachable!(
+            "the repeat tract at {region} is refused by `call_locus` before reaching here: \
+             its row exists, but the per-(read group, candidate) scoring contexts that row \
+             takes need the STR substitution rate, which FrozenParameters does not carry — \
+             step E2 of the calling loop's plan is where the pre-pass's outputs are gathered"
+        ),
+    };
+
+    // **Once per locus rather than once per sample**: how far an allele's own error mass is
+    // spread across the locus's others depends on the candidate sequences and on nothing a
+    // sample showed.
+    fill_error_spreads(candidates, genotypes, scratch.error_spreads_mut());
+
+    scratch.charge_table_build();
+    let read_groups = ReadGroupParameters::uncontaminated(parameters.calibration_by_read_group());
+    for row in 0..scratch.row_count() {
+        let sample = per_sample[scratch.run_sample_of_each_row()[row]].evidence;
+        scratch.charge_row_build(
+            sample.supported.len() + sample.partials.len(),
+            candidates.len(),
+        );
+        let buffers = scratch.generic_row_buffers_mut(row);
+        genotype_log_likelihood_row(
+            &sample,
+            candidates,
+            genotypes,
+            read_groups,
+            ErrorSpreadTable::over(buffers.error_spreads, genotypes),
+            buffers.row_scratch,
+            buffers.genotype_likelihoods,
+        );
+    }
+}
+
+/// **Summarise the cohort, then condition each sample on it** — arm A of the step-9 seam, and
+/// the whole of `doc/devel/ng/spec/calling_em_loop.md` §2's pseudocode in one function.
+///
+/// Three loops, one inside the next, and **ng ships with the outer two switched off**:
+///
+/// 1. the **discovery round**, which would add tract lengths the converged posteriors are
+///    explaining as slippage (§4.1) — `DiscoveryMode::Off` by default;
+/// 2. the **slippage round**, which would re-fit this locus's slippage numbers from its own
+///    reads and rebuild the table under them (§5.1) — `max_rounds = 0` by default;
+/// 3. the **frequency loop**, the innermost, and the only one that repeats at the shipped
+///    configuration ([`run_frequency_loop`]).
+///
+/// **The outer two are written as loops whose bodies run once**, rather than left out and added
+/// later, because what they will need is a place to re-enter from. **Each body ends in an
+/// unconditional `break`, and that — not the configuration — is what makes it run once**:
+/// neither loop reads `config.discovery` or `config.slippage_refit`, so a token that somehow
+/// held a non-default setting would change nothing here. Validation is the second lock rather
+/// than the first: a *run* that asks for either setting is refused before it can reach a
+/// [`RunnableCallingLoopConfig`], so no run arrives here expecting rounds it will not get.
+///
+/// **The bodies are not empty — they hold the whole of the work.** Building the likelihood
+/// table and running the frequency loop are inside the inner one; what a filled-in round adds
+/// is a reason to go round again, not the work.
+///
+/// **On the SNP/indel path both rounds are ignored structurally rather than half-honoured**
+/// (spec §5.1's closing paragraph): there are no slippage numbers to re-fit, and discovery's
+/// retrace is defined on stutter attribution.
+///
+/// **At the defaults the table is therefore built exactly once**, before the frequency loop,
+/// and read by every pass of it — which is what makes the loop's cost independent of the pass
+/// count (§2, §8), and is what [`EmissionCost`](crate::ng::calling::EmissionCost) records.
+///
+/// # A sample the candidate step ruled uncallable leaves before the first pass
+///
+/// It is given **no scratch row at all** (spec §5.0's ruling, and the choice B2 and C3b both
+/// recorded as this step's). The rows are the run's sample order with the gaps closed up, so
+/// the M-step sums the rows there are, the convergence delta divides by the chromosomes those
+/// rows carry, and the site quality's count axis runs over the same cohort — none of them
+/// having to be told to skip anything. The final pass walks the run's samples against a row
+/// cursor and writes [`SampleGenotypeCall::Missing`] where a sample has no row.
+///
+/// # The type parameter, and why a SNP/indel locus carries it
+///
+/// It is the repeat-tract emission model — the seam a bake-off between two of them needs. A
+/// SNP/indel locus never reaches it, and the arm still names it, because one worker's scratch
+/// is typed by it and the same arm calls both paths.
+pub struct SummariseConditionLoop<Model, Prior> {
+    emission: Model,
+    prior: Prior,
+}
+
+impl<Model, Prior> SummariseConditionLoop<Model, Prior> {
+    /// Arm A, scoring repeat tracts with `emission` and every locus's genotypes under `prior`.
+    ///
+    /// **Both are values rather than constants**, and for the same reason: each is a seam the
+    /// design exists to compare across. The genotype prior's two implementations disagree by
+    /// 11 points of genotype accuracy on GIAB at 5× (`spec/calling_priors.md` §2.2), and a run
+    /// has to be able to say which it used.
+    pub fn new(emission: Model, prior: Prior) -> Self {
+        Self { emission, prior }
+    }
+}
+
+impl<Model, Prior> LocusGenotyper<Model::Scratch> for SummariseConditionLoop<Model, Prior>
+where
+    Model: SsrEmissionModel,
+    Prior: GenotypePriorModel,
+{
+    fn name(&self) -> &'static str {
+        "summarise the cohort, then condition each sample on it (arm A)"
+    }
+
+    #[expect(
+        clippy::never_loop,
+        reason = "the two outer rounds of spec §2's pseudocode are structurally present and \
+                  switched off at the shipped configuration, which is the whole of step D1: \
+                  their bodies are what calling_bakeoffs.md fills in. Both `break`s are \
+                  load-bearing in a way the lint cannot see, and measured: `outcome` is \
+                  assigned inside the inner body, so turning either `break` into a `continue` \
+                  is an E0384 rather than a second round, and making the binding `mut` to get \
+                  past that spins forever because nothing counts rounds — what a filled-in \
+                  round has to add is the counter, not just the `continue`"
+    )]
+    fn call_locus(
+        &self,
+        evidence: &LocusEvidence<'_>,
+        parameters: &FrozenParameters<'_>,
+        candidates: CandidateAlleles,
+        config: &RunnableCallingLoopConfig,
+        scratch: &mut CallingScratch<Model::Scratch>,
+    ) -> LocusInference {
+        evidence.assert_matches_locus_and_run(&candidates, parameters);
+        // **The two things this arm cannot do yet are refused at its front door**, before any
+        // of the worker's scratch is touched. The release profile aborts on a panic, so once
+        // this is wired into a run one such locus ends the whole cohort run — it should do so
+        // from the seam the run selected rather than from three frames down, and it should not
+        // first leave a shared scratch prepared for a locus that was never scored. **These are
+        // the guards**; `build_genotype_likelihood_table` restates both for a reader of that
+        // function alone, in debug only, because a release check no test can reach is one the
+        // suite cannot keep honest.
+        assert!(
+            !matches!(evidence, LocusEvidence::Ssr { .. }),
+            "the repeat tract at {} cannot be scored yet: its row exists, but the \
+             per-(read group, candidate) scoring contexts that row takes need the STR \
+             substitution rate, which FrozenParameters does not carry — step E2 of the \
+             calling loop's plan is where the pre-pass's outputs are gathered",
+            evidence.region()
+        );
+        assert!(
+            parameters.contamination_is_absent(),
+            "this run fitted a contamination fraction for at least one read group, and the \
+             other half of the mixture — the contaminant allele frequencies, which are per \
+             locus and are built from the loop's own current expected copies — is step E2a of \
+             the calling loop's plan. Scoring against the fractions alone would be a different \
+             model rather than a smaller one"
+        );
+        let table = GenotypeTable::build(parameters.ploidy(), candidates.len());
+        let genotypes = table.view();
+
+        let callable_sample_count = (0..evidence.sample_count())
+            .filter(|sample| is_callable(evidence, *sample))
+            .count();
+        assert!(
+            callable_sample_count > 0,
+            "every one of the {} samples at {} was ruled uncallable by the candidate step, so \
+             this locus has nobody to call. Selection cuts an allele rather than refusing a \
+             locus, on the ground that most samples stay callable (candidate_alleles.md §4.1), \
+             and a locus where none of them does is the case that ruling does not cover",
+            evidence.sample_count(),
+            evidence.region()
+        );
+        // **Prepared first, claimed second, and the order is checked rather than merely
+        // conventional.** `prepare_for_locus` clears the row map, so claiming before it would
+        // throw the claims away and leave the locus with none — which the first read of the
+        // map then refuses by name, "0 of them were claimed" (measured by swapping the two).
+        scratch.prepare_for_locus(callable_sample_count, &candidates, &genotypes);
+        for run_sample in 0..evidence.sample_count() {
+            if is_callable(evidence, run_sample) {
+                scratch.claim_row_for(
+                    run_sample,
+                    parameters.inbreeding_coefficient_by_sample()[run_sample],
+                );
+            }
+        }
+
+        // The locus's seed concentration: what the prior behaves as though it had already seen
+        // here, before any sample's reads (`spec/calling_priors.md` §2.3). Once per locus — no
+        // pass moves it.
+        // The value it returns is a view over the buffer it just filled; what every pass
+        // reads is the buffer, through the scratch, so the view is dropped here.
+        let _seed_concentration = fill_locus_concentration(
+            parameters.prior_seed(),
+            variant_class_of(&candidates),
+            candidates.len(),
+            scratch.seed_concentration_mut(),
+        );
+
+        let outcome;
+        // ── the discovery round (spec §4.1), `Off` by default ──
+        loop {
+            // ── the slippage round (spec §5.1), `max_rounds = 0` by default ──
+            loop {
+                build_genotype_likelihood_table(
+                    &self.emission,
+                    evidence,
+                    parameters,
+                    &candidates,
+                    &genotypes,
+                    scratch,
+                );
+                outcome = run_frequency_loop(scratch, &genotypes, &self.prior, config);
+                // The frozen arm: the slippage numbers are the pre-pass's and no round
+                // re-fits them, so the table just built is the only one this locus gets.
+                break;
+            }
+            // Discovery off: the candidate set is what selection settled on, and the prune
+            // and the re-run that would follow a round have nothing to do.
+            break;
+        }
+
+        summarise_final_pass(
+            scratch,
+            &genotypes,
+            evidence,
+            parameters,
+            &self.prior,
+            candidates,
+            outcome,
+            weakest_warrant_at_the_locus(evidence, parameters),
+            // The repeat-tract seed marker, and on this path it is not a placeholder:
+            // `LocusInference::new` refuses a `true` at a SNP/indel locus, and a tract does
+            // not reach here at all until step E2.
+            false,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2978,6 +3347,11 @@ mod tests {
     ) -> (FrequencyLoopOutcome, CallingScratch<()>) {
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(likelihoods.len(), alleles, view);
+        // Every sample of this fixture is callable, so the rows are the run's samples
+        // one for one — which is what a locus with nothing set aside looks like.
+        for (sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
+            scratch.claim_row_for(sample, inbreeding);
+        }
         scratch
             .seed_concentration_mut()
             .copy_from_slice(seed_concentration);
@@ -2990,13 +3364,7 @@ mod tests {
                 *slot = LogProb(value);
             }
         }
-        let outcome = run_frequency_loop(
-            &mut scratch,
-            view,
-            &MarginalizedDirichletPrior,
-            inbreeding_by_sample,
-            config,
-        );
+        let outcome = run_frequency_loop(&mut scratch, view, &MarginalizedDirichletPrior, config);
         (outcome, scratch)
     }
 
@@ -3608,12 +3976,16 @@ mod tests {
         let _ = cohort_expected_copies_have_settled(&[0.0], &[9.0], diploid(), 1, f64::INFINITY);
     }
 
-    /// The inbreeding coefficients are one per sample in the run's sample order, and the
-    /// seeded pass walks them — so a slice one short scores fewer samples than the locus has
-    /// and the M-step sums the rest as though this pass had written them.
+    /// **One claimed row per prepared row, in both directions** — the check that replaced the
+    /// loop's own coefficient-length assertion when the coefficients moved onto the scratch.
+    ///
+    /// A scratch prepared for three rows and given two samples' coefficients has a row map
+    /// that describes a different locus: the seeded pass would score two rows and leave the
+    /// third holding the prior-free initialisation's copies, which the M-step then sums as
+    /// though this pass had produced them — finite, plausible, wrong and silent.
     #[test]
-    #[should_panic(expected = "one per sample in the run's sample order")]
-    fn fewer_inbreeding_coefficients_than_samples_are_refused() {
+    #[should_panic(expected = "of them were claimed")]
+    fn fewer_claimed_rows_than_the_scratch_was_prepared_for_are_refused() {
         let (alleles, table) = generic_locus(1);
         let view = table.view();
         let (_, _) = loop_over_inbred(
@@ -3626,12 +3998,12 @@ mod tests {
         );
     }
 
-    /// The mirror of the short slice, and the same run-shape bug. Without the check it
-    /// surfaces two modules away as a scratch-indexing panic about the genotype-likelihood
-    /// table, which names neither the cohort nor the coefficients.
+    /// The mirror of the short map, and the same run-shape bug. Without the check it surfaces
+    /// two modules away as a scratch-indexing panic about the genotype-likelihood table, which
+    /// names neither the cohort nor the rows.
     #[test]
-    #[should_panic(expected = "one per sample in the run's sample order")]
-    fn more_inbreeding_coefficients_than_samples_are_refused() {
+    #[should_panic(expected = "of them were claimed")]
+    fn more_claimed_rows_than_the_scratch_was_prepared_for_are_refused() {
         let (alleles, table) = generic_locus(1);
         let view = table.view();
         let two_samples = three_samples_pulling_apart()[..2].to_vec();
@@ -3694,10 +4066,14 @@ mod tests {
         SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape)
     }
 
-    /// **The whole of one locus**: the frequency loop over `likelihoods`, then the final
-    /// pass over the same scratch — which is the order and the sharing the design requires,
+    /// **The whole of one locus over a hand-built likelihood table**: the frequency loop, then
+    /// the final pass over the same scratch — the order and the sharing the design requires,
     /// since the pass reads the posterior row the loop leaves and the likelihood table the
     /// loop never rebuilt.
+    ///
+    /// `likelihoods` holds **one row per sample of the run**, and a sample the candidate step
+    /// ruled uncallable simply does not get a scratch row — so its row here is never read,
+    /// which is what the driver does with it too.
     fn call_locus(
         likelihoods: &[Vec<f64>],
         evidence: &LocusEvidence<'_>,
@@ -3716,16 +4092,22 @@ mod tests {
             &strata,
             view.ploidy(),
         );
+        let callable: Vec<usize> = (0..evidence.sample_count())
+            .filter(|run_sample| is_callable(evidence, *run_sample))
+            .collect();
         let mut scratch = CallingScratch::<()>::default();
-        scratch.prepare_for_locus(likelihoods.len(), alleles, view);
+        scratch.prepare_for_locus(callable.len(), alleles, view);
+        for &run_sample in &callable {
+            scratch.claim_row_for(run_sample, outbred());
+        }
         scratch
             .seed_concentration_mut()
             .copy_from_slice(seed_concentration);
-        for (sample, row) in likelihoods.iter().enumerate() {
+        for (row, &run_sample) in callable.iter().enumerate() {
             for (slot, &value) in scratch
-                .sample_genotype_likelihoods_mut(sample)
+                .sample_genotype_likelihoods_mut(row)
                 .iter_mut()
-                .zip(row)
+                .zip(&likelihoods[run_sample])
             {
                 *slot = LogProb(value);
             }
@@ -3734,7 +4116,6 @@ mod tests {
             &mut scratch,
             view,
             model,
-            &inbreeding,
             &RunnableCallingLoopConfig::default(),
         );
         summarise_final_pass(
@@ -4375,11 +4756,11 @@ mod tests {
         assert_eq!(inference.uncorrected_site_quality(), expected);
     }
 
-    /// Evidence covering a different number of samples than the scratch was prepared for is
-    /// refused: this pass pairs evidence row *i* with scratch row *i*, and two lists of
-    /// different lengths are two different sample orders.
+    /// Evidence and the run's inbreeding coefficients covering different cohorts are refused:
+    /// the pass walks the coefficients and indexes the evidence by the same number, so two
+    /// lists of different lengths are two different sample orders.
     #[test]
-    #[should_panic(expected = "indexed by a different sample order")]
+    #[should_panic(expected = "one per sample of the run")]
     fn evidence_covering_another_cohort_is_refused() {
         let (alleles, table) = generic_locus(1);
         let view = table.view();
@@ -4414,11 +4795,11 @@ mod tests {
         );
     }
 
-    /// One inbreeding coefficient per sample, **in both directions** — the walk is over the
-    /// coefficients, so a short slice would call some samples and leave the rest with no
-    /// call at all.
+    /// One inbreeding coefficient per sample of the run, **in both directions** — the walk is
+    /// over the coefficients, so a short slice would call some samples and leave the rest with
+    /// no call at all.
     #[test]
-    #[should_panic(expected = "one per sample in the run's sample order")]
+    #[should_panic(expected = "one per sample of the run")]
     fn fewer_inbreeding_coefficients_than_samples_are_refused_by_the_final_pass() {
         let (alleles, table) = generic_locus(1);
         let view = table.view();
@@ -4437,6 +4818,127 @@ mod tests {
         );
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(2, &alleles, &view);
+        let _ = summarise_final_pass(
+            &mut scratch,
+            &view,
+            &evidence,
+            &parameters,
+            &MarginalizedDirichletPrior,
+            alleles.clone(),
+            FrequencyLoopOutcome {
+                passes: 1,
+                converged: true,
+            },
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// **The callable samples and the scratch's rows must be the same set**, and the row map
+    /// is what says so. A scratch prepared for two rows at a locus with one callable sample
+    /// was filled for a different set of them — and every row it did read was a legal row of a
+    /// real table, so nothing about the arithmetic complains. The join is checked at each
+    /// sample rather than by a count at the end, because a count is satisfied by a
+    /// *permutation*: the table filled for one sample and read for another.
+    #[test]
+    #[should_panic(expected = "was filled for a different set of samples")]
+    fn a_scratch_prepared_for_more_rows_than_the_locus_can_call_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [
+            called_sample(&rows),
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::new(&rows, 0.0, &[]),
+                genotype_must_be_missing: true,
+            },
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, view.ploidy());
+        let mut scratch = CallingScratch::<()>::default();
+        // Two rows where the locus can call one, and both claimed — the shape the driver
+        // cannot produce and a hand-assembled call site can.
+        scratch.prepare_for_locus(2, &alleles, &view);
+        scratch.claim_row_for(0, outbred());
+        scratch.claim_row_for(1, outbred());
+        for row in 0..2 {
+            for (slot, &value) in scratch
+                .sample_genotype_likelihoods_mut(row)
+                .iter_mut()
+                .zip(&[-4.0_f64, 0.0, -4.0])
+            {
+                *slot = LogProb(value);
+            }
+        }
+        scratch
+            .cohort_expected_copies_mut()
+            .copy_from_slice(&[2.0, 2.0]);
+        for row in 0..2 {
+            scratch
+                .sample_expected_copies_mut(row)
+                .copy_from_slice(&[1.0, 1.0]);
+        }
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(&[1.0, 0.5]);
+        let _ = summarise_final_pass(
+            &mut scratch,
+            &view,
+            &evidence,
+            &parameters,
+            &MarginalizedDirichletPrior,
+            alleles.clone(),
+            FrequencyLoopOutcome {
+                passes: 1,
+                converged: true,
+            },
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// **Rows claimed past the end of the run are the one disagreement the per-sample check
+    /// cannot see**, because a row nobody walks is never asked whose it is. Three rows claimed
+    /// at a two-sample run: every sample matches its own row and the walk still ends one row
+    /// short of the table, which is the only trace there is.
+    #[test]
+    #[should_panic(expected = "callable samples and the scratch was prepared for")]
+    fn rows_claimed_past_the_end_of_the_run_are_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [called_sample(&rows), called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, view.ploidy());
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(3, &alleles, &view);
+        for run_sample in 0..3 {
+            scratch.claim_row_for(run_sample, outbred());
+        }
+        for row in 0..3 {
+            for (slot, &value) in scratch
+                .sample_genotype_likelihoods_mut(row)
+                .iter_mut()
+                .zip(&[-4.0_f64, 0.0, -4.0])
+            {
+                *slot = LogProb(value);
+            }
+            scratch
+                .sample_expected_copies_mut(row)
+                .copy_from_slice(&[1.0, 1.0]);
+        }
+        scratch
+            .cohort_expected_copies_mut()
+            .copy_from_slice(&[3.0, 3.0]);
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(&[1.0, 0.5]);
         let _ = summarise_final_pass(
             &mut scratch,
             &view,
@@ -4712,5 +5214,682 @@ mod tests {
             sorted.sort_by_key(|id| id.get());
             proptest::prop_assert_eq!(&sorted[..], minted.alleles());
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // D1 — the driver: the table built once, the outer rounds structurally off
+    // ────────────────────────────────────────────────────────────────────────────────
+
+    use crate::ng::calling::likelihood::ssr_emission::{
+        StutterSubstitutionEmission, StutterSubstitutionScratch,
+    };
+    use crate::ng::calling::{ContaminationView, EmissionCost};
+    use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
+
+    /// The shipped arm: repeat tracts scored by the shipped emission model, genotypes under
+    /// the marginalized Dirichlet prior.
+    fn shipped_arm()
+    -> SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior> {
+        SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior)
+    }
+
+    /// A worker's scratch, typed by the shipped emission model.
+    fn worker_scratch() -> CallingScratch<StutterSubstitutionScratch> {
+        CallingScratch::default()
+    }
+
+    /// One run's frozen parameters over `samples` outbred samples and one read group, with
+    /// nothing contaminated.
+    fn uncontaminated_run<'a>(
+        calibration: &'a [ReadGroupCalibration],
+        inbreeding: &'a [InbreedingF],
+        strata: &'a StratumFits,
+        ploidy: Ploidy,
+    ) -> FrozenParameters<'a> {
+        FrozenParameters::uncontaminated(calibration, inbreeding, human_like_seed(), strata, ploidy)
+    }
+
+    /// **The driver calls genotypes from evidence** — reads in, `LocusInference` out, with the
+    /// likelihood table built from the reads rather than handed in.
+    ///
+    /// Two samples at a biallelic SNP: the first shows 8 reads of the alternative and none of
+    /// the reference, the second 8 of the reference and none of the alternative. The reads are
+    /// one-sided enough that the calls do not depend on the prior's strength — `1/1` and
+    /// `0/0` — and the cohort's expected copies come out **`[2.0151, 1.9849]`**, which is the
+    /// two calls' four chromosomes split very nearly evenly, as the two samples' reads split
+    /// them. The 0.015 of a copy away from an even split is the seed's pull toward the
+    /// reference, which at eight reads a sample is most of what the prior is still worth.
+    ///
+    /// **The table is built once**: `EmissionCost` reports one table build over two row
+    /// builds, whatever the pass count, which is the property Milestone D exists for.
+    #[test]
+    fn the_driver_calls_genotypes_from_reads_and_builds_the_table_once() {
+        let (alleles, _) = generic_locus(1);
+        let carrier = [observation(1, 0, 8, 4, 4)];
+        let reference_sample = [observation(0, 0, 8, 4, 4)];
+        let per_sample = [called_sample(&carrier), called_sample(&reference_sample)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(1), AlleleId(1)]
+        );
+        assert_eq!(
+            called(&inference, 1).0.alleles(),
+            [AlleleId(0), AlleleId(0)]
+        );
+        assert!(inference.converged);
+        assert_eq!(inference.passes, 2);
+        let copies = inference.cohort_expected_copies().copies();
+        assert!(
+            (copies[0] - 2.015_067_414_196_071).abs() < 1e-12
+                && (copies[1] - 1.984_932_585_803_929_3).abs() < 1e-12,
+            "the cohort's four chromosomes split as the reads split them: {copies:?}"
+        );
+        assert_eq!(
+            scratch.emission_cost(),
+            EmissionCost {
+                table_builds: 1,
+                row_builds: 2,
+                emission_evaluations: 4,
+            },
+            "one table build over two samples, each of one observation against two candidates \
+             — and `passes` was {}",
+            inference.passes
+        );
+    }
+
+    /// **A sample the candidate step ruled uncallable is given no scratch row at all**, and
+    /// what that buys is a denominator: the cohort's expected copies are over the samples the
+    /// locus was called on, so they sum to the **two** chromosomes of the one called sample
+    /// rather than to the four of the run (`spec/calling_em_loop.md` §5.0, §9).
+    ///
+    /// A version that gave the sample a row and skipped it in the E-step would leave that row
+    /// holding the scratch's `NaN` sentinel and the M-step would refuse the locus; one that
+    /// scored it would put its mass on whichever surviving genotype its reads mismatch least
+    /// — usually the homozygous reference — and pull the frequencies toward the reference by
+    /// exactly the samples carrying the rarest alleles.
+    #[test]
+    fn a_sample_the_candidate_step_ruled_uncallable_gets_no_row_and_no_vote() {
+        let (alleles, _) = generic_locus(1);
+        let carrier = [observation(1, 0, 8, 4, 4)];
+        let loud = [observation(0, 0, 40, 20, 20)];
+        let per_sample = [
+            called_sample(&carrier),
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::new(&loud, 0.0, &[]),
+                genotype_must_be_missing: true,
+            },
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(1), AlleleId(1)]
+        );
+        assert!(inference.per_sample[1].is_missing());
+        assert_eq!(
+            scratch.row_count(),
+            1,
+            "one row, for the one callable sample"
+        );
+        assert_eq!(
+            scratch.emission_cost().row_builds,
+            1,
+            "the uncallable sample's reads are never scored, so its row is never built"
+        );
+        let copies: f64 = inference.cohort_expected_copies().copies().iter().sum();
+        assert!(
+            (copies - 2.0).abs() < 1e-12,
+            "the expected copies are over the samples the locus was called on — one diploid \
+             sample's two chromosomes — and they sum to {copies}"
+        );
+    }
+
+    /// A locus at which the candidate step ruled **every** sample uncallable has nobody to
+    /// call, and is refused rather than emitted empty.
+    ///
+    /// **The ruling that produces such a locus does not cover it.** Candidate selection cuts
+    /// an allele rather than refusing a locus, on the ground that most samples stay callable
+    /// (`candidate_alleles.md` §4.1); where none does, that argument has nothing left to rest
+    /// on. Nothing upstream can reach this today — the loop is not wired into a run — and the
+    /// refusal is loud so that the case is decided rather than discovered.
+    #[test]
+    #[should_panic(expected = "has nobody to call")]
+    fn a_locus_where_every_sample_was_ruled_uncallable_is_refused() {
+        let (alleles, _) = generic_locus(1);
+        let rows = [observation(0, 0, 4, 2, 2)];
+        let set_aside = GenericLocusSample {
+            evidence: GenericSampleEvidence::new(&rows, 0.0, &[]),
+            genotype_must_be_missing: true,
+        };
+        let per_sample = [set_aside, set_aside];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+        let _ = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+    }
+
+    /// **A repeat tract is refused, and the message names what it is waiting for.** The row
+    /// exists; what does not is the STR substitution rate on `FrozenParameters`, which step E2
+    /// gathers from the pre-pass. Scoring the tract against an invented rate would be a
+    /// genotype nobody could trace.
+    #[test]
+    #[should_panic(expected = "cannot be scored yet")]
+    fn a_repeat_tract_is_refused_by_the_driver_rather_than_scored_against_invented_parameters() {
+        let detail = SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        };
+        let mut alleles = CandidateAlleles::new(
+            Box::from(b"ATAT".as_slice()),
+            LocusKind::Ssr(SsrDetail {
+                motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+                left_flank: Box::from(b"CCCGGG".as_slice()),
+                right_flank: Box::from(b"TTTAAA".as_slice()),
+            }),
+        );
+        alleles.admit(Box::from(b"ATATAT".as_slice()));
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+        let _ = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+    }
+
+    /// **A run that fitted a contamination fraction is stopped, not quietly given the
+    /// uncontaminated formula.** The mixture's other half — the contaminant allele frequencies,
+    /// which are per locus and come from the loop's own expected copies — is step E2a's.
+    /// Scoring against the fractions alone is a different model rather than a smaller one.
+    #[test]
+    #[should_panic(expected = "step E2a")]
+    fn a_run_with_a_fitted_contamination_fraction_is_refused_until_its_other_half_exists() {
+        let (alleles, _) = generic_locus(1);
+        let rows = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let contamination = [ContaminationView {
+            fraction: 0.03,
+            markers_with_reads: 400,
+            reads_on_markers: 1_000,
+            source: ContaminationSource::ThisReadGroupsReads,
+        }];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = FrozenParameters::new(
+            &calibration,
+            &contamination,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            diploid(),
+        );
+        let mut scratch = worker_scratch();
+        let _ = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+    }
+
+    /// **The arm says which arm it is**, because the seam exists to compare three of them and
+    /// a result that cannot name its own is not auditable.
+    #[test]
+    fn the_shipped_arm_names_itself_and_is_object_safe() {
+        let arm: Box<dyn LocusGenotyper<StutterSubstitutionScratch>> = Box::new(shipped_arm());
+        assert!(arm.name().contains("summarise"));
+    }
+
+    /// **A locus whose alternatives are the reference's own length is a substitution, and one
+    /// carrying a different length is an insertion or a deletion.**
+    ///
+    /// The two classes take the same seed today, so this moves no number — which is exactly
+    /// why it needs a test: nothing downstream would notice it being wrong until the split
+    /// arrives (`spec/calling_priors.md` §4.2).
+    #[test]
+    fn the_variant_class_is_read_off_the_candidate_lengths() {
+        let (substitution, _) = generic_locus(1);
+        assert_eq!(variant_class_of(&substitution), VariantClass::Substitution);
+
+        let mut deletion = CandidateAlleles::new(Box::from(b"ACGT".as_slice()), LocusKind::Generic);
+        deletion.admit(Box::from(b"A".as_slice()));
+        assert_eq!(
+            variant_class_of(&deletion),
+            VariantClass::InsertionOrDeletion
+        );
+
+        let reference_only =
+            CandidateAlleles::new(Box::from(b"ACGT".as_slice()), LocusKind::Generic);
+        assert_eq!(
+            variant_class_of(&reference_only),
+            VariantClass::Substitution,
+            "a locus called over the reference alone carries no length change"
+        );
+    }
+
+    /// **The gap comes first, which is the shape that separates a row from its sample.**
+    ///
+    /// Every other set-aside fixture in this file puts the uncallable sample **last**, where a
+    /// row's index and its sample's index are the same number and a table filled by row gives
+    /// the right answer by accident. Here sample 0 is set aside holding 8 reference reads and
+    /// sample 1 is called holding 8 alternative ones, so the one scratch row is row 0 and it
+    /// belongs to run sample 1.
+    ///
+    /// **Measured:** a build that read `per_sample[row]` calls the surviving sample `0/0` on
+    /// reads it never saw, with copies `[2.0000, 3.9e-6]` against this fixture's
+    /// `[0.0077, 1.9923]` — a systematic permutation, and no panic anywhere.
+    #[test]
+    fn call_locus_scores_each_row_against_the_sample_that_claimed_it_when_the_gap_comes_first() {
+        let (alleles, _) = generic_locus(1);
+        let reference_reads = [observation(0, 0, 8, 4, 4)];
+        let alternative_reads = [observation(1, 0, 8, 4, 4)];
+        let per_sample = [
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::new(&reference_reads, 0.0, &[]),
+                genotype_must_be_missing: true,
+            },
+            called_sample(&alternative_reads),
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert!(inference.per_sample[0].is_missing());
+        assert_eq!(
+            called(&inference, 1).0.alleles(),
+            [AlleleId(1), AlleleId(1)],
+            "row 0 belongs to run sample 1, whose reads are all alternative"
+        );
+        let copies = inference.cohort_expected_copies().copies();
+        assert!(
+            (copies[0] - 0.007_744_253_786_433_548).abs() < 1e-12
+                && (copies[1] - 1.992_255_746_213_566_4).abs() < 1e-12,
+            "the one called sample's two chromosomes are nearly all alternative: {copies:?}"
+        );
+    }
+
+    /// **A record may not claim its parameters were fitted when they were defaulted.**
+    ///
+    /// The fixture's calibration is `ReadGroupCalibration::defaulted()`, whose own provenance
+    /// is `Defaulted` — nothing could be fitted and a stated constant was used — and the reads
+    /// scored at this locus all came from that read group. So the weakest warrant behind the
+    /// call is `Defaulted`, and a consumer that treated it as fitted is the failure
+    /// `LocusInference::weakest_provenance` exists to prevent.
+    #[test]
+    fn call_locus_reports_the_weakest_warrant_of_the_parameters_that_reached_the_locus() {
+        let (alleles, _) = generic_locus(1);
+        let het = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&het)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        assert_eq!(calibration[0].provenance, Provenance::Defaulted);
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(inference.weakest_provenance, Provenance::Defaulted);
+    }
+
+    /// **A locus no read reached claims the strongest warrant**, because nothing weaker
+    /// entered it: every sample is decided by the prior alone, and the prior's own seed
+    /// carries no provenance to report. The fold's identity, not a claim about a measurement.
+    #[test]
+    fn a_locus_no_read_reached_has_no_weaker_warrant_to_report() {
+        let (alleles, _) = generic_locus(1);
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::empty(),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(inference.weakest_provenance, Provenance::FittedHere);
+        assert!(inference.artifact_test_counts().is_none());
+    }
+
+    /// **The run's configuration reaches the loop**, and a cap is the one setting that shows
+    /// it: the same fixture settles on its second pass at the default cap, so a cap of one
+    /// stops it short and the record has to say so.
+    ///
+    /// **Measured:** with the config dropped and the default used instead, this locus comes
+    /// back `passes = 2, converged = true` — a stronger claim than the loop earned.
+    #[test]
+    fn call_locus_honours_the_runs_pass_cap() {
+        let (alleles, _) = generic_locus(1);
+        let carrier = [observation(1, 0, 8, 4, 4)];
+        let reference_sample = [observation(0, 0, 8, 4, 4)];
+        let per_sample = [called_sample(&carrier), called_sample(&reference_sample)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference =
+            shipped_arm().call_locus(&evidence, &parameters, alleles, &capped_at(1), &mut scratch);
+
+        assert_eq!(inference.passes, 1);
+        assert!(
+            !inference.converged,
+            "the cap stopped this locus, and the record has to say so"
+        );
+    }
+
+    /// **Two coefficients that differ, because every other driver fixture is outbred.**
+    ///
+    /// The loop reads a row's inbreeding coefficient off the scratch and the final pass reads
+    /// the same sample's off the run, so a compaction indexed wrongly makes the two disagree
+    /// about one sample with neither of them noticing. Both samples here show the same
+    /// balanced reads, so the only thing separating their genotype qualities is the
+    /// coefficient each was scored against.
+    #[test]
+    fn call_locus_claims_each_row_with_its_own_samples_inbreeding_coefficient() {
+        let (alleles, _) = generic_locus(1);
+        let balanced = [observation(0, 0, 3, 2, 1), observation(1, 0, 3, 1, 2)];
+        let per_sample = [called_sample(&balanced), called_sample(&balanced)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [
+            InbreedingF::try_new(0.0).expect("an outbred sample"),
+            InbreedingF::try_new(0.9).expect("a highly inbred sample"),
+        ];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        let outbred_quality = called(&inference, 0).1.get();
+        let inbred_quality = called(&inference, 1).1.get();
+        assert!(
+            (outbred_quality - 32.323_853).abs() < 1e-3
+                && (inbred_quality - 20.752_254).abs() < 1e-3,
+            "the same reads under F = 0 and F = 0.9: {outbred_quality} and {inbred_quality}"
+        );
+        let copies = inference.cohort_expected_copies().copies();
+        assert!(
+            (copies[0] - 2.003_187_445_790_709_7).abs() < 1e-12,
+            "scoring both rows at F = 0 gives 2.000584 instead: {copies:?}"
+        );
+    }
+
+    /// **Unequal observation counts, which is the shape spec §13's test 5 asks for.**
+    ///
+    /// A sample of one observation beside a sample of two: `Σ_s obs_s × candidates` is
+    /// `(1 + 2) × 2 = 6`, where a version charging the first row's count for every row would
+    /// report `2 × 1 × 2 = 4`. A fixture whose samples hold equal counts cannot tell the two
+    /// apart, which is what the counter's own documentation says and what the driver's first
+    /// fixture does.
+    #[test]
+    fn emission_evaluations_sum_each_samples_own_observation_count() {
+        let (alleles, _) = generic_locus(1);
+        let thin = [observation(1, 0, 8, 4, 4)];
+        let thick = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&thin), called_sample(&thick)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let _ = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(
+            scratch.emission_cost(),
+            EmissionCost {
+                table_builds: 1,
+                row_builds: 2,
+                emission_evaluations: 6,
+            }
+        );
+    }
+
+    /// **A read that saw only part of the locus is still an emission the builder was asked
+    /// for**, so it is charged: two whole-span observations and one partial, over two
+    /// candidates, is 6 — dropping the partials from the charge reports 4.
+    #[test]
+    fn emission_evaluations_charge_the_partial_observations_too() {
+        let (alleles, _) = generic_locus(1);
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let partials = [PartialObservation {
+            witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
+                .expect("one witnessed position"),
+            read_group: ReadGroupId(0),
+            bases: Box::from(b"A".as_slice()),
+            num_reads: 50,
+            q_sum: -100.0,
+        }];
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::new(&rows, 0.0, &partials),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let _ = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(
+            scratch.emission_cost(),
+            EmissionCost {
+                table_builds: 1,
+                row_builds: 1,
+                emission_evaluations: 6,
+            },
+            "two whole-span observations and one partial, over two candidates"
+        );
+    }
+
+    /// **The same one build at four passes as at two** — which is what "independent of the
+    /// pass count" means, and what a single fixture at two passes cannot say. Three samples
+    /// over three alleles, each showing one read of each: the loop takes four passes and the
+    /// table is still built once.
+    ///
+    /// This is also the driver's only fixture above two samples and above two alleles.
+    #[test]
+    fn the_table_is_built_once_at_a_locus_that_takes_four_passes() {
+        let (alleles, _) = generic_locus(2);
+        let mixed = [
+            observation(0, 0, 4, 2, 2),
+            observation(1, 0, 4, 2, 2),
+            observation(2, 0, 4, 2, 2),
+        ];
+        let per_sample = [
+            called_sample(&mixed),
+            called_sample(&mixed),
+            called_sample(&mixed),
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(inference.passes, 4);
+        assert_eq!(
+            scratch.emission_cost(),
+            EmissionCost {
+                table_builds: 1,
+                row_builds: 3,
+                emission_evaluations: 27,
+            },
+            "four passes, one build — three rows of three observations against three candidates"
+        );
+        let total: f64 = inference.cohort_expected_copies().copies().iter().sum();
+        assert!(
+            (total - 6.0).abs() < 1e-12,
+            "three diploid samples carry six chromosomes, and they are all accounted for"
+        );
+    }
+
+    /// **A cohort of one, called end to end** — the hardest corner of the range this caller
+    /// commits to, and the only cohort size at which the prior's leave-one-out subtraction is
+    /// between a number and itself. The concentration comes back as the seed, so the loop
+    /// reaches its fixed point by arithmetic on the second pass.
+    #[test]
+    fn call_locus_calls_a_cohort_of_one() {
+        let (alleles, _) = generic_locus(1);
+        let het = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&het)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let mut scratch = worker_scratch();
+
+        let inference = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut scratch,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+        assert_eq!(inference.passes, 2);
+        assert!(inference.converged);
+        let copies = inference.cohort_expected_copies().copies();
+        assert!(
+            (copies[0] - 1.019_039_125_169_859_6).abs() < 1e-12
+                && (copies[1] - 0.980_960_874_830_140_3).abs() < 1e-12,
+            "one diploid sample's two chromosomes, split as its reads split them: {copies:?}"
+        );
+    }
+
+    /// **Spec §5.0.1's ruling, as a unit**, because no end-to-end fixture can reach it: a
+    /// repeat tract is refused at the driver's front door until step E2, so the callable count
+    /// it computes there is never observable. A discovery round at a tract can put back a
+    /// length the cap cut, so no sample is locked out of the locus for the rest of its calling.
+    #[test]
+    fn is_callable_rules_no_sample_out_on_a_repeat_tract() {
+        let detail = SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        };
+        let per_sample = [
+            SsrSampleEvidence::new(&[], &detail),
+            SsrSampleEvidence::new(&[], &detail),
+        ];
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
+
+        assert!(is_callable(&evidence, 0));
+        assert!(is_callable(&evidence, 1));
     }
 }
