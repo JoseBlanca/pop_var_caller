@@ -345,6 +345,14 @@ impl<R: Read + Seek> PspReader<R> {
         self.metadata.as_deref()
     }
 
+    /// EXPERIMENT (Milestone Z): hand over the metadata bytes and stop holding
+    /// them. Everything in the calling path reads this section exactly once, at
+    /// startup, to parse the per-sample summary out of it; the reader then keeps
+    /// the decompressed bytes alive for the whole run for nobody.
+    pub fn take_metadata(&mut self) -> Option<Vec<u8>> {
+        self.metadata.take()
+    }
+
     /// Decoded block index, in genomic order. Empty for a
     /// zero-block file. Exposed for tests, the future `psp dump`
     /// utility, and the cohort-merge driver that wants per-sample
