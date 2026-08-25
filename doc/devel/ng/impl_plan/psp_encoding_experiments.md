@@ -29,6 +29,12 @@ deliverable is the shape of the curve over that ladder, on two species.
    back the compressor may look for a repeat *and* how much memory a reader spends. Decompressing
    a block incrementally breaks that link: the memory becomes the compressor's *reach* — a number
    we set at write time and can cap at, say, 32 kB — while the block itself can be a megabyte.
+
+   **The target to aim at, stated by the owner on 2026-08-25: a reader that holds one observation
+   per open file at a time.** Nothing reaches that exactly — a compressor needs its reach and a
+   decoder needs somewhere to put its output — but it is the direction every choice here is judged
+   against, and it is why the number that matters is what a reader *holds*, not what the file
+   weighs.
 2. **Approximate the three floating-point quantities.** The window's mean coverage, the window's
    GC fraction and the summed log-error per allele are stored at full precision, and their bottom
    bits are arithmetic noise. Stored instead as an integer count of a chosen step, they are much
@@ -143,6 +149,11 @@ fits with room to spare.
 **That server is offered on the condition that the experiment is easy to port, so portability is a
 requirement of every step here and not an afterthought:**
 
+- **⚠ The Mac has six fast cores, not eight.** The rest are energy-saving cores, and the container
+  wrapper hands the runtime `--cpus 8` by default, which oversubscribes the fast ones and makes any
+  thread-scaling curve taken here meaningless. **Cap Mac runs at four threads, and take every
+  thread-scaling measurement on the 32-thread Linux server.** A wall-time figure from this machine
+  carries its thread count and the caveat, or it is not reported.
 - **One script per experiment, taking paths as arguments** — no hard-coded locations, no dependence
   on the developer's home directory.
 - **Assume no container runtime.** The dev container wrapper refuses to run where neither podman nor
@@ -225,11 +236,19 @@ an encoding question:
   and ng does not inherit production's chunk shape — so part of this saving may already be designed
   in and merely unmeasured. **Confirm that before crediting it to anything here.**
 - **Hold the same information in a narrower form.** A name that is an index within a block rather
-  than a genome-wide 64-bit integer; or keeping the names in their differential form in memory and
-  materialising a list only for the locus being worked on. *Production tried a block-local index and
-  rejected it — the code came out considerably more complex and it cost performance (the owner,
-  2026-08-18) — but that ruling was about the bytes in the file. This is about what is held, where
-  the trade is a different one, so it is re-opened here deliberately rather than by oversight.*
+  than a genome-wide 64-bit integer; or keeping the names differential in memory and materialising a
+  list only for the locus in hand.
+
+  **⛔ Not first, and only if measurement forces it (the owner, 2026-08-25):** *"that would
+  complicate the code quite a bit. So first let's try simpler approaches, let's evaluate them and
+  let's increase the complexity only if needed."* Production already tried a block-local name and
+  rejected it as considerably more complex and slower, for the file rather than for what is held.
+
+  **So the order is fixed: measure what the simple things give first** — holding less per sample
+  (above), and the plain encoding changes of Milestones B, C and D — and open this only if the
+  measured gap to the objective still needs it. **Report the gap explicitly when that point is
+  reached**, so the decision to add complexity is taken against a number rather than against a
+  hunch.
 
 **Report, per rung: bytes held per sample per position, for each candidate in-memory shape**, beside
 the file figures the rest of the plan produces. A design that halves the file and doubles what is
