@@ -176,6 +176,34 @@ down to 1 kb more than halves the peak again — 411.6 MB to 191.6 MB — for 28
 floor, the part no block-span change can reach, is **below 191.6 MB and still unmeasured**, and
 **the majority of a cohort run's peak at the default setting is state sized by the block span.**
 
+### 4.0 Why simply shrinking the block is not the answer — the index
+
+**Small blocks look like a free memory win on this benchmark, and they are not one on a real
+genome.** Every block costs an entry in the file's block index, and production decodes the whole
+index when it opens a file, before reading any data (`decode_index`, 24 bytes an entry). So halving
+the span doubles a per-open-sample cost that the sweep above cannot see.
+
+It cannot see it because **the tomato benchmark files cover about one per cent of the genome.**
+Measured on one of them: 1,674 blocks, mean span 4,712 bp, so about 7.9 Mb of reference against the
+782 Mb the header declares. Its index is 40 kB — noise beside a 411 MB peak.
+
+Scaled to a whole-genome sample at the same spans — arithmetic from that measured block count, not a
+measurement:
+
+| block span | blocks in a whole-genome sample | index, per open sample | at 1,000 samples |
+|---:|---:|---:|---:|
+| 1,000 bp | ~782,000 | **18.8 MB** | 18.8 GB |
+| 5,000 bp (today) | ~156,000 | 3.8 MB | 3.8 GB |
+| 80,000 bp | ~9,800 | **0.24 MB** | 0.24 GB |
+
+**So the two ends of the sweep trade one cost for another.** A 1 kb span holds little decoded data
+and carries an index eighty times larger than an 80 kb span's; an 80 kb span has a negligible index
+and holds 1,666 MB. Neither end is somewhere a thousand-sample whole-genome run can stand.
+
+**This is the argument for streaming decompression, and it is stronger than the file-size one.**
+Untying what a reader holds from the block's span is the only way to take the small-index end of
+this table and the small-memory end at the same time.
+
 ### 4.1 Which is not what the heap profile appeared to say, and the difference matters
 
 §2 attributes 43.6 MB of a 342.6 MB live heap — 12.7% — to the block decode. Taken alone that reads
