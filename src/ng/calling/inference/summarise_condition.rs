@@ -30,7 +30,81 @@ use crate::ng::calling::genotype_prior::{
     fill_sample_concentration,
 };
 use crate::ng::calling::{CohortSummingBuffers, SampleScoringBuffers};
-use crate::ng::types::InbreedingF;
+use crate::ng::types::{InbreedingF, LogProb};
+
+/// Which prior one pass scores against — **a value, not a code path**.
+///
+/// **The first pass through a locus has no prior at all, and it cannot simply be handed a flat
+/// one.** The leave-one-out prior is built from the cohort's expected allele copies, and those
+/// are what a *previous* pass produces; on the first pass there is none, so the buffers holding
+/// them are still the scratch's `NaN` sentinel. A caller that passed a flat
+/// [`GenotypePriorModel`] would therefore still run step 1 and read them.
+///
+/// **What that costs depends on which buffer is unwritten, and both cases are measured.** With
+/// the sample's own copies unwritten — the ordinary first pass — it **panics, in release as
+/// well as debug**, on this function's own release-held check that those copies are finite. If
+/// only the *cohort* row is unwritten, nothing panics in release and the concentration comes
+/// back as **the seed exactly**, because the leave-one-out `max(0, ·)` returns the other
+/// operand on a `NaN`; probed at a seed of `[1.0, 0.5]`, the concentration came back
+/// `[1.0, 0.5]`. **The second case is the seeded first pass
+/// `doc/devel/ng/spec/calling_em_loop.md` §3 exists to prevent**, arrived at by accident rather
+/// than by choice. So the choice is a variant here rather than a model behind the seam.
+///
+/// **Why the first pass is flat and not seeded**, in one paragraph, because it is the whole of
+/// §3: the seed says a locus is almost certainly invariant — about `1 − 3θ/2` of the prior mass
+/// on the homozygous reference against roughly `θ` on a heterozygote, a pull of about 30 Phred
+/// at `θ = 0.001`. Apply that on the first pass at a locus where the reads are thin and every
+/// sample carrying the variant is scored homozygous reference; their expected copies of the
+/// alternative come out near zero, so the cohort term is near zero on the second pass, so the
+/// prior is still just the seed. **The loop converges, and it converges to no-variant, having
+/// never let the reads speak.** GATK's allele-frequency calculation starts flat for the same
+/// reason, and so does production's own E-step
+/// (`src/var_calling/posterior_engine.rs`, `EmStepPhase::FirstIteration`).
+///
+/// **It runs at the start of every outer round, not only the very first.** For the first round
+/// the reason is that the number does not exist yet; for the later ones it is different — a
+/// round begins with new slippage numbers, and the expected copies it would inherit were
+/// converged under the *old* ones, so carrying them in seeds the new round at the old round's
+/// answer. That is the same self-reinforcing start, with the previous round standing in for the
+/// seed (spec §3).
+///
+/// **Inherited from GATK and from production, and never measured here — soft.** The argument is
+/// arithmetic about the prior's size, not a count of calls that moved. It should bite hardest
+/// where the read likelihood is weakest against a 20-to-30 Phred prior, which is the tomato
+/// panel's corner at three reads a position, and hardly at all at 300. Spec §12's question 7 is
+/// the measurement.
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "step D1 of the calling-loop plan is the first to build one"
+    )
+)]
+pub(crate) enum PassPrior<'a> {
+    /// **No prior at all** — every candidate genotype equally likely, and no concentration
+    /// built, so nothing reads the cohort's expected copies. The first pass of every round.
+    Flat,
+    /// The seed plus what the **other** samples showed here — every pass but the first.
+    LeaveOneOut {
+        /// Which of the two shipped priors this run scores against.
+        model: &'a dyn GenotypePriorModel,
+        /// This sample's inbreeding coefficient, frozen by the parameter pre-pass.
+        inbreeding: InbreedingF,
+    },
+}
+
+impl PassPrior<'_> {
+    /// Whether this pass builds a concentration and reads the cohort's expected copies.
+    ///
+    /// **One of the two places the arms are told apart** — this predicate and the `match` in
+    /// [`score_one_sample`] — kept as a named method so that what it gates reads as a
+    /// property of the pass rather than as an inline `matches!`.
+    #[inline]
+    fn reads_the_cohort(&self) -> bool {
+        matches!(self, Self::LeaveOneOut { .. })
+    }
+}
 
 /// Score **one sample** against every candidate genotype, then **replace** that sample's
 /// expected allele copies with the answer — one sample's share of the E-step.
@@ -46,7 +120,9 @@ use crate::ng::types::InbreedingF;
 ///    showed here. The sample's own expected copies are subtracted from the cohort's total
 ///    first, so its own reads cannot reach it twice — once through its likelihood row and
 ///    once through the frequency they helped set
-///    (`doc/devel/ng/spec/calling_priors.md` §6).
+///    (`doc/devel/ng/spec/calling_priors.md` §6). **Skipped entirely on a
+///    [`PassPrior::Flat`] pass**, which is what makes the flat pass possible at all: the
+///    cohort's copies do not exist yet on the first pass through a locus.
 /// 2. **This sample's log-prior** over the candidate genotypes, from that concentration.
 ///    Which prior is a seam: two are shipped and they disagree by 11 points of genotype
 ///    accuracy on GIAB at 5×, each sample called on its own — 83.6% against 94.6%
@@ -124,8 +200,7 @@ use crate::ng::types::InbreedingF;
 pub(crate) fn score_one_sample(
     buffers: SampleScoringBuffers<'_>,
     genotypes: &GenotypeTableView<'_>,
-    prior: &dyn GenotypePriorModel,
-    inbreeding: InbreedingF,
+    prior: PassPrior<'_>,
 ) {
     let SampleScoringBuffers {
         sample,
@@ -162,6 +237,29 @@ pub(crate) fn score_one_sample(
          and the locus's seed holds {}",
         seed_concentration.len()
     );
+    // **These two are checked here because the flat arm reaches neither of the functions that
+    // used to check them.** `prior_row`'s width was `PriorRow::new`'s to check and
+    // `sample_expected_copies`' was `fill_sample_concentration`'s, and a flat pass calls
+    // neither — so a mis-shaped buffer made the seeded arm panic in release and made the flat
+    // arm return a **wrong posterior in silence**. Measured on a 3-genotype locus given a
+    // 2-entry prior row: `[0.199, 0.399, 0.402]` against the right `[0.25, 0.5, 0.25]`, the
+    // tail entry being the stale value the buffer arrived holding, carried through the
+    // normalisation because the score loop's `zip` stops at the shortest row while the
+    // normalising loop divides all of them.
+    assert_eq!(
+        prior_row.len(),
+        genotype_count,
+        "one prior entry per candidate genotype: the table holds {genotype_count} genotypes \
+         and the prior row holds {}, scoring sample {sample}",
+        prior_row.len()
+    );
+    assert_eq!(
+        sample_expected_copies.len(),
+        allele_count,
+        "one expected-copies entry per allele: the table is built over {allele_count} \
+         alleles and sample {sample}'s copies row holds {}",
+        sample_expected_copies.len()
+    );
     // **Debug-only, unlike the release-held checks around it, and the reason is that it
     // cannot fire today.** Step 4 reads this table with `chunks_exact`, so a short one would truncate the
     // fold silently — but every `GenotypeTableView` comes from `GenotypeTable::build`, which
@@ -180,37 +278,49 @@ pub(crate) fn score_one_sample(
     // `prepare_for_locus` leaves this row `NaN`, and the leave-one-out `max(0, ·)` below
     // returns the other operand on a `NaN` — so in release an unwritten row becomes a zero
     // cohort term and the sample is quietly scored against the bare seed.
+    //
+    // **Only on a seeded pass.** On a flat pass this row is *expected* to hold the sentinel —
+    // that is the whole situation the flat pass exists for — and step 4 overwrites it without
+    // ever reading it.
     assert!(
-        sample_expected_copies
-            .iter()
-            .all(|copies| copies.is_finite() && *copies >= 0.0),
+        !prior.reads_the_cohort()
+            || sample_expected_copies
+                .iter()
+                .all(|copies| copies.is_finite() && *copies >= 0.0),
         "sample {sample}'s own expected allele copies are counts of genome copies, so every \
          entry must be finite and at or above zero; the likeliest cause is that a pass \
          reached this sample before anything wrote them: {sample_expected_copies:?}"
     );
 
-    // 1. The seed, plus what the other samples showed. The sample's own copies are read
-    //    here and overwritten at the end, so the read has to come first.
-    fill_sample_concentration(
-        Concentration::new(seed_concentration),
-        CohortAlleleCopies::new(cohort_expected_copies),
-        SampleAlleleCopies::new(sample_expected_copies),
-        sample_concentration,
-    );
-
-    // 2. The prior over genotypes that concentration implies. `PriorRow::new` checks the
-    //    genotype table's three flat views against it, so a mis-shaped table is refused
-    //    before any implementation is entered.
-    {
-        let mut row = PriorRow::new(
-            Concentration::new(sample_concentration),
-            genotypes.genotype_allele_counts(),
-            genotypes.log_multinomial_coeffs(),
-            genotypes.homozygous_alleles(),
-            prior_per_allele_workspace,
-            prior_row,
-        );
-        prior.fill_genotype_log_priors(&mut row, inbreeding);
+    // 1 and 2. The prior over genotypes, and — on a seeded pass only — the concentration it
+    //          is built from. The flat arm writes a zero row rather than branching inside
+    //          step 3, so the hot loop below keeps one spelling; the cost is `genotypes`
+    //          stores against `genotypes` calls to `exp`.
+    match prior {
+        PassPrior::Flat => prior_row.fill(LogProb(0.0)),
+        PassPrior::LeaveOneOut { model, inbreeding } => {
+            // The seed, plus what the other samples showed. The sample's own copies are read
+            // here and overwritten at the end, so the read has to come first.
+            fill_sample_concentration(
+                Concentration::new(seed_concentration),
+                CohortAlleleCopies::new(cohort_expected_copies),
+                SampleAlleleCopies::new(sample_expected_copies),
+                sample_concentration,
+            );
+            // `PriorRow::new` checks the genotype table's three flat views against the
+            // concentration, so a mis-shaped table is refused before any implementation is
+            // entered. **The flat arm does not go through it**, which is why the copy table's
+            // own width is checked above rather than being left to this call.
+            let mut row = PriorRow::new(
+                Concentration::new(sample_concentration),
+                genotypes.genotype_allele_counts(),
+                genotypes.log_multinomial_coeffs(),
+                genotypes.homozygous_alleles(),
+                prior_per_allele_workspace,
+                prior_row,
+            );
+            model.fill_genotype_log_priors(&mut row, inbreeding);
+        }
     }
 
     // 3. Likelihood plus prior, normalised into a posterior over genotypes.
@@ -449,7 +559,7 @@ mod tests {
     use crate::ng::calling::genotype_prior::MarginalizedDirichletPrior;
     use crate::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
     use crate::ng::locus_generation::LocusKind;
-    use crate::ng::types::{LogProb, Ploidy};
+    use crate::ng::types::Ploidy;
     use std::sync::Arc;
 
     /// A genotype prior that writes numbers the test chose.
@@ -548,8 +658,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 2.0 * two]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 2.0 * two]),
+                inbreeding: outbred(),
+            },
         );
 
         assert_eq!(scratch.sample_concentration(), &[3.0, 0.5]);
@@ -615,8 +727,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
 
         for (got, want) in scratch.posterior_row().iter().zip([0.25, 0.5, 0.25]) {
@@ -663,8 +777,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &MarginalizedDirichletPrior,
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &MarginalizedDirichletPrior,
+                inbreeding: outbred(),
+            },
         );
 
         assert_eq!(scratch.sample_concentration(), &seed);
@@ -720,8 +836,10 @@ mod tests {
             score_one_sample(
                 scratch.sample_scoring_buffers_mut(sample),
                 &view,
-                &MarginalizedDirichletPrior,
-                outbred(),
+                PassPrior::LeaveOneOut {
+                    model: &MarginalizedDirichletPrior,
+                    inbreeding: outbred(),
+                },
             );
 
             let posterior_total: f64 = scratch.posterior_row().iter().sum();
@@ -793,8 +911,10 @@ mod tests {
                 sample_expected_copies: &mut copies,
             },
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
 
@@ -834,8 +954,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
     /// **A posterior row one genotype short is refused, not silently truncated.**
@@ -877,8 +999,10 @@ mod tests {
                 sample_expected_copies: &mut copies,
             },
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
 
@@ -914,8 +1038,10 @@ mod tests {
                 sample_expected_copies: &mut copies,
             },
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
 
@@ -960,8 +1086,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
 
@@ -997,8 +1125,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &FixedLogPriors(vec![0.0, 0.0, 0.0]),
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &FixedLogPriors(vec![0.0, 0.0, 0.0]),
+                inbreeding: outbred(),
+            },
         );
     }
 
@@ -1037,8 +1167,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &MarginalizedDirichletPrior,
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &MarginalizedDirichletPrior,
+                inbreeding: outbred(),
+            },
         );
         let first_posterior = scratch.posterior_row().to_vec();
         let first_copies = scratch.sample_expected_copies(0).to_vec();
@@ -1050,8 +1182,10 @@ mod tests {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(0),
             &view,
-            &MarginalizedDirichletPrior,
-            outbred(),
+            PassPrior::LeaveOneOut {
+                model: &MarginalizedDirichletPrior,
+                inbreeding: outbred(),
+            },
         );
 
         assert_eq!(
@@ -1065,11 +1199,40 @@ mod tests {
             "pass 2's expected copies are not pass 1's"
         );
     }
+
+    /// One locus's worth of cohort fixture — what [`run_passes`] scores.
+    struct CohortFixture<'a> {
+        /// Per sample, per candidate genotype: the log-likelihood of that sample's reads.
+        likelihoods: &'a [Vec<f64>],
+        /// Per sample: the expected allele copies each starts the first pass holding.
+        starting_copies: &'a [Vec<f64>],
+        /// Which sample of `likelihoods` sits at each index of the run.
+        order: &'a [usize],
+        /// The cohort row the first pass sees. See [`run_passes`] for why it is given rather
+        /// than derived.
+        starting_cohort: &'a [f64],
+        alleles: &'a CandidateAlleles,
+        view: &'a GenotypeTableView<'a>,
+        /// The locus's seed concentration.
+        seed: &'a [f64],
+    }
+
     /// Run whole passes over a cohort — the E-step for every sample in index order, then the
     /// M-step — with the samples presented in whatever order `order` names.
     ///
     /// Returns each sample's most probable genotype **after the last pass**, in the order it
     /// was presented in, and the cohort's summed expected copies.
+    ///
+    /// **`starting_cohort` is taken rather than derived**, because what it is decides what the
+    /// counterfactual below even means. Setting it to the *sum* of the samples' own copies
+    /// gives every sample a leave-one-out term of `n − 1` samples' worth on pass 1; setting it
+    /// equal to one sample's own copies, where every sample starts alike, makes that term
+    /// exactly zero — which is the *"seed concentration on its own"* that
+    /// `spec/calling_em_loop.md` §3 names as the flat pass's only alternative.
+    ///
+    /// **`flat_first` chooses the first pass's prior**, so the same helper drives the shipped
+    /// behaviour and the counterfactual `spec/calling_em_loop.md` §3 rules out. A run always
+    /// passes `true`; `false` exists so a test can show what the other choice converges to.
     ///
     /// **`passes` is the whole reason this helper exists rather than a one-pass one.** On the
     /// first pass every sample is scored against a cohort row this function wrote before the
@@ -1083,29 +1246,29 @@ mod tests {
     /// The posterior is one reused buffer, so each sample's winner is read off before the next
     /// is scored — which is also why step C3 of the plan has to take the genotype quality as it
     /// scores rather than afterwards.
+    /// One locus's worth of cohort fixture — what [`run_passes`] scores.
     fn run_passes(
         passes: usize,
-        likelihoods: &[Vec<f64>],
-        starting_copies: &[Vec<f64>],
-        order: &[usize],
-        alleles: &CandidateAlleles,
-        view: &GenotypeTableView<'_>,
-        seed: &[f64],
+        flat_first: bool,
+        fixture: &CohortFixture<'_>,
     ) -> (Vec<usize>, Vec<f64>) {
+        let &CohortFixture {
+            likelihoods,
+            starting_copies,
+            order,
+            starting_cohort,
+            alleles,
+            view,
+            seed,
+        } = fixture;
         assert!(passes > 0, "a pass count of zero scores nothing");
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(order.len(), alleles, view);
         scratch.seed_concentration_mut().copy_from_slice(seed);
 
-        let mut cohort = vec![0.0; view.allele_count()];
-        for &sample in order {
-            for (total, copies) in cohort.iter_mut().zip(&starting_copies[sample]) {
-                *total += copies;
-            }
-        }
         scratch
             .cohort_expected_copies_mut()
-            .copy_from_slice(&cohort);
+            .copy_from_slice(starting_cohort);
 
         for (index, &sample) in order.iter().enumerate() {
             for (slot, &value) in scratch
@@ -1121,15 +1284,18 @@ mod tests {
         }
 
         let mut winners = Vec::with_capacity(order.len());
-        for _pass in 0..passes {
+        for pass in 0..passes {
+            let prior = if pass == 0 && flat_first {
+                PassPrior::Flat
+            } else {
+                PassPrior::LeaveOneOut {
+                    model: &MarginalizedDirichletPrior,
+                    inbreeding: outbred(),
+                }
+            };
             winners.clear();
             for index in 0..order.len() {
-                score_one_sample(
-                    scratch.sample_scoring_buffers_mut(index),
-                    view,
-                    &MarginalizedDirichletPrior,
-                    outbred(),
-                );
+                score_one_sample(scratch.sample_scoring_buffers_mut(index), view, prior);
                 let posterior = scratch.posterior_row();
                 let (winner, _) = posterior
                     .iter()
@@ -1141,6 +1307,18 @@ mod tests {
             sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
         }
         (winners, scratch.cohort_expected_copies().to_vec())
+    }
+
+    /// The cohort row that is the sum of the samples' own starting copies — what a run's
+    /// first M-step would have produced from them.
+    fn cohort_of(starting_copies: &[Vec<f64>], order: &[usize]) -> Vec<f64> {
+        let mut cohort = vec![0.0; starting_copies[0].len()];
+        for &sample in order {
+            for (total, copies) in cohort.iter_mut().zip(&starting_copies[sample]) {
+                *total += copies;
+            }
+        }
+        cohort
     }
 
     /// Three samples whose reads pull them to three different genotypes, with different
@@ -1190,21 +1368,29 @@ mod tests {
 
         let (called_in_order, cohort_in_order) = run_passes(
             2,
-            &likelihoods,
-            &starting_copies,
-            &[0, 1, 2],
-            &alleles,
-            &view,
-            &seed,
+            true,
+            &CohortFixture {
+                likelihoods: &likelihoods,
+                starting_copies: &starting_copies,
+                order: &[0, 1, 2],
+                starting_cohort: &cohort_of(&starting_copies, &[0, 1, 2]),
+                alleles: &alleles,
+                view: &view,
+                seed: &seed,
+            },
         );
         let (called_rotated, cohort_rotated) = run_passes(
             2,
-            &likelihoods,
-            &starting_copies,
-            &[2, 0, 1],
-            &alleles,
-            &view,
-            &seed,
+            true,
+            &CohortFixture {
+                likelihoods: &likelihoods,
+                starting_copies: &starting_copies,
+                order: &[2, 0, 1],
+                starting_cohort: &cohort_of(&starting_copies, &[2, 0, 1]),
+                alleles: &alleles,
+                view: &view,
+                seed: &seed,
+            },
         );
 
         // The fixture is only a test of the ordering if **all three** samples disagree; two
@@ -1345,12 +1531,16 @@ mod tests {
 
         let (_winners, cohort) = run_passes(
             1,
-            &likelihoods,
-            &starting_copies,
-            &[0, 1, 2],
-            &alleles,
-            &view,
-            &seed,
+            false,
+            &CohortFixture {
+                likelihoods: &likelihoods,
+                starting_copies: &starting_copies,
+                order: &[0, 1, 2],
+                starting_cohort: &cohort_of(&starting_copies, &[0, 1, 2]),
+                alleles: &alleles,
+                view: &view,
+                seed: &seed,
+            },
         );
 
         let total: f64 = cohort.iter().sum();
@@ -1578,5 +1768,364 @@ mod tests {
                 );
             }
         }
+    }
+    /// **The flat first pass runs at a locus whose cohort summary does not exist yet**, which
+    /// is the whole reason it is a variant of this function rather than a flat prior handed to
+    /// it.
+    ///
+    /// Neither the cohort's expected copies nor the sample's own are written here — they hold
+    /// the scratch's `NaN` sentinel, exactly as `prepare_for_locus` left them, because on the
+    /// first pass through a locus no pass has produced them. A seeded pass would read them:
+    /// **measured, handing this same scratch `PassPrior::LeaveOneOut` panics in debug** with
+    /// *"the cohort's expected allele copies … must be finite"*, and in release would return a
+    /// concentration equal to the bare seed, since `f64::max` returns the other operand on a
+    /// `NaN`. That is the seeded first pass `spec/calling_em_loop.md` §3 rules out.
+    ///
+    /// The posterior must be the likelihoods alone: `ln 1, ln 2, ln 1` normalise to
+    /// `0.25, 0.5, 0.25`, and the copies to one of each allele.
+    #[test]
+    fn the_flat_first_pass_needs_no_cohort_summary() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &view);
+        // The seed is filled because it is a property of the locus; the cohort's copies and
+        // the sample's own deliberately are not.
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(&[1.0, 0.5]);
+        assert!(
+            scratch.cohort_expected_copies().iter().all(|c| c.is_nan()),
+            "the fixture is only a test of the flat pass if the cohort summary is unwritten"
+        );
+        let two = std::f64::consts::LN_2;
+        for (slot, value) in scratch
+            .sample_genotype_likelihoods_mut(0)
+            .iter_mut()
+            .zip([0.0, two, 0.0])
+        {
+            *slot = LogProb(value);
+        }
+
+        score_one_sample(
+            scratch.sample_scoring_buffers_mut(0),
+            &view,
+            PassPrior::Flat,
+        );
+
+        for (got, want) in scratch.posterior_row().iter().zip([0.25, 0.5, 0.25]) {
+            assert!((got - want).abs() < 1e-15, "posterior {got} against {want}");
+        }
+        for (got, want) in scratch.sample_expected_copies(0).iter().zip([1.0, 1.0]) {
+            assert!((got - want).abs() < 1e-15, "copies {got} against {want}");
+        }
+    }
+
+    /// **A flat first pass finds the variant on pass 1; a seeded one takes nine passes to get
+    /// there.** This is `spec/calling_em_loop.md` §13 test 3's trap — and the measurement is
+    /// weaker than §3's account of it, which is why the numbers are here rather than the
+    /// story.
+    ///
+    /// A thin locus: every sample's reads favour the heterozygote over the homozygous
+    /// reference by **1 nat**, about 4.3 Phred — one alternative read among a handful. The seed
+    /// is `[1.0, 0.000_5]`, under which the homozygous reference outweighs the heterozygote by
+    /// **7.6009 nats** (measured: the row prints `[0.693, −6.908, −7.600]` at that
+    /// concentration), so on a seeded first pass the reads lose by 6.6 nats.
+    ///
+    /// **What is measured, at 63 samples**, alternative copies per sample:
+    ///
+    /// | pass | flat start | seeded start |
+    /// |---|---|---|
+    /// | 1 | 0.731 — every sample heterozygous | 0.0014 — every sample homozygous reference |
+    /// | 6 | 0.767 | 0.151 — still homozygous reference |
+    /// | 9 | 0.767 | 0.633 — **flips to heterozygous** |
+    /// | 30 | 0.767332 | 0.767332 |
+    ///
+    /// **So both starts reach the same answer, and what the flat pass buys on this fixture is
+    /// eight passes rather than a different call.** `spec/calling_em_loop.md` §3 says the
+    /// seeded loop *"converges, and it converges to no-variant, having never let the reads
+    /// speak"* — that stronger claim is **not** what this fixture shows, and no fixture built
+    /// for this test showed it: a rare-variant shape, where a handful of carriers sit among 60
+    /// samples whose reads are firmly homozygous reference, was swept over carrier count and
+    /// likelihood advantage and the two starts agreed in **every** cell. Whether the delay ever
+    /// becomes permanent is governed by the pass cap, which ships at 50 and is C2's, and by
+    /// §12's question 7 on real data.
+    ///
+    /// **The delay is not nothing.** Production's own comment records the expectation-maximization
+    /// converging in 3 to 5 passes, so a locus that needs 9 under one start and 1 under the
+    /// other is a locus whose answer depends on where the cap falls.
+    ///
+    /// **Where the two starts part depends on both the reads and the cohort size**, swept over
+    /// likelihood advantage × samples (3, 6, 20, 63): at **2 nats and above they agree at every
+    /// size** — the reads beat the seed either way and the choice costs nothing. At **0.5 nats**
+    /// they part at 20 and 63 samples but not at 3 or 6, where the flat start does not reach the
+    /// heterozygote either. At **1 nat** they part at every size tried, which is why the tests
+    /// use it. **An earlier version of this comment reported that sweep as though cohort size
+    /// were not an axis**, which is the failure `CLAUDE.md` names — a figure measured in one
+    /// corner and reported as a property of the caller.
+    ///
+    /// Run at 3 samples and at 63 — the tomato panel's size — because a difference visible at
+    /// one cohort size would be an artifact of that size.
+    #[test]
+    fn a_flat_first_pass_finds_the_variant_at_once_where_a_seeded_one_takes_nine_passes() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        assert_eq!(view.genotype_count(), 3, "0/0, 0/1, 1/1");
+        let seed = [1.0, 0.000_5];
+
+        for samples in [3usize, 63] {
+            let likelihoods = vec![vec![-1.0, 0.0, -30.0]; samples];
+            let starting_copies = vec![vec![1.0, 1.0]; samples];
+            let order: Vec<usize> = (0..samples).collect();
+            let fixture = CohortFixture {
+                likelihoods: &likelihoods,
+                starting_copies: &starting_copies,
+                order: &order,
+                starting_cohort: &starting_copies[0],
+                alleles: &alleles,
+                view: &view,
+                seed: &seed,
+            };
+
+            // One pass is all the flat start needs.
+            let (flat_first_pass, flat_cohort) = run_passes(1, true, &fixture);
+            assert!(
+                flat_first_pass.iter().all(|&g| g == 1),
+                "at {samples} samples the flat start should call every sample heterozygous \
+                 on pass 1 (genotype 1 of 0/0, 0/1, 1/1): {flat_first_pass:?}"
+            );
+            assert!(
+                flat_cohort[1] / (samples as f64) > 0.7,
+                "the flat start's first pass should leave about 0.73 copies of the \
+                 alternative per sample: {flat_cohort:?}"
+            );
+
+            // Six passes and the seeded start is still calling no-variant.
+            let (seeded_at_six, seeded_cohort) = run_passes(6, false, &fixture);
+            assert!(
+                seeded_at_six.iter().all(|&g| g == 0),
+                "at {samples} samples the seeded start should still call every sample \
+                 homozygous reference at six passes: {seeded_at_six:?}"
+            );
+            assert!(
+                seeded_cohort[1] / (samples as f64) < 0.2,
+                "at six passes the seeded start should still have the alternative all but \
+                 absent: {seeded_cohort:?}"
+            );
+
+            // And by thirty they agree — the delay, not a different answer.
+            let (_flat_late, flat_late_cohort) = run_passes(30, true, &fixture);
+            let (_seeded_late, seeded_late_cohort) = run_passes(30, false, &fixture);
+            assert!(
+                (flat_late_cohort[1] - seeded_late_cohort[1]).abs() < 1e-4,
+                "at thirty passes the two starts should have reached the same cohort \
+                 frequency at {samples} samples: {flat_late_cohort:?} against \
+                 {seeded_late_cohort:?}"
+            );
+        }
+    }
+
+    /// **After the flat pass the expected copies reflect the reads and not the seed** —
+    /// `spec/calling_em_loop.md` §13 test 3's first half, on the same fixture as the trap above
+    /// so the two read together.
+    ///
+    /// The seed puts about 2,000 to 1 on the homozygous reference. One flat pass over reads
+    /// that favour the heterozygote by a single nat leaves the cohort carrying more than half a
+    /// copy of the alternative allele per sample — which is the number the second pass's prior
+    /// is built from, and the whole point of starting flat.
+    #[test]
+    fn after_the_flat_pass_the_copies_reflect_the_reads_and_not_the_seed() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let samples = 6;
+        let likelihoods = vec![vec![-1.0, 0.0, -30.0]; samples];
+        let starting_copies = vec![vec![1.0, 1.0]; samples];
+        let order: Vec<usize> = (0..samples).collect();
+
+        let (_winners, cohort) = run_passes(
+            1,
+            true,
+            &CohortFixture {
+                likelihoods: &likelihoods,
+                starting_copies: &starting_copies,
+                order: &order,
+                starting_cohort: &starting_copies[0],
+                alleles: &alleles,
+                view: &view,
+                seed: &[1.0, 0.000_5],
+            },
+        );
+
+        // Six diploid samples carry twelve copies in all, and the reads put more than half of
+        // them on the alternative allele — where the seed alone would leave near none.
+        let total: f64 = cohort.iter().sum();
+        assert!(
+            (total - 12.0).abs() < 1e-12,
+            "twelve copies over six diploid samples: {total}"
+        );
+        assert!(
+            cohort[1] / samples as f64 > 0.5,
+            "the reads should put more than half a copy of the alternative on each sample, \
+             not the seed's near-zero: {cohort:?}"
+        );
+    }
+    /// **The flat pass leaves the cohort's copies untouched, and this is the only test that
+    /// says so in the release profile.**
+    ///
+    /// It is the property the whole variant exists for, and until this test the only thing
+    /// standing behind it was a `debug_assert` inside `SampleAlleleCopies::new` one module
+    /// away — so a mutant that built the concentration anyway passed the release CI step.
+    /// Asserted positively, on the buffers, rather than by not panicking: after a flat pass the
+    /// cohort row and the sample's concentration are both still the `NaN` sentinel
+    /// `prepare_for_locus` wrote, because nothing read or wrote either.
+    ///
+    /// Measured: under a mutant that builds the concentration on the flat arm, the
+    /// concentration comes back `[1.0, 0.5]` — the bare seed — where it is `[NaN, NaN]` as
+    /// shipped.
+    #[test]
+    fn the_flat_pass_touches_neither_the_cohort_summary_nor_the_concentration() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &view);
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(&[1.0, 0.5]);
+        for slot in scratch.sample_genotype_likelihoods_mut(0).iter_mut() {
+            *slot = LogProb(0.0);
+        }
+
+        score_one_sample(
+            scratch.sample_scoring_buffers_mut(0),
+            &view,
+            PassPrior::Flat,
+        );
+
+        assert!(
+            scratch.cohort_expected_copies().iter().all(|c| c.is_nan()),
+            "a flat pass must not write the cohort's copies: {:?}",
+            scratch.cohort_expected_copies()
+        );
+        assert!(
+            scratch.sample_concentration().iter().all(|c| c.is_nan()),
+            "a flat pass builds no concentration, so the buffer must still hold the sentinel: \
+             {:?}",
+            scratch.sample_concentration()
+        );
+    }
+
+    /// **A prior row of the wrong width is refused on the flat arm too.**
+    ///
+    /// Before C1 this width was checked only inside `PriorRow::new`, which a flat pass never
+    /// calls — so the seeded arm panicked in release and the flat arm returned a **wrong
+    /// posterior in silence**: measured at a 3-genotype locus given a 2-entry prior row,
+    /// `[0.199, 0.399, 0.402]` against the right `[0.25, 0.5, 0.25]`, the tail entry being the
+    /// stale value the buffer arrived holding.
+    #[test]
+    #[should_panic(expected = "one prior entry per candidate genotype")]
+    fn a_prior_row_of_the_wrong_width_is_refused_on_a_flat_pass() {
+        let (_alleles, table) = generic_locus(1);
+        let view = table.view();
+        let likelihoods = [LogProb(0.0), LogProb(0.0), LogProb(0.0)];
+        let mut sample_concentration = vec![0.0; 2];
+        let mut workspace = vec![0.0; 2];
+        let mut prior_row = vec![LogProb(0.0); 2]; // one short
+        let mut posterior_row = vec![0.0; 3];
+        let mut copies = vec![1.0; 2];
+
+        score_one_sample(
+            SampleScoringBuffers {
+                sample: 0,
+                seed_concentration: &[1.0, 0.5],
+                cohort_expected_copies: &[2.0, 1.0],
+                genotype_likelihoods: &likelihoods,
+                sample_concentration: &mut sample_concentration,
+                prior_per_allele_workspace: &mut workspace,
+                prior_row: &mut prior_row,
+                posterior_row: &mut posterior_row,
+                sample_expected_copies: &mut copies,
+            },
+            &view,
+            PassPrior::Flat,
+        );
+    }
+
+    /// **An expected-copies row of the wrong width is refused on the flat arm too.**
+    ///
+    /// Its width was `fill_sample_concentration`'s to check, and a flat pass never calls it.
+    /// Measured at a 3-allele locus given a 2-entry copies row, the flat arm returned
+    /// `[0.667, 0.667]` — a diploid sample carrying 1.33 copies of a genome — with nothing
+    /// raised.
+    #[test]
+    #[should_panic(expected = "one expected-copies entry per allele")]
+    fn an_expected_copies_row_of_the_wrong_width_is_refused_on_a_flat_pass() {
+        let (_alleles, table) = generic_locus(2);
+        let view = table.view();
+        let likelihoods = vec![LogProb(0.0); 6];
+        let mut sample_concentration = vec![0.0; 3];
+        let mut workspace = vec![0.0; 3];
+        let mut prior_row = vec![LogProb(0.0); 6];
+        let mut posterior_row = vec![0.0; 6];
+        let mut copies = vec![1.0; 2]; // one short
+
+        score_one_sample(
+            SampleScoringBuffers {
+                sample: 0,
+                seed_concentration: &[1.0, 0.5, 0.5],
+                cohort_expected_copies: &[2.0, 1.0, 1.0],
+                genotype_likelihoods: &likelihoods,
+                sample_concentration: &mut sample_concentration,
+                prior_per_allele_workspace: &mut workspace,
+                prior_row: &mut prior_row,
+                posterior_row: &mut posterior_row,
+                sample_expected_copies: &mut copies,
+            },
+            &view,
+            PassPrior::Flat,
+        );
+    }
+
+    /// **A sample with no reads votes for a 50% allele frequency on the flat pass**, and the
+    /// design does not currently say whether it should.
+    ///
+    /// `spec/calling_em_loop.md` §7 says a sample with no coverage *"scores every genotype
+    /// alike, so the prior decides it alone — the right answer rather than a special case"*.
+    /// **On a flat pass there is no prior to decide it**, so its posterior is the normalised
+    /// genotype table and its expected copies come out as the average genotype: a full copy of
+    /// the alternative allele at a biallelic locus, the same contribution as a confident
+    /// heterozygote.
+    ///
+    /// This test pins the behaviour rather than endorsing it — the number is `1.0`, and at
+    /// three reads a position roughly one sample in twenty is silent at any given position, so
+    /// this is the ordinary case rather than a corner. Raised for the owner against §3 and §7.
+    #[test]
+    fn a_sample_with_no_reads_contributes_a_full_alternative_copy_to_the_flat_pass() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &view);
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(&[1.0, 0.000_5]);
+        // A sample with no reads: every genotype equally likely.
+        for slot in scratch.sample_genotype_likelihoods_mut(0).iter_mut() {
+            *slot = LogProb(0.0);
+        }
+
+        score_one_sample(
+            scratch.sample_scoring_buffers_mut(0),
+            &view,
+            PassPrior::Flat,
+        );
+
+        let copies = scratch.sample_expected_copies(0);
+        assert!(
+            (copies[1] - 1.0).abs() < 1e-12,
+            "a silent sample's flat-pass copies of the alternative allele: {copies:?}"
+        );
+        assert!(
+            (copies[0] - 1.0).abs() < 1e-12,
+            "and of the reference: {copies:?}"
+        );
     }
 }

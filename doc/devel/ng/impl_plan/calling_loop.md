@@ -197,7 +197,7 @@ quietly different output at another worker count, never a crash; the bitwise tes
 
 ### Milestone C — the frequency loop
 
-**C1. The flat first pass.**  ☐
+**C1. The flat first pass.**  ✅
 The prior-free initialisation (reads only), ported with its reasoning — `EmStepPhase`'s shape
 ([`posterior_engine.rs:2586`](../../../../src/var_calling/posterior_engine.rs)); it runs at the
 start of every outer round, which the skeleton in D preserves. Test (spec §13 test 3): after the
