@@ -151,7 +151,82 @@ The emitted VCF is unchanged: identical record counts at all six cohort sizes. 4
 pass. *(Ten `should_panic` tests fail under `--release` on this branch and on `main` alike — they
 assert a `debug_assert` firing, which release builds strip. Not related to this change.)*
 
-## 4. What this means for the three encoding experiments
+## 4. The block window: what memory currently costs in bytes
+
+The `.psp` block is the cohort reader's decode unit — a reader inflates a whole block before it can
+hand out a record — so the block's span in reference coordinates sets how much every open sample
+forces the reader to hold. It is also the compressor's reach, and those two uses of one number are
+what every experiment in the plan exists to separate. Rewriting the same 50 accessions at three
+spans and calling each (`scripts/psp_block_window_sweep.sh`, with the metadata released):
+
+| block span | psp on disk | peak resident | wall |
+|---:|---:|---:|---:|
+| 1,000 bp | 3,930 MB | **191.6 MB** | 48 s |
+| 2,500 bp | 3,511 MB | 283.4 MB | 50 s |
+| 5,000 bp (today's default) | 3,061 MB | **411.6 MB** | 47 s |
+| 20,000 bp | 2,748 MB | 930.3 MB | 47 s |
+| 80,000 bp | 2,511 MB | **1,666.0 MB** | 48 s |
+
+**Peak memory moves nearly nine-fold across that range and the file moves 57% the other way.** Wall
+time does not move at all. This is the trade in its plainest form: **today the only way to buy
+memory is with bytes.**
+
+**And the curve has not flattened at the smallest span measured.** Going from today's 5 kb default
+down to 1 kb more than halves the peak again — 411.6 MB to 191.6 MB — for 28% more disk. So the
+floor, the part no block-span change can reach, is **below 191.6 MB and still unmeasured**, and
+**the majority of a cohort run's peak at the default setting is state sized by the block span.**
+
+### 4.1 Which is not what the heap profile appeared to say, and the difference matters
+
+§2 attributes 43.6 MB of a 342.6 MB live heap — 12.7% — to the block decode. Taken alone that reads
+as *the store controls an eighth of the peak*, and the sweep shows it does not: shrinking the span
+five-fold takes 220 MB off a 411.6 MB peak, which is five times more than that group holds.
+
+**Both measurements are right and they count different things.** The profile's group is the
+decompression buffer at one instant. The sweep moves everything *sized by* the span — that buffer,
+the per-sample columns decoded out of it (§2's largest group, 29.6%), and whatever the merge holds
+downstream of those. **When the question is "what does this knob control", the knob is the better
+instrument**, and the profile's value is telling you which code to look at, not how much a change
+would win.
+
+**This sharpens what each of the three experiments can deliver, and they are not equal:**
+
+- **Larger blocks with streaming decompression targets the objective.** It is aimed at the term that
+  the sweep shows is most of the peak.
+- **Approximating the floats and re-encoding the read names do not reduce memory at all.** They
+  change what the file weighs. A window's mean coverage read back from a quantised integer is still
+  an `f64` in memory, and a read-name list rebuilt from a differential stream is still the same list
+  of 64-bit integers — which is precisely why the alternative is to hold them differently, and the
+  owner has ruled that is not first.
+
+**So the prize can be stated as a number.** If a reader holds the compressor's reach rather than the
+whole block, span and memory are chosen separately: an 80 kb block for its ratio, a small reach for
+its memory. That is **the 2,511 MB file — 18% smaller than today's default — at the memory of a
+1 kb span or better, which is 191.6 MB against today's 411.6.** Roughly half the memory and a fifth
+off the disk, from the same change.
+
+### 4.1 The block window is not call-neutral, and any byte-identity oracle has to know that
+
+**Changing the block span changes the emitted VCF.** It changes nothing about which variants are
+found — between 20 kb and 80 kb the set of sites and alleles is identical, to the line — but
+**1,194 records of 180,366 (0.66%) come back with a different QUAL**, and nothing else moves: no
+genotype, no GQ, no DP, no AD, no INFO field differs anywhere in the cohort.
+
+The differences are small and the mechanism is ordinary: a different block span means per-sample
+evidence is summed in a different order, and floating-point addition is not associative. Median
+difference **0.010 Phred**, largest 4.48.
+
+**One site in 180,366 crossed the emission gate because of it.** `SL4.0ch10:58265030 T>A` has
+QUAL 30.075 against a minimum of 30, and it is emitted at 20 kb and 80 kb and not at 5 kb.
+Seventeen of the differing records sit below QUAL 40, so within reach of the gate.
+
+**What this costs the plan: a store redesign cannot be validated by a byte-identical VCF.** The
+oracle has to be *genotypes, GQ, DP, AD and the site list exactly, QUAL within a tolerance* — and it
+has to say what happens at the gate, because a record within rounding distance of it can appear or
+vanish. Every measurement in this document that quotes a record count carries that one-record
+ambiguity.
+
+## 5. What this means for the three encoding experiments
 
 **The ceiling is real but it is not where the plan assumed.** Of the per-sample slope, the part the
 *encoding* of records controls — the compressed block decode — is 12.7% of live heap at 50 samples.
@@ -172,11 +247,12 @@ it:
    right. Unmeasured, and the next cheap thing to measure.
 3. **Then the encoding experiments**, whose reachable share is now known rather than assumed.
 
-## 5. What is not yet measured
+## 6. What is not yet measured
 
-- **The block-window sweep** — how much of the peak follows the block's span in reference
-  coordinates. The script is written (`scripts/psp_block_window_sweep.sh`); rewriting 50 samples at
-  three window sizes is the expensive part and it has not been run.
+- **Where the floor is below 5 kb.** The sweep's smallest span is today's default, and peak memory
+  was still falling steeply there. Nothing here says how much of the 411.6 MB at 5 kb is still the
+  block and how much is the floor a store redesign cannot reach — which is exactly the number that
+  says what untying memory from block size is worth. A sweep at 1 kb and 2.5 kb is running.
 - **Anything above 62 samples.** Every figure here is 1–62 on one species at about three reads a
   position. The committed range goes to thousands of samples and to 300 reads a position, and the
   line's slight convexity at 62 is a reason to measure rather than extrapolate.
@@ -186,7 +262,7 @@ it:
   fast cores. The wall-time column in these results is not usable and no conclusion here rests on
   it.
 
-## 6. How to reproduce
+## 7. How to reproduce
 
 ```
 scripts/cohort_memory_vs_samples.sh \
