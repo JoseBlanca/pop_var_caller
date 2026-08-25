@@ -1472,6 +1472,53 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.emission_cost.table_builds += 1;
     }
 
+    /// **Where the seventeen per-locus buffers' bytes are and how many of them there are** —
+    /// the cheap half of the loop's zero-allocation invariant
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §13's test 7).
+    ///
+    /// A `Vec` that **grew** during the loop moves its bytes, so its pointer changes; one
+    /// refilled in place does not. What this cannot see is a temporary allocated and dropped
+    /// inside a pass, which leaves no trace in any buffer — **that half is counted for real**,
+    /// by `tests/ng_calling_loop_allocation.rs`, which installs `dhat`'s counting allocator and
+    /// reads `total_blocks` across two runs at different pass counts. It lives in a test binary
+    /// of its own because a global allocator counts the whole process, and the lib suite runs
+    /// its tests in parallel.
+    ///
+    /// **The two row scratches are deliberately not here**, and their absence is the invariant
+    /// rather than a gap: `GenericRowScratch` sizes itself per *sample*, inside the table
+    /// build, so it legitimately grows within a locus when a wider sample arrives. The table
+    /// build happens once, outside the frequency loop, so a pass still allocates nothing —
+    /// which is what §13's test 7 claims. Fingerprinting them would make this test fail on
+    /// correct code.
+    ///
+    /// Test-only, because the pointers are an implementation detail that no run should read.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn buffer_fingerprints(&self) -> Vec<(usize, usize)> {
+        fn of<T>(buffer: &[T]) -> (usize, usize) {
+            (buffer.as_ptr() as usize, buffer.len())
+        }
+        vec![
+            of(&self.genotype_likelihoods),
+            of(&self.prior_row),
+            of(&self.posterior_row),
+            of(&self.seed_concentration),
+            of(&self.sample_concentration),
+            of(&self.prior_per_allele_workspace),
+            of(&self.cohort_expected_copies),
+            of(&self.previous_cohort_expected_copies),
+            of(&self.per_sample_expected_copies),
+            of(&self.copy_count_log_likelihoods),
+            of(&self.allele_count_distribution),
+            of(&self.allele_count_distribution_next),
+            of(&self.log_allele_count_distribution),
+            of(&self.pooled_allele_reads),
+            of(&self.error_spreads),
+            of(&self.run_sample_of_each_row),
+            of(&self.inbreeding_coefficient_by_row),
+        ]
+    }
+
     /// The SNP/indel row's own scratch, which owns its own sizing.
     #[inline]
     pub fn generic_row_mut(&mut self) -> &mut GenericRowScratch {

@@ -252,7 +252,7 @@ discovery round present as loops whose bodies are unreachable at the defaults (`
 **structurally** (spec §5.1's closing paragraph), not by half-honouring them. An instrumented
 emission-call counter lands here. *Depends:* C3. *Source:* spec §2, §5; arch §1, §5, §6.
 
-**D2. The two cost invariants.**  ☐
+**D2. The two cost invariants.**  ✅
 Tests: **the emission-call count** equals `candidates × Σ_s (observations in sample s) × builds`
 with `builds = 1` at the defaults, independent of pass count — `Σ_s`, not a three-way product,
 because a fixture with equal per-sample observation counts is the one shape that hides the bug
