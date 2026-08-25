@@ -254,7 +254,73 @@ has to say what happens at the gate, because a record within rounding distance o
 vanish. Every measurement in this document that quotes a record count carries that one-record
 ambiguity.
 
-## 5. What this means for the three encoding experiments
+## 5. Built and measured: the streaming store
+
+The sections above are diagnosis. This one is the change itself, built as a working writer and
+reader (`examples/psp_row_stream_roundtrip.rs`, phases `encode-streaming` / `verify-streaming` /
+`many-ngs`) and walked over the same 62 accessions against production's `.psp`.
+
+**The design, in one sentence.** A block is a megabyte of records — so the compressor has plenty to
+look back over and the index has few entries — while the *window*, the reach the compressor is
+allowed, is capped when the file is written and is what a reader has to hold.
+
+**Two conditions have to hold together, and only the first is zstd's doing.** Do not inflate the
+whole block: the reader pulls decompressed bytes out a piece at a time, bounded by the window. And
+do not accumulate what you inflated: it parses a record out of a 64 kB rolling buffer, hands it
+over, and keeps nothing. Satisfy only the first and the memory reappears in the caller's arrays,
+which is where §2 found the largest single mass.
+
+### 5.1 What it costs per open sample
+
+62 samples open at once and advanced one record each per round — the shape a cohort merge reads in:
+
+| samples open | production `.psp` | streaming store |
+|---:|---:|---:|
+| 1 | 5.0 MB | 2.5 MB |
+| 8 | 24.3 MB | 4.8 MB |
+| 31 | 85.8 MB | 12.7 MB |
+| 62 | 164.5 MB | 23.1 MB |
+
+| | fixed | **per open sample** | R² |
+|---|---:|---:|---:|
+| production `.psp` | 3.3 MB | **2.614 MB** | 0.9998 |
+| streaming store | 2.1 MB | **0.338 MB** | 1.0000 |
+
+**The per-open-sample cost falls 7.7-fold — 2,677 kB to 346 kB — and 346 kB is inside the 500 kB
+budget.** Both lines are straight to four digits, which is what a per-open-sample cost looks like.
+Extrapolated to the top of the committed range, 3,000 samples goes from 7.66 GB to 0.99 GB; that is
+arithmetic from a line fitted over 1 to 62, not a measurement.
+
+### 5.2 And it is not a trade — every column moves the same way
+
+| | production `.psp` | streaming store | |
+|---|---:|---:|---|
+| bytes a record | 8.188 | 5.356 | 35% smaller |
+| cohort on disk | 3.52 GB | 2.38 GB | 32% smaller |
+| blocks per sample | 1,674 | 154 | index 11× smaller |
+| 62-sample walk | 42.4 s | 23.1 s | 1.8× faster |
+| records read | 471,520,156 | 471,520,156 | same checksum |
+
+This is the point of untying the two uses of one number: the table in §4 was a curve you slide
+along, paying for every gain. Here memory, file size, index size and read time all improve at once,
+because the block and the window are no longer the same knob.
+
+### 5.3 Correctness before size
+
+`verify-streaming` walks the store and the `.psp` it was written from in lockstep over **7,687,686
+records** and fails on the first disagreement. Every integer field, every allele sequence and every
+read-name list is compared **exactly**; only the three quantised quantities are compared against
+their own step, and each is inside it — worst GC error 0.000050 against a 0.000100 step, worst
+coverage 0.031 against 0.0625, worst summed log-error 0.00195 against 0.00391.
+
+### 5.4 What this does not measure
+
+**The whole caller.** This is the per-open-sample term, which §4 showed dominates a cohort run's
+peak — but a run also carries the merger's per-group projections and the genotype fit, and those
+are not sized by the block. Putting this reader behind the real calling loop, and re-running the
+cohort measurement of §1, is what turns a 7.7-fold per-sample figure into a figure for the run.
+
+## 6. What this means for the three encoding experiments
 
 **The ceiling is real but it is not where the plan assumed.** Of the per-sample slope, the part the
 *encoding* of records controls — the compressed block decode — is 12.7% of live heap at 50 samples.
@@ -275,7 +341,7 @@ it:
    right. Unmeasured, and the next cheap thing to measure.
 3. **Then the encoding experiments**, whose reachable share is now known rather than assumed.
 
-## 6. What is not yet measured
+## 7. What is not yet measured
 
 - **Where the floor is below 5 kb.** The sweep's smallest span is today's default, and peak memory
   was still falling steeply there. Nothing here says how much of the 411.6 MB at 5 kb is still the
@@ -290,7 +356,7 @@ it:
   fast cores. The wall-time column in these results is not usable and no conclusion here rests on
   it.
 
-## 7. How to reproduce
+## 8. How to reproduce
 
 ```
 scripts/cohort_memory_vs_samples.sh \
