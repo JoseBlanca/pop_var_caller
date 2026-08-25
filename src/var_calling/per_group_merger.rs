@@ -1945,7 +1945,13 @@ fn compute_log_likelihoods(
 
 /// Freebayes' closed-form likelihood for `(sample, genotype)` with no
 /// chain-broken compound in the genotype.
-fn standard_log_likelihood(
+///
+/// **`pub(crate)` for one reason: ng's read likelihood reconciles against it**
+/// (`doc/devel/ng/spec/read_likelihoods.md` §3.3, the plan's step B2). ng is a
+/// from-scratch caller that does not depend on production, and this is the one
+/// exception the freeze allows — widening visibility so a parity test can name
+/// the oracle, changing nothing else. Nothing shipped in `src/ng/` calls it.
+pub(crate) fn standard_log_likelihood(
     scalars: &[AlleleSupportStats],
     other_scalars: &AlleleSupportStats,
     genotype: &[u8],

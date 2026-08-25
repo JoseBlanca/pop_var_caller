@@ -265,21 +265,27 @@ pub struct UnitRobustConfig {
 /// [`StutterModel`]** — algorithm 4's derivation, unchanged.
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
-    /// `ln(in_up · in_geom) − ln(equal)`.
+    /// `ln(whole_repeat_longer_share · whole_repeat_one_step_share) − ln(same_length_share)`.
     open_expansion: f64,
-    /// `ln(in_down · in_geom) − ln(equal)`.
+    /// `ln(whole_repeat_shorter_share · whole_repeat_one_step_share) − ln(same_length_share)`.
     open_contraction: f64,
-    /// `ln(1 − in_geom)`, per unit after the first.
+    /// `ln(1 − whole_repeat_one_step_share)`, per unit after the first.
     extend: f64,
 }
 
 impl SlipCosts {
     fn from_model(model: &StutterModel) -> Self {
-        let ln_equal = model.equal().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
-            open_expansion: (model.in_up() * model.in_geom()).ln() - ln_equal,
-            open_contraction: (model.in_down() * model.in_geom()).ln() - ln_equal,
-            extend: (1.0 - model.in_geom()).ln(),
+            open_expansion: (model.whole_repeat_longer_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share,
+            open_contraction: (model.whole_repeat_shorter_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share,
+            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
 }
@@ -1051,12 +1057,12 @@ mod tests {
     /// the whole point of the algorithm-4 family.
     fn contraction_biased() -> StutterModel {
         StutterModel::new(StutterRates {
-            in_up: 0.03,
-            in_down: 0.07,
-            in_geom: 0.9,
-            out_up: 0.004,
-            out_down: 0.012,
-            out_geom: 0.8,
+            whole_repeat_longer_share: 0.03,
+            whole_repeat_shorter_share: 0.07,
+            whole_repeat_one_step_share: 0.9,
+            part_repeat_longer_share: 0.004,
+            part_repeat_shorter_share: 0.012,
+            part_repeat_one_step_share: 0.8,
         })
     }
 
@@ -1127,14 +1133,14 @@ mod tests {
         let model = contraction_biased();
         let slip = SlipCosts::from_model(&model);
         let period = std::num::NonZeroU8::new(3).unwrap();
-        let ln_equal = model.equal().ln();
+        let ln_same_length_share = model.same_length_share().ln();
 
         for n in 1..=5i64 {
             let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(n * 3, period).ln() - ln_equal;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
             let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
-            let expected = model.probability(-n * 3, period).ln() - ln_equal;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
             assert!((reconstructed - expected).abs() < 1e-12);
         }
     }

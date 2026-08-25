@@ -97,13 +97,17 @@ production); the two doc repointings spec §7 asks for.
 - The STR evidence needs no merge work: `SequenceObservation`
   ([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
   `(bases, witness, read_group)`; `complete_observations()`
-  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) stays the only unguarded access.
+  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) is where the split is spelled there.
+  *(Corrected 2026-08-24 at A1: this said that method "stays the only unguarded access", and it is
+  neither a guard — the field it reads is `pub` — nor now the only one, since `SsrSampleEvidence`
+  holds a bare slice and spells the split again. Arch §2.2 carries the full correction.)*
 - The pieces to reuse or port: `StutterModel`/`StutterRates`/`probability`
-  ([`alignment/stutter.rs:147`](../../../../src/ng/alignment/stutter.rs),
-  [`:82`](../../../../src/ng/alignment/stutter.rs),
-  [`:300`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
-  ([`:63`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
-  ([`:67`](../../../../src/ng/alignment/stutter.rs)); production's seam and comparator
+  ([`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs),
+  [`:106`](../../../../src/ng/alignment/stutter.rs),
+  [`:345`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
+  ([`:78`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
+  ([`:90`](../../../../src/ng/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
+  rather than spelling a second copy); production's seam and comparator
   ([`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs),
   [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)); the placement enumeration
   ([`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs)); `MIN_BASE_ERROR`
@@ -127,20 +131,31 @@ production); the two doc repointings spec §7 asks for.
 
 ### Milestone A — module scaffold + the shared vocabulary (types, no logic)
 
-**A1. Scaffold + evidence views.**  ☐
+**A1. Scaffold + evidence views.**  ✅ *(shipped with the merge-to-candidate mapping as an argument
+rather than an assumption — `GenericObservation::fill_from_supported_alleles` takes selection's
+`&[Option<AlleleId>]` and returns the quality of the rows it dropped, because the merge's allele
+index and `AlleleId` are two numberings and a prune renumbers between them; arch §2.1 carries the
+correction)*
 `calling/likelihood/mod.rs` wired into `calling/mod.rs`. `GenericSampleEvidence`
 (`supported: &[GenericObservation]`, `unmatched_q_sum`, `partials`) and `GenericObservation`
 (`allele`, `read_group`, `num_reads`, `q_sum`) as **views over the merge's rows** — one entry per
 `(allele, read group)`, which prerequisites Milestone B made real; `PartialObservation` over
-Milestone C's kept rows, bases + witnessed run intact. `SsrSampleEvidence` — a slice of
+Milestone C's kept rows, bases + witnessed positions intact. `SsrSampleEvidence` — a slice of
 `SequenceObservation` plus the locus's `SsrDetail`
 ([`locus_generation/mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)). *Source:* arch
 §2.1, §2.2; spec §1.4, §2.3.
 
-**A2. Parameter views, floors, contract.**  ☐
+**A2. Parameter views, floors, contract.**  ✅ *(shipped with three departures, all recorded in the
+step's report: the row's scratch is **two** types, because the evidence view borrows the staging
+buffer and a row taking `&mut` the same object cannot be called — so `GenericEvidenceBuffer` holds
+the evidence and the generic row's own scratch arrives at D1 with the buffers it needs; the
+emission cache takes the evidence rather than an observation count, because "how many observations"
+had two reachable readings and one of them is silent; and the depth-cap question spec §3.2 hands
+to this step is decided — **the denominator stays unthinned** — with the owner's ruling invited)*
 `ReadGroupCalibration { scale, provenance }` (scale 1.0 + `Defaulted` where no rate was emitted —
-visible, never silent) and `ContaminationView` (fraction, `markers_with_reads`, `reads_at_markers` —
-"measured clean" vs "unmeasurable" told apart by the counts). **`ContaminationView` carries no
+visible, never silent) and `ContaminationView` (fraction, `markers_with_reads`, `reads_on_markers` —
+"measured clean" vs "unmeasurable" told apart by the counts; *the plan said `reads_at_markers`,
+which is not the field's name — corrected 2026-08-24*). **`ContaminationView` carries no
 allele-class frequencies**: the mixture's second half is per locus and per iteration, so it is read
 where the allele frequency is rather than frozen on this view (C2 below).
 
@@ -154,12 +169,19 @@ row = all zeros (the prior decides, no branch), mis-shaped input = assertion hel
 Scratch shells `GenericRowScratch`, `SsrRowScratch<S>`. *Depends:* A1. *Source:* arch §1.1, §2.3;
 spec §3.2, §3.6, §8.
 
-> **Checkpoint A:** the vocabulary compiles; the tier table (frozen / per-call / invisible) is
-> documented on the types that enforce it. Pause for review.
+> **Checkpoint A — reached 2026-08-24.** The vocabulary compiles; the tier table is documented on
+> the types. *Its three tiers are **frozen / per-call / per-iteration**, not "frozen / per-call /
+> invisible" as this line said: spec §3.6's correction of 2026-08-24 gives the third tier a reader
+> in this module, and the spec's own §6.1 is corrected to match at A2.* Pause for review.
 
 ### Milestone B — the SNP/indel closed form
 
-**B1. `error_spread_divisors` — `m(a, g)`.**  ☐
+**B1. `error_spread_divisors` — `m(a, g)`.**  ✅ *(shipped as `fill_error_spread_divisors` plus
+`DivisorTable`, which carries the stride: a bare `(values, allele_count)` pair cannot check that
+the count is the stride the buffer really has, and reading a three-allele table at a stride of two
+returns a real divisor from the wrong row on six of twelve lookups with nothing to panic about —
+which is this step's own named failure shape arriving through the accessor written to prevent it.
+Verified against an independent oracle over 1,758,811 cells at ploidy 1 to 4: no disagreements.)*
 `3.0` where the observation differs from every allele the genotype carries by a substitution at
 exactly one position, `1.0` otherwise — a property of the allele pair, computed once per
 `(allele, genotype)` over the projected sequences the merge unified. **Own commit, do not
@@ -167,7 +189,13 @@ bundle** — a wrong divisor is `log 3` (4.8 Phred) per wrong read in the wrong 
 nothing crashes; the oracle is a hand-built fixture per class (one-substitution, multi-position,
 indel). *Depends:* A2. *Source:* spec §3.5; arch §3.
 
-**B2. `genotype_log_likelihood_row`, plain form.**  ☐
+**B2. `genotype_log_likelihood_row`, plain form.**  ✅ *(shipped with the error-spread table
+storing `log m` — the decision this step owed — and with the production differential reconciling
+**three** differences rather than two: production has no calibration, so ng's `n·log scale` comes
+back out too, and at a defaulted calibration that term is exactly zero, which is how a mutation
+deleting it outright survived every test at a cost of 1,620 Phred. Two specification claims were
+found false and corrected: the aggregation identity is not bitwise and neither is order
+independence — §12 tests 8 and 9, §2.3, and the architecture's own row contract.)*
 Spec §3.3 exactly, with an empty contamination slice: explained reads charged `n·log(k_a/P)`;
 unexplained charged `q_sum + n·(log scale − log m)`; `unmatched_q_sum` added as the
 genotype-independent constant (kept for emission). Tests: **the aggregation identity, bit for
@@ -182,12 +210,44 @@ floating-point tolerance — every difference attributed to the two recorded cha
 §3.5), none unexplained. **Own commit, do not bundle.** *Depends:* B1. *Source:* spec §3.3; arch
 §3.
 
-> **Checkpoint B:** the closed form matches production term-for-term once the two recorded
-> changes are reconciled, and aggregation is exact. Pause for review.
+**Three things B1's review put on this step** (2026-08-24), the first of them a gate:
+
+- **The differential must take the `÷3` effect from `DivisorTable`, not from a literal
+  `n_alt · ln 3`.** Written with the literal it passes with B1 deleted and the divisor hardcoded —
+  the same shape as a test B1 shipped and had to repair, which computed `3.0_f64.ln()` and never
+  touched the table. More generally: **at least one B2 test must obtain its divisors by calling
+  `fill_error_spread_divisors` on a real candidate table**, so that deleting B1 is a compile error
+  rather than a quiet subtraction. Every step of this plan so far reverts green, and this is where
+  that stops.
+- **Decide whether the table stores `m` or `log m`.** The row charges `log m` once per
+  `(observation, genotype)`, so as it stands B2 calls `.ln()` in the inner loop — measured at 1.392
+  ns a term against 0.553 ns if the table held the logarithm, about 26 s single-threaded over a
+  high-depth sample. It has to be decided here because storing the logarithm makes *divisor* the
+  wrong word (arch §3 carries the `OPEN:`).
+- **Widen `standard_log_likelihood` to `pub(crate)`** ([`per_group_merger.rs:1948`]
+  (../../../../src/var_calling/per_group_merger.rs)) — it is a private `fn` and the differential
+  cannot reach it. Visibility only, which is the one production change the freeze allows.
+
+> **Checkpoint B — reached 2026-08-24.** The closed form matches production term-for-term once the
+> **three** recorded changes are reconciled — the dropped coefficient, the error spread, and ng's
+> calibration scale, which production has no counterpart for and which this line used to leave out.
+> *Aggregation is exact in the model and not in the arithmetic: a relative 2 × 10⁻¹⁴, spec §2.3.*
+> Pause for review.
 
 ### Milestone C — the generic contamination mixture
 
-**C1. The mixture, no `c = 0` branch.**  ☐
+**C1. The mixture, no `c = 0` branch.**  ✅ *(shipped as the row's one path, with
+`ContaminationMixture` holding both halves rather than the sketch's bare
+`&[ContaminationView]` — the fraction and the frequency sit in different tiers, and one
+construction is where they can be checked against each other. The `c = 0` agreement is a
+relative 7.3 × 10⁻¹⁵ over 4,440 comparisons, and the sweep kills both defects this step names:
+production's extra `(1 − ε)` factor disagrees on 3,172 of them, its allele-count divisor on
+2,336. **One A2 decision had to be reversed to get here** — `calibrated_error`'s ceiling is a
+non-linear function of a per-read quality, which spec §2.3 forbids outright, so what the row
+charges floors and does not cap; on the aggregation fixture the cap would have moved the answer
+69 nats where the property is pinned to a relative 2 × 10⁻¹⁴. Two open questions for the owner
+are recorded in the step's report: whether the capped reading survives at all, and whether the
+spread table should now store `m`.)*
 Spec §3.6: `n_o · log[(1 − c)·own(o|g) + c·q(o)]`, evaluated in probability space with one
 logarithm, `q(o)` taken as a parameter for now so this step is about the mixture and nothing else.
 **There is no `c == 0` branch** — the two forms agree to a few ulp and the tolerance is a named
@@ -196,7 +256,26 @@ extra `(1 − ε)` factor or its allele-count divisor into `own`. A second test 
 contaminated case (`c = 0.03`, contaminant frequency 1 in 1,000). *Depends:* B2. *Source:* spec
 §3.6; arch §3.
 
-**C2. `q(o)` — the contaminating population's frequency for the allele the observation shows.**  ☐
+**C2. `q(o)` — the contaminating population's frequency for the allele the observation shows.**  ✅
+*(shipped as `fill_contaminant_allele_frequencies` — a batch's copies summed over its samples and
+divided by their total — plus a batch axis on the mixture's frequency table, read through the
+observation's own read group. **The row needs no sample identity for this**, which is what made it
+fit: batches are over read groups, and every observation already carries one. `SequencingBatches`
+is still unbuilt and is not built here; the mixture takes the batching as a
+`BatchOfEachReadGroup`, which that type produces trivially when it lands. **Two things are owed and named in the step's
+report:** which batch a sample belongs to when its libraries ran in different ones — that rule
+belongs with `SequencingBatches`, so the producer takes the sample's batch as an argument — and
+whether the never-seen floor should stay defensive at `1e-12` or become a statistical pseudocount
+— **settled 2026-08-24: keep it very low**, since the statistical reading would say *this read
+might well be contamination* at every candidate the cohort is thin on. **The review found a third
+and the owner settled it the same day:** the frequency was summed over the batch's samples
+*including the one being scored*, so a sample alone in a batch explained its own alternative reads
+as its own contaminant. It now leaves itself out, as the genotype prior's concentration already
+did — `fill_batch_allele_copies` sums per locus, `fill_contaminant_allele_frequencies` subtracts
+and normalises per sample. **A sample alone in its batch therefore gets the reference**, which is
+the conservative answer: a library with no neighbours has no contaminating population.
+[`calling_loop.md`](calling_loop.md) E2a and E2b own what is left — the batching itself, and the
+run reporting the fraction it used.)*
 **New here on 2026-08-24 (owner); this used to arrive from the pre-pass as three allele-class
 frequencies and does not.** `q(o)` is the frequency of the observation's own allele at the locus
 being called, over the samples in this sample's **sequencing batch** — the grain
@@ -219,13 +298,41 @@ first tier holds the fraction only.
 
 ### Milestone D — partial observations on the generic path
 
-**D1. The compatibility rule.**  ☐
-An allele is compatible with a partial when its projection **restricted to the witnessed run**
-equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the genotype's
-compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly aggregable
-by construction (the witnessed run is part of the observation's identity). Tests: a partial
-compatible with both of a diploid heterozygote's alleles contributes 1 — no information,
-correctly; the no-compatible error charge; verdicts identical for pooled reads. *Depends:* B2;
+**D1. The compatibility rule.**  ✅ *(shipped, and **the rule turned out to need no positional
+restriction at all** — the correction that made the step small. An allele is the whole locus as a
+carrier has it, not the reference with gaps, so a read from a carrier shows the start or the end
+of that carrier's own sequence: flush left means its bases are a **prefix** of the allele, flush
+right a **suffix**, and `WitnessedLocusPositions`' two predicates are documented as exactly those
+constraints. **So there is no gather and no buffer sized by the widest witness** — this step's
+scratch is the compatibility cache alone. A witness with a hole reaching both borders splits into
+a prefix and a suffix at an unknown point, which is checked without trying every split; a witness
+flush at neither border is anchored to nothing and constrains nothing, rather than being matched
+by content somewhere inside the allele, which would move a genotype on a coincidence. The row
+gained `&CandidateAlleles` and the scratch, and its two per-read-group parameters were paired into
+`ReadGroupParameters` — which is where their read-group counts are now checked against each
+other. **The first version shipped a defect its own review caught and this note keeps:** the rule
+branched on the two borders alone, so a witness with a hole that reached only one border was
+tested as though its bases were contiguous, and the verdicts **inverted** — the allele agreeing
+with the read at every position it saw was charged 14 nats and the one disagreeing was charged
+nothing. The rule now decides on the run count too, and *says nothing* wherever a run is anchored
+to neither border, which is what those shapes genuinely imply rather than a fallback.)*
+An allele is compatible with a partial when its projection **restricted to the positions the read
+witnessed** equals the partial's bases; a compatible partial contributes `Σ k_a/P` over the
+genotype's compatible alleles; compatible with none → charged as an error with `m = 1`. Exactly
+aggregable by construction (the witnessed positions are part of the observation's identity).
+
+**Those positions are a *set of runs with holes*, not one run** (spec §5.3, corrected 2026-08-24),
+and this step owns the two consequences. The restricted projection is a **gather**, so it needs a
+buffer sized by the widest witness — the generic row's own scratch, which A2 deliberately did not
+invent and which lands here. And the witness counts *locus positions* while the partial's bases are
+what the read showed over them, so **their lengths are not interchangeable** and neither may index
+the other. This step also needs a compatibility cache per `(partial, allele)`, for the reason the
+STR path caches emissions: the verdict is read by every genotype.
+
+Tests: a partial compatible with both of a diploid heterozygote's alleles contributes 1 — no
+information, correctly; the no-compatible error charge; verdicts identical for pooled reads; **and a
+witness with a hole in it, against an allele whose bases differ only inside the hole** — the case a
+contiguous-range implementation gets wrong and no single-run fixture can see. *Depends:* B2;
 prerequisites C. *Source:* spec §5.3; arch §3.
 
 > **Checkpoint C/D:** the generic path is complete — plain, contaminated, and censored evidence
@@ -236,7 +343,7 @@ prerequisites C. *Source:* spec §5.3; arch §3.
 The distribution is **reused, not duplicated**; the file already records the follow-ups its port
 deferred. All three changes are in ng code.
 
-**E1. Rename to the spec's vocabulary.**  ☐
+**E1. Rename to the spec's vocabulary.**  ✅
 `StutterRates`/`StutterModel` fields renamed — `whole_repeat_longer_share`,
 `part_repeat_one_step_share`, … — with HipSTR's names kept in doc comments for whoever ports
 alongside; *in frame / out of frame* is banned vocabulary (spec §1.3) and the fields currently
@@ -245,9 +352,9 @@ doc repointings spec §7 records: [`alignment.md`](../spec/alignment.md) §5.2 r
 spec's §4.2 as the distribution's owner, its *in frame / out of frame* wording moved to §1.3's.
 *Source:* spec §1.3, §4.2, §7; arch §4.2.
 
-**E2. Two named cutoffs + the reported truncation.**  ☐
+**E2. Two named cutoffs + the reported truncation.**  ✅
 `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base pairs) replace the
-single `MAX_SLIP` ([`stutter.rs:63`](../../../../src/ng/alignment/stutter.rs)) — both inherited
+single `MAX_SLIP` ([`stutter.rs:78`](../../../../src/ng/alignment/stutter.rs)) — both inherited
 from production's provisional 10 and declared inherited. The mass the cutoffs discard is
 **computed and reported per candidate** (feeds `SsrScoringContext.truncated_mass_lost`). Test:
 the reported loss equals one minus the truncated sum, to floating-point tolerance, across
@@ -256,7 +363,7 @@ the loss is computed and surfaced, not that it is small** (spec §12 test 5; its
 2 in a million to 2 in a thousand). **Own commit, do not bundle** — an unreported loss compares
 candidates on different scales silently. *Depends:* E1. *Source:* spec §4.2; arch §4.2.
 
-**E3. `stutter_rates_for(&Slippage)` + the sums-to-one tripwire.**  ☐
+**E3. `stutter_rates_for(&Slippage)` + the sums-to-one tripwire.**  ✅
 Seven shares from the fit's three numbers, the placeholders named as placeholders:
 `PART_REPEAT_SHARE_OF_WHOLE = 0.05` (production's `OUT_FRAME_REL`) and the two one-step shares
 tied to one value — both awaiting an owner (spec §10). Test: **the distribution sums to one**
@@ -270,7 +377,7 @@ share, and an off-by-one re-indexing, all three silent). **Own commit, do not bu
 
 ### Milestone F — the STR emission seam
 
-**F1. The seam types.**  ☐
+**F1. The seam types.**  ✅
 `ssr_emission.rs`: `SsrScoringContext` (the tier-two seam — every number arrives per call, none
 read from global state; carries `stutter`, `substitution_rate` — the fitted per-stratum rate,
 **never the SNP ε and never `q_sum`**, spec's closed Q6 — `truncated_mass_lost`,
@@ -280,7 +387,7 @@ the **candidate's** stratum, not the reference's, so contexts are per
 `SsrEmissionModel` trait with `emission` and `censored_emission`. *Depends:* A2. *Source:* arch
 §4.1; spec §4.3, §4.4.
 
-**F2. `StutterSubstitutionEmission` — Model A.**  ☐
+**F2. `StutterSubstitutionEmission` — Model A.**  ✅
 The stutter factor (E's distribution, via the reused `StutterModel`) times the substitution
 factor — **composed** from `FlatEmission`
 ([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)) under the fitted rate,

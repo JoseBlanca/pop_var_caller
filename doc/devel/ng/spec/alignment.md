@@ -218,9 +218,10 @@ The **two-penalty** model is closer to the biology. Two things must be right for
   already does this ([hipstr.rs](../../../../src/ssr/cohort/read_model/hipstr.rs) derives its
   expansion and contraction mass from a separate direction split, with a test asserting a one-unit
   contraction outscores a one-unit expansion). A two-penalty delimiter must inherit that asymmetry;
-  a symmetric one would be a step backwards from production's scoring. **The parameters, the
-  formulas and the two silent conversion traps are set out in full in §5.2** — this aligner and the
-  repeat-aware marginal use the same stutter model, so it is written once and shared.
+  a symmetric one would be a step backwards from production's scoring. **The parameters and the
+  formulas are set out in full in [`read_likelihoods.md`](read_likelihoods.md) §4.2, which owns the
+  distribution** (§5.2 points there and keeps what that document does not carry) — this aligner and
+  the repeat-aware marginal use the same stutter model, so it is written once and shared.
 - **Out-of-frame changes must keep a route.** Making unit slips cheap is only half the model. HipSTR
   pairs its in-frame slip model with a **separate out-of-frame model** for changes that are not unit
   multiples. Without that second route, a read whose repeat is interrupted or not a whole number of
@@ -367,127 +368,88 @@ change was. That is a separate job, and the boundary matters:
 > the read-likelihood model would therefore never touch the forward pass at all. The unequal-length
 > case has to be driven deliberately, or it ships untested.
 
-### 5.2 The stutter model — shared, and not an alignment algorithm
+### 5.2 The stutter model — shared, and specified elsewhere
 
-How likely each length change is. It is set out here despite not being an alignment algorithm,
-because **two consumers share it**: the two-penalty best-path aligner in this module (§4.2), and the
-genotyping likelihood outside it (§5.1). One description, so the two cannot drift apart. It is
-HipSTR's model.
+How likely each length change is: the probability that a copy of an allele `L` bases long produced a
+read showing `L + Δ` bases.
 
-**The stutter model has two regimes, and that split is its defining structure.** A read's length
-change is either a whole number of repeat units or it is not, and the two mean different things:
+**This distribution is not this document's.** It is a genetics model — a statement about how a
+polymerase slips — and [`read_likelihoods.md`](read_likelihoods.md) §4.2 **owns it and states it in
+full**, which is the ownership that document's §7 fixes. This section used to set it out as well and
+no longer does: two spellings of one distribution are two things that can drift apart. **Go there
+for** the two regimes and the arithmetic that decides between them, all seven parameters with
+HipSTR's field names beside them, the distribution term by term, why part-repeat sizes are
+re-indexed, the placement enumeration and the mass an unreachable contraction loses, the two cutoffs,
+and where the parameters come from.
 
-- **in frame** — the change is a whole number of units. This is slippage, the common event, and its
-  size is measured in **units**.
-- **out of frame** — it is not a whole number of units. This is a sequencing indel or an
-  interruption, not slippage; it is rarer, it gets its **own** parameters, and its size is measured
-  in **base pairs**.
+A section survives here at all because **two consumers share the distribution**: the two-penalty
+best-path aligner in this module (§4.2), and the genotyping likelihood outside it. It is HipSTR's
+model, and there is **one** implementation of it —
+[`alignment/stutter.rs`](../../../../src/ng/alignment/stutter.rs), which both callers read.
 
-Each regime splits again by direction, because stutter is asymmetric: **losing units is more common
-than gaining them**.
+**The vocabulary is [`read_likelihoods.md`](read_likelihoods.md) §1.3's.** A read's length change is
+either **a whole-repeat change** — a whole number of repeats: slippage, the common event, its size
+measured in repeats — or **a part-repeat change** — not a whole number of repeats: an ordinary small
+insertion, deletion or interruption, rarer, with its own parameters, its size measured in base pairs.
+Each splits again by direction, because losing repeats is more common than gaining them. **Which of
+the two applies is decided by arithmetic alone** — is the change a multiple of the period? — and
+never by what was actually inserted; §4.2 works through what that mis-routing costs at period 1.
 
-**Which regime applies is decided by arithmetic alone** — is the length change a multiple of the
-period? — and **never by what was actually inserted**. So an insertion that happens to be
-period-sized is treated as slippage whether or not its bases are the repeat unit. The composition is
-caught downstream, as a base-error mismatch against the re-tiled candidate, rather than as an
-out-of-frame event. The mis-routing is worst at period 1, where it catches roughly three of every
-four single-base insertions; §4.2 works through what that costs and what the comparison must do
-about it.
+*(HipSTR calls the two **in frame** and **out of frame**, and neither this section nor
+[`read_likelihoods.md`](read_likelihoods.md) uses those words: *frame* is borrowed from coding
+sequence, and it was read here as meaning inside the tract against in the flanks, which is a
+different distinction entirely. HipSTR's own field names are kept in that document's parameter table
+and in `stutter.rs`'s doc comments, for whoever reads the two side by side.)*
 
-**The parameters — seven.** HipSTR's field names are in brackets:
+Four things stay in this section because [`read_likelihoods.md`](read_likelihoods.md) §4.2 does not
+carry them.
 
-| quantity | what it is |
-|---|---|
-| `equal` [`log_equal_`] | probability the read shows the allele's length unchanged |
-| `in_up`, `in_down` [`in_up_`, `in_down_`] | probability of an in-frame expansion / contraction, of any size |
-| `in_geom` [`in_geom_`] | how fast in-frame slip size decays, per **unit** |
-| `out_up`, `out_down` [`out_up_`, `out_down_`] | the same two, for out-of-frame changes |
-| `out_geom` [`out_geom_`] | how fast out-of-frame size decays, per **base pair** |
+**A second silent trap, beside the one that document sets out at length** (a one-step share is not a
+decay; the two are complements, and reversing them inverts the size distribution). This one is:
+**clamps carry weight.** The one-step shares are held strictly inside (0, 1) and the same-length
+share is floored, so a parameter combination that would otherwise drive the same-length share
+negative degrades instead of producing a negative probability. It matters most to a consumer *here*:
+an aligner prices its slip transitions **relative to no slip**, so it divides by the same-length
+share, and the floor is what keeps that quotient finite.
 
-The unchanged mass is whatever the four direction masses leave:
-`equal = 1 − in_up − in_down − out_up − out_down`.
+**The defaults, quoted in matched sets.** HipSTR has two, and mixing them yields a pairing that
+exists nowhere:
 
-**The distribution.** Write Δ for the read's length change in base pairs and *p* for the repeat's
-unit length. Both regimes are a direction mass times a geometric over size:
-
-```
-in frame  (Δ divisible by p), n = Δ/p units:
-    n = 0   →  equal
-    n > 0   →  in_up    · in_geom  · (1 − in_geom )^(n − 1)
-    n < 0   →  in_down  · in_geom  · (1 − in_geom )^(|n| − 1)
-
-out of frame  (Δ not divisible by p), e = Δ − Δ/p  (truncated division):
-    e > 0   →  out_up   · out_geom · (1 − out_geom)^(e − 1)
-    e < 0   →  out_down · out_geom · (1 − out_geom)^(|e| − 1)
-```
-
-A geometric with success probability *g* puts mass *g* on the first step and multiplies by (1 − *g*)
-for each step after, so a **larger** *g* concentrates the mass on single-unit slips. HipSTR ships
-0.95 — nineteen slips in twenty are exactly one unit. Note *g* is a **success** probability, not a
-decay; the two are complements, and confusing them is the first of the traps below.
-
-**Why out-of-frame sizes are re-indexed.** The out-of-frame geometric is indexed by
-`e = Δ − Δ/p` (truncated division), not by Δ. The reason is **not** double-counting — the two regimes
-are disjoint by construction, since a change is out-of-frame precisely when it is *not* a multiple of
-the period, so no length can reach both. What the re-indexing does is **compress the ranks**: it maps
-the out-of-frame values onto consecutive integers so the geometric's support has no gaps. At period 3
-the out-of-frame Δ values 1, 2, 4, 5, 7 map to e = 1, 2, 3, 4, 5. Without it the geometric would be
-evaluated at indices that skip the multiples, distorting the distribution.
-
-**A slip can land in more than one place — in frame.** In a pure repeat, adding a unit anywhere gives
-the same sequence and there is nothing to choose. In an **interrupted** repeat the placements give
-genuinely different sequences, so the model enumerates them and sums with equal weight (one over the
-number of placements). If a slip cannot be reached from the allele at all — contracting away more
-units than exist — the term is zero. **Production does this only for in-frame slips**; out-of-frame
-resizing uses a single placement at the end of the repeat, a documented simplification of the same
-class as the out-of-frame mass below.
-
-**Slips past a cutoff score zero**, rather than being explained by an implausibly large slip. Such a
-read falls to the model's outlier handling instead. **Mind the units:** production applies one
-constant to the *unit* count in the in-frame branch and to the re-indexed *base-pair* count in the
-out-of-frame branch. One number, two scales — decide deliberately whether that is intended rather
-than inheriting it.
-
-**Where the parameters come from.** HipSTR does **not** rely on its shipped values in normal use: it
-fits expansion, contraction and the geometric **per locus by expectation-maximization**, jointly with
-the genotype, so the rates adapt to the motif and the repeat's length. Production derives them per call instead,
-from the per-locus stutter shape (its direction split and decay) and the per-read stutter level. One
-piece is currently a placeholder rather than an estimate: **the out-of-frame mass is a fixed small
-fraction of the in-frame mass** (5%). A real out-of-frame estimator — binning out-of-frame reads
-separately in the parameter pre-pass — is a known and unfinished follow-up, and any comparison
-involving out-of-frame reads inherits that weakness.
-
-**Two conversion traps, both silent.**
-
-1. **A decay is not a geometric success probability.** If a parameter is expressed as the probability
-   of *continuing* to the next step (mean size 1/(1 − decay)), it is the complement of HipSTR's
-   geometric, whose mean is 1/geom: `geom = 1 − decay`. Getting this backwards inverts the size
-   distribution — large slips become common — and nothing crashes.
-2. **Clamps carry weight.** The geometric probabilities are held strictly inside (0, 1) and `equal`
-   is floored, so a parameter combination that would otherwise drive the unchanged mass negative
-   degrades instead of producing a negative probability.
-
-**On the defaults — quote them in matched sets.** HipSTR has two, and mixing them yields a pairing
-that exists nowhere:
-
-| | in-frame geom | in up / down | out-of-frame geom | out up / down |
+| | whole-repeat one-step share | whole-repeat longer / shorter | part-repeat one-step share | part-repeat longer / shorter |
 |---|---|---|---|---|
 | shipped default | **0.95** | 0.05 / 0.05 | **0.95** | 0.01 / 0.01 |
 | the EM's starting point | **0.9** | 0.1 / 0.1 | **0.8** | 0.01 / 0.01 |
 
 The second row is an *initialisation the fitting immediately moves away from*, not a default. (An
 earlier draft of this spec paired 0.9 with 0.05/0.05, which is one number from each row.)
+`StutterModel::hipstr_shipped` and `StutterModel::hipstr_em_start` exist so that the two rows cannot
+be crossed by hand.
 
 Note the shipped row also makes expansion and contraction *equal* — but that symmetry is a starting
-point, not a claim: HipSTR's fitted values are contraction-biased. And note that HipSTR keeps the
-in-frame and out-of-frame geometrics as **independent** parameters, with genuinely different values
-in its EM start. **Production ties them to a single value** — a second undeclared placeholder
-alongside the out-of-frame mass, and it should be recorded as one rather than mistaken for a fitted
-result.
+point, not a claim: HipSTR's fitted values are contraction-biased. And note that HipSTR keeps the two
+one-step shares as **independent** parameters, with genuinely different values in its EM start.
+**Production ties them to a single value** — an undeclared placeholder alongside the fixed
+part-repeat share, and it should be recorded as one rather than mistaken for a fitted result.
 
-Finally, stutter depends strongly on library chemistry: PCR-free preparation reduces it several-fold
-against PCR-plus, and by different factors per motif length. So these parameters belong to a **sample
-group**, not to the cohort — which is the shape the cohort parameter design already uses.
+**The follow-up this section is a named home for, and what it costs any comparison run before it
+lands.** One of the seven parameters is a placeholder rather than an estimate: **the part-repeat
+share is a fixed 5% of the whole-repeat share**
+([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)). A real part-repeat estimator —
+**binning part-repeat reads separately in the parameter pre-pass, as HipSTR does** — is a known and
+unfinished follow-up, and **any comparison involving part-repeat reads inherits that weakness**,
+this module's algorithm comparisons included.
+[`read_likelihoods.md`](read_likelihoods.md) §4.2 and §10 both name *this section* as one of the two
+places the follow-up is recorded, and §10 files it as "Home: unowned, and that is the finding" — so
+this paragraph is load-bearing, not a summary of one elsewhere.
+
+**Which grain the parameters belong to**, because that is what an aligner's caller has to supply.
+HipSTR does **not** rely on its shipped values in normal use: it fits the two direction masses and
+the one-step share **per locus by expectation-maximization**, jointly with the genotype. Production
+derives them per call from a per-locus stutter shape plus a per-read stutter level; ng's come from
+the pre-pass per read group per stratum ([`read_likelihoods.md`](read_likelihoods.md) §4.2). Either
+way, stutter depends strongly on library chemistry — PCR-free preparation reduces it several-fold
+against PCR-plus, and by different factors per motif length — so **these parameters belong to a
+sample group, not to the cohort**, which is the shape the cohort parameter design already uses.
 
 ### 5.3 Affine marginal aligner — not in the initial set
 
@@ -678,7 +640,7 @@ wanting per-base qualities would take them the same way.
 |---|---|---|
 | repeat-aware best-path | `delimit_read`, `ViterbiScratch` ([ssr/pileup/alignment.rs](../../../../src/ssr/pileup/alignment.rs)) | the model for §4.2; its output must additionally report which flank anchored ([`read_preparation_ssr.md`](read_preparation_ssr.md) §3) |
 | repeat-aware marginal | `align_subst` ([pair_hmm.rs](../../../../src/ssr/cohort/pair_hmm.rs)) | §5.1 — **this function alone**. **Returns a plain probability; this interface returns its logarithm** (§7) — convert at the boundary |
-| the stutter distribution | `HipstrModel` ([ssr/cohort/read_model/](../../../../src/ssr/cohort/read_model/)) | §5.2 — the *genotyping* model, **not an algorithm in this module**. It composes the row above; this module documents its distribution only because the two-penalty best-path aligner (§4.2) needs the same parameters |
+| the stutter distribution | `HipstrModel` ([ssr/cohort/read_model/](../../../../src/ssr/cohort/read_model/)) | owned by [`read_likelihoods.md`](read_likelihoods.md) §4.2 — the *genotyping* model, **not an algorithm in this module**. It composes the row above; §5.2 points there and keeps only what that document does not carry, because the two-penalty best-path aligner (§4.2) needs the same parameters |
 | emission models | Dindel per-base-quality table; flat error rate ([alignment.rs](../../../../src/ssr/pileup/alignment.rs), [pair_hmm.rs](../../../../src/ssr/cohort/pair_hmm.rs)) | the swappable emission component (§3) |
 | left-alignment | freebayes `LeftAlign.cpp` (vendored, read-only reference) | §6 — the algorithm is standard; implement from the description, not by transliteration |
 | affine best-path | — | new (§4.1); optional fast-core swap |

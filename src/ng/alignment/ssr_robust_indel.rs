@@ -181,21 +181,31 @@ fn effective_guard(configured: usize, tract_len: usize, period: usize) -> usize 
 /// The whole-unit slip transition costs, in log space, derived from the shared [`StutterModel`].
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
-    /// `ln(in_up · in_geom) − ln(equal) − margin`.
+    /// `ln(whole_repeat_longer_share · whole_repeat_one_step_share)
+    /// − ln(same_length_share) − margin`.
     open_expansion: f64,
-    /// `ln(in_down · in_geom) − ln(equal) − margin`.
+    /// `ln(whole_repeat_shorter_share · whole_repeat_one_step_share)
+    /// − ln(same_length_share) − margin`.
     open_contraction: f64,
-    /// `ln(1 − in_geom)`, per unit after the first.
+    /// `ln(1 − whole_repeat_one_step_share)`, per unit after the first.
     extend: f64,
 }
 
 impl SlipCosts {
     fn from_model(model: &StutterModel, margin: f64) -> Self {
-        let ln_equal = model.equal().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
-            open_expansion: (model.in_up() * model.in_geom()).ln() - ln_equal - margin,
-            open_contraction: (model.in_down() * model.in_geom()).ln() - ln_equal - margin,
-            extend: (1.0 - model.in_geom()).ln(),
+            open_expansion: (model.whole_repeat_longer_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share
+                - margin,
+            open_contraction: (model.whole_repeat_shorter_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share
+                - margin,
+            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
 }
@@ -735,7 +745,7 @@ impl<E: Emission> BestPathAligner for SsrRobustIndelAligner<E> {
 mod tests {
     use super::*;
     use crate::ng::alignment::emission::PerQualityEmission;
-    use crate::ng::alignment::{RepeatGeometry, StutterModel};
+    use crate::ng::alignment::{RepeatGeometry, StutterModel, StutterRates};
     use crate::ng::types::{Bp, Motif};
 
     /// The aperiodic flank bodies the synthetic bake-off uses, so the tests below sit in the same
@@ -785,6 +795,71 @@ mod tests {
 
     fn measure(read: &[u8], reference: &[u8], geometry: &RepeatGeometry) -> RepeatSpan {
         measure_with(RobustIndelConfig::default(), read, reference, geometry)
+    }
+
+    /// Contraction-biased parameters, with **all six rates different** — HipSTR's fitted
+    /// values are contraction-biased, and a fixture that gives the two members of a pair the
+    /// same value cannot tell them apart.
+    ///
+    /// This module's alignment fixtures use `StutterModel::hipstr_shipped()`, whose two
+    /// whole-repeat shares are both 0.05 — so `open_expansion` and `open_contraction` derive
+    /// to the *same number*, and swapping them was a change no test in this file could see.
+    /// Measured: both opened at −2.9191921964316565 clean and swapped, bit for bit. The
+    /// cost-level tests below use this fixture instead, which is the same discipline
+    /// `all_distinct()` enforces in `stutter.rs`.
+    fn contraction_biased() -> StutterModel {
+        StutterModel::new(StutterRates {
+            whole_repeat_longer_share: 0.03,
+            whole_repeat_shorter_share: 0.07,
+            whole_repeat_one_step_share: 0.9,
+            part_repeat_longer_share: 0.004,
+            part_repeat_shorter_share: 0.012,
+            part_repeat_one_step_share: 0.8,
+        })
+    }
+
+    /// **A contraction must be cheaper to open than an expansion**, on a model that says so.
+    /// The asymmetry lives at the cost level, and this is the only thing in this file that
+    /// reads it: without it, `open_expansion` and `open_contraction` could be exchanged and
+    /// every other test here would still pass.
+    #[test]
+    fn a_contraction_is_cheaper_to_open_than_an_expansion() {
+        let slip = SlipCosts::from_model(&contraction_biased(), 0.0);
+        assert!(
+            slip.open_contraction > slip.open_expansion,
+            "a contraction-biased model must make contraction the cheaper slip to open"
+        );
+    }
+
+    /// The slip costs reconstruct the stutter model's own probabilities exactly — the affine
+    /// open plus its extends must sum back to `ln(P(n)) − ln(same_length_share)`, or this
+    /// aligner is pricing a different distribution than the one it was handed. Run at a zero margin, since a
+    /// non-zero one shifts both opens by the same constant and so cannot be checked against
+    /// the model's own probabilities; `a_contraction_is_cheaper_to_open_than_an_expansion`
+    /// covers the pairing at any margin.
+    #[test]
+    fn the_slip_costs_reconstruct_the_stutter_probability() {
+        let model = contraction_biased();
+        let slip = SlipCosts::from_model(&model, 0.0);
+        let period = std::num::NonZeroU8::new(3).unwrap();
+        let ln_same_length_share = model.same_length_share().ln();
+
+        for n in 1..=5i64 {
+            // Expansion of n units: one open plus (n − 1) extends, relative to no slip.
+            let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "expansion of {n} units diverged: {reconstructed} vs {expected}"
+            );
+            // Contraction likewise, and it is the direction the fixture makes cheaper.
+            let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "contraction of {n} units diverged"
+            );
+        }
     }
 
     /// The baseline sanity check: with no slip, the aligner must not invent one.

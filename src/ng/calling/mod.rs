@@ -19,14 +19,15 @@
 //! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
 //! counts the loop feeds back to itself; and [`LocusInference`] with
 //! [`SampleGenotypeCall`], what a locus produces. Of the four sub-modules — the candidate
-//! step, the likelihood, the genotype prior and the inference loop — two are here:
-//! [`allele_candidates`], step 6, which will narrow the merge's allele table to the
-//! sequences worth calling over — so far the two constants its admission rule is made of
-//! (`doc/devel/ng/impl_plan/candidate_alleles.md`), and
+//! step, the likelihood, the genotype prior and the inference loop — three are here:
+//! [`allele_candidates`], step 6, which narrows the merge's allele table to the sequences
+//! worth calling over (`doc/devel/ng/impl_plan/candidate_alleles.md`);
+//! [`likelihood`], step 7, how probable this sample's reads are given each genotype
+//! (`doc/devel/ng/impl_plan/calling_read_likelihoods.md`); and
 //! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
-//! (`doc/devel/ng/impl_plan/calling_prior.md`). The other two, and the shared types that
-//! borrow from them, arrive with their own plans
-//! (`doc/devel/ng/impl_plan/calling_foundations.md`).
+//! (`doc/devel/ng/impl_plan/calling_prior.md`). **The fourth is the loop that consumes all
+//! three**, and it and the shared types that borrow from them arrive with their own plan
+//! (`doc/devel/ng/impl_plan/calling_loop.md`).
 //!
 //! Beside this file rather than inside any one sub-module: [`genotype_table`], which
 //! says which genotypes a locus's alleles make and holds the three flat tables the
@@ -48,8 +49,25 @@ mod genotype_table_parity;
 pub mod allele_candidates;
 pub mod genotype_prior;
 pub mod genotype_table;
+pub mod likelihood;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
+/// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
+/// worth stating: **without a `use` of it that has to compile, deleting `pub mod
+/// likelihood;` orphans the whole module silently.** The crate still builds, clippy is
+/// still clean, and `cargo test --lib ng::calling::likelihood` reports `0 passed; ok` —
+/// a green run naming a module that is no longer compiled. With this line the same
+/// deletion is `error[E0432]: unresolved import`.
+pub use likelihood::generic::{
+    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, allele_is_compatible_with_partial,
+    fill_error_spreads, genotype_log_likelihood_row,
+};
+pub use likelihood::{
+    ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
+    GenericRowScratch, GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY,
+    ReadGroupCalibration, ReadGroupParameters, SsrRowScratch, SsrSampleEvidence,
+    fill_batch_allele_copies, fill_contaminant_allele_frequencies,
+};
 
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;

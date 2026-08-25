@@ -45,7 +45,7 @@ pub mod ssr_unit_robust;
 pub mod stutter;
 
 pub use emission::{BaseScores, Emission, FlatEmission, PerQualityEmission};
-pub use stutter::{MAX_SLIP, StutterModel, StutterRates};
+pub use stutter::{StutterModel, StutterRates};
 
 use crate::ng::types::{BaseQual, Bp, DomainError, LogProb, Motif};
 use crate::pileup::walker::CigarOp;

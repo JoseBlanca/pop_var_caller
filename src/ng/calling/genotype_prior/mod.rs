@@ -674,7 +674,12 @@ impl SpectrumMatch {
 /// Measured on the worst leave-one-out cancellation at ploidy scale: the two-path gap reaches
 /// 3.3e-10 at 5,000 samples — about 3,000 times inside this threshold — and would not reach it
 /// until roughly two million samples, far past the several thousand the caller commits to.
-const COUNT_PATH_DESYNC_THRESHOLD: f64 = -1e-6;
+///
+/// **Named `pub(crate)` because the same subtraction happens twice**: here, and in the
+/// contaminant frequency the read likelihood leaves each sample out of
+/// (`likelihood::fill_contaminant_allele_frequencies`). One threshold, one measurement behind
+/// it, one place to change it.
+pub(crate) const COUNT_PATH_DESYNC_THRESHOLD: f64 = -1e-6;
 
 /// Fill `out` with what this sample's prior at this locus is worth in chromosomes, before any of
 /// its own reads are looked at: the run's starting concentration plus **what the other samples

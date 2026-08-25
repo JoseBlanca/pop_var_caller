@@ -19,7 +19,47 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **candidate selection is complete on the SNP/indel path**
+> - **Last completed task (2026-08-24):** **the stutter model says *repeats*, because *frame*
+> meant something else here** (step E1 of
+> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
+> `ng-calling-likelihoods`; the first step of the STR path, after **Checkpoint C/D** completed the
+> generic one). The seven numbers that say how often a read shows a length other than its
+> allele's were named after HipSTR's fields — `in_up`, `out_geom` — and those names carry *in
+> frame* and *out of frame*, which the read-likelihood spec bans: *frame* is borrowed from coding
+> sequence, and in this repository it was read as meaning *inside the tract* against *in the
+> flanks*. They are now `whole_repeat_longer_share`, `part_repeat_one_step_share` and so on, with
+> HipSTR's names kept in the doc comments for whoever reads the two side by side. **No arithmetic
+> moved:** every numeric literal in the module's test code is identical before and after, and the
+> library target holds the same 4,354 passing tests. The fixtures that hold the rename are the
+> ones that were already there — `all_distinct()` gives all six rates different values, so a
+> longer/shorter or whole/part transposition fails a published-formula test rather than passing
+> silently. Alongside it, the alignment spec's §5.2 stopped restating the distribution and now
+> points at the read-likelihood spec's §4.2, which owns it.
+> [What was renamed, what stayed, and why the tests did not need to change](doc/devel/reports/implementations/ng_calling_likelihood_e1_2026-08-24.md).
+> - **Previously (2026-08-24):** **some of a sample's reads came from somebody else, and
+> the likelihood now says so** (step C1 of
+> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
+> `ng-calling-likelihoods`). A read is scored as either something this individual's genotype can
+> produce or something a contaminating neighbour's DNA showed, mixed by how contaminated that
+> library is. **There is no separate path for a clean sample** — with nothing contaminated the
+> formula is the old one, and that had to be measured rather than asserted: over 3,552
+> comparisons the two agree to a relative 2.9 × 10⁻¹⁶, which is 2 × 10⁻¹² Phred where the
+> numbers are largest. On a diploid showing one alternative read, a 3% fraction moves the
+> heterozygote's lead over the reference homozygote from 6.019 nats to 5.981 where the
+> contaminant carries that allele at 1 in 1,000, and to 2.131 at 1 in 2 — **so it is the
+> contaminant's own frequency, not the fraction, that decides whether contamination changes a
+> call.**
+> **One decision taken two steps ago had to be reversed to get here.** The calibrated error the
+> row was built to charge was clamped at one half, and a clamp that binds on a single read but
+> not on the fold of that read with others breaks the property the whole formula is shaped
+> around: that pooling reads must not change the answer. On the row's own fixture the clamp
+> would have moved the result by 69 nats where the property is pinned to a relative 2 × 10⁻¹⁴.
+> **The reviews found two ways to get a confident wrong answer with nothing crashing:** a
+> not-a-number summed error came back as the most confident read the model can express, because
+> `f64::max` returns the other operand; and a spread table from the wrong ploidy truncated the
+> genotype walk in silence, leaving an unscored genotype the winner.
+> [What was built, what the reviews changed, and two questions for the owner](doc/devel/reports/implementations/ng_calling_likelihood_c1_2026-08-24.md).
+> - **Previously (2026-08-24):** **candidate selection is complete on the SNP/indel path**
 > (steps C2 and C3 of [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`; **Milestone C complete, at Checkpoint C**). `select_generic` now takes one
 > assembled cohort locus and returns everything the calling loop needs: the narrowed allele list,

@@ -194,26 +194,32 @@ struct Resolved {
 /// The whole-unit slip transition costs, in log space, derived **from the shared
 /// [`StutterModel`]** — not a second copy of its parameters.
 ///
-/// `open` carries the affine open plus the `− ln(equal)` baseline shift (a best-path aligner
-/// maximises, so only scores relative to "no slip" matter); `extend` is the geometric's
-/// per-extra-unit factor.
+/// `open` carries the affine open plus the `− ln(same_length_share)` baseline shift (a
+/// best-path aligner maximises, so only scores relative to "no slip" matter); `extend` is the
+/// geometric's per-extra-unit factor.
 #[derive(Debug, Clone, Copy)]
 struct SlipCosts {
-    /// `ln(in_up · in_geom) − ln(equal)`.
+    /// `ln(whole_repeat_longer_share · whole_repeat_one_step_share) − ln(same_length_share)`.
     open_expansion: f64,
-    /// `ln(in_down · in_geom) − ln(equal)`.
+    /// `ln(whole_repeat_shorter_share · whole_repeat_one_step_share) − ln(same_length_share)`.
     open_contraction: f64,
-    /// `ln(1 − in_geom)`, charged per unit after the first.
+    /// `ln(1 − whole_repeat_one_step_share)`, charged per unit after the first.
     extend: f64,
 }
 
 impl SlipCosts {
     fn from_model(model: &StutterModel) -> Self {
-        let ln_equal = model.equal().ln();
+        let ln_same_length_share = model.same_length_share().ln();
         Self {
-            open_expansion: (model.in_up() * model.in_geom()).ln() - ln_equal,
-            open_contraction: (model.in_down() * model.in_geom()).ln() - ln_equal,
-            extend: (1.0 - model.in_geom()).ln(),
+            open_expansion: (model.whole_repeat_longer_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share,
+            open_contraction: (model.whole_repeat_shorter_share()
+                * model.whole_repeat_one_step_share())
+            .ln()
+                - ln_same_length_share,
+            extend: (1.0 - model.whole_repeat_one_step_share()).ln(),
         }
     }
 }
@@ -917,12 +923,12 @@ mod tests {
     /// Contraction-biased parameters — HipSTR's fitted values are.
     fn contraction_biased() -> StutterModel {
         StutterModel::new(StutterRates {
-            in_up: 0.03,
-            in_down: 0.07,
-            in_geom: 0.9,
-            out_up: 0.004,
-            out_down: 0.012,
-            out_geom: 0.8,
+            whole_repeat_longer_share: 0.03,
+            whole_repeat_shorter_share: 0.07,
+            whole_repeat_one_step_share: 0.9,
+            part_repeat_longer_share: 0.004,
+            part_repeat_shorter_share: 0.012,
+            part_repeat_one_step_share: 0.8,
         })
     }
 
@@ -941,6 +947,47 @@ mod tests {
         let bases = ReadBases::try_new(read, &quality).expect("matched lengths");
         let mut scratch = AnchorRobustScratch::new();
         aligner.align(bases, reference, context, &mut scratch)
+    }
+
+    /// **A contraction must be cheaper to open than an expansion**, on a model that says so.
+    /// The asymmetry lives at the cost level, and this is the only thing in this file that
+    /// reads it: without it, `open_expansion` and `open_contraction` could be exchanged and
+    /// every other test here would still pass.
+    #[test]
+    fn a_contraction_is_cheaper_to_open_than_an_expansion() {
+        let slip = SlipCosts::from_model(&contraction_biased());
+        assert!(
+            slip.open_contraction > slip.open_expansion,
+            "a contraction-biased model must make contraction the cheaper slip to open"
+        );
+    }
+
+    /// The slip costs reconstruct the stutter model's own probabilities exactly — the affine
+    /// open plus its extends must sum back to `ln(P(n)) − ln(same_length_share)`, or this
+    /// aligner is pricing a different distribution than the one it was handed.
+    #[test]
+    fn the_slip_costs_reconstruct_the_stutter_probability() {
+        let model = contraction_biased();
+        let slip = SlipCosts::from_model(&model);
+        let period = std::num::NonZeroU8::new(3).unwrap();
+        let ln_same_length_share = model.same_length_share().ln();
+
+        for n in 1..=5i64 {
+            // Expansion of n units: one open plus (n − 1) extends, relative to no slip.
+            let reconstructed = slip.open_expansion + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "expansion of {n} units diverged: {reconstructed} vs {expected}"
+            );
+            // Contraction likewise, and it is the direction the fixture makes cheaper.
+            let reconstructed = slip.open_contraction + (n - 1) as f64 * slip.extend;
+            let expected = model.probability(-n * 3, period).ln() - ln_same_length_share;
+            assert!(
+                (reconstructed - expected).abs() < 1e-12,
+                "contraction of {n} units diverged"
+            );
+        }
     }
 
     /// **Mandatory property 1: a clean read of the reference measures the reference length.**

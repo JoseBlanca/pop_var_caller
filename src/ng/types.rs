@@ -228,6 +228,70 @@ impl fmt::Display for ReadGroupId {
     }
 }
 
+/// Which set of read groups ran together — an index into the run's declared batching.
+///
+/// A **sequencing batch** is the group of libraries that were sequenced beside one another,
+/// as the run was *told*: a flowcell, a plate, a submission. It matters because **a
+/// contaminating read is far likelier to come from a neighbour on the same run than from a
+/// random member of the species**, so the population a contaminant's genotype is drawn against
+/// is the batch and not the cohort (`doc/devel/ng/spec/read_likelihoods.md` §3.6,
+/// `doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
+///
+/// **It is stated, never inferred.** The grouping is absent from both benchmark cohorts'
+/// alignments — the tomato archive's `@RG` lines carry no platform unit, and SRA rewrote the
+/// read names — and a pipeline that guessed it from what survives would be wrong in silence.
+///
+/// **The default is one batch holding the whole run**, which is `BatchId(0)` for every read
+/// group. So a run that declares no batching gets the cohort frequency and loses nothing it
+/// had, and no consumer branches on the batching's absence.
+///
+/// Unconstrained for [`ReadGroupId`]'s reason: it indexes a table, an out-of-range value is
+/// caught at lookup, and `u32` rather than `u64` because it is an index and not a position.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct BatchId(pub u32);
+
+impl BatchId {
+    /// The batch every read group is in when a run declares no batching — **the name the
+    /// architecture already uses for it**, `SequencingBatches::all_together`
+    /// (`doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
+    pub const ALL_TOGETHER: Self = Self(0);
+
+    #[inline]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A run's batching **keyed by read group** — entry *i* is [`ReadGroupId`] *i*'s batch.
+///
+/// **A wrapper rather than a bare `&[BatchId]`, because the sample-keyed batching is the same
+/// slice type and means something else.** The two agree in length whenever a run has one
+/// library per sample — which is every sample of every benchmark cohort here — so transposing
+/// them passes both shape checks and comes back as a wrong contaminant frequency rather than a
+/// panic. Sample order and read-group order are minted by different rules, so the mis-key is
+/// only invisible, never harmless: the frequency it produces is worth up to 12 nats a read
+/// between batches.
+///
+/// **The same argument the allele-copy views already won here.**
+/// `CohortAlleleCopies` and `SampleAlleleCopies` are two types for one shape for exactly this
+/// reason, and the measurement recorded there is that the flat-slice version, swapped, silently
+/// returned the bare seed at every allele with nothing raised.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct BatchOfEachReadGroup<'a>(pub &'a [BatchId]);
+
+/// A run's batching **keyed by sample** — entry *i* is sample *i*'s batch, in the run's sample
+/// order. [`BatchOfEachReadGroup`] says why this is a wrapper and not a slice.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct BatchOfEachSample<'a>(pub &'a [BatchId]);
+
+/// Just the index, for [`ReadGroupId`]'s reason: a message naming a batch supplies its own
+/// word for it.
+impl fmt::Display for BatchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A probability held as its natural logarithm — the number stored is `ln(p)`, not
 /// `p` itself.
 ///
@@ -1994,6 +2058,22 @@ mod tests {
             assert_eq!(motif.period(), bases.len());
             assert_eq!(usize::from(motif.ssr_period().get()), motif.period());
         }
+    }
+
+    /// A batch renders as the bare index, so a message can supply its own word for it —
+    /// "batch {batch}", not "batch batch 2". Untested until mutation testing gave `Display` a
+    /// prefix and the whole suite stayed green (C2's review).
+    #[test]
+    fn a_batch_renders_as_the_index_alone() {
+        assert_eq!(BatchId(2).to_string(), "2");
+        assert_eq!(BatchId::ALL_TOGETHER.to_string(), "0");
+    }
+
+    /// The default batching is batch zero, which is what makes an all-zero batching mean
+    /// "every read group ran together" without anyone saying so.
+    #[test]
+    fn the_default_batch_is_the_first_one() {
+        assert_eq!(BatchId::ALL_TOGETHER.get(), 0);
     }
 
     /// A period renders as the bare number, so a message can supply its own word for it.

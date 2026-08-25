@@ -366,6 +366,23 @@ pub use generator::{
     MAX_RECORD_SPAN_CEILING, PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
     PileupGeneratorCounts,
 };
+/// **How wrong one read is, as the walk mints it** — the worse of its base quality and its
+/// mapping quality, in log space.
+///
+/// Re-exported because spec §3.2 makes it a requirement rather than a convenience: the
+/// quantity the calibration accumulator averages and the quantity the read likelihood charges
+/// must be computed by *the same function*, or the scale calibrates against a different
+/// definition of "how wrong is this read" than the one it is applied to. The likelihood's
+/// tests mint their fixtures through this rather than re-deriving `10^(−q/10)`, which differs
+/// from the crate's own table in the last place or two and would be a second definition of
+/// the quantity all the same.
+///
+/// `#[cfg(test)]` because that is where the consumer is, and for the reason
+/// [`DEFAULT_MATE_LOOKUP_WINDOW`] above carries: left ungated it is an unused import in a
+/// non-test build. **The shipping path never needs it** — a row charges the `q_sum` the walk
+/// already summed, and minting is the walk's own business.
+#[cfg(test)]
+pub(crate) use open_record::minted_ln_read_error;
 
 /// **Measurement scaffolding, not part of the walk.** Process-global tallies of how many
 /// columns the walk saw and how many of them were the *ordinary* column — one covered base,

@@ -289,9 +289,53 @@ between them is their quality — which is why this contract is about quality an
    carries is the one that was corrected here, and it is corrected there too.
 2. **Anything else that varies read by read must enter as a term that is exactly additive in
    `q_sum`, or not at all.** §3.3's formula is built to satisfy this and §12's ninth test pins it:
-   compute the likelihood from a list of made-up reads and from the aggregate of those same reads
-   and require the two to agree **bit for bit**. This one *is* bitwise: §3.3's formula sums the same
-   terms in the same order either way, with no round trip through probability space.
+   compute the likelihood from a list of made-up reads and from the aggregate of those same reads,
+   and require the two to agree.
+
+   > **They agree to a relative 2 × 10⁻¹⁴, not bit for bit — corrected 2026-08-24, measured while
+   > building the row** ([`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md)
+   > B2). This paragraph used to say *"This one **is** bitwise: §3.3's formula sums the same terms in
+   > the same order either way"*, and the second half is what is wrong: the two forms are **not** the
+   > same sequence of additions. A read at a time accumulates `q_r + log scale − log m`, where the
+   > fold accumulates `Σ q_r + n·log scale − n·log m` once, and floating-point addition is not
+   > associative.
+   >
+   > **The disagreement grows with depth, so a unit-in-the-last-place count is the wrong bound.** A
+   > first version of this correction quoted 2 ulps from a sweep that stopped at seven reads. Widened
+   > to the depths this caller commits to, the count goes past a hundred at 300 reads a position —
+   > it is repeated summation, so it grows with how much is summed. What does not grow is the
+   > *relative* size, and that is what the specification and the test now bound: **2 × 10⁻¹⁴ over
+   > 1,080 combinations**, read counts from 2 to 300, five quality profiles including all-equal at
+   > Phred 93, three read-group scales and two ploidies. *(Widened at C1, 2026-08-24, from 864
+   > combinations over four profiles: the fifth is every read at Phred 1, which is the only one
+   > whose **fold** is charged an error above a half — every other profile's geometric mean sits far
+   > below it however poor its single reads are. Without it no fixture could tell a capped charge
+   > from an uncapped one, and the ceiling §3.6 forbids could be reintroduced with the suite green.
+   > The worst measured disagreement over the widened sweep is 1.0 × 10⁻¹⁴, so the bound is
+   > unchanged.)*
+   >
+   > **The requirement itself is untouched, and the two claims are worth keeping apart.** What this
+   > contract asks is that pooling not change the answer *because of the model* — that no term be a
+   > non-linear function of a per-read quality, since `q_sum` recovers only the geometric mean
+   > (§1.4). §3.3's formula satisfies that exactly, and that is the thing worth testing. What is not
+   > exact is the summation order, and nothing in genotyping can see it: 2 × 10⁻¹⁴ relative is
+   > 10⁻¹⁰ Phred at the depths where it is largest.
+   >
+   > **A shape does exist that would make the single-observation case exact, and it is refused for a
+   > stated reason.** Accumulating the read *counts* — integers, so their sums are exact — per
+   > `(read group, spread class)` and per copy count, then multiplying each logarithm in once at the
+   > end, is bitwise exact wherever each `(allele, read group)` has one observation; a reviewer
+   > implemented it and measured zero disagreement over four million comparisons. **It buys nothing
+   > beyond that corner**: with two or more observations the per-read form sums flat where the fold
+   > sums a tree, and the row cannot recover a grouping the fold has already consumed — the merge's
+   > own `q_sum` is itself a tree sum. And it costs `genotypes × read groups × 2` accumulators held
+   > across the observation walk, which is scratch §8's no-allocation contract does not provide. **So
+   > the exactness is not available in general, and buying it in the corner is not worth the
+   > contract.**
+   >
+   > **A single fixture will often agree to the last bit**, which is why this was stated too strongly
+   > in the first place: the row's first aggregation test does, and it took a sweep to show that was
+   > luck rather than arithmetic.
 
 **What this contract costs, stated plainly.** A read's mapping quality cannot enter as its own
 `λ` — the natural and correct treatment, since a mismapped read is exactly a read that came from
@@ -547,11 +591,20 @@ what biases the estimate, and stops being true of **the caller**. The edit is no
 **At the ends of the range.** The fitted rate is pooled over hundreds of millions of base
 observations, so it is equally well determined at 3 reads a position and at 300, and it exists at
 one sample as readily as at a thousand — it is a property of a read group, and one sample has read
-groups. **Where the pre-pass emits no rate** — too little data, or a sample whose noise is off the
-end of its ladder, which two of five real alignments were
-([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1) — the scale is 1 and the
-qualities are used as reported. **That must be visible in the run's output**, because a run
-calibrated against a measurement and a run trusting the instrument are otherwise indistinguishable.
+groups. **Where the pre-pass emits no rate** — too little data — the scale is 1 and the qualities
+are used as reported. **That must be visible in the run's output**, because a run calibrated against
+a measurement and a run trusting the instrument are otherwise indistinguishable.
+
+**A sample whose noise is off the end of the ladder is not that case, and this paragraph used to
+say it was** *(corrected 2026-08-24, owner, while the read likelihood's A2 was building the scale
+against this section)*. Two of five real alignments ask for a noisier class than the pre-pass's
+model covers and are refused it — tomato SRR7279482 and SRR7279483, at 0.42% and 0.49% of sites —
+and what they get is **the one-rate answer**, not no answer
+([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1: *"such a sample gets the
+one-rate answer it would have had before this milestone, and the caller can see that it did"*).
+What is `None` for them is `site_noise`, and `site_noise_off_the_ladder` says which kind of `None`
+it is. So their calibration is built from a measurement and its provenance is a fitted one; **what
+is open about them is what that measurement is worth, which is Q1 (§11) and not this paragraph.**
 
 ### 3.3 The formula
 
@@ -586,11 +639,14 @@ case.
 - **A read that the genotype explains is not charged for being right.** The exact term is
   `log(k_a/P) + log(1 − ε)` and the second half is dropped, because recovering it needs the
   *arithmetic* mean of `ε` over the observation's reads and `q_sum` gives the geometric mean (§1.4).
-  The omission is at most `n·ε` nats for a genotype explaining `n` reads at rate `ε`, and what
-  matters is the *difference* between two genotypes, which is the difference in how many reads each
-  explains. At 20 reads with 2 of them alternative, at an error rate of 1 in a thousand, that
+  The omission is `−n·ln(1 − ε)` nats for a genotype explaining `n` reads at rate `ε` — which is
+  `n·ε` **and a little more**, not `n·ε` at most; this said "at most" and had the inequality the
+  wrong way round until 2026-08-24. What matters is the *difference* between two genotypes, which
+  is the difference in how many reads each explains. At 20 reads with 2 of them alternative, at an error rate of 1 in a thousand, that
   difference is 0.002 nats — a hundredth of a Phred. At 300 reads and a poor library at 1 in 20, comparing a heterozygote
-  explaining all 300 against a reference homozygote explaining 285, it is 0.75 nats, about 3 Phred.
+  explaining all 300 against a reference homozygote explaining 285, it is **0.77 nats, 3.3 Phred**
+  — the 0.75 this used to quote is the linearisation `15 × 0.05`, and the exact value is 2.6%
+  larger.
   **So it is negligible at good chemistry and small but real at bad chemistry and high depth**, and
   it always favours the genotype that explains more reads.
 - **Every read supporting one allele is charged the same, whatever its own quality**, once it is on
@@ -906,16 +962,22 @@ never enters the EM loop.** How contaminated a sample is is a property of that s
 library and of how it was handled — and not of any locus, so there is nothing about it for a
 per-locus loop to re-estimate.
 
-**The one half that could in principle have varied is the contaminant's allele frequency**, since a
-contaminating read shows whatever the contaminating population carries *at this locus*, and the
-cohort's own per-locus frequency is exactly what the EM rewrites each iteration. **That route is
-closed by the same ruling.** Tying a sample-level quantity to a number the loop keeps rewriting would
-make the contamination term move locus by locus and pass by pass, for a refinement nobody has
-measured, and it would cost the model the property that makes it cheap — that its numbers survive
-every pass of the caller's loop. Production uses one frequency per allele *class* — reference,
-substitution alternative, insertion-or-deletion alternative — averaged over the census sites, and
-freebayes likewise uses per read-group constants
-([`Contamination.h`](../../../../freebayes/src/Contamination.h)). ng follows both.
+**Retracted 2026-08-24, and kept here because it argued the opposite of what this section now
+decides.** The paragraph that stood here said: *the one half that could in principle have varied is
+the contaminant's allele frequency … that route is closed by the same ruling*, on the grounds that
+letting it move would cost the model the property that makes it cheap. **The owner opened that route
+the same day** — `q(o)` is the locus's own frequency and moves with the loop — and the cost argument
+does not survive contact with what actually moves: the **emission** reads no frequency, so it is
+still computed once per `(sample, observation, candidate)`, and what changes per iteration is one
+multiply and one add inside a logarithm the row was taking anyway. What is genuinely given up is
+narrower and worth naming: **a caller may no longer cache a whole row across iterations wherever
+contamination is on.**
+
+Production uses one frequency per allele *class* — reference, substitution alternative,
+insertion-or-deletion alternative — averaged over the census sites, and freebayes likewise uses per
+read-group constants ([`Contamination.h`](../../../../freebayes/src/Contamination.h)). **ng follows
+neither**, and the correction block above says why: those are what a caller does when it has no
+per-locus frequency, and this caller has one.
 
 ### 3.7 Positions that are not the kind of position the model assumes — and why the repair is not here
 
@@ -1063,9 +1125,11 @@ does not depend on its size.
 **How likely is it that a copy of an allele `L` bases long produced a read showing `L + Δ` bases?**
 That is the whole of this section, and it is a genetics model — a statement about how a polymerase
 slips — rather than an alignment algorithm. **It belongs to this document.**
-[`alignment.md`](alignment.md) §5.2 sets out the same distribution, because a candidate repeat-aware
-aligner there would consume it too, and says outright that it is *"not an alignment algorithm"*. §7
-below fixes the ownership and asks for that section to be repointed here; the edit is not made here.
+[`alignment.md`](alignment.md) §5.2 used to set out the same distribution, because a candidate
+repeat-aware aligner there would consume it too, and said outright that it is *"not an alignment
+algorithm"*. §7 below fixes the ownership, and **that section was repointed here on 2026-08-24**
+(plan step E1): it now names this section as the owner and keeps only what this one does not
+carry.
 
 **The distribution has two regimes and that split is its defining structure.**
 
@@ -1613,10 +1677,43 @@ should happen to a read that saw too little to say anything.
 
 ### 5.3 Scoring a read that saw only part of an ordinary locus
 
-A partial observation here covers a run of positions inside the locus span and nothing outside it.
-Its bases cannot be compared against a whole-span allele — that comparison would report a read
+A partial observation here covers **a set of positions** inside the locus span and nothing outside
+it. Its bases cannot be compared against a whole-span allele — that comparison would report a read
 agreeing with the reference over everything it saw as non-reference, which is the trap the evidence
 type's own documentation names.
+
+> **A set of runs, not one run, and this section used to say the singular throughout** *(corrected
+> 2026-08-24, owner; found while the read likelihood's Milestone A was built against it)*. The
+> generic fold mints witnesses **with holes in them**, so `WitnessedLocusPositions`
+> ([`witness.rs`](../../../../src/ng/locus_generation/witness.rs)) is a *set* of half-open runs and
+> not an offset and a length — its own documentation says two numbers "can only describe a hole by
+> swallowing it".
+>
+> **One consequence a coder must not miss, and one this paragraph drew and was wrong about.**
+>
+> The one that holds: **the two axes are not interchangeable**. The witness counts *locus
+> positions* while the observation's bases are what the read showed over them, so the two lengths
+> differ by the net indel the read carried — a read carrying a two-base insertion and a two-base
+> deletion inside the stretch comes back with as many bases as positions and is still not a
+> positional match for any of them (`PartialObservation::bases`). **The witness may never index the
+> bases.**
+>
+> **The one that does not: there is no gather, and scoring needs no buffer** *(corrected
+> 2026-08-24 at D1, which was built against this paragraph and found it had no work to do)*. This
+> said the restricted projection could not be a subslice of the allele's bases and so needed a
+> buffer sized by the widest witness, which
+> [`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md) D1 owed a home. **It
+> follows from reading the rule below as a positional restriction, and it is not one.** An allele
+> is the whole locus *as a carrier has it*, so a read from a carrier shows the start or the end of
+> that carrier's own sequence, and the comparison is against the allele's **prefix** or **suffix** —
+> nothing is assembled. `WitnessedLocusPositions`' own `is_flush_left`/`is_flush_right` are
+> documented as exactly those two constraints, which is the shape the rule really has. What a
+> witness with a hole costs is not a gather but an unknown *split point*: the read's bases divide
+> into a prefix and a suffix somewhere the hole swallowed, so the test is that some split works.
+>
+> The aggregation argument below is unaffected: a *set* of runs is part of the observation's
+> identity exactly as a single run would be, so every read pooled into one observation witnessed the
+> same positions and gets the same verdict.
 
 **The rule: an allele is compatible with a partial observation when the allele's projection,
 restricted to the positions the read witnessed, equals the read's bases.** Then, for genotype `g`:
@@ -1628,10 +1725,11 @@ term(o | g)  =  Σ  ( k_a / P )   over the alleles a in g that are compatible wi
 and if no allele in `g` is compatible, the observation is charged as an error exactly as in §3.3,
 with `m = 1`, because a multi-position difference has no finite set of wrong outcomes to divide by.
 
-**This is exactly aggregable**, which is why it is the rule chosen: the witnessed run is already part
-of an observation's identity ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)
-— `read_witness` carries the offset and the number of positions covered), so every read pooled into
-one observation witnessed the same stretch and gets the same compatibility verdict.
+**This is exactly aggregable**, which is why it is the rule chosen: the witnessed positions are
+already part of an observation's identity
+([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs) — `read_witness` carries
+them, as a canonical set of runs), so every read pooled into one observation witnessed the same
+positions and gets the same compatibility verdict.
 
 **What it gives up.** A partial that is compatible with two of the genotype's alleles contributes
 `(k_a + k_b)/P`, which is 1 for a diploid heterozygote — no information, correctly. A read that
@@ -1746,7 +1844,8 @@ out rather than left to be discovered.
 |---|---|---|---|
 | per-read-group error rate and its calibration scale | read group | no | no |
 | slippage level, direction split, fall-off, STR substitution rate | read group × stratum | **yes** — through the candidate's stratum (§4.4) | no — **as this document specifies them**, and the first three are a live candidate for per-locus re-estimation, which would change that answer (§6.1) |
-| contamination fraction and the contaminating population's frequencies | read group | no | fitted from the cohort, then **frozen**; absent at one sample |
+| the contamination **fraction** | read group | no | fitted from the cohort, then **frozen**; absent at one sample |
+| the contaminating population's frequency for the allele an observation shows, `q(o)` | **locus × sequencing batch** | **yes** | **yes** — it is the loop's own estimate, re-read every iteration (§3.6, corrected 2026-08-24). *This row said "frozen" alongside the fraction until the read likelihood's A2 was built against it.* |
 | the allele table and the candidate set | locus | yes | yes — the merge unifies across samples |
 | the outlier term's spread | — | should be per locus | **is per cohort today, and §4.5 is why that is wrong** |
 
@@ -1755,10 +1854,12 @@ out rather than left to be discovered.
 **Three tiers, and only the middle one is open.**
 
 **Tier one — frozen for the whole run, and this document requires it.** The per-read-group error rate
-and its calibration scale, the STR substitution rate, the contamination fraction and the contaminating
-population's frequencies. **Contamination is frozen by a ruling and for its own reason** — how
-contaminated a sample is is a property of that sample and not of any locus, so a per-locus loop has
-nothing about it to re-estimate (§3.6, owner, 2026-08-19). **For the rest the reason is not tidiness,
+and its calibration scale, the STR substitution rate, and the contamination **fraction**. *(Corrected
+2026-08-24 at the read likelihood's A2: this said "the contamination fraction and the contaminating
+population's frequencies", and §3.6's own correction of the same day moves the second half into tier
+three. Only the fraction is frozen.)* **The fraction is frozen by a ruling and for its own reason** —
+how contaminated a *library* is is a property of that library and not of any locus, so a per-locus
+loop has nothing about it to re-estimate (§3.6, owner, 2026-08-19). **For the rest the reason is not tidiness,
 it is selection.** The caller only ever sees
 the loci that survived the merge's variability filter — positions selected precisely for carrying
 non-reference reads. An error rate re-fitted from those loci would be an error rate measured on the
@@ -1823,12 +1924,22 @@ they cover both ends of the axis that matters.
 value are known misspecifications of this same emission, and un-nailing them is already scheduled
 work, so a per-locus refit measured before them would be fitting around a defect.
 
-**Tier three — re-estimated every iteration, and this model never sees it.** The per-locus allele
-frequencies. They enter the **prior** as expected allele copies summed over the other samples
-([`calling_priors.md`](calling_priors.md) §6), and no term of §2.1 reads them. That separation is
-worth keeping deliberately: it is what lets the read likelihood be computed once per
-`(sample, observation, candidate)` and reused across every iteration of the caller's loop, which is
-the difference between a cheap EM and an expensive one.
+**Tier three — re-estimated every iteration.** The per-locus allele frequencies. They enter the
+**prior** as expected allele copies summed over the other samples
+([`calling_priors.md`](calling_priors.md) §6), and **one term of §2.1 reads them too**: `q(o)`, the
+contaminating population's frequency for the allele an observation shows, over the samples in that
+sample's sequencing batch (§3.6, corrected 2026-08-24).
+
+*(This paragraph said "and this model never sees it … no term of §2.1 reads them", which the same
+day's correction to §3.6 makes false. It is corrected here at the read likelihood's A2, which was
+building the tier table onto the types.)*
+
+**What the separation still buys, and what it no longer buys.** The **emission** — the expensive part,
+the answer to how one copy of one allele produced one observed sequence — reads no frequency, so it is
+still computed once per `(sample, observation, candidate)` and reused across every iteration, which is
+the difference between a cheap EM and an expensive one. What moves per iteration is one multiply and
+one add inside a logarithm the row was taking anyway. **A caller that caches whole rows rather than
+emissions no longer may**, wherever contamination is on.
 
 **One sample.** Everything above except contamination is available and unchanged. Contamination is a
 comparison between samples and does not exist at one, so `c` is absent and §3.3's formula runs — the
@@ -1863,7 +1974,7 @@ say the same thing.**
 |---|---|---|
 | measuring a read's repeat tract — the ruler | [`alignment.md`](alignment.md) §4.2 | consumes the measurement; never re-measures |
 | comparing two equal-length sequences under one flat error rate | [`alignment.md`](alignment.md) §5.1 | **composes** it as §4.3's factor |
-| the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 sets it out because a candidate aligner there would consume it, and states it is not an alignment algorithm. **That section should be repointed here**, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, **and its *in frame* / *out of frame* wording moved to §1.3's**; neither edit is made here |
+| the stutter distribution — how likely a length change is | **this document**, §4.2 | [`alignment.md`](alignment.md) §5.2 used to set it out, because a candidate aligner there would consume it, while stating it is not an alignment algorithm. **Both edits were made on 2026-08-24** (plan step E1): that section is repointed here, the way [`cohort_merge.md`](cohort_merge.md) repointed [`run_streaming.md`](run_streaming.md) §10, and its *in frame* / *out of frame* wording is now §1.3's. It keeps three things this document does not carry — the *clamps carry weight* trap, HipSTR's two parameter rows as matched sets, and the grain the parameters belong to |
 | every parameter | [`parameter_prepass.md`](parameter_prepass.md) and its two path siblings | reads them frozen; **fits nothing** |
 | the evidence — observations, counts, summed moments | [`cohort_merge.md`](cohort_merge.md) | consumes it, and placed **two** requirements on it: **keep read group in the identity** (§2.3) — **built 2026-08-23**, rows are one per `(allele, read group)` — and **let a partial observation survive collation**, keyed and projected over the stretch it witnessed, because the built merge discards it and §5 has nothing to score without it (§5.4, corrected 2026-08-21), which is still owed. Neither changes which loci get built — an earlier draft asked for that third change and §5.4.2 withdrew it |
 | which alleles are candidates | candidate generation, [`ng_proposal.md`](ng_proposal.md) step 6 | scores what it is handed |
@@ -1901,8 +2012,12 @@ already imposes ([`run_streaming.md`](run_streaming.md) §12).
 **Cost and memory.** Per sample per locus, `observations × genotypes` inner terms on the SNP/indel
 path. On the STR path the emission is evaluated once per `(observation, candidate)` and reused across
 every genotype containing that candidate — **the caching is not an optimisation, it is what makes the
-cost `observations × candidates` instead of `observations × genotypes`**, a factor of 10 at six
-candidates and a diploid. **Nothing may allocate inside the per-sample loop.** The caller hands in
+cost `observations × candidates` instead of `observations × genotypes`**, a factor of **3.5** at six
+candidates and a diploid. *(Corrected 2026-08-24 at the read likelihood's A2, which was copying the
+figure into a doc comment: this said a factor of 10, and a diploid at six candidates has 21
+genotypes — §6.1 two paragraphs below says so — which is 3.5 times six, not ten. The factor is
+`(candidates + 1)/2` at a diploid, so it reaches ten at 19 candidates; at a tetraploid's 126
+genotypes it is 21.)* **Nothing may allocate inside the per-sample loop.** The caller hands in
 scratch sized by candidate count and observation count and the model fills it; production lifted
 exactly these buffers out of its own iteration after a profile put the allocator's self-time at about
 16% of cycles ([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs)). The
@@ -2113,13 +2228,23 @@ production already tests and ng's port should carry across
    on each allele, emission 0.9 on a match and 0.001 otherwise, gives the mixed genotype −1.59 nats
    against −7.01 for either homozygote. Pin both cases; the second is the one a wrong copy weighting
    breaks.
-8. **Order independence.** Permuting the observations, and permuting the candidates, changes no
-   genotype's log-likelihood by a single bit.
-9. **The aggregation contract holds exactly.** Build a list of individual reads with different error
+8. **Order independence.** Permuting the observations, and permuting the candidates, moves no
+   genotype's log-likelihood by more than the summation order costs — the same relative bound as
+   test 9. *This said "by a single bit" until 2026-08-24, and it is false for the same reason test 9's
+   claim was: permuting the observations **is** changing the summation order, measured at one unit in
+   the last place on the row's own fixture.* **What the property is really about is that the row
+   imposes no order of its own** — it must not sort, bucket or re-group behind the caller, because
+   the caller always hands it the merge's order and that is what makes a run reproducible at any
+   worker count.
+9. **The aggregation contract holds.** Build a list of individual reads with different error
    probabilities; compute the SNP/indel likelihood by looping over those reads; compute it again from
-   the counts and summed logs the merge would have produced; require the two to agree **bit for
-   bit**. This is the test that would have caught §1.4's geometric-mean substitution, and it is the
-   reason §3.3's formula is shaped the way it is.
+   the counts and summed logs the merge would have produced; require the two to agree **to within
+   two units in the last place**, and **sweep rather than take one fixture** — over several read
+   counts, quality spreads, read-group scales and ploidies, because a single fixture will often agree
+   to the last bit and that is luck rather than arithmetic. *This asked for bitwise agreement until
+   2026-08-24; §2.3 carries the correction and the measurement.* This is the test that would have
+   caught §1.4's geometric-mean substitution, and it is the reason §3.3's formula is shaped the way
+   it is.
 10. **The calibration scale reproduces the fitted rate.** Given a read group's minted per-read error
     probabilities and the pre-pass's fitted rate, the scaled probabilities' mean equals the fitted
     rate to floating-point tolerance. A second assertion checks the definitional requirement of §3.2:
