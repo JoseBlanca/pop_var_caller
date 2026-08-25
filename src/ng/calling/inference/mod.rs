@@ -47,6 +47,8 @@
 //! open question sweeps them independently of selection's; what is shared is the type, and
 //! with it the impossibility of a negative share or a floor of zero reads.
 
+pub mod summarise_condition;
+
 use std::num::NonZeroU32;
 
 use crate::ng::calling::{

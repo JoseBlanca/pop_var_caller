@@ -807,8 +807,11 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// what the *other* samples showed here.
     sample_concentration: Vec<f64>,
     /// One entry per allele: the genotype prior's own working space, which
-    /// `PriorRow::new` borrows mutably while it reads the concentration.
-    prior_row_workspace: Vec<f64>,
+    /// `PriorRow::new` borrows mutably while it reads the concentration. **One per allele,
+    /// not one per genotype** — the buffer beside it, `prior_row`, is the other, and at a
+    /// diploid biallelic locus they are 2 and 3, so each is a legal length for the other.
+    /// `PriorRow::new` calls this same buffer `per_allele_scratch`.
+    prior_per_allele_workspace: Vec<f64>,
     /// One entry per allele: the **cohort's** expected allele copies as this pass has them,
     /// summed over every sample.
     cohort_expected_copies: Vec<f64>,
@@ -907,7 +910,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             UNWRITTEN_SCRATCH_VALUE,
         );
         resize_and_fill(
-            &mut self.prior_row_workspace,
+            &mut self.prior_per_allele_workspace,
             allele_count,
             UNWRITTEN_SCRATCH_VALUE,
         );
@@ -1172,9 +1175,9 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// On an unprepared scratch.
     #[inline]
     #[must_use]
-    pub fn prior_row_workspace(&self) -> &[f64] {
+    pub fn prior_per_allele_workspace(&self) -> &[f64] {
         self.assert_prepared();
-        &self.prior_row_workspace
+        &self.prior_per_allele_workspace
     }
 
     /// The genotype prior's per-allele working space, to lend it.
@@ -1183,9 +1186,9 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     ///
     /// On an unprepared scratch.
     #[inline]
-    pub fn prior_row_workspace_mut(&mut self) -> &mut [f64] {
+    pub fn prior_per_allele_workspace_mut(&mut self) -> &mut [f64] {
         self.assert_prepared();
-        &mut self.prior_row_workspace
+        &mut self.prior_per_allele_workspace
     }
 
     /// Candidate selection's buffers. **Not sized by
@@ -1206,6 +1209,55 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     #[inline]
     pub fn ssr_row_mut(&mut self) -> &mut SsrRowScratch<SsrEmissionScratch> {
         &mut self.ssr_row
+    }
+
+    /// Every buffer scoring **one sample** at this locus reads or writes, handed out
+    /// together.
+    ///
+    /// **It exists because four of them have to be live at once and they are fields of one
+    /// scratch.** Scoring a sample builds its concentration from three buffers into a
+    /// fourth, its log-prior from that concentration and a working buffer into a fifth, its
+    /// posterior from that prior and its likelihood row into a sixth, and finally its own
+    /// expected copies from the posterior. Reaching for those one accessor at a time does
+    /// not compile — each borrows the whole scratch — and the way round it that needs no
+    /// new type is to copy a buffer, which would put an allocation back into a pass whose
+    /// whole shape exists to have none.
+    ///
+    /// **The borrows are disjoint by construction**: every borrowed field below is a
+    /// different field of this scratch, so nothing here can alias.
+    ///
+    /// **`_mut` because it is the mutable half of five accessor pairs at once**, not the
+    /// shared half of a sixth — five of the eight borrows it hands out are `&mut`, and the
+    /// suffix is the only thing on the name that says a caller needs a mutable scratch.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, or a sample past the count
+    /// [`prepare_for_locus`](Self::prepare_for_locus) was given.
+    #[inline]
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its only caller is `score_one_sample`, which step D1 of the \
+                      calling-loop plan is the first to call from outside a test"
+        )
+    )]
+    pub(crate) fn sample_scoring_buffers_mut(&mut self, sample: usize) -> SampleScoringBuffers<'_> {
+        let genotype_row = self.genotype_row_range(sample);
+        let allele_row = self.allele_row_range(sample);
+        SampleScoringBuffers {
+            sample,
+            seed_concentration: &self.seed_concentration,
+            cohort_expected_copies: &self.cohort_expected_copies,
+            genotype_likelihoods: &self.genotype_likelihoods[genotype_row],
+            sample_concentration: &mut self.sample_concentration,
+            prior_per_allele_workspace: &mut self.prior_per_allele_workspace,
+            prior_row: &mut self.prior_row,
+            posterior_row: &mut self.posterior_row,
+            sample_expected_copies: &mut self.per_sample_expected_copies[allele_row],
+        }
     }
 
     /// Refuse a scratch that was never sized for a locus.
@@ -1263,6 +1315,55 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         let start = sample * width;
         start..start + width
     }
+}
+
+/// Every buffer one sample's turn through a pass touches, borrowed from one
+/// [`CallingScratch`] at once.
+///
+/// **Every run-time construction goes through
+/// [`CallingScratch::sample_scoring_buffers_mut`]**, which is where the flat sample-major
+/// tables are sliced, so the row arithmetic has one spelling. See that method for why the
+/// buffers travel together rather than one at a time.
+///
+/// **The fields are public because the tests build one by hand**, deliberately: the only way
+/// to hand the scorer a row of the wrong width — the mis-shape its release-held checks exist
+/// for — is to reach past the accessor, which cannot produce one. Nothing in a run should.
+/// The shapes are not this type's to enforce: they are checked where they are used, in
+/// `score_one_sample`, `fill_sample_concentration` and `PriorRow::new`.
+///
+/// Of the eight buffers, three are read-only — what the locus's setup and the *previous* pass
+/// left — and four are this sample's share of what this pass produces. The eighth is both:
+/// this sample's expected copies are read as the leave-one-out term the prior needs, and then
+/// overwritten with what this pass's posterior implies. The `sample` index beside them is not
+/// a buffer; it is there so a panic can say which sample was being scored.
+#[derive(Debug)]
+pub(crate) struct SampleScoringBuffers<'a> {
+    /// Which sample of the run these buffers belong to — carried so a panic raised while
+    /// scoring can name it. At a thousand samples that is the first thing the reader of a
+    /// message wants, and no other field records it.
+    pub sample: usize,
+    /// The locus's seed concentration — one entry per allele, the same for every sample,
+    /// and what the prior falls back to where the cohort says nothing.
+    pub seed_concentration: &'a [f64],
+    /// The cohort's expected allele copies as the previous pass left them, this sample's
+    /// own contribution included.
+    pub cohort_expected_copies: &'a [f64],
+    /// This sample's row of the genotype-likelihood table — one entry per candidate
+    /// genotype, built once per set of slippage numbers and read by every pass.
+    pub genotype_likelihoods: &'a [LogProb],
+    /// One entry per allele, to fill: this sample's own concentration — the seed plus what
+    /// the **other** samples showed here.
+    pub sample_concentration: &'a mut [f64],
+    /// One entry per allele of working space, to hand the genotype prior. Its contents on
+    /// entry are ignored and on exit unspecified.
+    pub prior_per_allele_workspace: &'a mut [f64],
+    /// One entry per candidate genotype, to fill: this sample's log-prior.
+    pub prior_row: &'a mut [LogProb],
+    /// One entry per candidate genotype, to fill: this sample's posterior over genotypes.
+    pub posterior_row: &'a mut [f64],
+    /// One entry per allele: this sample's own expected allele copies — **read first** as
+    /// the leave-one-out term, then **overwritten** with this pass's answer.
+    pub sample_expected_copies: &'a mut [f64],
 }
 
 /// Resize a scratch buffer and overwrite every entry, including the ones that were already
@@ -2483,6 +2584,54 @@ mod tests {
         }
     }
 
+    /// **[`CallingScratch::sample_scoring_buffers_mut`] hands back that sample's two rows**
+    /// of the flat sample-major tables — its likelihood row and its expected-copies row —
+    /// and not another sample's.
+    ///
+    /// **The scoring path's own tests cannot see this**, which is why the check lives here.
+    /// Measured: with the method's two `sample` arguments replaced by `0`, so every sample
+    /// is handed sample 0's rows, the whole of `ng::calling` still passes. The test that
+    /// looks like the one to catch it — the three-sample scoring test, whose `assert_ne!`
+    /// is commented *"sample 1 was scored on sample 0's likelihood row"* — passes under
+    /// that mutation, because it also redirects the expected-copies row, which the scorer
+    /// **overwrites** on every call; so each sample gets a different leave-one-out term and
+    /// therefore a different posterior, from the same reads.
+    ///
+    /// The two rows are 3 and 2 entries wide here, so a wrong row is a legal slice of the
+    /// right table — the hazard [`row_range`](CallingScratch::row_range)'s own doc names.
+    #[test]
+    fn the_scoring_buffers_hand_back_that_samples_own_rows() {
+        let (alleles, table) = biallelic_locus();
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(3, &alleles, &view);
+        for sample in 0..3 {
+            for (genotype, slot) in scratch
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .enumerate()
+            {
+                *slot = LogProb(10.0 * sample as f64 + genotype as f64);
+            }
+            scratch
+                .sample_expected_copies_mut(sample)
+                .copy_from_slice(&[sample as f64, 2.0 - sample as f64]);
+        }
+
+        let buffers = scratch.sample_scoring_buffers_mut(1);
+        assert_eq!(buffers.sample, 1);
+        assert_eq!(
+            buffers.genotype_likelihoods,
+            &[LogProb(10.0), LogProb(11.0), LogProb(12.0)],
+            "sample 1's likelihood row"
+        );
+        assert_eq!(
+            buffers.sample_expected_copies,
+            &[1.0, 1.0],
+            "sample 1's own expected copies"
+        );
+    }
+
     /// A sample past the count the scratch was prepared for is refused by name, rather than
     /// reading the next sample's row.
     #[test]
@@ -2786,25 +2935,33 @@ mod tests {
         assert_eq!(scratch.prior_row().len(), view.genotype_count());
         assert_eq!(scratch.posterior_row().len(), view.genotype_count());
         assert_eq!(scratch.sample_concentration().len(), view.allele_count());
-        assert_eq!(scratch.prior_row_workspace().len(), view.allele_count());
+        assert_eq!(
+            scratch.prior_per_allele_workspace().len(),
+            view.allele_count()
+        );
         assert_ne!(view.genotype_count(), view.allele_count());
 
         // And they arrive unwritten, like every other buffer.
         assert!(scratch.prior_row().iter().all(|entry| entry.get().is_nan()));
         assert!(scratch.posterior_row().iter().all(|entry| entry.is_nan()));
         assert!(scratch.sample_concentration().iter().all(|a| a.is_nan()));
-        assert!(scratch.prior_row_workspace().iter().all(|a| a.is_nan()));
+        assert!(
+            scratch
+                .prior_per_allele_workspace()
+                .iter()
+                .all(|a| a.is_nan())
+        );
 
         // Written, then overwritten by the next locus of the same shape.
         scratch.prior_row_mut()[0] = LogProb(-1.5);
         scratch.posterior_row_mut()[0] = 0.25;
         scratch.sample_concentration_mut()[0] = 1.0;
-        scratch.prior_row_workspace_mut()[0] = 2.0;
+        scratch.prior_per_allele_workspace_mut()[0] = 2.0;
         scratch.prepare_for_locus(2, &alleles, &view);
         assert!(scratch.prior_row()[0].get().is_nan());
         assert!(scratch.posterior_row()[0].is_nan());
         assert!(scratch.sample_concentration()[0].is_nan());
-        assert!(scratch.prior_row_workspace()[0].is_nan());
+        assert!(scratch.prior_per_allele_workspace()[0].is_nan());
     }
 
     /// The configuration a run actually uses — the shipped repeat-tract emission model's

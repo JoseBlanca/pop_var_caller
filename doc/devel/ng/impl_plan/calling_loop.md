@@ -178,7 +178,7 @@ takes it rather than restating it. *Depends:* A1. *Source:* arch
 
 ### Milestone B — one E/M pass (the heart, on hand-built rows)
 
-**B1. The E-step for one sample.**  ☐
+**B1. The E-step for one sample.**  ✅
 Given a filled `Lg` row: build the sample's concentration (`sample_concentration`), its log-prior
 row (`GenotypePriorModel`), add, softmax into the posterior row, fold into per-sample expected
 copies. Pure, scratch-backed, no allocation. Test: a hand-computed 2-allele diploid case, prior
