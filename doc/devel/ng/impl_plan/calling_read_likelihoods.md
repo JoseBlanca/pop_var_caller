@@ -414,13 +414,20 @@ independent-implementation check behind the whole path. *Depends:* F2. *Source:*
 
 **G1. `censored_emission`.**  ✅
 Spec §5.2: the factorised form on pure candidates — the letter match on the witnessed prefix
-times the closed-form tail `P(length ≥ ℓ | a)`, both geometric tails capped at E2's cutoffs —
-and the exact sum over reachable stretchings on interrupted candidates. Tests: **the complement
-identity** — `P(≥ ℓ) + P(< ℓ)` equals the truncated distribution's own total (one minus E2's
-reported loss), **not 1** (spec §12 test 12); where the constraint admits exactly one length
-change, censored equals complete **bit for bit**; **a partial never out-discriminates a
-complete observation** on a stated parameter set (test 13). *Depends:* F2, E2. *Source:* spec
-§5.2; arch §4.1.
+times the tail `P(length ≥ ℓ | a)`, both geometric tails capped at E2's cutoffs — and the exact
+sum over reachable stretchings on interrupted candidates. Tests: **the complement identity** —
+`P(≥ ℓ) + P(< ℓ)` equals the mass the candidate can actually reach (one minus E2's reported
+loss), **not 1** (spec §12 test 12); where the constraint admits exactly one length change,
+censored equals complete **bit for bit**; and test 13's two properties. *Depends:* F2, E2.
+*Source:* spec §5.2; arch §4.1.
+
+> **Two departures, both recorded** ([impl
+> report](../../reports/implementations/ng_calling_likelihood_g1_2026-08-25.md)). The tail sums
+> the distribution's own terms rather than telescoping a geometric, because the bit-for-bit
+> identity above requires it. And **spec §12's thirteenth test was false as written** — a
+> partial *can* out-discriminate a complete observation, by 5.661 nats against 1.586 where the
+> two candidates straddle the witnessed length. The specification was corrected on 2026-08-25
+> (owner) to the two properties that hold; §5.2 carries the counterexample and its sizes.
 
 ### Milestone H — the STR row
 
@@ -464,7 +471,7 @@ prior plan E2. *Source:* spec §4.5, §4.5.1; arch §4.1.
 | D | hand-built compatibility fixtures — no-information, error-charge, pooled-verdict |
 | E | existing stutter tests green through the rename; the reported-loss identity; the sums-to-one tripwire |
 | F | the three ported property tests; **`ClassicEmissionOracle`** cross-model agreement |
-| G | the complement-vs-truncated-total identity; the single-length bitwise case; the never-out-discriminates bound |
+| G | the complement-vs-reachable-total identity; the single-length bitwise case; test 13's two properties, plus the measured counterexample to the claim it replaced |
 | H | junk-cancellation bit-for-bit; ploidy properties; the emission-call count; **the zero-bit cohort-independence test** |
 
 ## Out of scope (next plans)

@@ -197,17 +197,20 @@ pub trait SsrEmissionModel {
     /// a length would score it as evidence *for* a short allele — the trap spec §5.1 names.
     ///
     /// **What a lower bound is safe about, and what it is not.** It never scores *below* the
-    /// complete read of the same bases, so it cannot be mistaken for a short allele; that is
-    /// the property §5.1 needs, and it is tested. It is **not** true that a censored read is
-    /// always the less discriminating of the two — spec §5.2 and §12's thirteenth test say so
-    /// and they are wrong. Where one candidate is shorter than the stretch the read got
-    /// through and the other is longer, the censored read separates them **further**: it needs
-    /// no stutter at all under the longer candidate, so it collects the same-length share,
-    /// while the complete read needs a one-repeat change under each and the two differ only by
-    /// the direction ratio. Measured at 5.661 nats against 1.586 on the fixture in
+    /// complete read of the same bases, so it cannot be mistaken for evidence of a short
+    /// allele; that is the property §5.1 needs, and it is tested. It is **not** always the
+    /// *less discriminating* of the two: where one candidate is shorter than the stretch the
+    /// read got through and the other is longer, the censored read separates them **further**
+    /// — it needs no stutter at all under the longer candidate, so it collects the same-length
+    /// share, while the complete read needs a one-repeat change under each and the two differ
+    /// only by the fitted direction ratio. Measured at 5.661 nats against 1.586 by
     /// `a_censored_read_out_discriminates_a_complete_one_where_the_candidates_straddle_it`.
     /// That is real information — a lower bound rules out everything below it — and it is the
     /// evidence §5.1 turned these reads on to collect.
+    ///
+    /// *(Spec §5.2 and §12's thirteenth test claimed the stronger property until 2026-08-25,
+    /// when this measurement was put to the owner and both were corrected. §5.2's correction
+    /// box is the place to read the argument.)*
     fn censored_emission(
         &self,
         witnessed_prefix: &[u8],
@@ -1675,25 +1678,26 @@ mod tests {
         );
     }
 
-    /// **The counterexample to the unrestricted claim, measured rather than argued.**
-    ///
-    /// Spec §5.2 says a partial is *always* less discriminating than a complete observation of
-    /// the same bases, and §12's thirteenth test asks for that without restriction. **It is
-    /// false whenever the two candidates straddle the stretch the read got through**, and the
-    /// reason is not a parameter choice but the shape of the question a censored read asks.
+    /// **A censored read can separate two candidates further than a complete one, measured
+    /// rather than argued** — and it does so whenever the two candidates **straddle** the
+    /// stretch the read got through. The reason is not a parameter choice but the shape of the
+    /// question a censored read asks.
     ///
     /// A read that got through ten bases of tract, against a candidate that already holds
     /// twelve, needs nothing to have happened at all — the tract is at least ten because it is
     /// twelve — so it collects the same-length share, which is most of the distribution.
     /// Against a candidate holding eight it needs an expansion, which is rare. The complete
     /// read of those same ten bases needs a one-repeat change either way, and those two shares
-    /// differ only by the direction ratio. So the partial separates the two candidates
-    /// **further** than the complete read does.
+    /// differ only by the fitted direction ratio. So the censored read separates the two
+    /// candidates **further** than the complete read does.
     ///
     /// That is real information rather than a defect: a lower bound rules out everything below
-    /// it, and it is exactly the evidence spec §5.1 turned these reads on to collect. What is
-    /// wrong is the claim, and this test is here so the fact is asserted rather than
-    /// remembered.
+    /// it, and it is exactly the evidence spec §5.1 turned these reads on to collect.
+    ///
+    /// **This test exists because the specification once claimed the opposite.** §5.2 said a
+    /// partial is *always* less discriminating and §12's thirteenth test asked for that without
+    /// restriction; both were corrected on 2026-08-25 after this fixture measured them. The
+    /// numbers stay asserted here so the correction cannot quietly come undone.
     #[test]
     fn a_censored_read_out_discriminates_a_complete_one_where_the_candidates_straddle_it() {
         // The contraction-biased fitted row, not HipSTR's shipped one: that ships equal
