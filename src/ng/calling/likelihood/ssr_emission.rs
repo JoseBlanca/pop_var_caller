@@ -153,6 +153,57 @@ fn period_of(motif: &Motif) -> NonZeroU8 {
     NonZeroU8::new(period).expect("a motif is at least one base")
 }
 
+/// **The tract lengths this locus's candidates can reach**, ascending and without repeats,
+/// written into a buffer the caller reuses (cleared first).
+///
+/// # What it is for, and why it is not a count of what anybody showed
+///
+/// Two of the row's terms are spread over this support. The **outlier weight** is uniform over
+/// it — a read from a paralogous tract or a chimera could have shown any of these lengths and
+/// nothing about the genotype says which. And the **contamination seed** is a distribution over
+/// it, one entry per length.
+///
+/// **Production spreads its outlier weight over `D`, the number of distinct sequences the whole
+/// cohort showed at the locus, and that is the defect this repairs** (spec §4.5). A single
+/// sample showing two sequences got a junk floor of 0.005 and a 63-accession panel showing
+/// twenty got 0.0005 — ten times lower — so a sample's own genotype likelihood moved when an
+/// unrelated sample was added to the run. That is not a property a per-sample likelihood may
+/// have.
+///
+/// **So this asks the candidates and the cutoffs and nothing else.** No observation reaches it,
+/// no sample count, and — because it goes through
+/// [`StutterModel::reachable_length_changes_of`], which takes no model — none of the fitted
+/// rates either, so it does not move between the caller's iterations.
+///
+/// **What that does and does not buy, measured.** What it removes is the dependence on *what
+/// samples showed*: a sample's own row no longer moves when an unrelated sample's reads join
+/// the locus. What it does not remove is every trace of the cohort, because the candidate set
+/// is itself cohort-derived — a locus that admits one more candidate reaches more lengths.
+/// Measured over 1 to 20 candidates, the junk floor swings by about **2.2 to 2.6 fold**, against
+/// production's **10 fold** for the same growth in what the cohort showed, and one extra
+/// candidate at a five-candidate dinucleotide locus moves it by 5 parts in 100. That is the
+/// honest size of the repair: much smaller and no longer a function of the reads, not zero.
+///
+/// A candidate contributes the lengths its own tract can be stretched or trimmed to. **The
+/// guard is against a contraction, not a stretching** — only trimming can take a tract to no
+/// bases at all, and the distribution's own reachability rule already stops it one repeat
+/// earlier on the whole-repeat branch.
+pub fn fill_reachable_lengths(candidates: &[SsrCandidate<'_>], motif: &Motif, out: &mut Vec<u32>) {
+    out.clear();
+    let period = period_of(motif);
+    for candidate in candidates {
+        let held = candidate.bases.len() as i64;
+        for bp_diff in StutterModel::reachable_length_changes_of(period, candidate.repeat_count) {
+            let reached = held + bp_diff;
+            if reached > 0 {
+                out.push(reached as u32);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+}
+
 /// `Lr(observation | one candidate allele)` — **the only part that differs between models**.
 ///
 /// Everything around it is shared: the copy-weighted mixture over a genotype's alleles, the

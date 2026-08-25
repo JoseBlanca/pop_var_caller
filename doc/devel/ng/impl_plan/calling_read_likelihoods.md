@@ -443,7 +443,7 @@ between-ness claims (test 7 — pin both the matching case and the split case); 
 (test 8); an instrumented count pinning one row build at `observations × candidates` emission
 calls. *Depends:* F2, G1. *Source:* spec §2.1, §4.5, §8; arch §4.1.
 
-**H2. The per-locus outlier spread + STR contamination.**  ☐
+**H2. The per-locus outlier spread + STR contamination.**  ✅
 `reachable_length_count` computed from the candidate set and the cutoffs alone — **no cohort in
 it**, the decided repair of production's cohort-wide `D`
 ([`em.rs:393`](../../../../src/ssr/cohort/em.rs)); and the three-term form

@@ -590,6 +590,27 @@ impl StutterModel {
         period: NonZeroU8,
         repeat_count: NonZeroU32,
     ) -> impl Iterator<Item = (i64, f64)> + '_ {
+        Self::reachable_length_changes_of(period, repeat_count)
+            .map(move |bp_diff| (bp_diff, self.probability(bp_diff, period)))
+    }
+
+    /// **The same support without the masses — and it takes no model, which is the point.**
+    ///
+    /// Which length changes a tract of this shape can reach is decided by the period, the
+    /// repeat count and the two cutoffs. **None of the seven fitted rates enters it**, so the
+    /// support does not move when the caller's loop re-estimates them.
+    ///
+    /// That is what spec §4.5 needs: the outlier weight at a repeat tract is spread over the
+    /// lengths the candidates can reach, and the spec requires that count be "computed from the
+    /// candidate set alone, without asking what any sample showed" — and, by the same argument,
+    /// without asking what the current iteration's rates are. Reading the count off
+    /// [`Self::reachable_length_changes`] and discarding the probabilities would work and would
+    /// hide that: a later reader would have no way to see that the answer is rate-independent
+    /// except by checking every branch.
+    pub fn reachable_length_changes_of(
+        period: NonZeroU8,
+        repeat_count: NonZeroU32,
+    ) -> impl Iterator<Item = i64> {
         let period_bases = i64::from(period.get());
         let contractable_repeats = i64::from(contractable_repeats(repeat_count));
 
@@ -609,7 +630,6 @@ impl StutterModel {
             .chain((1..=whole_shorter_steps).map(move |repeats| -(repeats * period_bases)))
             .chain((1..=part_longer_steps).map(move |step| part_repeat_bp_diff(step, period)))
             .chain((1..=part_shorter_steps).map(move |step| -part_repeat_bp_diff(step, period)))
-            .map(move |bp_diff| (bp_diff, self.probability(bp_diff, period)))
     }
 
     /// **How probable it is that a read of this candidate came out at least `min_bp_diff`
