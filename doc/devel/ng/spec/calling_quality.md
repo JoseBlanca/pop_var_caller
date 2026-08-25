@@ -136,8 +136,10 @@ more to take the argmax, calls it as it goes. *Rejected:* widening the scratch t
 posteriors, for the memory above; and letting the loop inline the formula, which puts the cap in
 two places the first time anything else needs a genotype quality.
 
-**And it is taken once, not every pass.** A mid-loop posterior is conditioned on allele frequencies
-that are still moving; it is not a worse answer, it is an answer to a different question.
+**And it is taken once, not every pass — which is a cost point, not a correctness one.** A quality
+computed on pass 3 of 50 is a perfectly good quality; it is simply thrown away when pass 4 rewrites
+the posterior row. Computing it every pass would multiply one logarithm per sample by the pass
+count and keep only the last result. There is no argument to make beyond that.
 
 ### 3.2 The site quality's baseline is computed in the worker
 
