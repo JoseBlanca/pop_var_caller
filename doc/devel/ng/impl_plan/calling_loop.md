@@ -205,7 +205,7 @@ first pass the expected copies reflect the reads and not the seed; **and the tra
 a locus thin enough that the seed outweighs each sample's reads, a seeded first pass converges
 to no-variant where the flat start converges to the variant. *Depends:* B2. *Source:* spec §3.
 
-**C2. Convergence, the cap, and the emitted flag.**  ☐
+**C2. Convergence, the cap, and the emitted flag.**  ✅
 Stop when the largest change in expected copies **divided by cohort chromosomes** falls below the
 threshold; at the cap, emit with `converged = false` — never dropped, never an error — and
 `passes` always emitted. Tests: spec §13 test 4 (capped locus emitted, flag reaches the output;

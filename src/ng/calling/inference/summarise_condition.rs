@@ -29,8 +29,10 @@ use crate::ng::calling::genotype_prior::{
     CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
     fill_sample_concentration,
 };
-use crate::ng::calling::{CohortSummingBuffers, SampleScoringBuffers};
-use crate::ng::types::{InbreedingF, LogProb};
+use crate::ng::calling::{CallingScratch, CohortSummingBuffers, SampleScoringBuffers};
+use crate::ng::types::{InbreedingF, LogProb, Ploidy};
+
+use super::RunnableCallingLoopConfig;
 
 /// Which prior one pass scores against — **a value, not a code path**.
 ///
@@ -78,7 +80,8 @@ use crate::ng::types::{InbreedingF, LogProb};
     not(test),
     expect(
         dead_code,
-        reason = "step D1 of the calling-loop plan is the first to build one"
+        reason = "the first to build one is `run_frequency_loop`, which is itself \
+                  unreached until step C3 of the calling-loop plan"
     )
 )]
 pub(crate) enum PassPrior<'a> {
@@ -187,15 +190,21 @@ impl PassPrior<'_> {
 ///
 /// The remaining shapes are checked by [`fill_sample_concentration`] and [`PriorRow::new`],
 /// which is why they are not repeated here.
-// **`pub(crate)` with the dead-code lint expected, rather than `pub`.** Step D1 of
-// `doc/devel/ng/impl_plan/calling_loop.md` is the caller; until it lands the only callers are
-// this module's tests, and widening the visibility to silence the lint would be an accident
-// dressed as a decision. `expect` rather than `allow`, and only outside the test build where
-// the lint genuinely fires, so that D1 adding a real caller turns this line into a compile
-// error and whoever writes it deletes the expectation.
+// **`pub(crate)` with the dead-code lint expected, rather than `pub`.**
+// [`run_frequency_loop`] calls this, but that function is itself unreached outside this
+// module's tests until step C3 of `doc/devel/ng/impl_plan/calling_loop.md` mints a
+// `LocusInference` from it — so the whole chain is still dead in a non-test build. Widening
+// the visibility to silence the lint would be an accident dressed as a decision. `expect`
+// rather than `allow`, and only outside the test build where the lint genuinely fires, so
+// that the first real caller turns this line into a compile error and whoever writes it
+// deletes the expectation.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "step D1 of the calling-loop plan is the caller")
+    expect(
+        dead_code,
+        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
+                  step C3 of the calling-loop plan mints a `LocusInference` from it"
+    )
 )]
 pub(crate) fn score_one_sample(
     buffers: SampleScoringBuffers<'_>,
@@ -454,7 +463,11 @@ pub(crate) fn score_one_sample(
 /// Nothing allocates.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "step D1 of the calling-loop plan is the caller")
+    expect(
+        dead_code,
+        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
+                  step C3 of the calling-loop plan mints a `LocusInference` from it"
+    )
 )]
 pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
     let CohortSummingBuffers {
@@ -551,16 +564,333 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
     );
 }
 
+/// Whether the cohort's expected allele copies have stopped moving — **the loop's whole
+/// stopping rule**, and the one place the division that makes it portable is written.
+///
+/// Two rows of expected copies, the one the pass just ending was scored against and the one
+/// its M-step produced. The loop stops when the largest change between them, **divided by
+/// the number of chromosomes in the cohort**, falls below `threshold`
+/// (`doc/devel/ng/spec/calling_em_loop.md` §6).
+///
+/// # Why expected copies and not the frequencies the locus reports
+///
+/// **Because this is the quantity that feeds back.** The M-step produces it and the next
+/// E-step's leave-one-out prior is built from it, so its movement is what says the loop has
+/// not settled. Production tests exactly this, and its comment records what testing the
+/// *reported* estimate cost: that number is scaled by a pseudocount and does not feed back,
+/// so a larger pseudocount damped the delta and stopped the loop earlier on an otherwise
+/// identical trajectory ([`posterior_engine.rs:2702`](../../../../src/var_calling/posterior_engine.rs)).
+///
+/// # Why the division, which is the easy thing to drop
+///
+/// **Expected copies are a count and the threshold is a fraction.** At one diploid sample the
+/// cohort carries 2 chromosomes and at a thousand it carries 2,000, so a movement of `1e-3`
+/// raw copies is a frequency shift of 5 in 10,000 in the first case and 5 in 10,000,000 in
+/// the second. A criterion written on raw counts therefore **tightens by the cohort size**,
+/// silently, across exactly the range this caller commits to
+/// (`doc/devel/ng/spec/design_principles.md` §0). Dividing puts the movement on the same
+/// `[0, 1]` frequency scale as the numbers the locus reports, which is what lets one
+/// inherited constant mean one thing from a single sample to several thousand.
+///
+/// # Why `all(… < threshold)` and not a maximum
+///
+/// **The two spellings are the same arithmetic on finite rows and they part on a row nobody
+/// wrote.** `prepare_for_locus` fills *both* cohort rows with
+/// [`UNWRITTEN_SCRATCH_VALUE`](crate::ng::calling::UNWRITTEN_SCRATCH_VALUE), which is `NaN`,
+/// and [`advance_cohort_expected_copies`](crate::ng::calling::CallingScratch::advance_cohort_expected_copies)
+/// leaves the previous row holding it until a pass has actually advanced. Every comparison
+/// against a `NaN` is false, so:
+///
+/// - `fold(0.0, f64::max)`, `fold(f64::NEG_INFINITY, f64::max)` and a hand-written
+///   `if d > largest` all **discard** the `NaN` — `f64::max` is documented to return the other
+///   argument when one side is `NaN`, and a `>` comparison against one is false. The first and
+///   third hand back their seed of `0.0` and the second hands back `−∞`; all three are below
+///   any threshold, so the locus reports itself settled after one pass having compared against
+///   nothing;
+/// - `all(|d| d < threshold)` returns **false**, which is what
+///   [`previous_cohort_expected_copies`](crate::ng::calling::CallingScratch::previous_cohort_expected_copies)'s
+///   own documentation promises: *"every comparison against it is therefore false"*.
+///
+/// Three of the four natural spellings are wrong in the same direction, and the failure is
+/// silent — a genotype, flagged converged, from a loop that ran one pass. That is measured and
+/// pinned by `the_fold_spellings_of_the_delta_settle_where_this_one_does_not`.
+///
+/// **[`run_frequency_loop`] itself never hands over such a row**, and the guarantee is for its
+/// successors rather than for it: the prior-free initialisation's M-step writes finite copies
+/// before the first swap, so by the time this is first called the previous row is a real
+/// estimate. What the spelling protects is any later caller that compares before a pass has
+/// advanced — step C3's final pass, and step D1's outer rounds, which restart the
+/// initialisation and could reorder the swap.
+///
+/// # Why `.abs()`, which two alleles cannot show
+///
+/// **At a biallelic locus the two movements are equal and opposite**, because the expected
+/// copies sum to the cohort's chromosome total on every pass — so a signed comparison gives the
+/// same verdict as an absolute one and the `.abs()` looks like decoration. From three alleles
+/// on it is not: the reference allele can fall by more than the threshold while every
+/// alternative rises by less than it, and a signed comparison then calls a moving locus
+/// settled. Pinned by `cohort_expected_copies_have_settled_refuses_a_fall_larger_than_every_rise`,
+/// on a row measured at `[−0.0015, +0.0008, +0.0007]` against the `1e-3` threshold.
+///
+/// # Panics
+///
+/// Four checks, all **held in release**, because a caller bug in this module is an assertion
+/// rather than a `Result` (`doc/devel/ng/spec/calling_em_loop.md` §8):
+///
+/// - **the previous row must name at least one allele**, and **the two rows must be the same
+///   length**. Two checks rather than one, so a test can tell which fired: `all` over nothing
+///   is `true` and `zip` stops at the shorter side, so a pair of empty rows — the shape an
+///   unprepared scratch would hand over — reports every locus settled on its first pass, and a
+///   short row settles on the alleles it does not have. This is the same failure mode the
+///   sentinel exists to catch, reached by the one door the sentinel cannot cover.
+/// - **the cohort must hold at least one sample.** Zero samples is zero chromosomes, which
+///   turns every non-zero movement into an infinity and a zero movement into a `NaN`; neither
+///   is below the threshold, so no locus would ever settle and every one would spend the whole
+///   cap. **The chromosome count itself needs no check**, and that is the reason this takes a
+///   [`Ploidy`] and a sample count rather than the product: a `Ploidy` is at least one by
+///   construction, so the only way to a bad product is a cohort of no samples, and an infinite
+///   or `NaN` chromosome count is no longer expressible.
+/// - **the threshold must be finite and above zero.**
+///   [`CallingLoopConfig::validate`](super::CallingLoopConfig::validate) already refuses one
+///   that is not, and this is the check that says so where the value is used — the loop is
+///   reachable from tests that build a threshold by hand. `> 0.0` alone refuses zero and `NaN`;
+///   the `is_finite()` half is there for an infinity, which would report every locus settled on
+///   its first pass.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "its caller is `run_frequency_loop`, which is itself unreached until \
+                  step C3 of the calling-loop plan mints a `LocusInference` from it"
+    )
+)]
+fn cohort_expected_copies_have_settled(
+    previous_expected_copies: &[f64],
+    current_expected_copies: &[f64],
+    ploidy: Ploidy,
+    sample_count: usize,
+    threshold: f64,
+) -> bool {
+    assert!(
+        !previous_expected_copies.is_empty(),
+        "every locus has at least its reference allele, so a cohort row of no alleles is a \
+         scratch that was never prepared for this locus"
+    );
+    assert_eq!(
+        previous_expected_copies.len(),
+        current_expected_copies.len(),
+        "the two cohort rows are one entry per allele of the same locus: the previous pass's \
+         row holds {} entries and this pass's {}",
+        previous_expected_copies.len(),
+        current_expected_copies.len()
+    );
+    assert!(
+        sample_count > 0,
+        "a cohort has at least one sample, so a convergence test over none is a run whose \
+         sample order went missing"
+    );
+    assert!(
+        threshold.is_finite() && threshold > 0.0,
+        "the convergence threshold is a fraction on the frequency scale, so {threshold} is \
+         not one; CallingLoopConfig::validate refuses it where a run sets it"
+    );
+    // Chromosomes, not samples: it is what puts the movement below on the frequency scale.
+    // `u8` widens to `f64` exactly at every value it can hold; `usize` does so up to 2^53, so
+    // the product is exact for any cohort a machine could hold.
+    let cohort_chromosomes = f64::from(ploidy.get()) * sample_count as f64;
+    previous_expected_copies
+        .iter()
+        .zip(current_expected_copies)
+        .all(|(before, after)| (after - before).abs() / cohort_chromosomes < threshold)
+}
+
+/// What one run of the frequency loop reports about *how* it stopped — the two fields that
+/// travel into [`LocusInference`](crate::ng::calling::LocusInference) unchanged.
+///
+/// **Both are emitted, and neither is an error.** A locus that runs out of passes is called
+/// anyway: production retired its non-convergence error precisely so that one hard site could
+/// not kill a cohort run (`doc/devel/ng/spec/calling_em_loop.md` §6). What the caller owes is
+/// that the flag reaches the output, because a genotype from a loop that did not settle is a
+/// weaker claim than one from a loop that did and nothing downstream can tell them apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "step C3 of the calling-loop plan is the first to read these two fields \
+                  into a `LocusInference`"
+    )
+)]
+pub(crate) struct FrequencyLoopOutcome {
+    /// How many seeded passes ran. **At least one, and the prior-free initialisation is not
+    /// one of them** — it produces the estimate pass 1 is compared against, so a locus that
+    /// settles immediately reports one pass rather than zero
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §3).
+    pub(crate) passes: u32,
+    /// Whether the copies stopped moving, or the loop simply reached `max_passes`.
+    pub(crate) converged: bool,
+}
+
+/// Run the frequency loop at one locus: the prior-free pass, then seeded passes until the
+/// cohort's expected copies stop moving or the cap is reached.
+///
+/// **The innermost of the design's three loops** — the only one that repeats at the shipped
+/// configuration (`doc/devel/ng/spec/calling_em_loop.md` §2). It reads the genotype
+/// likelihood table the scratch already holds and never rebuilds it, which is what makes the
+/// table's cost independent of the pass count (§2, §8); assembling that table, and the two
+/// outer rounds that would rebuild it, is step D1's.
+///
+/// **What it leaves behind is as much the point as what it returns.** On return the scratch
+/// holds the converged cohort expected copies, each sample's own expected copies, and the
+/// posterior row of *the last sample scored* — so a caller that wants every sample's genotype
+/// must score them again. That final pass is step C3's, and it is a pass rather than a
+/// read-back because the posterior row is one reused buffer.
+///
+/// # The order within a pass, and why the swap sits between the two halves
+///
+/// 1. the **E-step** scores every sample against the cohort row as it stands — which is what
+///    the *previous* pass's M-step wrote;
+/// 2. the swap makes that row the previous one and hands back a `NaN`-filled buffer for this
+///    pass;
+/// 3. the **M-step** fills it;
+/// 4. the two rows are compared.
+///
+/// Swapping before the E-step instead would hand every sample a row of `NaN`s to be scored
+/// against, and swapping after the comparison would compare a row against itself.
+///
+/// **The settled test comes before the cap test, and that order is the difference between
+/// two claims.** A locus whose last allowed pass is the one that settles is *converged*, not
+/// capped: §6 makes the flag a statement about the locus, and reporting the cap there would
+/// understate every genotype at the site. Pinned by
+/// `run_frequency_loop_reports_converged_when_the_last_allowed_pass_settles`.
+///
+/// # One sample, and a thousand
+///
+/// **No line of this function branches on the cohort size**, and none should be written
+/// (`doc/devel/ng/spec/calling_em_loop.md` §7). At one sample the prior's leave-one-out
+/// subtraction is between a number and itself, so the concentration comes back as the seed and
+/// the loop reaches its fixed point by arithmetic: pass 2's copies equal pass 1's bit for bit
+/// and it stops with `passes = 2`. The wasted second pass is spec §12's question 6 and is an
+/// optimisation, not a correctness rule.
+///
+/// # Panics
+///
+/// Every check is **held in release** (`doc/devel/ng/spec/calling_em_loop.md` §8). This
+/// function adds one — that `inbreeding_by_sample` holds one coefficient per sample of the
+/// prepared scratch, **in both directions**. It is load-bearing rather than defensive: the
+/// seeded E-step walks the coefficients, so a slice one coefficient short at a three-sample
+/// locus would score two samples and leave the third holding the prior-free initialisation's
+/// copies, which the M-step then sums as though this pass had produced them — finite,
+/// plausible, wrong, and silent. One coefficient too many is the same run-shape bug, and
+/// without the check it surfaces as a scratch-indexing panic two modules away rather than as
+/// a message naming the cohort. The rest of the checks belong to the two halves this drives
+/// and to [`cohort_expected_copies_have_settled`].
+///
+/// **The ploidy is the genotype table's, and there is no second source of it.** The table was
+/// built for a `(ploidy, allele count)` shape and `prepare_for_locus` already refuses a scratch
+/// that disagrees with it about the alleles; taking a `Ploidy` argument beside it would add a
+/// number nothing compares. Measured on the three-sample fixture with a diploid table: a
+/// `ploidy` argument of 64 returned `passes: 2, converged: true` against the true
+/// `passes: 4`, identically in debug and release, with nothing asserting — a too-large ploidy
+/// loosens the threshold by the ratio and claims convergence it did not reach.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "step C3 of the calling-loop plan adds the final pass that turns this \
+                  loop's result into a `LocusInference`, and D1 assembles the rounds \
+                  around it"
+    )
+)]
+pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
+    scratch: &mut CallingScratch<SsrEmissionScratch>,
+    genotypes: &GenotypeTableView<'_>,
+    model: &dyn GenotypePriorModel,
+    inbreeding_by_sample: &[InbreedingF],
+    config: &RunnableCallingLoopConfig,
+) -> FrequencyLoopOutcome {
+    let sample_count = scratch.sample_count();
+    assert_eq!(
+        inbreeding_by_sample.len(),
+        sample_count,
+        "the inbreeding coefficients are one per sample in the run's sample order: this \
+         locus is prepared for {sample_count} samples and {} coefficients arrived",
+        inbreeding_by_sample.len()
+    );
+
+    // The initialisation: one E-step on the reads alone, then the M-step, which together
+    // mint the expected copies the first seeded pass's prior is built from. It is **not**
+    // counted as a pass — `passes` counts the passes that had a prior — and it runs at the
+    // start of every outer round, not only the very first (§3).
+    for sample in 0..sample_count {
+        score_one_sample(
+            scratch.sample_scoring_buffers_mut(sample),
+            genotypes,
+            PassPrior::Flat,
+        );
+    }
+    sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+
+    let max_passes = config.max_passes.get();
+    let mut passes = 0;
+    loop {
+        // Walking the coefficients rather than the sample indices is what makes the run's
+        // sample order the *only* order either half of the pass can be in — and the length
+        // check above is what makes it a walk over every sample rather than over as many as
+        // happened to arrive.
+        for (sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
+            score_one_sample(
+                scratch.sample_scoring_buffers_mut(sample),
+                genotypes,
+                PassPrior::LeaveOneOut { model, inbreeding },
+            );
+        }
+        scratch.advance_cohort_expected_copies();
+        sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+        passes += 1;
+
+        if cohort_expected_copies_have_settled(
+            scratch.previous_cohort_expected_copies(),
+            scratch.cohort_expected_copies(),
+            genotypes.ploidy(),
+            sample_count,
+            config.convergence_threshold,
+        ) {
+            return FrequencyLoopOutcome {
+                passes,
+                converged: true,
+            };
+        }
+        if passes >= max_passes {
+            // **Emitted with the flag, never dropped and never an error.** One hard locus
+            // must not kill a cohort run (§6).
+            return FrequencyLoopOutcome {
+                passes,
+                converged: false,
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
     use crate::ng::calling::genotype_prior::MarginalizedDirichletPrior;
-    use crate::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
+    use crate::ng::calling::{
+        CandidateAlleles, ExpectedAlleleCopies, GenotypeTable, LocusInference, SampleGenotypeCall,
+        UNWRITTEN_SCRATCH_VALUE,
+    };
     use crate::ng::locus_generation::LocusKind;
-    use crate::ng::types::Ploidy;
+    use crate::ng::parameter_estimation::Provenance;
+    use crate::ng::types::{AlleleId, ContigId, GenomeRegion, Genotype, Phred, Position};
+    use std::num::NonZeroU32;
     use std::sync::Arc;
+
+    use super::super::{CallingLoopConfig, DEFAULT_CONVERGENCE_THRESHOLD};
 
     /// A genotype prior that writes numbers the test chose.
     ///
@@ -2126,6 +2456,743 @@ mod tests {
         assert!(
             (copies[0] - 1.0).abs() < 1e-12,
             "and of the reference: {copies:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------
+    // C2 — convergence, the cap, and the emitted flag
+    // ---------------------------------------------------------------------------------
+
+    /// A configuration that ships, with the pass cap moved.
+    fn capped_at(max_passes: u32) -> RunnableCallingLoopConfig {
+        CallingLoopConfig {
+            max_passes: NonZeroU32::new(max_passes).expect("a cap of at least one pass"),
+            ..CallingLoopConfig::DEFAULT
+        }
+        .validate()
+        .expect("only the cap moved, and it is not a value validation refuses")
+    }
+
+    /// A configuration a locus can meet **only by reaching a bitwise fixed point**, so that
+    /// short of one the cap is what stops it.
+    ///
+    /// **Not "never settles", which is what this was first called and is not true of any
+    /// fixture here.** A threshold of `1e-300` is met the moment two passes produce identical
+    /// copies, and expectation-maximization reaches that: measured,
+    /// `three_samples_pulling_apart` hits its fixed point at pass 29 and reports
+    /// `converged: true` however small the threshold. The helper is honest below that and a
+    /// trap above it.
+    ///
+    /// **`1e-300`, not zero** — [`CallingLoopConfig::validate`] refuses a threshold that is
+    /// not above zero, and it is right to.
+    fn settles_only_at_a_bitwise_fixed_point(max_passes: u32) -> RunnableCallingLoopConfig {
+        CallingLoopConfig {
+            max_passes: NonZeroU32::new(max_passes).expect("a cap of at least one pass"),
+            convergence_threshold: 1e-300,
+            ..CallingLoopConfig::DEFAULT
+        }
+        .validate()
+        .expect("a positive finite threshold below the ceiling")
+    }
+
+    /// Run the frequency loop over a cohort whose genotype likelihoods are `likelihoods`, one
+    /// row per sample, every sample outbred — and hand back the scratch so a test can read
+    /// what the loop left in it: the cohort's expected copies, the previous pass's row, and
+    /// the last sample scored.
+    ///
+    /// For a cohort whose samples differ in inbreeding, use [`loop_over_inbred`].
+    fn loop_over(
+        likelihoods: &[Vec<f64>],
+        seed_concentration: &[f64],
+        alleles: &CandidateAlleles,
+        view: &GenotypeTableView<'_>,
+        config: &RunnableCallingLoopConfig,
+    ) -> (FrequencyLoopOutcome, CallingScratch<()>) {
+        let outbred_cohort = vec![outbred(); likelihoods.len()];
+        loop_over_inbred(
+            likelihoods,
+            &outbred_cohort,
+            seed_concentration,
+            alleles,
+            view,
+            config,
+        )
+    }
+
+    /// [`loop_over`] with an inbreeding coefficient chosen per sample, in the run's sample
+    /// order.
+    fn loop_over_inbred(
+        likelihoods: &[Vec<f64>],
+        inbreeding_by_sample: &[InbreedingF],
+        seed_concentration: &[f64],
+        alleles: &CandidateAlleles,
+        view: &GenotypeTableView<'_>,
+        config: &RunnableCallingLoopConfig,
+    ) -> (FrequencyLoopOutcome, CallingScratch<()>) {
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(likelihoods.len(), alleles, view);
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(seed_concentration);
+        for (sample, row) in likelihoods.iter().enumerate() {
+            for (slot, &value) in scratch
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .zip(row)
+            {
+                *slot = LogProb(value);
+            }
+        }
+        let outcome = run_frequency_loop(
+            &mut scratch,
+            view,
+            &MarginalizedDirichletPrior,
+            inbreeding_by_sample,
+            config,
+        );
+        (outcome, scratch)
+    }
+
+    /// Three samples whose reads pull them apart, at a biallelic locus — the fixture the
+    /// cap tests and the hand-driven oracle share.
+    ///
+    /// The rows are the three diploid genotypes in the table's order (`0/0`, `0/1`, `1/1`).
+    /// One sample's reads favour each, by 2 nats — about 8.7 Phred, a handful of reads —
+    /// which is enough disagreement that the cohort's frequencies are still moving after
+    /// several passes.
+    fn three_samples_pulling_apart() -> Vec<Vec<f64>> {
+        vec![
+            vec![0.0, -2.0, -6.0],
+            vec![-2.0, 0.0, -2.0],
+            vec![-6.0, -2.0, 0.0],
+        ]
+    }
+
+    /// **One sample reaches its fixed point on the loop's first pass, and the second only
+    /// confirms it** — `spec/calling_em_loop.md` §13 test 1.
+    ///
+    /// Two runs of the same locus, differing only in the pass cap.
+    ///
+    /// - **Capped at one pass**, the loop stops with `converged = false` and the two cohort
+    ///   rows it leaves behind are the prior-free initialisation's and the first seeded
+    ///   pass's. §3 says they must differ, because the seed is worth 20 to 30 Phred, and
+    ///   they do: measured on this fixture, `[1.7279, 0.2721]` against `[1.9998, 0.0002]`.
+    ///   That is 0.272 copies of the alternative allele, against the 0.002 raw copies the
+    ///   `1e-3` threshold allows over one diploid sample's two chromosomes — 136 times the
+    ///   movement that would have stopped the loop.
+    /// - **At the shipped cap** the loop stops after **two** passes, and pass 2's copies are
+    ///   pass 1's **bit for bit** — asserted with `assert_eq!` on the slices, not a
+    ///   tolerance.
+    ///
+    /// **No branch on cohort size is what produces this** (§7): the prior's leave-one-out
+    /// term subtracts the one sample's copies from a cohort total that *is* those copies, so
+    /// the concentration comes back as the seed on every pass and the second pass cannot
+    /// move. Whether to skip that second pass is spec §12's question 6; this test asserts on
+    /// the genotype and on pass-1-equals-pass-2 as well, so it survives the branch being
+    /// added.
+    #[test]
+    fn at_one_sample_the_loop_settles_on_the_second_pass() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let seed = [1.0, 0.000_5];
+        // Reads that mildly favour the reference homozygote: 1 nat over the heterozygote.
+        let likelihoods = vec![vec![0.0, -1.0, -6.0]];
+
+        let (capped, scratch) = loop_over(&likelihoods, &seed, &alleles, &view, &capped_at(1));
+        assert_eq!(capped.passes, 1);
+        assert!(
+            !capped.converged,
+            "the prior-free initialisation and the first seeded pass are 20 to 30 Phred \
+             apart, so one pass cannot have settled"
+        );
+        let initialisation = scratch.previous_cohort_expected_copies().to_vec();
+        let after_one_pass = scratch.cohort_expected_copies().to_vec();
+        assert!(
+            (initialisation[1] - after_one_pass[1]).abs() > 0.1,
+            "the seed moved the alternative allele's copies from {} to {}, which is less \
+             than a tenth of a copy — the fixture no longer poses the question",
+            initialisation[1],
+            after_one_pass[1]
+        );
+
+        let (settled, scratch) = loop_over(
+            &likelihoods,
+            &seed,
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+        assert!(settled.converged);
+        assert_eq!(
+            settled.passes, 2,
+            "pass 1 differs from the initialisation and pass 2 cannot differ from pass 1"
+        );
+        assert_eq!(
+            scratch.previous_cohort_expected_copies(),
+            scratch.cohort_expected_copies(),
+            "at one sample pass 2's expected copies are pass 1's bit for bit"
+        );
+        let (winner, _) = scratch
+            .posterior_row()
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("a finite posterior"))
+            .expect("a locus has at least one genotype");
+        assert_eq!(winner, 0, "the reads and the seed both favour 0/0");
+    }
+
+    /// **A locus that runs out of passes is emitted with the flag set** —
+    /// `spec/calling_em_loop.md` §13 test 4 and §6.
+    ///
+    /// The same three-sample locus twice, differing only in the pass cap. Capped at two it
+    /// reports `passes = 2, converged = false`; at the shipped cap of 50 it settles in 4
+    /// passes and reports `converged = true`. **So the flag is about the cap and not about
+    /// the locus**, which is the property that makes it worth emitting.
+    ///
+    /// **The capped locus is called, and the flag survives the call**: the outcome's two
+    /// fields go into a `LocusInference` and come back out. `LocusInference::new`
+    /// deliberately does not check `converged` against `passes` — the cap is run
+    /// configuration it cannot see — so this is what says a capped locus is emitted rather
+    /// than refused.
+    ///
+    /// **Deliberately not asserted: that the delta falls on every pass.**
+    /// Expectation-maximization guarantees a monotone likelihood, not a monotone parameter
+    /// delta, and §6 claims no such thing (§13 test 4).
+    #[test]
+    fn a_locus_that_runs_out_of_passes_is_called_and_says_so() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let seed = [1.0, 0.000_5];
+        let likelihoods = three_samples_pulling_apart();
+
+        let (capped, _) = loop_over(&likelihoods, &seed, &alleles, &view, &capped_at(2));
+        assert_eq!(
+            capped,
+            FrequencyLoopOutcome {
+                passes: 2,
+                converged: false,
+            },
+            "two passes is not enough for this locus, so the cap is what stopped it"
+        );
+
+        let (settled, _) = loop_over(
+            &likelihoods,
+            &seed,
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+        assert!(
+            settled.converged,
+            "the same locus settles when it is allowed the passes"
+        );
+        assert_eq!(settled.passes, 4);
+
+        // The flag reaches the output, which is the half §6 says nothing downstream can
+        // reconstruct.
+        let called = LocusInference::new(
+            GenomeRegion {
+                contig: ContigId(3),
+                start: Position(940),
+                end: Position(940),
+            },
+            alleles.clone(),
+            vec![
+                SampleGenotypeCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
+                    genotype_quality: Phred::try_new(30.0).expect("a quality"),
+                };
+                3
+            ],
+            ExpectedAlleleCopies::new(vec![5.0, 1.0], &alleles),
+            capped.converged,
+            capped.passes,
+            Provenance::FittedHere,
+            false,
+        );
+        assert!(!called.converged);
+        assert_eq!(called.passes, 2);
+    }
+
+    /// **The same movement on the frequency scale stops the loop at one sample and at a
+    /// thousand** — the division's own test (`spec/calling_em_loop.md` §6).
+    ///
+    /// Expected copies are a count and the threshold is a fraction, so the criterion is
+    /// written on the count *divided by the cohort's chromosomes*. This walks a cohort of 1
+    /// and a cohort of 1,000, gives each the raw movement that is the same fraction of its
+    /// own chromosome total, and requires the same verdict: settled at 9 parts in 10,000,
+    /// not settled at 11.
+    ///
+    /// **Measured against the mutation it exists for.** With the `/ cohort_chromosomes`
+    /// deleted, this test stops at its very first cell: at one sample the movement is 0.0018
+    /// raw copies against a `1e-3` threshold, so a locus that *has* settled is reported as
+    /// still moving. The thousand-sample cell, at 1.8 raw copies, would fail the same way —
+    /// which is the point. **A criterion on raw counts is not merely tighter at a thousand
+    /// samples; it is already wrong at one.** The same mutation also pushes the cap test's
+    /// three-sample locus from 4 passes to 6.
+    #[test]
+    fn the_same_frequency_scale_movement_settles_at_one_sample_and_at_a_thousand() {
+        let threshold = DEFAULT_CONVERGENCE_THRESHOLD;
+        for samples in [1_usize, 1000] {
+            let chromosomes = 2.0 * samples as f64;
+            for (frequency_movement, should_settle) in [(9e-4, true), (1.1e-3, false)] {
+                let previous = [10.0, 0.0];
+                let current = [10.0, frequency_movement * chromosomes];
+                assert_eq!(
+                    cohort_expected_copies_have_settled(
+                        &previous,
+                        &current,
+                        diploid(),
+                        samples,
+                        threshold
+                    ),
+                    should_settle,
+                    "a movement of {frequency_movement} on the frequency scale is \
+                     {} raw copies over {chromosomes} chromosomes",
+                    current[1]
+                );
+            }
+        }
+    }
+
+    /// **Three of the four natural spellings of the delta report a locus settled before any
+    /// pass has advanced**, and the shipped one does not.
+    ///
+    /// `prepare_for_locus` fills **both** cohort rows with `UNWRITTEN_SCRATCH_VALUE`, which
+    /// is `NaN`, and the previous row keeps it until a pass has actually swapped. Every
+    /// comparison against a `NaN` is false, and `f64::max` is documented to return *the other
+    /// argument* when one is `NaN` — so a fold discards the sentinel instead of propagating
+    /// it, and the three fold spellings hand back a delta below any threshold.
+    ///
+    /// The failure that would produce is silent and it is the worst kind: a genotype,
+    /// **flagged as converged**, from a loop that ran one pass and compared it against
+    /// nothing.
+    ///
+    /// This test computes all four on that exact state and asserts the disagreement, so the
+    /// reason for `all(… < threshold)` is a fact in the suite rather than a remark in a doc
+    /// comment.
+    #[test]
+    fn the_fold_spellings_of_the_delta_settle_where_this_one_does_not() {
+        let previous = [UNWRITTEN_SCRATCH_VALUE, UNWRITTEN_SCRATCH_VALUE];
+        let current = [1.9, 0.1];
+        let chromosomes = 6.0;
+        let threshold = DEFAULT_CONVERGENCE_THRESHOLD;
+        let scaled: Vec<f64> = previous
+            .iter()
+            .zip(&current)
+            .map(|(before, after)| (after - before).abs() / chromosomes)
+            .collect();
+
+        let from_zero = scaled.iter().copied().fold(0.0_f64, f64::max);
+        let from_negative_infinity = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut by_hand = 0.0_f64;
+        for &movement in &scaled {
+            if movement > by_hand {
+                by_hand = movement;
+            }
+        }
+
+        assert!(
+            from_zero < threshold,
+            "fold(0.0, f64::max) discards the sentinel and returns {from_zero}"
+        );
+        assert!(
+            from_negative_infinity < threshold,
+            "fold(-inf, f64::max) discards it too and returns {from_negative_infinity}"
+        );
+        assert!(
+            by_hand < threshold,
+            "a hand-written `>` comparison loses every comparison against a NaN and \
+             returns {by_hand}"
+        );
+        assert!(
+            !cohort_expected_copies_have_settled(&previous, &current, diploid(), 3, threshold),
+            "the shipped rule is the only one of the four that refuses to settle against a \
+             row no pass has written"
+        );
+    }
+
+    /// **The loop is exactly the sequence of passes driven by hand**, cohort row for cohort
+    /// row, bit for bit.
+    ///
+    /// The oracle for everything the loop's own body decides and no single-property test
+    /// pins: that the prior-free pass runs once and is not counted, that the E-step is
+    /// scored against the row the *previous* M-step wrote, that the swap sits between the
+    /// two halves of a pass, and that `passes` counts the seeded passes.
+    ///
+    /// **The two sides are stopped by different means and that is deliberate.** The
+    /// hand-driven side has no stopping rule at all — it is `for _ in 0..PASSES` — so it
+    /// cannot inherit a bug from the rule under test; the loop is held to the same pass count
+    /// by a threshold small enough that only a bitwise fixed point meets it, which this
+    /// fixture does not reach until pass 29. Two rows are compared, not one: the loop's
+    /// current row against the hand-driven row after four passes, and the loop's *previous*
+    /// row against the hand-driven row after three — which is what says the swap happens
+    /// where it does rather than a pass late.
+    ///
+    /// **Measured against the reordering it exists for.** Moving the swap ahead of the
+    /// E-step scores every sample against a cohort row that has just been refilled with the
+    /// `NaN` sentinel. In debug that panics inside the prior — *"the cohort's expected
+    /// allele copies … got `[NaN, NaN]`"* — but that check is a `debug_assert!`, so
+    /// **under `--release` the run does not panic**: the leave-one-out `max(0, ·)` returns
+    /// the other operand on a `NaN`, every sample is scored against the bare seed, and the
+    /// loop reports `passes: 2, converged: true` where the shipped order gives
+    /// `passes: 4, converged: false`. A converged flag, two passes early, with the cohort's
+    /// evidence silently absent. This test is what sees it, and it sees it in both profiles.
+    #[test]
+    fn the_loop_reproduces_the_passes_driven_by_hand() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let seed = [1.0, 0.000_5];
+        let likelihoods = three_samples_pulling_apart();
+        const PASSES: u32 = 4;
+
+        let (outcome, scratch) = loop_over(
+            &likelihoods,
+            &seed,
+            &alleles,
+            &view,
+            &settles_only_at_a_bitwise_fixed_point(PASSES),
+        );
+        assert_eq!(
+            outcome,
+            FrequencyLoopOutcome {
+                passes: PASSES,
+                converged: false,
+            }
+        );
+
+        // The same passes, written out.
+        let mut by_hand = CallingScratch::<()>::default();
+        by_hand.prepare_for_locus(likelihoods.len(), &alleles, &view);
+        by_hand.seed_concentration_mut().copy_from_slice(&seed);
+        for (sample, row) in likelihoods.iter().enumerate() {
+            for (slot, &value) in by_hand
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .zip(row)
+            {
+                *slot = LogProb(value);
+            }
+        }
+        for sample in 0..likelihoods.len() {
+            score_one_sample(
+                by_hand.sample_scoring_buffers_mut(sample),
+                &view,
+                PassPrior::Flat,
+            );
+        }
+        sum_cohort_expected_copies(by_hand.cohort_summing_buffers_mut());
+        let mut rows = Vec::with_capacity(PASSES as usize);
+        for _ in 0..PASSES {
+            for sample in 0..likelihoods.len() {
+                score_one_sample(
+                    by_hand.sample_scoring_buffers_mut(sample),
+                    &view,
+                    PassPrior::LeaveOneOut {
+                        model: &MarginalizedDirichletPrior,
+                        inbreeding: outbred(),
+                    },
+                );
+            }
+            by_hand.advance_cohort_expected_copies();
+            sum_cohort_expected_copies(by_hand.cohort_summing_buffers_mut());
+            rows.push(by_hand.cohort_expected_copies().to_vec());
+        }
+
+        assert_eq!(
+            scratch.cohort_expected_copies(),
+            &rows[PASSES as usize - 1][..],
+            "the loop's final row is not the hand-driven pass {PASSES} row"
+        );
+        assert_eq!(
+            scratch.previous_cohort_expected_copies(),
+            &rows[PASSES as usize - 2][..],
+            "the loop's previous row is not the hand-driven pass {} row, so the swap is \
+             not where it should be",
+            PASSES - 1
+        );
+    }
+
+    /// **Each sample is scored against its own inbreeding coefficient, not the cohort's
+    /// first** — the property the length check exists to protect, and the one no other
+    /// fixture reaches, because every other cohort here is `vec![outbred(); n]`.
+    ///
+    /// Samples 1 and 2 pull toward opposite homozygotes, so trading their coefficients
+    /// **without moving the samples** must move the answer; an implementation that hands
+    /// every sample one shared coefficient returns the same row for both runs. Measured, with
+    /// the coefficient hoisted to `inbreeding_by_sample[0]`: `passes` goes 3 → 4 and the
+    /// cohort's copies of the alternative allele move 0.38 out of six chromosomes, an
+    /// allele-frequency shift of 0.064 — finite, plausible, wrong, and until this test,
+    /// unseen.
+    ///
+    /// **Not asserted: that moving a sample and its coefficient together reproduces the
+    /// cohort row bitwise.** It does not, and it should not — the M-step sums in sample order
+    /// (spec §8), so a permutation moves the sum by one unit in the last place, measured
+    /// `2.883168867243733` against `2.8831688672437323`. Spec §13 test 2 pins the bitwise
+    /// comparison on the fixed order for exactly this reason.
+    #[test]
+    fn each_sample_is_scored_against_its_own_inbreeding_coefficient() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let seed_concentration = [1.0, 0.000_5];
+        let likelihoods = three_samples_pulling_apart();
+        let half = InbreedingF::try_new(0.5).expect("a coefficient");
+        let most = InbreedingF::try_new(0.9).expect("a coefficient");
+        let shipped = RunnableCallingLoopConfig::default();
+
+        let (_, as_given) = loop_over_inbred(
+            &likelihoods,
+            &[outbred(), half, most],
+            &seed_concentration,
+            &alleles,
+            &view,
+            &shipped,
+        );
+        let (_, traded) = loop_over_inbred(
+            &likelihoods,
+            &[outbred(), most, half],
+            &seed_concentration,
+            &alleles,
+            &view,
+            &shipped,
+        );
+
+        let moved =
+            (as_given.cohort_expected_copies()[1] - traded.cohort_expected_copies()[1]).abs();
+        assert!(
+            moved > 0.01,
+            "samples 1 and 2 pull opposite ways, so trading their coefficients must move the \
+             cohort's copies of the alternative allele — it moved {moved}, and an \
+             implementation that hands every sample one shared coefficient would move it by \
+             nothing at all"
+        );
+    }
+
+    /// **A locus that settles on its last allowed pass is converged, not capped** — the one
+    /// input that separates the loop's two exit tests.
+    ///
+    /// Everywhere else in this file the cap and the settling are several passes apart, so
+    /// nothing distinguishes the two orderings. `three_samples_pulling_apart` settles on pass
+    /// 4, so a cap of exactly 4 is where they disagree: measured, testing the cap first
+    /// returns `converged: false` for a locus that did settle, which understates every
+    /// genotype at the site (§6).
+    #[test]
+    fn run_frequency_loop_reports_converged_when_the_last_allowed_pass_settles() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let (outcome, _) = loop_over(
+            &three_samples_pulling_apart(),
+            &[1.0, 0.000_5],
+            &alleles,
+            &view,
+            &capped_at(4),
+        );
+        assert_eq!(
+            outcome,
+            FrequencyLoopOutcome {
+                passes: 4,
+                converged: true,
+            },
+            "this locus settles on pass 4, so a cap of exactly 4 must report it settled \
+             rather than capped"
+        );
+    }
+
+    /// **The `.abs()` earns its place only from three alleles on**, and this is the row that
+    /// shows it.
+    ///
+    /// At a biallelic locus the expected copies sum to the cohort's chromosome total, so the
+    /// two movements are equal and opposite and a signed comparison gives the same verdict as
+    /// an absolute one — which is why every other fixture in this file, all of them two
+    /// alleles, leaves a dropped `.abs()` invisible. At three alleles the reference can fall
+    /// by more than the threshold while both alternatives rise by less: scaled,
+    /// `[−0.0015, +0.0008, +0.0007]` against `1e-3`. That is the ordinary shape of a
+    /// multi-allelic locus still moving, and a caller without the `.abs()` calls it settled.
+    #[test]
+    fn a_fall_larger_than_every_rise_has_not_settled() {
+        let previous = [10.0, 2.0, 3.0];
+        let current = [10.0 - 0.009, 2.0 + 0.004_8, 3.0 + 0.004_2];
+        assert!(
+            !cohort_expected_copies_have_settled(
+                &previous,
+                &current,
+                diploid(),
+                3,
+                DEFAULT_CONVERGENCE_THRESHOLD
+            ),
+            "the reference allele fell by 0.0015 on the frequency scale, half again the 1e-3 \
+             threshold, while both alternatives rose by less than it"
+        );
+    }
+
+    /// **The loop at three alleles**, because every other fixture here is biallelic and a
+    /// two-allele locus hides a whole class of defect: the expected copies sum to the
+    /// cohort's chromosome total, so at two alleles the two movements are equal and opposite
+    /// and anything that only looks at one of them agrees with the shipped rule by
+    /// construction (`a_fall_larger_than_every_rise_has_not_settled` is the unit-level
+    /// counterpart).
+    ///
+    /// Three samples whose reads pull toward three different homozygotes over three alleles,
+    /// by the same 2 nats as the biallelic fixture, so the loop takes several passes rather
+    /// than settling on the first. The asserted property is the one that must hold at any
+    /// allele count: the cohort's expected copies sum to `ploidy × samples`, because each
+    /// sample's posterior is normalised over genotypes that each carry `ploidy` copies.
+    /// Measured, it settles in 2 passes at `[2.4868, 1.7566, 1.7566]`.
+    #[test]
+    fn the_loop_settles_at_three_alleles_and_the_copies_still_sum_to_the_chromosomes() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        assert_eq!(view.allele_count(), 3);
+        // The table's genotype order at three alleles, read off `genotype_allele_counts`:
+        // 0/0, 0/1, 1/1, 0/2, 1/2, 2/2. Each sample favours one homozygote by 2 nats.
+        let likelihoods = vec![
+            vec![0.0, -2.0, -6.0, -2.0, -6.0, -6.0],
+            vec![-6.0, -2.0, 0.0, -6.0, -2.0, -6.0],
+            vec![-6.0, -6.0, -6.0, -2.0, -2.0, 0.0],
+        ];
+
+        let (outcome, scratch) = loop_over(
+            &likelihoods,
+            &[1.0, 0.000_5, 0.000_5],
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+        assert!(outcome.converged);
+
+        let copies = scratch.cohort_expected_copies();
+        assert_eq!(copies.len(), 3, "one entry per allele");
+        let total: f64 = copies.iter().sum();
+        assert!(
+            (total - 6.0).abs() < 1e-12,
+            "three diploid samples carry six chromosomes, and the cohort's expected copies \
+             sum to {total} over {copies:?}"
+        );
+    }
+
+    /// §6 stops when the movement falls *below* the threshold, and this is the row that sits
+    /// exactly on it: `2e-3` raw copies over two chromosomes is `1e-3` in `f64` exactly, not
+    /// a rounding of it, so the strict comparison is what decides the case.
+    #[test]
+    fn a_movement_exactly_at_the_threshold_has_not_settled() {
+        assert_eq!(
+            2e-3_f64 / 2.0,
+            DEFAULT_CONVERGENCE_THRESHOLD,
+            "the fixture only tests the boundary if it lands on it exactly"
+        );
+        assert!(
+            !cohort_expected_copies_have_settled(
+                &[0.0],
+                &[2e-3],
+                diploid(),
+                1,
+                DEFAULT_CONVERGENCE_THRESHOLD
+            ),
+            "§6 stops when the movement falls below the threshold, not when it reaches it"
+        );
+    }
+
+    /// A row of no alleles would report **every** locus settled on its first pass, because
+    /// `all` over nothing is true — the shape an unprepared scratch hands over, and the one
+    /// door the `NaN` sentinel cannot cover.
+    #[test]
+    #[should_panic(expected = "a cohort row of no alleles")]
+    fn a_convergence_test_over_no_alleles_is_refused() {
+        let _ = cohort_expected_copies_have_settled(
+            &[],
+            &[],
+            diploid(),
+            1,
+            DEFAULT_CONVERGENCE_THRESHOLD,
+        );
+    }
+
+    /// `zip` stops at the shorter row, so a short previous row would compare the alleles it
+    /// has and settle on the ones it does not. **A separate assertion from the emptiness
+    /// check above**, so each test can only be satisfied by the condition it names.
+    #[test]
+    #[should_panic(expected = "one entry per allele of the same locus")]
+    fn cohort_rows_of_different_lengths_are_refused() {
+        let _ = cohort_expected_copies_have_settled(
+            &[1.0],
+            &[1.0, 2.0],
+            diploid(),
+            1,
+            DEFAULT_CONVERGENCE_THRESHOLD,
+        );
+    }
+
+    /// A cohort of no samples is zero chromosomes, which turns every movement into an
+    /// infinity or a `NaN` — so no locus would ever settle and every one would spend the
+    /// whole cap.
+    ///
+    /// **The infinite and `NaN` chromosome counts that used to need their own tests are gone
+    /// rather than untested:** the function takes a [`Ploidy`], which is at least one by
+    /// construction, and a sample count, so no caller can express them.
+    #[test]
+    #[should_panic(expected = "a run whose sample order went missing")]
+    fn a_convergence_test_over_a_cohort_of_no_samples_is_refused() {
+        let _ = cohort_expected_copies_have_settled(
+            &[1.0],
+            &[1.0],
+            diploid(),
+            0,
+            DEFAULT_CONVERGENCE_THRESHOLD,
+        );
+    }
+
+    /// The threshold is a fraction on the frequency scale. `validate` refuses one that is
+    /// not where a run sets it; this is the check at the point of use, for a threshold built
+    /// by hand.
+    #[test]
+    #[should_panic(expected = "is not one")]
+    fn a_threshold_that_is_not_a_fraction_is_refused() {
+        let _ = cohort_expected_copies_have_settled(&[1.0], &[1.0], diploid(), 1, f64::NAN);
+    }
+
+    /// **The `is_finite()` half of the threshold guard needs an infinity to be reached at
+    /// all**, because `> 0.0` already refuses zero and `NaN`. And an infinity is the value
+    /// that matters: it reports every locus settled on its first pass rather than never.
+    #[test]
+    #[should_panic(expected = "is not one")]
+    fn an_infinite_threshold_is_refused() {
+        let _ = cohort_expected_copies_have_settled(&[0.0], &[9.0], diploid(), 1, f64::INFINITY);
+    }
+
+    /// The inbreeding coefficients are one per sample in the run's sample order, and the
+    /// seeded pass walks them — so a slice one short scores fewer samples than the locus has
+    /// and the M-step sums the rest as though this pass had written them.
+    #[test]
+    #[should_panic(expected = "one per sample in the run's sample order")]
+    fn fewer_inbreeding_coefficients_than_samples_are_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let (_, _) = loop_over_inbred(
+            &three_samples_pulling_apart(),
+            &[outbred(), outbred()],
+            &[1.0, 0.000_5],
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+    }
+
+    /// The mirror of the short slice, and the same run-shape bug. Without the check it
+    /// surfaces two modules away as a scratch-indexing panic about the genotype-likelihood
+    /// table, which names neither the cohort nor the coefficients.
+    #[test]
+    #[should_panic(expected = "one per sample in the run's sample order")]
+    fn more_inbreeding_coefficients_than_samples_are_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let two_samples = three_samples_pulling_apart()[..2].to_vec();
+        let (_, _) = loop_over_inbred(
+            &two_samples,
+            &[outbred(), outbred(), outbred()],
+            &[1.0, 0.000_5],
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
         );
     }
 }
