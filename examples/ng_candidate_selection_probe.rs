@@ -655,10 +655,14 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 for row in &sample.supported {
                     pooled[row.allele] += row.support.num_reads;
                 }
+                // **Every allele of the table, including the ones this sample showed no reads
+                // for.** An earlier version skipped the zero-read rows, and at a homozygous site
+                // that silently dropped the *reference* — every read carries the alternative, so
+                // allele 0 has no row — which cost a fixture built from this 221 loci of 7,478 at
+                // 300× and 279 of 4,177 at 30×, every one of them a clean homozygous truth
+                // variant. A consumer that wants only the non-zero rows can filter; one that
+                // needs the table's shape cannot invent it.
                 for (allele, reads) in pooled.iter().enumerate() {
-                    if *reads == 0 {
-                        continue;
-                    }
                     writeln!(
                         out,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",

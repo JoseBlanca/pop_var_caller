@@ -1,48 +1,74 @@
 //! **Does the support bar keep the alleles that are really there?** — candidate selection
-//! scored against the GIAB trio's v4.2.1 truth set, on loci cut from real reads.
+//! scored against HG002's v4.2.1 truth set, on loci cut from real reads at two depths.
 //!
 //! The module's own unit tests build loci by hand and prove the rule does what it says. This one
-//! has no hand-built locus in it: it runs [`select_generic`] over the merge's real tables at two
-//! depths and asks what the bar cost in true alternative alleles. It is the step that would catch
-//! a rule that is self-consistent and wrong on data.
+//! has no hand-built locus in it: it runs [`select_generic`] over the merge's real tables and asks
+//! what the bar cost in true alternative alleles. It is the step that would catch a rule that is
+//! self-consistent and wrong on data.
 //!
-//! # The fixture, and what a "true allele" is in it
+//! # One sample, and why that is not a choice
 //!
-//! `tests/data/candidate_truth/` holds one file per depth, cut from the 100 benchmark intervals
-//! of `HG002_bench_azar_merged_100.bed` (572 kb) over HG002/3/4. One row per
-//! `(locus, sample, allele)`: that sample's pooled reads on the allele and its compared reads at
-//! the locus, which are the numerator and the denominator the rule is asked with. **Only loci
-//! carrying at least one true alternative are kept**, which is what makes it 78 kB rather than a
-//! few megabytes.
+//! **The fixture is HG002 alone at each depth, and the benchmark data cannot currently give it a
+//! sample axis.** `benchmarks/giab/per_sample/bam/300x/` holds three files, but HG003 and HG004
+//! are sliced to *their own* benchmark regions: over `HG002_bench_azar_merged_100.bed` — the BED
+//! these loci come from — `samtools view -c` counts 36,597 reads for HG002 and **0** for HG003.
+//! Walking all three therefore builds byte-identical output to walking one, and HG003 alone builds
+//! **0 loci**. The same holds at 30×. *An earlier version of this file called the fixture "the
+//! GIAB trio", which is what the directory is named and not what the data is.*
 //!
-//! **A true allele is a haplotype the truth genotypes admit, projected onto the locus's span.**
-//! That is the whole of the fixture's correctness and it is not the obvious construction. A
-//! homozygous record sits on both copies and a heterozygous one on a single copy, so a span with
-//! no het gives one sequence and a span with one het gives two — the homozygous records alone,
-//! and those plus the het. **Projecting a record on its own when another sits beside it asks for a
-//! sequence the sample does not carry**, and doing exactly that is what made two correctly-called
-//! alleles look lost to the bar for a day (`doc/devel/ng/spec/candidate_alleles.md` §3.3): at
-//! `chr1:90667287-90667293` HG002 carries a homozygous 2-base deletion and a heterozygous
-//! substitution, the caller keeps both of its haplotypes at 162 and 127 reads, and the
-//! substitution-without-the-deletion sequence that a naive projection looks for has one read
-//! because no read carries it. **Spans with two or more unphased heterozygous records are dropped
-//! rather than guessed** — 12 of them at 300×, 11 at 30× — because enumerating both readings
-//! manufactures sequences nobody carries, which is the same defect wearing a different hat.
+//! **What that costs, stated because it is a real hole:** every distinction between "this sample's
+//! own count" and "the cohort's count" is arithmetically invisible here, since a sum over one
+//! sample is that sample's own count. Four mutations of the module leave every test below green —
+//! switching the bar's denominator to the cohort total, switching its numerator to the cohort's
+//! reads, folding only the first covering sample, and, in the other direction, requiring two
+//! samples instead of one. **That half of the rule is covered by the module's own unit tests**,
+//! which build multi-sample loci by hand
+//! (`the_share_is_one_samples_own_and_the_rule_is_asked_of_each_sample_alone`). What is missing is
+//! a *real* cohort with a truth set, and this project has none: the truth data is one human, the
+//! cohort data is 63 tomato accessions with no truth VCF.
+//!
+//! # What a "true allele" is here
+//!
+//! **A true allele is a haplotype the truth genotypes admit, projected onto the locus's span** —
+//! not any combination of the records in that span. A site with one option sits on both copies; a
+//! site with two puts a different thing on each, so one variable site gives two haplotypes.
+//! **Projecting a record on its own when another sits beside it asks for a sequence the sample
+//! does not carry**, and doing that is what made two correctly-called alleles look lost to the bar
+//! for a day (`doc/devel/ng/spec/candidate_alleles.md` §3.3): at `chr1:90667287-90667293` HG002
+//! carries a homozygous 2-base deletion *and* a heterozygous substitution, the caller keeps both
+//! haplotypes at 162 and 127 reads, and the substitution-without-the-deletion sequence a naive
+//! projection looks for has one read because no read carries it.
+//!
+//! **A `1/2` record is one site, not two overlapping heterozygous ones.** Reading it as two was
+//! what made every multiallelic repeat-length indel look ambiguous and dropped 11 of them; they
+//! are exactly the hard cases, and the bar keeps them. Only genuinely unphased multi-site spans
+//! are dropped now — **1 at 300× and 0 at 30×**, against 12 and 11 before.
 //!
 //! # What each test is for
 //!
-//! The recall identity alone **cannot fail on the share term**, and that is worth stating because
-//! it is what the plan's own description of this step asked for. Both it and the oracle ask the
-//! same predicate, so deleting the share from the caller changes both sides together. **The
-//! ladders are what make this file bite:** each asserts that a stricter bar loses true alleles a
-//! looser one keeps, so a term that stopped working shows up as a ladder that stopped separating.
+//! **The recall identity is the strongest of the four, not the weakest.** Of 23 mutations tried
+//! against the module, 15 killed at least one test and **every one of those 15 killed the
+//! identity**; each ladder killed a strict subset. That is because its oracle re-derives
+//! `max(floor, ceil(share × compared))` in this file rather than calling `MinAltReads::required_of`
+//! — a test that asks the module its own question could only ever agree with it. *An earlier
+//! version of this comment claimed the opposite, and the helper 180 lines below already said so.*
 //!
-//! Both ladders are exercised at both depths, because which half of `max(floor, ceil(share ×
-//! compared))` decides is a property of the locus rather than of the run. **The label "300×" is a
-//! run average and not a per-locus fact**: across this fixture a sample's compared reads at a
-//! locus run from 8 to 428, median 273. So the floor is *not* inert at 300× — raising it from 2
-//! to 3 costs two true alleles there at every share setting — and an argument that it must be,
-//! because a 5-in-100 share of 300 reads asks for 15, holds only at the median locus.
+//! **What the ladders add is not mutation coverage but fixture coverage**: each asserts that a
+//! stricter bar loses true alleles a looser one keeps, which is a statement about whether *these
+//! loci* still discriminate at those settings. A recut that lost the discriminating loci would
+//! turn them red rather than leave them quietly meaningless.
+//!
+//! Both ladders run at both depths, because which half of the rule decides is a property of the
+//! locus and not of the run. **The label "300×" is a run average**: across this fixture a sample's
+//! compared reads at a locus run from **8 to 428, median 274** (at 30×: 3 to 54, median 28). So
+//! the floor is *not* inert at depth — raising it from 2 to 3 costs two true alleles at 300× at
+//! every share setting — and the argument that it must be, because a 5-in-100 share of 300 reads
+//! asks for 15, holds only at the median locus.
+//!
+//! **Two assertions rest on a single allele and that is worth knowing before a recut.** At 30× the
+//! share ladder needs 1 lost at 5 in 100 against 2 at 10 in 100, and the vacuity guard's
+//! `lost >= 1` limb needs that same one. They fail loudly rather than passing vacuously, but a
+//! fixture recut that missed one locus would turn them red.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -259,7 +285,7 @@ fn true_alleles_lost(loci: &[FixtureLocus], floor: u32, share: f64) -> usize {
 fn fixture(depth: &str) -> Vec<FixtureLocus> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/candidate_truth")
-        .join(format!("giab_trio_{depth}.csv"));
+        .join(format!("hg002_{depth}.csv"));
     let loci = read_fixture(&path);
     assert!(
         loci.len() > 500,
@@ -269,13 +295,16 @@ fn fixture(depth: &str) -> Vec<FixtureLocus> {
     loci
 }
 
-/// **What the bar admits is exactly what some single sample's reads reached it with** — spec §3.2
-/// in one assertion, over every locus of both fixtures and at every bar the ladders below use.
+/// **What the bar admits is exactly what the rule, re-derived here, says it should** — over every
+/// locus of both fixtures and at every bar the ladders below use.
 ///
-/// **This cannot fail on the share term alone** and the file's header says why; it is here to pin
-/// the *shape* of the rule — one sample suffices, the denominator is that sample's own compared
-/// reads — which is what a cohort-total bar or a two-sample bar would break, and both were live
-/// alternatives (spec §3.2).
+/// **This is the strongest test in the file**: of 23 mutations of the module, every one that any
+/// test caught was caught by this one. It works because [`some_sample_reached_the_bar`] spells the
+/// arithmetic out rather than calling `MinAltReads::required_of`.
+///
+/// **What it cannot see is the sample axis**, because this fixture has one sample — a cohort
+/// denominator and a per-sample denominator are the same number here. The header says what that
+/// costs and where that half is covered instead.
 #[test]
 fn the_bar_admits_exactly_the_alleles_some_single_sample_reached_it_with() {
     for depth in ["30x", "300x"] {

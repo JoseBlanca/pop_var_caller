@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **the stutter model says *repeats*, because *frame*
+> - **Last completed task (2026-08-25):** **candidate selection is done on the SNP/indel path, and
+> the two true alleles it was said to lose were never lost** (Milestone D of
+> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`, merged to main). **D1** put the measurement onto the shipped code: the
+> probe called its own copy of the rule, and that copy had drifted from the module three ways, not
+> the two anyone had written down — the third being the cap's last tie-break, which a trace then
+> showed cannot decide anything on this panel. It reproduces every figure the spec quotes, the
+> truth-set column included. **The support share moved from 5 in 100 to 10** (owner's ruling): it
+> costs two true alleles at 300× that 5 keeps, and ships anyway, because recall is one side of the
+> trade and the count of admitted candidates is the other and nothing has measured the second yet.
+> **D2** is the standing check: a 47 kB and 73 kB fixture cut from the GIAB trio at both depths,
+> four tests, each one killed by mutating the module rather than trusted after reading it.
+> **⛦ The finding that mattered came from the owner asking why a real allele would sit below a
+> tenth of a sample's reads at 300×.** It would not. Of the four the 10-in-100 share drops, two
+> were a scoring artefact: at `chr1:90667287-90667293` HG002 carries a homozygous 2-base deletion
+> *and* a heterozygous substitution, the caller keeps both haplotypes at 162 and 127 reads, and the
+> join was looking for the substitution without the deletion — a sequence no read carries. With
+> truth built as haplotypes the genotypes admit, the count-only bar loses **zero** true alleles at
+> 300×, where the spec's table had said two at every setting.
+> **⚠ And "300×" is a run average, not a per-locus fact** — across that fixture a sample's compared
+> reads at a locus run from 8 to 428 — so the floor is *not* inert at depth, which two documents
+> had claimed. **D3 was stopped short deliberately:** at the shipped bar the cap binds at 16 tomato
+> loci in 53,935 and at none of the trio's, and what would choose its value is a memory cost the
+> calling loop has to exist to measure.
+> - **Previously (2026-08-24):** **the stutter model says *repeats*, because *frame*
 > meant something else here** (step E1 of
 > [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
 > `ng-calling-likelihoods`; the first step of the STR path, after **Checkpoint C/D** completed the

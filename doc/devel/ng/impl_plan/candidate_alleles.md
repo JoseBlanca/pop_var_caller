@@ -232,7 +232,7 @@ share over every sample where the module maximises it over the samples that clea
 *other* difference is a defect.
 *Depends:* C3. *Source:* spec §3.3, §4.2, §5.
 
-**D2. The truth-set property, as a checked-in test.**  ☐
+**D2. The truth-set property, as a checked-in test.**  ✅
 **Widened at D1's measurement, with two reasons and the owner's agreement of 2026-08-24.**
 **Both depths, not 300× alone**, because the bar has two terms and each depth is the only place
 one of them decides: at 300× a 5-in-100 share asks for about 15 reads so the floor of 2 can never
@@ -249,7 +249,8 @@ Written as a property with the count, not as a golden number, so a fixture regen
 different depth still means something.
 *Depends:* D1. *Source:* spec §3.3, §12.
 
-**D3. What each cap would cost — the owner's measurement of 2026-08-24.**  ☐
+**D3. What each cap would cost — the owner's measurement of 2026-08-24.**  ◐ *partly measured,
+deliberately stopped short — see the ruling at the end of this entry.*
 The cap's default of six was inherited from production and has never been chosen from data.
 **Settled at Checkpoint C: it becomes a command-line parameter** — `MaxCandidateAlleles` is already
 a newtype refusing anything below two, so that wiring is the argument parser's.
@@ -279,10 +280,31 @@ over the samples that cleared the bar (§4.1, the owner's ruling of 2026-08-24).
 default from numbers the shipped code does not produce is the thing to avoid.
 *Depends:* D1. *Source:* spec §4, §4.1, §4.2, §11 Q2.
 
-> **Checkpoint D:** both external checks green, the numbers in the spec are reproduced by the
-> shipped code rather than by the probe's own copy, and D3's table is in front of the owner so the
-> cap's default can be chosen from it rather than inherited. **That choice is the owner's and is
-> not this plan's to make.** Pause for review.
+**Stopped short on 2026-08-25, with the owner, and here is what changed under it.** This entry was
+written when the support share was 5 in 100. It is now 10 (§3.3, the owner's ruling), which admits
+far fewer alternatives, and **the cap at the shipped bar has almost nothing left to do**: it binds
+at **16 of 53,935 tomato loci** — one in 3,400 — and at **none of the GIAB trio's, at any cap of
+three or more**, because the trio's widest locus in 572 kb carries two alternatives. Those two
+figures are measured and are in spec §4.2.
+
+**What was measured** (spec §4.2): loci above six, four and three alleles at the shipped bar on
+both benchmarks; the widest locus at each; and the cohort-growth table at 1, 4, 16 and 63 samples.
+**What was not, and why it was not:** the sample-genotypes-lost column — the per-sample missing
+this design ships against discarding the whole locus — and the single-base-locus saturation
+column. Both are still worth having, and neither can settle the default: **the cap's real cost is
+memory and genotype-table width, and nothing can weigh that until the calling loop and emission
+exist.** That is the same reason the share's own value is provisional, and it is the same shape of
+argument. Inheriting six until then costs a measured 16 tomato loci and nothing on the trio.
+
+*So the default stays at six, not because six was chosen but because nothing measurable yet
+distinguishes it. §11's Q2 carries the question, and the calling loop is what will answer it.*
+
+> **Checkpoint D:** both external checks green — the probe reproduces every figure §3.3 and §4.2
+> quote, including the truth-set column, and the recall property is a checked-in test over a
+> committed fixture at two depths. **The cap's default is not chosen from a table and will not be
+> at this checkpoint**: at the shipped bar it binds at 16 tomato loci in 53,935 and at none of the
+> trio's, and what would distinguish one value from another is a cost the calling loop has to
+> exist to measure. It stays at six, and §11's Q2 carries the question. Pause for review.
 
 ---
 
