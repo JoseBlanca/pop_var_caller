@@ -306,16 +306,43 @@ the cohort's expected allele copies, and from the second pass on the prior runs 
 included, and the loop converges under it. **What the first pass settles is where the iteration
 starts, not what the model is.**
 
-**Why not the seed: the seed on its own can talk the loop out of a variant that is really there.**
+**Why not the seed: the seed on its own holds the loop at no-variant for several passes.**
 The seed says a locus is almost certainly invariant — the hom-ref genotype carries about `1 − 3θ/2`
 of the prior mass and a heterozygote about `θ` ([`calling_priors.md`](calling_priors.md) §4), a pull
 of roughly 30 Phred at `θ = 0.001` and 20 Phred at `θ = 0.01`. Apply that on the first pass and, at a
-locus where the reads are thin, every sample that carries the variant can be scored hom-ref. Their
+locus where the reads are thin, every sample that carries the variant is scored hom-ref. Their
 expected copies of the alternative allele then come out near zero, so the cohort term for that
-allele is near zero on the second pass, so the prior is still just the seed — and so on. **The loop
-converges, and it converges to no-variant, having never let the reads speak.** GATK names this in its
-own allele-frequency calculation, which starts its frequencies flat and only then switches to the
-Dirichlet posterior mean:
+allele is near zero on the second pass, so the prior is still very nearly the seed — and the loop
+spends pass after pass climbing out of a hole its own first pass dug.
+
+**How deep the hole is, measured** (2026-08-25, on the unit fixtures of
+[`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) C1; alternative copies per sample, at
+a locus where every sample's reads favour the heterozygote by 1 nat and the seed favours hom-ref by
+7.60):
+
+| pass | flat start | seeded start |
+|---|---|---|
+| 1 | 0.731 — every sample het | 0.0014 — every sample hom-ref |
+| 6 | 0.767 | 0.151 — still hom-ref |
+| 9 | 0.767 | 0.633 — **flips to het** |
+| 30 | 0.767332 | 0.767332 |
+
+**So the cost is eight passes, and not the variant.** At three samples the flip is between passes 10
+and 16, and the two starts again converge to the same frequency. **An earlier version of this
+section claimed the seeded loop "converges, and it converges to no-variant, having never let the
+reads speak", and that was not reproduced**: neither on the fixture above nor on the shape this
+section actually describes — one, three or six carriers among 60 samples whose reads are firmly
+hom-ref, swept against read strength at the pass cap, where the two starts agreed in every cell.
+
+**Eight passes is still a reason, because the pass cap is what turns a delay into a loss.** The cap
+ships at 50 (§6) and production's own comment records this expectation-maximization converging in 3
+to 5 passes, so a cap tightened on that observation would fall between the two starts and the seeded
+one would emit no-variant. **Whether that happens on real data is §12's Q7**, which is also where
+the deeper question belongs: whether some locus shape does trap the loop permanently, or whether the
+inherited justification below was always about the delay.
+
+GATK names this in its own allele-frequency calculation, which starts its frequencies flat and only
+then switches to the Dirichlet posterior mean:
 
 > *"first iteration uses flat prior in order to avoid local minimum where the prior + no pseudocounts
 > gives such a low effective allele frequency that it overwhelms the genotype likelihood of a real
@@ -328,8 +355,8 @@ Production does the same and marks it as a step of its own
 prior (likelihood only) so the cohort's reads set an honest initial frequency before the
 leave-one-out prior engages"*).
 
-**Inherited from both, and never measured here — soft.** The reasoning above is sound arithmetic
-about the prior's size, not a count of calls that moved. It should bite hardest where the read
+**Inherited from both, and soft.** The reasoning above is arithmetic about the prior's size plus
+the pass counts in the table, not a count of calls that moved on real data. It should bite hardest where the read
 likelihood is weakest against a 20-to-30 Phred prior, which is the tomato panel's corner at 3 reads
 a position, and hardly at all at 300. **Q7 is the measurement.**
 

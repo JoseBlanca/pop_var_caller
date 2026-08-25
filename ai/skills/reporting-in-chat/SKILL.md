@@ -606,3 +606,64 @@ consistent about the fix being structural rather than motivational:
   <https://experienceleague.adobe.com/en/perspectives/brand-consistency-at-scale>
 - **BLUF / the Pyramid Principle** — conclusion first, then support, then data.
   <https://en.wikipedia.org/wiki/BLUF_(communication)>
+
+---
+
+### 2026-08-25 — two decisions asked with none of the context needed to answer them
+
+A milestone report ended with two questions for the owner. Both were real decisions;
+neither was answerable.
+
+> ❌ "**Does §3 get amended, or do you want me to keep hunting for a fixture where
+> it's permanent?**" … "Neither §3 nor §7 answers it. I pinned the behaviour with a
+> test rather than changing it. Options as I see them: leave it, skip silent samples
+> on the flat pass only, or give the flat pass a uniform-over-*alleles* rather than
+> uniform-over-*genotypes* reading."
+>
+> Owner: *"explain to me what do you need from me giving me the context. Otherwise I
+> can't answer"*
+
+Three failures in one reply, and the vocabulary was the least of them.
+
+**1. The decision was stated in the design document's own section numbers.** `§3`,
+`§7`, `§12's Q7` — the reader has to open three documents before the question means
+anything. The repair is to quote the sentence being challenged, in full, once:
+
+> ✅ "§3 justifies running the first pass with no prior by saying that the alternative
+> traps the loop permanently: *'The loop converges, and it converges to no-variant,
+> having never let the reads speak.'* I could not make that happen."
+
+**2. The second question should never have been asked, because measuring it took
+four minutes and dissolved it.** The concern — samples with no reads voting as though
+heterozygous on the first pass — was real on pass 1 and gone by convergence: no call
+changed, and the fitted allele frequency moved by 0.0007 with 12 of 63 samples
+silent. **Offering three options for a thing you have not measured is asking the
+reader to do your work.** Before escalating a design question, run the measurement
+that would make it moot.
+
+**3. "Options as I see them" is not a recommendation.** The skill already says a
+decision needs one; a list of three with no ranking and no consequence attached is
+the failure it names, dressed as thoroughness.
+
+The rule this adds to the D row: **a decision paragraph must be answerable by
+someone who has read only this reply.** If answering it requires opening a document,
+recalling a section number, or asking you what a term means, it is not ready — and
+if a measurement you could run would settle it, run the measurement instead of
+sending the question.
+
+### 2026-08-25 — a range claim measured on two axes, reported on one
+
+Not a chat failure but a writing one, caught by a reviewer and worth logging here
+because the reply repeated it to the owner as fact.
+
+A sweep covered likelihood advantage **× cohort size** (3, 6, 20, 63 samples). The
+comment written from it said the effect bit near 1 nat "and nowhere else" and that at
+0.5 nats "there is nothing to lose" — while the sweep's own output showed the two
+arms parting at 0.5 nats for 20 and 63 samples. The second axis was measured, then
+dropped from the sentence.
+
+`CLAUDE.md` names this exactly: *"a figure measured at 3× on 50 samples is a fact
+about that corner, not a property of the caller."* **The failure is not forgetting to
+measure the axis — it is measuring it and then writing as though it were not there.**
+Before writing a sentence from a sweep, list the sweep's axes and check each one
+appears in the sentence or is explicitly said not to matter.
