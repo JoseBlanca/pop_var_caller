@@ -4,6 +4,7 @@
 //! Spec §3 in code. This file starts with the one piece the formula needs before it can be
 //! written: **where a wrong read's probability goes.**
 
+use super::MAX_PLOIDY_COPIES;
 use crate::ng::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
 use crate::ng::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::ng::types::{AlleleId, LogProb};
@@ -603,21 +604,9 @@ pub fn genotype_log_likelihood_row(
     // copy carrying this observation's allele. `k = 0` is never read — that is the error side —
     // and is filled with a value that would be visible if it ever were.
     let copies_of_the_genome = usize::from(genotypes.ploidy().get());
-    assert!(
-        copies_of_the_genome <= MAX_PLOIDY_COPIES,
-        "a sample with {copies_of_the_genome} copies of its genome is past the \
-         {MAX_PLOIDY_COPIES} this row builds a copy-share table for"
-    );
-    let ploidy = f64::from(genotypes.ploidy().get());
-    // Filled in its own scope so it is immutable for the rest of the row: it is a property of
-    // the ploidy alone, and nothing below may write to it.
-    let copy_share = {
-        let mut shares = [f64::NAN; MAX_PLOIDY_COPIES + 1];
-        for (copies, share) in shares.iter_mut().enumerate().skip(1) {
-            *share = copies as f64 / ploidy;
-        }
-        shares
-    };
+    // A property of the ploidy alone, and shared with the STR row so the two cannot disagree
+    // about what `k / P` is.
+    let copy_share = super::copy_shares(genotypes.ploidy());
 
     // The explained side's logarithms, one per copy count, refilled per observation because both
     // halves of the mixture change with the read group and the allele. Declared here so the row
@@ -821,14 +810,6 @@ fn score_partials(
         }
     }
 }
-
-/// The widest ploidy the row builds a copy-share table for.
-///
-/// **`Ploidy::try_new` rejects only zero**, so seventeen copies is constructible and would index
-/// past the array. The row asserts on it, in release as well as debug, rather than panicking with
-/// `index out of bounds` — every other caller bug in this file says in a sentence what went
-/// wrong, and this one used to be the exception.
-const MAX_PLOIDY_COPIES: usize = 16;
 
 #[cfg(test)]
 mod tests {

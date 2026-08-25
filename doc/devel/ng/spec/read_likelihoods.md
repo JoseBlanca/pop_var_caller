@@ -2259,8 +2259,23 @@ production already tests and ng's port should carry across
    which is unrunnable.* Its size is a property of the parameters, running from 2 in a million to 2 in
    a thousand across that range (§4.2).
 6. **The junk term cancels for a read nothing explains.** For an observation whose emission is zero
-   under every candidate, the difference between any two genotypes' log-likelihoods is bit-for-bit
-   what it is with that observation removed.
+   under every candidate, the difference between any two genotypes' log-likelihoods is what it is
+   with that observation removed, **to within a stated number of units in the last place** — and
+   **sweep rather than take one fixture**, over several candidate counts, because a narrow one will
+   agree to the bit by luck. *This asked for bitwise agreement until 2026-08-25, and no
+   implementation of §2.1's formula can give it: the junk term is added to each genotype's running
+   total, and `(a + k) − (b + k)` is not `a − b` in floating point however carefully `k` is
+   computed.*
+   
+   *Measured at plan step H1, and **the unit matters more than the number**. Units in the last
+   place **of the difference between two genotypes** measure the true rounding error scaled by
+   `|entry| / |separation|`, and that ratio is set by how many junk reads there are: one fixture
+   reports 16 at three junk reads and 3,072 at three hundred, with nothing about the row having
+   changed. Relative to **the entries' own magnitude**, where the rounding actually happens, the
+   worst disagreement is one `f64::EPSILON` and stays there — which is the same relative bound
+   item 8 above means. A two-candidate fixture agrees bitwise, which is the luck item 9 warns
+   about in its own words, so the test sweeps candidate counts and junk read counts. The property
+   is real; the unit was wrong, the same correction items 8 and 9 already carry.*
 7. **Ploidy generality.** At ploidy 2 the copy mixture reproduces a biallelic calculation done by
    hand. At ploidy 4, with every observation matching one allele, a genotype carrying two copies each
    of two alleles scores **between** the two homozygous quadruples; where the observations are split

@@ -431,7 +431,7 @@ censored equals complete **bit for bit**; and test 13's two properties. *Depends
 
 ### Milestone H — the STR row
 
-**H1. The row, cache, and two-term mixture.**  ☐
+**H1. The row, cache, and two-term mixture.**  ✅
 `ssr.rs`: `genotype_log_likelihood_row<Model>` — emissions cached per
 `(observation, candidate)` and reused across genotypes (**the cost is
 `observations × candidates`, not `× genotypes`; that is the design, not an optimisation**);
