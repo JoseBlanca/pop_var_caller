@@ -125,6 +125,7 @@
 //! a per-locus loop is for.
 
 pub mod generic;
+pub mod ssr;
 pub mod ssr_emission;
 pub mod stutter_rates;
 
@@ -137,8 +138,49 @@ use crate::ng::parameter_estimation::joint::contamination::{
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::run::cohort_merge::build::{PartialObservation, SupportedAllele};
 use crate::ng::types::{
-    AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, ReadGroupId,
+    AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, Ploidy, ReadGroupId,
 };
+
+/// The widest ploidy either row builds a copy-share table for.
+///
+/// **`Ploidy::try_new` rejects only zero**, so seventeen copies is constructible and would
+/// index past the array. Both rows assert on it, in release as well as debug, rather than
+/// panicking with `index out of bounds` — every other caller bug in these files says in a
+/// sentence what went wrong, and this one used to be the exception.
+///
+/// **Shared rather than written once per path**, because the two rows build the same table
+/// from the same ploidy and a limit that differed between them would be a limit nobody could
+/// state.
+pub(crate) const MAX_PLOIDY_COPIES: usize = 16;
+
+/// `k / P` for every copy count a genotype can carry — the chance a read was copied from a
+/// copy carrying a given allele, for `k` copies of it out of `P` copies of the genome.
+///
+/// **Built once and shared by both rows**, because they build the same table from the same
+/// ploidy for the same reason, and a limit or a formula that differed between them would be one
+/// nobody could state. The entry for `k = 0` is never read — a read from no copy is the error
+/// side on one path and contributes nothing to the sum on the other — and is filled with a
+/// value that would be visible if it ever were.
+///
+/// # Panics
+///
+/// On a ploidy past [`MAX_PLOIDY_COPIES`]. `Ploidy::try_new` rejects only zero, so seventeen
+/// copies is constructible and would index past the array; the rows say in a sentence what went
+/// wrong rather than panicking with `index out of bounds`.
+pub(crate) fn copy_shares(ploidy: Ploidy) -> [f64; MAX_PLOIDY_COPIES + 1] {
+    let copies_of_the_genome = usize::from(ploidy.get());
+    assert!(
+        copies_of_the_genome <= MAX_PLOIDY_COPIES,
+        "a sample with {copies_of_the_genome} copies of its genome is past the \
+         {MAX_PLOIDY_COPIES} this row builds a copy-share table for"
+    );
+    let copies_of_the_genome = f64::from(ploidy.get());
+    let mut shares = [f64::NAN; MAX_PLOIDY_COPIES + 1];
+    for (copies, share) in shares.iter_mut().enumerate().skip(1) {
+        *share = copies as f64 / copies_of_the_genome;
+    }
+    shares
+}
 
 /// The clamps a geometric success probability is held inside, **re-exported and not copied**.
 ///
@@ -1441,7 +1483,8 @@ impl GenericEvidenceBuffer {
 /// **`emissions` is the cache that decides what a row costs.** One entry per
 /// `(observation, candidate)`, filled once and read by every genotype that carries the
 /// candidate, so a row costs `observations × candidates` rather than
-/// `observations × genotypes` — a factor of ten at six candidates and a diploid. Spec §8
+/// `observations × genotypes` — 6 calls an observation against 21 at six candidates and a
+/// diploid, a factor of 3.5. Spec §8
 /// calls that the design and not an optimisation, which is why the cache is a field of the
 /// scratch rather than a local inside whoever fills it.
 ///

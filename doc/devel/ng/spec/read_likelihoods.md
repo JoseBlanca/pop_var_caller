@@ -1613,8 +1613,14 @@ this caller cannot see.
 mis-scores as a *short* allele**, because its bases are a prefix of the truth. That is why
 `complete_observations()` exists as a deliberate guard on the evidence type
 ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)) and why the sections below
-are careful that a lower bound produces a *less discriminating* likelihood, never a differently
-biased one.
+are careful that a lower bound produces a likelihood that is **never smaller** than the complete
+read's on the same bases — which is what stops it from reading as evidence *for* a short allele.
+
+> **That safety property is not the same as "less discriminating", and an earlier version of this
+> section conflated the two** *(corrected 2026-08-25, owner, after §5.2's form was built and
+> measured)*. A lower bound can separate two candidates **further** than a complete read does; §5.2
+> now says when and by how much. What it can never do is score below the complete read, and that is
+> the property this paragraph is about.
 
 ### 5.2 Scoring a read that ran out inside a tract
 
@@ -1669,11 +1675,46 @@ in 200. **So: use the factorised form on pure candidates and the exact sum on in
 exact sum costs one substitution evaluation per reachable length change, which is at most the repeat
 cutoff plus the base-pair cutoff, and interrupted candidates are the minority.
 
-**Two properties this form has and a coder should check they still hold after any change.** A partial
-is always *less* discriminating than a complete observation of the same bases, because a tail
-probability varies less between candidates than a point probability does. And a partial that could
-have come from every candidate contributes the same to every genotype and drops out, which is what
-should happen to a read that saw too little to say anything.
+**Three properties this form has and a coder should check they still hold after any change.**
+
+1. **A partial never scores *below* the complete observation of the same bases.** Its tail contains
+   the complete read's own term and every longer stretching besides, so it can only be larger — and
+   where the read's length admits one stretching alone the two meet exactly. **This is the safety
+   property §5.1 needs**: a lower bound can never be mistaken for evidence of a short allele.
+2. **A partial that could have come from every candidate contributes the same to every genotype and
+   drops out**, which is what should happen to a read that saw too little to say anything.
+3. **Among candidates the read *outgrew* — both shorter than the stretch it got through — a partial
+   and a complete observation separate them by very nearly the same amount.** Above the read's own
+   length the geometric is memoryless, so the tail is proportional to the point probability and the
+   two log-likelihood ratios cancel down to one number. What breaks the exact equality is the
+   part-repeat branch, whose re-indexing does not line its terms up with the whole-repeat ones:
+   measured over two parameter rows, three read lengths and six candidate pairs, the two separations
+   differ by at most **0.043 nats against a separation of 3.149** — 1.4 parts in a hundred — and the
+   partial is the larger at that cell.
+
+> **What this section used to claim, and why it is wrong** *(corrected 2026-08-25, owner; found by
+> measuring it at plan step G1)*. It said *"a partial is always less discriminating than a complete
+> observation of the same bases, because a tail probability varies less between candidates than a
+> point probability does"*. **That is false whenever the two candidates straddle the stretch the read
+> got through**, and the failure is structural rather than a matter of parameters.
+>
+> Take a read that got through ten bases of tract, against a candidate holding eight bases and one
+> holding twelve. Under the twelve-base candidate the partial needs **nothing to have happened at
+> all** — the tract is at least ten because it is twelve — so it collects the same-length share,
+> which is most of the distribution. Under the eight-base one it needs an expansion, which is rare.
+> The complete read of those same ten bases needs a one-repeat change either way, and those two
+> shares differ only by the fitted direction ratio. Measured at motif `CA`, an error rate of 1 in
+> 1,000 and a slippage level of 2 in 100 split 83:17 toward contraction: the **partial separates the
+> two candidates by 5.661 nats, the complete read by 1.586**.
+>
+> **The theorem the old sentence was reaching for is the data-processing inequality, which bounds
+> *expected* discrimination** — the average over reads the model would produce. The old sentence
+> stated the pointwise version of an averaged result, and the pointwise version does not hold.
+>
+> **This is real information rather than a defect**: a lower bound rules out everything below it,
+> which is exactly the evidence §5.1 turned these reads on to collect. Both facts are asserted by
+> tests in `calling/likelihood/ssr_emission.rs` rather than left in prose here, so neither can go
+> stale silently.
 
 ### 5.3 Scoring a read that saw only part of an ordinary locus
 
@@ -2218,8 +2259,23 @@ production already tests and ng's port should carry across
    which is unrunnable.* Its size is a property of the parameters, running from 2 in a million to 2 in
    a thousand across that range (§4.2).
 6. **The junk term cancels for a read nothing explains.** For an observation whose emission is zero
-   under every candidate, the difference between any two genotypes' log-likelihoods is bit-for-bit
-   what it is with that observation removed.
+   under every candidate, the difference between any two genotypes' log-likelihoods is what it is
+   with that observation removed, **to within a stated number of units in the last place** — and
+   **sweep rather than take one fixture**, over several candidate counts, because a narrow one will
+   agree to the bit by luck. *This asked for bitwise agreement until 2026-08-25, and no
+   implementation of §2.1's formula can give it: the junk term is added to each genotype's running
+   total, and `(a + k) − (b + k)` is not `a − b` in floating point however carefully `k` is
+   computed.*
+   
+   *Measured at plan step H1, and **the unit matters more than the number**. Units in the last
+   place **of the difference between two genotypes** measure the true rounding error scaled by
+   `|entry| / |separation|`, and that ratio is set by how many junk reads there are: one fixture
+   reports 16 at three junk reads and 3,072 at three hundred, with nothing about the row having
+   changed. Relative to **the entries' own magnitude**, where the rounding actually happens, the
+   worst disagreement is one `f64::EPSILON` and stays there — which is the same relative bound
+   item 8 above means. A two-candidate fixture agrees bitwise, which is the luck item 9 warns
+   about in its own words, so the test sweeps candidate counts and junk read counts. The property
+   is real; the unit was wrong, the same correction items 8 and 9 already carry.*
 7. **Ploidy generality.** At ploidy 2 the copy mixture reproduces a biallelic calculation done by
    hand. At ploidy 4, with every observation matching one allele, a genotype carrying two copies each
    of two alleles scores **between** the two homozygous quadruples; where the observations are split
@@ -2265,11 +2321,20 @@ production already tests and ng's port should carry across
     earlier version said 1, which a correct implementation must fail.* And where the constraint admits exactly one length change, the censored
     likelihood equals the complete likelihood at that change, bit for bit — which is the test of the
     tail arithmetic rather than of the tolerance.
-13. **A partial never out-discriminates a complete observation.** For the same bases and a stated
-    parameter set, the log-likelihood ratio between any two candidates is no larger in magnitude for
-    the partial than for the complete observation. Stated on a fixed parameter set rather than as a
-    universal claim, because it is a property of decreasing-tailed distributions and this document
-    has not proved it for every parameter combination.
+13. **A partial never scores below a complete observation, and separates outgrown candidates
+    alike.** Two assertions, replacing one that was false. **(a)** For the same bases, the partial's
+    likelihood is at least the complete observation's under every candidate — the safety property
+    §5.1 needs, and the one that stops a lower bound reading as evidence for a short allele.
+    **(b)** For two candidates the read **outgrew**, both shorter than the stretch it got through,
+    the log-likelihood ratio between them is the same for the partial and the complete observation
+    to within a stated bound — measured at 0.043 nats against a separation of 3.149 on the module's
+    fitted row.
+
+    *An earlier version asked that the partial's ratio never exceed the complete one's, on any pair
+    of candidates. §5.2's correction box works through why that is false where the candidates
+    straddle the witnessed length: measured, the partial separates them by 5.661 nats against 1.586.
+    A correct implementation must fail the old form of this test, so a third assertion pins the
+    counterexample with its two sizes.*
 
 **The change measurements, which are not tests but must be run before adoption.**
 

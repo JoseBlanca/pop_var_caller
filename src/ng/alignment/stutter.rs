@@ -479,7 +479,6 @@ impl StutterModel {
     #[must_use]
     pub fn unreachable_mass(&self, period: NonZeroU8, repeat_count: NonZeroU32) -> f64 {
         let period_bases = u32::from(period.get());
-        let repeat_count = repeat_count.get();
 
         // A geometric's first `steps` terms, `1 − (1 − one_step)^steps` — which is already
         // `0.0` at no steps at all, since `powi(0)` is one.
@@ -487,10 +486,9 @@ impl StutterModel {
             1.0 - (1.0 - one_step).powi(i32::try_from(steps).unwrap_or(i32::MAX))
         };
 
-        // How far a read of this candidate can contract: the tract keeps at least one
-        // repeat, so `repeat_count - 1` of them can go. See the doc above for why this
+        // How far a read of this candidate can contract. See the doc above for why this
         // boundary and not `repeat_count`.
-        let contractable_repeats = repeat_count.saturating_sub(1);
+        let contractable_repeats = contractable_repeats(repeat_count);
 
         // Whole repeats: expansion is unbounded above, contraction stops at the tract's own
         // length.
@@ -522,6 +520,174 @@ impl StutterModel {
         let reachable =
             self.same_length_share + whole_longer + whole_shorter + part_longer + part_shorter;
         (1.0 - reachable).max(0.0)
+    }
+
+    /// **Every length change a read of this candidate could actually show**, each paired with
+    /// the mass this model puts on it — the support whose total
+    /// [`Self::unreachable_mass`] reports the complement of.
+    ///
+    /// # Why the support is a thing to hand out, and not just a thing to sum
+    ///
+    /// Two callers need it and they need different subsets. A **censored** read — one that
+    /// entered the tract and ran off its own end — is scored over the changes that leave the
+    /// tract at least as long as what it showed (spec §5.2), which is this support filtered
+    /// by one inequality. And an **interrupted** candidate has to be scored change by change
+    /// rather than in closed form, because its placements give genuinely different letters.
+    /// Handing out the support is what lets both read the reachability rule off one place
+    /// instead of restating it.
+    ///
+    /// # Why it sits here, beside the distribution
+    ///
+    /// **Because the map from a part-repeat step back to a length change is the inverse of
+    /// the one [`Self::probability`] applies**, twenty lines above
+    /// ([`part_repeat_bp_diff`] against `bp_diff − bp_diff / period`). Two inverse functions
+    /// in two modules have nothing holding them together; here a single test round-trips
+    /// them. The reachability boundary is the second reason and the weaker one, because it is
+    /// genuinely stated twice — see below.
+    ///
+    /// **The boundary, and where else it is written.** A read of this candidate must still
+    /// show a repeat, so at most `repeat_count − 1` repeats can go, and on the part-repeat
+    /// branch at most the `(repeat_count − 1) · (period − 1)` non-multiples of the period
+    /// inside the part of the tract that can go. [`Self::unreachable_mass`] states the same
+    /// boundary from the other side, and the two share [`contractable_repeats`] so they
+    /// cannot drift.
+    ///
+    /// **A third statement of it lives outside this module, at a different grain, and that is
+    /// deliberate.** `enumerate_placements` in `calling::likelihood::ssr_emission` refuses a
+    /// placement that would empty the tract, and it sees the tract's **runs** where this sees
+    /// only the total — so a tract of two runs of two repeats cannot lose three even though
+    /// it holds four, while this support admits that contraction. The two agree on every pure
+    /// tract and the run-grain rule is the stricter one on an interrupted tract. That gap is
+    /// a recorded open question, not an accident, and it is why "written once" would be the
+    /// wrong thing to claim here.
+    ///
+    /// # What it yields, and in what order
+    ///
+    /// `(length change in base pairs, its probability)`. **The order is a contract, not an
+    /// accident**: same-length first, then whole-repeat expansions ascending, whole-repeat
+    /// contractions, part-repeat expansions, part-repeat contractions — pinned by
+    /// `the_handed_out_support_is_bounded_and_ordered_as_documented`, so a caller may index
+    /// or zip against it.
+    ///
+    /// Two things a reader cannot get from the code below at a glance. **No change appears
+    /// twice** — a part-repeat change is precisely one that is not a multiple of the period,
+    /// so the two branches are disjoint by construction. And **at period 1 there is no
+    /// part-repeat branch at all**, because every change is then a whole number of repeats.
+    ///
+    /// The support is bounded by the two cutoffs at
+    /// `1 + 2 · MAX_WHOLE_REPEAT_SLIP + 2 · MAX_PART_REPEAT_SLIP` = 41 changes, **whatever the
+    /// tract's length** — which is what makes walking it affordable per observation per
+    /// candidate, and is asserted by the same test.
+    ///
+    /// # Each mass comes from [`Self::probability`], deliberately
+    ///
+    /// Not from a second spelling of the geometric. A tail summed from the same terms the
+    /// point probability produces is **bit-for-bit** equal to that point probability when the
+    /// filter admits exactly one change, which is the identity spec §12's twelfth test asks
+    /// for by name; a telescoped `(1 − g)^(a−1) − (1 − g)^b` is equal only algebraically.
+    pub fn reachable_length_changes(
+        &self,
+        period: NonZeroU8,
+        repeat_count: NonZeroU32,
+    ) -> impl Iterator<Item = (i64, f64)> + '_ {
+        Self::reachable_length_changes_of(period, repeat_count)
+            .map(move |bp_diff| (bp_diff, self.probability(bp_diff, period)))
+    }
+
+    /// **The same support without the masses — and it takes no model, which is the point.**
+    ///
+    /// Which length changes a tract of this shape can reach is decided by the period, the
+    /// repeat count and the two cutoffs. **None of the seven fitted rates enters it**, so the
+    /// support does not move when the caller's loop re-estimates them.
+    ///
+    /// That is what spec §4.5 needs: the outlier weight at a repeat tract is spread over the
+    /// lengths the candidates can reach, and the spec requires that count be "computed from the
+    /// candidate set alone, without asking what any sample showed" — and, by the same argument,
+    /// without asking what the current iteration's rates are. Reading the count off
+    /// [`Self::reachable_length_changes`] and discarding the probabilities would work and would
+    /// hide that: a later reader would have no way to see that the answer is rate-independent
+    /// except by checking every branch.
+    pub fn reachable_length_changes_of(
+        period: NonZeroU8,
+        repeat_count: NonZeroU32,
+    ) -> impl Iterator<Item = i64> {
+        let period_bases = i64::from(period.get());
+        let contractable_repeats = i64::from(contractable_repeats(repeat_count));
+
+        let whole_longer_steps = i64::from(MAX_WHOLE_REPEAT_SLIP);
+        let whole_shorter_steps = whole_longer_steps.min(contractable_repeats);
+        let (part_longer_steps, part_shorter_steps) = if period_bases == 1 {
+            (0, 0)
+        } else {
+            (
+                i64::from(MAX_PART_REPEAT_SLIP),
+                i64::from(MAX_PART_REPEAT_SLIP).min(contractable_repeats * (period_bases - 1)),
+            )
+        };
+
+        std::iter::once(0)
+            .chain((1..=whole_longer_steps).map(move |repeats| repeats * period_bases))
+            .chain((1..=whole_shorter_steps).map(move |repeats| -(repeats * period_bases)))
+            .chain((1..=part_longer_steps).map(move |step| part_repeat_bp_diff(step, period)))
+            .chain((1..=part_shorter_steps).map(move |step| -part_repeat_bp_diff(step, period)))
+    }
+
+    /// **How probable it is that a read of this candidate came out at least `min_bp_diff`
+    /// base pairs longer than the candidate itself** — the censored term's length factor
+    /// (spec §5.2).
+    ///
+    /// A read that ran off its own end inside the tract does not say what length the sample
+    /// carries; it says the tract is **at least** as long as the stretch it got through. So
+    /// the question stops being *how probable is exactly this length* and becomes *how
+    /// probable is this length or more*, and the answer is this model summed over every
+    /// change at or above that floor. Pass `witnessed_bases − candidate_bases` as
+    /// `min_bp_diff`.
+    ///
+    /// **It is an exact finite sum, not an approximation.** [`MAX_WHOLE_REPEAT_SLIP`] and
+    /// [`MAX_PART_REPEAT_SLIP`] bound the support above, so there is no tail left over to
+    /// neglect — the whole of what a censored read gives up is that it cannot distinguish
+    /// the lengths inside the sum, not that the sum is truncated.
+    ///
+    /// **Why `repeat_count` when [`Self::probability`] does not take one:** a floor of
+    /// `−∞` must return the same total the tract can actually reach, and how deep the
+    /// contractions go is a property of the tract's length. Without it a short tract's tail
+    /// would carry mass on contractions it cannot perform.
+    ///
+    /// **A floor that admits exactly one change returns that change's own probability to the
+    /// bit, and that is arithmetic rather than luck.** Rust folds a sum of `f64` from `-0.0`,
+    /// the true additive identity, so a one-term sum is that term whatever its value — the
+    /// identity does not depend on the fixture. An empty tail comes back as `-0.0` for the
+    /// same reason; it compares equal to zero and carries no mass.
+    ///
+    /// # The complement, and what it sums to
+    ///
+    /// This plus the mass strictly below the same floor is **the mass this candidate can
+    /// actually reach**, `1 − unreachable_mass` — and **not 1**. Spec §12's twelfth test
+    /// says so and calls that quantity the truncated distribution's own total; the word this
+    /// module uses is *reachable*, because the cutoffs are only one of the three reasons mass
+    /// goes missing (see [`Self::unreachable_mass`]).
+    ///
+    /// **How far short of 1 it falls, measured over the grid
+    /// `the_censored_tail_and_its_complement_make_the_reachable_total` sweeps, which asserts
+    /// both extremes: from nothing at all to 2.06 parts in a hundred.** The widest is a
+    /// mononucleotide candidate, where the whole part-repeat branch is unreachable — that
+    /// function's third item, and the largest of the three losses by far. The narrowest is
+    /// zero because that function clamps at zero, not because the total is ever exact.
+    ///
+    /// So a caller that treated the two as summing to one would be right on some candidates
+    /// and wrong by 2 in 100 on others, which is worse than being uniformly wrong: it
+    /// compares candidates on different scales.
+    #[must_use]
+    pub fn probability_at_least_this_much_longer(
+        &self,
+        min_bp_diff: i64,
+        period: NonZeroU8,
+        repeat_count: NonZeroU32,
+    ) -> f64 {
+        self.reachable_length_changes(period, repeat_count)
+            .filter(|(bp_diff, _)| *bp_diff >= min_bp_diff)
+            .map(|(_, probability)| probability)
+            .sum()
     }
 
     /// Share of reads showing the allele's own length — neither longer nor shorter.
@@ -616,6 +782,47 @@ impl Regime {
         // return above is what makes the cast safe: any future cutoff must keep the guard.
         share * self.one_step_share * (1.0 - self.one_step_share).powi((size - 1) as i32)
     }
+}
+
+/// How many repeats a read of a tract this long may contract away: **all but one**, because a
+/// read of this candidate must still show a repeat.
+///
+/// **The single spelling of the boundary spec §4.2's figures set.**
+/// [`StutterModel::unreachable_mass`] and [`StutterModel::reachable_length_changes`] both read
+/// it here, so the mass the model reports as unplaceable and the support it actually walks
+/// cannot drift apart. `unreachable_mass`'s own documentation carries the argument for this
+/// boundary rather than `repeat_count`, and what it would cost to flip it.
+#[inline]
+fn contractable_repeats(repeat_count: NonZeroU32) -> u32 {
+    repeat_count.get() - 1
+}
+
+/// The length change in base pairs that the part-repeat branch's step number `step` stands
+/// for — the inverse of the re-indexing §4.2 of the read-likelihood specification describes.
+///
+/// The branch is indexed by `Δ − Δ/p` (truncated division) rather than by `Δ` itself, so that
+/// its geometric has no gaps where the multiples of the period were removed: at period 3 the
+/// changes 1, 2, 4, 5, 7 are steps 1, 2, 3, 4, 5. Going back the other way, step `s` sits
+/// `(s − 1)/(p − 1)` **base pairs** past `s` — one for each multiple of the period the
+/// re-indexing skipped over. (At period 3, step 5 is change 7, not 11.)
+///
+/// **The period arrives as a [`NonZeroU8`] rather than a second `i64` so that the two
+/// arguments cannot be transposed.** Both are small positive integers and the guards below
+/// cannot tell them apart: at period 3, `(5, 3)` gives 7 and `(3, 5)` gives 3, and both pass.
+/// The same reasoning as [`StutterModel::probability`]'s period — make the illegal state
+/// unrepresentable rather than testable.
+///
+/// **Sign is the caller's**, because both directions use the same step numbering: negate the
+/// result for a contraction.
+#[inline]
+fn part_repeat_bp_diff(step: i64, period: NonZeroU8) -> i64 {
+    let period_bases = i64::from(period.get());
+    debug_assert!(
+        period_bases >= 2,
+        "at period 1 every change is a whole number of repeats and this branch does not exist"
+    );
+    debug_assert!(step >= 1, "the part-repeat branch's steps start at one");
+    step + (step - 1) / (period_bases - 1)
 }
 
 /// Every rate a [`StutterRates`] carries, as an array — destructured exhaustively so that a
@@ -1385,12 +1592,30 @@ mod tests {
     /// enumeration, deliberately — it is the oracle for
     /// [`StutterModel::unreachable_mass`], which uses a closed form.
     fn reachable_mass(model: &StutterModel, period: NonZeroU8, repeat_count: NonZeroU32) -> f64 {
+        reachable_mass_over(model, period, repeat_count, |_| true)
+    }
+
+    /// The same enumeration, restricted to the lengths `keep` accepts — the oracle for
+    /// [`StutterModel::probability_at_least_this_much_longer`] and for its complement.
+    ///
+    /// **It walks base pairs, not the branches' step numbers**, which is what makes it an
+    /// independent second route: it never touches the re-indexing, the cutoff bookkeeping or
+    /// the two direction shares as such — it asks `probability` for every length in turn and
+    /// lets the model's own zeros do the truncating. The one thing it does encode is the
+    /// contraction floor, and that is the boundary the whole design turns on.
+    fn reachable_mass_over(
+        model: &StutterModel,
+        period: NonZeroU8,
+        repeat_count: NonZeroU32,
+        keep: impl Fn(i64) -> bool,
+    ) -> f64 {
         let period_bases = i64::from(period.get());
         let deepest_contraction = i64::from(repeat_count.get() - 1) * period_bases;
         // Far past both cutoffs on either scale, so the sum is complete.
         let widest = period_bases * i64::from(MAX_WHOLE_REPEAT_SLIP + MAX_PART_REPEAT_SLIP + 4)
             + deepest_contraction;
         (-deepest_contraction..=widest)
+            .filter(|bp_diff| keep(*bp_diff))
             .map(|bp_diff| model.probability(bp_diff, period))
             .sum()
     }
@@ -1604,5 +1829,268 @@ mod tests {
             clamped_cells, 12,
             "the clamp fired at {clamped_cells} of 18 cells"
         );
+    }
+
+    /// **The handed-out support is the same distribution the reported loss is the complement
+    /// of.** Two things could go wrong quietly and both are caught here: a change yielded
+    /// twice would double-count its mass, and a part-repeat step mapped to the wrong base-pair
+    /// change would be scored on the whole-repeat branch — or on the right branch at the wrong
+    /// size — while the totals still looked plausible.
+    ///
+    /// The oracle is the base-pair walk, which never touches the re-indexing.
+    #[test]
+    fn the_handed_out_support_totals_what_the_loss_reports() {
+        for one_step in [GEOM_MIN, 0.5, 0.95, GEOM_MAX] {
+            let model = StutterModel::new(StutterRates {
+                whole_repeat_longer_share: 0.004,
+                whole_repeat_shorter_share: 0.016,
+                whole_repeat_one_step_share: one_step,
+                part_repeat_longer_share: 0.0002,
+                part_repeat_shorter_share: 0.0008,
+                part_repeat_one_step_share: one_step,
+            });
+            for period_bases in 1..=6u8 {
+                let period = period(period_bases);
+                for repeat_count in [1u32, 2, 4, 9, 11, 30].map(repeats) {
+                    let support: Vec<(i64, f64)> = model
+                        .reachable_length_changes(period, repeat_count)
+                        .collect();
+
+                    let mut seen: Vec<i64> = support.iter().map(|(bp_diff, _)| *bp_diff).collect();
+                    let before = seen.len();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    assert_eq!(
+                        seen.len(),
+                        before,
+                        "period {period_bases}, {repeat_count:?} repeats: a change was yielded twice"
+                    );
+
+                    // **The bound is the affordability argument** for walking the support
+                    // once per observation per candidate, so it must fail if the support ever
+                    // starts growing with the tract. The sweep above is order-blind by
+                    // construction — it sorts before deduplicating — so the order is pinned
+                    // here instead, where the documentation states it as a contract.
+                    assert!(
+                        support.len()
+                            <= 1 + 2 * MAX_WHOLE_REPEAT_SLIP as usize
+                                + 2 * MAX_PART_REPEAT_SLIP as usize,
+                        "period {period_bases}, {repeat_count:?} repeats: the support grew to {}",
+                        support.len()
+                    );
+                    assert_eq!(
+                        support[0].0, 0,
+                        "the same-length change is not yielded first"
+                    );
+                    for (position, repeats) in (1..=i64::from(MAX_WHOLE_REPEAT_SLIP)).enumerate() {
+                        assert_eq!(
+                            support[1 + position].0,
+                            repeats * i64::from(period_bases),
+                            "the whole-repeat expansions are not where the documentation puts \
+                             them"
+                        );
+                    }
+
+                    let handed_out: f64 = support.iter().map(|(_, mass)| *mass).sum();
+                    let walked = reachable_mass(&model, period, repeat_count);
+                    assert!(
+                        (handed_out - walked).abs() < 1e-12,
+                        "period {period_bases}, {repeat_count:?} repeats, one-step {one_step}: \
+                         handed out {handed_out}, walked {walked}"
+                    );
+                    assert!(
+                        (handed_out - (1.0 - model.unreachable_mass(period, repeat_count))).abs()
+                            < 1e-12,
+                        "period {period_bases}, {repeat_count:?} repeats: the support and the \
+                         reported loss disagree"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Spec §12's twelfth test — the censored tail is a complement, and not of one.**
+    ///
+    /// For every candidate and every period, the probability that the tract came out at least
+    /// `min_bp_diff` longer, plus the probability that it came out shorter than that, must be
+    /// the **truncated distribution's own total mass** — `1 − unreachable_mass`.
+    ///
+    /// **Not 1.** Slips past the two cutoffs score zero and contractions deeper than the tract
+    /// cannot happen, so the total falls short by a loss this sweep spans: the assertions below
+    /// record how far short it actually gets, so a version of this test that had quietly
+    /// compared against one would have something to fail against.
+    ///
+    /// The tail comes from the model's own support; the complement comes from the base-pair
+    /// walk, so the two halves are not two readings of one expression.
+    #[test]
+    fn the_censored_tail_and_its_complement_make_the_reachable_total() {
+        let mut largest_shortfall = 0.0f64;
+        let mut smallest_shortfall = f64::INFINITY;
+        let mut floors_checked = 0usize;
+
+        for one_step in [GEOM_MIN, 0.5, 0.95, GEOM_MAX] {
+            let model = StutterModel::new(StutterRates {
+                whole_repeat_longer_share: 0.004,
+                whole_repeat_shorter_share: 0.016,
+                whole_repeat_one_step_share: one_step,
+                part_repeat_longer_share: 0.0002,
+                part_repeat_shorter_share: 0.0008,
+                part_repeat_one_step_share: one_step,
+            });
+            for period_bases in 1..=6u8 {
+                let period = period(period_bases);
+                for repeat_count in [1u32, 2, 4, 9, 30].map(repeats) {
+                    let reachable_total = 1.0 - model.unreachable_mass(period, repeat_count);
+                    let deepest = i64::from(repeat_count.get() - 1) * i64::from(period_bases);
+                    let widest = i64::from(period_bases) * i64::from(MAX_WHOLE_REPEAT_SLIP) + 1;
+
+                    for floor in (-deepest - 2)..=(widest + 2) {
+                        let at_or_above = model.probability_at_least_this_much_longer(
+                            floor,
+                            period,
+                            repeat_count,
+                        );
+                        let below = reachable_mass_over(&model, period, repeat_count, |bp_diff| {
+                            bp_diff < floor
+                        });
+                        assert!(
+                            (at_or_above + below - reachable_total).abs() < 1e-12,
+                            "period {period_bases}, {repeat_count:?} repeats, floor {floor}, \
+                             one-step {one_step}: {at_or_above} + {below} against \
+                             {reachable_total}"
+                        );
+                        floors_checked += 1;
+                    }
+
+                    largest_shortfall = largest_shortfall.max(1.0 - reachable_total);
+                    smallest_shortfall = smallest_shortfall.min(1.0 - reachable_total);
+                }
+            }
+        }
+
+        // **What the sweep actually covered**, so that a fixture quietly shrinking to one
+        // trivial cell is visible.
+        assert_eq!(floors_checked, 8_364, "the sweep changed size");
+
+        // **The shortfall this sweep spans, measured.** The widest is **2.06 parts in 100** —
+        // a mononucleotide tract of one repeat at a one-step share of 0.01, which can neither
+        // contract nor reach the part-repeat branch at all — and that is four orders above the
+        // 1e-12 the identity is checked to. So a version of this test that compared against 1
+        // would fail here rather than pass by luck, which is the whole reason the extremes are
+        // asserted.
+        //
+        // **The narrowest is exactly zero, and that is the clamp rather than a perfect
+        // total.** `unreachable_mass` reports `max(0, 1 − reachable)`, so a long tract at a
+        // one-step share of 0.99 — where the reachable sum rounds to one or a hair above —
+        // reports no loss at all. Pinned so that a change making the loss always positive is
+        // visible as a change.
+        assert!(
+            (largest_shortfall - 2.0618e-2).abs() < 1e-5,
+            "the widest shortfall was {largest_shortfall}"
+        );
+        assert_eq!(
+            smallest_shortfall, 0.0,
+            "the narrowest shortfall was {smallest_shortfall}"
+        );
+    }
+
+    /// **The two ends of the tail, which the sweep above averages over.** A floor below
+    /// everything the tract can reach is the whole truncated distribution; a floor past the
+    /// widest expansion is nothing at all. Pinned separately because a tail that silently
+    /// clamped its floor would still satisfy the complement identity at every interior floor.
+    #[test]
+    fn a_tail_at_either_end_is_the_whole_distribution_or_nothing() {
+        let model = StutterModel::hipstr_shipped();
+        for period_bases in 1..=6u8 {
+            let period = period(period_bases);
+            for repeat_count in [1u32, 4, 30].map(repeats) {
+                let reachable_total = 1.0 - model.unreachable_mass(period, repeat_count);
+                let deepest = i64::from(repeat_count.get() - 1) * i64::from(period_bases);
+
+                let everything =
+                    model.probability_at_least_this_much_longer(-deepest - 1, period, repeat_count);
+                assert!(
+                    (everything - reachable_total).abs() < 1e-12,
+                    "period {period_bases}, {repeat_count:?} repeats: {everything} against \
+                     {reachable_total}"
+                );
+
+                let widest_expansion = i64::from(period_bases) * i64::from(MAX_WHOLE_REPEAT_SLIP);
+                assert_eq!(
+                    model.probability_at_least_this_much_longer(
+                        widest_expansion + 1,
+                        period,
+                        repeat_count
+                    ),
+                    0.0,
+                    "period {period_bases}: mass past the whole-repeat cutoff"
+                );
+            }
+        }
+    }
+
+    /// **The support's step-to-base-pair map is the inverse of the one
+    /// [`StutterModel::probability`] applies**, and it must land on a non-multiple of the
+    /// period every time — otherwise a part-repeat step would be scored on the whole-repeat
+    /// branch, at a different share and a different size.
+    ///
+    /// Pinned directly rather than through a distribution total. The re-indexing *is* covered
+    /// indirectly, but on a failure that route reports itself as "the support and the reported
+    /// loss disagree", which sends the reader to the wrong line.
+    #[test]
+    fn part_repeat_bp_diff_inverts_the_re_indexing_the_distribution_applies() {
+        for period_bases in 2..=6u8 {
+            let period = period(period_bases);
+            for step in 1..=i64::from(MAX_PART_REPEAT_SLIP) {
+                let bp_diff = part_repeat_bp_diff(step, period);
+                assert_ne!(
+                    bp_diff % i64::from(period_bases),
+                    0,
+                    "step {step} at period {period_bases} came back a whole repeat"
+                );
+                assert_eq!(
+                    bp_diff - bp_diff / i64::from(period_bases),
+                    step,
+                    "the round trip broke at step {step}, period {period_bases}"
+                );
+            }
+        }
+
+        // The worked example the function's own documentation gives.
+        assert_eq!(
+            (1..=5)
+                .map(|step| part_repeat_bp_diff(step, period(3)))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4, 5, 7],
+            "the documented period-3 example moved"
+        );
+    }
+
+    /// **A tail that admits exactly one length change is that change's own probability, bit
+    /// for bit** — the property spec §12's twelfth test asks for by name, and the reason the
+    /// tail is summed from [`StutterModel::probability`]'s own terms rather than telescoped.
+    ///
+    /// The widest expansion either branch can reach is `MAX_WHOLE_REPEAT_SLIP` whole repeats:
+    /// at period 2 that is 20 base pairs against the part-repeat branch's widest of 19, and
+    /// the gap only grows with the period. So a floor set there admits that one change alone.
+    #[test]
+    fn a_tail_of_one_change_is_the_probability_of_that_change() {
+        let model = StutterModel::hipstr_shipped();
+        for period_bases in 1..=6u8 {
+            let period = period(period_bases);
+            let widest = i64::from(period_bases) * i64::from(MAX_WHOLE_REPEAT_SLIP);
+            for repeat_count in [1u32, 4, 30].map(repeats) {
+                let tail =
+                    model.probability_at_least_this_much_longer(widest, period, repeat_count);
+                let point = model.probability(widest, period);
+                assert_eq!(
+                    tail.to_bits(),
+                    point.to_bits(),
+                    "period {period_bases}, {repeat_count:?} repeats: tail {tail} against point \
+                     {point}"
+                );
+                assert!(point > 0.0, "the fixture stopped scoring anything");
+            }
+        }
     }
 }

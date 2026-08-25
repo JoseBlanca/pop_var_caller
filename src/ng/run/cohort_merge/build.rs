@@ -1105,9 +1105,14 @@ pub struct SupportedAllele {
 /// with a gap in the middle. It does not say what the sample carries; it says the sample carries
 /// **at least** this, over the positions it saw
 /// (`doc/devel/ng/spec/read_likelihoods.md` §5.1, whose "prefix or suffix" predates the hole). Scoring it is the calling step's
-/// — a censored term, less discriminating than a complete observation of the same bases, never
-/// differently biased (§5.2 at a repeat tract, §5.3 at an ordinary locus). Carrying it is this
-/// module's, and until now the merge threw it away.
+/// — a censored term, which is **never less likely** than a complete observation of the same
+/// bases and so can never read as evidence for a short allele (§5.2 at a repeat tract, §5.3 at
+/// an ordinary locus). Carrying it is this module's, and until now the merge threw it away.
+///
+/// **Not "less discriminating", which this sentence said until 2026-08-25 and §5.2 no longer
+/// claims.** A lower bound can separate two candidates *further* than a complete read does,
+/// where one candidate is shorter than the stretch the read saw and the other is longer; §5.2's
+/// correction box carries the sizes.
 ///
 /// **Where these exist at all is decided by how wide the locus is on the reference**, and it is
 /// not intuition: a single-base substitution has none, an insertion has none — its reference
