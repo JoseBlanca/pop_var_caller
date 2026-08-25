@@ -1,8 +1,18 @@
 # ng — how the psp stores one sample's observations
 
-*Status: design spec, 2026-08-19. **No code.** This settles what a psp record costs and
-what shape the file has; it does not fix a byte layout. Every number in it was measured
-on real files with three throwaway programs, named in §14.*
+*Status: design spec, 2026-08-19; **revised 2026-08-25, when the shape was built and
+measured.** This settles what a psp record costs and how much memory a reader spends to get
+it back; it does not fix a byte layout. Every number in it was measured on real files with
+the programs named in §14.*
+
+*What the revision changed, so a reader of the old version knows what moved: the block is
+now **large** and the compressor's **reach** is capped separately, where before both were one
+small frame (§3, §3.2); the **dictionary is gone**, because a large block warms its own
+context (§3.2); the **index question is closed**, because a large block has few entries
+(§3.4, §13 Q4); and the byte-identity oracle is replaced by an exact-plus-tolerance one,
+because block boundaries move QUAL in its last digits (§12). The measured result: **the cost
+of an open sample falls 7.7-fold, 2,677 kB to 346 kB, while the file gets 35 % smaller, the
+index 11× smaller and the read 1.8× faster** (§3.1).*
 
 *This is the document [`run_streaming.md`](run_streaming.md) §10 defers to when it says
 "the psp file's encoding — byte layout, compression, block sizing …, checksums, format
@@ -40,9 +50,11 @@ kilobytes, not megabytes*, at three thousand open samples.
 
 ### 1.2 Goals
 
-1. **An open psp costs tens of kilobytes.** Inherited from
-   [`run_streaming.md`](run_streaming.md) §7.2, and the constraint the whole shape is
-   chosen against.
+1. **An open psp costs a few hundred kilobytes at most.** The owner set the working budget
+   at **500 kB resident per open sample** on 2026-08-25 — 1.5 GB across three thousand — which
+   is looser than the "tens of kilobytes" [`run_streaming.md`](run_streaming.md) §7.2 asks
+   for; that document's §7.2 should be corrected when it is next touched. **Measured, the
+   shape in §3 costs 346 kB**, so the goal is met rather than argued.
 2. **The file is smaller than production's at every point on that curve**, not merely at
    the memory-hungry end.
 3. **A reader can start part-way through**, at a grain no coarser than 100 kb of
@@ -127,24 +139,45 @@ ng stores all of them, and §8 measures that field separately.
 
 ## 3. The proposal, in one page
 
-**Write the records as a stream, not as a grid.** Each record's fields go one after
-another; the bytes are cut into small frames; each frame is compressed on its own against
-a dictionary stored in the file. Beside it runs a second, tiny stream carrying the one
-number the merge scans. A tail index names every frame.
+*Revised 2026-08-25 after the shape below was built and measured. The earlier proposal —
+small independent frames compressed against a shared dictionary — is superseded, and §3.2
+records why, because the reasoning that led to it was sound against a question that turned
+out to be the wrong one.*
+
+**Write the records as a stream, not as a grid — and make the block large while capping
+what a reader has to hold.** Each record's fields go one after another; the bytes are cut
+into large blocks; each block is compressed on its own, with the compressor's **reach**
+capped at write time. A reader never inflates a block: it pulls decompressed bytes into a
+small rolling buffer, parses one record out of it, hands that record over and keeps
+nothing. Beside the records runs a second, tiny stream carrying the one number the merge
+scans. A tail index names every block.
 
 ```
 psp file
   header                  plain-text, the fields run_streaming.md §6.1 fixes
-  dictionary              one, ~16-112 KiB, trained on this file's own frames
-  frame 0   light         the scan scalar for each record in the frame
-            heavy         the records themselves
-  frame 1   light
+  block 0   light         the scan scalar for each record in the block
+            heavy         the records themselves, compressed with a capped reach
+  block 1   light
             heavy
   ...
-  index                   one entry per frame: chromosome, first position,
-                          the two byte offsets, and the frame's scan summary
+  index                   one entry per block: chromosome, first position,
+                          the two byte offsets, and the block's scan summary
   trailer                 locates the index; its absence means "interrupted"
 ```
+
+**The one idea the whole shape rests on: the block and the reader's memory are different
+numbers.** In production's `.psp` they are the same one — a block is both how far back the
+compressor may look for a repeat and how much must be inflated before the first record
+exists — so every setting is a trade. Capping the reach separates them: the block can be a
+megabyte, for its ratio and for a small index, while a reader holds tens of kilobytes.
+
+**Two conditions have to hold together, and only the first is the compressor's doing:**
+
+1. **Do not inflate the whole block.** The capped reach and an incremental decoder.
+2. **Do not accumulate what you inflated.** The reader hands each record over and retains
+   nothing. Satisfy only the first and the memory reappears in the caller's arrays — which
+   is where the largest single mass of a cohort run's heap was found
+   ([the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-25.md) §2).
 
 Everything below is a consequence of that shape or a number that justifies it.
 
@@ -175,25 +208,73 @@ Against the file production writes today (11.85 bytes a record on that sample, 1
 HG002), the record stream is 37 % and 43 % smaller — but most of that is §7's, not this
 section's.
 
-### 3.2 Frames with a dictionary, not one long stream with a sliding window
+**Those rows all price memory against bytes, and the shape in §3 does not have to pay
+that.** Built and walked against production's reader on the same 62-accession cohort, one
+record at a time, the way a merge reads — 1 MB blocks, a 32 KiB reach, no dictionary:
 
-The obvious alternative to independent frames is one continuous compressed stream whose
-sliding window is capped, flushed periodically so a reader can resume. **Measured, it buys
-nothing.** On HG002 with the identical record encoding, a stream with a 512 KiB window
-gives 6.54 bytes a record and 32 KiB frames with a dictionary give 6.52 — the same size for
-fourteen times the reader memory. Only an 8 MiB window pulls ahead, to 6.25, which is 4 % of
-the file for 230 times the memory.
+| samples open | production `.psp` | this shape |
+|---:|---:|---:|
+| 1 | 5.0 MB | 2.5 MB |
+| 8 | 24.3 MB | 4.8 MB |
+| 31 | 85.8 MB | 12.7 MB |
+| 62 | 164.5 MB | 23.1 MB |
 
-The reason is structural rather than incidental: **a window is paid for in memory by every
-open reader on every read; a dictionary is paid for once, is smaller, and can be shared
-between readers.** The stream also gives up free random access between its flush points,
-and flushing every 8 KiB to get it back costs 3 % more bytes.
+| | fixed | **per open sample** | R² |
+|---|---:|---:|---:|
+| production `.psp` | 3.3 MB | **2.614 MB** | 0.9998 |
+| this shape | 2.1 MB | **0.338 MB** | 1.0000 |
 
-The dictionary itself is a knob, not a fixture: at 32 KiB frames it is worth 6 % of the
-file (tomato 7.90 → 7.44 bytes a record with a 112 KiB dictionary), and a 16 KiB
-dictionary keeps most of that (7.66) at a seventh of the per-reader cost. **A file with no
-dictionary at all still beats production**, so this is a tuning decision and not a
-dependency.
+**The per-open-sample cost falls 7.7-fold, from 2,677 kB to 346 kB**, and both lines are
+straight to four digits, which is what a per-open-sample cost looks like. Extrapolated over
+the committed range — arithmetic from a fit over 1 to 62 samples, not a measurement — three
+thousand samples goes from 7.66 GB to 0.99 GB.
+
+**And nothing is traded away for it**, which is what makes this different from every row in
+the table above:
+
+| | production `.psp` | this shape | |
+|---|---:|---:|---|
+| bytes a record | 8.188 | 5.356 | 35 % smaller |
+| cohort on disk | 3.52 GB | 2.38 GB | 32 % smaller |
+| blocks per sample | 1,674 | 154 | index 11× smaller |
+| 62-sample walk | 42.4 s | 23.1 s | 1.8× faster |
+| records read | 471,520,156 | 471,520,156 | identical, same checksum |
+
+*Measured on `examples/psp_row_stream_roundtrip.rs`, phases `encode-streaming`,
+`verify-streaming` and `many-ngs`; tomato at about three reads a position. This is the
+per-open-sample term only — a whole cohort run also carries the merger's projections and
+the genotype fit, and neither is sized by the block.*
+
+### 3.2 Why the dictionary was proposed, and why it is no longer needed — a superseded conclusion, kept
+
+**This section used to argue for small frames with a shared dictionary, against one long
+stream with a capped reach. The measurement behind it was correct and the conclusion was
+wrong, and the reason is worth keeping** — it is a clean example of sweeping a grid that
+does not contain the answer.
+
+What was measured: on HG002, a continuous stream with a **512 KiB reach** gave 6.54 bytes a
+record and 32 KiB frames with a dictionary gave 6.52 — the same size for fourteen times the
+memory, so the reach looked like something you pay for and do not get back.
+
+**What was never swept is the combination §3 proposes: a *large block* with a *small
+reach*.** Every streaming arm in that grid tied the reach to the block, or used an 8 MiB
+reach for both. The two were separate knobs in the measuring program and were never varied
+independently, so the one configuration that wins was not in the table. **The reach is not
+what costs memory when a reader decodes incrementally — the inflated block is** — and that
+distinction is invisible in a sweep where the two always move together.
+
+Two consequences:
+
+- **The dictionary is no longer part of the design.** It existed because a 32 KiB frame is
+  compressed from a cold start; a 1 MB block warms its own context within the first few
+  kilobytes. The measured store in §3.1 carries **no dictionary at all** and is still 35 %
+  smaller a record than production's file.
+- **The trap it created goes with it.** A dictionary is held per open reader unless
+  deliberately shared, and 112 KiB across three thousand samples is about 330 MB — larger
+  than the frames the whole design existed to shrink. That risk is now simply absent rather
+  than mitigated.
+
+*Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
 
 ### 3.3 The light stream — how the two-phase decode survives
 
@@ -257,11 +338,32 @@ production's flat vector of one 24-byte entry per block
 ([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs), decoded whole at
 open, [`decode_index`, `:110`](../../../../src/psp/index.rs)).
 
-**So finer frames make the index problem worse, and this design does not solve it — it
-inherits §7.2's shape and owes the sizing.** Index at a coarse grain and chain the frames
-within it, each frame carrying enough to reach the next, so a reader seeks once and then
-walks. **This is the one requirement in this document with no measurement behind it**, and
-it should be settled before the writer is built rather than after (§13, open question 4).
+#### The large block dissolves this — settled 2026-08-25
+
+**That paragraph was the strongest argument against small frames and it is now moot, because
+the block no longer has to be small.** Once a reader holds its reach rather than the block,
+the block is sized for compression and for the index, and both want it large.
+
+Measured on one tomato accession, the same records written both ways:
+
+| | blocks in that sample | index at 24 bytes an entry |
+|---|---:|---:|
+| production `.psp`, 5 kb reference window | 1,674 | 40 kB |
+| this design, 1 MB blocks | **154** | **3.7 kB** |
+
+Scaled to a whole-genome sample — arithmetic from that measured block count — a 1 MB block
+gives roughly **14,000 blocks and 340 kB of index per open sample**, against 3.8 MB at
+production's 5 kb window and 18.8 MB at the 1 kb window that would otherwise be needed to
+get the memory down.
+
+**So the coarse-index-and-chain scheme this section owed is not needed and must not be
+built.** A flat vector of one entry per block, decoded at open, is a few hundred kilobytes —
+inside the per-open-sample budget on its own terms. Open question 4 is closed.
+
+**The 100 kb cut rule stays**, and for the original reason: a block holds a fixed number of
+*bytes*, so on a sparse sample it can span a long stretch of reference and goal 3's
+restart guarantee would not hold. At 1 MB blocks this rule will bind more often than it did
+at 32 KiB, and it is what keeps the restart grain honest rather than incidental.
 
 ---
 
@@ -270,17 +372,30 @@ it should be settled before the writer is built rather than after (§13, open qu
 Every number below was measured on both corners; the spread is what makes each of these a
 knob rather than a constant.
 
-| setting | proposed | range measured | what it moves |
-|---|---|---|---|
-| frame size | 32 KiB | 8 – 512 KiB | 4 % of the file (tomato 7.66 → 7.36); it **is** the reader memory |
-| dictionary | 16 KiB, shared across readers | 0 – 112 KiB | 6 % of the file (tomato 7.90 → 7.44); held per reader unless shared |
-| zstd level | 9 | 3 / 9 / 19 | 16 % of the file (tomato 8.15 / 7.44 / 6.86); write time 1.7 s / 4.0 s / 16.2 s |
+**The block and the reach are two settings, not one, and that is the point of the design.**
+Confusing them is what made the earlier proposal (§3.2) reach for a dictionary.
+
+| setting | proposed | what it moves |
+|---|---|---|
+| **block size** | **1 MB of records** | the compression ratio and the number of index entries. **Not the reader's memory.** |
+| **compressor reach** | **32 KiB** | **the reader's memory**, and almost nothing else once the block is large |
+| rolling buffer | 64 KiB | how often the reader refills; one record must fit, and it grows if one does not |
+| zstd level | 9 | 16 % of the file (tomato 8.15 / 7.44 / 6.86); write time 1.7 s / 4.0 s / 16.2 s |
+| dictionary | **none** | superseded — a 1 MB block warms its own context (§3.2) |
 
 **Level 9 is inherited, not derived** — it is what production uses
 ([`src/psp/block.rs:709`](../../../../src/psp/block.rs)) and the sweep gives no reason to
-move: level 19 costs four times the write for 8 % of the file. **The frame size is a
-genuine choice and 32 KiB is the middle of a flat region**, not an optimum. Both are safe
-to move later; neither is a format change if the reader takes what the file says.
+move: level 19 costs four times the write for 8 % of the file.
+
+**Neither the block size nor the reach is a format change**, provided the reach is written
+into the file and the reader takes what it finds there rather than assuming a value. A
+reader that assumes will either allocate more than it needs or refuse a legitimate file.
+
+**What has not been swept: the block size itself.** 1 MB was chosen as comfortably large
+and measured once; nothing here says whether 256 KB gives the same file and the same index
+or whether 16 MB gives a better one. The reach was capped at 32 KiB for the same reason.
+Both are cheap to sweep now that a working writer and reader exist, and neither can move
+the per-open-sample figure much — the reach is what that is made of.
 
 ---
 
@@ -472,13 +587,29 @@ the one place these two documents' designs touch (§3.4).
   [`open_record.rs:494`](../../../../src/ng/locus_generation/pileup/open_record.rs)), by the
   2026-08-17 ruling that post-dates the bullet. Fix the bullet when that document is next
   touched.
-- **A dictionary is held per open reader unless it is shared.** 112 KiB across three
-  thousand samples is about 330 MB — larger than the frames the whole design exists to
-  shrink. zstd can prepare one dictionary and lend it to every reader
-  (`Decompressor::with_prepared_dictionary`); use that, or a 16 KiB dictionary, or both.
-  Measured: 63 open samples cost 22 MB, about 312 KiB each, of which the 112 KiB dictionary
-  is a third and the rest is the read buffer, the decompressed frame and the decompressor's
-  own workspace.
+- **⚠ Streaming the block is half the job; not accumulating the records is the other half,
+  and it is the half that gets lost.** A reader can decode incrementally and still gather
+  every record into per-sample arrays before handing anything on, at which point the memory
+  is exactly where it was. In production's cohort run those assembled per-sample columns are
+  the largest single mass of the heap, larger than the decompression buffer they came from
+  ([the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-25.md) §2). The
+  reader must hand each record over and retain nothing.
+- **A record can straddle the rolling buffer, and the parse has to be restartable.** The
+  buffer holds whatever has been decompressed so far, which may be the first half of a
+  record. Running out of bytes has to be an answer the parser can give — not a panic and not
+  a short read — and the retry must resume from the record's *start* with the running
+  position, coverage and read-name bases restored to what they were. A parse that half-
+  advances that state before failing corrupts every record after it, plausibly.
+- **A single record can exceed the rolling buffer.** Many alleles, many read names. The
+  buffer has to grow rather than fail, and a fixed maximum record size is not a safe
+  assumption to bake in.
+- **The reach must be written into the file and honoured on read.** zstd will refuse a frame
+  whose window exceeds the decoder's configured maximum, so a reader that assumes 32 KiB will
+  reject a legitimate file written with more. Read it from the header and configure the
+  decoder from that.
+- **A dictionary is no longer part of this design (§3.2)**, and if one is ever reintroduced
+  it is held *per open reader* unless deliberately shared: 112 KiB across three thousand
+  samples is about 330 MB, larger than the buffers the whole design exists to shrink.
 - **A dictionary trained on the frames it is then measured against reports a saving no
   reader ever gets.** This is easy to do by accident and the number it produces is
   spectacular — in an early run of our own probe, a hundredfold. Train on one half of the
@@ -586,6 +717,23 @@ used only by tests, and the real reader compared against it record for record.
    called through the direct route and through the psp route gives the same VCF. It is the
    sufficiency test for everything this document chose not to store.
 
+**⚠ Oracle 6 cannot be a byte-identical VCF, and this was measured rather than feared.**
+Changing only how records are grouped into blocks changes the order in which per-sample
+evidence is summed, and floating-point addition is not associative. On the 50-accession
+tomato cohort, rewriting the same records at a 20 kb and an 80 kb block window left the set
+of sites and alleles **identical to the line** and returned **1,194 records of 180,366 with a
+different QUAL** — median difference 0.010 Phred, largest 4.48. Nothing else moved: no
+genotype, no GQ, no DP, no AD, no INFO field differed anywhere in the cohort.
+
+**One site in 180,366 crossed the emission gate as a result** — `SL4.0ch10:58265030 T>A`
+sits at QUAL 30.075 against a minimum of 30, and it is emitted at 20 kb and 80 kb and not at
+5 kb. Seventeen differing records sit below QUAL 40, so within reach of the gate.
+
+**So the oracle is: the site list, genotypes, GQ, DP and AD exactly; QUAL within a
+tolerance; and an explicit statement about the gate.** A test that demands byte-identity
+will fail on a correct implementation, and a test that compares everything with a tolerance
+will pass while a read-name list is being corrupted.
+
 ---
 
 ## 13. Open questions
@@ -607,15 +755,13 @@ used only by tests, and the real reader compared against it record for record.
    one sequential read. *Leaning:* interleave, because
    [`run_streaming.md`](run_streaming.md) §3.4's reader serves segments rather than files.
    **Settled by:** timing a cohort merge over one chromosome both ways, once a writer exists.
-4. **How does the index stay small when a file has 100,000 frames?** — OPEN, and the one
-   requirement in this document with no measurement behind it. Ten bytes an entry is 1 MB per
-   open sample, which fails
-   [`run_streaming.md`](run_streaming.md) §7.2 at three thousand samples. *Leaning:* index at a
-   coarse grain — one entry per megabase, say — and let each frame carry the offset of the
-   next, so a reader seeks once and then walks; the per-frame scan summary then has to live in
-   the frame's own head rather than in the index, which costs a decode per skipped frame unless
-   the summaries are gathered into the coarse entry. **Settled by:** pricing both against a
-   real segment-serving read, and it should be settled before the writer is built, not after.
+4. **How does the index stay small when a file has 100,000 frames?** — **CLOSED 2026-08-25:
+   the file does not have 100,000 frames.** The question only existed because the frame had to
+   be small to bound a reader's memory; once the reach does that instead, the block is sized
+   for compression and for the index, and both want it large. Measured: 154 blocks in a tomato
+   accession at 1 MB blocks against 1,674 in production's `.psp`, so a flat index of one entry
+   per block is a few hundred kilobytes on a whole-genome sample (§3.4). **The coarse-index-
+   and-chain scheme must not be built.**
 5. **How much do the numbers move on a multi-library sample?** — OPEN. Both corners here are
    one read group, and the read group joins an observation's identity
    ([`src/ng/locus_generation/mod.rs:245`](../../../../src/ng/locus_generation/mod.rs)), so a
