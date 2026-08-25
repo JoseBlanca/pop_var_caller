@@ -25,10 +25,11 @@ Three things came back, and the third was not being looked for.
    block decode holds 43.6 MB of a 342.6 MB live heap — 12.7%. The larger masses are the per-sample
    columns the merge assembles (29.6%), the merger's own projections (23.2%), and one thing nobody
    had counted.
-3. **A quarter of the per-sample cost is the `.psp`'s metadata section, and two thirds of that is
-   read once at startup and then held for the whole run for nobody.** Releasing it takes the
-   measured slope from 7.53 to 6.50 MB per sample — **13.7% off the per-sample cost of every cohort
-   run** — with identical output.
+3. **A quarter of the per-sample cost is the `.psp`'s metadata section, and two thirds of that is a
+   duplicate.** The summary it carries is needed and stays; what is held for nothing is the *text it
+   was parsed from*, kept alive beside the parsed structure for the rest of the run. Dropping the
+   text takes the measured slope from 7.53 to 6.50 MB per sample — **13.7% off the per-sample cost
+   of every cohort run** — with identical output.
 
 ---
 
@@ -89,7 +90,7 @@ comparing them directly was wrong the first time it was tried here.
 
 The one figure that survives the comparison is the one that is identical in both: the metadata.
 
-## 3. The finding: 1.58 MB per open sample of metadata, two thirds of it dead
+## 3. The finding: the summary is kept twice — parsed, and as the text it came from
 
 Every `.psp` carries a metadata section — the per-sample summary the genotype prior and the
 hidden-paralog filter read, chiefly a coverage-against-GC histogram, stored as text and compressed.
@@ -103,12 +104,22 @@ as long as the reader lives, which is the whole run.
 | 10 samples | 15.8 MB | 1.58 MB |
 | 50 samples | 79.1 MB | 1.58 MB |
 
-It splits in two:
+It splits in two, and **only one of the two is waste**:
 
-- **1.05 MB per sample — the raw decompressed bytes.** In the whole calling path these are read in
-  exactly one place, `pipeline.rs`, at startup, to parse the summary out of them. Nothing reads them
-  again, and the reader holds them until the run ends.
-- **0.52 MB per sample — the parsed summary.** Genuinely used, held on purpose.
+- **0.52 MB per sample — the parsed summary.** A coverage-against-GC histogram and heterozygosity
+  counts. **Needed, and needed more later, not less.** The genotype prior and the hidden-paralog
+  filter read it today, and ng's own duplication filter will read it when that is built. Nothing
+  here proposes touching it.
+- **1.05 MB per sample — the text the summary was parsed from.** Read in exactly one place in the
+  whole calling path, `pipeline.rs`, at startup, to produce the structure above. Nothing reads it
+  again, and the reader holds it until the run ends. **So the sample summary is resident twice for
+  the length of the run: once as a parsed histogram and once as the TOML it was decoded from.**
+
+**The waste is the duplication, not the information.** A store that dropped this section would break
+the hidden-paralog filter, which hard-fails rather than silently emitting an unfiltered callset when
+a sample's summary is missing (`require_paralog_summaries`). That the filter ran, and that the VCF
+came back identical, is the evidence that the experiment below keeps everything both consumers
+need.
 
 **Against the working budget of 500 kB per open sample this is more than three times over, before a
 single record has been read** — and none of it is touched by block size, record layout, read-name
@@ -155,9 +166,10 @@ it:
    Nothing in the encoding plan is a prerequisite. **Recommended, and it is the owner's call because
    it touches production.**
 2. **Stop storing that section as text.** A count matrix written as TOML is several times its own
-   size, on disk and again in the parser. The 0.52 MB per sample that is genuinely used is the
-   parsed histogram; the 1.05 MB is the text it came from. Unmeasured, and the next cheap thing to
-   measure.
+   size, on disk and again in the parser — 1.05 MB of text for a 0.52 MB histogram. **This gets more
+   worth doing rather than less**, because ng will read this summary too: its own duplication filter
+   is not built yet but is coming, so the section is permanent and its encoding is worth getting
+   right. Unmeasured, and the next cheap thing to measure.
 3. **Then the encoding experiments**, whose reachable share is now known rather than assumed.
 
 ## 5. What is not yet measured
