@@ -483,7 +483,7 @@ fn main() {
             s.variance_to_mean_standard_error(),
             with_zero_ratio,
             ordinary_ratio,
-            implied.map_or(f64::NAN, |r| r),
+            implied.unwrap_or(f64::NAN),
             s.variance_share_of_deepest_hundredth(),
             poisson_tail,
             nb_tail,

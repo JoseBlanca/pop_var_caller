@@ -69,10 +69,17 @@ decides which one ng keeps.
 
 - **It does not define the prior or the read likelihood.** Both are siblings. This document calls
   them.
-- **It does not decide whether a variant is emitted, or what its QUAL is.** That is site filtering
-  and emission, step 11 of [`ng_proposal.md`](ng_proposal.md), and production's STR work found
-  emission and genotyping behave independently. What this produces is genotypes and their
-  confidence; what is done with them is a separate document.
+- **It does not decide whether a variant is emitted.** That is site filtering and emission, step 11
+  of [`ng_proposal.md`](ng_proposal.md), and production's STR work found emission and genotyping
+  behave independently. What this produces is genotypes and their confidence; what is done with
+  them is a separate document.
+- **It does not define the site quality, but its last pass computes one** *(amended 2026-08-25)*.
+  [`calling_quality.md`](calling_quality.md) owns both quality numbers. Two of the three things it
+  needs exist only inside this loop — the per-sample posterior row, which is one reused buffer, and
+  the `samples × genotypes` likelihood table, which is per-worker scratch — so that document's §3
+  places their arithmetic in this loop's final pass rather than downstream, and §9 below records
+  what comes out. Nothing about the loop's own arithmetic changes; it calls a function and fills
+  two more fields.
 - **It does not select the candidate alleles from what the merge unified** — that is step 6's,
   and it has its own spec ([`candidate_alleles.md`](candidate_alleles.md)). What this document does
   own is whether the loop may **add** to the set once calling starts (§4.1, §12's Q3).
@@ -822,16 +829,36 @@ they came from, and the run's skeleton already collects results per region
 **It commutes either way**, so this is a memory decision rather than a correctness one, and it can be
 revisited when emission fixes the shape of what a call is.
 
-**What it hands on** is, per locus: the allele table, and per sample the genotype posteriors, the
-most probable genotype, its confidence, and the cohort's expected allele copies — **plus, on the
-SNP/indel path only, for a sample the candidate step declared uncallable (§5.0), the fact that its
-genotype is missing rather than any of the above.** Emission writes that sample's `GT` as missing;
-it is a decision taken before the reads were scored and not a low-confidence call, and the two must
-not be conflated in the output. **Such a sample has no posteriors and no expected copies at all** —
-§5.0 sets it aside before the first pass — so this is an absence rather than a value with a flag
-beside it, and the cohort's expected copies are a sum over the samples the locus was called on.
-**A repeat tract never produces such a sample** (§5.0.1): every covering sample there is handed on
-with posteriors, and the expected copies are a sum over all of them. **The cohort's expected allele
+**What it hands on** is, per locus: the allele table, and per sample the most probable genotype and
+its confidence, plus the cohort's expected allele copies — **plus, on the SNP/indel path only, for a
+sample the candidate step declared uncallable (§5.0), the fact that its genotype is missing rather
+than any of the above.** Emission writes that sample's `GT` as missing; it is a decision taken
+before the reads were scored and not a low-confidence call, and the two must not be conflated in
+the output.
+
+**The posteriors themselves are not handed on** *(amended 2026-08-25; this sentence used to say they
+were)*. `CallingScratch` holds one genotype-length posterior row that each sample in turn is scored
+into, so when the last sample has been scored the earlier rows no longer exist; keeping them would
+mean a second `samples × genotypes` buffer held for the whole locus. Nothing downstream asked for
+them. What *did* ask — the site quality, which needs the likelihood table — is answered by computing
+it here instead ([`calling_quality.md`](calling_quality.md) §3.2), not by widening the hand-off.
+
+**So two more things leave with each locus, both owned by
+[`calling_quality.md`](calling_quality.md)** *(added 2026-08-25)*: the site quality before its
+artifact correction, computed from the likelihood table once the loop has stopped; and nine pooled
+read counts — reference and primary-alternative reads, their forward-strand and placed-left shares,
+the locus total, and how many alternative reads the called genotypes imply — which are all the
+artifact correction needs and are the same nine numbers whatever the cohort size. That document's
+§3.5 also pins one rule on whoever consumes them: **there is one quality field, and it is written
+twice** — the baseline here, the corrected value at the first output stage — never two fields.
+
+**Back to the uncallable sample, because it is an absence in all of this too: it is scored at no
+point, so it has neither posteriors nor expected copies.** §5.0 sets it aside before the first pass,
+so this is an absence rather than a value with a flag beside it, and the cohort's expected copies
+are a sum over the samples the locus was called on — the same cohort the site quality's count axis
+runs over ([`calling_quality.md`](calling_quality.md) §5.1). **A repeat tract never produces such a
+sample** (§5.0.1): every covering sample there is handed on with a genotype and a confidence, and
+the expected copies are a sum over all of them. **The cohort's expected allele
 copies are not a by-product** — site filtering and emission read them, and recomputing them
 downstream from the called genotypes would give a different number, because a called genotype has
 thrown away the uncertainty the expected copies still carry.

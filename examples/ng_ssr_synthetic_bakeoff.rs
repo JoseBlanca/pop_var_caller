@@ -389,7 +389,7 @@ impl Rng {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
     fn other_base(&mut self, b: u8) -> u8 {
-        let bases = [b'A', b'C', b'G', b'T'];
+        let bases = *b"ACGT";
         loop {
             let c = bases[(self.next() % 4) as usize];
             if c != b {

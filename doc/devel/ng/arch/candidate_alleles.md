@@ -92,7 +92,7 @@ pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
 
 /// Six alleles including the reference — production's `DEFAULT_MAX_ALLELES_PER_RECORD`.
 /// **Inherited, and measured to bind at about one tomato locus in 2,300 and none of the
-/// human trio's** (spec §4.2). Soft.
+/// human sample's** (spec §4.2). Soft.
 pub const DEFAULT_MAX_CANDIDATE_ALLELES: MaxCandidateAlleles =
     MaxCandidateAlleles::new_or_panic(6);
 ```
@@ -180,7 +180,7 @@ impl UnmatchedSupport {
 ```
 
 **Why the second count and not `num_reads > 0`** (owner's decision, 2026-08-24). The bar drops
-alleles almost nobody showed — 13,166 of 15,474 alternatives on the GIAB trio at 300×, spec §3.3 —
+alleles almost nobody showed — 13,166 of 15,474 alternatives on HG002 at 300×, spec §3.3 —
 so nearly every sample has a non-zero pool at nearly every locus and a rule keyed on it would
 emit a missing genotype almost everywhere. The cap only ever cuts alleles that cleared the bar for
 *somebody*; asking whether it cleared for *this* sample is what makes the rule fire exactly where
@@ -361,8 +361,13 @@ so every argument is an index expression.
 ///
 /// **One pass over the locus's rows.** For each sample: its reads at the locus are the sum of
 /// its rows, which is that sample's compared reads because the merge admits only complete
-/// observations onto alleles (spec §1.3); each row then feeds its allele's summary. A second
-/// pass admits the survivors in table order, applies the cap, and fills the leftover.
+/// observations onto alleles (spec §1.3); each row then feeds its allele's summary. **Then the
+/// cap chooses, the survivors are admitted in the merge table's own order, and the leftover is
+/// filled last** — that order is forced and this sentence used to give it wrong. The cap has to
+/// precede admission because `CandidateAlleles` only ever pushes, so an allele admitted before
+/// the cap has cut cannot be taken back out; and the leftover has to follow admission because it
+/// is defined against the finished remapping, which is what says whether a sample's allele
+/// survived.
 ///
 /// The reference is admitted first and is exempt from both the bar and the cap.
 pub fn select_generic(
@@ -399,9 +404,12 @@ for each covering sample i:
     }
 ```
 
-**`GenericSampleEvidence` gains a field.** `read_likelihoods.md` §2.1 declares `unmatched_q_sum`
-alone; the count of §2.3 has to travel with it or nothing downstream can tell a truncated sample
-from a clean one. *That is an edit to that document and is not made here.*
+**`GenericSampleEvidence` gained a field, and that edit has landed.**
+[`read_likelihoods.md`](read_likelihoods.md) §2.1 declared `unmatched_q_sum` alone, and the count
+of §2.3 had to travel with it or nothing downstream could tell a truncated sample from a clean
+one — the mass is identical under every genotype and cancels. **It now declares
+`genotype_must_be_missing` beside it**, so this paragraph records a closed hand-off rather than an
+outstanding one.
 
 ---
 
@@ -527,12 +535,12 @@ they assert; the two that pin *this* document's shapes rather than the spec's ru
 - **the leftover is the merge's own arithmetic** — the pool equals the sum of the dropped rows'
   `q_sum` to the last bit, not a re-derivation from counts and a rate.
 
-The regression anchor is spec §12's last entry: the GIAB trio and the tomato panel through the
+The regression anchor is spec §12's last entry: the human benchmark and the tomato panel through the
 calling loop with real candidates, which is the blocker
 [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) records. The measurement harness
 already exists — `examples/ng_candidate_selection_probe.rs` — and **calls this module rather than
 carrying a copy of it** (step D1, 2026-08-24), so the numbers the spec quotes are the shipped
-code's. It reproduced them: 4,177 and 7,478 built loci on the trio at 30× and 300×, 53,935 on the
+code's. It reproduced them: 4,177 and 7,478 built loci on HG002 at 30× and 300×, 53,935 on the
 tomato panel, every bar's kept-alternative total, every cap's binding count, and the leftover at
 about 4 tomato reads in every 1,000 (143,712 of 39,589,086). **One figure changed with the code** —
 the two cap rankings keep different alleles at 19 tomato loci where the standalone copy found 17,

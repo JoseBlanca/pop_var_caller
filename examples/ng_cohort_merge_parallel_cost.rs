@@ -132,7 +132,7 @@ impl Ground {
                 (0..self.last_base / self.bases_between_records)
                     .map(|record| {
                         let at = record * self.bases_between_records + 1;
-                        let observed: &[u8] = if (record as usize + sample) % 8 == 0 {
+                        let observed: &[u8] = if (record as usize + sample).is_multiple_of(8) {
                             b"C"
                         } else {
                             b"A"

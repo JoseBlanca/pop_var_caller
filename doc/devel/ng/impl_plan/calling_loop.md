@@ -67,8 +67,13 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
   ([`candidate_alleles.md`](candidate_alleles.md)) and is still moving through that plan's
   Milestone D. Its public surface is settled; the one value that may still change is
   `DEFAULT_MAX_CANDIDATE_ALLELES`. The repeat-tract half is not written at all.
-- **Emission, QUAL, site filters, phasing** — steps 10–13
+- **Emission, site filters, phasing** — steps 10–12
   ([`ng_proposal.md`](../spec/ng_proposal.md)).
+- **The artifact correction to the site quality, and the output stage that applies it** —
+  [`../spec/calling_quality.md`](../spec/calling_quality.md) §3.4, §6. **Its other half is not out:**
+  that spec's §3 places the genotype quality and the *uncorrected* site quality inside this plan's
+  step C3, because the posterior row and the likelihood table are both gone by the time anything
+  downstream runs. C3's entry below says what that adds.
 - **Where the loop runs inside the merge's builder** — the wiring into `run/` follows the
   end-to-end blocker; this plan's driver takes a `CohortObservation` and is callable from the
   builder when selection exists (spec §9 says the placement commutes).
@@ -214,11 +219,19 @@ cohort range and a criterion written on raw counts tightens silently with cohort
 two-cohort-size test is the oracle. *Depends:* C1. *Source:* spec §6, §7; arch §4.
 
 **C3. The final pass.**  ☐
-Score every sample once more, take the highest-posterior genotype and its confidence
-(posterior-derived GQ as `Phred`; step 13 refines quality later, it does not replace this
-field), mint the owned `Genotype` from the winning `GenotypeIdx`, fill `LocusInference` —
-expected copies included, because recomputing them downstream from calls gives a different
-number. *Depends:* C2. *Source:* spec §2, §9; arch §2.
+Score every sample once more, take the highest-posterior genotype and its confidence, mint the
+owned `Genotype` from the winning `GenotypeIdx`, fill `LocusInference` — expected copies included,
+because recomputing them downstream from calls gives a different number.
+
+**The confidence is not this step's arithmetic** *(amended 2026-08-25)*.
+[`../spec/calling_quality.md`](../spec/calling_quality.md) §3.1 and §4 own the formula and the
+99 cap; this pass calls that function once per sample as it scores it, because the posterior row is
+a single reused buffer and computing it afterwards would need the whole table kept. **And two more
+outputs land here**, for the same reason — the inputs are gone otherwise: the site quality before
+its artifact correction, from the likelihood table once the loop has stopped (§3.2, §5), and the
+nine pooled read counts the correction consumes (§3.3). The correction itself and the output stage
+that applies it are that plan's, not this one's. *Depends:* C2. *Source:* spec §2, §9; arch §2;
+[`../spec/calling_quality.md`](../spec/calling_quality.md) §3.
 
 > **Checkpoint C:** the loop converges, stops, caps, and reports — proven on fixtures at one
 > sample and several. Pause for review.

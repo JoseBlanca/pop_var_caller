@@ -249,11 +249,7 @@ pub struct LnComponents {
 
 impl LnComponents {
     pub fn entries(&self) -> usize {
-        if self.genotypes == 0 {
-            0
-        } else {
-            self.ln.len() / self.genotypes
-        }
+        self.ln.len().checked_div(self.genotypes).unwrap_or(0)
     }
     pub fn row(&self, entry: usize) -> &[f64] {
         &self.ln[entry * self.genotypes..(entry + 1) * self.genotypes]
@@ -297,8 +293,7 @@ pub fn climb_genotype_frequencies(
             ln_freqs[g] = freqs[g].max(1e-300).ln();
         }
         next.iter_mut().for_each(|v| *v = 0.0);
-        for entry in 0..component.entries() {
-            let weight = weights[entry];
+        for (entry, &weight) in weights.iter().take(component.entries()).enumerate() {
             if weight == 0.0 {
                 continue;
             }
@@ -334,8 +329,7 @@ pub fn score_at(component: &LnComponents, weights: &[f64], freqs: &[f64]) -> f64
     }
     let mut terms = vec![0.0; genotypes];
     let mut score = 0.0;
-    for entry in 0..component.entries() {
-        let weight = weights[entry];
+    for (entry, &weight) in weights.iter().take(component.entries()).enumerate() {
         if weight == 0.0 {
             continue;
         }

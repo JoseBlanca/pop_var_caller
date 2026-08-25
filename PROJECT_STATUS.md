@@ -44,6 +44,39 @@ Skills and agents are instructed to leave it untouched.
 > [What was built](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md),
 > [what the review found](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md),
 > [what was done about it](doc/devel/reports/reviews/fixes_applied_2026-08-25.md).
+> - **Previously (2026-08-25):** **candidate selection is done on the SNP/indel path, and
+> the two true alleles it was said to lose were never lost** (Milestone D of
+> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
+> `ng-candidate-alleles`, merged to main). **D1** put the measurement onto the shipped code: the
+> probe called its own copy of the rule, and that copy had drifted from the module three ways, not
+> the two anyone had written down — the third being the cap's last tie-break, which a trace then
+> showed cannot decide anything on this panel. It reproduces every figure the spec quotes, the
+> truth-set column included. **The support share moved from 5 in 100 to 10** (owner's ruling): it
+> costs two true alleles at 300× that 5 keeps, and ships anyway, because recall is one side of the
+> trade and the count of admitted candidates is the other and nothing has measured the second yet.
+> **D2** is the standing check: a 68 kB and 95 kB fixture cut from HG002 at both depths, four
+> tests, each one killed by mutating the module rather than trusted after reading it — 23
+> mutations tried, 15 caught.
+> **⚠ And the reviews found the benchmark is not what every document called it.** Every "GIAB
+> trio" figure in this step's spec is **HG002 alone**: HG003 and HG004 are sliced to their own
+> benchmark regions, so over HG002's BED they contribute 0 reads and 0 loci, and a three-file walk
+> is byte-identical to a one-file walk. The measurements stand; the label did not. It also means
+> the trio runs were the *single-sample* end of the committed range all along, and that four
+> mutations of the per-sample rule survive this fixture — a sum over one sample is that sample's
+> own count. The module's multi-sample unit tests are what cover that half; **no benchmark here
+> pairs a real cohort with a truth set**.
+> **⛦ The finding that mattered came from the owner asking why a real allele would sit below a
+> tenth of a sample's reads at 300×.** It would not. Of the four the 10-in-100 share drops, two
+> were a scoring artefact: at `chr1:90667287-90667293` HG002 carries a homozygous 2-base deletion
+> *and* a heterozygous substitution, the caller keeps both haplotypes at 162 and 127 reads, and the
+> join was looking for the substitution without the deletion — a sequence no read carries. With
+> truth built as haplotypes the genotypes admit, the count-only bar loses **zero** true alleles at
+> 300×, where the spec's table had said two at every setting.
+> **⚠ And "300×" is a run average, not a per-locus fact** — across that fixture a sample's compared
+> reads at a locus run from 8 to 428 — so the floor is *not* inert at depth, which two documents
+> had claimed. **D3 was stopped short deliberately:** at the shipped bar the cap binds at 16 tomato
+> loci in 53,935 and at none of the trio's, and what would choose its value is a memory cost the
+> calling loop has to exist to measure.
 > - **Previously (2026-08-24):** **the stutter model says *repeats*, because *frame*
 > meant something else here** (step E1 of
 > [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
@@ -84,63 +117,6 @@ Skills and agents are instructed to leave it untouched.
 > `f64::max` returns the other operand; and a spread table from the wrong ploidy truncated the
 > genotype walk in silence, leaving an unscored genotype the winner.
 > [What was built, what the reviews changed, and two questions for the owner](doc/devel/reports/implementations/ng_calling_likelihood_c1_2026-08-24.md).
-> - **Previously (2026-08-24):** **candidate selection is complete on the SNP/indel path**
-> (steps C2 and C3 of [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
-> `ng-candidate-alleles`; **Milestone C complete, at Checkpoint C**). `select_generic` now takes one
-> assembled cohort locus and returns everything the calling loop needs: the narrowed allele list,
-> what selection did, the map from the merge's allele indices onto the new dense ids, and per
-> covering sample the reads and error mass selection dropped. **C2** is the cap — above six
-> sequences counting the reference the list is cut to the best and the locus is still called, never
-> refused. **C3** is the leftover, and the count that decides whether a sample is genotyped at all:
-> its reads on an allele **it** earned and the **cap** cut.
-> **Eleven Blockers across the six steps, and not one of them was wrong code.** Every one was a
-> test that could not fail, and they share a shape precise enough to check for: **a fixture built
-> at a size, depth or cohort where the term under test is not the term that decides.** Shallow
-> enough that the rule's floor decided and its share never did; single-sample enough that a cohort
-> sum matched a per-sample rule and a cohort total matched a within-sample share; one dropped allele
-> per sample, so a per-allele count matched a running total. One question would have caught all
-> eleven: at this size, would the simplest wrong rule give the same answer here?
-> **Spec §8 names three assertions this module holds in release and only two were implemented** —
-> the third, a non-finite quality mass, first becomes reachable at C3, which is the first step to
-> read `q_sum` at all. It is not a crash waiting to happen: the mass flows into the pool, the pool
-> into every genotype's data likelihood, and a non-finite likelihood prefers no genotype over any
-> other, so the locus comes out called with nothing chosen and nothing failed.
-> **The measurement that matters for the owner: the cap stops being a safety valve well before 400
-> samples**, where it binds at essentially every locus with merge tables of 145 to 1,953 alleles.
-> Spec §4.1's "measured, that is rare: 23 of 53,935 tomato loci" is a fact about 63 accessions and
-> does not carry — and the cap's by-catch is the samples, not the alleles: between 1 sample in 20
-> and 1 in 8 comes back missing at 400 samples and 30 reads a position.
-> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_c3_2026-08-24.md).
-> - **Previously (2026-08-24):** **the first whole answer selection returns, and a rule two
-> tests could not tell from a cohort sum** (step C1 of
-> [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
-> `ng-candidate-alleles`). `select_generic` now takes one assembled cohort locus and returns the
-> narrowed allele table: it seeds the candidate list with the merge's reference, admits every
-> alternative some single sample's reads earned — **in the merge table's own order, which is the
-> order that reaches the VCF's `ALT` column** — and records where each of the merge's allele
-> indices ended up, which is what lets the calling loop re-key a sample's evidence rows onto the
-> new dense ids. The cap is C2 and the per-sample leftover is C3.
-> **Both Blockers were again tests that could not fail, and this is now three steps in a row.**
-> The whole admission rule could be replaced by a cohort read total — `cohort_reads >= 2` in place
-> of *did some single sample earn this* — and all 65 tests stayed green, because no fixture had two
-> samples each lending an allele less than the floor so that their reads pooled over it. A cohort
-> term there is the one thing this module exists to prevent: it makes a sample's candidate list
-> depend on who else is in the run, and it admits error alleles in proportion to cohort size. And
-> **the rule's share could be dropped entirely**, because every fixture was shallow enough that the
-> floor decided — where the shipped share binds above 41 compared reads, which is exactly where the
-> GIAB trio runs at 30× and 300×.
-> **The recurring shape is now legible: a fixture built at a size where the term under test is not
-> the one that decides.** Raising a threshold in the fixture is not the same as raising its depth.
-> **And one wrong mechanism in the prose, proved by deleting the code.** The panic note claimed an
-> empty allele table would fail inside `CandidateAlleles::new`; a reviewer deleted the assertion and
-> got `index out of bounds` two statements earlier, never reaching that call. A wrong mechanism is
-> worse than a wrong number — it sends the next reader hunting a symptom that does not happen.
-> **Raised for Checkpoint C: the cap's by-catch is samples, not alleles.** At 400 samples each
-> carrying a different private allele the cap cuts 395 and **395 samples are emitted as missing**,
-> because each earned the allele it took away. Spec §4.1's "only the samples that earned a cut
-> allele are affected" is measured at 63 accessions where the cap binds at 23 loci in 53,935; at
-> several hundred samples the same sentence means almost everybody.
-> [What was built and what the review changed](doc/devel/reports/implementations/ng_candidate_alleles_c1_2026-08-24.md).
 >
 > _Older entries are trimmed rather than kept: this log accumulated 44 of them,
 > some 580 lines. Every one is in git history — `git log -p PROJECT_STATUS.md`,

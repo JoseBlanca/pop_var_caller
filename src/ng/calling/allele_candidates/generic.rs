@@ -50,7 +50,7 @@ use crate::ng::types::AlleleId;
 /// an error.** The merge builds a locus when some sample's non-reference reads *pooled* reach
 /// its rule, and two reads split one and one across two alternatives clear that while clearing
 /// neither allele's own bar. Measured at more than one built locus in four on both benchmarks —
-/// 27.4% on the 63-accession tomato panel, 27.3% on the GIAB trio at 30× and 28.0% at 300×
+/// 27.4% on the 63-accession tomato panel, 27.3% on HG002 at 30× and 28.0% at 300×
 /// (spec §6.2). What the run does with such a locus is emission's business.
 ///
 /// **It relies on the merge's allele table holding each sequence once**, which
@@ -553,7 +553,7 @@ mod tests {
     /// **Every other fixture in this file is a handful of reads, where the floor decides
     /// whatever the share is** — so without this one the share could be dropped, or the whole
     /// configured rule replaced by the shipped default, and the suite would not notice. The
-    /// regime it covers is not a corner: the GIAB trio runs at 30× and 300×, so it is where
+    /// regime it covers is not a corner: the human benchmark runs at 30× and 300×, so it is where
     /// the high-depth benchmark spends all of its time, and a rule that degraded to its floor
     /// there would admit sequencing error as a candidate — 10 reads in 300 is about the error
     /// rate — with a longer `ALT` list and no crash.
@@ -763,7 +763,7 @@ mod tests {
 
     /// **The default cap is six alleles counting the reference**, so five alternatives fit and it
     /// first bites at six — the width production's own constant is set at, and which spec §4.2
-    /// measures binding at 23 of 53,935 tomato loci and none of the GIAB trio's.
+    /// measures binding at 23 of 53,935 tomato loci and none of HG002's.
     #[test]
     fn the_default_cap_first_bites_at_six_alternatives() {
         let six = locus_of(
@@ -1132,7 +1132,7 @@ mod tests {
     /// non-zero pool — the third's is its one error read — so a rule keyed on the pool would
     /// no-call all three, and at nearly every locus in a real run it would no-call everybody:
     /// the admission rule drops sequencing error at 13,166 of 15,474 alternatives on the GIAB
-    /// trio at 300× (spec §3.3), and every sample carries a few error reads almost everywhere.
+    /// HG002 at 300× (spec §3.3), and every sample carries a few error reads almost everywhere.
     /// **The condition is the cap and not the pool** (spec §4.1, §5).
     #[test]
     fn only_the_samples_that_earned_the_cut_allele_are_emitted_as_missing() {
@@ -1304,7 +1304,7 @@ mod tests {
     /// **Asked against the allele's own reads the first sample would be missing too** — 10 reads
     /// against `max(2, ceil(0.05 × 10)) = 2` clears easily — and every other fixture here is
     /// built at a share of zero or a depth where the two denominators agree, so this is the only
-    /// one that separates them. At the GIAB trio's 30× and 300× that wrong denominator would
+    /// one that separates them. At HG002's 30× and 300× that wrong denominator would
     /// no-call every sample with a handful of error reads on a cut allele.
     #[test]
     fn the_leftover_asks_the_rule_against_the_samples_compared_reads() {

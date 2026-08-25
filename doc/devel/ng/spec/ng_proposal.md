@@ -494,6 +494,13 @@ genotypes to estimate parameters).
 - **ours — SNP:** GQ + site QUAL from the **exact allele-count posterior**, then a
   **`final_qual` refinement** subtracting allele-balance/strand/position bias
   penalties. **STR:** posterior GQ + emission-model QUAL. No CIs / expansion prob.
+- **ng — settled 2026-08-25, [`calling_quality.md`](calling_quality.md).** The SNP/indel
+  arithmetic above is ported, with one input changed and one placement changed: the prior on the
+  cohort allele count becomes the run's **fitted** frequency spectrum instead of two GATK-inherited
+  constants, and the two model numbers are computed inside the calling loop's last pass — their
+  inputs do not survive it — leaving only the artifact correction downstream. Repeat tracts are
+  **not** covered: that document's §8 says why and names the sibling. No calibration, no intervals,
+  no expansion probability.
 
 ### Cross-cutting reading (the levers ng should probe)
 - **Trust vs reassemble (step 2)** is the deepest axis and the leading hypothesis for

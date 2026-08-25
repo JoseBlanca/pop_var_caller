@@ -134,14 +134,14 @@ impl Default for MaxCandidateAlleles {
 /// **Two reads, or 10 in 100 of that sample's reads at the locus, whichever is more.**
 ///
 /// **The floor is the merge's own** ([`MinAltObs::DEFAULT`], production's number) **and
-/// should stay at 2**: measured against the GIAB trio's v4.2.1 truth set over 572 kb on
+/// should stay at 2**: measured against HG002's v4.2.1 truth set over 572 kb on
 /// 2026-08-24, **at 30×** raising it from 2 to 3 loses five true alternative alleles,
 /// where raising the share to 10 in 100 loses two for the same reduction in table size —
 /// 1,539 alternatives kept against 1,601. The floor is the expensive knob (spec §3.3).
 ///
 /// **The share is 10 in 100 where the merge's keep rule uses 2** (owner's decision,
 /// 2026-08-24), **and it is set against the recall measurement rather than by it.** On
-/// this trio **at 300×** it cuts the merge's 15,474 alternatives to 1,273 where a bar of
+/// HG002 **at 300×** it cuts the merge's 15,474 alternatives to 1,273 where a bar of
 /// 2 reads alone keeps 10,793, and **it costs two true alleles that 5 in 100 keeps** —
 /// `chr1:193718424` `T→C` at 6 of one sample's 107 compared reads, and `chr1:120579074`
 /// `C→A` at 4 of 42.
@@ -164,7 +164,7 @@ impl Default for MaxCandidateAlleles {
 /// neighbouring comparison: turning the share off entirely against the merge's 2 in 100
 /// moves 4 loci in 53,935 (spec §3.3).
 ///
-/// **Soft, and the softest constant in this module.** Measured for recall on one human trio
+/// **Soft, and the softest constant in this module.** Measured for recall on HG002
 /// over 572 kb (spec §11, Q3); the candidate-count argument that decided it is not measured
 /// at all yet.
 pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
@@ -186,7 +186,7 @@ pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
 ///
 /// **Measured to be a safety valve rather than a working part at the cohort sizes we
 /// have** (spec §4.2, 2026-08-24): it binds at 23 of 53,935 tomato loci — one in 2,300 —
-/// and at none of the GIAB trio's 4,177 loci at 30× or 7,478 at 300×. What it guards
+/// and at none of HG002's 4,177 loci at 30× or 7,478 at 300×. What it guards
 /// against grows with the cohort, which is why it is here: holding the tomato allele
 /// table fixed and asking the bar of 1, 4, 16 and 63 samples gives 0, 0, 3 and 23 loci
 /// above six alleles.
@@ -225,7 +225,7 @@ pub enum SelectionVerdict {
     /// *pooled* reach its rule, and two reads split one and one across two alternatives
     /// clear that while clearing neither allele bar. Measured at more than one built locus
     /// in four, and the fraction is the same on both benchmarks — 27.4% on the 63-accession
-    /// tomato panel, 27.3% on the GIAB trio at 30× and 28.0% at 300× (spec §6.2).
+    /// tomato panel, 27.3% on HG002 at 30× and 28.0% at 300× (spec §6.2).
     Selected,
     /// The cap bound, and `dropped` alternatives were cut — the lowest-ranked first, by the
     /// ranking [`compare_best_first`] defines: the largest share of one sample's compared
@@ -287,7 +287,7 @@ pub struct UnmatchedSupport {
     /// **Why this is separate from [`num_reads`](Self::num_reads), and it is the whole
     /// point of the field.** Sequences are dropped two ways, and only one of them says
     /// anything about a sample. The support rule drops sequences almost nobody showed,
-    /// which are overwhelmingly sequencing error — on the GIAB trio at 300× that is
+    /// which are overwhelmingly sequencing error — on HG002 at 300× that is
     /// 13,166 of the merge's 15,474 alternatives (spec §3.3). Every sample has a few
     /// error reads at nearly every locus, so a rule keyed on `num_reads` would emit a
     /// missing genotype almost everywhere. The cap is the other way, and it only ever
@@ -803,7 +803,7 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// 2026-08-24).
 ///
 /// **Keying it on the pool instead would no-call almost everybody.** The rule drops alleles almost
-/// nobody showed — 13,166 of 15,474 alternatives on the GIAB trio at 300× (spec §3.3) — which are
+/// nobody showed — 13,166 of 15,474 alternatives on HG002 at 300× (spec §3.3) — which are
 /// overwhelmingly sequencing error, and every sample carries a few error reads at nearly every
 /// locus, so a sample's pool is almost always non-zero and says nothing. The cap is the other way,
 /// and it only ever cuts alleles that already cleared the bar for *somebody* — but not necessarily
@@ -1325,7 +1325,7 @@ mod tests {
     /// `MinAltReads::DEFAULT` here is a one-token slip that nothing else would catch: the
     /// type is right, the floor is right, and only the share moves — from 10 in 100 to 2 in
     /// 100. It is invisible at tomato depth, where the two are the same rule, and on the
-    /// GIAB trio at 300× it is the difference between keeping 1,273 alternatives and
+    /// HG002 at 300× it is the difference between keeping 1,273 alternatives and
     /// keeping 5,596 (spec §3.3), each of which the genotype prior divides its
     /// concentration by. The last assertion is what makes the test about the *number* and
     /// not merely about the type.
@@ -1466,7 +1466,7 @@ mod tests {
     /// assertion that separates the two ways a sequence leaves the table.
     ///
     /// The fixture is the ordinary case, not a corner: a sample with 40 reads of pooled
-    /// error mass, all of it on sequences the support rule rejected. On the GIAB trio at
+    /// error mass, all of it on sequences the support rule rejected. On HG002 at
     /// 300× the support rule rejects 13,166 of 15,474 alternatives, so nearly every sample
     /// at nearly every locus has a pool like this — a rule keyed on the pool's size would
     /// emit a missing genotype almost everywhere.
@@ -1722,7 +1722,7 @@ mod tests {
     /// every other test here would still pass**, and a fold applying the floor alone admits
     /// sequencing error as a candidate allele at 300× — the depth at which the share is the
     /// only half of the rule doing any work (spec §3.3: the shipped 10-in-100 share cuts the
-    /// GIAB trio's 15,474 alternatives to 1,273 where a count-only bar keeps 10,793).
+    /// HG002's 15,474 alternatives to 1,273 where a count-only bar keeps 10,793).
     ///
     /// It also pins the **denominator** the share is taken of: asked against the allele's
     /// own 3 reads instead of the sample's 100, `ceil(0.05 × 3) = 1` and the alternative

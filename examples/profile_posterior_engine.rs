@@ -39,7 +39,7 @@ use pop_var_caller::var_calling::posterior_engine::backends::{
 use pop_var_caller::var_calling::posterior_engine::{PosteriorEngine, PosteriorEngineConfig};
 use pop_var_caller::var_calling::variant_grouping::OverlappingVariantGroup;
 
-const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+const BASES: [u8; 4] = *b"ACGT";
 
 const N_SAMPLES: usize = 64;
 const N_GROUPS: u32 = 10_000;

@@ -1287,11 +1287,8 @@ fn print_alt_fraction_shape(
             continue;
         }
         print!("  {name:<30}  ");
-        for cell in 0..CELLS {
-            print!(
-                "{:>9.4}",
-                100.0 * counts[band][cell] as f64 / totals[band] as f64
-            );
+        for count in counts[band].iter().take(CELLS) {
+            print!("{:>9.4}", 100.0 * *count as f64 / totals[band] as f64);
         }
         println!("   ({} positions)", totals[band]);
     }

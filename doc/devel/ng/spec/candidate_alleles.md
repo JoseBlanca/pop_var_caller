@@ -213,7 +213,21 @@ loci in 1,000 at one tomato accession and only 439 at 63).
 [`cohort_merge.md`](cohort_merge.md) §4.3 books that debt in its own last paragraph. This section
 pays it for the allele-level rule.
 
-*Measured 2026-08-24 on the GIAB trio (HG002/3/4) over the 100 benchmark intervals of
+> **Every "GIAB trio" figure in this document is HG002 alone, and that was found on 2026-08-25.**
+> `benchmarks/giab/per_sample/bam/300x/` holds three files, but HG003 and HG004 are sliced to
+> *their own* benchmark regions. Over `HG002_bench_azar_merged_100.bed` — the intervals every
+> measurement below uses — `samtools view -c` counts 36,597 reads for HG002 and **0** for HG003, at
+> both depths. So a three-file walk builds byte-identical output to a one-file walk, and HG003
+> alone builds **0 loci**. **The measurements are correct; the label was not**, and the phrase
+> "the trio" is left standing below only where changing it would break a cross-reference.
+>
+> Two things follow. These runs are the **single-sample** end of the committed range, not the
+> three-sample one — which is a gap in the other direction, since the only real cohort here is the
+> 63 tomato accessions and they have no truth set. And **no measurement below says anything about
+> how the rule behaves across samples**: a sum over one sample is that sample's own count, so the
+> per-sample denominator this design turns on is untested by them (§12's regression entry).
+
+*Measured 2026-08-24 on HG002 over the 100 benchmark intervals of
 `benchmarks/giab/per_sample/bed/HG002_bench_azar_merged_100.bed`, 572 kb, scored against the
 v4.2.1 truth VCFs. "Lost to the bar" means some sample's reads did show the allele and the bar
 rejected it; of the 920 true alternative alleles carried by at least one sample inside those
@@ -271,7 +285,7 @@ the identical rule it would have seen at 2%. And **the floor is the expensive kn
 raising it from 2 to 3 loses five true alleles to keep 1,539 alternatives, where the share at 10
 in 100 loses two to keep 1,601. **The floor stays at 2 and should be defended there.**
 
-**The share is what controls the allele count at depth, not the cap.** On the same 300× trio, a
+**The share is what controls the allele count at depth, not the cap.** On the same 300× run, a
 count-only bar leaves 471 of 7,478 loci carrying more than three alternatives — 6.3% — while a
 2-in-100 share brings that to 16 loci, 0.2%, 5 in 100 to a single locus and the shipped 10 in 100
 to none at all. The cap of §4 is
@@ -365,13 +379,13 @@ that locus.** "Earned" is this document's admission rule (§3) asked of that sam
 cleared the bar *for it*. The locus is still called, and every other sample is genotyped normally.
 
 **The condition is the cap, not the bar, and the difference is the whole rule.** The bar drops
-alleles almost nobody showed — 13,166 of 15,474 alternatives on the trio at 300× (§3.3) — which are
+alleles almost nobody showed — 13,166 of 15,474 alternatives on HG002 at 300× (§3.3) — which are
 overwhelmingly sequencing error, and every sample carries a few error reads at nearly every locus.
 A rule keyed on "this sample has reads in the pool" would emit a missing genotype almost
 everywhere. The cap only ever cuts alleles that already cleared the bar for somebody, and asking
 whether it cleared the bar *for this sample* is what makes the rule fire where a real allele was
 lost and nowhere else. **Measured, that is rare:** the cap binds at 23 of 53,935 tomato loci and 0
-of 7,478 trio loci at 300× (§4.2), and only the samples that earned a cut allele are affected at
+of 7,478 HG002 loci at 300× (§4.2), and only the samples that earned a cut allele are affected at
 those.
 
 **Refusing the whole locus was the alternative and it loses more.** It is what HipSTR does above
@@ -448,7 +462,7 @@ and at a binding cap the shallow sample's allele is the last thing cut.
 commits to working from 3 reads a position to several hundred, and the alternative — a share
 shrunk toward a half by the sample's depth, a posterior mean rather than the raw proportion —
 would change what the key means at every locus to fix a case the cap makes rare: it binds at 23 of
-53,935 tomato loci and none of the GIAB trio's (§4.2). It is stated here because a reader of the
+53,935 tomato loci and none of HG002's (§4.2). It is stated here because a reader of the
 two sentences above would conclude the opposite.
 
 **No second, harder ceiling is needed.** Production carries one at 64 alleles, where the group is
@@ -466,8 +480,24 @@ wrap onto the reference's index
 | cohort | built loci | loci above six alleles | loci above four |
 |---|---|---|---|
 | 63 tomato accessions, ~3 reads a position, 400 kb | 53,935 | 23 (1 in 2,300) | 65 (0.12%) |
-| GIAB trio, 30×, 572 kb | 4,177 | 0 | 0 |
-| GIAB trio, 300×, 572 kb | 7,478 | 0 | 4 (0.05%) |
+| HG002, 30×, 572 kb | 4,177 | 0 | 0 |
+| HG002, 300×, 572 kb | 7,478 | 0 | 4 (0.05%) |
+
+**At the bar this module actually ships — 2 reads or 10 in 100 — it binds less still, and that is
+now a measurement rather than the inequality this section used to carry** (2026-08-25). The same
+three runs:
+
+| cohort | loci above six alleles | loci above four | loci above three | widest locus |
+|---|---|---|---|---|
+| 63 tomato accessions, 400 kb | **16** (1 in 3,400) | 53 (0.10%) | 171 (0.32%) | 11 or more alternatives |
+| HG002, 30×, 572 kb | 0 | 0 | 1 locus | 3 alternatives |
+| HG002, 300×, 572 kb | **0** | 0 | **0** | **2 alternatives** |
+
+HG002 at 300× is the striking one: with the shipped share the widest locus in 572 kb carries
+two alternatives, so **no cap of three or more could bind anywhere in that run**. The earlier
+table's counts stand as what a 2-in-100 share gives, which is what §3.3 swept. *"11 or more" is
+the histogram's top bucket rather than an exact width; at the 2-in-100 share the widest tomato
+locus carried 14.*
 
 **So at these cohort sizes the cap is a safety valve, not a working part**, and its exact value
 carries little. **But what it guards against grows with the cohort**, which is why it is here.
@@ -488,7 +518,7 @@ extrapolation from this table, not a measurement** (§12, Q2).
 
 **And the ranking's advantage is, honestly, unmeasurable at these sizes.** Ranking by
 within-sample share and production's ranking by cohort read total keep different alleles at 19 of
-53,935 tomato loci and at none of the trio's. The argument for the share ranking is a
+53,935 tomato loci and at none of HG002's. The argument for the share ranking is a
 thousand-sample argument and no thousand-sample cohort exists here (§12, Q2).
 
 *Two figures in this section were re-measured on 2026-08-24 when the shipped module replaced the
@@ -568,7 +598,7 @@ silently vanishes on that path. ng's own likelihood has the same contamination m
 Flagged as a trap, not as a change to production.
 
 **Measured size** (2026-08-24, bar at 2 reads or 2%): the leftover takes 0.36% of the reads on the
-63-accession tomato panel and 1.05% of the trio's at 300×.
+63-accession tomato panel and 1.05% of HG002's at 300×.
 
 ### 5.1 What is *not* in the leftover
 
@@ -620,7 +650,7 @@ upstream, per sample. `NotPeriodic` survives and belongs only to repeat tracts
 builds a locus when some sample's non-reference reads *pooled* reach its rule; two reads split one
 and one across two alternatives clear that and clear neither allele bar. Measured, this is more
 than one built locus in four and the fraction is the same on both benchmarks: 27.4% on tomato,
-27.3% on the trio at 30×, 28.0% at 300×. **It is `Selected` with an empty alternative list, it is
+27.3% on HG002 at 30×, 28.0% at 300×. **It is `Selected` with an empty alternative list, it is
 counted, and what the run does with it is emission's.** It is not an error and must not become
 one.
 
@@ -680,6 +710,20 @@ a 2-in-100 share is added.
 more independent chances for one of them to reach the bar, so what is *admitted* grows even where
 the locus does not (§4.2's table). That is what the cap and its ranking are for, and it is the one
 part of this design whose behaviour at that size is extrapolated rather than measured.
+
+**And what the cap does at one sample, which this section owned and never said.** It is the same
+rule — nothing in it counts samples — but it is nearly inert there, and for a reason worth stating
+rather than leaving to be inferred. One sample can only put an allele among the cap's candidates
+by clearing the bar for it itself, so the cap can only ever cut sequences that one sample's own
+reads earned; and at three reads a position it takes six distinct earned sequences at one position
+before six alleles are reached at all. **Measured: holding the tomato allele table fixed and
+asking the rule of one accession, the widest locus of 53,935 carries two alternatives — three
+alleles, against a cap of six** (§4.2's growth table). That figure is at the merge's 2-in-100
+share, which is the bar that table was swept at; the shipped 10 in 100 admits no more, so the
+conclusion only strengthens. So at the thin end of the range the cap is not a working part, and the
+truncation policy §4.1 argues for — a cut allele making its carrier's genotype missing — has
+almost nothing to act on: the sample that would be emitted missing is the only sample there is,
+and the locus would have been called over its own sequences or not at all.
 
 ---
 
@@ -782,7 +826,7 @@ repeat-tract path gets a differential instead
   correctly with depth regardless. *What would settle it:* a cohort of several hundred samples, or
   a resampling study that holds the allele table fixed and grows the sample set past 63.
 - **Q3 — the share is 10 in 100, and it is the one constant here set against its own measurement**
-  (owner's decision, 2026-08-24). Recall on this trio says 5 in 100 is free at both depths and 10
+  (owner's decision, 2026-08-24). Recall on HG002 says 5 in 100 is free at both depths and 10
   in 100 costs two true alleles at 300× (§3.3). It ships at 10 because **recall is one side of the
   trade and the count of candidates is the other, and nothing has measured the second yet**: an
   allele one sample shows at a twentieth of its reads is far likelier to be error than variation,
@@ -815,10 +859,17 @@ repeat-tract path gets a differential instead
 - **Property, scale-freedom:** adding a sample that shows only reference reads changes neither the
   surviving list nor any other sample's leftover. This is §3.2's principle as a test, and it is
   the one that fails first if a cohort term creeps into the bar.
-- **Regression, the definition of done:** the GIAB trio and the tomato panel run end to end
+- **Regression, the definition of done:** the human benchmark and the tomato panel run end to end
   through the calling loop with real candidates rather than fixtures — which is the blocker
   [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) records, and clearing it is what
   this document is for.
+- **Owed, and nothing here supplies it: a cohort with a truth set.** The human data is one sample
+  (§3.3's note), the 63-accession tomato panel has no truth VCF, so **no measurement in this
+  document says anything about how the admission rule behaves across samples** — and the rule's
+  whole design is that its denominator is one sample's own reads. `select_generic`'s unit tests
+  cover it on hand-built multi-sample loci; what is missing is real data. *What would supply it:*
+  HG003 and HG004 re-sliced to HG002's benchmark intervals, which is a benchmark-data task rather
+  than a caller one.
 - **The measurement harness exists**: `examples/ng_candidate_selection_probe.rs` walks a real
   cohort, applies the bar and the cap, and with `NG_SELECT_DUMP` writes a per-allele table for
   truth scoring. Every number in §3.3, §4.2 and §5 came from it on 2026-08-24.

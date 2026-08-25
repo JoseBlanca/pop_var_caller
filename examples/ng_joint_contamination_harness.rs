@@ -37,6 +37,13 @@
 //! ng_joint_contamination_harness [null|spike|budget] [samples] [depth] [loci] [groups] [fst]
 //! ```
 
+// The fits below are dense linear algebra written the way the textbooks write it — a Gram
+// matrix, a Cholesky solve, a Gaussian elimination — where the loop index *is* the matrix
+// index and two or three arrays are addressed by the same `k` at once. Clippy's rewrite of
+// `for k in 0..n` into `a.iter_mut().take(n)` names one of those arrays and hides the rest
+// behind `<item>`, which is the opposite of legible here.
+#![allow(clippy::needless_range_loop)]
+
 use std::time::Instant;
 
 // ---------------------------------------------------------------------
@@ -289,6 +296,11 @@ enum Frequencies {
     /// One frequency per locus **per subpopulation**, from that subpopulation's members.
     /// It is handed the membership `verifyBamID2` infers from principal components — but it
     /// still has to *estimate* the frequency, from a twelfth of the panel.
+    ///
+    /// Kept though no run currently selects it: the arm it names is one of the four the
+    /// note above compares, and its match arms below are what make that comparison
+    /// re-runnable by adding it back to the list at the bottom of this file.
+    #[allow(dead_code)]
     ByGroup,
     /// The frequencies the genotypes were actually drawn at. **No fit can have these**; the
     /// arm exists to separate a frequency that is wrong from one that is right and noisy.
@@ -486,9 +498,7 @@ fn pc_lines(
         let mut xty = vec![0.0_f64; width];
         for sample in 0..samples {
             let mut design = vec![1.0_f64; width];
-            for k in 0..components {
-                design[k + 1] = coordinates[sample][k];
-            }
+            design[1..(components + 1)].copy_from_slice(&coordinates[sample][..components]);
             for a in 0..width {
                 for b in 0..width {
                     xtx[a][b] += design[a] * design[b];
@@ -572,9 +582,7 @@ fn coordinate_leverage(coordinates: &[Vec<f64>], components: usize) -> Vec<f64> 
     let width = components + 1;
     let design = |sample: usize| -> Vec<f64> {
         let mut row = vec![1.0_f64; width];
-        for k in 0..components {
-            row[k + 1] = coordinates[sample][k];
-        }
+        row[1..(components + 1)].copy_from_slice(&coordinates[sample][..components]);
         row
     };
     let mut xtx = vec![vec![0.0_f64; width]; width];
