@@ -194,7 +194,20 @@ pub trait SsrEmissionModel {
     ///
     /// **Not a shorter complete observation.** A read that ran out inside the tract has not
     /// shown a shorter allele; it has shown a lower bound, and scoring it as though it pinned
-    /// a length would let a truncated read out-discriminate a whole one.
+    /// a length would score it as evidence *for* a short allele — the trap spec §5.1 names.
+    ///
+    /// **What a lower bound is safe about, and what it is not.** It never scores *below* the
+    /// complete read of the same bases, so it cannot be mistaken for a short allele; that is
+    /// the property §5.1 needs, and it is tested. It is **not** true that a censored read is
+    /// always the less discriminating of the two — spec §5.2 and §12's thirteenth test say so
+    /// and they are wrong. Where one candidate is shorter than the stretch the read got
+    /// through and the other is longer, the censored read separates them **further**: it needs
+    /// no stutter at all under the longer candidate, so it collects the same-length share,
+    /// while the complete read needs a one-repeat change under each and the two differ only by
+    /// the direction ratio. Measured at 5.661 nats against 1.586 on the fixture in
+    /// `a_censored_read_out_discriminates_a_complete_one_where_the_candidates_straddle_it`.
+    /// That is real information — a lower bound rules out everything below it — and it is the
+    /// evidence §5.1 turned these reads on to collect.
     fn censored_emission(
         &self,
         witnessed_prefix: &[u8],
@@ -244,13 +257,25 @@ pub trait SsrEmissionModel {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StutterSubstitutionEmission;
 
-/// Working memory Model A reuses across calls: the placements a whole-repeat slip could land
-/// in, and the buffer a part-repeat resize is rendered into.
+/// Working memory Model A reuses across calls: the candidate's run structure, the placements a
+/// whole-repeat slip could land in, and the buffer a part-repeat resize is rendered into.
 ///
-/// Held by the row and handed back on every call, so nothing allocates per observation per
-/// candidate.
+/// Held by the row and handed back on every call, so the buffers themselves are not
+/// reallocated per observation per candidate.
+///
+/// **Two allocations do survive that, and are named here because the sentence above used to
+/// claim more than it delivers.** `segment_tract_into` builds a fresh `Vec<u8>` for every
+/// interruption it finds, and clearing a `Vec<Vec<u8>>` drops each inner buffer, so
+/// `placements` keeps only its spine between calls and `render_tract` allocates one buffer per
+/// placement. Both are **per call** rather than per length change — the censored term's exact
+/// sum segments once and then walks the support — and closing them needs `render_tract` to
+/// write into a reused buffer, which is a change of its own.
 #[derive(Debug, Default)]
 pub struct StutterSubstitutionScratch {
+    /// The candidate split into its runs and interruptions — **a property of the candidate,
+    /// so it survives a whole walk over the length changes** rather than being rebuilt for
+    /// each one.
+    segments: Vec<TractSegment>,
     /// One entry per placement-distinct realisation of the slip.
     placements: Vec<Vec<u8>>,
     /// The candidate resized to the read's length, for the single-placement branch.
@@ -279,31 +304,18 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
         }
 
         let motif = context.motif.as_bytes();
-        let period_bases = i64::from(period.get());
-        let letters = if bp_diff % period_bases == 0 {
-            // A whole-repeat change: every run the slip could have landed in gives its own
-            // sequence, and they are averaged with equal weight.
-            enumerate_placements(
-                candidate.bases,
-                motif,
-                bp_diff / period_bases,
-                &mut scratch.placements,
-            );
-            if scratch.placements.is_empty() {
-                // Unreachable from this candidate — more repeats contracted than any run
-                // holds. `SsrScoringContext::unreachable_mass` is what accounts for it.
-                return 0.0;
-            }
-            let each = 1.0 / scratch.placements.len() as f64;
-            scratch
-                .placements
-                .iter()
-                .map(|placement| each * substitution_probability(observation, placement, context))
-                .sum()
-        } else {
-            // A part-repeat change: one placement, resized at the tract's end.
-            resize_at_the_end(candidate.bases, motif, bp_diff, &mut scratch.resized);
-            substitution_probability(observation, &scratch.resized, context)
+        segment_tract_into(candidate.bases, motif, &mut scratch.segments);
+        let Some(letters) = letters_over(
+            observation,
+            candidate.bases,
+            motif,
+            bp_diff,
+            context,
+            scratch,
+        ) else {
+            // Unreachable from this candidate — more repeats contracted than any run holds.
+            // `SsrScoringContext::unreachable_mass` is what accounts for it.
+            return 0.0;
         };
 
         length_probability * letters
@@ -311,16 +323,221 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
 
     fn censored_emission(
         &self,
-        _witnessed_prefix: &[u8],
-        _candidate: &SsrCandidate<'_>,
-        _context: &SsrScoringContext<'_>,
-        _scratch: &mut Self::Scratch,
+        witnessed_prefix: &[u8],
+        candidate: &SsrCandidate<'_>,
+        context: &SsrScoringContext<'_>,
+        scratch: &mut Self::Scratch,
     ) -> f64 {
-        // Milestone G's, and deliberately not a placeholder that scores: a read that ran out
-        // is not a shorter complete observation, and treating it as one would let a truncated
-        // read out-discriminate a whole one (spec §5.2).
-        unimplemented!("the censored term is plan step G1")
+        let period = period_of(context.motif);
+        let motif = context.motif.as_bytes();
+        let witnessed_bases = witnessed_prefix.len();
+
+        // The read got through `witnessed_bases` bases of tract, so the tract is at least that
+        // long — which for this candidate means a length change of at least this much. It is
+        // negative whenever the candidate is already long enough on its own, and that is the
+        // ordinary case rather than an edge one.
+        let smallest_bp_diff = witnessed_bases as i64 - candidate.bases.len() as i64;
+
+        if is_a_pure_tract(candidate.bases, motif) {
+            // **The factorised form, and on a pure tract it is exact.** Every stretching of a
+            // pure tract agrees on its first `witnessed_bases` bases — stretching appends or
+            // trims at the end — so the letters come out of the sum and what is left is the
+            // length factor (spec §5.2).
+            let length_probability_at_least =
+                context.stutter.probability_at_least_this_much_longer(
+                    smallest_bp_diff,
+                    period,
+                    candidate.repeat_count,
+                );
+            // An early exit rather than a correction: the letter factor is finite, so falling
+            // through would multiply out to this same zero. It saves a resize.
+            if length_probability_at_least <= 0.0 {
+                return 0.0;
+            }
+            resize_at_the_end(
+                candidate.bases,
+                motif,
+                smallest_bp_diff,
+                &mut scratch.resized,
+            );
+            return length_probability_at_least
+                * substitution_probability(witnessed_prefix, &scratch.resized, context);
+        }
+
+        // **The exact sum, on an interrupted tract.** Here the stretchings give genuinely
+        // different first-`witnessed_bases` bases, so the letters cannot come out of the sum:
+        // an interruption sits at a different offset in each one. Spec §5.2 bounds what the
+        // factorisation would cost here at `log(3(1−ε)/ε)` per distinguishing base — 6.4 nats
+        // at an error rate of 1 in 200 — and says to pay for the sum instead.
+        //
+        // **What that costs is one letter comparison per placement per length change**, not
+        // one per length change: the support is at most 41 changes wide and an interrupted
+        // tract offers one placement per run, so a two-run tract pays at most 82 comparisons
+        // of the tract's length. It reaches only candidates that are interrupted at all — a
+        // pure one took the branch above.
+        //
+        // **The runs are found once**, before the walk: they are a property of the candidate,
+        // and the candidate does not move inside the loop.
+        segment_tract_into(candidate.bases, motif, &mut scratch.segments);
+        let mut total = 0.0;
+        for (bp_diff, length_probability) in context
+            .stutter
+            .reachable_length_changes(period, candidate.repeat_count)
+        {
+            // Only the stretchings that leave the tract at least as long as what the read
+            // showed. Everything else is a tract the read could not have run out inside — and
+            // this filter is also what makes every prefix below well defined, because a
+            // stretching admitted here is by construction at least `witnessed_bases` long.
+            if bp_diff < smallest_bp_diff || length_probability <= 0.0 {
+                continue;
+            }
+            let Some(letters) = letters_over(
+                witnessed_prefix,
+                candidate.bases,
+                motif,
+                bp_diff,
+                context,
+                scratch,
+            ) else {
+                // Unreachable from this candidate's runs. A slip lands in *one* run, and the
+                // distribution's own reachability rule sees only the total, so the support can
+                // offer a contraction no single run can absorb — the recorded open question.
+                // Skipping is an early exit rather than a correction: an empty placement list
+                // contributes zero to this sum either way.
+                continue;
+            };
+            total += length_probability * letters;
+        }
+        total
     }
+}
+
+/// **How probable the letters are, given this candidate stretched by `bp_diff`** — compared
+/// over `observed`'s own length, and `None` when no run of the candidate can absorb the
+/// change.
+///
+/// # One function, two questions
+///
+/// **The comparison stops at `observed.len()`, and that is what lets one function serve both
+/// [`SsrEmissionModel::emission`] and [`SsrEmissionModel::censored_emission`].** A complete
+/// read is exactly as long as the stretched candidate — `bp_diff` was derived from it — so
+/// truncating to its length is a no-op there. A censored read is shorter, and that truncation
+/// is the whole difference between the two callers. Written once because the alternative is
+/// two copies of the whole-versus-part dispatch, the equal-weight average and the unreachable
+/// rule, and the next change to where a slip may land would have to reach both.
+///
+/// # The caller owes the segmentation
+///
+/// `scratch.segments` must already hold this candidate's runs ([`segment_tract_into`]). That
+/// is what lets a caller walk many length changes against one candidate without re-splitting a
+/// tract that does not move: the censored term's exact sum pays for it once and then walks the
+/// support.
+///
+/// # Where a slip can land
+///
+/// A whole-repeat change enumerates one placement per run it could have landed in and averages
+/// them with equal weight; a part-repeat change is resized at the tract's end in a single
+/// placement (spec §4.2).
+fn letters_over(
+    observed: &[u8],
+    candidate: &[u8],
+    motif: &[u8],
+    bp_diff: i64,
+    context: &SsrScoringContext<'_>,
+    scratch: &mut StutterSubstitutionScratch,
+) -> Option<f64> {
+    let period_bases = motif.len() as i64;
+
+    if bp_diff == 0 {
+        // The one placement is the candidate itself, so there is nothing to render.
+        return Some(substitution_probability(
+            observed,
+            prefix_of_stretching(candidate, observed.len())?,
+            context,
+        ));
+    }
+
+    if bp_diff % period_bases == 0 {
+        // A whole-repeat change: every run the slip could have landed in gives its own
+        // sequence, and they are averaged with equal weight.
+        place_slip_in_each_run(
+            &scratch.segments,
+            motif,
+            bp_diff / period_bases,
+            &mut scratch.placements,
+        );
+        if scratch.placements.is_empty() {
+            return None;
+        }
+        let each = 1.0 / scratch.placements.len() as f64;
+        Some(
+            scratch
+                .placements
+                .iter()
+                .map(
+                    |placement| match prefix_of_stretching(placement, observed.len()) {
+                        Some(prefix) => each * substitution_probability(observed, prefix, context),
+                        None => 0.0,
+                    },
+                )
+                .sum(),
+        )
+    } else {
+        // A part-repeat change: one placement, resized at the tract's end.
+        resize_at_the_end(candidate, motif, bp_diff, &mut scratch.resized);
+        Some(
+            match prefix_of_stretching(&scratch.resized, observed.len()) {
+                Some(prefix) => substitution_probability(observed, prefix, context),
+                None => 0.0,
+            },
+        )
+    }
+}
+
+/// The first `length` bases of a stretching, or `None` if the stretching is shorter than that.
+///
+/// **It cannot be `None` at either call site, and it is fallible anyway.** The guarantee spans
+/// three statements and two functions — `censored_emission`'s floor filter admits only
+/// stretchings at least as long as what the read showed, and a complete read is exactly as
+/// long as its own stretching — which is more derivation than a bare index should rest on in a
+/// path that runs once per observation per candidate. Indexing would abort a calling run;
+/// this scores nothing, which is what [`substitution_probability`] already does when handed
+/// two lengths that disagree, so the two branches of the sum now fail the same way.
+#[inline]
+fn prefix_of_stretching(stretching: &[u8], length: usize) -> Option<&[u8]> {
+    let prefix = stretching.get(..length);
+    debug_assert!(
+        prefix.is_some(),
+        "the floor filter admits only stretchings at least as long as what the read showed"
+    );
+    prefix
+}
+
+/// Whether this candidate's tract is whole copies of the motif and nothing else.
+///
+/// **It decides which of spec §5.2's two forms scores a censored read**, and that is the only
+/// thing it is for: on a pure tract every stretching agrees on the witnessed prefix, so the
+/// letters factor out exactly; on an interrupted one they do not, because an interruption
+/// sits at a different offset in each stretching.
+///
+/// **It must agree with [`segment_tract`], which is what actually places a slip.** That is
+/// asserted rather than argued — `a_tract_is_pure_exactly_when_the_segmenter_finds_one_run`
+/// checks the two against each other over every tract of eight bases or fewer on a two-letter
+/// alphabet — because `segment_tract`'s own documentation calls its greedy left-to-right phase
+/// *a choice*, and a later change to that choice must not be able to leave the two classifying
+/// different tracts.
+///
+/// **The length check is not redundant with the chunk walk**, and it is the conjunct a reader
+/// is most likely to think is. `chunks_exact` drops the remainder on the floor, so without it
+/// `CAGCAGTT` under motif `CAG` comes back pure — and it is not, because its stretchings are
+/// built from its runs rather than by continuing the tiling off the end. Measured on that
+/// tract, a censored read of `CAGCAGCAG` scores 3.369e-3 down the interrupted route against
+/// 3.939e-10 down the pure one.
+fn is_a_pure_tract(candidate: &[u8], motif: &[u8]) -> bool {
+    candidate.len().is_multiple_of(motif.len())
+        && candidate
+            .chunks_exact(motif.len())
+            .all(|chunk| chunk == motif)
 }
 
 /// `P(the letters differ this way)` for two sequences the stutter factor has already made the
@@ -379,14 +596,33 @@ fn substitution_probability(
 /// interrupted tracts.** Closing that needs the run structure to reach the distribution,
 /// which takes only a period and a repeat count today; it is recorded as an open question
 /// rather than papered over.
+/// **Test-only since the scoring paths began reusing a segmentation.** `place_slip_in_each_run`
+/// is what `emission` and `censored_emission` call; this wrapper exists for the tests and the
+/// comparison model, which score one length change at a time and have no buffer to keep.
+#[cfg(test)]
 fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut Vec<Vec<u8>>) {
-    out.clear();
     if repeats == 0 {
+        out.clear();
         out.push(candidate.to_vec());
         return;
     }
+    place_slip_in_each_run(&segment_tract(candidate, motif), motif, repeats, out);
+}
 
-    let segments = segment_tract(candidate, motif);
+/// The same enumeration over a tract whose runs have already been found — what a caller uses
+/// when it walks many length changes against **one** candidate, so the split is paid for once
+/// rather than once a change.
+///
+/// `repeats` is non-zero: the identity has no slip to place, and [`enumerate_placements`]
+/// answers it without splitting anything.
+fn place_slip_in_each_run(
+    segments: &[TractSegment],
+    motif: &[u8],
+    repeats: i64,
+    out: &mut Vec<Vec<u8>>,
+) {
+    debug_assert_ne!(repeats, 0, "the identity has no slip to place");
+    out.clear();
     let run_count = segments
         .iter()
         .filter(|segment| matches!(segment, TractSegment::Run(_)))
@@ -420,7 +656,7 @@ fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut 
         if held_in_total + resized as usize - held == 0 {
             continue;
         }
-        let rendered = render_tract(&segments, motif, target, resized as usize);
+        let rendered = render_tract(segments, motif, target, resized as usize);
         if !out.contains(&rendered) {
             out.push(rendered);
         }
@@ -442,9 +678,21 @@ enum TractSegment {
 /// **Left-to-right and greedy, which is a choice about interrupted tracts.** A different
 /// phase would split some tracts differently; this is production's rule, and the two must
 /// agree while the models are meant to.
+#[cfg(test)]
 fn segment_tract(candidate: &[u8], motif: &[u8]) -> Vec<TractSegment> {
-    let period = motif.len();
     let mut segments = Vec::new();
+    segment_tract_into(candidate, motif, &mut segments);
+    segments
+}
+
+/// The same split, written into a buffer the caller owns and reuses (cleared first).
+///
+/// The scoring paths take this one. A candidate's runs do not change while the model walks the
+/// length changes that candidate could show, so splitting once a call rather than once a
+/// change is the difference between one split and up to forty-one of them.
+fn segment_tract_into(candidate: &[u8], motif: &[u8], segments: &mut Vec<TractSegment>) {
+    segments.clear();
+    let period = motif.len();
     let mut run = 0usize;
     let mut interruption: Vec<u8> = Vec::new();
     let mut at = 0usize;
@@ -473,7 +721,6 @@ fn segment_tract(candidate: &[u8], motif: &[u8]) -> Vec<TractSegment> {
     if !interruption.is_empty() {
         segments.push(TractSegment::Interruption(interruption));
     }
-    segments
 }
 
 /// Render the segments back to bytes, with the run at `target` holding `resized` repeats
@@ -1148,6 +1395,782 @@ mod tests {
         assert!(
             (scored - expected).abs() <= expected * 1e-12,
             "{scored} against {expected}"
+        );
+    }
+
+    /// Score a read that ran out inside the tract, at a stated substitution rate — the
+    /// counterpart of [`score`], and the shape every censored test below uses.
+    fn score_censored(
+        witnessed_prefix: &[u8],
+        candidate_bases: &[u8],
+        repeat_count: u32,
+        motif: &[u8],
+        model: &StutterModel,
+        substitution_rate: f64,
+    ) -> f64 {
+        let motif = a_motif(motif);
+        let candidate = SsrCandidate {
+            bases: candidate_bases,
+            repeat_count: repeats(repeat_count),
+        };
+        let context = SsrScoringContext::new(
+            &motif,
+            model,
+            &candidate,
+            ErrorRate::try_new(substitution_rate).expect("a valid rate"),
+            [Provenance::FittedHere],
+        );
+        let mut scratch = StutterSubstitutionScratch::default();
+        StutterSubstitutionEmission.censored_emission(
+            witnessed_prefix,
+            &candidate,
+            &context,
+            &mut scratch,
+        )
+    }
+
+    /// The cell of a sweep where a censored read and a complete one disagreed most about how
+    /// far apart two candidates are — carried as three named numbers rather than a tuple,
+    /// because the cell is read sixty lines from where it is built.
+    #[derive(Clone, Copy, Default)]
+    struct WidestDisagreement {
+        /// How far apart the two separations were, in nats.
+        gap: f64,
+        /// What the complete read made of the two candidates, in nats.
+        complete_separation: f64,
+        /// What the censored read made of them.
+        censored_separation: f64,
+    }
+
+    /// A tract of `repeat_count` whole copies of `motif`.
+    fn a_tract(motif: &[u8], repeat_count: usize) -> Vec<u8> {
+        motif.repeat(repeat_count)
+    }
+
+    /// **Where the read's own length admits exactly one stretching, a censored read scores
+    /// bit for bit what the complete read of the same bases scores** — spec §12's twelfth
+    /// test, second half.
+    ///
+    /// **This is a test of the tail's arithmetic and not of a tolerance.** The widest
+    /// stretching either branch reaches is [`MAX_WHOLE_REPEAT_SLIP`] whole repeats, so a read
+    /// that got through exactly that much tract leaves the tail one term — and a tail summed
+    /// from the distribution's own terms is then that term itself, to the bit. A tail written
+    /// as a telescoped geometric difference would agree only to within rounding, which is why
+    /// it is not written that way.
+    ///
+    /// Both branches are exercised: the pure tract takes the factorised form, the interrupted
+    /// one the exact sum over stretchings.
+    #[test]
+    fn a_censored_read_of_one_admissible_length_scores_what_the_complete_read_does() {
+        let model = a_model();
+        let epsilon = 1e-3;
+
+        // Pure: the factorised branch.
+        for (motif, repeat_count) in [
+            (b"A".as_slice(), 6u32),
+            (b"CA".as_slice(), 5),
+            (b"CAG".as_slice(), 4),
+        ] {
+            let candidate = a_tract(motif, repeat_count as usize);
+            let widest = motif.len() * MAX_WHOLE_REPEAT_SLIP as usize;
+            let observation = a_tract(
+                motif,
+                repeat_count as usize + MAX_WHOLE_REPEAT_SLIP as usize,
+            );
+            assert_eq!(observation.len(), candidate.len() + widest);
+
+            let complete = score(
+                &observation,
+                &candidate,
+                repeat_count,
+                motif,
+                &model,
+                epsilon,
+            );
+            let censored = score_censored(
+                &observation,
+                &candidate,
+                repeat_count,
+                motif,
+                &model,
+                epsilon,
+            );
+            assert!(complete > 0.0, "the fixture stopped scoring anything");
+            assert_eq!(
+                censored.to_bits(),
+                complete.to_bits(),
+                "motif {}: censored {censored}, complete {complete}",
+                String::from_utf8_lossy(motif)
+            );
+        }
+
+        // Interrupted: the exact-sum branch. Two runs of two `CAG` around a `TT`, so a
+        // whole-repeat slip has two placements and the letters cannot factor out.
+        let candidate = b"CAGCAGTTCAGCAG";
+        let mut observation = a_tract(b"CAG", 12);
+        observation.extend_from_slice(b"TT");
+        observation.extend_from_slice(&a_tract(b"CAG", 2));
+        assert_eq!(observation.len(), candidate.len() + 30);
+
+        let complete = score(&observation, candidate, 4, b"CAG", &model, epsilon);
+        let censored = score_censored(&observation, candidate, 4, b"CAG", &model, epsilon);
+        assert!(complete > 0.0, "the interrupted fixture scores nothing");
+        assert_eq!(
+            censored.to_bits(),
+            complete.to_bits(),
+            "interrupted: censored {censored}, complete {complete}"
+        );
+    }
+
+    /// **A lower bound is never less likely than the exact length it bounds.** The censored
+    /// score sums the complete read's own term together with every longer stretching, so it
+    /// can only be larger — and where the read's length admits one stretching alone the two
+    /// meet, which the test above pins to the bit.
+    ///
+    /// Pinned because it is the cheapest check that the tail sums **upward** from its floor: a
+    /// tail that summed the wrong direction, or that made its floor strict, breaks it at once.
+    ///
+    /// **It does not catch a floor dropped altogether**, and an earlier version of this comment
+    /// claimed it did. Dropping the floor makes the tail *larger*, which an inequality in this
+    /// direction accepts by construction. Measured: replacing the floor with `i64::MIN` leaves
+    /// this test green and fails four others, of which
+    /// `a_censored_read_past_every_stretching_scores_nothing` is the one to read.
+    #[test]
+    fn a_censored_read_is_at_least_as_likely_as_the_complete_read_of_the_same_bases() {
+        let model = a_model();
+        let epsilon = 1e-3;
+        let motif = b"CA";
+
+        for repeat_count in [2u32, 4, 8] {
+            let candidate = a_tract(motif, repeat_count as usize);
+            for witnessed_repeats in 1..=(repeat_count as usize + 4) {
+                let observation = a_tract(motif, witnessed_repeats);
+                let complete = score(
+                    &observation,
+                    &candidate,
+                    repeat_count,
+                    motif,
+                    &model,
+                    epsilon,
+                );
+                let censored = score_censored(
+                    &observation,
+                    &candidate,
+                    repeat_count,
+                    motif,
+                    &model,
+                    epsilon,
+                );
+                assert!(
+                    censored >= complete,
+                    "{repeat_count} repeats, read of {witnessed_repeats}: censored {censored} \
+                     below complete {complete}"
+                );
+            }
+        }
+    }
+
+    /// **Spec §12's thirteenth test, measured — and what the measurement changed about it.**
+    ///
+    /// For two candidates the read **outgrew** — both shorter than the stretch it got through
+    /// — a partial observation and the complete observation of the same bases separate them by
+    /// **very nearly the same amount**, not by an amount ordered one way.
+    ///
+    /// The reason is the geometric's memorylessness: above the read's own length the tail is
+    /// proportional to the point probability, so the two log-likelihood ratios cancel down to
+    /// the same number. What breaks the exact equality is the **part-repeat branch**, whose
+    /// re-indexing means its terms do not line up with the whole-repeat ones — and it breaks
+    /// it in *both* directions, so "no larger for the partial" is false here too, by a
+    /// whisker.
+    ///
+    /// **Measured over this grid, the two separations differ by at most 0.043 nats — 1.4 parts
+    /// in a hundred of a separation of 3.15 nats — and the partial is the larger of the two at
+    /// that cell.** That is the honest form of the property, and the assertion below is a
+    /// two-sided bound for that reason rather than the one-sided claim the specification
+    /// states.
+    ///
+    /// The unrestricted claim fails far more loudly, and the test after this one is the
+    /// counterexample.
+    #[test]
+    fn a_censored_and_a_complete_read_separate_outgrown_candidates_alike() {
+        let epsilon = 1e-3;
+        let motif = b"CA";
+        let mut widest_gap = WidestDisagreement::default();
+
+        for model in [a_model(), StutterModel::hipstr_shipped()] {
+            for witnessed_repeats in [6usize, 8, 10] {
+                let observation = a_tract(motif, witnessed_repeats);
+                for shorter in 2u32..=4 {
+                    for longer in (shorter + 1)..=5 {
+                        let short_tract = a_tract(motif, shorter as usize);
+                        let long_tract = a_tract(motif, longer as usize);
+
+                        let complete_shorter =
+                            score(&observation, &short_tract, shorter, motif, &model, epsilon);
+                        let complete_longer =
+                            score(&observation, &long_tract, longer, motif, &model, epsilon);
+                        let censored_shorter = score_censored(
+                            &observation,
+                            &short_tract,
+                            shorter,
+                            motif,
+                            &model,
+                            epsilon,
+                        );
+                        let censored_longer = score_censored(
+                            &observation,
+                            &long_tract,
+                            longer,
+                            motif,
+                            &model,
+                            epsilon,
+                        );
+                        if complete_shorter <= 0.0 || complete_longer <= 0.0 {
+                            continue;
+                        }
+
+                        let complete_separation =
+                            (complete_shorter.ln() - complete_longer.ln()).abs();
+                        let censored_separation =
+                            (censored_shorter.ln() - censored_longer.ln()).abs();
+                        let gap = (censored_separation - complete_separation).abs();
+                        assert!(
+                            gap < 5e-2,
+                            "read of {witnessed_repeats} repeats, candidates {shorter} and \
+                             {longer}: the censored read separated them by \
+                             {censored_separation} nats against the complete read's \
+                             {complete_separation}"
+                        );
+                        if gap > widest_gap.gap {
+                            widest_gap = WidestDisagreement {
+                                gap,
+                                complete_separation,
+                                censored_separation,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        // **The grid has to reach a cell where the two genuinely differ**, or the property is
+        // being read off arithmetic that happened to cancel — and the cell it reaches is
+        // asserted rather than described, so it cannot go stale. At the widest cell the
+        // complete read separates the two candidates by 3.149 nats and the partial by 3.193:
+        // the partial is the **larger** of the two, by 1.4 parts in a hundred.
+        let WidestDisagreement {
+            gap,
+            complete_separation,
+            censored_separation,
+        } = widest_gap;
+        assert!(
+            (gap - 0.043_354).abs() < 1e-5,
+            "the two separations differed by at most {gap} nats"
+        );
+        assert!(
+            (complete_separation - 3.149_47).abs() < 1e-4
+                && (censored_separation - 3.192_82).abs() < 1e-4,
+            "the widest cell moved: complete {complete_separation}, censored \
+             {censored_separation}"
+        );
+    }
+
+    /// **The counterexample to the unrestricted claim, measured rather than argued.**
+    ///
+    /// Spec §5.2 says a partial is *always* less discriminating than a complete observation of
+    /// the same bases, and §12's thirteenth test asks for that without restriction. **It is
+    /// false whenever the two candidates straddle the stretch the read got through**, and the
+    /// reason is not a parameter choice but the shape of the question a censored read asks.
+    ///
+    /// A read that got through ten bases of tract, against a candidate that already holds
+    /// twelve, needs nothing to have happened at all — the tract is at least ten because it is
+    /// twelve — so it collects the same-length share, which is most of the distribution.
+    /// Against a candidate holding eight it needs an expansion, which is rare. The complete
+    /// read of those same ten bases needs a one-repeat change either way, and those two shares
+    /// differ only by the direction ratio. So the partial separates the two candidates
+    /// **further** than the complete read does.
+    ///
+    /// That is real information rather than a defect: a lower bound rules out everything below
+    /// it, and it is exactly the evidence spec §5.1 turned these reads on to collect. What is
+    /// wrong is the claim, and this test is here so the fact is asserted rather than
+    /// remembered.
+    #[test]
+    fn a_censored_read_out_discriminates_a_complete_one_where_the_candidates_straddle_it() {
+        // The contraction-biased fitted row, not HipSTR's shipped one: that ships equal
+        // direction shares, so the complete read separates the two candidates by exactly
+        // zero and the counterexample would be true for an uninteresting reason.
+        let model = a_model();
+        let epsilon = 1e-3;
+        let motif = b"CA";
+
+        let observation = a_tract(motif, 5); // ten bases of tract
+        let shorter = a_tract(motif, 4); // eight bases — the read outgrew it
+        let longer = a_tract(motif, 6); // twelve bases — the read did not reach its end
+
+        let complete_shorter = score(&observation, &shorter, 4, motif, &model, epsilon);
+        let complete_longer = score(&observation, &longer, 6, motif, &model, epsilon);
+        let censored_shorter = score_censored(&observation, &shorter, 4, motif, &model, epsilon);
+        let censored_longer = score_censored(&observation, &longer, 6, motif, &model, epsilon);
+
+        let complete_separation = (complete_shorter.ln() - complete_longer.ln()).abs();
+        let censored_separation = (censored_shorter.ln() - censored_longer.ln()).abs();
+
+        assert!(
+            censored_separation > complete_separation,
+            "the counterexample stopped being one: censored {censored_separation} nats against \
+             complete {complete_separation}"
+        );
+        // **The sizes, asserted rather than described.** The complete read separates the two
+        // candidates by 1.586 nats — the direction ratio alone, since one candidate needs a
+        // one-repeat expansion and the other a one-repeat contraction. The partial separates
+        // them by 5.661, because against the longer candidate it needs nothing to have
+        // happened at all.
+        assert!(
+            (complete_separation - 1.5856).abs() < 1e-3,
+            "complete separation {complete_separation}"
+        );
+        assert!(
+            (censored_separation - 5.6605).abs() < 1e-3,
+            "censored separation {censored_separation}"
+        );
+    }
+
+    /// **A read that got through more tract than any stretching of this candidate could
+    /// produce scores zero**, and falls to the row's outlier term — the same fate a complete
+    /// read of an impossible length meets.
+    #[test]
+    fn a_censored_read_past_every_stretching_scores_nothing() {
+        let model = a_model();
+        let motif = b"CA";
+        let candidate = a_tract(motif, 4);
+        // Eight bases of tract plus the widest whole-repeat expansion, and one repeat more.
+        let observation = a_tract(motif, 4 + MAX_WHOLE_REPEAT_SLIP as usize + 1);
+        assert_eq!(
+            score_censored(&observation, &candidate, 4, motif, &model, 1e-3),
+            0.0
+        );
+    }
+
+    /// **A tract is pure exactly when the segmenter finds one run and nothing else**, which is
+    /// the agreement the whole routing rests on: the factorised form is only exact if every
+    /// stretching really does share the witnessed prefix, and what builds a stretching is
+    /// `segment_tract`.
+    ///
+    /// Asserted rather than argued, because `segment_tract`'s own documentation calls its
+    /// greedy left-to-right phase *a choice* — so a later change to that choice must fail here
+    /// rather than silently send interrupted tracts down the exact branch, or worse, pure ones
+    /// down neither.
+    ///
+    /// **The named fixture is the one the length check alone catches.** `CAGCAGTT` under motif
+    /// `CAG` passes the chunk walk — `chunks_exact` drops the trailing `TT` on the floor — and
+    /// is plainly not a whole number of copies.
+    #[test]
+    fn a_tract_is_pure_exactly_when_the_segmenter_finds_one_run() {
+        let motif = b"CAG";
+        let candidate = b"CAGCAGTT";
+        assert!(
+            candidate
+                .chunks_exact(motif.len())
+                .all(|chunk| chunk == motif),
+            "the fixture must be one the chunk walk alone calls pure, or this tests nothing"
+        );
+        assert!(
+            !is_a_pure_tract(candidate, motif),
+            "the length check is what has to catch this"
+        );
+
+        // Exhaustive over a two-letter alphabet: motifs to three bases, tracts to eight.
+        let mut checked = 0usize;
+        for motif_len in 1..=3usize {
+            for motif_code in 0..(1usize << motif_len) {
+                let motif: Vec<u8> = (0..motif_len)
+                    .map(|at| {
+                        if (motif_code >> at) & 1 == 0 {
+                            b'A'
+                        } else {
+                            b'C'
+                        }
+                    })
+                    .collect();
+                for tract_len in 1..=8usize {
+                    for tract_code in 0..(1usize << tract_len) {
+                        let tract: Vec<u8> = (0..tract_len)
+                            .map(|at| {
+                                if (tract_code >> at) & 1 == 0 {
+                                    b'A'
+                                } else {
+                                    b'C'
+                                }
+                            })
+                            .collect();
+                        let segments = segment_tract(&tract, &motif);
+                        let one_run_only = matches!(segments.as_slice(), [TractSegment::Run(_)]);
+                        assert_eq!(
+                            is_a_pure_tract(&tract, &motif),
+                            one_run_only,
+                            "motif {} tract {}: {segments:?}",
+                            String::from_utf8_lossy(&motif),
+                            String::from_utf8_lossy(&tract)
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 7_140, "the sweep changed size");
+    }
+
+    /// **A pure candidate takes the factorised route, and the assertion is bitwise for a
+    /// reason.** Both routes are correct to about one part in 10¹⁵, so a tolerance cannot tell
+    /// them apart; the product `length factor × letters` is reproduced to the bit only by the
+    /// route that computes it that way.
+    ///
+    /// Without this, forcing every candidate down the exact sum passes the whole suite — the
+    /// branch is pinned in one direction only, and the untested direction is the one that
+    /// costs a placement enumeration per length change on the majority of candidates.
+    #[test]
+    fn a_pure_candidate_is_scored_by_the_factorised_route() {
+        let model = a_model();
+        let epsilon = 1e-3;
+        for (motif_bytes, repeat_count) in [(b"A".as_slice(), 1u32), (b"CA".as_slice(), 4)] {
+            let motif = a_motif(motif_bytes);
+            let candidate = a_tract(motif_bytes, repeat_count as usize);
+            assert!(
+                is_a_pure_tract(&candidate, motif_bytes),
+                "the fixture must be pure"
+            );
+
+            for witnessed_len in 0..=(candidate.len() + 8) {
+                let witnessed: Vec<u8> = a_tract(motif_bytes, 20)
+                    .into_iter()
+                    .take(witnessed_len)
+                    .collect();
+                let scored = score_censored(
+                    &witnessed,
+                    &candidate,
+                    repeat_count,
+                    motif_bytes,
+                    &model,
+                    epsilon,
+                );
+
+                let smallest_bp_diff = witnessed.len() as i64 - candidate.len() as i64;
+                let length_factor = model.probability_at_least_this_much_longer(
+                    smallest_bp_diff,
+                    period_of(&motif),
+                    repeats(repeat_count),
+                );
+                let mut stretched = Vec::new();
+                resize_at_the_end(&candidate, motif_bytes, smallest_bp_diff, &mut stretched);
+                let candidate_view = SsrCandidate {
+                    bases: &candidate,
+                    repeat_count: repeats(repeat_count),
+                };
+                let context = SsrScoringContext::new(
+                    &motif,
+                    &model,
+                    &candidate_view,
+                    ErrorRate::try_new(epsilon).expect("a valid rate"),
+                    [Provenance::FittedHere],
+                );
+                let factorised =
+                    length_factor * substitution_probability(&witnessed, &stretched, &context);
+                assert_eq!(
+                    scored.to_bits(),
+                    factorised.to_bits(),
+                    "motif {} at {witnessed_len} bases witnessed: {scored} against {factorised}",
+                    String::from_utf8_lossy(motif_bytes)
+                );
+            }
+        }
+    }
+
+    /// **Every stretching of an interrupted tract is cut back to what the read witnessed**, and
+    /// that cut is the only thing standing between the exact sum and two sequences of
+    /// different lengths — which score nothing at all.
+    ///
+    /// **The fixture is chosen so that the cut does real work.** Eleven bases witnessed of a
+    /// fourteen-base candidate: the deepest admitted stretching lands exactly on the prefix —
+    /// the floor is `−3` and the tract gives up exactly three bases — and every other one
+    /// overshoots it and must be cut. The bit-for-bit identity test cannot reach this, because
+    /// there the read is exactly as long as the single stretching admitted and both cuts are
+    /// full length.
+    ///
+    /// It is also the only test that puts the placement average and the part-repeat arm of the
+    /// sum under a real proper prefix.
+    #[test]
+    fn the_exact_sum_cuts_every_stretching_back_to_the_witnessed_prefix() {
+        let model = a_model();
+        let candidate = b"CAGCAGTTCAGCAG"; // two runs of two around a TT
+        assert!(!is_a_pure_tract(candidate, b"CAG"));
+        let witnessed = b"CAGCAGTTCAG";
+
+        let motif = a_motif(b"CAG");
+        let smallest_bp_diff = witnessed.len() as i64 - candidate.len() as i64;
+        let mut admitted = 0usize;
+        let mut part_repeat_terms = 0usize;
+        let mut cut_terms = 0usize;
+        for (bp_diff, probability) in model.reachable_length_changes(period_of(&motif), repeats(4))
+        {
+            if bp_diff < smallest_bp_diff || probability <= 0.0 {
+                continue;
+            }
+            admitted += 1;
+            if bp_diff % 3 != 0 {
+                part_repeat_terms += 1;
+            }
+            let stretched_len = candidate.len() as i64 + bp_diff;
+            assert!(
+                stretched_len >= witnessed.len() as i64,
+                "stretching by {bp_diff} is shorter than the prefix and was admitted anyway"
+            );
+            if stretched_len > witnessed.len() as i64 {
+                cut_terms += 1;
+            }
+        }
+        assert!(admitted > 1, "the sum has only {admitted} term(s)");
+        assert!(
+            cut_terms >= admitted - 1,
+            "only {cut_terms} of {admitted} terms are actually cut, so the slicing is barely \
+             exercised"
+        );
+        assert!(
+            part_repeat_terms > 0,
+            "the fixture never enters the part-repeat arm of the sum"
+        );
+
+        let scored = score_censored(witnessed, candidate, 4, b"CAG", &model, 1e-3);
+        assert!(
+            scored > 0.0 && scored < 1.0,
+            "the exact sum over cut stretchings came back {scored}"
+        );
+    }
+
+    /// **A read that witnessed nothing rules nothing out**, so its score is the whole mass the
+    /// model can place on this candidate — and on a pure tract that is `1 − unreachable_mass`
+    /// to the bit.
+    ///
+    /// **On an interrupted tract it falls short, and the shortfall is the recorded open
+    /// question rather than a defect here.** A slip lands in one run, so two runs of two
+    /// repeats cannot lose three even though the tract holds four; the exact sum drops that
+    /// term while `unreachable_mass`, which sees only the total, counts it as reachable. The
+    /// size is pinned so it cannot grow unnoticed.
+    #[test]
+    fn a_read_that_witnessed_nothing_scores_the_whole_reachable_mass() {
+        let model = a_model();
+
+        let pure = a_tract(b"CA", 4);
+        let scored = score_censored(b"", &pure, 4, b"CA", &model, 1e-3);
+        let reachable = 1.0 - model.unreachable_mass(period_of(&a_motif(b"CA")), repeats(4));
+        assert_eq!(
+            scored.to_bits(),
+            reachable.to_bits(),
+            "{scored} against {reachable}"
+        );
+
+        let interrupted = b"CAGCAGTTCAGCAG";
+        let scored = score_censored(b"", interrupted, 4, b"CAG", &model, 1e-3);
+        let reachable = 1.0 - model.unreachable_mass(period_of(&a_motif(b"CAG")), repeats(4));
+        let unplaced_by_the_runs = reachable - scored;
+        assert!(
+            (unplaced_by_the_runs - 1.3218e-3).abs() < 1e-6,
+            "the per-run shortfall moved: {scored} against {reachable}, short by \
+             {unplaced_by_the_runs}"
+        );
+    }
+
+    /// **A candidate holding one repeat can only be stretched.** Both contraction branches
+    /// close at once — no whole repeat can go, and none of the non-multiples inside it can
+    /// either — so the read is scored over the same-length term and expansions and nothing
+    /// else.
+    ///
+    /// One repeat is the boundary the contraction rule turns on, and no other censored test
+    /// uses it.
+    #[test]
+    fn a_one_repeat_candidate_has_nothing_to_contract() {
+        let model = a_model();
+        let motif = a_motif(b"CAG");
+        let contractions = model
+            .reachable_length_changes(period_of(&motif), repeats(1))
+            .filter(|(bp_diff, probability)| *bp_diff < 0 && *probability > 0.0)
+            .count();
+        assert_eq!(contractions, 0, "a one-repeat tract has nothing to give up");
+
+        let scored = score_censored(b"CAG", b"CAG", 1, b"CAG", &model, 1e-3);
+        let reachable = 1.0 - model.unreachable_mass(period_of(&motif), repeats(1));
+        let letters = (1.0f64 - 1e-3).powi(3);
+        assert!(
+            (scored - reachable * letters).abs() <= scored * 1e-12,
+            "{scored} against {}",
+            reachable * letters
+        );
+    }
+
+    /// **One wrong base costs one `ε/3` in place of one `1 − ε`, and the length factor is
+    /// untouched** — the two halves separate on the censored side exactly as they do on the
+    /// complete one.
+    ///
+    /// Every other censored fixture hands the letter half a perfect match, so it is at its
+    /// maximum in all of them and this is the only place it is asked to do anything. Without
+    /// it, an implementation that compared only the first base, or compared against the wrong
+    /// placement where all placements happen to agree, passes.
+    #[test]
+    fn a_mismatching_base_inside_the_witnessed_prefix_is_charged_once() {
+        let model = a_model();
+        let epsilon = 1e-3;
+        let candidate = a_tract(b"CAG", 6);
+
+        let clean = score_censored(b"CAGCAGCAG", &candidate, 6, b"CAG", &model, epsilon);
+        let dirty = score_censored(b"CAGCTGCAG", &candidate, 6, b"CAG", &model, epsilon);
+        let expected = clean * (epsilon / 3.0) / (1.0 - epsilon);
+        assert!(
+            (dirty - expected).abs() <= expected * 1e-12,
+            "{dirty} against {expected}"
+        );
+    }
+
+    /// **The support the distribution hands out and the placements the scoring can build are
+    /// the same rule on a pure tract, and the support is the looser of the two otherwise** —
+    /// the direction `place_slip_in_each_run`'s own documentation states.
+    ///
+    /// **This is what stops the two from being changed apart.** The reachability rule is
+    /// written on the distribution's side, where it sees only a total repeat count, and here,
+    /// where it sees the runs. Before this test, moving either one alone left the other green:
+    /// the distribution's tests never call the placements and the placement test pins its
+    /// boundary with hand-written literals.
+    #[test]
+    fn the_placements_and_the_support_agree_on_a_pure_tract() {
+        let model = a_model();
+        let motif = a_motif(b"CA");
+        let period = period_of(&motif);
+        let mut placements = Vec::new();
+
+        for (bases, repeat_count, pure) in [
+            (b"CACACACA".as_slice(), 4u32, true),
+            (b"CACATTCACA".as_slice(), 4u32, false),
+        ] {
+            assert_eq!(is_a_pure_tract(bases, motif.as_bytes()), pure);
+            for (bp_diff, probability) in
+                model.reachable_length_changes(period, repeats(repeat_count))
+            {
+                if probability <= 0.0 || bp_diff % 2 != 0 {
+                    continue;
+                }
+                enumerate_placements(bases, motif.as_bytes(), bp_diff / 2, &mut placements);
+                if pure {
+                    assert!(
+                        !placements.is_empty(),
+                        "pure tract: the support offers {bp_diff} and the placements refuse it"
+                    );
+                }
+            }
+
+            // And nothing outside the support is placeable, on either kind of tract: one
+            // repeat deeper than the tract can give up, and one repeat past the cutoff.
+            for repeats_moved in [
+                -(i64::from(repeat_count)),
+                i64::from(MAX_WHOLE_REPEAT_SLIP) + 1,
+            ] {
+                enumerate_placements(bases, motif.as_bytes(), repeats_moved, &mut placements);
+                let in_support = model
+                    .reachable_length_changes(period, repeats(repeat_count))
+                    .any(|(bp_diff, probability)| {
+                        bp_diff == repeats_moved * 2 && probability > 0.0
+                    });
+                assert!(
+                    !in_support,
+                    "{repeats_moved} repeats is in the support after all"
+                );
+                if repeats_moved < 0 {
+                    assert!(
+                        placements.is_empty(),
+                        "{repeats_moved} repeats is outside the support but placeable"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Where the scoring and the support disagree about what a tract can reach, measured —
+    /// because they do, and the disagreement is not this step's to settle.**
+    ///
+    /// `censored_emission` takes its length changes from
+    /// [`StutterModel::reachable_length_changes`], which applies the contraction rule: a read
+    /// of this candidate must still show a repeat. `emission` does not — on the part-repeat
+    /// branch it asks only whether the distribution gives the change a non-zero probability,
+    /// and that question does not know the tract's length. So a two-base `CA` tract scores a
+    /// one-base read at 5.390e-4 while `unreachable_mass` counts that same mass as unplaced.
+    ///
+    /// **All 22 disagreements over this grid run one way**: `emission` places mass the support
+    /// refuses, never the reverse, and every one is a part-repeat contraction that would leave
+    /// the tract below one repeat. The number is asserted so it cannot grow unnoticed and so
+    /// that whoever settles the contraction question in spec §4.2 finds this rather than
+    /// rediscovering it.
+    ///
+    /// **This is a fact about `emission`, which milestone F shipped, not about the censored
+    /// term.** Repairing it changes scores at one- and two-repeat tracts, which is a decision
+    /// about the model rather than a coding slip.
+    #[test]
+    fn the_scoring_and_the_support_disagree_only_where_the_open_question_says_they_do() {
+        let model = a_model();
+        let mut disagreements = Vec::new();
+
+        for motif_bytes in [
+            b"A".as_slice(),
+            b"CA".as_slice(),
+            b"CAG".as_slice(),
+            b"CAGT".as_slice(),
+        ] {
+            let motif = a_motif(motif_bytes);
+            for repeat_count in 1u32..=4 {
+                let candidate = a_tract(motif_bytes, repeat_count as usize);
+                let admitted: Vec<i64> = model
+                    .reachable_length_changes(period_of(&motif), repeats(repeat_count))
+                    .filter(|(_, probability)| *probability > 0.0)
+                    .map(|(bp_diff, _)| bp_diff)
+                    .collect();
+
+                for bp_diff in -(candidate.len() as i64)..=40 {
+                    let observed_len = candidate.len() as i64 + bp_diff;
+                    if observed_len < 0 {
+                        continue;
+                    }
+                    let observation: Vec<u8> = a_tract(motif_bytes, 60)
+                        .into_iter()
+                        .take(observed_len as usize)
+                        .collect();
+                    let scored = score(
+                        &observation,
+                        &candidate,
+                        repeat_count,
+                        motif_bytes,
+                        &model,
+                        1e-3,
+                    );
+                    if (scored > 0.0) != admitted.contains(&bp_diff) {
+                        assert!(
+                            scored > 0.0,
+                            "the support admits {bp_diff} at {repeat_count} repeats of {} and \
+                             the scoring refuses it — that is the other direction, and it \
+                             would mean the censored term is charging mass nothing can place",
+                            String::from_utf8_lossy(motif_bytes)
+                        );
+                        assert!(
+                            bp_diff < 0 && bp_diff % (motif_bytes.len() as i64) != 0,
+                            "a disagreement that is not a part-repeat contraction: {bp_diff} at \
+                             {repeat_count} repeats of {}",
+                            String::from_utf8_lossy(motif_bytes)
+                        );
+                        disagreements.push(bp_diff);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            disagreements.len(),
+            22,
+            "the disagreement between the scoring and the support changed size"
         );
     }
 }

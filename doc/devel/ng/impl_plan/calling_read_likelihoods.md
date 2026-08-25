@@ -412,7 +412,7 @@ independent-implementation check behind the whole path. *Depends:* F2. *Source:*
 
 ### Milestone G — the censored term
 
-**G1. `censored_emission`.**  ☐
+**G1. `censored_emission`.**  ✅
 Spec §5.2: the factorised form on pure candidates — the letter match on the witnessed prefix
 times the closed-form tail `P(length ≥ ℓ | a)`, both geometric tails capped at E2's cutoffs —
 and the exact sum over reachable stretchings on interrupted candidates. Tests: **the complement
