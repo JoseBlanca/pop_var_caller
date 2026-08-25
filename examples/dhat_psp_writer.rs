@@ -61,7 +61,7 @@ fn writer_header() -> WriterHeader {
 
 fn build_records() -> Vec<PileupRecord> {
     let mut records = Vec::with_capacity(NUM_RECORDS);
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     for i in 0..NUM_RECORDS {
         let pos = (i as u32) + 1;
         let ref_base = bases[i & 3];

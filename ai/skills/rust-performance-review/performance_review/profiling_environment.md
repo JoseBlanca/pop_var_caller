@@ -70,7 +70,7 @@ The reference FASTA for tomato fixtures lives at `~/genomes/s_lycopersicum/4.00/
 
 ## Toolchain pin
 
-`rust-toolchain.toml` pins `channel = "1.95"` so criterion baselines stay comparable across review cycles — autovectorisation decisions shift between rustc versions without warning. Two consequences for measurement plans:
+`rust-toolchain.toml` pins `channel = "1.98.0"` so criterion baselines stay comparable across review cycles — autovectorisation decisions shift between rustc versions without warning. Two consequences for measurement plans:
 
-- A plan must not depend on a std API newer than 1.95 (e.g. `f64::algebraic_add`, stable from Rust 1.98) unless it names the pin bump as part of the fix's complexity cost.
-- A pin bump is itself a measurable event: re-run the affected criterion baselines before and after, because codegen changes can move numbers with no code change.
+- A plan must not depend on a std API newer than 1.98.0 unless it names the pin bump as part of the fix's complexity cost. `f64::algebraic_add` and its siblings are *inside* the pin as of 1.98 and may be proposed freely (see `hot_loops.md`).
+- A pin bump is itself a measurable event: re-run the affected criterion baselines before and after, because codegen changes can move numbers with no code change. **The pin moved 1.97.1 → 1.98.0 on 2026-08-25; baselines saved before that date are stale.**

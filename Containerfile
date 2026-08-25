@@ -6,7 +6,7 @@
 #      from the host filesystem outside the project directory.
 #
 # Rust version is pinned to match the host toolchain used during development.
-FROM docker.io/library/rust:1.97-bookworm
+FROM docker.io/library/rust:1.98-bookworm
 
 # System dependencies:
 #   - build-essential / pkg-config: required by a few cargo crates that

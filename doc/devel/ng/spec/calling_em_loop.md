@@ -73,9 +73,9 @@ decides which one ng keeps.
   and emission, step 11 of [`ng_proposal.md`](ng_proposal.md), and production's STR work found
   emission and genotyping behave independently. What this produces is genotypes and their
   confidence; what is done with them is a separate document.
-- **It does not select the candidate alleles from what the merge unified** — that step has no spec
-  yet and §4 says so. What this document does own is whether the loop may **add** to the set once
-  calling starts (§4.1, §12's Q3).
+- **It does not select the candidate alleles from what the merge unified** — that is step 6's,
+  and it has its own spec ([`candidate_alleles.md`](candidate_alleles.md)). What this document does
+  own is whether the loop may **add** to the set once calling starts (§4.1, §12's Q3).
 - **It fits nothing the parameter pre-pass fits.** Every error rate, contamination fraction and
   inbreeding coefficient arrives frozen and leaves unchanged. What the loop may move is §5's, and it
   is two things: this locus's allele frequencies, always; and this locus's slippage numbers, if
@@ -393,20 +393,25 @@ added *between two passes of the frequency loop*, because the third row plus the
 would leave the loop comparing a different quantity from one pass to the next. Add alleles between
 whole runs of the loop, as §2's outermost `repeat` does, and every row of the table is satisfied.
 
-**No document says how the candidate alleles are chosen, and one has to.**
-[`cohort_merge.md`](cohort_merge.md) §13 passes *"choosing candidate alleles from the table"* to
-"the calling steps' spec"; all three calling documents pass it to
-[`ng_proposal.md`](ng_proposal.md) step 6, which is a row in a table comparing five callers. Nobody
-has written the design.
+**This section recorded that no document said how the candidate alleles are chosen. One does
+now** ([`candidate_alleles.md`](candidate_alleles.md), with its architecture and a shipped
+`select_generic`; the repeat-tract half is
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) and is written but not built). The gap was
+found here — [`cohort_merge.md`](cohort_merge.md) §13 passed *"choosing candidate alleles from the
+table"* to "the calling steps' spec", all three calling documents passed it on to
+[`ng_proposal.md`](ng_proposal.md) step 6, which is a row in a table comparing five callers, and
+nobody had written the design. **What follows is kept because it is what the design had to
+answer**, not because it is still open.
 
-**One consequence is already blocking a formula, which is how the gap was noticed.** The SNP/indel
+**One consequence was blocking a formula, and that is how the gap was noticed.** The SNP/indel
 emission needs `q_sum_other`, the pooled error mass of reads matching no candidate
 ([`read_likelihoods.md`](read_likelihoods.md) §3.3), and **nothing upstream produces it**: the merge
 unifies *every* sequence a sample showed into the allele table ([`cohort_merge.md`](cohort_merge.md)
 §4.2), so there is no leftover until something narrows the table. **Selection is what creates that
 pool, so whoever specifies selection owes the pool** — the alleles it dropped, with their summed
-per-read error mass, not merely a count of them. Recorded here because a coder who writes the
-emission before selection exists will otherwise invent a producer for it.
+per-read error mass, not merely a count of them. **It does**: `LocusSelection::unmatched` carries
+the reads and the mass per covering sample, summed from the merge's own rows rather than
+re-derived from a count and a rate.
 
 **What is true of both paths today: neither invents a sequence.** A coder coming from HipSTR will
 expect otherwise. Production's STR candidate assembly admits a repeat length only where some
@@ -528,6 +533,102 @@ frozen before the first pass and stays frozen.
 | per-read-group error rate, contamination, STR substitution rate | **no** — frozen by the parameter fit | [`read_likelihoods.md`](read_likelihoods.md) §6.1 |
 | each sample's inbreeding coefficient | **no** — frozen by the parameter fit | [`calling_priors.md`](calling_priors.md) §7 |
 | the candidate alleles | **no while the loop runs** — a discovery round may add to them between whole runs of it, and ng ships with that off (§4.1) | candidate selection, plus discovery where switched on |
+
+### 5.0 A sample the candidate step could not call, and what the M-step does with it
+
+**This whole section is the SNP/indel path's, and the repeat-tract path sets no sample aside**
+(owner, 2026-08-24). §5.0.1 is why the two differ; everything before it describes the generic path.
+
+**Candidate selection can hand this loop a sample it has already declared uncallable at the locus.**
+When the allele cap cuts a sequence that a sample's own reads had earned, that sample carries
+something the locus is no longer called over, and
+[`candidate_alleles.md`](candidate_alleles.md) §4.1 fixes its genotype as **missing** rather than
+letting the caller invent one. The flag travels on the evidence as
+`GenericSampleEvidence::genotype_must_be_missing`
+([`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2.1); this loop does not re-derive
+it and could not, because the pooled error mass that would be the only trace is identical under
+every genotype and cancels.
+
+**The E-step is unaffected: such a sample is simply not scored, and emission writes its genotype as
+missing.**
+
+**Decision: it leaves the loop entirely, before the first pass** (owner, 2026-08-24). An uncallable
+sample is set aside when the loop is entered and takes no part in either step: it is not scored, it
+contributes nothing to the M-step's sums, and emission writes its genotype as missing because it
+has no call rather than because a call was withheld. **The locus is still called, on the samples
+that can be.**
+
+**Why it cannot merely be left in with an uncertain posterior.** The M-step sums every sample's
+expected allele copies into the cohort's, and that sum is what the next pass's prior is built from
+(§2). A sample whose true allele is absent from the table does not have an *uncertain* posterior —
+it has one over the **wrong set**, and it puts its mass on whichever surviving genotype its reads
+mismatch least, which is usually the homozygous reference. Including it pulls the locus's allele
+frequencies toward the reference by exactly the samples carrying the rarest alleles: the error is
+systematic and in one direction, not noise that averages out.
+
+**And this decision is what makes candidate selection's truncation defensible at all**, which is
+why it belongs to that document as much as to this one.
+[`candidate_alleles.md`](candidate_alleles.md) §4.1 prefers cutting the allele list over refusing
+the locus, on the ground that refusing costs every sample a locus most of them were callable at.
+That preference holds **only** if the samples that lost an earned allele stop contributing to the
+locus's numbers — otherwise the locus is corrupted cohort-wide and refusing it would be the honest
+answer. Setting them aside at the loop's entrance is what closes that.
+
+**Excluding costs the loop nothing it does not already tolerate.** A sample with no reads at the
+locus already contributes zero for every genotype and is decided by the prior alone (§7), so a
+smaller cohort is a shape the loop is built for. What it does change is the denominator of the
+fitted frequencies, which is the right denominator: the samples the locus was actually called on.
+
+**The ruling has a producer and no carrier, and the gap is in the shared vocabulary rather than
+in this loop** (found 2026-08-24, checking candidate selection against the modules it feeds).
+Selection already decides the fact — `UnmatchedSupport::genotype_must_be_missing()` is true for a
+sample whose own reads earned an allele the cap then cut. What does not exist is anywhere to put
+the answer: `SampleGenotypeCall` is `{ genotype, genotype_quality }` with no absent variant, and
+`Genotype::new` panics on an empty multiset, deliberately — *"an empty multiset is not a haploid
+call, it is a sample with no genome"*. **So a missing genotype cannot currently be expressed**, and
+this section's decision cannot be implemented until it can. The type is `calling/mod.rs`'s; whoever
+builds the loop adds the variant there, and §9's hand-off is written against its existence.
+
+**And the two per-sample lists are in different orders.** `LocusSelection::unmatched` is parallel
+to the merge's covering samples, `LocusInference::per_sample` is one entry per sample of the run in
+run order. A sample that does not cover the locus and a covering sample that lost nothing are
+different facts that look identical if the join is by position rather than through the sample index
+the merge records.
+
+*What would still be worth measuring, though nothing turns on it:* the tomato panel at the loci
+where the cap binds, comparing the fitted frequencies with the samples in and out — it would say
+how large the bias would have been. Not measurable until selection is wired into the builder, which
+is [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)'s work.
+
+#### 5.0.1 Why the repeat-tract path does not need this
+
+**At a repeat tract the loop can put back what selection cut, so no sample is set aside** (owner's
+decision, 2026-08-24). A discovery round between whole runs of the loop looks at what the converged
+posteriors are explaining as slippage, nominates the tract lengths that recur too often in one
+sample to be slippage, and **adds them to the candidate set** (§4, §4.1). A length one sample's
+reads earned and the cap removed is therefore not gone for the rest of the locus's calling, which is
+the fact the generic path does not have: there the candidate set is settled before the first pass
+and stays settled to the end (§4, §5's table). So the repeat-tract path scores every covering sample
+on every pass, and `genotype_must_be_missing` is a flag the generic evidence carries and the
+repeat-tract evidence does not.
+
+**What separates the two paths is what happens to the cut allele's reads, not the cap itself.** On
+the SNP/indel path a read whose sequence is no longer a candidate contributes only the pooled error
+mass `q_sum_other` ([`read_likelihoods.md`](read_likelihoods.md) §3.3) — the same number under every
+genotype, so it cancels, and the sample's posterior comes out confident over a set that cannot
+represent what it carries with nothing in the arithmetic saying so. That is what the paragraphs
+above answer. At a tract, a length off the candidate set is still **reached by the stutter model
+from a candidate** ([`read_likelihoods.md`](read_likelihoods.md) §4, and §4.5 for what happens
+beyond the slip cutoff), so those reads have a likelihood that differs between genotypes rather than
+one that cancels.
+
+**One condition, and it is stated because §4 makes it necessary.** The discovery round this rests on
+**ships off**, and §12's Q3 is the measurement that would default it on. With it off, a repeat
+tract's candidate set is as fixed during the loop as the generic path's, and the whole weight falls
+on that path's selection admitting enough rungs to begin with — which is why its cap is 32 against
+the generic path's six ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §12). **That
+document's §12 argues for 32 partly from this section's missing-genotype rule and so needs
+re-reading against this ruling**; the ruling is not in doubt, the sentence resting on it is.
 
 **Why the slippage numbers get a clock of their own rather than joining the frequencies on the
 inner one.** Building the read-likelihood table takes `candidates × Σ_s (observations in sample s)`
@@ -722,10 +823,18 @@ they came from, and the run's skeleton already collects results per region
 revisited when emission fixes the shape of what a call is.
 
 **What it hands on** is, per locus: the allele table, and per sample the genotype posteriors, the
-most probable genotype, its confidence, and the cohort's expected allele copies. **The last of those
-is not a by-product** — site filtering and emission read it, and recomputing it downstream from the
-called genotypes would give a different number, because a called genotype has thrown away the
-uncertainty the expected copies still carry.
+most probable genotype, its confidence, and the cohort's expected allele copies — **plus, on the
+SNP/indel path only, for a sample the candidate step declared uncallable (§5.0), the fact that its
+genotype is missing rather than any of the above.** Emission writes that sample's `GT` as missing;
+it is a decision taken before the reads were scored and not a low-confidence call, and the two must
+not be conflated in the output. **Such a sample has no posteriors and no expected copies at all** —
+§5.0 sets it aside before the first pass — so this is an absence rather than a value with a flag
+beside it, and the cohort's expected copies are a sum over the samples the locus was called on.
+**A repeat tract never produces such a sample** (§5.0.1): every covering sample there is handed on
+with posteriors, and the expected copies are a sum over all of them. **The cohort's expected allele
+copies are not a by-product** — site filtering and emission read them, and recomputing them
+downstream from the called genotypes would give a different number, because a called genotype has
+thrown away the uncertainty the expected copies still carry.
 
 ---
 

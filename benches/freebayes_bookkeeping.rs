@@ -252,7 +252,7 @@ impl OursStyle {
     /// Drop everything still open. Used at end-of-stream to make
     /// the closed-event total comparable across impls.
     fn finalize(&mut self) {
-        for (_, slot) in self.open.iter() {
+        for slot in self.open.values() {
             self.total_events_closed += slot.n_entries as u64;
         }
         self.open.clear();

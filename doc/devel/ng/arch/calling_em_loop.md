@@ -174,11 +174,17 @@ pub struct CallingLoopConfig {
     /// cohort range (spec §6). Inherited, soft.
     pub convergence_threshold: f64,            // DEFAULT_CONVERGENCE_THRESHOLD = 1e-3 (unitless frequency scale)
     pub max_passes: u32,                       // DEFAULT_MAX_PASSES = 50 (production; observed need 3–5)
-    pub max_candidate_alleles: u16,            // DEFAULT_MAX_CANDIDATE_ALLELES = 6 (production Stage-5 default)
     pub slippage_refit: SlippageRefitConfig,   // spec Q2 — §6.1
     pub discovery: DiscoveryConfig,            // spec Q3 — §6.2
 }
 ```
+
+**The allele cap was a field here and is not** (2026-08-25). It belongs to candidate selection,
+which now exists: `CandidateSelectionConfig` carries the cap and the support bar together, and
+`DEFAULT_MAX_CANDIDATE_ALLELES` is a `MaxCandidateAlleles` — a newtype refusing anything below
+two, because a cap of 0 or 1 admits no alternative and is refusal under another name
+([`candidate_alleles.md`](candidate_alleles.md) §2.1). A `u16` field of the same name here would
+be a second spelling of one rule, and the weaker of the two.
 
 ## 3. The loop seam — spec Q1's two axes as two seams, one configuration each
 
@@ -287,8 +293,12 @@ the slippage round runs only for `LocusKind::Ssr` loci, and discovery's retrace 
 stutter attribution, so both configs are ignored on `Generic` loci rather than half-honoured (spec
 §5.1's closing paragraph gives the reasons: no slippage numbers; error rate frozen because a refit
 would measure the merge's selection; contamination frozen by grain). Candidate selection is flat —
-a cap and a support bar over the merge's already-unified table (spec §4); the selection step's own
-design has no spec yet, and this doc only fixes its output type (`CandidateAlleles`).
+a cap and a support bar over the merge's already-unified table (spec §4). **That step now has its
+own spec, architecture and shipped generic implementation**
+([`candidate_alleles.md`](candidate_alleles.md); this doc used to say it had none and fixed only
+its output type). What it hands over is more than `CandidateAlleles`: a verdict, the map from the
+merge's allele indices onto the new dense ids, and per covering sample the reads and error mass it
+dropped — the last being the `q_sum_other` the SNP/indel row needs and nothing else produces.
 
 ## 6. The STR path
 
@@ -372,7 +382,7 @@ Every row read on 2026-08-21.
 | read attribution | `attribute_locus`, [`em.rs:1189`](../../../../src/ssr/cohort/em.rs) (called-genotype input; the soft split its comment defers) | **shape ported, input not** — posteriors (spec §5.1) |
 | the frequency M-step + final calls | `run_pi_em` [`em.rs:816`](../../../../src/ssr/cohort/em.rs), `final_calls` [`:857`](../../../../src/ssr/cohort/em.rs) | one ng loop for both paths |
 | STR loop differential (not oracle) | π-convergence at `1e-6`, [`em.rs:137`](../../../../src/ssr/cohort/em.rs) | run ng under production's rule, require matching genotypes, then restore and report (spec §10) |
-| `CandidateAlleles` (generic input) | `CohortObservation.alleles`, [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs) | select from it (cap + bar); the selection step has no spec — this doc fixes only the output type |
+| `CandidateAlleles` (generic input) | `CohortObservation.alleles`, [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs) | **built**: `select_generic` narrows it with the cap and the support bar ([`candidate_alleles.md`](candidate_alleles.md)) — call it, do not re-derive it |
 | `CandidateAlleles` (STR input) | `assemble_candidates` + `occupied`, [`candidate_set.rs:193`](../../../../src/ssr/cohort/candidate_set.rs), [`:221`](../../../../src/ssr/cohort/candidate_set.rs) | port the rung ladder when the STR path comes through the merge |
 | arm B's prior | [`genetics.rs:127`](../../../../src/genetics.rs) on cohort counts | reuse the sibling's port — one primitive, two callers |
 | arm C's prior | [`freebayes/src/Ewens.cpp`](../../../../freebayes/src/Ewens.cpp) (51 lines) | reimplement natively; store moves, not assignment copies (spec Q1) |

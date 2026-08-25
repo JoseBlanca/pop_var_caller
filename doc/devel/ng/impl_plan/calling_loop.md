@@ -19,12 +19,30 @@ exhaustive scorer, the slippage re-fit and discovery mechanisms, and every bench
 [`calling_bakeoffs`](calling_bakeoffs.md). This plan needs **both** fan-out plans: it drives the
 prior's builders and the likelihood's rows, and owns nothing of their mathematics.
 
-**One known blocker, recorded here and not solved here: candidate selection (step 6) has no
-spec.** Both calling specs record the gap and the arch docs fix only its output type
-(`CandidateAlleles`). Consequence for this plan: every integration test takes a
-**fixture-supplied candidate set**, and an end-to-end run on real data — the GIAB and HG002
-regressions included — **is blocked until that spec exists and is built**. The genotypes this
-plan produces are real genotypes over supplied candidates; nothing here pretends otherwise.
+**That blocker is lifted on the SNP/indel path, and this paragraph replaces the one that said
+otherwise** (2026-08-25). This plan was written when candidate selection had no spec, and recorded
+as its one blocker that every integration test would take a fixture-supplied candidate set and
+that an end-to-end run on real data was impossible. **Step 6 now has a spec, an architecture and a
+shipped implementation on the generic path**: `select_generic`
+([`../spec/candidate_alleles.md`](../spec/candidate_alleles.md),
+[`../arch/candidate_alleles.md`](../arch/candidate_alleles.md),
+[`candidate_alleles.md`](candidate_alleles.md)) takes one assembled `CohortObservation` and
+returns the narrowed `CandidateAlleles` with the per-sample leftover the read likelihood needs.
+
+**What that changes here, and what it does not.** Hand-built candidate sets remain right for the
+unit tests, and for a reason stronger than convenience: a test that calls selection and the loop
+together cannot say which of the two is wrong. What changes is Milestone E — an integration test on
+the generic path may now build its candidates by calling selection, and the end-to-end run on real
+data is no longer blocked for that path.
+
+**It is still blocked for repeat tracts, by two independent gaps.** The STR read-likelihood row
+does not exist — `censored_emission` is `unimplemented!()`
+([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1; the row is its H1 and H2) — and
+**that one blocks a tract genotype outright**, whatever candidates are supplied. Separately, the
+STR candidate path is unwritten: `allele_candidates/` holds `mod.rs` and `generic.rs` only, and
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's. The first must close
+before a tract can be called at all; the second only decides whether its candidates are chosen or
+handed in.
 
 ---
 
@@ -44,8 +62,11 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
 - **The slippage re-fit body and `discovery.rs`** — the same plan (spec Q2, Q3). Here their
   configs exist and their non-default values are **rejected with a clear message** until the
   bodies land, so a configuration cannot silently no-op.
-- **Candidate selection (step 6)** — no spec; see the blocker above. `allele_candidates/` is not
-  scaffolded here.
+- **Candidate selection (step 6)** — **built and merged on the generic path; consume it, do not
+  edit it.** `src/ng/calling/allele_candidates/` is another plan's
+  ([`candidate_alleles.md`](candidate_alleles.md)) and is still moving through that plan's
+  Milestone D. Its public surface is settled; the one value that may still change is
+  `DEFAULT_MAX_CANDIDATE_ALLELES`. The repeat-tract half is not written at all.
 - **Emission, QUAL, site filters, phasing** — steps 10–13
   ([`ng_proposal.md`](../spec/ng_proposal.md)).
 - **Where the loop runs inside the merge's builder** — the wiring into `run/` follows the
@@ -91,7 +112,10 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
   [`:96`](../../../../src/var_calling/posterior_engine.rs)), the retired-error rule
   ([`:26`](../../../../src/var_calling/posterior_engine.rs)), the STR final pass
   ([`em.rs:857`](../../../../src/ssr/cohort/em.rs)).
-- **Not in place, by design:** a candidate-selection spec (the blocker above).
+- **Candidate selection merged**, on the generic path: `select_generic` and its config, verdict,
+  remapping and per-sample leftover ([`candidate_alleles.md`](candidate_alleles.md)).
+- **Not in place:** the two repeat-tract halves — the STR read-likelihood row and the STR
+  candidate path. Both are named in the blocker note above.
 
 ## Branch and merge (sequential — no worktree)
 
@@ -115,6 +139,13 @@ likelihood's `RowScratch` section — allocated once per worker, reused per locu
 16%-of-cycles allocator reason travels in the doc comment); `LocusEvidence`
 (`Generic`/`Ssr` per-sample views — the one place the paths meet); `FrozenParameters`
 (calibration, contamination, per-sample `InbreedingF`, `SpectrumSeed`, `&StratumFits`, ploidy).
+
+**`CallingScratch` also gains candidate selection's buffers as a field** — `SelectionScratch`
+(`src/ng/calling/allele_candidates/mod.rs`), which that module built standing alone and whose own
+doc comment names this step as where it moves. The same worker runs selection and then the loop on
+the same locus, so a second per-worker allocation would buy nothing
+([`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §2.4). **Nothing about its shape
+changes** — move it in, do not restate it.
 The ordering contract documented and asserted: one run-wide sample order indexes every per-sample
 slice; `LocusEvidence`'s discriminant and `CandidateAlleles.kind` must agree — disagreement is a
 caller bug and asserts. *Source:* arch §2; spec §8.
@@ -122,11 +153,19 @@ caller bug and asserts. *Source:* arch §2; spec §8.
 **A2. `LocusGenotyper` + `CallingLoopConfig`.**  ☐
 `inference/mod.rs`: the seam trait (`call_locus(evidence, parameters, candidates, config,
 scratch) -> LocusInference`); `CallingLoopConfig` with the inherited constants as named,
-soft-marked values — `DEFAULT_CONVERGENCE_THRESHOLD = 1e-3`, `DEFAULT_MAX_PASSES = 50`,
-`DEFAULT_MAX_CANDIDATE_ALLELES = 6` — plus `SlippageRefitConfig` (default `max_rounds = 0`) and
+soft-marked values — `DEFAULT_CONVERGENCE_THRESHOLD = 1e-3`, `DEFAULT_MAX_PASSES = 50` — plus
+`SlippageRefitConfig` (default `max_rounds = 0`) and
 `DiscoveryConfig` (default `Off`) as **values, not code paths**. Until
 [`calling_bakeoffs.md`](calling_bakeoffs.md) lands the bodies, a non-default setting of either is
-rejected loudly at config validation — never silently ignored. *Depends:* A1. *Source:* arch
+rejected loudly at config validation — never silently ignored.
+
+**The allele cap is deliberately not among those constants, and this entry used to declare it**
+(corrected 2026-08-25). `DEFAULT_MAX_CANDIDATE_ALLELES` already exists, in
+`src/ng/calling/allele_candidates/mod.rs`, as a `MaxCandidateAlleles` — a newtype that refuses
+anything below two, because a cap of 0 or 1 is refusal under another name. A second constant of
+the same name here, typed `u16`, would be two spellings of one rule and would drop the check;
+selection's `CandidateSelectionConfig` is what carries the cap and the support bar, and the loop
+takes it rather than restating it. *Depends:* A1. *Source:* arch
 §2.1, §3.1, §6.1, §6.2.
 
 > **Checkpoint A:** the seam compiles against both siblings' types; the ordering contract is
@@ -264,15 +303,31 @@ produces. *Depends:* E2a, E3. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6.
 
 **E3. The integration fixture — ng calls genotypes.**  ☐
-End-to-end over a small fixture: reads → merge → E1's shaping → `call_locus` with a
-**fixture-supplied `CandidateAlleles`** (the step-6 blocker, stated in the test's doc) →
+End-to-end over a small fixture: reads → merge → E1's shaping → `call_locus` →
 `LocusInference` asserted against hand-derived genotypes, on both paths, at one sample and at
 several. Provenance and `seed_diversity_unreachable` reach the output. **This is the milestone
-where ng calls genotypes**; what it cannot yet do — select candidates on real data — is the
-recorded blocker, not a missing step here. *Depends:* D1, E1, E2, E2a. *Source:* spec §1, §9.
+where ng calls genotypes.**
 
-> **Checkpoint E:** genotypes come out of real evidence over supplied candidates. Pause for
-> review.
+**Where the candidates come from, restated 2026-08-25 now that selection exists.** On the
+**generic path**, run `select_generic` on the merged locus, so the fixture is reads → merge →
+selection → shaping → loop and nothing in it is supplied by hand. **The three joins that step
+has to get right are named in
+[`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §5.1** — the prior takes the
+*total* allele count and not `alternative_allele_count()`; `LocusSelection::unmatched` is
+parallel to the merge's covering samples and not to the run's sample order; and
+`genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one.
+
+**The repeat-tract half of this step is blocked, and on the row rather than on the candidates.**
+Without the STR read-likelihood row there is no `Lg` for a tract genotype, so no supplied
+candidate set rescues it: `censored_emission` is `unimplemented!()`
+([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1) and the row itself is that
+plan's H1 and H2. When it lands, this step's tract candidates are still **fixture-supplied**,
+because the STR selection path is unwritten — a second and independent gap. Say both in the
+test's own doc comment, so a later reader does not read one as the other. *Depends:* D1, E1, E2,
+E2a; the STR half additionally on that plan's G1–H2. *Source:* spec §1, §9.
+
+> **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
+> path, over supplied ones at a repeat tract. Pause for review.
 
 ### Milestone F — the two loop oracles
 
@@ -302,19 +357,22 @@ with a failing state, not parity with an escape clause. *Depends:* E3. *Source:*
 | B | hand-computed E-step case; **bitwise M-step mutation check on summed copies** |
 | C | the flat-pass trap test; one-sample bitwise fixed point; capped-emit flag; **the two-cohort-size division test** |
 | D | **instrumented emission-call count** (`candidates × Σ_s obs × 1`); zero-allocation-per-pass |
-| E | the integration fixture — hand-derived genotypes from real evidence, both paths, supplied candidates |
+| E | the integration fixture — hand-derived genotypes from real evidence, both paths; **selected** candidates on the generic path, supplied at a repeat tract |
 | F | **production parity (SNP/indel)** and **the STR convergence differential** |
 
 ## Out of scope (next plans)
 
 - **Arms B/C, the exhaustive scorer, the local search; the slippage re-fit and discovery
   bodies; every Q1/Q2/Q3 measurement** — [`calling_bakeoffs.md`](calling_bakeoffs.md).
-- **Candidate selection (step 6)** — **needs a spec before any plan**; until it exists,
-  end-to-end runs on real data (the GIAB 5× and HG002 regressions the sibling specs name as
-  their definition of done) stay blocked, and this plan's integration tests stand in with
-  supplied candidates.
-- **Wiring `call_locus` into the merge's builder for real runs** — follows the same blocker;
-  the placement commutes (spec §9).
+- **Candidate selection (step 6)** — its own plan
+  ([`candidate_alleles.md`](candidate_alleles.md)), **built and merged on the generic path**.
+  Consume `select_generic`; **do not edit `src/ng/calling/allele_candidates/`**, which is still
+  moving through that plan's Milestone D. The repeat-tract half
+  ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)) is unwritten, and that is what still
+  blocks an end-to-end run at a tract.
+- **Wiring `call_locus` into the merge's builder for real runs** — the placement commutes
+  (spec §9). With selection merged, this wiring is the only thing between the generic path and
+  the GIAB and HG002 regressions the sibling specs name as their definition of done.
 - **The deferred loop items** — the shared-prior fast path for large cohorts, the one-sample
   second-pass skip (Q6), threshold/cap tuning from the `passes` distribution (Q4) — spec §11,
   §12.

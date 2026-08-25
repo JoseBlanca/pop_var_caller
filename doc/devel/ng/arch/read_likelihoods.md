@@ -128,6 +128,19 @@ pub struct GenericSampleEvidence<'a> {
     /// alleles that candidate selection dropped, folded here by that selection. Cancels
     /// in genotyping, kept for the data likelihood (spec §3.3's q_sum_other).
     pub unmatched_q_sum: f64,
+    /// **Whether this sample lost an allele its own reads had earned to the cap**, copied
+    /// from `UnmatchedSupport::genotype_must_be_missing`
+    /// ([`candidate_alleles.md`](candidate_alleles.md) §2.3). True means the locus is
+    /// called over a set that does not contain what this sample carries, so **its genotype
+    /// is emitted as missing** — the alternative is an invented genotype, and
+    /// [`../spec/candidate_alleles.md`](../spec/candidate_alleles.md) §4.1 rules that out
+    /// (owner's decision, 2026-08-24).
+    ///
+    /// **It has to travel here because nothing in this module could derive it.**
+    /// `unmatched_q_sum` is identical under every genotype and cancels, so the likelihood
+    /// cannot tell a sample that lost a real allele from one that had a few error reads
+    /// dropped — and the second is nearly every sample at nearly every locus.
+    pub genotype_must_be_missing: bool,
     /// The partial observations, bases + witnessed positions intact — §3's compatibility
     /// rule (spec §5.3) needs them, so they are NOT folded onto alleles. **A set of runs
     /// with holes in it, not one run** (spec §5.3, corrected 2026-08-24). What the holes

@@ -145,15 +145,15 @@ impl GroupAnswer {
     /// assumption about the other columns.
     fn render(&self) -> String {
         let reads = self.census.reads;
-        let geometric = self.census.geometric_mean().map_or(f64::NAN, |mean| mean);
-        let arithmetic = self.census.arithmetic_mean().map_or(f64::NAN, |mean| mean);
+        let geometric = self.census.geometric_mean().unwrap_or(f64::NAN);
+        let arithmetic = self.census.arithmetic_mean().unwrap_or(f64::NAN);
         // The accumulator's own geometric mean, from its fixed-point sum rather than the
         // census's `f64` one. If the two site sets agree this equals `geometric` to the
         // accumulator's documented 2^-21 on the mean log.
         let accumulator_geometric = self
             .accumulator
             .mean_error_probability()
-            .map_or(f64::NAN, |mean| mean);
+            .unwrap_or(f64::NAN);
         format!(
             "read_group={name}\treads_census={reads}\treads_accumulator={accumulator_reads}\t\
              reads_agree={agree}\tgeometric_mean={geometric:.6e}\t\

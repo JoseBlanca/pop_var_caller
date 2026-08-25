@@ -193,8 +193,6 @@ pub(crate) fn path_is_bgzf(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use tempfile::tempdir;
 
     use super::*;

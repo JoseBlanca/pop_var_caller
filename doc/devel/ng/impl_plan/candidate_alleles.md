@@ -1,0 +1,339 @@
+# ng step 6 — candidate alleles: implementation plan
+
+*Draft, 2026-08-24. Turns the settled design —
+[`../spec/candidate_alleles.md`](../spec/candidate_alleles.md) and
+[`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) — into build order. **Not a place
+for new design:** a question this plan cannot answer from those two goes back to them.*
+
+*This plan builds the shared module and the ordinary SNP/indel path. The repeat-tract path is
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md), which depends on this one and on a field
+the merge does not yet carry.*
+
+**Clearing this plan clears the blocker [`calling_loop.md`](calling_loop.md) records twice:** once
+selection exists, the calling loop can run on real candidates instead of fixtures, and the GIAB
+and tomato regressions the sibling specs name as their definition of done stop being blocked.
+
+---
+
+## Scope
+
+**In:**
+
+- `src/ng/run/cohort_merge/mod.rs` — a `const` path for `MinAltReadShare`, so
+  `DEFAULT_MIN_ALLELE_SUPPORT` can be a `pub const`; and one doc-comment widening on
+  `MinAltReads::reached_by` saying the numerator is the caller's.
+- `src/ng/calling/allele_candidates/mod.rs` — `CandidateSelectionConfig` with its two named
+  defaults, `SelectionVerdict`, `UnmatchedSupport`, `AlleleRemap`, `LocusSelection`,
+  `SelectionScratch`, the private per-allele fold and the ranking comparison.
+- `src/ng/calling/allele_candidates/generic.rs` — `select_generic`.
+- `examples/ng_candidate_selection_probe.rs` — rewritten to call the module instead of carrying
+  its own copy of the rule (Milestone D; it is the measurement oracle).
+
+**Out (later plans):**
+
+- **The repeat-tract path** — [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md). `ssr.rs` is
+  not scaffolded here; `mod.rs` declares nothing for it.
+- **Nesting `SelectionScratch` inside `CallingScratch`** —
+  [`calling_loop.md`](calling_loop.md) A1, which is where `CallingScratch` is built. Here
+  `SelectionScratch` stands alone; the loop's A1 makes it a field. Arch §2.4 records why.
+- **`GenericSampleEvidence` gaining the dropped-read count, and building the evidence views from
+  `remap`** — [`calling_read_likelihoods.md`](calling_read_likelihoods.md) (the type) and
+  [`calling_loop.md`](calling_loop.md) E1 (the shaping). Arch §3.2 fixes the hand-off's shape so
+  neither has to invent it.
+- **Retiring `DiscoveryBar` and routing a discovery round through this rule** —
+  [`calling_bakeoffs.md`](calling_bakeoffs.md), which owns `discovery.rs`. Spec §3.4 and §6.3 say
+  what it must call and what it must do at the cap.
+- **Wiring `select_generic` into the merge's builder for real runs** —
+  [`calling_loop.md`](calling_loop.md), which owns that wiring for the loop it sits beside.
+- **A bar on summed read quality** — spec Q1's neighbour, spec §3.3. Nothing here reserves a field
+  for it; the merge already carries `q_sum`.
+
+## Principles (how the order was chosen)
+
+- **Types first, then implementation** (project rule) — the whole vocabulary in Milestone A, no
+  logic until B.
+- **The algorithmic heart before the plumbing.** The fold that answers *did this sample support
+  this allele* is built and proven on hand-built observations before anything assembles an output
+  bundle from it.
+- **Reuse over rewrite.** `MinAltReads`, `CandidateAlleles` and the merge's own per-row `q_sum` are
+  called as they are; this plan writes a driver, not a second rule (arch §5's table).
+- **Isolate the silent steps.** Four steps here produce a *quietly wrong answer* rather than a
+  crash, so each lands as **its own commit with its oracle green before and after**, never bundled
+  into a neighbour, so a `git bisect` can find it if a number moves: **B1** the per-sample
+  denominator, **B2** the ranking, **C1** the remapping, **C3** the leftover sum. Each is marked
+  below with the oracle that guards it.
+- **Verify against ground truth, and be honest that there is no production oracle.** Production
+  has no per-allele bar (spec §9), so byte-parity with it is not available. Two external checks
+  replace it: the **measurement oracle** — the standalone implementation in
+  `examples/ng_candidate_selection_probe.rs` produced every number the spec quotes, so the shipped
+  module must reproduce them (D1) — and the **truth-set property**: over the GIAB trio, of the true
+  alternative alleles some sample's reads showed, the bar must keep the fraction spec §3.3
+  measured (D2).
+- **Container builds.** All `cargo` via `./scripts/dev.sh`; a native host build at completion.
+
+## Preconditions (already in place)
+
+- **The merge, complete** ([`cohort_merge.md`](cohort_merge.md), 16 of 16): `CohortObservation`
+  ([`build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs)), `SampleSupport`
+  ([`:965`](../../../../src/ng/run/cohort_merge/build.rs)) with its `(allele, read group)` rows
+  ([`:1089`](../../../../src/ng/run/cohort_merge/build.rs)) and its partials
+  ([`:1130`](../../../../src/ng/run/cohort_merge/build.rs)), `AlleleSupport::q_sum`
+  ([`:1245`](../../../../src/ng/run/cohort_merge/build.rs)), and
+  `SampleSupport::pooled_support_for` ([`:1070`](../../../../src/ng/run/cohort_merge/build.rs)).
+- **The support rule**: `MinAltReads` with `required_of` and `reached_by`
+  ([`cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs)).
+- **The output table**: `CandidateAlleles` with `new`/`admit`/`bases_of`
+  ([`calling/mod.rs:86`](../../../../src/ng/calling/mod.rs)) and `AlleleId`
+  ([`types.rs:304`](../../../../src/ng/types.rs)).
+- **The measurement harness**: `examples/ng_candidate_selection_probe.rs`, and the benchmark
+  inputs it reads — `benchmarks/giab/per_sample/bam/{30x,300x}` with the v4.2.1 truth VCFs, and
+  `benchmarks/tomato1/`.
+- **Not in place, and not needed here:** `CallingScratch` and `GenericSampleEvidence`. Neither the
+  read-likelihoods plan nor the loop plan has started, and this plan depends on neither — selection
+  reads the merge's output and writes `CandidateAlleles`, both of which exist.
+
+## Branch and merge
+
+- **Branch** `ng-candidate-alleles`, from `main`. No worktree — the convention for sequential work.
+- **Conflict surface, and it is one line.** `src/ng/calling/mod.rs` gains
+  `pub mod allele_candidates;`, and [`calling_loop.md`](calling_loop.md) A1 also edits that file.
+  Whichever lands second rebases over a one-line addition. Everything else in this plan is new
+  files, plus one method and one doc comment in `cohort_merge/mod.rs`, which nothing else in
+  flight touches.
+- **This plan does not have to wait for the prior or read-likelihood plans** and can run beside
+  them.
+
+---
+
+## The steps
+
+### Milestone A — the vocabulary (types, no logic)
+
+**A1. The rule's constants, and a `const` path for the share.**  ✅
+`MinAltReadShare` gains a `const` constructor beside its fallible `new`
+([`cohort_merge/mod.rs:366-380`](../../../../src/ng/run/cohort_merge/mod.rs)) — its field is
+private, so `DEFAULT_MIN_ALLELE_SUPPORT` cannot be a `pub const` without one; it panics on a value
+outside `0..=1`, which is a compile-time failure for a `const` and so is the right severity.
+Then, in the new `calling/allele_candidates/mod.rs`: `CandidateSelectionConfig`,
+`DEFAULT_MIN_ALLELE_SUPPORT` (floor 2 from `MinAltObs::DEFAULT`, share 5 in 100) and
+`DEFAULT_MAX_CANDIDATE_ALLELES = 6`, each with a doc comment carrying its source and marking it
+soft. Widen `reached_by`'s doc comment: the numerator is the caller's, and selection and a
+discovery round pass different ones. *Depends:* none. *Source:* arch §2.1; spec §3.3, §4.
+
+**A2. The output vocabulary.**  ✅
+`SelectionVerdict` (`Selected` / `Truncated { dropped }` / `NotPeriodic`, `#[non_exhaustive]`, the
+last documented as repeat-tract-only), `UnmatchedSupport`, `AlleleRemap` with `candidate_for`,
+`LocusSelection`, `SelectionScratch`. `calling/mod.rs` gains `pub mod allele_candidates;`. The
+two parallelism invariants go in doc comments and are asserted where they are built:
+`LocusSelection::unmatched` runs parallel to `CohortObservation::per_sample`, and `AlleleRemap` is
+indexed by the merge table's own index. *Depends:* A1. *Source:* arch §2.2, §2.3, §2.4.
+
+> **Checkpoint A:** the module compiles, no logic yet, and every constant names its source and its
+> softness. Pause for review.
+
+### Milestone B — the fold (the heart, on hand-built observations)
+
+**B1. The per-sample denominator and the bar. — own commit, do not bundle.**  ✅
+The single pass over `CohortObservation::per_sample`: a sample's reads at the locus are the sum of
+its rows, **pooled across read groups** and across alleles, which is that sample's compared reads
+because the merge admits only complete observations onto alleles; each row then asks
+`MinAltReads::reached_by` of its allele. Partials are not read.
+**Why this one is isolated:** using depth, or forgetting to pool the read-group rows, gives a
+quietly wrong bar at every locus and no test crashes.
+*Oracle:* a hand-built locus whose `reads_compared_with_reference` is known independently, carrying
+partials, a silent read and one allele shown from two read groups — the denominator must equal the
+first and the two group rows must sum rather than the larger winning.
+*Depends:* A2. *Source:* arch §3.1; spec §1.3, §3.
+
+**B2. The per-allele summary and the ranking. — own commit, do not bundle.**  ✅
+The private `AlleleSummary` (largest within-sample share, samples clearing the bar, cohort read
+total) filled by B1's pass, and `compare_best_first` (arch §2.5's `ranks_above`, renamed at
+Checkpoint B): share first by
+`f64::total_cmp`, then samples clearing, then cohort reads, then the bases.
+*Corrected at Checkpoint A: this step originally also asked the summary for "the reads and mass it
+would contribute to the leftover", and it cannot hold them — the summary is per allele where the
+leftover is per sample, survival is not known during B1's pass, and **a cohort total is a sum in
+allele-major order where C3's oracle demands the per-sample rows' own sum**, so C3's bitwise check
+would fail by construction if the total were its source. Arch §2.4 carries the same correction.*
+**Why this one is isolated:** a mis-ordered tie-break or a `partial_cmp` in place of `total_cmp` is
+a different truncation at a minority of loci and nothing fails.
+*Oracle:* a table built so that each tie-break level in turn is the one that decides, plus the same
+table with its rows reversed — the ranking must not move.
+*Depends:* B1. *Source:* arch §2.5; spec §4.1.
+
+> **Checkpoint B:** the bar and the ranking are proven on hand-built loci, with nothing assembled
+> from them yet. Pause for review.
+
+### Milestone C — the output
+
+**C1. Admission and the remapping. — own commit, do not bundle.**  ✅
+`select_generic`'s second pass: seed `CandidateAlleles::new` with the merge's allele 0, `admit`
+each surviving alternative in table order, and fill `AlleleRemap` as it goes. A locus where every
+alternative failed the bar returns the reference alone with `Selected` — a normal outcome, and the
+test says so.
+**Why this one is isolated:** an off-by-one in the remapping hands the loop a real but wrong
+allele's evidence, which is a wrong genotype rather than a panic.
+*Oracle:* the round trip — drop the middle allele of five, then feed every surviving merge row
+through `candidate_for` and require the dense id back, and `None` for the dropped one; and the
+hand-off of arch §3.2 reproduces the evidence rows exactly.
+*Depends:* B2. *Source:* arch §2.3, §3.1; spec §3, §6.2.
+
+**C2. The cap and truncation.**  ✅
+Above `max_candidate_alleles`, keep the best by B2's ranking, reference always, and return
+`Truncated { dropped }`. Below it, `Selected`. The reference is exempt from both the bar and the
+cap. *Depends:* C1. *Source:* arch §2.2, §2.5; spec §4.1.
+
+**C3. The leftover. — own commit, do not bundle.**  ✅
+Per sample, sum the merge's own per-row `q_sum` and read count over the alleles that did not
+survive — bar or cap — into `LocusSelection::unmatched`. Nothing is re-derived from counts and a
+rate. What is *not* in it: partials, reads that produced no observation, reads removed as
+evidence, and the reference's reads.
+**Why this one is isolated:** a pool that double-counts or misses a row shifts every data
+likelihood at that locus, which emission and `QUAL` read as an absolute number, and no genotype
+changes.
+*Oracle:* the pool equals the bitwise sum of the dropped rows' `q_sum`; a sample with nothing
+dropped gets a zero pool with no branch taken to produce it.
+*Depends:* C2. *Source:* arch §2.3; spec §5, §5.1.
+
+**C3 also fills the second count, and it is a different question from the pool** (owner's
+decision, 2026-08-24; spec §4.1, §5): `earned_reads_cut_by_the_cap` is this sample's reads on an
+allele that **cleared the bar for this sample** and was then cut **by the cap** — not by the bar.
+Non-zero means emission writes a missing genotype for that sample. It needs B1's per-sample bar
+answers to still be reachable at C3, which the fold's per-allele summary does not carry, since
+"some sample cleared it" is not "this sample cleared it" — **so C3 asks the bar again, per
+`(sample, allele)`, over the alleles the cap cut**, and the cap cuts at 23 of 53,935 tomato loci
+and none of the trio's, so that second ask costs nothing at almost every locus.
+*Second oracle:* a locus above the cap where two samples earned the cut allele and a third had one
+error read on it — the two are missing, the third is genotyped, and the third's pool is non-zero
+so the test discriminates the count from the pool.
+
+> **Checkpoint C:** `select_generic` is complete and proven on hand-built loci, including the
+> reference-only and truncated outcomes. Pause for review.
+
+### Milestone D — real data, and the two external checks
+
+**D1. The probe calls the module.**  ✅
+Rewrite `examples/ng_candidate_selection_probe.rs` to call `select_generic` instead of carrying its
+own `summarise`/`keep_by_share` copy, keeping its reporting and its `NG_SELECT_DUMP` /
+`NG_SELECT_DUMP_FLOOR` / `NG_SELECT_DUMP_SHARE` surface unchanged. **This is the measurement
+oracle:** the standalone implementation produced every number spec §3.3, §4.2 and §5 quote, so the
+run must reproduce them — 5,596 alternatives kept of 15,474 on the trio at 300× with the 2% bar,
+23 tomato loci of 53,935 above six alleles, 0.36% of tomato's reads in the pool. A difference is a
+defect in one of the two implementations and must be traced, not accepted.
+
+**Two differences are expected, and both were introduced deliberately after those numbers were
+taken** (recorded at Checkpoint B so the run is not read as a regression). The probe's
+`summarise_over` asks the support rule of each `(allele, read group)` row separately where the
+shipped fold pools a sample's rows first, so **the probe applied a stricter rule to the samples
+carrying more than one read group** — 157 of 1,707 in the surveyed tomato archive — and its
+figures are a lower bound on what the module admits. And the probe maximises the within-sample
+share over every sample where the module maximises it over the samples that cleared the rule
+(spec §4.1, owner's decision 2026-08-24), which can move which alleles a binding cap keeps. Any
+*other* difference is a defect.
+*Depends:* C3. *Source:* spec §3.3, §4.2, §5.
+
+**D2. The truth-set property, as a checked-in test.**  ✅
+**Widened at D1's measurement, with two reasons and the owner's agreement of 2026-08-24.**
+**Both depths, not 300× alone**, because the bar has two terms and each depth is the only place
+one of them decides: at 300× a 5-in-100 share asks for about 15 reads so the floor of 2 can never
+bind, and at 30× `ceil(0.02 × 30) = 1` so the share is inert and the bar is a read count. Measured
+consequence: at 300× a count-only bar and the shipped bar lose **the same two** alleles, so the
+assertion this entry originally described passes with the share term deleted from the caller.
+**And the join must project every truth record in a span together**, not one at a time: both of
+those two "losses" are a SNP and a deletion in one 7-bp span, whose combined haplotype the caller
+does call (spec §3.3). A fixture built from the one-record-at-a-time join would freeze a scoring
+defect in as the expected answer.
+An integration test over a small committed fixture cut from the GIAB trio: of the true alternative
+alleles some sample's reads showed, the bar keeps them all but the two spec §3.3 records at 300×.
+Written as a property with the count, not as a golden number, so a fixture regenerated at a
+different depth still means something.
+*Depends:* D1. *Source:* spec §3.3, §12.
+
+**D3. What each cap would cost — the owner's measurement of 2026-08-24.**  ◐ *partly measured,
+deliberately stopped short — see the ruling at the end of this entry.*
+The cap's default of six was inherited from production and has never been chosen from data.
+**Settled at Checkpoint C: it becomes a command-line parameter** — `MaxCandidateAlleles` is already
+a newtype refusing anything below two, so that wiring is the argument parser's.
+**Open at Checkpoint C: what the default should be.** The owner's expectation is that it goes up,
+and by how much is a decision to take with these numbers in hand, not before them. **This step
+measures; it does not choose.**
+
+**On the tomato panel (63 accessions, ~3 reads a position, 53,935 built loci) and the GIAB trio at
+30× and 300×**, for caps of 4, 6, 8, 10, 12, 16, 20 and no cap at all:
+
+- **loci above the cap** — what a run would truncate, or discard under the policy §4.1 rejected;
+- **sample-genotypes lost, two ways**: the per-sample missing this design ships, against discarding
+  the whole locus. That is the direct comparison, and §4.1 has argued it from principle without
+  ever putting the two numbers side by side;
+- the same at **1, 4, 16 and 63 samples asked**, so §4.2's growth is measured at each cap rather
+  than extrapolated from one;
+- **loci one reference base wide whose alleles are all one base, admitting more than three
+  alternatives.** Four bases means at most three alternatives, so **every one of those is error or
+  mismapping rather than segregating variation** — which is what decides whether the growth §4.2
+  measures saturates. If it does, a wider cap ends the problem; if it does not, the admission rule
+  needs a term it has not got.
+
+**It has to follow D1, not precede it.** The probe's own copy of the rule now differs from the
+shipped module twice over: it asks the bar of each `(allele, read group)` row where the module pools
+them first, and it maximises the within-sample share over every sample where the module maximises
+over the samples that cleared the bar (§4.1, the owner's ruling of 2026-08-24). Choosing a shipped
+default from numbers the shipped code does not produce is the thing to avoid.
+*Depends:* D1. *Source:* spec §4, §4.1, §4.2, §11 Q2.
+
+**Stopped short on 2026-08-25, with the owner, and here is what changed under it.** This entry was
+written when the support share was 5 in 100. It is now 10 (§3.3, the owner's ruling), which admits
+far fewer alternatives, and **the cap at the shipped bar has almost nothing left to do**: it binds
+at **16 of 53,935 tomato loci** — one in 3,400 — and at **none of the GIAB trio's, at any cap of
+three or more**, because the trio's widest locus in 572 kb carries two alternatives. Those two
+figures are measured and are in spec §4.2.
+
+**What was measured** (spec §4.2): loci above six, four and three alleles at the shipped bar on
+both benchmarks; the widest locus at each; and the cohort-growth table at 1, 4, 16 and 63 samples.
+**What was not, and why it was not:** the sample-genotypes-lost column — the per-sample missing
+this design ships against discarding the whole locus — and the single-base-locus saturation
+column. Both are still worth having, and neither can settle the default: **the cap's real cost is
+memory and genotype-table width, and nothing can weigh that until the calling loop and emission
+exist.** That is the same reason the share's own value is provisional, and it is the same shape of
+argument. Inheriting six until then costs a measured 16 tomato loci and nothing on the trio.
+
+*So the default stays at six, not because six was chosen but because nothing measurable yet
+distinguishes it. §11's Q2 carries the question, and the calling loop is what will answer it.*
+
+> **Checkpoint D:** both external checks green — the probe reproduces every figure §3.3 and §4.2
+> quote, including the truth-set column, and the recall property is a checked-in test over a
+> committed fixture at two depths. **The cap's default is not chosen from a table and will not be
+> at this checkpoint**: at the shipped bar it binds at 16 tomato loci in 53,935 and at none of the
+> trio's, and what would distinguish one value from another is a cost the calling loop has to
+> exist to measure. It stays at six, and §11's Q2 carries the question. Pause for review.
+
+---
+
+## Verification summary
+
+| milestone | proven by |
+|---|---|
+| A | compiles; every constant carries its source and its softness in a doc comment |
+| B | hand-built loci: the denominator against an independently known `reads_compared_with_reference`; two read-group rows summing; each tie-break level deciding in turn; row order reversed with no change |
+| C | the remapping round trip with a hole in the middle; the reference-only outcome; `Truncated { dropped }` keeping exactly the top-ranked; the pool as a bitwise sum |
+| D | **external**: the probe reproducing the spec's measured numbers on real reads, and the GIAB truth-set property |
+
+**Property tests that outlive the fixtures**, run at every milestone from C on: the surviving list
+is a subset of the merge's table, contains the reference, and never exceeds the cap; and adding a
+sample that shows only reference reads changes neither the surviving list nor any other sample's
+leftover. **The second is spec §3.2's principle as a test — it is the one that fails first if a
+cohort term ever creeps into the bar.**
+
+## Out of scope (next plans)
+
+- **The repeat-tract path** — [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md).
+- **`SelectionScratch` as a field of `CallingScratch`; the evidence views built from `remap`; the
+  wiring into the merge's builder** — [`calling_loop.md`](calling_loop.md) A1, E1 and its own
+  out-of-scope list.
+- **`GenericSampleEvidence` gaining the dropped-read count** —
+  [`calling_read_likelihoods.md`](calling_read_likelihoods.md), with the edit to
+  [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2.1 that goes with it.
+- **Discovery through this rule, and retiring `DiscoveryBar`** —
+  [`calling_bakeoffs.md`](calling_bakeoffs.md).
+- **The measurements that would move the two soft numbers** — spec Q1 (the false-allele rate at
+  one sample and three reads), Q2 (the cap past 63 samples), Q3 (the share on a second cohort).
+  All three are parameters, so no code waits on them.

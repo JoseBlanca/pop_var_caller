@@ -163,7 +163,7 @@ struct Stratum {
 fn stratum_of_segment(segment: &SsrSegment) -> Option<Stratum> {
     let period = segment.period();
     let length = segment.tract_len();
-    if period == 0 || length % period as u64 != 0 {
+    if period == 0 || !length.is_multiple_of(period as u64) {
         return None;
     }
     Some(Stratum {
@@ -687,7 +687,7 @@ fn fit_exact(
         let score = score_at(&component, weights, &freqs);
         (score, freqs)
     };
-    fit_from_starts(&objective, &starting_points(0.02), SearchPrecision::fine())
+    fit_from_starts(objective, &starting_points(0.02), SearchPrecision::fine())
 }
 
 fn score_exact(
@@ -845,10 +845,10 @@ fn run(
                 if !wanted_contig(region.region.contig) {
                     continue;
                 }
-                if let Some(stratum) = stratum_of_segment(segment) {
-                    if stratum.repeats <= max_repeats {
-                        *segments_by_stratum.entry(stratum).or_insert(0) += 1;
-                    }
+                if let Some(stratum) = stratum_of_segment(segment)
+                    && stratum.repeats <= max_repeats
+                {
+                    *segments_by_stratum.entry(stratum).or_insert(0) += 1;
                 }
             }
         }

@@ -369,11 +369,51 @@ impl MinAltReadShare {
     /// The default share, [`DEFAULT_MIN_ALT_READ_SHARE`].
     pub const DEFAULT: Self = Self(DEFAULT_MIN_ALT_READ_SHARE);
 
+    /// Whether `share` is a fraction of one — at least nothing, at most everything, and
+    /// a real number.
+    ///
+    /// **One spelling for both constructors**, so that the fallible one and the `const`
+    /// one cannot come to disagree about what a legal share is. That is not a
+    /// hypothetical: a first draft of the pair wrote the test out twice, and a review's
+    /// mutation of one copy left the other's tests green.
+    ///
+    /// The comparison is written out rather than asked of `(0.0..=1.0).contains(&share)`
+    /// because `RangeInclusive::contains` is not a `const fn`. It refuses everything the
+    /// range plus an `is_finite()` call would refuse: **a negative share and `-∞` fail
+    /// the lower comparison, a share above one and `+∞` fail the upper, and `NaN` fails
+    /// both.** `-0.0` is a share of nothing and passes, as it does through the range.
+    const fn is_a_fraction_of_one(share: f64) -> bool {
+        share >= 0.0 && share <= 1.0
+    }
+
     /// The share, or `None` if it is not a fraction of 1 — negative, above one, or not a
     /// number. Rejecting rather than clamping: a mistyped share is a run that quietly
     /// keeps everything or nothing, and neither is visible in the output.
     pub fn new(share: f64) -> Option<Self> {
-        (share.is_finite() && (0.0..=1.0).contains(&share)).then_some(Self(share))
+        Self::is_a_fraction_of_one(share).then_some(Self(share))
+    }
+
+    /// The same share, for a `const` that has to name one — and it **panics** where
+    /// [`new`](Self::new) returns `None`.
+    ///
+    /// **The severity is the point, not a lapse.** It is written for `const`
+    /// declarations of a rule the whole run is judged against, where a value outside
+    /// `0..=1` fails the compile rather than the run and there is nobody to hand an
+    /// `Option` to. Written for
+    /// [`DEFAULT_MIN_ALLELE_SUPPORT`](crate::ng::calling::allele_candidates::DEFAULT_MIN_ALLELE_SUPPORT),
+    /// which needs a share of 5 in 100 and cannot reach this type's private field.
+    ///
+    /// **Called at runtime it aborts the process** — `[profile.release]` sets
+    /// `panic = "abort"` — and nothing in the signature stops that, because a `const fn`
+    /// is an ordinary function too. **A share that is not a literal in this source tree —
+    /// one an operator typed, one read from a file, one computed — goes through
+    /// [`new`](Self::new)**, which refuses rather than aborts.
+    pub const fn new_or_panic(share: f64) -> Self {
+        assert!(
+            Self::is_a_fraction_of_one(share),
+            "a minimum non-reference read share is a fraction of one"
+        );
+        Self(share)
     }
 
     /// The share, as a fraction of 1.
@@ -456,6 +496,17 @@ impl MinAltReads {
     /// Whether one sample that showed `non_reference_reads` out of
     /// `reads_compared_with_reference` reaches the rule — the question the merge asks of
     /// every contributing sample at every locus.
+    ///
+    /// **The numerator is the caller's, and the callers count different reads.** The
+    /// merge passes a sample's non-reference reads pooled over the whole allele table,
+    /// which is what the argument is named for. Candidate selection passes *one
+    /// allele's* reads, so that the question "is this sequence worth calling over"
+    /// is the merge's own question asked one level down
+    /// (`doc/devel/ng/spec/candidate_alleles.md` §3). A discovery round passes a
+    /// narrower count still — the reads the converged model is explaining as slippage
+    /// (§3.4). The denominator is the same in all three: that sample's compared reads
+    /// at the locus. **There is deliberately no wrapper per caller**: a second spelling
+    /// of one rule is how two rules become different rules.
     ///
     /// **The floor is tested first because it is the cheap half and it cannot be
     /// skipped.** [`required_of`](Self::required_of) is never below the floor, so a
@@ -703,6 +754,77 @@ mod tests {
         assert!(MinAltReadShare::new(1.01).is_none(), "above one");
         assert!(MinAltReadShare::new(f64::NAN).is_none(), "not a number");
         assert!(MinAltReadShare::new(f64::INFINITY).is_none(), "not finite");
+        assert!(
+            MinAltReadShare::new(f64::NEG_INFINITY).is_none(),
+            "not finite, the other way"
+        );
+    }
+
+    /// **The `const` constructor refuses exactly what [`MinAltReadShare::new`] refuses**,
+    /// which is the whole claim `is_a_fraction_of_one` exists to make true — one test,
+    /// both constructors, over the same ten values.
+    ///
+    /// `new_or_panic` panics where `new` returns `None`, so the two are compared through
+    /// [`std::panic::catch_unwind`] rather than by reading them side by side. The values
+    /// that matter here are the ones no earlier fixture reached: **a negative share**,
+    /// which does not crash anything downstream but silently deletes the share half of
+    /// the rule — `required_of` casts a negative product to `u32`, which saturates to
+    /// zero, so `max(floor, 0)` is the floor at every depth — and **both ends of the
+    /// closed range**, which must be accepted rather than refused.
+    #[test]
+    fn the_const_share_refuses_exactly_what_the_fallible_one_refuses() {
+        for share in [
+            -1.0,
+            -0.05,
+            -0.0,
+            0.0,
+            0.05,
+            1.0,
+            1.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            let accepted_by_new = MinAltReadShare::new(share).is_some();
+            let accepted_by_new_or_panic =
+                std::panic::catch_unwind(|| MinAltReadShare::new_or_panic(share)).is_ok();
+            assert_eq!(
+                accepted_by_new, accepted_by_new_or_panic,
+                "the two constructors disagree about a share of {share}"
+            );
+        }
+    }
+
+    /// The `const` constructor's message, so the two ends of its range are pinned as
+    /// *refusals* and not merely as "something went wrong".
+    ///
+    /// **A negative share is the one that has to be loud.** Above one and `NaN` are
+    /// visibly nonsense; a negative share reads as a plausible typo and, unrefused,
+    /// produces a run that keeps every allele the floor admits at every depth with
+    /// nothing in the output saying so.
+    #[test]
+    #[should_panic(expected = "a fraction of one")]
+    fn a_const_share_below_zero_fails_rather_than_clamping() {
+        let _ = MinAltReadShare::new_or_panic(-0.05);
+    }
+
+    #[test]
+    #[should_panic(expected = "a fraction of one")]
+    fn a_const_share_above_one_fails_rather_than_clamping() {
+        let _ = MinAltReadShare::new_or_panic(1.5);
+    }
+
+    #[test]
+    #[should_panic(expected = "a fraction of one")]
+    fn a_const_share_that_is_not_a_number_fails() {
+        let _ = MinAltReadShare::new_or_panic(f64::NAN);
+    }
+
+    /// Both ends of the closed range are legal shares — no read at all, and every read.
+    #[test]
+    fn a_const_share_may_sit_on_either_end_of_the_range() {
+        assert_eq!(MinAltReadShare::new_or_panic(0.0).get(), 0.0);
+        assert_eq!(MinAltReadShare::new_or_panic(1.0).get(), 1.0);
     }
 
     /// **A share of one at the largest read count lands on `u32::MAX` and does not

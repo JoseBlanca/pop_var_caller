@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 # Mi22: edition 2024 requires ≥ 1.85; the `let-chains` features
-# (e.g. `if let ... && ...` in header.rs) are stable since 1.88, so
-# 1.88 is the practical floor. `rust-toolchain.toml` pins 1.97.1 for
-# benchmark reproducibility — see its comment.
-rust-version = "1.88"
+# (e.g. `if let ... && ...` in header.rs) are stable since 1.88, which
+# was the floor until 2026-08-25.
+#
+# **Raised to 1.98 with the pin bump**, because the bump was made in
+# order to *use* what 1.98 added — `f64::algebraic_add` and its
+# siblings in the likelihood and EM reductions, among others — and a
+# floor below the features the code uses is a claim that does not hold.
+# `rust-toolchain.toml` pins 1.98.0 for benchmark reproducibility; this
+# says which compiler the source actually needs. The two now coincide,
+# so CI's MSRV job duplicates the main build until the pin next moves
+# ahead of the floor again.
+rust-version = "1.98"
 
 [lints.rust]
 # Mi23: pin the unsafe-free policy via the lint table so editor LSPs
@@ -41,6 +49,20 @@ fn_params_excessive_bools = "warn"
 # cost lives only on error paths and the diagnostic value is the
 # whole point.
 result_large_err = "allow"
+
+# Two lints 1.98's clippy added, both of which fire almost entirely inside the
+# frozen production caller (`src/var_calling/`, `src/vcf/`, `src/genetics.rs`),
+# which is not edited — see `src/ng/mod.rs`'s freeze paragraph. Nine of the
+# twelve `chunks_exact` sites are production's, and two of them sit under
+# comments explaining that the constant chunk size is what removes the bounds
+# check from the EM inner loop; rewriting those to `as_chunks` would be a
+# change to code whose whole value right now is that it does not change.
+#
+# `as_chunks::<N>()` is the better form and is stable from 1.98 — prefer it in
+# new ng code even though the lint no longer asks for it. Drop both `allow`s
+# when production is retired.
+chunks_exact_to_as_chunks = "allow"
+manual_slice_fill = "allow"
 
 [profile.release]
 lto = "fat"

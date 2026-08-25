@@ -199,6 +199,10 @@ fn coverage_sd(copies: f64, aligned: f64) -> f64 {
     clippy::too_many_arguments,
     reason = "the drawn cohort's own parameters"
 )]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "odds[sample][index]: the index clippy names is the inner one, whose outer index is the loop above it"
+)]
 fn draw(
     samples: usize,
     positions: usize,
