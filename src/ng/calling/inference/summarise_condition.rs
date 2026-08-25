@@ -25,11 +25,11 @@
 //! [`SampleScoringBuffers`] rather than returning anything.
 
 use crate::ng::calling::GenotypeTableView;
-use crate::ng::calling::SampleScoringBuffers;
 use crate::ng::calling::genotype_prior::{
     CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
     fill_sample_concentration,
 };
+use crate::ng::calling::{CohortSummingBuffers, SampleScoringBuffers};
 use crate::ng::types::InbreedingF;
 
 /// Score **one sample** against every candidate genotype, then **replace** that sample's
@@ -279,9 +279,173 @@ pub(crate) fn score_one_sample(
     }
 }
 
+/// Add every sample's expected allele copies up into the cohort's — the **M-step** of one
+/// pass.
+///
+/// The other half of the loop: the E-step turned the cohort's summary into each sample's
+/// genotype probabilities, and this turns those back into the summary the next pass will use
+/// (`doc/devel/ng/spec/calling_em_loop.md` §2). It is the whole of the M-step — there is no
+/// second quantity, because the allele frequencies are the only thing that moves while the
+/// frequency loop runs (§5's table).
+///
+/// # The order of the sum is this function's, and that is the point
+///
+/// **Floating-point addition is not associative, so "the sum over the samples" is not one
+/// number until the order is fixed.** This walks the table in ascending sample index, so the
+/// same evidence gives the same cohort copies at any worker count, on any machine, in any
+/// build — which is the whole of `doc/devel/ng/spec/calling_em_loop.md` §8's determinism
+/// contract. That is why the table arrives whole rather than a row at a time: a caller handed
+/// one row per call decides the order, and a caller that parallelised over samples would
+/// decide it differently on every run.
+///
+/// **How far apart the orders actually land, measured on this module's own fixture:** three
+/// samples carrying `1.0`, `2⁻⁵³` and `2⁻⁵³` copies of an allele sum forward to exactly `1.0`,
+/// because each tiny addend rounds away against the one — and backward to
+/// `1.0000000000000002`, because the two tiny ones meet each other first and their total no
+/// longer rounds away. One unit in the last place. **A difference that size does not move an
+/// argmax** — not over the six genotypes this module's fixtures use, and not over the 21 of
+/// the six-allele locus spec §2 works through. That is why the test for this compares the
+/// summed copies *bitwise* rather than comparing genotypes: a test whose observable is the
+/// call passes against a sum with no fixed order and proves nothing (spec §13 test 2).
+///
+/// # A sample the candidate step set aside
+///
+/// **Not handled here, and it must be before the loop runs on real evidence.** Spec §5.0 sets
+/// aside a sample whose own reads earned an allele the cap then cut: it is scored against
+/// nothing and *contributes nothing to this sum*, because its posterior would sit over the
+/// wrong set of alleles and would pull the locus's frequencies toward the reference by exactly
+/// the samples carrying the rarest alleles. `LocusEvidence::Generic` carries the flag
+/// (`GenericLocusSample::genotype_must_be_missing`) and keeps such a sample's *index*, so this
+/// table has a row for it.
+///
+/// **What happens today is that such a row is never written and this function refuses the
+/// locus**, loudly, because `prepare_for_locus` left it holding the `NaN` sentinel and a `NaN`
+/// propagates through every addition into the finiteness check below. That is the right
+/// failure while the exclusion is unbuilt — a wrong cohort frequency would be silent — but it
+/// is not the answer. Step D1 assembles the loop and owns the choice between skipping those
+/// rows here and never giving them one.
+///
+/// # Panics
+///
+/// Four checks, all **held in release**, because a caller bug in this module is an assertion
+/// rather than a `Result` (`doc/devel/ng/spec/calling_em_loop.md` §8):
+///
+/// - **the cohort row must name at least one allele**, and **the sample count must be at
+///   least one**. These two look like belt-and-braces and are not: a sample count of zero
+///   *satisfies* the size check below, because `0 == 0 × alleles`, and would hand back an
+///   all-zero cohort row that reads like a locus where nobody carries anything.
+/// - **the table must be `sample_count × alleles`**, with the product taken by `checked_mul`
+///   so that a wrapped multiply cannot admit a shape nobody asked for.
+/// - **every cohort entry must come out finite and non-negative.** The load-bearing one: it
+///   is the only thing standing between an unwritten sample row and a cohort summary that
+///   every sample's next prior is built from. See the comment on it for what it does not
+///   catch.
+///
+/// Nothing allocates.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "step D1 of the calling-loop plan is the caller")
+)]
+pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
+    let CohortSummingBuffers {
+        sample_count,
+        per_sample_expected_copies,
+        cohort_expected_copies,
+    } = buffers;
+
+    let allele_count = cohort_expected_copies.len();
+    assert!(
+        allele_count > 0,
+        "every locus has a reference allele, so a cohort row of no alleles is a scratch that \
+         was never prepared for this locus"
+    );
+    assert!(
+        sample_count > 0,
+        "a cohort has at least one sample, so a sum over none is a run whose sample order \
+         went missing"
+    );
+    // **`checked_mul`, not `*`.** `prepare_for_locus` guards this very product the same way,
+    // and for the same reason: a plain multiply wraps in release, and a wrapped product that
+    // happens to equal the table's length would let the sum run over a shape nobody asked for
+    // and come back looking like a summary. In debug it panics with "attempt to multiply with
+    // overflow", which names the arithmetic rather than the locus.
+    let expected_entries = sample_count.checked_mul(allele_count).unwrap_or_else(|| {
+        panic!(
+            "a cohort of {sample_count} samples over {allele_count} alleles needs a \
+             per-sample copies table longer than a usize can index"
+        )
+    });
+    assert_eq!(
+        per_sample_expected_copies.len(),
+        expected_entries,
+        "the per-sample copies are samples × alleles, sample-major: {sample_count} samples \
+         over {allele_count} alleles is {expected_entries} entries and the table holds {}",
+        per_sample_expected_copies.len()
+    );
+
+    // Ascending sample index, and within each sample ascending allele. Every allele's
+    // accumulator therefore receives its addends in ascending sample order, which is the
+    // order the determinism contract names.
+    //
+    // **The first row is copied in rather than added to a zeroed buffer**, and the difference
+    // is not the arithmetic — `0.0 + x` is exactly `x` for every value here, so the two are
+    // bit-identical. It is that a `fill(0.0)` would overwrite the scratch's
+    // `UNWRITTEN_SCRATCH_VALUE` sentinel *before* the walk, so a walk that summed no rows at
+    // all would hand back a row of zeros that reads like a real summary. That cannot happen
+    // today, because `sample_count` is checked above — but it is exactly the shape step D1
+    // would introduce if it implemented spec §5.0 by skipping set-aside rows here, and a
+    // locus where every sample was set aside would then report the cohort as carrying
+    // nothing. Seeding from a row that must exist makes the empty walk unrepresentable.
+    let mut rows = per_sample_expected_copies.chunks_exact(allele_count);
+    let first = rows
+        .next()
+        .expect("the shape check above admits at least one sample's row");
+    cohort_expected_copies.copy_from_slice(first);
+    for own_copies in rows {
+        for (total, &copies) in cohort_expected_copies.iter_mut().zip(own_copies) {
+            *total += copies;
+        }
+    }
+
+    // **Release-held, and it is what makes the `NaN` sentinel reach anybody.** A sample row
+    // nobody wrote is `UNWRITTEN_SCRATCH_VALUE`, and `NaN` propagates through addition, so one
+    // check over the alleles catches an unwritten row anywhere in the table — at a cost of
+    // `alleles`, not `samples × alleles`. Without it the cohort's summary goes on to build
+    // every sample's prior on the next pass.
+    //
+    // **On the first pass at a locus only, and the difference matters to whoever writes D1.**
+    // The sentinel is written by `prepare_for_locus`, once per locus, and the per-sample rows
+    // are deliberately *not* re-armed between passes, because `score_one_sample` reads each
+    // sample's previous copies as its leave-one-out term. So from pass 2 a row this pass did
+    // not write holds the **previous pass's finite, plausible value** and is summed as though
+    // it were current — measured `[1.0, 3.0]` where pass 1 gave `[2.0, 2.0]` and one sample's
+    // E-step did not run. Finite, non-negative, wrong, silent. A loop that can skip a sample
+    // mid-run — which is what spec §5.0's exclusion would be — needs a per-pass written mask,
+    // and that is D1's to build.
+    //
+    // **Complete for a non-finite input and not for a negative one**, and the asymmetry is
+    // worth knowing rather than glossing: `NaN` and `±∞` survive addition, so a single bad
+    // entry anywhere reaches the total, but two finite rows of `-1.0` and `3.0` sum to a
+    // perfectly acceptable `2.0`. Checking every input instead would cost
+    // `samples × alleles` on the loop's hot path to catch a state no producer can reach —
+    // expected copies are a posterior-weighted sum of non-negative copy counts. The check is
+    // on the output because that is where it is cheap, not because it is exhaustive.
+    assert!(
+        cohort_expected_copies
+            .iter()
+            .all(|total| total.is_finite() && *total >= 0.0),
+        "the cohort's expected allele copies are counts of genome copies, so every entry must \
+         be finite and at or above zero after summing {sample_count} samples; a NaN here is a \
+         sample row the E-step never wrote, since NaN survives every addition: \
+         {cohort_expected_copies:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
     use crate::ng::calling::genotype_prior::MarginalizedDirichletPrior;
     use crate::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
     use crate::ng::locus_generation::LocusKind;
@@ -900,5 +1064,519 @@ mod tests {
             &first_copies[..],
             "pass 2's expected copies are not pass 1's"
         );
+    }
+    /// Run whole passes over a cohort — the E-step for every sample in index order, then the
+    /// M-step — with the samples presented in whatever order `order` names.
+    ///
+    /// Returns each sample's most probable genotype **after the last pass**, in the order it
+    /// was presented in, and the cohort's summed expected copies.
+    ///
+    /// **`passes` is the whole reason this helper exists rather than a one-pass one.** On the
+    /// first pass every sample is scored against a cohort row this function wrote before the
+    /// loop, so no genotype is downstream of `sum_cohort_expected_copies` and a test reading
+    /// winners off pass 1 passes against an M-step that computes nothing. Measured during
+    /// B2's review: with the summing loop deleted, the one-pass version of the permutation
+    /// test below stayed green while three other tests failed. From pass 2 the winners are
+    /// scored against the row the previous pass's M-step produced, which is the regime the
+    /// coupling under test actually occurs in.
+    ///
+    /// The posterior is one reused buffer, so each sample's winner is read off before the next
+    /// is scored — which is also why step C3 of the plan has to take the genotype quality as it
+    /// scores rather than afterwards.
+    fn run_passes(
+        passes: usize,
+        likelihoods: &[Vec<f64>],
+        starting_copies: &[Vec<f64>],
+        order: &[usize],
+        alleles: &CandidateAlleles,
+        view: &GenotypeTableView<'_>,
+        seed: &[f64],
+    ) -> (Vec<usize>, Vec<f64>) {
+        assert!(passes > 0, "a pass count of zero scores nothing");
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(order.len(), alleles, view);
+        scratch.seed_concentration_mut().copy_from_slice(seed);
+
+        let mut cohort = vec![0.0; view.allele_count()];
+        for &sample in order {
+            for (total, copies) in cohort.iter_mut().zip(&starting_copies[sample]) {
+                *total += copies;
+            }
+        }
+        scratch
+            .cohort_expected_copies_mut()
+            .copy_from_slice(&cohort);
+
+        for (index, &sample) in order.iter().enumerate() {
+            for (slot, &value) in scratch
+                .sample_genotype_likelihoods_mut(index)
+                .iter_mut()
+                .zip(&likelihoods[sample])
+            {
+                *slot = LogProb(value);
+            }
+            scratch
+                .sample_expected_copies_mut(index)
+                .copy_from_slice(&starting_copies[sample]);
+        }
+
+        let mut winners = Vec::with_capacity(order.len());
+        for _pass in 0..passes {
+            winners.clear();
+            for index in 0..order.len() {
+                score_one_sample(
+                    scratch.sample_scoring_buffers_mut(index),
+                    view,
+                    &MarginalizedDirichletPrior,
+                    outbred(),
+                );
+                let posterior = scratch.posterior_row();
+                let (winner, _) = posterior
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("a finite posterior"))
+                    .expect("a locus has at least one genotype");
+                winners.push(winner);
+            }
+            sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+        }
+        (winners, scratch.cohort_expected_copies().to_vec())
+    }
+
+    /// Three samples whose reads pull them to three different genotypes, with different
+    /// starting copies — the fixture the two cohort-wide tests share.
+    fn three_disagreeing_samples() -> (Vec<Vec<f64>>, Vec<Vec<f64>>, [f64; 3]) {
+        let likelihoods = vec![
+            vec![0.0, -9.0, -18.0, -9.0, -18.0, -18.0],
+            vec![-9.0, 0.0, -9.0, -9.0, -9.0, -18.0],
+            vec![-18.0, -9.0, 0.0, -9.0, -9.0, -18.0],
+        ];
+        let starting_copies = vec![
+            vec![1.9, 0.05, 0.05],
+            vec![0.6, 1.3, 0.1],
+            vec![1.2, 0.2, 0.6],
+        ];
+        (likelihoods, starting_copies, [1.0, 0.000_5, 0.000_5])
+    }
+
+    /// **Presenting the cohort's samples in a different order calls the same genotypes.**
+    ///
+    /// The M-step's inputs are a set, not a sequence: which sample sits at which index is an
+    /// accident of how the run was assembled, and no call may depend on it. Three samples with
+    /// different reads and different starting copies are run in `[0, 1, 2]` and again in
+    /// `[2, 0, 1]`, and each sample's most probable genotype is required to follow it.
+    ///
+    /// **Two passes, and the second is the only one that tests anything here.** On pass 1
+    /// every sample is scored against a cohort row the fixture wrote, so no genotype depends
+    /// on the M-step at all; the winners are taken after pass 2, when they are scored against
+    /// the row pass 1's M-step produced. Measured: written as one pass, this test passed with
+    /// the summing loop **deleted entirely**, while three other tests failed.
+    ///
+    /// **All three samples must call different genotypes**, and the assertion below insists on
+    /// it rather than on the weaker "some two differ": if two samples agree, an implementation
+    /// that swapped exactly those two satisfies every assertion here. The fixture's earlier
+    /// version called `[0, 1, 0]` and passed a guard that allowed it.
+    ///
+    /// **The cohort's summed copies are compared with a tolerance and the genotypes are not**,
+    /// and that difference is the whole of `spec/calling_em_loop.md` §13 test 2. Reordering a
+    /// floating-point sum moves it in the last bits, so an exact comparison here would fail on
+    /// a correct implementation; the genotypes must not move at all. The *bitwise* check
+    /// belongs to a fixture built for it — [`the_sum_runs_in_ascending_sample_order`].
+    #[test]
+    fn presenting_the_samples_in_another_order_calls_the_same_genotypes() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        let (likelihoods, starting_copies, seed) = three_disagreeing_samples();
+
+        let (called_in_order, cohort_in_order) = run_passes(
+            2,
+            &likelihoods,
+            &starting_copies,
+            &[0, 1, 2],
+            &alleles,
+            &view,
+            &seed,
+        );
+        let (called_rotated, cohort_rotated) = run_passes(
+            2,
+            &likelihoods,
+            &starting_copies,
+            &[2, 0, 1],
+            &alleles,
+            &view,
+            &seed,
+        );
+
+        // The fixture is only a test of the ordering if **all three** samples disagree; two
+        // that agree are two this test cannot see swapped.
+        assert_eq!(called_in_order.len(), 3);
+        assert!(
+            called_in_order[0] != called_in_order[1]
+                && called_in_order[1] != called_in_order[2]
+                && called_in_order[0] != called_in_order[2],
+            "two samples called the same genotype, so this fixture cannot see them swapped: \
+             {called_in_order:?}"
+        );
+        for (presented, &sample) in [2usize, 0, 1].iter().enumerate() {
+            assert_eq!(
+                called_rotated[presented], called_in_order[sample],
+                "sample {sample} was called {} presented in order and {} presented at index \
+                 {presented}",
+                called_in_order[sample], called_rotated[presented]
+            );
+        }
+        for (allele, (rotated_total, in_order_total)) in
+            cohort_rotated.iter().zip(&cohort_in_order).enumerate()
+        {
+            assert!(
+                (rotated_total - in_order_total).abs() < 1e-12,
+                "allele {allele}'s cohort copies moved from {in_order_total} to \
+                 {rotated_total} on a reordering"
+            );
+        }
+    }
+
+    /// **The sum runs in ascending sample order, and the check is on the bits.**
+    ///
+    /// This is the mutation oracle `spec/calling_em_loop.md` §13 test 2 asks for. The reference
+    /// allele's column is four samples carrying `2⁻⁵³`, `1.0`, `2⁻⁵³` and `2⁻⁵²` copies —
+    /// `2⁻⁵³` being exactly half the gap between `1.0` and its neighbour, so it rounds away
+    /// against the one and does not round away against another `2⁻⁵³`.
+    ///
+    /// **The fixture certifies itself.** Rather than quoting what the wrong orders give, the
+    /// test builds them and asserts they differ: reversal, and every adjacent transposition
+    /// **except the first**. That exception is not a gap — `t = a; t += b` and `t = b; t += a`
+    /// are bit-identical for every pair, IEEE addition being commutative, so **no fixture of
+    /// any shape can separate a swap of the first two samples, and no implementation can be
+    /// wrong by making one.** An earlier three-sample fixture separated reversal only, and a
+    /// walk that swapped rows 1 and 2 passed it.
+    ///
+    /// **What it still cannot see**: 3 of the 23 non-identity permutations of four samples sum
+    /// bit-identically to ascending. Floating-point addition is commutative in pairs, so no
+    /// column separates every permutation; this one separates the ones an implementation could
+    /// plausibly produce.
+    ///
+    /// The cost of getting this wrong is not a wrong answer at one locus; it is a run whose
+    /// output depends on the worker count (`spec/calling_em_loop.md` §8).
+    #[test]
+    fn the_sum_runs_in_ascending_sample_order() {
+        let half_an_ulp_at_one = f64::from_bits(0x3CA0_0000_0000_0000); // 2^-53
+        let one_ulp_at_one = f64::from_bits(0x3CB0_0000_0000_0000); // 2^-52
+        assert_eq!(half_an_ulp_at_one, 2.0_f64.powi(-53));
+        assert_eq!(one_ulp_at_one, 2.0_f64.powi(-52));
+
+        // Sample-major, two alleles: the reference column is what carries the property, and
+        // the alternative column is three-and-a-bit copies of an order-invariant `1.0`.
+        let reference = [half_an_ulp_at_one, 1.0, half_an_ulp_at_one, one_ulp_at_one];
+        let table: Vec<f64> = reference.iter().flat_map(|&r| [r, 1.0]).collect();
+
+        let fold_in = |walk: &[usize]| -> f64 {
+            walk.iter()
+                .skip(1)
+                .fold(reference[walk[0]], |total, &row| total + reference[row])
+        };
+        let ascending = fold_in(&[0, 1, 2, 3]);
+
+        // Reversal, and every adjacent transposition but the first, must be visible. The first
+        // cannot be: `a + b` and `b + a` are the same bits.
+        assert_ne!(
+            fold_in(&[3, 2, 1, 0]).to_bits(),
+            ascending.to_bits(),
+            "this fixture cannot see a reversed sum"
+        );
+        for (i, walk) in [[1, 0, 2, 3], [0, 2, 1, 3], [0, 1, 3, 2]]
+            .iter()
+            .enumerate()
+        {
+            let swapped = fold_in(walk);
+            if i == 0 {
+                assert_eq!(
+                    swapped.to_bits(),
+                    ascending.to_bits(),
+                    "swapping the first two samples must be a no-op, IEEE addition being \
+                     commutative"
+                );
+            } else {
+                assert_ne!(
+                    swapped.to_bits(),
+                    ascending.to_bits(),
+                    "this fixture cannot see samples {i} and {} swapped",
+                    i + 1
+                );
+            }
+        }
+
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 4,
+            per_sample_expected_copies: &table,
+            cohort_expected_copies: &mut cohort,
+        });
+
+        assert_eq!(
+            cohort[0].to_bits(),
+            ascending.to_bits(),
+            "the reference allele's copies came to {} where ascending sample order gives {}",
+            cohort[0],
+            ascending
+        );
+        assert_eq!(cohort[1], 4.0);
+    }
+
+    /// **The cohort's copies come to the ploidy times the sample count**, because every
+    /// sample's own copies come to the ploidy and the M-step only adds them up.
+    ///
+    /// It is the cheapest check there is on a sum that dropped or double-counted a sample —
+    /// either moves the total by a whole 2.0, so the `1e-12` tolerance is ample.
+    ///
+    /// **The grand total is asserted and so is each allele**, because the total alone cannot
+    /// see an M-step that mixed the alleles up: any permutation of the cohort row sums to the
+    /// same number. The per-allele half compares against a fold written independently here.
+    ///
+    /// **This is the identity `spec/calling_em_loop.md` §5.0 will break**: once a sample the
+    /// candidate step set aside stops contributing, the total becomes the ploidy times the
+    /// *callable* count. Whoever builds that in step D1 should expect to edit this test, and
+    /// its failing is the point.
+    #[test]
+    fn the_cohort_carries_the_ploidy_for_every_sample_it_summed() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        let (likelihoods, starting_copies, seed) = three_disagreeing_samples();
+
+        let (_winners, cohort) = run_passes(
+            1,
+            &likelihoods,
+            &starting_copies,
+            &[0, 1, 2],
+            &alleles,
+            &view,
+            &seed,
+        );
+
+        let total: f64 = cohort.iter().sum();
+        let expected = f64::from(view.ploidy().get()) * 3.0;
+        assert!(
+            (total - expected).abs() < 1e-12,
+            "the cohort carries {total} copies over three diploid samples, not {expected}"
+        );
+
+        // Per allele too, because the total alone cannot see a cohort row whose alleles were
+        // permuted: any permutation sums to the same number.
+        assert_eq!(cohort.len(), view.allele_count());
+        assert!(
+            cohort.iter().all(|c| c.is_finite() && *c >= 0.0),
+            "every cohort entry is a count of genome copies: {cohort:?}"
+        );
+        // The reference allele must carry more than either alternative here: all three
+        // samples start reference-heavy and only one is pulled off it hard.
+        assert!(
+            cohort[0] > cohort[1] && cohort[0] > cohort[2],
+            "the reference allele should dominate this fixture's cohort: {cohort:?}"
+        );
+    }
+
+    /// **A sample row the E-step never wrote is refused, and one check over the alleles is
+    /// enough to catch it** — `NaN` survives every addition, so an unwritten row anywhere in a
+    /// table of any size reaches the cohort entry it belongs to.
+    ///
+    /// This is what stands between the scratch's sentinel and a cohort summary that every
+    /// sample's next prior is built from. **It is also how a sample set aside by
+    /// `spec/calling_em_loop.md` §5.0 fails today** — loudly, which is the right failure while
+    /// the exclusion is unbuilt, and not the answer, which step D1 owes.
+    #[test]
+    #[should_panic(expected = "a sample row the E-step never wrote")]
+    fn a_sample_row_that_was_never_written_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+        scratch
+            .sample_expected_copies_mut(0)
+            .copy_from_slice(&[1.0, 1.0]);
+        // Sample 1's row deliberately left as `prepare_for_locus` wrote it.
+
+        sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+    }
+
+    /// **A per-sample table that is not `samples × alleles` is refused**, rather than summed
+    /// over whatever rows `chunks_exact` happens to find. A table one row short would sum a
+    /// cohort of `n − 1` and report it as `n`, which no later check can see: the copies would
+    /// be finite, non-negative, and smaller than they should be by one sample's worth.
+    #[test]
+    #[should_panic(expected = "the per-sample copies are samples × alleles")]
+    fn a_per_sample_table_of_the_wrong_size_is_refused() {
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 3,
+            per_sample_expected_copies: &[1.0, 1.0, 1.0, 1.0],
+            cohort_expected_copies: &mut cohort,
+        });
+    }
+    /// **A cohort of no samples is refused, and the size check cannot do it.**
+    ///
+    /// A count of zero *satisfies* the shape check, because `0 == 0 × alleles` — so without
+    /// this guard the walk sums nothing and hands back a cohort row that reads like a locus
+    /// where nobody carries anything, which the finiteness check accepts. Measured during
+    /// B2's review: with both `> 0` guards deleted the whole of `ng::calling` stays green.
+    #[test]
+    #[should_panic(expected = "a sum over none is a run whose sample order went missing")]
+    fn a_cohort_of_no_samples_is_refused() {
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 0,
+            per_sample_expected_copies: &[],
+            cohort_expected_copies: &mut cohort,
+        });
+    }
+
+    /// **A locus of no alleles is refused**, for the same reason and by the same reasoning:
+    /// `entries == samples × 0` holds for any sample count, so the shape check passes and the
+    /// walk writes nothing.
+    #[test]
+    #[should_panic(expected = "a cohort row of no alleles")]
+    fn a_locus_of_no_alleles_is_refused() {
+        let mut cohort: Vec<f64> = Vec::new();
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 3,
+            per_sample_expected_copies: &[],
+            cohort_expected_copies: &mut cohort,
+        });
+    }
+
+    /// **An infinite total is refused** — the half of the output check that `>= 0.0` cannot
+    /// do, and the one a real overflow would reach.
+    ///
+    /// The two halves are not redundant and each needs its own case:
+    /// [`a_negative_total_is_refused`] is the other.
+    #[test]
+    #[should_panic(expected = "must be finite and at or above zero")]
+    fn an_infinite_total_is_refused() {
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 2,
+            per_sample_expected_copies: &[f64::MAX, 1.0, f64::MAX, 1.0],
+            cohort_expected_copies: &mut cohort,
+        });
+    }
+
+    /// **A negative total is refused** — the half of the output check that `is_finite` cannot
+    /// do.
+    ///
+    /// **And this test is also where the check's limit lives.** It catches a total that comes
+    /// out negative; it does **not** catch negative *inputs* that cancel, because two rows of
+    /// `-1.0` and `3.0` sum to a perfectly acceptable `2.0`. Checking every input instead
+    /// would cost `samples × alleles` on the loop's hot path to catch a state no producer can
+    /// reach, expected copies being a posterior-weighted sum of non-negative counts. Reached
+    /// with a hand-built bundle for that reason: the E-step cannot produce one.
+    #[test]
+    #[should_panic(expected = "must be finite and at or above zero")]
+    fn a_negative_total_is_refused() {
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 2,
+            per_sample_expected_copies: &[-3.0, 1.0, 1.0, 1.0],
+            cohort_expected_copies: &mut cohort,
+        });
+    }
+
+    /// **At one sample the cohort's copies are that sample's own row, bit for bit.**
+    ///
+    /// The boundary the whole design leans on: `spec/calling_em_loop.md` §7 makes one sample a
+    /// first-class case rather than a degraded one, and the M-step there is not an
+    /// approximation of a sum — it *is* the row. Asserted on the bits, because a sum of one
+    /// addend has no rounding to hide behind, so anything that scales, doubles or reorders the
+    /// addends shows up.
+    ///
+    /// Nothing else in this module's tests runs the M-step at one sample.
+    #[test]
+    fn the_cohort_of_one_sample_is_that_samples_own_row_bit_for_bit() {
+        let own = [0.7_f64, 1.3];
+        let mut cohort = vec![f64::NAN; 2];
+        sum_cohort_expected_copies(CohortSummingBuffers {
+            sample_count: 1,
+            per_sample_expected_copies: &own,
+            cohort_expected_copies: &mut cohort,
+        });
+        assert_eq!(cohort[0].to_bits(), own[0].to_bits());
+        assert_eq!(cohort[1].to_bits(), own[1].to_bits());
+    }
+
+    /// **From pass 2 the `NaN` sentinel is gone, and a row this pass did not write is summed
+    /// as though it were current.** This is the limit of the finiteness check, pinned so that
+    /// the doc comment claiming it and the behaviour cannot drift apart.
+    ///
+    /// The scratch fills the per-sample rows with `UNWRITTEN_SCRATCH_VALUE` once per locus,
+    /// not once per pass — deliberately, because `score_one_sample` reads each sample's
+    /// previous copies as its leave-one-out term. So a sample whose E-step is skipped on a
+    /// later pass contributes its **previous** copies, finite and plausible, and nothing
+    /// raises.
+    ///
+    /// **This is not a bug in the M-step; it is the reason spec §5.0's exclusion needs a
+    /// per-pass written mask**, which step D1 owes. If a later step makes skipping a sample
+    /// mid-run impossible, this test should start failing and be deleted with a note saying
+    /// why.
+    #[test]
+    fn from_the_second_pass_an_unwritten_row_is_summed_as_current() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+
+        // Pass 1: both samples write their rows, and the sum is what they say.
+        scratch
+            .sample_expected_copies_mut(0)
+            .copy_from_slice(&[2.0, 0.0]);
+        scratch
+            .sample_expected_copies_mut(1)
+            .copy_from_slice(&[0.0, 2.0]);
+        sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+        assert_eq!(scratch.cohort_expected_copies(), &[2.0, 2.0]);
+
+        // Pass 2: only sample 0 writes. Sample 1's pass-1 row is still there.
+        scratch
+            .sample_expected_copies_mut(0)
+            .copy_from_slice(&[1.0, 1.0]);
+        sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
+        assert_eq!(
+            scratch.cohort_expected_copies(),
+            &[1.0, 3.0],
+            "sample 1's pass-1 copies were summed into pass 2's cohort, which is the limit \
+             the finiteness check cannot see"
+        );
+    }
+
+    proptest! {
+        /// **The sum is an ascending fold, at every shape and every value** — the property the
+        /// five hand-built fixtures can only sample.
+        ///
+        /// This function exists *because* floating-point addition is not associative, so its
+        /// contract is not "the total" but one specific fold in one specific order. The
+        /// expectation here is written independently of the implementation, as a plain
+        /// ascending fold over the same table, and compared **on the bits**.
+        #[test]
+        fn the_sum_is_an_ascending_fold_at_every_shape(
+            sample_count in 1_usize..24,
+            allele_count in 1_usize..8,
+            raw in prop::collection::vec(0.0_f64..2.0, 24 * 8),
+        ) {
+            let table: Vec<f64> = raw[..sample_count * allele_count].to_vec();
+            let mut cohort = vec![f64::NAN; allele_count];
+            sum_cohort_expected_copies(CohortSummingBuffers {
+                sample_count,
+                per_sample_expected_copies: &table,
+                cohort_expected_copies: &mut cohort,
+            });
+
+            for allele in 0..allele_count {
+                let expected = (1..sample_count).fold(table[allele], |total, sample| {
+                    total + table[sample * allele_count + allele]
+                });
+                prop_assert_eq!(
+                    cohort[allele].to_bits(),
+                    expected.to_bits(),
+                    "allele {} over {} samples", allele, sample_count
+                );
+            }
+        }
     }
 }

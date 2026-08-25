@@ -185,7 +185,7 @@ copies. Pure, scratch-backed, no allocation. Test: a hand-computed 2-allele dipl
 and likelihood chosen so every intermediate is checkable by hand. *Depends:* A2. *Source:* spec
 §2; arch §1.
 
-**B2. The M-step, fixed order.**  ☐
+**B2. The M-step, fixed order.**  ✅
 The cohort's expected copies as a sum over samples **in the run's fixed sample order**. Tests
 (spec §13 test 2): permuting the samples changes no genotype; **the mutation check is on the
 summed expected copies, compared bitwise** — not on the argmax, which will not flip on a

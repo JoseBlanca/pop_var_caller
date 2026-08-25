@@ -1260,6 +1260,40 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         }
     }
 
+    /// The two buffers the **M-step** reads and writes: every sample's own expected allele
+    /// copies, and the cohort row their sum goes into.
+    ///
+    /// **A second bundle for the same reason as the first** — the per-sample copies and the
+    /// cohort's are two fields of one scratch, and reaching for them one accessor at a time
+    /// does not compile. Measured while B1 was in review: an M-step written against the
+    /// per-buffer accessors gives two `error[E0502]`.
+    ///
+    /// **The whole per-sample table, not one row.** The M-step's defining property is that it
+    /// adds the samples up *in the run's fixed order*, so it takes the table and walks it
+    /// itself rather than being handed a row at a time by a caller whose loop could reorder.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its only caller is `sum_cohort_expected_copies`, which step D1 of the \
+                      calling-loop plan is the first to call from outside a test"
+        )
+    )]
+    pub(crate) fn cohort_summing_buffers_mut(&mut self) -> CohortSummingBuffers<'_> {
+        self.assert_prepared();
+        CohortSummingBuffers {
+            sample_count: self.sample_count,
+            per_sample_expected_copies: &self.per_sample_expected_copies,
+            cohort_expected_copies: &mut self.cohort_expected_copies,
+        }
+    }
+
     /// Refuse a scratch that was never sized for a locus.
     ///
     /// # Panics
@@ -1364,6 +1398,37 @@ pub(crate) struct SampleScoringBuffers<'a> {
     /// One entry per allele: this sample's own expected allele copies — **read first** as
     /// the leave-one-out term, then **overwritten** with this pass's answer.
     pub sample_expected_copies: &'a mut [f64],
+}
+
+/// The two buffers the **M-step** works between, borrowed from one [`CallingScratch`] at once.
+///
+/// **The M-step** is the half of one pass that turns every sample's genotype probabilities back
+/// into the cohort-wide summary the next pass conditions on: it adds up how many copies of each
+/// allele the samples are expected to carry. Its counterpart is the E-step, which goes the other
+/// way — [`SampleScoringBuffers`] is that half's bundle
+/// (`doc/devel/ng/spec/calling_em_loop.md` §2).
+///
+/// **Made only by [`CallingScratch::cohort_summing_buffers_mut`]** in a run; the tests build one
+/// by hand to hand the sum a mis-shaped table, which the accessor cannot produce.
+#[derive(Debug)]
+pub(crate) struct CohortSummingBuffers<'a> {
+    /// How many samples the table below holds — the run's whole sample count, which is what
+    /// the scratch was prepared for.
+    ///
+    /// **Deliberately redundant against the table's own length, because that redundancy is
+    /// what makes the shape check a check.** Derive the count from the length instead and any
+    /// table divides evenly by the allele count, so a two-row table presented as three samples
+    /// is accepted and the cohort comes back short by a sample with nothing raised. Measured
+    /// during B2's review: with the count derived, the suite stays green and the
+    /// wrong-size test starts accepting that table and returning `[2.0, 2.0]`.
+    pub sample_count: usize,
+    /// `samples × alleles`, sample-major: each sample's own expected allele copies, as the
+    /// E-step of this pass left them. Read whole, so that the order of the sum is this
+    /// function's and not its caller's.
+    pub per_sample_expected_copies: &'a [f64],
+    /// One entry per allele, to fill: the cohort's expected allele copies, the sum of the
+    /// rows above.
+    pub cohort_expected_copies: &'a mut [f64],
 }
 
 /// Resize a scratch buffer and overwrite every entry, including the ones that were already
