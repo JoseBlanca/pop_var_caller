@@ -132,7 +132,7 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
 
 ### Milestone A — the deferred shared types + the seam (types, no logic)
 
-**A1. `CallingScratch`, `LocusEvidence`, `FrozenParameters`.**  ☐
+**A1. `CallingScratch`, `LocusEvidence`, `FrozenParameters`.**  ✅
 In `calling/mod.rs`, now that every borrowed field exists: `CallingScratch` (the `Lg` table,
 posterior row, concentration, current/previous expected copies, per-sample copies, and the
 likelihood's `RowScratch` section — allocated once per worker, reused per locus; the measured

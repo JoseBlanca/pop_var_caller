@@ -18,7 +18,12 @@
 //! The vocabulary that needs nothing from the sub-modules: [`CandidateAlleles`], the
 //! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
 //! counts the loop feeds back to itself; and [`LocusInference`] with
-//! [`SampleGenotypeCall`], what a locus produces. Of the four sub-modules — the candidate
+//! [`SampleGenotypeCall`], what a locus produces. Beside them, the three the calling
+//! loop takes and gives back: [`LocusEvidence`], one locus's reads per sample and the
+//! one place the SNP/indel and repeat-tract paths meet; [`FrozenParameters`], everything
+//! the parameter pre-pass fitted, gathered so one borrow crosses the seam; and
+//! [`CallingScratch`], every buffer a locus's calling fills, allocated once per worker.
+//! Of the four sub-modules — the candidate
 //! step, the likelihood, the genotype prior and the inference loop — three are here:
 //! [`allele_candidates`], step 6, which narrows the merge's allele table to the sequences
 //! worth calling over (`doc/devel/ng/impl_plan/candidate_alleles.md`);
@@ -69,9 +74,11 @@ pub use likelihood::{
     fill_batch_allele_copies, fill_contaminant_allele_frequencies,
 };
 
-use crate::ng::locus_generation::LocusKind;
+use crate::ng::calling::genotype_prior::SpectrumSeed;
+use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Provenance;
-use crate::ng::types::{AlleleId, GenomeRegion, Genotype, Phred};
+use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::ng::types::{AlleleId, GenomeRegion, Genotype, InbreedingF, LogProb, Phred, Ploidy};
 
 /// The alleles one locus is called over: the reference allele, and every alternative
 /// the candidate step admitted — each stored as the bases it spells.
@@ -289,18 +296,1058 @@ impl ExpectedAlleleCopies {
     }
 }
 
-/// One sample's call at one locus: the alleles it carries, and how sure the caller is.
+/// One run sample's evidence at one SNP/indel locus, together with the candidate step's
+/// ruling on whether the sample can be genotyped there at all.
 ///
-/// [`Self::genotype_quality`] is the posterior-derived `GQ` of the loop's last pass —
-/// how much of the sample's genotype probability the winning genotype took. Step 13's
-/// quality model **refines** this number; it does not replace it
-/// (`doc/devel/ng/arch/calling_em_loop.md` §2).
+/// **Two facts that must travel together, because separating them is a silent join.** The
+/// evidence says what the sample's reads showed; the ruling says whether the alleles those
+/// reads earned survived candidate selection's cap. A run keeps both per sample and in the
+/// run's own sample order, so holding them in one entry is what stops a later step pairing
+/// sample *i*'s reads with sample *j*'s ruling.
+///
+/// **Why the ruling is not on [`GenericSampleEvidence`] itself**, where
+/// `doc/devel/ng/arch/read_likelihoods.md` §2.1 sketches it. A sample the cap ruled
+/// uncallable never reaches the read likelihood: it leaves the loop before the first pass
+/// and is scored against no genotype at all
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5.0). A field on the evidence view would
+/// therefore be one the row builder is handed and never reads, and the shipped
+/// `GenericSampleEvidence` does not carry it.
+#[derive(Copy, Clone, Debug)]
+pub struct GenericLocusSample<'a> {
+    /// What this sample's reads showed, as the SNP/indel row consumes it. A sample with no
+    /// coverage at the locus gets [`GenericSampleEvidence::empty`], which scores every
+    /// genotype alike and leaves the prior to decide — the right answer rather than a
+    /// special case (`doc/devel/ng/spec/calling_em_loop.md` §7).
+    pub evidence: GenericSampleEvidence<'a>,
+    /// **Whether the allele cap cut a sequence this sample's own reads had earned**, copied
+    /// from `UnmatchedSupport::genotype_must_be_missing`
+    /// ([`allele_candidates::UnmatchedSupport::genotype_must_be_missing`]).
+    ///
+    /// True means the locus is no longer called over something this sample carries, so
+    /// every genotype the caller could form for it is wrong. Such a sample is set aside
+    /// before the first pass: it is scored against nothing, contributes nothing to the
+    /// cohort's expected copies, and its call is emitted as
+    /// [`SampleGenotypeCall::Missing`] (`doc/devel/ng/spec/calling_em_loop.md` §5.0).
+    ///
+    /// **Nothing downstream could derive it.** The pooled error mass of the cut sequences
+    /// is the same number under every genotype and cancels, so the read likelihood cannot
+    /// tell a sample that lost a real allele from one that had a handful of error reads
+    /// dropped — and the second is nearly every sample at nearly every locus.
+    pub genotype_must_be_missing: bool,
+}
+
+/// One locus's evidence, per sample, in whichever shape its path uses.
+///
+/// **This enum is the only place the two calling paths meet.** Below it everything is
+/// path-pure: the discriminant chooses the row builder, and it is the same discriminant
+/// that chose the candidates (`doc/devel/ng/arch/calling_em_loop.md` §2).
+///
+/// **Every variant's `per_sample` is one entry per sample of the run, in the run's sample
+/// order** — not one entry per *covering* sample. That is the order every per-sample slice
+/// in [`FrozenParameters`] is indexed by and the order [`LocusInference::per_sample`] comes
+/// back in, and holding one order for the whole run is what makes the loop's fixed-order
+/// sum over samples reproducible (`doc/devel/ng/spec/calling_em_loop.md` §8). The merge's
+/// own `CohortObservation::per_sample` holds only the covering samples and is a different
+/// list; converting between them is the input edge's work, not this type's.
+#[derive(Copy, Clone, Debug)]
+pub enum LocusEvidence<'a> {
+    /// A SNP/indel locus: what each sample showed, and which samples the candidate cap
+    /// already ruled uncallable.
+    Generic {
+        /// Where on the reference this locus is.
+        region: GenomeRegion,
+        /// One entry per run sample, in run order.
+        per_sample: &'a [GenericLocusSample<'a>],
+    },
+    /// A repeat tract, or a repeat bundle: what each sample showed, and the tract's motif
+    /// and flanks.
+    ///
+    /// **No sample is set aside here**, and the absence is structural rather than an
+    /// oversight. A tract's discovery round can put back a length the cap cut, so a sample
+    /// that lost one is not locked out of the locus for the rest of its calling
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
+    Ssr {
+        /// Where on the reference this locus is.
+        region: GenomeRegion,
+        /// One entry per run sample, in run order.
+        per_sample: &'a [SsrSampleEvidence<'a>],
+        /// The tract's repeat unit and its two flanks — what the repeat read model scores
+        /// against.
+        detail: &'a SsrDetail,
+    },
+}
+
+impl<'a> LocusEvidence<'a> {
+    /// A SNP/indel locus's evidence.
+    ///
+    /// # Panics
+    ///
+    /// If `per_sample` names no sample. A run has at least one sample and every sample gets
+    /// an entry — an empty one is a locus whose evidence was lost on the way in, not a
+    /// locus nobody covered, which is one entry per sample of
+    /// [`GenericSampleEvidence::empty`].
+    #[must_use]
+    pub fn generic(region: GenomeRegion, per_sample: &'a [GenericLocusSample<'a>]) -> Self {
+        assert!(
+            !per_sample.is_empty(),
+            "the SNP/indel evidence at {region} names no sample: a locus carries one entry \
+             per sample of the run and a run has at least one sample, so an empty list is \
+             evidence that went missing rather than a locus nobody covered — a sample with \
+             no reads gets GenericSampleEvidence::empty()"
+        );
+        Self::Generic { region, per_sample }
+    }
+
+    /// A repeat tract's or repeat bundle's evidence.
+    ///
+    /// # Panics
+    ///
+    /// If `per_sample` names no sample, for the reason [`Self::generic`] gives.
+    #[must_use]
+    pub fn ssr(
+        region: GenomeRegion,
+        per_sample: &'a [SsrSampleEvidence<'a>],
+        detail: &'a SsrDetail,
+    ) -> Self {
+        assert!(
+            !per_sample.is_empty(),
+            "the repeat-tract evidence at {region} names no sample: a locus carries one \
+             entry per sample of the run and a run has at least one sample, so an empty \
+             list is evidence that went missing rather than a locus nobody covered"
+        );
+        Self::Ssr {
+            region,
+            per_sample,
+            detail,
+        }
+    }
+
+    /// Where on the reference this locus is.
+    #[inline]
+    #[must_use]
+    pub fn region(&self) -> GenomeRegion {
+        match self {
+            Self::Generic { region, .. } | Self::Ssr { region, .. } => *region,
+        }
+    }
+
+    /// How many samples the run has — the length of every per-sample list at this locus.
+    #[inline]
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        match self {
+            Self::Generic { per_sample, .. } => per_sample.len(),
+            Self::Ssr { per_sample, .. } => per_sample.len(),
+        }
+    }
+
+    /// Which calling path this evidence is on, in the words the panic messages use.
+    #[inline]
+    fn path_word(&self) -> &'static str {
+        match self {
+            Self::Generic { .. } => "SNP/indel",
+            Self::Ssr { .. } => "repeat-tract",
+        }
+    }
+
+    /// Check this evidence against the locus it claims to describe and the run it claims to
+    /// come from — **the ordering contract, made a runtime fact rather than a promise.**
+    ///
+    /// Two things are checked, and each is a caller bug whose symptom is a wrong genotype
+    /// rather than a crash:
+    ///
+    /// - **the path.** A repeat tract's evidence handed to a locus whose alleles say
+    ///   SNP/indel would be scored by the wrong read model, which is a different likelihood
+    ///   at every sample with nothing failing
+    ///   (`doc/devel/ng/arch/calling_em_loop.md` §2). A repeat **bundle** goes to the
+    ///   repeat path with a tract, which is how every other consumer of
+    ///   [`LocusKind`] groups the two.
+    /// - **the cohort.** One run-wide sample order indexes this evidence, every per-sample
+    ///   slice of `parameters`, and the calls that come back. Two lists of different lengths
+    ///   are two different orders, and a positional join between them silently pairs one
+    ///   sample's reads with another's inbreeding coefficient.
+    ///
+    /// **The locus's genotype table is not checked here**, because this method never sees
+    /// it. That check has its own home, at the one point the shape is fixed:
+    /// [`CallingScratch::prepare_for_locus`].
+    ///
+    /// # Panics
+    ///
+    /// On either disagreement, in release as well as debug: both are comparisons of two
+    /// integers or two discriminants, against a defect that would otherwise reach the
+    /// output as a genotype.
+    pub fn assert_matches_locus_and_run(
+        &self,
+        alleles: &CandidateAlleles,
+        parameters: &FrozenParameters<'_>,
+    ) {
+        let paths_agree = matches!(
+            (self, alleles.kind()),
+            (Self::Generic { .. }, LocusKind::Generic)
+                | (Self::Ssr { .. }, LocusKind::Ssr(_) | LocusKind::SsrBundle)
+        );
+        assert!(
+            paths_agree,
+            "the evidence at {} is on the {} path and its allele table is a {} locus, so \
+             the two belong to different loci — the discriminant that chose the candidates \
+             is the one that chooses the read model",
+            self.region(),
+            self.path_word(),
+            locus_kind_word(alleles.kind())
+        );
+        assert_eq!(
+            self.sample_count(),
+            parameters.sample_count(),
+            "the evidence at {} covers {} samples and the run's frozen parameters cover {}, \
+             so one of them is indexed by a different sample order",
+            self.region(),
+            self.sample_count(),
+            parameters.sample_count()
+        );
+    }
+}
+
+/// What kind of locus this is, in one word, for a panic message.
+///
+/// **Not `{:?}` on the kind**, which for a repeat tract prints both flanks as decimal byte
+/// arrays — a screenful of digits for a fact the discriminant alone carries.
+fn locus_kind_word(kind: &LocusKind) -> &'static str {
+    match kind {
+        LocusKind::Generic => "SNP/indel",
+        LocusKind::Ssr(_) => "repeat-tract",
+        LocusKind::SsrBundle => "repeat-bundle",
+    }
+}
+
+/// Everything the parameter pre-pass froze, borrowed for the whole run.
+///
+/// **Assembled once per run and never written during calling.** Every error rate,
+/// contamination fraction and inbreeding coefficient arrives fitted and leaves unchanged;
+/// what a locus may move is its own allele frequencies, and — at a repeat tract with the
+/// re-fit switched on — its own slippage numbers
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5). Each field is another document's to define;
+/// this type only gathers them so that the loop borrows them once, at the boundary where
+/// calling begins.
+///
+/// **Two different axes are in here and they are not interchangeable**, which is why every
+/// field says which one it is on. The calibration and the contamination views are per
+/// **read group** — a sample sequenced from two libraries has two of each. The inbreeding
+/// coefficients are per **sample**, in the run's sample order, the same order
+/// [`LocusEvidence`] and [`LocusInference::per_sample`] use.
+#[derive(Copy, Clone, Debug)]
+pub struct FrozenParameters<'a> {
+    calibration_by_read_group: &'a [ReadGroupCalibration],
+    contamination_by_read_group: &'a [ContaminationView],
+    inbreeding_coefficient_by_sample: &'a [InbreedingF],
+    prior_seed: SpectrumSeed,
+    ssr_slippage_fits: &'a StratumFits,
+    ploidy: Ploidy,
+}
+
+impl<'a> FrozenParameters<'a> {
+    /// Gather the run's frozen parameters for a run the fit **did** measure contamination
+    /// in, with what can be checked between them checked.
+    ///
+    /// - `calibration_by_read_group` — one entry per read group, indexed by
+    ///   [`ReadGroupId`](crate::ng::types::ReadGroupId).
+    /// - `contamination_by_read_group` — one entry per read group as well.
+    /// - `inbreeding_coefficient_by_sample` — one entry per sample, **in the run's sample
+    ///   order**.
+    /// - `prior_seed` — the genotype prior's starting concentration for the run: how many
+    ///   chromosomes' worth of belief each allele carries before any read is looked at
+    ///   ([`genotype_prior`]).
+    /// - `ssr_slippage_fits` — the fitted slippage numbers, how often a read gains or loses
+    ///   a whole repeat, looked up by read group and by **stratum**, the group of tracts
+    ///   that share a motif length and a repeat count. A run with no repeat tracts supplies
+    ///   `StratumFits::over(&[], BTreeMap::new())`, a gather over no outcomes rather than
+    ///   nothing at all, so the lookup answers *no such stratum* rather than being absent.
+    /// - `ploidy` — how many copies of the genome a sample carries.
+    ///
+    /// # Panics
+    ///
+    /// If `contamination_by_read_group` is empty. **No contamination fitted anywhere is
+    /// spelled [`Self::uncontaminated`]** — one named way to say it, so that a caller
+    /// reaches the decision rather than the shortest thing that compiles. That is the same
+    /// rule [`ContaminationMixture::uncontaminated`] already carries for the per-locus half
+    /// of the same mixture, and the reason is that *absent* and *fitted zero* are different
+    /// claims (`doc/devel/ng/spec/read_likelihoods.md` §3.6).
+    ///
+    /// If `contamination_by_read_group` is not one entry per read group. The two are read
+    /// off the same axis and a run whose calibration covers ten groups and whose
+    /// contamination covers four is a caller bug the row could only find lazily — at
+    /// whichever locus first held a read from the fifth, or never.
+    ///
+    /// If either per-axis list is empty. A run has at least one sample and at least one
+    /// read group, so an empty list is that axis going missing — and the symptom would
+    /// otherwise be an out-of-range index at whichever locus first carried a read, naming
+    /// neither the axis nor the locus.
+    #[must_use]
+    pub fn new(
+        calibration_by_read_group: &'a [ReadGroupCalibration],
+        contamination_by_read_group: &'a [ContaminationView],
+        inbreeding_coefficient_by_sample: &'a [InbreedingF],
+        prior_seed: SpectrumSeed,
+        ssr_slippage_fits: &'a StratumFits,
+        ploidy: Ploidy,
+    ) -> Self {
+        assert!(
+            !contamination_by_read_group.is_empty(),
+            "no contamination fitted anywhere is spelled `FrozenParameters::uncontaminated`, \
+             not an empty list — one named way to say it, so that a caller reaches the \
+             decision rather than the shortest thing that compiles"
+        );
+        assert_eq!(
+            contamination_by_read_group.len(),
+            calibration_by_read_group.len(),
+            "contamination is fitted per read group: the run supplied {} calibrations and \
+             {} contamination views",
+            calibration_by_read_group.len(),
+            contamination_by_read_group.len()
+        );
+        Self::gather(
+            calibration_by_read_group,
+            contamination_by_read_group,
+            inbreeding_coefficient_by_sample,
+            prior_seed,
+            ssr_slippage_fits,
+            ploidy,
+        )
+    }
+
+    /// The run's frozen parameters where **no contamination was fitted anywhere** — a single
+    /// sample, which has no panel to measure a contaminant against, or a fit that identified
+    /// none (`doc/devel/ng/spec/read_likelihoods.md` §3.6).
+    ///
+    /// **Absent, not a fitted zero**, and this is the one named way to say it. A consumer
+    /// that reached for `contamination.get(group).map(|v| v.fraction).unwrap_or(0.0)` would
+    /// turn *not estimable* into *estimated and found clean*, which are different claims
+    /// about the sample.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::new`], on an empty per-axis list.
+    #[must_use]
+    pub fn uncontaminated(
+        calibration_by_read_group: &'a [ReadGroupCalibration],
+        inbreeding_coefficient_by_sample: &'a [InbreedingF],
+        prior_seed: SpectrumSeed,
+        ssr_slippage_fits: &'a StratumFits,
+        ploidy: Ploidy,
+    ) -> Self {
+        Self::gather(
+            calibration_by_read_group,
+            &[],
+            inbreeding_coefficient_by_sample,
+            prior_seed,
+            ssr_slippage_fits,
+            ploidy,
+        )
+    }
+
+    /// The checks both constructors share, and the only place the fields are written.
+    fn gather(
+        calibration_by_read_group: &'a [ReadGroupCalibration],
+        contamination_by_read_group: &'a [ContaminationView],
+        inbreeding_coefficient_by_sample: &'a [InbreedingF],
+        prior_seed: SpectrumSeed,
+        ssr_slippage_fits: &'a StratumFits,
+        ploidy: Ploidy,
+    ) -> Self {
+        assert!(
+            !calibration_by_read_group.is_empty(),
+            "every read of the run belongs to a read group and a run has at least one, so \
+             an empty calibration list is a run whose read-group axis went missing"
+        );
+        assert!(
+            !inbreeding_coefficient_by_sample.is_empty(),
+            "every sample of the run carries an inbreeding coefficient and a run has at \
+             least one sample, so an empty list is a run whose sample order went missing"
+        );
+        Self {
+            calibration_by_read_group,
+            contamination_by_read_group,
+            inbreeding_coefficient_by_sample,
+            prior_seed,
+            ssr_slippage_fits,
+            ploidy,
+        }
+    }
+
+    /// One calibration per read group, indexed by
+    /// [`ReadGroupId`](crate::ng::types::ReadGroupId).
+    #[inline]
+    #[must_use]
+    pub fn calibration_by_read_group(&self) -> &'a [ReadGroupCalibration] {
+        self.calibration_by_read_group
+    }
+
+    /// One contamination view per read group, or empty where the fit identified none —
+    /// which [`Self::contamination_is_absent`] is the name for.
+    #[inline]
+    #[must_use]
+    pub fn contamination_by_read_group(&self) -> &'a [ContaminationView] {
+        self.contamination_by_read_group
+    }
+
+    /// Whether the fit identified no contamination anywhere, in which case the read
+    /// likelihood computes the plain formula.
+    ///
+    /// **The branch that decides which formula runs deserves a name** — see
+    /// [`ContaminationMixture::is_absent`], which exists for this reason. Asking it as an
+    /// emptiness test announces at the call site only that a list is empty.
+    #[inline]
+    #[must_use]
+    pub fn contamination_is_absent(&self) -> bool {
+        self.contamination_by_read_group.is_empty()
+    }
+
+    /// One inbreeding coefficient per sample, in the run's sample order.
+    #[inline]
+    #[must_use]
+    pub fn inbreeding_coefficient_by_sample(&self) -> &'a [InbreedingF] {
+        self.inbreeding_coefficient_by_sample
+    }
+
+    /// How many samples the run has.
+    #[inline]
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        self.inbreeding_coefficient_by_sample.len()
+    }
+
+    /// How many read groups the run has.
+    #[inline]
+    #[must_use]
+    pub fn read_group_count(&self) -> usize {
+        self.calibration_by_read_group.len()
+    }
+
+    /// The genotype prior's starting concentration for the run.
+    #[inline]
+    #[must_use]
+    pub fn prior_seed(&self) -> SpectrumSeed {
+        self.prior_seed
+    }
+
+    /// The fitted slippage numbers, looked up by read group and stratum.
+    #[inline]
+    #[must_use]
+    pub fn ssr_slippage_fits(&self) -> &'a StratumFits {
+        self.ssr_slippage_fits
+    }
+
+    /// How many copies of the genome a sample carries.
+    #[inline]
+    #[must_use]
+    pub fn ploidy(&self) -> Ploidy {
+        self.ploidy
+    }
+}
+
+/// What every scratch slot holds between [`CallingScratch::prepare_for_locus`] and the pass
+/// that writes it: **not a number**, so a slot some pass forgot to fill fails the next
+/// arithmetic check it is handed to rather than reaching a genotype as a plausible zero.
+///
+/// Zero is exactly the mistake to avoid: an expected copy count of zero, a log-prior of
+/// zero and a concentration of zero are all legal values a pass could have written, so a
+/// zero-filled buffer and a correctly-filled one are indistinguishable. It is the same
+/// argument `SsrRowScratch::prepare_emissions` makes for its own fill value.
+pub const UNWRITTEN_SCRATCH_VALUE: f64 = f64::NAN;
+
+/// Every buffer one locus's calling fills — **allocated once per worker and reused at every
+/// locus**, so calling a locus costs no allocation of its own.
+///
+/// **The reason is measured, not stylistic.** Production lifted exactly these buffers out of
+/// its own iteration after a profile put the allocator's own self-time at about one cycle in
+/// six (`src/var_calling/posterior_engine.rs`; `doc/devel/ng/spec/calling_em_loop.md` §8).
+///
+/// **Candidate selection's buffers live here too** — the per-allele running totals it
+/// accumulates and its survivor list — rather than standing alone as a second per-worker
+/// object. The same worker selects a locus's alleles and then calls it, so a second
+/// allocation would buy nothing (`doc/devel/ng/arch/candidate_alleles.md` §2.4). Nothing
+/// about their shape changed on the way in.
+///
+/// **Sized by [`prepare_for_locus`](Self::prepare_for_locus), one call per locus**, and
+/// every buffer comes back holding [`UNWRITTEN_SCRATCH_VALUE`]. Until that call the scratch
+/// has no shape, and every accessor refuses rather than handing back an empty slice: a fold
+/// over a zero-length buffer writes nothing and sums to a plausible `0.0`, which is the
+/// failure the fill value exists to prevent, reached by the door the fill cannot cover. The
+/// two row scratches and the candidate-selection buffers own their own sizing.
+///
+/// **Amortised, not allocation-free.** A buffer grows when a locus is wider than every locus
+/// this worker has met and never shrinks back, so a worker ends up holding its widest
+/// locus's shape for its lifetime.
+///
+/// `SsrEmissionScratch` is the repeat-tract emission model's own working memory — the
+/// associated `Scratch` of whichever [`SsrEmissionModel`](likelihood::ssr_emission::SsrEmissionModel)
+/// the run scores tracts with. **It has no default**, so every construction names the model
+/// it is for, the way the `SsrRowScratch` it wraps already does: that seam exists for a
+/// bake-off between two emission models, and a defaulted parameter would let a run switch
+/// models with no call site changing.
+#[derive(Default, Debug)]
+pub struct CallingScratch<SsrEmissionScratch> {
+    /// Candidate selection's per-allele running totals and its survivor list.
+    candidate_selection: allele_candidates::SelectionScratch,
+    /// `samples × genotypes`, sample-major: how probable each sample's reads are under each
+    /// candidate genotype — the **genotype** likelihood, written `Lg` in
+    /// `doc/devel/ng/spec/read_likelihoods.md` §1, as against `Lr`, which is one read
+    /// against one allele. Built once per set of slippage numbers and read by every pass.
+    genotype_likelihoods: Vec<LogProb>,
+    /// One entry per genotype: the sample being scored, its log-prior.
+    prior_row: Vec<LogProb>,
+    /// One entry per genotype: the sample being scored, its posterior over genotypes.
+    posterior_row: Vec<f64>,
+    /// One entry per allele: the locus's **seed concentration** — one positive number per
+    /// allele, read as chromosomes the prior behaves as though it had already seen
+    /// ([`genotype_prior`]'s module doc). Built once per locus.
+    seed_concentration: Vec<f64>,
+    /// One entry per allele: the sample being scored, its own concentration — the seed plus
+    /// what the *other* samples showed here.
+    sample_concentration: Vec<f64>,
+    /// One entry per allele: the genotype prior's own working space, which
+    /// `PriorRow::new` borrows mutably while it reads the concentration.
+    prior_row_workspace: Vec<f64>,
+    /// One entry per allele: the **cohort's** expected allele copies as this pass has them,
+    /// summed over every sample.
+    cohort_expected_copies: Vec<f64>,
+    /// One entry per allele: what the previous pass's cohort copies were — the convergence
+    /// comparison.
+    previous_cohort_expected_copies: Vec<f64>,
+    /// `samples × alleles`, sample-major: each **sample's own** expected allele copies. The
+    /// prior's leave-one-out term is the cohort's total minus this.
+    per_sample_expected_copies: Vec<f64>,
+    /// The SNP/indel row's own scratch.
+    generic_row: GenericRowScratch,
+    /// The repeat-tract row's own scratch, including the emission model's.
+    ssr_row: SsrRowScratch<SsrEmissionScratch>,
+    /// How many samples the buffers above are sized for. Zero means never prepared.
+    sample_count: usize,
+    /// How many genotypes they are sized for.
+    genotype_count: usize,
+    /// How many alleles they are sized for.
+    allele_count: usize,
+}
+
+impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
+    /// Size every buffer for one locus and fill it with [`UNWRITTEN_SCRATCH_VALUE`], so
+    /// nothing survives from the last one.
+    ///
+    /// **The shape comes from the locus's own allele table and genotype table, and from
+    /// nowhere else.** Taking the two objects rather than two integers is what stops the
+    /// allele count and the genotype count being swapped: at a diploid biallelic locus they
+    /// are 2 and 3, and every buffer would still be a legal length.
+    ///
+    /// # Panics
+    ///
+    /// If the genotype table does not index the locus's alleles. This is the first of the
+    /// three caller bugs `doc/devel/ng/spec/calling_em_loop.md` §8 names as assertions, and
+    /// this is the one point where the locus's shape is fixed, so it is where the two are
+    /// compared. A table built before a discovery round admitted an allele is exactly how
+    /// the two come apart; with a table one allele narrow, every per-allele buffer is sized
+    /// for the old count and the locus is called over a set that silently excludes the
+    /// allele just admitted.
+    ///
+    /// If `sample_count` is zero. A cohort has at least one sample, so a locus prepared for
+    /// none is a run whose sample order went missing rather than a locus nobody covered.
+    ///
+    /// If `samples × genotypes` or `samples × alleles` overflows a `usize`.
+    pub fn prepare_for_locus(
+        &mut self,
+        sample_count: usize,
+        alleles: &CandidateAlleles,
+        genotypes: &GenotypeTableView<'_>,
+    ) {
+        assert_eq!(
+            genotypes.allele_count(),
+            alleles.len(),
+            "the genotype table indexes {} alleles and this locus is called over {}, so the \
+             table was built for a different allele set — a discovery round that admitted \
+             an allele needs its table rebuilt with it",
+            genotypes.allele_count(),
+            alleles.len()
+        );
+        assert!(
+            sample_count > 0,
+            "a cohort has at least one sample, so a locus prepared for none is a run whose \
+             sample order went missing"
+        );
+        let genotype_count = genotypes.genotype_count();
+        let allele_count = genotypes.allele_count();
+        let table_len = sample_count.checked_mul(genotype_count).unwrap_or_else(|| {
+            panic!(
+                "a locus of {sample_count} samples over {genotype_count} genotypes needs a \
+                 genotype-likelihood table longer than a usize can index"
+            )
+        });
+        let copies_len = sample_count.checked_mul(allele_count).unwrap_or_else(|| {
+            panic!(
+                "a locus of {sample_count} samples over {allele_count} alleles needs a \
+                 per-sample copies table longer than a usize can index"
+            )
+        });
+
+        let unwritten = LogProb(UNWRITTEN_SCRATCH_VALUE);
+        resize_and_fill(&mut self.genotype_likelihoods, table_len, unwritten);
+        resize_and_fill(&mut self.prior_row, genotype_count, unwritten);
+        resize_and_fill(
+            &mut self.posterior_row,
+            genotype_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.seed_concentration,
+            allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.sample_concentration,
+            allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.prior_row_workspace,
+            allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.cohort_expected_copies,
+            allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.previous_cohort_expected_copies,
+            allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.per_sample_expected_copies,
+            copies_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+
+        self.sample_count = sample_count;
+        self.genotype_count = genotype_count;
+        self.allele_count = allele_count;
+    }
+
+    /// How many samples the buffers are currently sized for.
+    #[inline]
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
+
+    /// How many genotypes the buffers are currently sized for.
+    #[inline]
+    #[must_use]
+    pub fn genotype_count(&self) -> usize {
+        self.genotype_count
+    }
+
+    /// How many alleles the buffers are currently sized for.
+    #[inline]
+    #[must_use]
+    pub fn allele_count(&self) -> usize {
+        self.allele_count
+    }
+
+    /// One sample's row of the genotype-likelihood table — one entry per candidate genotype.
+    ///
+    /// **The one spelling of the index.** The table is flat and sample-major, so a caller
+    /// slicing it itself would, on a slip, read a different sample's likelihoods and score
+    /// that sample's reads onto this one's genotype with nothing failing.
+    ///
+    /// Until this locus's pass writes it, every entry is [`UNWRITTEN_SCRATCH_VALUE`].
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, or a sample past the count
+    /// [`prepare_for_locus`](Self::prepare_for_locus) was given.
+    #[inline]
+    #[must_use]
+    pub fn sample_genotype_likelihoods(&self, sample: usize) -> &[LogProb] {
+        let range = self.genotype_row_range(sample);
+        &self.genotype_likelihoods[range]
+    }
+
+    /// One sample's row of the genotype-likelihood table, to fill.
+    ///
+    /// # Panics
+    ///
+    /// As [`sample_genotype_likelihoods`](Self::sample_genotype_likelihoods).
+    #[inline]
+    pub fn sample_genotype_likelihoods_mut(&mut self, sample: usize) -> &mut [LogProb] {
+        let range = self.genotype_row_range(sample);
+        &mut self.genotype_likelihoods[range]
+    }
+
+    /// One sample's own expected allele copies — one entry per allele. The cohort's sum is
+    /// [`cohort_expected_copies`](Self::cohort_expected_copies), and the prior's
+    /// leave-one-out term is the difference of the two.
+    ///
+    /// Until this locus's pass writes it, every entry is [`UNWRITTEN_SCRATCH_VALUE`].
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, or a sample past the count
+    /// [`prepare_for_locus`](Self::prepare_for_locus) was given.
+    #[inline]
+    #[must_use]
+    pub fn sample_expected_copies(&self, sample: usize) -> &[f64] {
+        let range = self.allele_row_range(sample);
+        &self.per_sample_expected_copies[range]
+    }
+
+    /// One sample's own expected allele copies, to fill.
+    ///
+    /// # Panics
+    ///
+    /// As [`sample_expected_copies`](Self::sample_expected_copies).
+    #[inline]
+    pub fn sample_expected_copies_mut(&mut self, sample: usize) -> &mut [f64] {
+        let range = self.allele_row_range(sample);
+        &mut self.per_sample_expected_copies[range]
+    }
+
+    /// The **cohort's** expected allele copies as this pass has them, summed over every
+    /// sample. Until this pass writes it, every entry is [`UNWRITTEN_SCRATCH_VALUE`].
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn cohort_expected_copies(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.cohort_expected_copies
+    }
+
+    /// The cohort's expected allele copies, to fill.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn cohort_expected_copies_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.cohort_expected_copies
+    }
+
+    /// What the previous pass's cohort expected copies were — the convergence comparison.
+    /// Before the first pass has advanced, every entry is [`UNWRITTEN_SCRATCH_VALUE`], and
+    /// every comparison against it is therefore false.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn previous_cohort_expected_copies(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.previous_cohort_expected_copies
+    }
+
+    /// Make this pass's cohort copies the previous pass's, and hand back a buffer to write
+    /// the next pass into.
+    ///
+    /// **A swap rather than a copy**, so there is one spelling of *which buffer is now
+    /// which*. The returned buffer arrives holding [`UNWRITTEN_SCRATCH_VALUE`] in every
+    /// entry: a pass that leaves an allele unwritten fails the next check it reaches,
+    /// rather than reading the pass-before-last's value and letting the convergence test
+    /// compare a number no pass wrote.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn advance_cohort_expected_copies(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        std::mem::swap(
+            &mut self.cohort_expected_copies,
+            &mut self.previous_cohort_expected_copies,
+        );
+        self.cohort_expected_copies.fill(UNWRITTEN_SCRATCH_VALUE);
+        &mut self.cohort_expected_copies
+    }
+
+    /// The locus's seed concentration. Until this locus fills it, every entry is
+    /// [`UNWRITTEN_SCRATCH_VALUE`].
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn seed_concentration(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.seed_concentration
+    }
+
+    /// The locus's seed concentration, to fill once per locus.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn seed_concentration_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.seed_concentration
+    }
+
+    /// The sample being scored, its own concentration.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn sample_concentration(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.sample_concentration
+    }
+
+    /// The sample being scored, its own concentration, to fill per sample per pass.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn sample_concentration_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.sample_concentration
+    }
+
+    /// The sample being scored, its log-prior over every candidate genotype.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn prior_row(&self) -> &[LogProb] {
+        self.assert_prepared();
+        &self.prior_row
+    }
+
+    /// The sample's log-prior row, to fill.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn prior_row_mut(&mut self) -> &mut [LogProb] {
+        self.assert_prepared();
+        &mut self.prior_row
+    }
+
+    /// The sample being scored, its posterior over every candidate genotype.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn posterior_row(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.posterior_row
+    }
+
+    /// The sample's posterior row, to fill.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn posterior_row_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.posterior_row
+    }
+
+    /// The genotype prior's per-allele working space.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub fn prior_row_workspace(&self) -> &[f64] {
+        self.assert_prepared();
+        &self.prior_row_workspace
+    }
+
+    /// The genotype prior's per-allele working space, to lend it.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    pub fn prior_row_workspace_mut(&mut self) -> &mut [f64] {
+        self.assert_prepared();
+        &mut self.prior_row_workspace
+    }
+
+    /// Candidate selection's buffers. **Not sized by
+    /// [`prepare_for_locus`](Self::prepare_for_locus)** — it owns its own, and selection
+    /// runs before the locus's shape is known.
+    #[inline]
+    pub fn candidate_selection_mut(&mut self) -> &mut allele_candidates::SelectionScratch {
+        &mut self.candidate_selection
+    }
+
+    /// The SNP/indel row's own scratch, which owns its own sizing.
+    #[inline]
+    pub fn generic_row_mut(&mut self) -> &mut GenericRowScratch {
+        &mut self.generic_row
+    }
+
+    /// The repeat-tract row's own scratch, which owns its own sizing.
+    #[inline]
+    pub fn ssr_row_mut(&mut self) -> &mut SsrRowScratch<SsrEmissionScratch> {
+        &mut self.ssr_row
+    }
+
+    /// Refuse a scratch that was never sized for a locus.
+    ///
+    /// # Panics
+    ///
+    /// If [`prepare_for_locus`](Self::prepare_for_locus) has not been called. Every buffer
+    /// of a freshly-made scratch is empty, so without this a pass folding into
+    /// [`cohort_expected_copies_mut`](Self::cohort_expected_copies_mut) would run zero
+    /// iterations, write nothing, and leave the cohort's copies summing to a plausible
+    /// `0.0` — which the fill value cannot catch, because an unprepared buffer has no slots
+    /// to fill.
+    #[inline]
+    fn assert_prepared(&self) {
+        assert!(
+            self.sample_count > 0,
+            "this scratch has not been prepared for a locus: call prepare_for_locus first"
+        );
+    }
+
+    /// Where one sample's row of the genotype-likelihood table starts and ends.
+    #[inline]
+    fn genotype_row_range(&self, sample: usize) -> std::ops::Range<usize> {
+        self.row_range(sample, self.genotype_count, "genotype-likelihood")
+    }
+
+    /// Where one sample's row of the per-sample expected copies starts and ends.
+    #[inline]
+    fn allele_row_range(&self, sample: usize) -> std::ops::Range<usize> {
+        self.row_range(sample, self.allele_count, "per-sample expected copies")
+    }
+
+    /// Where one sample's row of a flat sample-major table starts and ends.
+    ///
+    /// **Private, and reached only through the two typed wrappers**, so no caller picks the
+    /// row width by hand — the two widths are the genotype count and the allele count, and
+    /// at a diploid biallelic locus they are 3 and 2, so a wrong one is a legal range over
+    /// the wrong table.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, or a sample past the count
+    /// [`prepare_for_locus`](Self::prepare_for_locus) was given — a caller that walked one
+    /// sample too far would otherwise read the next sample's row, or, at the last sample,
+    /// panic somewhere that says nothing about which sample it was.
+    #[inline]
+    fn row_range(&self, sample: usize, width: usize, table: &str) -> std::ops::Range<usize> {
+        self.assert_prepared();
+        assert!(
+            sample < self.sample_count,
+            "sample {sample} is past the {} this scratch was prepared for, indexing the \
+             {table} table",
+            self.sample_count
+        );
+        let start = sample * width;
+        start..start + width
+    }
+}
+
+/// Resize a scratch buffer and overwrite every entry, including the ones that were already
+/// there.
+///
+/// **`Vec::resize` alone is the bug this exists to avoid**: it leaves the leading entries
+/// untouched, so a locus with the same shape as the last one would silently reuse the last
+/// one's values — a wrong prior or a wrong likelihood at every sample, with nothing failing.
+fn resize_and_fill<T: Copy>(buffer: &mut Vec<T>, len: usize, fill: T) {
+    buffer.clear();
+    buffer.resize(len, fill);
+}
+
+/// One sample's call at one locus.
+///
+/// **Two outcomes, and the second is not a low-confidence version of the first.** A sample
+/// the candidate step declared uncallable has no genotype at all: the locus is called over a
+/// set of alleles that cannot represent what the sample carries, so it is set aside before
+/// the first pass, scored against nothing, and emitted as missing
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5.0, §9). Emission must not write that as a
+/// genotype with a poor quality beside it, and an enum is what stops it: there is no
+/// quality to read.
+///
+/// **A sample with no reads at the locus is [`Self::Called`], not [`Self::Missing`]**, and
+/// the distinction is the one a reader is most likely to get backwards. Such a sample scores
+/// every genotype alike, so the prior decides it alone and a genotype comes out — which is
+/// the right answer rather than a special case
+/// (`doc/devel/ng/spec/calling_em_loop.md` §7). [`Self::Missing`] is not *missing data*; it
+/// is *the caller declined to invent a genotype over a set that cannot hold this sample's
+/// allele*.
+///
+/// **Why the type changed shape here.** `doc/devel/ng/arch/calling_em_loop.md` §2 sketches
+/// this as a struct of a genotype and a quality, which cannot express the missing case, and
+/// [`Genotype::new`] refuses an empty multiset by design — *an empty multiset is not a
+/// haploid call, it is a sample with no genome*. The spec's §5.0 records that the ruling had
+/// a producer and no carrier and that the loop's own plan adds one; this is it.
 #[derive(Clone, PartialEq, Debug)]
-pub struct SampleGenotypeCall {
-    /// Which alleles this sample carries, one per copy of its genome.
-    pub genotype: Genotype,
-    /// How sure the caller is of that genotype.
-    pub genotype_quality: Phred,
+pub enum SampleGenotypeCall {
+    /// The caller reached a genotype for this sample.
+    Called {
+        /// Which alleles this sample carries, one per copy of its genome.
+        genotype: Genotype,
+        /// How sure the caller is of that genotype — the posterior-derived `GQ` of the
+        /// loop's last pass, how much of the sample's genotype probability the winning
+        /// genotype took. Step 13's quality model **refines** this number; it does not
+        /// replace it (`doc/devel/ng/arch/calling_em_loop.md` §2).
+        genotype_quality: Phred,
+    },
+    /// The candidate step ruled this sample uncallable at this locus, so it took no part in
+    /// the loop and emission writes its `GT` as missing.
+    ///
+    /// **This happens on the SNP/indel path only.** A repeat tract sets no sample aside
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), and [`LocusInference::new`] refuses
+    /// a locus that carries one there.
+    Missing,
+}
+
+impl SampleGenotypeCall {
+    /// The alleles called, or `None` where the sample was set aside.
+    #[inline]
+    #[must_use]
+    pub fn genotype(&self) -> Option<&Genotype> {
+        match self {
+            Self::Called { genotype, .. } => Some(genotype),
+            Self::Missing => None,
+        }
+    }
+
+    /// How sure the caller is, or `None` where the sample was set aside — which carries no
+    /// quality, because no genotype was scored to have one.
+    #[inline]
+    #[must_use]
+    pub fn genotype_quality(&self) -> Option<Phred> {
+        match self {
+            Self::Called {
+                genotype_quality, ..
+            } => Some(*genotype_quality),
+            Self::Missing => None,
+        }
+    }
+
+    /// Whether this sample's `GT` is written as missing.
+    #[inline]
+    #[must_use]
+    pub fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
 }
 
 /// What calling produces at one locus: the alleles it settled on, every sample's call,
@@ -420,6 +1467,26 @@ impl LocusInference {
     /// (`doc/devel/ng/arch/calling_priors.md` §5) and can never raise it, so setting it
     /// there means the marker was wired to the wrong path.
     ///
+    /// If any call is [`SampleGenotypeCall::Missing`] at a repeat tract or bundle. **A
+    /// repeat tract sets no sample aside** — a discovery round there can put back a length
+    /// the cap cut, so no sample is locked out of the locus
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1, §9). This is the mirror of the seed
+    /// marker's check above: one ruling belongs to each path, and each is refused on the
+    /// other. What it catches is a sample silently dropped from a tract's output — spec §9
+    /// says such a sample has no expected copies at all, so a `Missing` wrongly emitted
+    /// there also removes that sample from the cohort's expected-copies denominator, and
+    /// the locus's allele frequencies come out wrong with a well-formed record beside them.
+    ///
+    /// If a called genotype names an allele this locus was not called over. `Genotype::new`
+    /// checks only that the multiset is non-empty, and the final prune renumbers every id
+    /// above the one it drops ([`CandidateAlleles::admit`]), so a call not remapped
+    /// alongside it arrives stale. An out-of-range id reaches the VCF's `GT` column as an
+    /// index past the `ALT` list — an unparseable record, the same failure class
+    /// [`CandidateAlleles::new`] refuses an empty reference allele for. **It catches the
+    /// out-of-range half only:** an id that stays in range after a renumber names a
+    /// different allele silently, which is an argument for the prune returning its
+    /// remapping rather than for a wider check here.
+    ///
     /// If `region` runs backwards. [`GenomeRegion`] is plain data with no constructor of
     /// its own, and its documentation says a caller that requires `start <= end` says so
     /// itself; a called locus is such a caller, since the region reaches the `POS` column
@@ -469,6 +1536,25 @@ impl LocusInference {
              seeds from a different quantity and can never raise it"
         );
         assert!(
+            matches!(alleles.kind(), LocusKind::Generic)
+                || per_sample.iter().all(|call| !call.is_missing()),
+            "a repeat tract sets no sample aside, so a missing call at a {} locus is the \
+             SNP/indel path's ruling wired onto the wrong path",
+            locus_kind_word(alleles.kind())
+        );
+        assert!(
+            per_sample
+                .iter()
+                .all(|call| call.genotype().is_none_or(|genotype| genotype
+                    .alleles()
+                    .iter()
+                    .all(|id| alleles.bases_of(*id).is_some()))),
+            "a called genotype names an allele this locus was not called over: the locus \
+             holds {} alleles, and the final prune renumbers every id above the one it \
+             drops, so a call not remapped alongside it is stale",
+            alleles.len()
+        );
+        assert!(
             region.start <= region.end,
             "a called locus covers a stretch of reference, so its region cannot run \
              backwards: {region}"
@@ -501,7 +1587,6 @@ impl LocusInference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::SsrDetail;
     use crate::ng::types::{ContigId, Motif, Position};
 
     fn generic_reference() -> CandidateAlleles {
@@ -767,7 +1852,7 @@ mod tests {
         }
     }
     fn diploid_call(first: u16, second: u16, quality: f32) -> SampleGenotypeCall {
-        SampleGenotypeCall {
+        SampleGenotypeCall::Called {
             genotype: Genotype::new(vec![AlleleId(first), AlleleId(second)]),
             genotype_quality: Phred::try_new(quality).expect("a legal quality"),
         }
@@ -833,14 +1918,26 @@ mod tests {
         // sample is the heterozygote, and swapping them would be a different record.
         assert_eq!(inference.per_sample.len(), 2);
         assert_eq!(
-            inference.per_sample[0].genotype.alleles(),
+            inference.per_sample[0]
+                .genotype()
+                .expect("a called sample")
+                .alleles(),
             [AlleleId(0), AlleleId(0)]
         );
         assert_eq!(
-            inference.per_sample[1].genotype.alleles(),
+            inference.per_sample[1]
+                .genotype()
+                .expect("a called sample")
+                .alleles(),
             [AlleleId(0), AlleleId(1)]
         );
-        assert_eq!(inference.per_sample[1].genotype_quality.get(), 25.0);
+        assert_eq!(
+            inference.per_sample[1]
+                .genotype_quality()
+                .expect("a called sample")
+                .get(),
+            25.0
+        );
     }
 
     /// A locus that ran out of passes is emitted with the flag set, never dropped and
@@ -870,7 +1967,10 @@ mod tests {
         // The call is still there. Nothing about not converging removes it.
         assert_eq!(capped.per_sample.len(), 1);
         assert_eq!(
-            capped.per_sample[0].genotype.alleles(),
+            capped.per_sample[0]
+                .genotype()
+                .expect("a called sample")
+                .alleles(),
             [AlleleId(0), AlleleId(1)]
         );
         // And the two other warrants travel independently of it.
@@ -1040,5 +2140,755 @@ mod tests {
         );
         assert_eq!(single.per_sample.len(), 1);
         assert_eq!(single.cohort_expected_copies().copies(), [2.6, 1.4]);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // The three types the calling loop takes and gives back, and the missing genotype.
+    // ────────────────────────────────────────────────────────────────────────────────
+
+    use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
+    use std::collections::BTreeMap;
+
+    fn ssr_detail() -> SsrDetail {
+        SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        }
+    }
+
+    fn no_strata() -> StratumFits {
+        StratumFits::over(&[], BTreeMap::new())
+    }
+
+    fn diploid_ploidy() -> Ploidy {
+        Ploidy::try_new(2).expect("a diploid")
+    }
+
+    fn outbred_samples(samples: usize) -> Vec<InbreedingF> {
+        vec![InbreedingF::try_new(0.0).expect("a legal coefficient"); samples]
+    }
+
+    fn one_read_group() -> Vec<ReadGroupCalibration> {
+        vec![ReadGroupCalibration::defaulted()]
+    }
+
+    fn measured_contamination() -> ContaminationView {
+        ContaminationView {
+            fraction: 0.03,
+            markers_with_reads: 400,
+            reads_on_markers: 1_200,
+            source: ContaminationSource::ThisReadGroupsReads,
+        }
+    }
+
+    fn neutral_seed() -> SpectrumSeed {
+        SpectrumSeed::new(1.0, 1e-3, genotype_prior::SeedRegime::NeutralShape)
+    }
+
+    /// The frozen parameters for a run of diploids, routed to whichever constructor the
+    /// contamination list calls for — an empty one is the run where the fit identified
+    /// none, which has its own named door.
+    fn frozen_parameters<'a>(
+        calibration: &'a [ReadGroupCalibration],
+        contamination: &'a [ContaminationView],
+        inbreeding: &'a [InbreedingF],
+        strata: &'a StratumFits,
+    ) -> FrozenParameters<'a> {
+        if contamination.is_empty() {
+            FrozenParameters::uncontaminated(
+                calibration,
+                inbreeding,
+                neutral_seed(),
+                strata,
+                diploid_ploidy(),
+            )
+        } else {
+            FrozenParameters::new(
+                calibration,
+                contamination,
+                inbreeding,
+                neutral_seed(),
+                strata,
+                diploid_ploidy(),
+            )
+        }
+    }
+
+    /// A two-allele diploid locus: its allele table and the genotype table over it. Three
+    /// genotypes against two alleles, so a scratch that swapped the two counts is caught.
+    fn biallelic_locus() -> (CandidateAlleles, std::sync::Arc<GenotypeTable>) {
+        let (alleles, _) = two_allele_locus();
+        let table = GenotypeTable::build(diploid_ploidy(), alleles.len());
+        (alleles, table)
+    }
+
+    /// Contamination is fitted per read group, so a run whose calibration covers one group
+    /// and whose contamination covers two has one of the two indexed by something else.
+    ///
+    /// **The check has to be at construction, not at the first read.** The row looks a
+    /// fraction up by read group id, so a mismatched pair is found at whichever locus first
+    /// carries a read from the group past the end — or never, if no read ever comes from
+    /// one, in which case every genotype of the run is scored under somebody else's
+    /// contamination.
+    #[test]
+    #[should_panic(expected = "contamination is fitted per read group")]
+    fn frozen_parameters_refuse_a_contamination_list_of_another_read_group_count() {
+        let calibration = one_read_group();
+        let contamination = vec![measured_contamination(), measured_contamination()];
+        let inbreeding = outbred_samples(2);
+        let strata = no_strata();
+        let _ = frozen_parameters(&calibration, &contamination, &inbreeding, &strata);
+    }
+
+    /// No contamination anywhere has a **named** door, and it is a different claim from a
+    /// fitted zero: at one sample there is no panel to be surprised by, so the fraction is
+    /// not estimable at all rather than estimated and found clean.
+    #[test]
+    fn a_run_with_no_contamination_fitted_says_so_by_name() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let parameters = FrozenParameters::uncontaminated(
+            &calibration,
+            &inbreeding,
+            neutral_seed(),
+            &strata,
+            diploid_ploidy(),
+        );
+
+        assert!(parameters.contamination_is_absent());
+        assert!(parameters.contamination_by_read_group().is_empty());
+        assert_eq!(parameters.read_group_count(), 1);
+        assert_eq!(parameters.sample_count(), 1);
+        assert_eq!(parameters.ploidy().get(), 2);
+        assert_eq!(parameters.prior_seed().alpha_ref(), 1.0);
+        assert_eq!(parameters.ssr_slippage_fits().strata(), 0);
+    }
+
+    /// The shortest thing that compiles is refused, so a caller reaches the decision.
+    ///
+    /// **The two spellings are not equivalent and that is the whole point.** A consumer
+    /// handed an empty list writes `contamination.get(group).map(|v| v.fraction)
+    /// .unwrap_or(0.0)` and has silently turned *not estimable* into *estimated and found
+    /// clean* — which are different claims about the sample. The sibling half of the same
+    /// mixture, `ContaminationMixture::new`, refuses the empty spelling for this reason,
+    /// and this is the frozen half spelled to match.
+    #[test]
+    #[should_panic(expected = "is spelled `FrozenParameters::uncontaminated`")]
+    fn an_empty_contamination_list_is_refused_in_favour_of_the_named_constructor() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let _ = FrozenParameters::new(
+            &calibration,
+            &[],
+            &inbreeding,
+            neutral_seed(),
+            &strata,
+            diploid_ploidy(),
+        );
+    }
+
+    /// The two axes the type calls "not interchangeable" are told apart by a fixture where
+    /// they differ: one library, three samples.
+    ///
+    /// **Every fixture with one of each passes a swapped implementation.** `sample_count()`
+    /// is what the evidence check compares against, so `read_group_count()` and
+    /// `sample_count()` reading each other's field turns the run-order guard into a
+    /// read-group-count guard — invisible on a panel of 63 accessions with one library
+    /// each, and wrong on any run where a sample is sequenced twice.
+    #[test]
+    fn read_group_count_and_sample_count_are_two_different_axes() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(3);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        assert_eq!(parameters.read_group_count(), 1);
+        assert_eq!(parameters.sample_count(), 3);
+        assert_eq!(parameters.calibration_by_read_group().len(), 1);
+        assert_eq!(parameters.inbreeding_coefficient_by_sample().len(), 3);
+    }
+
+    /// A run whose read-group axis went missing is refused at construction, rather than
+    /// producing an out-of-range index at whichever locus first carries a read.
+    #[test]
+    #[should_panic(expected = "read-group axis went missing")]
+    fn frozen_parameters_refuse_a_run_with_no_read_groups() {
+        let inbreeding = outbred_samples(2);
+        let strata = no_strata();
+        let _ = frozen_parameters(&[], &[], &inbreeding, &strata);
+    }
+
+    /// A run whose sample order went missing is refused, rather than producing a locus with
+    /// no calls in it.
+    #[test]
+    #[should_panic(expected = "an empty list is a run whose sample order went missing")]
+    fn frozen_parameters_refuse_a_run_with_no_samples() {
+        let calibration = one_read_group();
+        let strata = no_strata();
+        let _ = frozen_parameters(&calibration, &[], &[], &strata);
+    }
+
+    /// Evidence and the allele table have to be on the same path: the discriminant that
+    /// chose the candidates is the one that chooses the read model.
+    ///
+    /// **Handing a repeat tract's alleles a SNP/indel's evidence would not crash** — the
+    /// generic row would score the tract's sequences as though they were substitutions,
+    /// giving a different likelihood at every sample and a plausible genotype at the end of
+    /// it.
+    #[test]
+    #[should_panic(expected = "belong to different loci")]
+    fn evidence_on_the_wrong_path_for_its_allele_table_is_refused() {
+        let (tract_alleles, _) = str_two_allele_locus();
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::empty(),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(region(), &per_sample);
+        evidence.assert_matches_locus_and_run(&tract_alleles, &parameters);
+    }
+
+    /// The evidence and the run's per-sample parameters are indexed by one sample order, so
+    /// two lists of different lengths are two different orders.
+    #[test]
+    #[should_panic(expected = "indexed by a different sample order")]
+    fn evidence_covering_a_different_sample_count_from_the_run_is_refused() {
+        let (alleles, _) = two_allele_locus();
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(3);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::empty(),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(region(), &per_sample);
+        evidence.assert_matches_locus_and_run(&alleles, &parameters);
+    }
+
+    /// Both paths pass their own check, and each carries the locus's region and the run's
+    /// sample count.
+    ///
+    /// **A repeat tract's evidence carries no missing-genotype flag at all**, and the
+    /// absence is the design: a tract's discovery round can put back a length the cap cut,
+    /// so no sample is set aside there.
+    #[test]
+    fn evidence_that_matches_its_locus_and_its_run_is_accepted_on_both_paths() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(2);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        let (generic_alleles, _) = two_allele_locus();
+        let generic_samples = [
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::empty(),
+                genotype_must_be_missing: false,
+            },
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::empty(),
+                genotype_must_be_missing: true,
+            },
+        ];
+        let generic = LocusEvidence::generic(region(), &generic_samples);
+        generic.assert_matches_locus_and_run(&generic_alleles, &parameters);
+        assert_eq!(generic.region(), region());
+        assert_eq!(generic.sample_count(), 2);
+        match generic {
+            LocusEvidence::Generic { per_sample, .. } => {
+                assert!(!per_sample[0].genotype_must_be_missing);
+                assert!(per_sample[1].genotype_must_be_missing);
+            }
+            LocusEvidence::Ssr { .. } => panic!("built on the SNP/indel path"),
+        }
+
+        let (tract_alleles, _) = str_two_allele_locus();
+        let detail = ssr_detail();
+        let tract_samples = [
+            SsrSampleEvidence::new(&[], &detail),
+            SsrSampleEvidence::new(&[], &detail),
+        ];
+        let tract = LocusEvidence::ssr(region(), &tract_samples, &detail);
+        tract.assert_matches_locus_and_run(&tract_alleles, &parameters);
+        assert_eq!(tract.region(), region());
+        assert_eq!(tract.sample_count(), 2);
+    }
+
+    /// A locus whose evidence list is empty is evidence that went missing, not a locus
+    /// nobody covered — a sample with no reads gets an empty *entry*, and the prior decides
+    /// its genotype alone.
+    #[test]
+    #[should_panic(expected = "evidence that went missing")]
+    fn evidence_naming_no_sample_at_all_is_refused() {
+        let _ = LocusEvidence::generic(region(), &[]);
+    }
+
+    /// Each sample reads and writes its own row of the two flat tables, and the rows do not
+    /// overlap.
+    ///
+    /// **The flat tables are where a slip is silent.** A caller slicing `lg_table` itself
+    /// with the allele count instead of the genotype count would read a window straddling
+    /// two samples' rows: every entry a real log-likelihood, none of them this sample's.
+    /// The fixture writes each sample's index into its own row so a wrong window names the
+    /// sample it actually came from.
+    #[test]
+    fn each_sample_reads_and_writes_its_own_row_of_the_scratch_tables() {
+        let (alleles, table) = biallelic_locus();
+        let view = table.view();
+        assert_eq!(view.genotype_count(), 3);
+        assert_eq!(view.allele_count(), 2);
+
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(3, &alleles, &view);
+        assert_eq!(scratch.sample_count(), 3);
+        assert_eq!(scratch.genotype_count(), 3);
+        assert_eq!(scratch.allele_count(), 2);
+
+        for sample in 0..3 {
+            for (genotype, slot) in scratch
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .enumerate()
+            {
+                *slot = LogProb(-(sample as f64) - 0.1 * genotype as f64);
+            }
+            for (allele, slot) in scratch
+                .sample_expected_copies_mut(sample)
+                .iter_mut()
+                .enumerate()
+            {
+                *slot = sample as f64 + 0.5 * allele as f64;
+            }
+        }
+
+        for sample in 0..3 {
+            let row = scratch.sample_genotype_likelihoods(sample);
+            assert_eq!(row.len(), 3);
+            assert_eq!(row[0].get(), -(sample as f64));
+            assert_eq!(row[2].get(), -(sample as f64) - 0.2);
+
+            let copies = scratch.sample_expected_copies(sample);
+            assert_eq!(copies.len(), 2);
+            assert_eq!(copies, [sample as f64, sample as f64 + 0.5]);
+        }
+    }
+
+    /// A sample past the count the scratch was prepared for is refused by name, rather than
+    /// reading the next sample's row.
+    #[test]
+    #[should_panic(expected = "sample 2 is past the 2 this scratch was prepared for")]
+    fn a_sample_past_the_prepared_count_is_refused() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &table.view());
+        let _ = scratch.sample_genotype_likelihoods(2);
+    }
+
+    /// **Preparing a locus overwrites every entry, even when the shape has not changed.**
+    ///
+    /// This is the failure `Vec::resize` alone would leave: at two loci of the same shape it
+    /// keeps the leading entries, so the second locus would be scored against the first
+    /// one's likelihoods and priors with nothing failing. Every buffer comes back `NaN`, so
+    /// a value that survived is one that reaches an arithmetic check rather than a genotype.
+    #[test]
+    fn preparing_a_locus_overwrites_the_previous_locus_of_the_same_shape() {
+        let (alleles, table) = biallelic_locus();
+        let view = table.view();
+
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+        scratch.sample_genotype_likelihoods_mut(0)[0] = LogProb(-7.0);
+        scratch.sample_genotype_likelihoods_mut(1)[2] = LogProb(-9.0);
+        scratch.sample_expected_copies_mut(0)[1] = 1.75;
+        scratch.cohort_expected_copies_mut()[0] = 3.5;
+        scratch.seed_concentration_mut()[0] = 1.0;
+
+        scratch.prepare_for_locus(2, &alleles, &view);
+
+        assert!(
+            scratch
+                .sample_genotype_likelihoods(0)
+                .iter()
+                .all(|entry| entry.get().is_nan())
+        );
+        assert!(
+            scratch
+                .sample_genotype_likelihoods(1)
+                .iter()
+                .all(|entry| entry.get().is_nan())
+        );
+        assert!(
+            scratch
+                .sample_expected_copies(0)
+                .iter()
+                .all(|copy| copy.is_nan())
+        );
+        assert!(
+            scratch
+                .cohort_expected_copies()
+                .iter()
+                .all(|copy| copy.is_nan())
+        );
+        assert!(scratch.seed_concentration().iter().all(|a| a.is_nan()));
+    }
+
+    /// Advancing hands the previous pass's copies to the convergence test and gives back a
+    /// buffer for the next pass — a swap, so no allele-length copy is paid per pass.
+    #[test]
+    fn advancing_makes_the_current_copies_the_previous_ones() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+
+        scratch
+            .cohort_expected_copies_mut()
+            .copy_from_slice(&[1.25, 0.75]);
+        let next = scratch.advance_cohort_expected_copies();
+        // Handed back unwritten, not holding the pass before last's real numbers: a pass
+        // that skipped an allele would otherwise leave a value no pass wrote for the
+        // convergence test to compare.
+        assert!(next.iter().all(|copy| copy.is_nan()), "{next:?}");
+        next.copy_from_slice(&[1.5, 0.5]);
+
+        assert_eq!(scratch.previous_cohort_expected_copies(), [1.25, 0.75]);
+        assert_eq!(scratch.cohort_expected_copies(), [1.5, 0.5]);
+    }
+
+    /// A locus prepared for no samples at all is a run whose sample order went missing.
+    #[test]
+    #[should_panic(expected = "a locus prepared for none")]
+    fn a_scratch_prepared_for_no_samples_is_refused() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(0, &alleles, &table.view());
+    }
+
+    /// A missing genotype has no genotype and no quality — the two are absent together,
+    /// which is what an enum buys over a struct with an optional field.
+    ///
+    /// **A quality beside a missing genotype would be the failure.** Emission has to write
+    /// this sample's `GT` as missing because no genotype was scored for it, not because a
+    /// scored one came out weak, and the two must not be conflated in the output.
+    #[test]
+    fn a_missing_call_carries_neither_a_genotype_nor_a_quality() {
+        let missing = SampleGenotypeCall::Missing;
+        assert!(missing.is_missing());
+        assert_eq!(missing.genotype(), None);
+        assert_eq!(missing.genotype_quality(), None);
+
+        let called = diploid_call(0, 1, 25.0);
+        assert!(!called.is_missing());
+        assert_eq!(
+            called.genotype().expect("a called sample").alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+        assert_eq!(
+            called.genotype_quality().expect("a called sample").get(),
+            25.0
+        );
+    }
+
+    /// A locus can hand back a missing call beside called ones, in the run's sample order —
+    /// which is what a cohort whose cap cut one sample's earned allele produces.
+    #[test]
+    fn a_locus_carries_a_missing_call_beside_called_ones_in_run_order() {
+        let (alleles, copies) = two_allele_locus();
+        let inference = LocusInference::new(
+            region(),
+            alleles,
+            vec![
+                diploid_call(0, 0, 40.0),
+                SampleGenotypeCall::Missing,
+                diploid_call(0, 1, 25.0),
+            ],
+            copies,
+            true,
+            3,
+            Provenance::FittedHere,
+            false,
+        );
+
+        assert!(!inference.per_sample[0].is_missing());
+        assert!(inference.per_sample[1].is_missing());
+        assert!(!inference.per_sample[2].is_missing());
+    }
+
+    /// A repeat **bundle**'s allele table takes repeat-tract evidence, exactly as a tract's
+    /// does — which is how every other consumer of `LocusKind` groups the two
+    /// (`src/ng/run/cohort_merge/close.rs`).
+    ///
+    /// **No fixture reached this cell before, and two mutations lived there.** Deleting
+    /// `| LocusKind::SsrBundle` from the accepting arm left the whole suite green, and so
+    /// did widening the SNP/indel arm to accept a bundle — the second of which routes a
+    /// repeat bundle to the SNP/indel row: a plausible genotype at every sample, nothing
+    /// failing.
+    #[test]
+    fn ssr_evidence_against_a_bundle_allele_table_is_accepted() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
+        let detail = ssr_detail();
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let evidence = LocusEvidence::ssr(region(), &per_sample, &detail);
+        evidence.assert_matches_locus_and_run(&bundle, &parameters);
+    }
+
+    /// The other half of the same cell: SNP/indel evidence at a repeat bundle is refused.
+    ///
+    /// This is the mutation that bites — an accepting arm widened to admit a bundle scores
+    /// a repeat locus with the SNP/indel read model, and nothing anywhere fails.
+    #[test]
+    #[should_panic(expected = "belong to different loci")]
+    fn generic_evidence_against_a_bundle_allele_table_is_refused() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+
+        let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::empty(),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(region(), &per_sample);
+        evidence.assert_matches_locus_and_run(&bundle, &parameters);
+    }
+
+    /// The repeat constructor's own empty-list guard, which its SNP/indel twin's test does
+    /// not reach.
+    ///
+    /// **Measured: this was the one assertion in the module no test noticed.** Downgrading
+    /// all sixteen of the implementation's release-held checks to `debug_assert!` and
+    /// running under `--release` failed a test for fifteen of them; this was the sixteenth.
+    /// The two constructors are a copy-paste pair, which is the shape in which one half
+    /// drifts from the other.
+    #[test]
+    #[should_panic(expected = "evidence that went missing")]
+    fn ssr_evidence_naming_no_sample_at_all_is_refused() {
+        let detail = ssr_detail();
+        let _ = LocusEvidence::ssr(region(), &[], &detail);
+    }
+
+    /// The third class the constructor's own documentation refuses, and the only one that
+    /// had no test.
+    ///
+    /// **Infinity is the arithmetic-gone-wrong shape a log-domain sum produces**, and it is
+    /// the one that survives a check weakened from `is_finite()` to `!is_nan()`. It would
+    /// ride into the locus's output, and the convergence comparison of two infinities is
+    /// itself not a number — the failure the not-a-number check exists to stop, arriving
+    /// through the untested door.
+    #[test]
+    #[should_panic(expected = "finite and at or above zero")]
+    fn expected_copies_reject_an_infinite_count() {
+        let mut candidates = generic_reference();
+        candidates.admit(Box::from(b"T".as_slice()));
+        let _ = ExpectedAlleleCopies::new(vec![1.0, f64::INFINITY], &candidates);
+    }
+
+    /// A scratch that was never sized for a locus is refused by name, rather than handing a
+    /// pass an empty buffer to fold nothing into.
+    ///
+    /// **The unwritten-value fill cannot cover this door**, and that is why the check
+    /// exists: an unprepared buffer has no slots to fill, so a fold over it runs zero
+    /// iterations, writes nothing, and leaves the cohort's expected copies summing to a
+    /// plausible `0.0` — which is exactly the value the fill exists to keep out of a
+    /// genotype. Step B2's oracle is a bitwise comparison of those sums, and an all-zero
+    /// sum passes against another all-zero sum.
+    #[test]
+    #[should_panic(expected = "has not been prepared for a locus")]
+    fn an_unprepared_scratch_is_refused() {
+        let mut scratch = CallingScratch::<()>::default();
+        for slot in scratch.cohort_expected_copies_mut() {
+            *slot = 99.0;
+        }
+    }
+
+    /// A genotype table built for a different allele set is refused where the locus's shape
+    /// is fixed, rather than at the far end of the locus.
+    ///
+    /// **This is the first of the three caller bugs the spec names as assertions**, and a
+    /// discovery round admitting an allele is exactly how the two come apart. With a table
+    /// one allele narrow, every per-allele buffer is sized for the old count, and the first
+    /// thing to notice is the copies-versus-alleles check when the locus is finished —
+    /// thousands of arithmetic operations later, naming the output rather than the table.
+    #[test]
+    #[should_panic(expected = "the table was built for a different allele set")]
+    fn a_genotype_table_built_for_another_allele_set_is_refused() {
+        let (mut alleles, table) = biallelic_locus();
+        // A discovery round admits a third allele; the table is still the two-allele one.
+        alleles.admit(Box::from(b"G".as_slice()));
+
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &table.view());
+    }
+
+    /// The previous pass's copies are poisoned by the next locus too, not only the current
+    /// pass's.
+    ///
+    /// **Without this, locus *n*'s first convergence comparison runs against locus *n−1*'s
+    /// final allele copies** — a locus declared settled on the previous locus's numbers,
+    /// with nothing failing. The fixture writes the previous-pass buffer between the two
+    /// loci, which is the one state the same-shape test does not reach.
+    #[test]
+    fn preparing_a_locus_poisons_the_previous_passs_copies_as_well() {
+        let (alleles, table) = biallelic_locus();
+        let view = table.view();
+
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+        scratch
+            .cohort_expected_copies_mut()
+            .copy_from_slice(&[1.25, 0.75]);
+        scratch
+            .advance_cohort_expected_copies()
+            .copy_from_slice(&[1.5, 0.5]);
+        assert_eq!(scratch.previous_cohort_expected_copies(), [1.25, 0.75]);
+
+        // The next locus, same shape.
+        scratch.prepare_for_locus(2, &alleles, &view);
+        assert!(
+            scratch
+                .previous_cohort_expected_copies()
+                .iter()
+                .all(|copy| copy.is_nan()),
+            "the previous pass's copies survived into the next locus: {:?}",
+            scratch.previous_cohort_expected_copies()
+        );
+    }
+
+    /// The four buffers no accessor reached are sized on the axis they belong to.
+    ///
+    /// **Three genotypes against two alleles is what makes this discriminating.** A buffer
+    /// sized on the wrong axis is still a legal length, so at a locus where the two counts
+    /// were equal every wrong sizing would pass; here the prior and posterior rows must be
+    /// 3 and the two per-allele buffers must be 2.
+    #[test]
+    fn the_prior_and_posterior_buffers_are_sized_on_their_own_axes() {
+        let (alleles, table) = biallelic_locus();
+        let view = table.view();
+
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+
+        assert_eq!(scratch.prior_row().len(), view.genotype_count());
+        assert_eq!(scratch.posterior_row().len(), view.genotype_count());
+        assert_eq!(scratch.sample_concentration().len(), view.allele_count());
+        assert_eq!(scratch.prior_row_workspace().len(), view.allele_count());
+        assert_ne!(view.genotype_count(), view.allele_count());
+
+        // And they arrive unwritten, like every other buffer.
+        assert!(scratch.prior_row().iter().all(|entry| entry.get().is_nan()));
+        assert!(scratch.posterior_row().iter().all(|entry| entry.is_nan()));
+        assert!(scratch.sample_concentration().iter().all(|a| a.is_nan()));
+        assert!(scratch.prior_row_workspace().iter().all(|a| a.is_nan()));
+
+        // Written, then overwritten by the next locus of the same shape.
+        scratch.prior_row_mut()[0] = LogProb(-1.5);
+        scratch.posterior_row_mut()[0] = 0.25;
+        scratch.sample_concentration_mut()[0] = 1.0;
+        scratch.prior_row_workspace_mut()[0] = 2.0;
+        scratch.prepare_for_locus(2, &alleles, &view);
+        assert!(scratch.prior_row()[0].get().is_nan());
+        assert!(scratch.posterior_row()[0].is_nan());
+        assert!(scratch.sample_concentration()[0].is_nan());
+        assert!(scratch.prior_row_workspace()[0].is_nan());
+    }
+
+    /// The configuration a run actually uses — the shipped repeat-tract emission model's
+    /// own scratch — is built here and nowhere else in the module's tests.
+    ///
+    /// **Every other fixture uses `()` as the model scratch**, which compiles whether or
+    /// not the shipped model's `Scratch` still satisfies what the type needs. This also
+    /// gives the three sub-scratch accessors their only call site, and pins that a scratch
+    /// can cross a thread boundary, which "allocated once per worker" requires and nothing
+    /// else checked.
+    #[test]
+    fn the_shipped_emission_scratch_builds_and_can_cross_a_worker_boundary() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CallingScratch<likelihood::ssr_emission::StutterSubstitutionScratch>>();
+
+        let (alleles, table) = biallelic_locus();
+        let mut scratch =
+            CallingScratch::<likelihood::ssr_emission::StutterSubstitutionScratch>::default();
+        scratch.prepare_for_locus(2, &alleles, &table.view());
+        assert_eq!(scratch.sample_count(), 2);
+
+        // The three sub-scratches are reachable, and are the worker's rather than a locus's.
+        let _ = scratch.candidate_selection_mut();
+        let _ = scratch.generic_row_mut();
+        let _ = scratch.ssr_row_mut();
+    }
+
+    /// A repeat tract sets no sample aside, so a missing call at one is the SNP/indel path's
+    /// ruling wired onto the wrong path.
+    ///
+    /// **The mirror of the gene-diversity marker's check**, which refuses the repeat path's
+    /// ruling at a SNP/indel locus. What this one catches is a sample silently dropped from
+    /// a tract's output: such a sample has no expected copies at all, so it also leaves the
+    /// cohort's expected-copies denominator, and the locus's allele frequencies come out
+    /// wrong with a well-formed record beside them.
+    #[test]
+    #[should_panic(expected = "a repeat tract sets no sample aside")]
+    fn a_repeat_tract_locus_cannot_carry_a_missing_call() {
+        let (alleles, copies) = str_two_allele_locus();
+        let _ = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(0, 1, 20.0), SampleGenotypeCall::Missing],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// A call naming an allele the locus was not called over is refused.
+    ///
+    /// **The prune is what produces one.** Dropping an allele renumbers every id above it,
+    /// so a call minted before the prune and not remapped alongside it names an id past the
+    /// end — which reaches the `GT` column as an index past the `ALT` list, an unparseable
+    /// record rather than a crash.
+    #[test]
+    #[should_panic(expected = "names an allele this locus was not called over")]
+    fn a_call_naming_an_allele_the_locus_lost_is_refused() {
+        let (alleles, copies) = two_allele_locus();
+        let _ = LocusInference::new(
+            region(),
+            alleles, // two alleles: ids 0 and 1
+            vec![diploid_call(0, 2, 20.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// The two "never true" emptiness answers are the ones their documentation promises.
+    ///
+    /// Both types hold at least one entry by construction — the reference allele, and the
+    /// copy count beside it — so these exist to say so at a call site rather than to be a
+    /// question. Nothing called either before.
+    #[test]
+    fn the_allele_table_and_its_copies_are_never_empty() {
+        let candidates = generic_reference();
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates.len(), 1);
+
+        let copies = ExpectedAlleleCopies::new(vec![2.0], &candidates);
+        assert!(!copies.is_empty());
+        assert_eq!(copies.len(), 1);
     }
 }

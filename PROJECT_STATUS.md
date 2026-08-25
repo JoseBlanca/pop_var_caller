@@ -19,7 +19,32 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-24):** **the stutter model says *repeats*, because *frame*
+> - **Last completed task (2026-08-25):** **the calling loop's shared types, and a way for a
+> locus to say a sample has no call** (step A1 of
+> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop`). The
+> two arguments the calling seam takes — one locus's reads per sample, and everything the
+> parameter pre-pass froze — plus the buffers a worker reuses at every locus. **The piece with
+> a consequence beyond plumbing is the last one:** candidate selection can cut a sequence a
+> sample's own reads had earned, and the spec rules that such a sample is set aside before the
+> first pass and emitted as missing rather than given an invented genotype — but
+> `SampleGenotypeCall` was a genotype and a quality, with nowhere to put *no call*. It is now
+> an enum, so a missing genotype has no quality beside it either, and emission cannot conflate
+> *never scored* with *scored and came out weak*.
+> **The review was the expensive half and it earned its keep.** Four category agents in
+> isolated worktrees returned one Blocker and fourteen Majors on code whose tests were all
+> green: two cells of the path-agreement check that no fixture reached, where one surviving
+> mutation routes a repeat bundle to the SNP/indel read model; a scratch that was never sized
+> answering six of its eight accessors with an empty slice, so the cohort's expected copies
+> come back as a plausible `0.0`; and the first of the three caller bugs the spec names as
+> assertions — a genotype table that disagrees with the allele count — asserted nowhere,
+> because no function held both objects. **One measurement is worth keeping:** downgrading all
+> sixteen of the module's release-held checks to `debug_assert!` and running under `--release`
+> fails a test for fifteen of them, which says the property is real — and that CI, which runs
+> only in debug, verifies none of it. Library target 4,488 → 4,517 passing.
+> [What was built](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md),
+> [what the review found](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md),
+> [what was done about it](doc/devel/reports/reviews/fixes_applied_2026-08-25.md).
+> - **Previously (2026-08-24):** **the stutter model says *repeats*, because *frame*
 > meant something else here** (step E1 of
 > [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
 > `ng-calling-likelihoods`; the first step of the STR path, after **Checkpoint C/D** completed the
@@ -734,6 +759,20 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **No criterion bench covers `ng::calling::genotype_prior`**, so the one hot-path question the review raised — `lgamma(α_a + k_a)` recomputed per genotype where only `alleles × ploidy` distinct values exist — has no evidence either way. It saves nothing at diploid biallelic and reaches about 5× at tetraploid with four alleles.
   - **Two gates this plan added to its own step list, because the review showed the standard ones blind here.** `cargo clippy --lib --tests --all-features -- -D warnings` (plain `--lib` never type-checks a test module) and `cargo test --release --lib ng::calling::genotype_prior` (the only command that can fail on an assertion demoted from release to debug). The second is worth a CI step; CI runs one test command, in debug.
   - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
+
+#### The calling loop (step 9, arm A) — the shared per-locus types, the seam, and the three nested loops
+- **Status:** fixes-applied — **A1 done; Milestone A continues at A2.** Branch `ng-calling-loop`, worktree `../pop_var_caller-calling-loop`, from `main` at `bbcf2165`. Running beside `ng-calling-likelihoods` (which owns `src/ng/calling/likelihood/`) and `ng-candidate-alleles` (which owns `src/ng/calling/allele_candidates/`); this branch consumes both and edits neither.
+- **Plan:** [calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md) (A–F, 12 steps, 6 checkpoints); **Spec:** [calling_em_loop.md](doc/devel/ng/spec/calling_em_loop.md); **Arch:** [calling_em_loop.md](doc/devel/ng/arch/calling_em_loop.md) (§2 owns every type A1 builds).
+- **Code:** [src/ng/calling/mod.rs](src/ng/calling/mod.rs) — `LocusEvidence` + `GenericLocusSample`, `FrozenParameters`, `CallingScratch` + `UNWRITTEN_SCRATCH_VALUE`, and `SampleGenotypeCall` turned from a struct into an enum so a sample the allele cap ruled uncallable can be emitted as missing.
+- **Impl report:** [A1](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md).
+- **Latest review:** [A1](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md) — Request-changes, 1 Blocker / 14 Majors / 13 Minors, four category agents in isolated worktrees; **fixes applied:** [2026-08-25](doc/devel/reports/reviews/fixes_applied_2026-08-25.md).
+- **A1 done (the three shared types + the missing genotype's carrier):** the two arguments the calling seam takes and the buffers a worker reuses at every locus, plus the enum that lets a locus say a sample has no call rather than inventing one for it. Every per-sample list is one entry per **run** sample in the run's sample order — the merge's own list holds only the covering samples, and joining the two positionally is the failure `spec/calling_em_loop.md` §5.0 names. Library target 4,488 → **4,517** passing.
+- **Open:**
+  - **⚠ No CI gate holds this module's assertions to release, and its whole no-`Result` design rests on them** (`spec/calling_em_loop.md` §8). Measured during A1's review: downgrading all 16 of the module's release-held checks to `debug_assert!` and running under `--release` fails a test for 15 of them — but the only test command in `.github/workflows/ci.yml` is a debug run, where the two are indistinguishable. **The gate is blocked on another branch:** `cargo test --release --lib ng::calling` is `461 passed; 4 failed` at `5843f60a`, and all four failures are pre-existing `#[should_panic]` tests in `src/ng/calling/likelihood/`, which `ng-calling-likelihoods` owns. Raise there, then add the step.
+  - **⚑ `arch/read_likelihoods.md` §2.1 describes a field that does not exist.** It puts `genotype_must_be_missing` on `GenericSampleEvidence`; the shipped type carries `supported`, `unmatched_q_sum` and `partials` only. A1 carries the ruling on `LocusEvidence` instead, because `spec/calling_em_loop.md` §5.0 sets such a sample aside **before** the first pass, so the read likelihood never sees it. Whether the architecture is amended is the owner's call.
+  - **⚑ `arch/calling_em_loop.md` §2** still sketches `CallingScratch` with public fields and one `concentration: Vec<f64>`, and `SampleGenotypeCall` as a struct. The prior's real API needs three per-allele buffers at once and the missing genotype needs an enum; both divergences are recorded in A1's report §2.
+  - **The branch is one compiler pin behind `main`** — 1.97.1 against main's 1.98 (`54a0fd96`), which also made `cargo clippy --all-targets --all-features -- -D warnings` exit 0 (`f3c8c797`). Take the pin, then run the wider clippy scope this branch has been excluding.
+  - **Follow-up (later steps):** `StratumFits` wants a named empty constructor the way `ContaminationMixture::uncontaminated` has one, in `parameter_estimation/joint/`; the prune must return its remapping, since `LocusInference::new` can only catch an out-of-range allele id and not one that stays in range after a renumber; and E1 owns the covering-samples-to-run-order conversion that `spec/calling_em_loop.md` §5.0 names as the most dangerous join in the design.
 
 #### Candidate alleles (step 6) — narrowing the merge's table to what a locus is called over
 - **Status:** **Milestone A complete, at Checkpoint A** — A1 and A2 implemented, reviewed and fixes applied. Branch `ng-candidate-alleles`, worktree `../pop_var_caller-candidate-alleles`, from `main` at `3edab4cd`. Runs beside `ng-calling-loop` and `ng-calling-read-likelihoods`; conflict surface is one `pub mod` line in [src/ng/calling/mod.rs](src/ng/calling/mod.rs).
