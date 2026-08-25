@@ -35,14 +35,19 @@ together cannot say which of the two is wrong. What changes is Milestone E — a
 the generic path may now build its candidates by calling selection, and the end-to-end run on real
 data is no longer blocked for that path.
 
-**It is still blocked for repeat tracts, by two independent gaps.** The STR read-likelihood row
-does not exist — `censored_emission` is `unimplemented!()`
-([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1; the row is its H1 and H2) — and
-**that one blocks a tract genotype outright**, whatever candidates are supplied. Separately, the
-STR candidate path is unwritten: `allele_candidates/` holds `mod.rs` and `generic.rs` only, and
-[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's. The first must close
-before a tract can be called at all; the second only decides whether its candidates are chosen or
-handed in.
+**It is still blocked for repeat tracts, but by one gap rather than two — and this paragraph
+replaces the one that named two** (corrected 2026-08-25, during C3b's review, which re-derived the
+claim instead of re-reading it). The paragraph said the STR read-likelihood row did not exist
+because `censored_emission` was `unimplemented!()`. **The row exists**: it is
+[`likelihood/ssr.rs`](../../../../src/ng/calling/likelihood/ssr.rs)'s
+`genotype_log_likelihood_row` over the shipped `StutterSubstitutionEmission`, landed as
+[`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1 and H2 and merged; the one
+`unimplemented!()` left anywhere under `src/ng/calling/` belongs to a `#[cfg(test)]` oracle that
+scores complete observations only. **What remains is the STR candidate path**, which is unwritten:
+`allele_candidates/` holds `mod.rs` and `generic.rs` only, and
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's. So a tract's
+candidates are **fixture-supplied** rather than selected, and with them supplied a tract can now be
+scored end to end.
 
 ---
 
@@ -218,7 +223,7 @@ drops the divisor. **Own commit, do not bundle** — the ÷chromosomes is load-b
 cohort range and a criterion written on raw counts tightens silently with cohort size; the
 two-cohort-size test is the oracle. *Depends:* C1. *Source:* spec §6, §7; arch §4.
 
-**C3. The final pass.**  ☐
+**C3. The final pass.**  ✅
 Score every sample once more, take the highest-posterior genotype and its confidence, mint the
 owned `Genotype` from the winning `GenotypeIdx`, fill `LocusInference` — expected copies included,
 because recomputing them downstream from calls gives a different number.
@@ -330,14 +335,14 @@ has to get right are named in
 parallel to the merge's covering samples and not to the run's sample order; and
 `genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one.
 
-**The repeat-tract half of this step is blocked, and on the row rather than on the candidates.**
-Without the STR read-likelihood row there is no `Lg` for a tract genotype, so no supplied
-candidate set rescues it: `censored_emission` is `unimplemented!()`
-([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1) and the row itself is that
-plan's H1 and H2. When it lands, this step's tract candidates are still **fixture-supplied**,
-because the STR selection path is unwritten — a second and independent gap. Say both in the
-test's own doc comment, so a later reader does not read one as the other. *Depends:* D1, E1, E2,
-E2a; the STR half additionally on that plan's G1–H2. *Source:* spec §1, §9.
+**The repeat-tract half of this step is no longer blocked on the row — only on the candidates**
+*(corrected 2026-08-25; this paragraph used to say the row did not exist)*. The STR
+read-likelihood row landed with [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1
+and H2 and is merged, so a tract has an `Lg` to be genotyped from. **What is unwritten is the STR
+selection path**, so this step's tract candidates are **fixture-supplied** rather than chosen —
+which is a smaller claim than the old paragraph made, and the test's own doc comment must say
+which of the two it is, so that a later reader does not read a supplied candidate set as a
+selected one. *Depends:* D1, E1, E2, E2a. *Source:* spec §1, §9.
 
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
 > path, over supplied ones at a repeat tract. Pause for review.

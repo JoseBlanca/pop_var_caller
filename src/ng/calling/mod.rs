@@ -78,7 +78,7 @@ pub use likelihood::{
 };
 
 use crate::ng::calling::genotype_prior::SpectrumSeed;
-use crate::ng::calling::quality::SiteQualityBuffers;
+use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
@@ -837,6 +837,18 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// `samples × ploidy + 1`: the fold's result back in the log domain, then the
     /// unnormalised log-posterior over the cohort's allele count once the prior is applied.
     log_allele_count_distribution: Vec<f64>,
+    /// One entry per allele: how many reads that allele drew, pooled over the samples the
+    /// locus was called on — the walk the artifact summary picks its **primary
+    /// alternative** from (`doc/devel/ng/spec/calling_quality.md` §6.3).
+    ///
+    /// **The one buffer here with no [`UNWRITTEN_SCRATCH_VALUE`] sentinel**, and it is
+    /// counts rather than the sentinel's type that decide it: reads are whole, so this is a
+    /// `u64` and a `NaN` is not expressible in it. What replaces the sentinel is that the
+    /// only thing that reads this buffer is the same call that zeroes and fills it, in that
+    /// order, so a stale entry from the previous locus cannot be read. A zero here is a
+    /// real answer — an allele no read reached — which is why nothing downstream may treat
+    /// it as *unwritten*.
+    pooled_allele_reads: Vec<u64>,
     /// The SNP/indel row's own scratch.
     generic_row: GenericRowScratch,
     /// The repeat-tract row's own scratch, including the emission model's.
@@ -983,6 +995,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             largest_count + 1,
             UNWRITTEN_SCRATCH_VALUE,
         );
+
+        // The artifact summary's per-allele read totals. **Zero rather than a sentinel** —
+        // see the field's own comment: its only reader zeroes it in the same call.
+        resize_and_fill(&mut self.pooled_allele_reads, allele_count, 0);
 
         self.sample_count = sample_count;
         self.genotype_count = genotype_count;
@@ -1348,6 +1364,25 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         }
     }
 
+    /// The artifact summary's per-allele read totals, to zero and refill.
+    ///
+    /// **Handed out mutably and never read back through a shared accessor**, because the
+    /// one caller that fills it is the one caller that reads it, in the same call: the
+    /// final pass pools every called sample's reads onto the alleles, picks the primary
+    /// alternative from the totals, and is done with them
+    /// (`doc/devel/ng/spec/calling_quality.md` §6.3). There is nothing for a later stage to
+    /// come back for.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    pub(crate) fn pooled_allele_reads_mut(&mut self) -> &mut [u64] {
+        self.assert_prepared();
+        &mut self.pooled_allele_reads
+    }
+
     /// The five buffers the **site quality** reads and writes: the likelihood table the loop
     /// built, and the four the fold needs.
     ///
@@ -1620,12 +1655,17 @@ impl SampleGenotypeCall {
 /// the time the record is written (`doc/devel/ng/spec/calling_em_loop.md` §6,
 /// `doc/devel/ng/arch/calling_priors.md` §5).
 ///
-/// Plain data, and six of its eight fields are public because every consumer reads
-/// them. The two that are not are [`Self::alleles`] and [`Self::cohort_expected_copies`]:
-/// they are one entry per allele of each other, and a public allele table would let a
-/// consumer widen it with [`CandidateAlleles::admit`] against unchanged copies — breaking,
-/// after construction, the pairing [`Self::new`] checks at it. They are read through
-/// accessors instead.
+/// Plain data, and six of its ten fields are public because every consumer reads
+/// them. **The four that are not are private for two different reasons.**
+/// [`Self::alleles`], [`Self::cohort_expected_copies`] and
+/// [`Self::artifact_test_counts`] are all indexed by, or parallel to, the allele table: a
+/// public allele table would let a consumer widen it with [`CandidateAlleles::admit`]
+/// against unchanged copies, or leave an artifact summary naming an allele the locus no
+/// longer holds — breaking, after construction, the pairings [`Self::new`] checks at it.
+/// [`Self::site_quality`] is private for a different rule, which its own comment gives:
+/// **there is one quality field, and nothing may read it between the worker that writes
+/// the baseline and the stage that overwrites it with the corrected value**
+/// (`doc/devel/ng/spec/calling_quality.md` §3.5).
 #[derive(Clone, PartialEq, Debug)]
 pub struct LocusInference {
     /// Where on the reference this locus is.
@@ -1697,6 +1737,47 @@ pub struct LocusInference {
     /// Never set on the SNP/indel path, which seeds from a different quantity — and
     /// [`Self::new`] refuses a locus that sets it there.
     pub seed_diversity_unreachable: bool,
+    /// **How unlikely it is that no sample here carries a copy of any non-reference
+    /// allele** — the site quality, on the Phred scale, as the worker computed it and
+    /// *before* the artifact correction that the first output stage applies
+    /// (`doc/devel/ng/spec/calling_quality.md` §5).
+    ///
+    /// **One quality field, written twice, and that is a rule with a shipped defect behind
+    /// it.** Production keeps its corrected value nowhere and recomputes it at VCF-encode
+    /// time; for sixteen days its `--min-qual` gate compared the engine's baseline while
+    /// the *corrected* number went into the `QUAL` column, so sites were emitted `PASS`
+    /// carrying a written quality of zero — 40 false positives at 30× on GIAB HG002 and 64
+    /// at 50×, against 14 and 14 once both read one function (§3.5). ng carries one field:
+    /// the worker writes the baseline here, the correction stage overwrites it in place,
+    /// and there is never a second quality for anything to read by mistake.
+    ///
+    /// **Which is why this field is private and has no public reader.** §3.5's other half
+    /// is that nothing between the worker and that stage may read it, and visibility is
+    /// what enforces it: [`Self::uncorrected_site_quality`] is `pub(crate)`, so no consumer
+    /// outside this crate can see the uncorrected number at all. The public accessor
+    /// arrives with the stage that makes the value public-worthy. The check that the value
+    /// came from the function that owns the ceiling is [`Self::new`]'s.
+    site_quality: Phred,
+    /// The nine pooled read counts the artifact correction consumes — or `None` at a locus
+    /// that gives the two tests nothing to test.
+    ///
+    /// **Built here rather than downstream because one of the nine needs the calls**: how
+    /// many alternative-allele reads the called genotypes lead you to expect. The other
+    /// eight are the evidence's, and the evidence is released with the locus
+    /// (`doc/devel/ng/spec/calling_quality.md` §3.3).
+    ///
+    /// **`None` is the ordinary outcome at more than one built locus in four**, not an
+    /// error: the merge builds a locus when some sample's non-reference reads *pooled*
+    /// reach its rule, so a locus whose candidate table came back as the reference alone is
+    /// a first-class result — measured at 27.4% of built loci on the 63-accession tomato
+    /// panel and 27.3% on HG002 at 30×
+    /// ([`allele_candidates::SelectionVerdict::Selected`]). Both tests compare an
+    /// alternative allele against the reference, so a locus with no alternative, or one
+    /// whose alternatives drew no read at all, has nothing for them to weigh; production
+    /// hands back its baseline unchanged in exactly those two cases
+    /// ([`qual_refine.rs:79`](../../../src/vcf/qual_refine.rs)), and `None` is that same
+    /// answer as a type rather than as an early return.
+    artifact_test_counts: Option<ArtifactTestCounts>,
 }
 
 impl LocusInference {
@@ -1751,6 +1832,19 @@ impl LocusInference {
     /// itself; a called locus is such a caller, since the region reaches the `POS` column
     /// and the writer's span arithmetic.
     ///
+    /// If `site_quality` is above [`quality::MAX_SITE_QUALITY`]. That ceiling belongs to
+    /// [`quality::score_uncorrected_site_quality`], which is the only thing that may fill
+    /// this field, so a value above it did not come from there — and the field is the one
+    /// the correction stage later overwrites in place
+    /// (`doc/devel/ng/spec/calling_quality.md` §3.5, §5.3). The lower end needs no check:
+    /// [`Phred`] is finite and non-negative by construction.
+    ///
+    /// If an artifact summary names the reference as its primary alternative, or names an
+    /// allele this locus was not called over. Both tests weigh one alternative against the
+    /// reference, so a locus with nothing to weigh carries **no summary at all** rather
+    /// than one pointing at allele 0; and an id past the table is the same stale-after-a-
+    /// renumber failure the genotype check above catches, arriving by the other door.
+    ///
     /// **What is deliberately *not* checked: `converged` against `passes`.** A locus that
     /// hit the cap should report the cap, but the cap is run configuration this type does
     /// not see. Nor is `converged` required to imply more than one pass: the loop's first
@@ -1759,9 +1853,10 @@ impl LocusInference {
     /// real outcome and not a comparison against nothing.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the architecture fixes this type's eight fields as a flat list \
-                  (arch/calling_em_loop.md §2); grouping them here to satisfy the lint \
-                  would be a design change, not a refactor"
+        reason = "the architecture fixes this type's fields as a flat list \
+                  (arch/calling_em_loop.md §2, and calling_quality.md §10's two additions); \
+                  grouping them here to satisfy the lint would be a design change, not a \
+                  refactor"
     )]
     pub fn new(
         region: GenomeRegion,
@@ -1772,6 +1867,8 @@ impl LocusInference {
         passes: u32,
         weakest_provenance: Provenance,
         seed_diversity_unreachable: bool,
+        site_quality: Phred,
+        artifact_test_counts: Option<ArtifactTestCounts>,
     ) -> Self {
         assert_eq!(
             cohort_expected_copies.len(),
@@ -1818,6 +1915,32 @@ impl LocusInference {
             "a called locus covers a stretch of reference, so its region cannot run \
              backwards: {region}"
         );
+        assert!(
+            site_quality.get() <= quality::MAX_SITE_QUALITY,
+            "a site quality of {} is above the ceiling {} that \
+             quality::score_uncorrected_site_quality caps at, so this number did not come \
+             from it — and the field it is going into is the one the correction stage \
+             overwrites in place",
+            site_quality.get(),
+            quality::MAX_SITE_QUALITY
+        );
+        if let Some(counts) = artifact_test_counts {
+            assert!(
+                !counts.primary_alternative.is_reference(),
+                "the artifact tests compare an alternative allele against the reference, so \
+                 a summary whose primary alternative *is* the reference has no comparison to \
+                 make — a locus with nothing to test carries no summary at all rather than \
+                 one naming allele 0"
+            );
+            assert!(
+                alleles.bases_of(counts.primary_alternative).is_some(),
+                "the artifact summary's primary alternative is allele {} and this locus \
+                 holds {} alleles: the summary was pooled against a different allele table, \
+                 or the final prune renumbered the table without re-cutting it",
+                counts.primary_alternative.get(),
+                alleles.len()
+            );
+        }
         Self {
             region,
             alleles,
@@ -1827,6 +1950,8 @@ impl LocusInference {
             passes,
             weakest_provenance,
             seed_diversity_unreachable,
+            site_quality,
+            artifact_test_counts,
         }
     }
 
@@ -1840,6 +1965,38 @@ impl LocusInference {
     #[inline]
     pub fn cohort_expected_copies(&self) -> &ExpectedAlleleCopies {
         &self.cohort_expected_copies
+    }
+
+    /// The site quality **as the worker wrote it**, before the artifact correction.
+    ///
+    /// **`pub(crate)`, and that is the enforcement of
+    /// `doc/devel/ng/spec/calling_quality.md` §3.5 rather than a default choice of
+    /// visibility**: the rule is that nothing between the worker and the correction stage
+    /// may read this number, and the two that legitimately do — that stage, and this
+    /// crate's tests — are both inside the crate. When the stage lands it overwrites the
+    /// field in place and publishes a reader for the corrected value; there is no moment at
+    /// which two qualities exist.
+    #[inline]
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its caller is the ordered output stage that applies the artifact \
+                      correction (spec/calling_quality.md §3.4), which is step 11's plan \
+                      and not this one's"
+        )
+    )]
+    pub(crate) fn uncorrected_site_quality(&self) -> Phred {
+        self.site_quality
+    }
+
+    /// The nine pooled counts the artifact correction reads, or `None` where this locus
+    /// gave its two tests nothing to weigh — see [`Self::artifact_test_counts`].
+    #[inline]
+    #[must_use]
+    pub fn artifact_test_counts(&self) -> Option<ArtifactTestCounts> {
+        self.artifact_test_counts
     }
 }
 
@@ -2110,6 +2267,16 @@ mod tests {
             proptest::prop_assert_eq!(candidates.bases_of(past_the_end), None);
         }
     }
+    /// A site quality standing in for one the worker computed, where what the test is
+    /// about is something else.
+    ///
+    /// **Deliberately not zero.** Zero is a real answer — a locus at which nobody carries
+    /// anything — so a test whose fixture wrote zero would pass against an
+    /// implementation that lost the value on the way in.
+    fn a_worker_written_site_quality() -> Phred {
+        Phred::try_new(37.0).expect("a legal quality, and below the site-quality ceiling")
+    }
+
     fn diploid_call(first: u16, second: u16, quality: f32) -> SampleGenotypeCall {
         SampleGenotypeCall::Called {
             genotype: Genotype::new(vec![AlleleId(first), AlleleId(second)]),
@@ -2163,6 +2330,8 @@ mod tests {
             4,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
 
         assert_eq!(inference.region, region());
@@ -2219,6 +2388,8 @@ mod tests {
             50,
             Provenance::Defaulted,
             true,
+            a_worker_written_site_quality(),
+            None,
         );
 
         assert!(!capped.converged, "the loop hit its cap");
@@ -2254,6 +2425,8 @@ mod tests {
             1,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
         assert_eq!(quick.passes, 1);
         assert!(quick.converged);
@@ -2287,6 +2460,8 @@ mod tests {
                 2,
                 Provenance::FittedHere,
                 false,
+                a_worker_written_site_quality(),
+                None,
             )
         };
 
@@ -2316,6 +2491,8 @@ mod tests {
             0,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 
@@ -2335,6 +2512,8 @@ mod tests {
             2,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 
@@ -2355,6 +2534,8 @@ mod tests {
             2,
             Provenance::FittedHere,
             true,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 
@@ -2378,6 +2559,8 @@ mod tests {
             2,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 
@@ -2396,9 +2579,171 @@ mod tests {
             2,
             Provenance::Borrowed,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
         assert_eq!(single.per_sample.len(), 1);
         assert_eq!(single.cohort_expected_copies().copies(), [2.6, 1.4]);
+    }
+
+    /// The nine pooled counts as the final pass builds them at a biallelic locus whose
+    /// alternative drew 6 of the 8 reads — a summary of the right shape, for the two checks
+    /// this type makes on it.
+    fn artifact_counts_naming(primary_alternative: AlleleId) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative,
+            reference_reads: 2.0,
+            reference_forward_reads: 1.0,
+            reference_placed_left_reads: 1.0,
+            alternative_reads: 6.0,
+            alternative_forward_reads: 5.0,
+            alternative_placed_left_reads: 2.0,
+            total_reads: 8.0,
+            genotype_expected_alternative_reads: 4.0,
+        }
+    }
+
+    /// **Both of the quality plan's fields travel onto the record**, and the site quality is
+    /// read back through the one accessor there is.
+    ///
+    /// `doc/devel/ng/spec/calling_quality.md` §3.5 makes that single accessor the design: the
+    /// worker writes the baseline, the artifact-correction stage overwrites the same field
+    /// with the corrected value, and **there is never a second quality field** for a gate and
+    /// a column to disagree about. Production shipped the other shape for sixteen days and
+    /// emitted 40 false positives at 30× on GIAB HG002 carrying a written `QUAL` of 0.
+    #[test]
+    fn the_site_quality_and_the_artifact_summary_travel_onto_the_record() {
+        let (alleles, copies) = two_allele_locus();
+        let inference = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(0, 1, 25.0)],
+            copies,
+            true,
+            3,
+            Provenance::FittedHere,
+            false,
+            Phred::try_new(431.5).expect("a legal quality"),
+            Some(artifact_counts_naming(AlleleId(1))),
+        );
+
+        assert_eq!(inference.uncorrected_site_quality().get(), 431.5);
+        let counts = inference
+            .artifact_test_counts()
+            .expect("this locus carries a summary");
+        assert_eq!(counts.primary_alternative, AlleleId(1));
+        assert_eq!(counts.total_reads, 8.0);
+    }
+
+    /// A locus with no summary carries `None` rather than a summary of zeroes — the two are
+    /// different claims, and only one of them can be told from *the tests found no bias*.
+    #[test]
+    fn a_locus_with_nothing_for_the_artifact_tests_to_weigh_carries_no_summary() {
+        let (alleles, copies) = two_allele_locus();
+        let inference = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(0, 0, 25.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+            a_worker_written_site_quality(),
+            None,
+        );
+        assert!(inference.artifact_test_counts().is_none());
+    }
+
+    /// A site quality above the ceiling did not come from the function that owns the ceiling.
+    ///
+    /// `quality::score_uncorrected_site_quality` caps at `MAX_SITE_QUALITY`, which is also
+    /// its answer to a probability of exactly zero, so nothing it returns can be above it.
+    /// The field this is going into is the one the correction stage overwrites in place, and
+    /// a number from somewhere else in it is the shape §3.5 exists to prevent.
+    #[test]
+    #[should_panic(expected = "above the ceiling")]
+    fn a_site_quality_above_the_ceiling_is_refused() {
+        let (alleles, copies) = two_allele_locus();
+        let _ = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(0, 0, 25.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+            Phred::try_new(quality::MAX_SITE_QUALITY + 1.0).expect("a legal Phred"),
+            None,
+        );
+    }
+
+    /// **The ceiling itself is accepted**, and the boundary is not academic: it is exactly
+    /// what `quality::score_uncorrected_site_quality` returns for a probability of no variant
+    /// of zero — a locus whose reads exclude the reference outright. A `<`/`<=` slip in the
+    /// check above would panic the worker on the loci the caller is most confident about.
+    #[test]
+    fn a_site_quality_at_the_ceiling_is_accepted() {
+        let (alleles, copies) = two_allele_locus();
+        let inference = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(1, 1, 25.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+            Phred::try_new(quality::MAX_SITE_QUALITY).expect("a legal Phred"),
+            None,
+        );
+        assert_eq!(
+            inference.uncorrected_site_quality().get(),
+            quality::MAX_SITE_QUALITY
+        );
+    }
+
+    /// An artifact summary that names the **reference** as its primary alternative is
+    /// refused: both tests weigh one alternative against the reference, so a locus with
+    /// nothing to weigh carries no summary at all rather than one pointing at allele 0.
+    #[test]
+    #[should_panic(expected = "has no comparison to make")]
+    fn an_artifact_summary_naming_the_reference_as_its_alternative_is_refused() {
+        let (alleles, copies) = two_allele_locus();
+        let _ = LocusInference::new(
+            region(),
+            alleles,
+            vec![diploid_call(0, 1, 25.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+            a_worker_written_site_quality(),
+            Some(artifact_counts_naming(AlleleId::REFERENCE)),
+        );
+    }
+
+    /// An artifact summary naming an allele this locus was not called over is refused, for
+    /// the reason a stale genotype is: the final prune renumbers every id above the one it
+    /// drops, so a summary not re-cut alongside the table points somewhere else.
+    #[test]
+    #[should_panic(expected = "pooled against a different allele table")]
+    fn an_artifact_summary_naming_an_allele_the_locus_lacks_is_refused() {
+        let (alleles, copies) = two_allele_locus();
+        let _ = LocusInference::new(
+            region(),
+            alleles, // two alleles: ids 0 and 1
+            vec![diploid_call(0, 1, 25.0)],
+            copies,
+            true,
+            2,
+            Provenance::FittedHere,
+            false,
+            a_worker_written_site_quality(),
+            Some(artifact_counts_naming(AlleleId(4))),
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -2921,6 +3266,8 @@ mod tests {
             3,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
 
         assert!(!inference.per_sample[0].is_missing());
@@ -3166,6 +3513,8 @@ mod tests {
             2,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 
@@ -3188,6 +3537,8 @@ mod tests {
             2,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
     }
 

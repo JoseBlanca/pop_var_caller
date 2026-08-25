@@ -29,8 +29,17 @@ use crate::ng::calling::genotype_prior::{
     CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
     fill_sample_concentration,
 };
-use crate::ng::calling::{CallingScratch, CohortSummingBuffers, SampleScoringBuffers};
-use crate::ng::types::{InbreedingF, LogProb, Ploidy};
+use crate::ng::calling::quality::{
+    ArtifactTestCounts, score_best_genotype, score_uncorrected_site_quality,
+};
+use crate::ng::calling::{
+    CallingScratch, CandidateAlleles, CohortSummingBuffers, ExpectedAlleleCopies, FrozenParameters,
+    GenericLocusSample, GenericSampleEvidence, LocusEvidence, LocusInference, SampleGenotypeCall,
+    SampleScoringBuffers,
+};
+use crate::ng::parameter_estimation::Provenance;
+use crate::ng::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
+use std::iter::repeat_n;
 
 use super::RunnableCallingLoopConfig;
 
@@ -874,19 +883,447 @@ pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
     }
 }
 
+/// **Eight of the artifact summary's nine numbers while they are still being pooled** — the
+/// ninth is the allele the other eight are pooled *for*, which is chosen before any of this
+/// and is never summed.
+///
+/// **Seven of the eight are counts and are summed as integers**, which is not a
+/// micro-optimisation but the removal of a question: `f64` addition is not associative, so a
+/// cohort's read totals summed in another order could differ in the last bits and the two
+/// binomial tests downstream would see different inputs at a different worker count. Whole
+/// reads summed as `u64` cannot. The eighth is fractional by construction — a genotype
+/// carrying one copy of two expects half a sample's reads — so it is an `f64` summed in the
+/// run's fixed sample order, the same order and the same reason as the M-step's
+/// (`doc/devel/ng/spec/calling_quality.md` §9).
+#[derive(Default)]
+struct PooledArtifactCounts {
+    reference_reads: u64,
+    reference_forward_reads: u64,
+    reference_placed_left_reads: u64,
+    alternative_reads: u64,
+    alternative_forward_reads: u64,
+    alternative_placed_left_reads: u64,
+    total_reads: u64,
+    genotype_expected_alternative_reads: f64,
+}
+
+impl PooledArtifactCounts {
+    /// Add one **called** sample's reads to the pool, and its call's share of the expected
+    /// alternative reads.
+    ///
+    /// **A sample the candidate step set aside never reaches here**, and the exclusion is
+    /// one decision rather than two: it has no called genotype to derive an expectation
+    /// from, so counting its reads in the observed total while it contributes nothing to
+    /// the expectation would manufacture an apparent *excess* — and since only a deficit is
+    /// penalised, that would quietly weaken the test rather than break it loudly
+    /// (`doc/devel/ng/spec/calling_quality.md` §6.3).
+    ///
+    /// **The sample's depth is its reads on the locus's alleles, and nothing else.** Two
+    /// kinds of read are outside it, both deliberately: a *partial* read showed no allele —
+    /// it says the sample carries *at least* this, not what it carries — and a read whose
+    /// allele candidate selection dropped reaches the view as pooled error mass with no
+    /// count beside it (`GenericSampleEvidence::unmatched_q_sum`). Production's depth is the
+    /// same quantity, a sum over the alleles its record carries
+    /// ([`qual_refine.rs:92`](../../../../src/vcf/qual_refine.rs)).
+    fn add_called_sample(
+        &mut self,
+        evidence: &GenericSampleEvidence<'_>,
+        primary_alternative: AlleleId,
+        primary_alternative_copies: u32,
+        ploidy: Ploidy,
+    ) {
+        let mut depth = 0_u64;
+        for observation in evidence.supported {
+            let reads = u64::from(observation.num_reads);
+            depth += reads;
+            // **Two `if`s over one allele, and the reference arm cannot be the primary
+            // alternative's**, because `LocusInference::new` refuses a summary that names
+            // the reference as its alternative.
+            if observation.allele.is_reference() {
+                self.reference_reads += reads;
+                self.reference_forward_reads += u64::from(observation.forward_reads);
+                self.reference_placed_left_reads += u64::from(observation.placed_left_reads);
+            } else if observation.allele == primary_alternative {
+                self.alternative_reads += reads;
+                self.alternative_forward_reads += u64::from(observation.forward_reads);
+                self.alternative_placed_left_reads += u64::from(observation.placed_left_reads);
+            }
+        }
+        self.total_reads += depth;
+        // How many of this sample's reads the *call* expects to carry the alternative: a
+        // heterozygote expects half its depth, a homozygote all of it, a homozygous
+        // reference none. The expectation is read from the genotypes and never from the
+        // fitted frequency, which adapts to an artifact and would excuse it (§6.2).
+        self.genotype_expected_alternative_reads +=
+            (f64::from(primary_alternative_copies) / f64::from(ploidy.get())) * depth as f64;
+    }
+
+    /// The pool as the two artifact tests read it.
+    fn into_summary(self, primary_alternative: AlleleId) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative,
+            reference_reads: self.reference_reads as f64,
+            reference_forward_reads: self.reference_forward_reads as f64,
+            reference_placed_left_reads: self.reference_placed_left_reads as f64,
+            alternative_reads: self.alternative_reads as f64,
+            alternative_forward_reads: self.alternative_forward_reads as f64,
+            alternative_placed_left_reads: self.alternative_placed_left_reads as f64,
+            total_reads: self.total_reads as f64,
+            genotype_expected_alternative_reads: self.genotype_expected_alternative_reads,
+        }
+    }
+}
+
+/// **Which allele the artifact tests treat as *the* alternative**: the non-reference allele
+/// the most reads reached, pooled over the samples the locus is called on — or `None` where
+/// there is no such allele to name.
+///
+/// `pooled_reads` is the scratch buffer this fills and reads, one entry per allele of the
+/// locus; it arrives holding the previous locus's totals and is zeroed here.
+///
+/// **`None` is two different situations and the caller need not tell them apart**: a locus
+/// whose candidate table is the reference alone — 27.4% of built loci on the 63-accession
+/// tomato panel and 27.3% on HG002 at 30×
+/// ([`SelectionVerdict::Selected`](crate::ng::calling::allele_candidates::SelectionVerdict))
+/// — and a locus with alternatives that no read reached. Both leave the two tests with
+/// nothing to weigh, and production returns its baseline unchanged in exactly these two
+/// cases ([`qual_refine.rs:79`](../../../../src/vcf/qual_refine.rs)).
+///
+/// **Ties go to the lowest allele id**, because the fold keeps the first *strict* maximum —
+/// the same rule and the same reason as the genotype quality's argmax
+/// ([`score_best_genotype`]): the allele table's order is fixed, so a run must not depend on
+/// which of two equally supported alternatives a comparison happened to keep.
+///
+/// # Panics
+///
+/// **Held in release**, and both are about an observation rather than a buffer:
+///
+/// - **every observation must name an allele this locus holds.** The candidate id is
+///   selection's mapping of the merge's own allele index, and a mapping applied against the
+///   wrong table produces ids past the end. Without this the buffer index panics with a
+///   message naming a slice, which sends the reader to the scratch rather than to the join.
+/// - **an observation's forward-strand and placed-left counts cannot exceed its read
+///   count.** They are shares of the same reads, and both artifact tests read them as
+///   fractions: a fraction above one reaches the binomial tail as a probability above one
+///   and comes back as a penalty rather than as a failure.
+fn pool_reads_and_pick_primary_alternative(
+    per_sample: &[GenericLocusSample<'_>],
+    pooled_reads: &mut [u64],
+) -> Option<AlleleId> {
+    pooled_reads.fill(0);
+    for (sample, locus_sample) in per_sample.iter().enumerate() {
+        if locus_sample.genotype_must_be_missing {
+            continue;
+        }
+        for observation in locus_sample.evidence.supported {
+            let allele = usize::from(observation.allele.get());
+            assert!(
+                allele < pooled_reads.len(),
+                "sample {sample}'s reads name allele {allele} and this locus is called over \
+                 {} alleles, so the observation was mapped against a different allele table",
+                pooled_reads.len()
+            );
+            assert!(
+                observation.forward_reads <= observation.num_reads
+                    && observation.placed_left_reads <= observation.num_reads,
+                "sample {sample}'s {} reads of allele {allele} carry {} on the forward \
+                 strand and {} placed left: both are shares of those same reads, and the \
+                 artifact tests read them as fractions",
+                observation.num_reads,
+                observation.forward_reads,
+                observation.placed_left_reads
+            );
+            pooled_reads[allele] += u64::from(observation.num_reads);
+        }
+    }
+    // The first strict maximum over the alternatives, so ties go to the lowest id; allele 0
+    // is the reference and is never a candidate for it.
+    //
+    // PANIC-FREE: `best_allele` indexes `pooled_reads`, whose length is the genotype table's
+    // `allele_count`, and `GenotypeTable::build` refuses an `allele_count` above
+    // `MAX_ALLELE_COUNT` — so the index is at most 65,535 and always fits a `u16`.
+    let (best_allele, best_reads) = pooled_reads.iter().enumerate().skip(1).fold(
+        (0_usize, 0_u64),
+        |(best_allele, best_reads), (allele, &reads)| {
+            if reads > best_reads {
+                (allele, reads)
+            } else {
+                (best_allele, best_reads)
+            }
+        },
+    );
+    (best_reads > 0).then(|| AlleleId(u16::try_from(best_allele).expect("an allele id fits a u16")))
+}
+
+/// **Score every sample once more, take its best genotype, and mint what leaves the locus** —
+/// the final pass (`doc/devel/ng/spec/calling_em_loop.md` §2's `finally`).
+///
+/// It runs after the frequency loop has stopped, against the frequencies it settled on, and
+/// it is **a pass rather than a read-back** for one reason: `CallingScratch`'s posterior row
+/// is a single genotype-length buffer that every sample in turn is scored into, so by the
+/// time the loop returns only the last sample's posterior still exists
+/// (`doc/devel/ng/spec/calling_quality.md` §3.1).
+///
+/// # Three things are computed here because here is the last moment they can be
+///
+/// - **each sample's genotype quality**, taken by [`score_best_genotype`] from the posterior
+///   row *as that sample is scored*, in the same walk that picks its winner. Computing it
+///   after the pass would need a `samples × genotypes` posterior table kept for the whole
+///   locus — a second buffer the size of the largest one already allocated, to produce one
+///   number per sample (§3.1).
+/// - **the site quality before its artifact correction**, from the genotype likelihood table
+///   the loop built and never rebuilt. That table is per-worker scratch overwritten at the
+///   next locus, and the fold over it is quadratic in cohort size, so computing it
+///   downstream would both carry about half a megabyte per locus in flight at 3,000 samples
+///   and put a quadratic computation on the run's one serial thread (§3.2).
+/// - **the nine pooled counts the artifact correction consumes.** Eight are the evidence's,
+///   which is released with the locus; the ninth needs the calls, which is why the whole
+///   summary is built in this pass rather than at the input edge (§3.3).
+///
+/// **The correction itself is not here** — it is a few dozen operations on those nine
+/// numbers plus the baseline, and it belongs to the first ordered output stage, where it can
+/// be re-run at two settings over the same called stream without re-running the loop (§3.4).
+///
+/// # What the pass does not recompute
+///
+/// **The cohort's expected allele copies are the loop's, carried out unchanged.** Deriving
+/// them downstream from the called genotypes gives a different number, because a call has
+/// already thrown away the uncertainty these counts still carry, and site filtering and
+/// emission both read them (`doc/devel/ng/spec/calling_em_loop.md` §9). This pass overwrites
+/// each *sample's* own copies as it scores it — that is the E-step's fourth step — and never
+/// re-sums the cohort's.
+///
+/// **So the genotypes are one E-step further on than the frequencies they are reported
+/// beside**, which is exactly what production's own final pass does. At convergence the two
+/// differ by less than the threshold that stopped the loop, by definition of having stopped.
+///
+/// # A sample the candidate step set aside
+///
+/// It is emitted as [`SampleGenotypeCall::Missing`], **scored against nothing and with no
+/// quality beside it** — the enum is what makes that expressible, since a missing call and a
+/// low-confidence one are different claims and emission must not conflate them
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5.0). Such a sample is in neither the artifact
+/// counts nor the expectation they are compared against (§6.3).
+///
+/// **It is not yet out of the site quality, and that is D1's to finish.** The site quality's
+/// fold runs over the scratch's whole likelihood table, so its cohort is whichever samples
+/// the scratch was prepared for — and this branch has not yet decided whether a set-aside
+/// sample gets a row there or is left out of the scratch entirely
+/// ([`sum_cohort_expected_copies`]'s own note owns the same choice). **Nothing wrong reaches
+/// a run today**: such a sample's likelihood row is never written, so the **loop's prior-free
+/// first pass** refuses the locus loudly on the scratch's `NaN` sentinel — the E-step finds no
+/// usable score in a row of `NaN`s ([`score_one_sample`]'s own check), before any M-step has
+/// run — and the only way to reach the mismatch is a test that fills the row by hand.
+///
+/// # One sample, and a thousand
+///
+/// **No line branches on cohort size.** At one sample the loop has already reached its fixed
+/// point, so this pass reproduces its last E-step; at a thousand the same walk runs a
+/// thousand times. What does grow is the site quality's fold, quadratically
+/// (`doc/devel/ng/spec/calling_quality.md` §9).
+///
+/// # What it allocates, which is not nothing
+///
+/// **One `Vec` of calls, one owned `Genotype` per called sample, and one copy of the cohort's
+/// expected copies** — the locus's *output*, which is owned by the caller and outlives the
+/// scratch. The arithmetic itself allocates nothing: every buffer it reads and writes is the
+/// worker's (`doc/devel/ng/spec/calling_em_loop.md` §8).
+///
+/// # Panics
+///
+/// Every check is **held in release** (`doc/devel/ng/spec/calling_em_loop.md` §8). This
+/// function adds two, and both are the same class as the one
+/// [`run_frequency_loop`] carries — a positional join between two per-sample lists:
+///
+/// - **the evidence must cover the samples the scratch was prepared for.** This pass pairs
+///   evidence row *i* with scratch row *i*, so two lists of different lengths are two
+///   different sample orders and every pairing past the first difference is a sample's reads
+///   read against another sample's likelihoods.
+/// - **the inbreeding coefficients must be one per sample**, in both directions, for the
+///   reason [`run_frequency_loop`] gives: the walk is over the coefficients, so a short
+///   slice would call some samples and silently leave the rest without a call at all.
+///
+/// The rest belong to the four functions this drives: [`score_one_sample`],
+/// [`score_best_genotype`], [`score_uncorrected_site_quality`] and
+/// [`LocusInference::new`], which is where the two new fields are checked against the allele
+/// table.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the seam this feeds (LocusGenotyper::call_locus) already takes four of these — \
+              the evidence, the parameters, the candidates and the scratch — and the five \
+              that remain are the prior model, the loop's outcome and the two warrants a \
+              locus carries, all of which D1 has in hand when it calls this; a bundle \
+              invented to satisfy the lint would be a type nothing else names"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "its caller is step D1 of the calling-loop plan, which assembles the \
+                  likelihood table and the two outer rounds around the loop and this pass"
+    )
+)]
+pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+    scratch: &mut CallingScratch<SsrEmissionScratch>,
+    genotypes: &GenotypeTableView<'_>,
+    evidence: &LocusEvidence<'_>,
+    parameters: &FrozenParameters<'_>,
+    model: &dyn GenotypePriorModel,
+    candidates: CandidateAlleles,
+    outcome: FrequencyLoopOutcome,
+    weakest_provenance: Provenance,
+    seed_diversity_unreachable: bool,
+) -> LocusInference {
+    let sample_count = scratch.sample_count();
+    assert_eq!(
+        evidence.sample_count(),
+        sample_count,
+        "the evidence at {} covers {} samples and the scratch was prepared for {}, so one \
+         of them is indexed by a different sample order",
+        evidence.region(),
+        evidence.sample_count(),
+        sample_count
+    );
+    let inbreeding_by_sample = parameters.inbreeding_coefficient_by_sample();
+    assert_eq!(
+        inbreeding_by_sample.len(),
+        sample_count,
+        "the inbreeding coefficients are one per sample in the run's sample order: this \
+         locus is prepared for {sample_count} samples and {} coefficients arrived",
+        inbreeding_by_sample.len()
+    );
+
+    // The SNP/indel per-sample rows, where there are any. They carry two things this pass
+    // needs and the repeat-tract path has neither: which samples the candidate step set
+    // aside, and the per-allele read counts the artifact summary pools. At a tract what goes
+    // wrong is slippage rather than strand or read position, and that is already inside the
+    // read likelihood — `doc/devel/ng/spec/calling_quality.md` §8 leaves a tract's quality to
+    // a sibling document that is not written.
+    let generic_samples = match evidence {
+        LocusEvidence::Generic {
+            region: _,
+            per_sample,
+        } => Some(*per_sample),
+        LocusEvidence::Ssr { .. } => None,
+    };
+    // **The rows the artifact summary pools from, and the allele it weighs against the
+    // reference — one value, because the second cannot exist without the first.** Held as
+    // two `Option`s and re-paired at the use site, the combination that cannot arise —
+    // an alternative allele with no rows behind it — would pool nothing and say nothing,
+    // which is the silent-wrong-answer shape rather than the loud one.
+    let artifact_pool = generic_samples.and_then(|per_sample| {
+        pool_reads_and_pick_primary_alternative(per_sample, scratch.pooled_allele_reads_mut())
+            .map(|primary_alternative| (per_sample, primary_alternative))
+    });
+
+    // **The genotype table's ploidy, and there is no second source of it.** The table was
+    // built for a `(ploidy, allele count)` shape and every genotype's copies come out of it;
+    // taking `FrozenParameters`' would add a number nothing compares (C2's ruling). It stays
+    // a `Ploidy` all the way to the division it is the divisor of, so that no arithmetic
+    // below can be handed a zero.
+    let ploidy = genotypes.ploidy();
+    let mut pooled = PooledArtifactCounts::default();
+    let mut per_sample = Vec::with_capacity(sample_count);
+
+    // Walking the coefficients rather than the sample indices is what makes the run's sample
+    // order the only order this pass can be in — the same walk, for the same reason, as the
+    // loop's own.
+    for (sample, &inbreeding) in inbreeding_by_sample.iter().enumerate() {
+        if generic_samples.is_some_and(|per_sample| per_sample[sample].genotype_must_be_missing) {
+            per_sample.push(SampleGenotypeCall::Missing);
+            continue;
+        }
+        score_one_sample(
+            scratch.sample_scoring_buffers_mut(sample),
+            genotypes,
+            PassPrior::LeaveOneOut { model, inbreeding },
+        );
+        let (winner, genotype_quality) = score_best_genotype(scratch.posterior_row());
+        // PANIC-FREE: `score_best_genotype` returns an index into the posterior row, which
+        // `prepare_for_locus` sized from this same table's genotype count.
+        let copies_of_each_allele = genotypes
+            .allele_counts_of(winner)
+            .expect("the winner is an index into the row this table's own width sized");
+        if let Some((locus_samples, primary)) = artifact_pool {
+            pooled.add_called_sample(
+                &locus_samples[sample].evidence,
+                primary,
+                copies_of_each_allele[usize::from(primary.get())],
+                ploidy,
+            );
+        }
+        per_sample.push(SampleGenotypeCall::Called {
+            genotype: mint_genotype(copies_of_each_allele),
+            genotype_quality,
+        });
+    }
+
+    // **After the samples, and it could as well have been before them**: the fold reads the
+    // genotype likelihood table, which the loop built and this pass only reads
+    // (`doc/devel/ng/spec/calling_quality.md` §3.2).
+    let site_quality = score_uncorrected_site_quality(
+        scratch.site_quality_buffers_mut(),
+        genotypes,
+        parameters.prior_seed(),
+    );
+
+    let cohort_expected_copies =
+        ExpectedAlleleCopies::new(scratch.cohort_expected_copies().to_vec(), &candidates);
+    LocusInference::new(
+        evidence.region(),
+        candidates,
+        per_sample,
+        cohort_expected_copies,
+        outcome.converged,
+        outcome.passes,
+        weakest_provenance,
+        seed_diversity_unreachable,
+        site_quality,
+        artifact_pool.map(|(_, primary)| pooled.into_summary(primary)),
+    )
+}
+
+/// The owned genotype a row of the table's copy counts describes — allele `a` repeated as
+/// many times as that genotype carries it.
+///
+/// **The loop's currency is the [`GenotypeIdx`](crate::ng::calling::GenotypeIdx) and the
+/// output's is this**, and the conversion happens once per called sample on the final pass
+/// rather than anywhere in the loop: a `Genotype` owns a boxed slice, so minting one per
+/// sample per *pass* would be an allocation on the hot path for a value every pass but the
+/// last throws away (`doc/devel/ng/arch/calling_em_loop.md` §2).
+fn mint_genotype(copies_of_each_allele: &[u32]) -> Genotype {
+    let mut alleles = Vec::with_capacity(copies_of_each_allele.iter().sum::<u32>() as usize);
+    for (allele, &copies) in copies_of_each_allele.iter().enumerate() {
+        // PANIC-FREE: as at `pool_reads_and_pick_primary_alternative` — the row is one entry
+        // per allele, and `GenotypeTable::build` caps `allele_count` at `MAX_ALLELE_COUNT`.
+        let allele = AlleleId(u16::try_from(allele).expect("an allele id fits a u16"));
+        alleles.extend(repeat_n(allele, copies as usize));
+    }
+    Genotype::new(alleles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    use crate::ng::calling::genotype_prior::MarginalizedDirichletPrior;
+    use crate::ng::calling::GenericObservation;
+    use crate::ng::calling::genotype_prior::{
+        MarginalizedDirichletPrior, SeedRegime, SpectrumSeed,
+    };
+    use crate::ng::calling::quality::MAX_GENOTYPE_QUALITY;
     use crate::ng::calling::{
-        CandidateAlleles, ExpectedAlleleCopies, GenotypeTable, LocusInference, SampleGenotypeCall,
+        CandidateAlleles, ExpectedAlleleCopies, FrozenParameters, GenotypeIdx, GenotypeTable,
+        LocusEvidence, LocusInference, ReadGroupCalibration, SampleGenotypeCall, SsrSampleEvidence,
         UNWRITTEN_SCRATCH_VALUE,
     };
-    use crate::ng::locus_generation::LocusKind;
+    use crate::ng::locus_generation::{LocusKind, SsrDetail, WitnessedLocusPositions};
     use crate::ng::parameter_estimation::Provenance;
-    use crate::ng::types::{AlleleId, ContigId, GenomeRegion, Genotype, Phred, Position};
+    use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
+    use crate::ng::run::cohort_merge::build::PartialObservation;
+    use crate::ng::types::{
+        AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position, ReadGroupId,
+    };
     use std::num::NonZeroU32;
     use std::sync::Arc;
 
@@ -922,6 +1359,16 @@ mod tests {
 
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("a diploid")
+    }
+
+    /// A site quality standing in for one the worker computed, where what the test is about
+    /// is something else.
+    ///
+    /// **Deliberately not zero.** Zero is a real answer — a locus at which nobody carries
+    /// anything — so a test whose fixture wrote zero would pass against an implementation
+    /// that lost the value on the way in.
+    fn a_worker_written_site_quality() -> Phred {
+        Phred::try_new(37.0).expect("a legal quality, and below the site-quality ceiling")
     }
 
     fn outbred() -> InbreedingF {
@@ -2709,6 +3156,8 @@ mod tests {
             capped.passes,
             Provenance::FittedHere,
             false,
+            a_worker_written_site_quality(),
+            None,
         );
         assert!(!called.converged);
         assert_eq!(called.passes, 2);
@@ -3194,5 +3643,1074 @@ mod tests {
             &view,
             &RunnableCallingLoopConfig::default(),
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // C3b — the final pass: the calls, the site quality, and the artifact summary
+    // ────────────────────────────────────────────────────────────────────────────────
+
+    fn locus_region() -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(3),
+            start: Position(940),
+            end: Position(940),
+        }
+    }
+
+    /// One `(allele, read group)` row of a sample's evidence, with the two counts the
+    /// artifact summary reads.
+    ///
+    /// **`q_sum` is filled with something that would be wrong if anything read it**, rather
+    /// than with zero: the final pass never looks at the error mass, and a fixture of zeroes
+    /// would not say so.
+    fn observation(
+        allele: u16,
+        read_group: u32,
+        num_reads: u32,
+        forward_reads: u32,
+        placed_left_reads: u32,
+    ) -> GenericObservation {
+        GenericObservation {
+            allele: AlleleId(allele),
+            read_group: ReadGroupId(read_group),
+            num_reads,
+            q_sum: -3.0 * f64::from(num_reads),
+            forward_reads,
+            placed_left_reads,
+        }
+    }
+
+    /// A sample whose reads are `rows` and which the candidate step did not set aside.
+    fn called_sample<'a>(rows: &'a [GenericObservation]) -> GenericLocusSample<'a> {
+        GenericLocusSample {
+            evidence: GenericSampleEvidence::new(rows, 0.0, &[]),
+            genotype_must_be_missing: false,
+        }
+    }
+
+    /// A neutral panel's fitted spectrum at one variant per kilobase — human diversity, and
+    /// the seed the site quality's own tests use.
+    fn human_like_seed() -> SpectrumSeed {
+        SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape)
+    }
+
+    /// **The whole of one locus**: the frequency loop over `likelihoods`, then the final
+    /// pass over the same scratch — which is the order and the sharing the design requires,
+    /// since the pass reads the posterior row the loop leaves and the likelihood table the
+    /// loop never rebuilt.
+    fn call_locus(
+        likelihoods: &[Vec<f64>],
+        evidence: &LocusEvidence<'_>,
+        seed_concentration: &[f64],
+        alleles: &CandidateAlleles,
+        view: &GenotypeTableView<'_>,
+        model: &dyn GenotypePriorModel,
+    ) -> LocusInference {
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = vec![outbred(); likelihoods.len()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = FrozenParameters::uncontaminated(
+            &calibration,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            view.ploidy(),
+        );
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(likelihoods.len(), alleles, view);
+        scratch
+            .seed_concentration_mut()
+            .copy_from_slice(seed_concentration);
+        for (sample, row) in likelihoods.iter().enumerate() {
+            for (slot, &value) in scratch
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .zip(row)
+            {
+                *slot = LogProb(value);
+            }
+        }
+        let outcome = run_frequency_loop(
+            &mut scratch,
+            view,
+            model,
+            &inbreeding,
+            &RunnableCallingLoopConfig::default(),
+        );
+        summarise_final_pass(
+            &mut scratch,
+            view,
+            evidence,
+            &parameters,
+            model,
+            alleles.clone(),
+            outcome,
+            Provenance::FittedHere,
+            false,
+        )
+    }
+
+    /// The call this fixture expects, unwrapped — a `Missing` here is the test's failure and
+    /// not something to match on.
+    fn called(inference: &LocusInference, sample: usize) -> (&Genotype, Phred) {
+        match &inference.per_sample[sample] {
+            SampleGenotypeCall::Called {
+                genotype,
+                genotype_quality,
+            } => (genotype, *genotype_quality),
+            SampleGenotypeCall::Missing => {
+                panic!("sample {sample} was called, so it is not missing")
+            }
+        }
+    }
+
+    /// **One sample's call, its confidence, and its artifact counts, on numbers a reader can
+    /// follow** — the final pass's own hand-computed case.
+    ///
+    /// The likelihoods and log-priors are the ones
+    /// [`one_samples_e_step_matches_the_arithmetic_done_by_hand`] uses, so the posterior is
+    /// the same `1/7, 2/7, 4/7`: the winner is genotype 2, which at a diploid biallelic
+    /// locus is `1/1`, and it takes `4/7` of the probability.
+    ///
+    /// - **the genotype quality** is `−10·log₁₀(1 − 4/7)` = `10·log₁₀(7/3)` = **3.6798**,
+    ///   which is what comes back to the last digit an `f32` holds: `3.6797678`;
+    /// - **the call** is two copies of allele 1;
+    /// - **the artifact counts** are the sample's own rows: 3 reference reads of which 2 are
+    ///   forward and 1 placed left, 6 alternative reads of which 5 are forward and 2 placed
+    ///   left, 9 in total — and because the call carries both copies of the alternative, the
+    ///   genotypes expect all 9 of those reads to carry it.
+    ///
+    /// **The reference row's forward and placed-left counts are deliberately different.** They
+    /// feed two different binomial tests — strand bias and read-position bias — and a fixture
+    /// in which they are equal cannot tell the two apart: swapping the two `+=` lines that
+    /// accumulate them leaves such a suite green.
+    ///
+    /// **A fixed prior rather than a shipped one**, so every intermediate stays hand-checkable:
+    /// both shipped priors go through `lgamma`, and a hand-computed expectation for one of
+    /// them would be a transcription of a calculator rather than a check on this pass.
+    #[test]
+    fn one_samples_call_and_its_confidence_match_the_arithmetic_done_by_hand() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let two = std::f64::consts::LN_2;
+        let rows = [observation(0, 0, 3, 2, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![0.0, two, 0.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &FixedLogPriors(vec![0.0, 0.0, 2.0 * two]),
+        );
+
+        let (genotype, quality) = called(&inference, 0);
+        assert_eq!(genotype.alleles(), [AlleleId(1), AlleleId(1)]);
+        let by_hand = 10.0 * (7.0_f64 / 3.0).log10();
+        assert!(
+            (f64::from(quality.get()) - by_hand).abs() < 1e-4,
+            "the genotype quality is {} and the arithmetic gives {by_hand}",
+            quality.get()
+        );
+
+        let counts = inference
+            .artifact_test_counts()
+            .expect("six reads reached the alternative allele");
+        assert_eq!(counts.primary_alternative, AlleleId(1));
+        assert_eq!(counts.reference_reads, 3.0);
+        assert_eq!(counts.reference_forward_reads, 2.0);
+        assert_eq!(counts.reference_placed_left_reads, 1.0);
+        assert_eq!(counts.alternative_reads, 6.0);
+        assert_eq!(counts.alternative_forward_reads, 5.0);
+        assert_eq!(counts.alternative_placed_left_reads, 2.0);
+        assert_eq!(counts.total_reads, 9.0);
+        assert_eq!(counts.genotype_expected_alternative_reads, 9.0);
+    }
+
+    /// **The primary alternative is the allele the most reads reached, and the fixture makes
+    /// it the second one.**
+    ///
+    /// Every other fixture in this module is biallelic, where allele 1 is the only
+    /// alternative there is and a hard-coded `AlleleId(1)` would pass every one of them. Here
+    /// allele 2 draws 9 reads across the cohort against allele 1's 6, and the first sample's
+    /// counts are pooled from **two read groups**, which a fixture with one row per allele
+    /// would also let a reader-of-the-first-row pass.
+    ///
+    /// The two samples' calls do not enter the choice — it is made from the reads alone,
+    /// before any sample is scored (`spec/calling_quality.md` §6.3).
+    #[test]
+    fn the_primary_alternative_is_the_allele_the_most_reads_reached_over_two_read_groups() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        assert_eq!(view.allele_count(), 3);
+        let first = [
+            observation(0, 0, 1, 1, 0),
+            observation(0, 1, 1, 0, 1),
+            observation(1, 0, 2, 1, 1),
+            observation(1, 1, 2, 1, 1),
+            observation(2, 0, 3, 2, 1),
+            observation(2, 1, 2, 1, 0),
+        ];
+        let second = [observation(1, 0, 2, 1, 1), observation(2, 0, 4, 3, 2)];
+        let per_sample = [called_sample(&first), called_sample(&second)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        // Six genotypes at three alleles; both samples' reads favour the one carrying
+        // allele 2 twice, which is the last of them.
+        let favouring_two_twos = vec![-6.0, -6.0, -6.0, -6.0, -6.0, 0.0];
+        let inference = call_locus(
+            &[favouring_two_twos.clone(), favouring_two_twos],
+            &evidence,
+            &[1.0, 0.5, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let counts = inference
+            .artifact_test_counts()
+            .expect("both alternatives drew reads");
+        assert_eq!(
+            counts.primary_alternative,
+            AlleleId(2),
+            "allele 2 drew 9 reads across the cohort and allele 1 drew 6"
+        );
+        // Allele 2's rows only: 3 + 2 in the first sample, 4 in the second.
+        assert_eq!(counts.alternative_reads, 9.0);
+        assert_eq!(counts.alternative_forward_reads, 6.0);
+        assert_eq!(counts.alternative_placed_left_reads, 3.0);
+        // The reference's two rows, which is the pooling across read groups.
+        assert_eq!(counts.reference_reads, 2.0);
+        assert_eq!(counts.reference_forward_reads, 1.0);
+        assert_eq!(counts.reference_placed_left_reads, 1.0);
+        // Every allele's reads, both samples: 2 + 4 + 5 in the first, 2 + 4 in the second.
+        assert_eq!(counts.total_reads, 17.0);
+        // **And the ninth count is read from the primary alternative's copies, not from
+        // allele 1's.** Both samples are called homozygous for allele 2, so the calls expect
+        // every one of the 17 reads to carry it; counting copies of allele 1 — which neither
+        // call carries — would give 0, a maximal apparent deficit at a locus with none.
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(2), AlleleId(2)]
+        );
+        assert_eq!(counts.genotype_expected_alternative_reads, 17.0);
+    }
+
+    /// **Two alternatives the same number of reads reached: the lower id wins**, because the
+    /// fold keeps the first strict maximum.
+    ///
+    /// The allele table's order is fixed, so this is the difference between a run that
+    /// reproduces itself and one that does not — the same rule the genotype quality's argmax
+    /// follows, for the same reason.
+    #[test]
+    fn a_tie_between_two_alternatives_goes_to_the_lower_allele_id() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        let rows = [
+            observation(0, 0, 2, 1, 1),
+            observation(1, 0, 5, 3, 2),
+            observation(2, 0, 5, 1, 4),
+        ];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![0.0, -1.0, -3.0, -1.0, -3.0, -3.0]],
+            &evidence,
+            &[1.0, 0.5, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let counts = inference
+            .artifact_test_counts()
+            .expect("both alternatives drew reads");
+        assert_eq!(counts.primary_alternative, AlleleId(1));
+        // And the counts are that allele's, not the other's — 3 forward against 1.
+        assert_eq!(counts.alternative_forward_reads, 3.0);
+    }
+
+    /// **A locus whose alternatives no read reached carries no artifact summary**, and the
+    /// site quality and the calls are unaffected.
+    ///
+    /// Both artifact tests weigh one alternative against the reference, so a locus with no
+    /// alternative *reads* leaves them nothing to weigh; production hands back its baseline
+    /// unchanged in exactly this case. **Not a rare shape**: the merge builds a locus when a
+    /// sample's non-reference reads pooled reach its rule, so an alternative that ends the
+    /// pass with no read of its own is an ordinary outcome.
+    #[test]
+    fn a_locus_whose_alternatives_no_read_reached_carries_no_artifact_summary() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 7, 4, 3)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![0.0, -4.0, -9.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert!(inference.artifact_test_counts().is_none());
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(0)]
+        );
+        // The site quality is still computed and is the right one for a locus this
+        // reference-looking: 8 in 100,000 of a Phred, which is a probability of no variant
+        // of 0.99998.
+        assert!(
+            inference.uncorrected_site_quality().get() < 1e-3,
+            "one sample whose reads favour the homozygous reference by 4 nats leaves \
+             essentially no chance of a variant here, and the quality says so: {}",
+            inference.uncorrected_site_quality().get()
+        );
+    }
+
+    /// **A locus called over the reference alone is a first-class result** — 27.4% of built
+    /// loci on the 63-accession tomato panel and 27.3% on HG002 at 30×
+    /// (`SelectionVerdict::Selected`) — and it carries no artifact summary, because there is
+    /// no alternative for the two tests to name.
+    ///
+    /// One allele means one genotype, so every sample's posterior is `1.0` on it: the
+    /// genotype quality is the clamp's, capped at 99, rather than an infinity.
+    #[test]
+    fn a_locus_called_over_the_reference_alone_carries_no_artifact_summary() {
+        let alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
+        let table = GenotypeTable::build(diploid(), 1);
+        let view = table.view();
+        assert_eq!(view.genotype_count(), 1);
+        let rows = [observation(0, 0, 5, 3, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![0.0]],
+            &evidence,
+            &[1.0],
+            &alleles,
+            &view,
+            &FixedLogPriors(vec![0.0]),
+        );
+
+        assert!(inference.artifact_test_counts().is_none());
+        let (genotype, quality) = called(&inference, 0);
+        assert_eq!(genotype.alleles(), [AlleleId(0), AlleleId(0)]);
+        assert_eq!(quality.get(), MAX_GENOTYPE_QUALITY);
+    }
+
+    /// **A sample the candidate step set aside is emitted missing, with no quality beside
+    /// it, and is in neither the artifact counts nor the expectation they are weighed
+    /// against.**
+    ///
+    /// Its reads are deliberately loud — 20 of them on the alternative, more than the other
+    /// two samples together — so that counting them would be visible: with the set-aside
+    /// sample included the alternative would draw **26 reads of 38** rather than the 6 of 12
+    /// asserted here, and the expectation would move with it.
+    ///
+    /// **Why the fixture has to write that sample's likelihood row at all.** Nothing sets a
+    /// sample aside before the loop yet — that is step D1's — so this test hands the loop a
+    /// complete table and flags the sample only in the evidence. What it pins is the final
+    /// pass's half of the ruling, which is the half this step owns.
+    #[test]
+    fn a_sample_the_candidate_step_set_aside_is_missing_and_counted_nowhere() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let quiet = [observation(0, 0, 3, 2, 1), observation(1, 0, 3, 1, 2)];
+        let loud = [observation(0, 0, 6, 3, 3), observation(1, 0, 20, 18, 2)];
+        let per_sample = [
+            called_sample(&quiet),
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::new(&loud, 0.0, &[]),
+                genotype_must_be_missing: true,
+            },
+            called_sample(&quiet),
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let heterozygous = vec![-2.0, 0.0, -2.0];
+        let inference = call_locus(
+            &[heterozygous.clone(), heterozygous.clone(), heterozygous],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert!(inference.per_sample[1].is_missing());
+        assert!(
+            inference.per_sample[1].genotype().is_none()
+                && inference.per_sample[1].score_best_genotype().is_none(),
+            "a sample set aside has no genotype and no quality: there is nothing that was \
+             scored to have one"
+        );
+        assert!(!inference.per_sample[0].is_missing() && !inference.per_sample[2].is_missing());
+
+        let counts = inference
+            .artifact_test_counts()
+            .expect("the two called samples' reads reached the alternative");
+        assert_eq!(counts.total_reads, 12.0, "6 reads from each called sample");
+        assert_eq!(counts.alternative_reads, 6.0);
+        assert_eq!(counts.reference_reads, 6.0);
+        // Both called samples are heterozygous, so the calls expect half of each one's six
+        // reads to carry the alternative.
+        assert_eq!(counts.genotype_expected_alternative_reads, 6.0);
+    }
+
+    /// **The expectation is read from the calls and not from the fitted frequency**, which
+    /// is what makes the allele-balance test able to catch an artifact at all: the frequency
+    /// adapts to the artifact and would excuse it (`spec/calling_quality.md` §6.2).
+    ///
+    /// Two samples with the same depth and different calls: one heterozygous, one homozygous
+    /// reference. The calls expect `0.5 × 8 + 0 × 8 = 4` alternative reads. The loop's
+    /// converged copies at this locus are `[3.0441, 0.9559]`, so the fitted alternative
+    /// frequency is **0.23898** of the cohort's four chromosomes and a version that used it
+    /// would expect `0.23898 × 16 = 3.8237` — close enough to be mistaken for the right
+    /// answer and not equal to it, which is the point of asserting the exact 4.
+    #[test]
+    fn the_expected_alternative_reads_come_from_the_calls_and_not_from_the_frequency() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let heterozygote = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let homozygous_reference = [observation(0, 0, 7, 4, 3), observation(1, 0, 1, 1, 0)];
+        let per_sample = [
+            called_sample(&heterozygote),
+            called_sample(&homozygous_reference),
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![-4.0, 0.0, -4.0], vec![0.0, -4.0, -9.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+        assert_eq!(
+            called(&inference, 1).0.alleles(),
+            [AlleleId(0), AlleleId(0)]
+        );
+        let counts = inference.artifact_test_counts().expect("a summary");
+        assert_eq!(counts.total_reads, 16.0);
+        assert_eq!(counts.genotype_expected_alternative_reads, 4.0);
+    }
+
+    /// **At ploidy four a call carrying one copy expects a quarter of its reads**, not a
+    /// half — the divisor is the locus's ploidy and the fixture is the only one here that
+    /// can tell the two apart.
+    ///
+    /// Every other fixture in this module is diploid, where the ploidy, the allele count and
+    /// the copies of a heterozygote are all 2 and a hard-coded divisor passes. Here the winning genotype is `0/0/0/1`: the minted call names four alleles,
+    /// and the expectation is `(1 ÷ 4) × 8 = 2`, against the 4 a divisor of two would give.
+    #[test]
+    fn at_ploidy_four_a_call_carrying_one_copy_expects_a_quarter_of_its_reads() {
+        let mut alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
+        alleles.admit(Box::from(b"T".as_slice()));
+        let tetraploid = Ploidy::try_new(4).expect("a tetraploid");
+        let table = GenotypeTable::build(tetraploid, 2);
+        let view = table.view();
+        // Five genotypes: 4/0, 3/1, 2/2, 1/3, 0/4 copies of (reference, alternative).
+        assert_eq!(view.genotype_count(), 5);
+        assert_eq!(view.allele_counts_of(GenotypeIdx(1)), Some(&[3, 1][..]));
+
+        let rows = [observation(0, 0, 6, 3, 3), observation(1, 0, 2, 1, 1)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![-3.0, 0.0, -3.0, -6.0, -9.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &FixedLogPriors(vec![0.0; 5]),
+        );
+
+        let (genotype, _) = called(&inference, 0);
+        assert_eq!(
+            genotype.alleles(),
+            [AlleleId(0), AlleleId(0), AlleleId(0), AlleleId(1)],
+            "a tetraploid call names one allele per copy of the genome"
+        );
+        let counts = inference.artifact_test_counts().expect("a summary");
+        assert_eq!(counts.total_reads, 8.0);
+        assert_eq!(counts.genotype_expected_alternative_reads, 2.0);
+    }
+
+    /// **A read that saw only part of the locus is in neither the depth nor the total**, and
+    /// the reason is not tidiness: a partial says the sample carries *at least* this, not
+    /// what it carries, so it stands behind no allele and neither artifact test has a column
+    /// for it.
+    ///
+    /// The fixture's partial carries 50 reads against the 8 the summary counts — more than
+    /// six times as many — so a version that folded partials into the depth would miss by a
+    /// factor rather than by a rounding.
+    #[test]
+    fn reads_that_saw_only_part_of_the_locus_are_in_neither_the_depth_nor_the_total() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let partials = [PartialObservation {
+            witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
+                .expect("one witnessed position"),
+            read_group: ReadGroupId(0),
+            bases: Box::from(b"A".as_slice()),
+            num_reads: 50,
+            q_sum: -100.0,
+        }];
+        let per_sample = [GenericLocusSample {
+            evidence: GenericSampleEvidence::new(&rows, 0.0, &partials),
+            genotype_must_be_missing: false,
+        }];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![-4.0, -4.0, 0.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let counts = inference.artifact_test_counts().expect("a summary");
+        assert_eq!(counts.total_reads, 8.0);
+        assert_eq!(counts.genotype_expected_alternative_reads, 8.0);
+    }
+
+    /// **The cohort's expected copies leave the locus as the loop left them, not recomputed
+    /// from the calls** (`spec/calling_em_loop.md` §9).
+    ///
+    /// Two samples, both called heterozygous. Their calls say the cohort carries two copies
+    /// of each allele; the loop's converged estimate is **`[2.6759, 1.3241]`**, which is
+    /// what the record carries. **Two thirds of a copy apart**, and the gap is the
+    /// uncertainty a call has thrown away: each sample's converged posterior is
+    /// `[0.3438, 0.6507, 0.0055]`, so **a third** of its probability sits on the homozygous
+    /// reference — 2 × 0.3438 is the two thirds of a copy — and a call has no way to say it.
+    /// Site filtering and emission both read that number.
+    ///
+    /// Asserted **bit for bit** against a second run of the same loop, so the check is that
+    /// the value travelled rather than that it is approximately right.
+    #[test]
+    fn the_cohort_expected_copies_are_the_loops_and_not_recomputed_from_the_calls() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&rows), called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        // Reads that favour the heterozygote by one nat over the homozygous reference — so
+        // each sample keeps real probability on a genotype its call does not name.
+        let likelihoods = vec![vec![-1.0, 0.0, -4.0], vec![-1.0, 0.0, -4.0]];
+
+        let inference = call_locus(
+            &likelihoods,
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let (_, loop_only) = loop_over(
+            &likelihoods,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+        assert_eq!(
+            inference.cohort_expected_copies().copies(),
+            loop_only.cohort_expected_copies(),
+            "the record carries the loop's own row"
+        );
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+        assert_eq!(
+            called(&inference, 1).0.alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+        let copies = inference.cohort_expected_copies().copies();
+        assert!(
+            (copies[0] - 2.675_948_480_830_401).abs() < 1e-12
+                && (copies[1] - 1.324_051_519_169_599).abs() < 1e-12,
+            "the loop's converged row is [2.6759, 1.3241] and the record carries {copies:?}"
+        );
+        assert!(
+            (copies[0] - 2.0).abs() > 0.5,
+            "two heterozygous calls would give exactly two copies of each allele, and the \
+             expected copies are two thirds of a copy away from that — which is the \
+             uncertainty the calls threw away"
+        );
+    }
+
+    /// **The site quality on the record is the fold's own number for this likelihood
+    /// table** — the same value a second, independently prepared scratch produces from the
+    /// same rows.
+    ///
+    /// What this catches is the field arriving unwritten or written from something else: a
+    /// quality of zero is a perfectly ordinary answer at a locus nobody carries, so a test
+    /// that only asked for *a* number would pass against a pass that lost it. This fixture's
+    /// two samples both favour the homozygous alternative by 9 nats, and the quality is
+    /// **42.373**.
+    #[test]
+    fn the_site_quality_on_the_record_is_the_fold_of_the_table_the_loop_built() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [called_sample(&rows), called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let likelihoods = vec![vec![-9.0, -4.0, 0.0], vec![-9.0, -4.0, 0.0]];
+
+        let inference = call_locus(
+            &likelihoods,
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let mut fold_only = CallingScratch::<()>::default();
+        fold_only.prepare_for_locus(likelihoods.len(), &alleles, &view);
+        for (sample, row) in likelihoods.iter().enumerate() {
+            for (slot, &value) in fold_only
+                .sample_genotype_likelihoods_mut(sample)
+                .iter_mut()
+                .zip(row)
+            {
+                *slot = LogProb(value);
+            }
+        }
+        let expected = score_uncorrected_site_quality(
+            fold_only.site_quality_buffers_mut(),
+            &view,
+            human_like_seed(),
+        );
+        assert_eq!(inference.uncorrected_site_quality(), expected);
+        assert!(
+            expected.get() > 0.0,
+            "two samples whose reads exclude the reference give a quality well above zero, \
+             so this fixture can tell a lost value from a computed one"
+        );
+    }
+
+    /// **A repeat tract carries a site quality and no artifact summary**, and no sample there
+    /// is set aside.
+    ///
+    /// The strand and read-position tests are the SNP/indel path's: at a tract what goes
+    /// wrong is slippage, which is already inside the read likelihood, and
+    /// `spec/calling_quality.md` §8 leaves a tract's quality to a sibling document that is
+    /// not written. **The likelihood table here is the fixture's own**: the repeat-tract row
+    /// exists (`likelihood/ssr.rs`), but the repeat-tract *candidate* path does not, so
+    /// nothing upstream of this pass yet hands a tract the alleles to score.
+    #[test]
+    fn a_repeat_tract_carries_a_site_quality_and_no_artifact_summary() {
+        let detail = SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        };
+        let mut alleles = CandidateAlleles::new(
+            Box::from(b"ATAT".as_slice()),
+            LocusKind::Ssr(SsrDetail {
+                motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+                left_flank: Box::from(b"CCCGGG".as_slice()),
+                right_flank: Box::from(b"TTTAAA".as_slice()),
+            }),
+        );
+        alleles.admit(Box::from(b"ATATAT".as_slice()));
+        let table = GenotypeTable::build(diploid(), 2);
+        let view = table.view();
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
+
+        let inference = call_locus(
+            &[vec![-4.0, 0.0, -4.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert!(inference.artifact_test_counts().is_none());
+        assert!(!inference.per_sample[0].is_missing());
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(1)]
+        );
+
+        // **The site quality is the only number this arm has to get right**, so it is
+        // compared against an independently prepared fold rather than merely being present.
+        let mut fold_only = CallingScratch::<()>::default();
+        fold_only.prepare_for_locus(1, &alleles, &view);
+        for (slot, &value) in fold_only
+            .sample_genotype_likelihoods_mut(0)
+            .iter_mut()
+            .zip(&[-4.0_f64, 0.0, -4.0])
+        {
+            *slot = LogProb(value);
+        }
+        let expected = score_uncorrected_site_quality(
+            fold_only.site_quality_buffers_mut(),
+            &view,
+            human_like_seed(),
+        );
+        assert!(expected.get() > 0.0, "the fixture's fold is above zero");
+        assert_eq!(inference.uncorrected_site_quality(), expected);
+    }
+
+    /// Evidence covering a different number of samples than the scratch was prepared for is
+    /// refused: this pass pairs evidence row *i* with scratch row *i*, and two lists of
+    /// different lengths are two different sample orders.
+    #[test]
+    #[should_panic(expected = "indexed by a different sample order")]
+    fn evidence_covering_another_cohort_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred(), outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = FrozenParameters::uncontaminated(
+            &calibration,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            diploid(),
+        );
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+        let _ = summarise_final_pass(
+            &mut scratch,
+            &view,
+            &evidence,
+            &parameters,
+            &MarginalizedDirichletPrior,
+            alleles.clone(),
+            FrequencyLoopOutcome {
+                passes: 1,
+                converged: true,
+            },
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// One inbreeding coefficient per sample, **in both directions** — the walk is over the
+    /// coefficients, so a short slice would call some samples and leave the rest with no
+    /// call at all.
+    #[test]
+    #[should_panic(expected = "one per sample in the run's sample order")]
+    fn fewer_inbreeding_coefficients_than_samples_are_refused_by_the_final_pass() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1)];
+        let per_sample = [called_sample(&rows), called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let calibration = [ReadGroupCalibration::defaulted()];
+        let inbreeding = [outbred()];
+        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+        let parameters = FrozenParameters::uncontaminated(
+            &calibration,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            diploid(),
+        );
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &view);
+        let _ = summarise_final_pass(
+            &mut scratch,
+            &view,
+            &evidence,
+            &parameters,
+            &MarginalizedDirichletPrior,
+            alleles.clone(),
+            FrequencyLoopOutcome {
+                passes: 1,
+                converged: true,
+            },
+            Provenance::FittedHere,
+            false,
+        );
+    }
+
+    /// An observation naming an allele the locus was not called over is refused **by name**:
+    /// without the check the buffer index panics with a message about a slice, which sends
+    /// the reader to the scratch rather than to the mapping that produced the id.
+    #[test]
+    #[should_panic(expected = "mapped against a different allele table")]
+    fn an_observation_naming_an_allele_the_locus_lacks_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(4, 0, 3, 1, 1)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let _ = call_locus(
+            &[vec![0.0, -1.0, -3.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+    }
+
+    /// More forward-strand reads than reads is refused. Both artifact tests read the two
+    /// counts as fractions of the read count, and a fraction above one reaches the binomial
+    /// tail as a probability above one — which comes back as a penalty rather than as a
+    /// failure.
+    #[test]
+    #[should_panic(expected = "shares of those same reads")]
+    fn more_forward_reads_than_reads_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 3, 1)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let _ = call_locus(
+            &[vec![0.0, -1.0, -3.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+    }
+
+    /// The placed-left half of the same check, which a fixture varying only the strand count
+    /// would leave unreached.
+    #[test]
+    #[should_panic(expected = "shares of those same reads")]
+    fn more_placed_left_reads_than_reads_is_refused() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 5)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let _ = call_locus(
+            &[vec![0.0, -1.0, -3.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+    }
+
+    /// **Each sample's confidence is its own**, taken from the posterior row while that sample
+    /// is the one in it — which is why this is a pass and not a read-back after the loop
+    /// (`spec/calling_quality.md` §3.1). `CallingScratch`'s posterior row is one buffer that
+    /// every sample in turn is scored into, so a pass that took the quality *after* the walk
+    /// would give every sample the last one's number.
+    ///
+    /// Two samples, one favouring the heterozygote by 4 nats and one the homozygous reference
+    /// by 4, so their winning posteriors are far apart: **11.553 and 17.697 Phred**, six
+    /// Phred and a call in fifty apart. A pass that gave both samples one sample's quality
+    /// leaves every other test in this module green.
+    #[test]
+    fn two_samples_take_their_confidence_from_their_own_posterior_rows() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&rows), called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![-4.0, 0.0, -4.0], vec![0.0, -4.0, -9.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let first = called(&inference, 0).1.get();
+        let second = called(&inference, 1).1.get();
+        assert!(
+            (first - 11.552_688).abs() < 1e-3 && (second - 17.697_23).abs() < 1e-3,
+            "each sample's quality comes from its own posterior row: got {first} and {second}"
+        );
+    }
+
+    /// **A set-aside sample's reads do not choose the alternative either**, not merely the
+    /// counts (`spec/calling_quality.md` §6.3).
+    ///
+    /// Over the two called samples allele 1 draws 10 reads and allele 2 draws 6; the set-aside
+    /// sample's 20 reads of allele 2 would reverse that if they were pooled. **The biallelic
+    /// fixture beside this one cannot catch it** — there a set-aside sample's reads can move
+    /// the counts but not which allele is counted, because there is only one alternative to
+    /// choose.
+    #[test]
+    fn the_primary_alternative_ignores_a_set_aside_samples_reads() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        let called_rows = [
+            observation(0, 0, 2, 1, 1),
+            observation(1, 0, 5, 3, 2),
+            observation(2, 0, 3, 2, 1),
+        ];
+        let set_aside_rows = [observation(2, 0, 20, 10, 10)];
+        let per_sample = [
+            called_sample(&called_rows),
+            GenericLocusSample {
+                evidence: GenericSampleEvidence::new(&set_aside_rows, 0.0, &[]),
+                genotype_must_be_missing: true,
+            },
+            called_sample(&called_rows),
+        ];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let row = vec![0.0, -1.0, -3.0, -1.0, -3.0, -3.0];
+
+        let inference = call_locus(
+            &[row.clone(), row.clone(), row],
+            &evidence,
+            &[1.0, 0.5, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        let counts = inference.artifact_test_counts().expect("a summary");
+        assert_eq!(
+            counts.primary_alternative,
+            AlleleId(1),
+            "over the called samples allele 1 drew 10 reads and allele 2 drew 6; the \
+             set-aside sample's 20 reads of allele 2 are not pooled"
+        );
+    }
+
+    /// **The four values the pass only carries** reach the record unchanged: where the locus
+    /// is, whether the loop converged, how many passes it took, and where its parameters came
+    /// from. None of the four panics when wrong — a transposed region is a silently misplaced
+    /// variant, and a hard locus reported as converged is a stronger claim than the loop
+    /// earned (`spec/calling_em_loop.md` §6).
+    #[test]
+    fn the_pass_carries_the_region_the_outcome_and_the_provenance_onto_the_record() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let likelihoods = vec![vec![-4.0, 0.0, -4.0]];
+
+        let inference = call_locus(
+            &likelihoods,
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+        let (outcome, _) = loop_over(
+            &likelihoods,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &RunnableCallingLoopConfig::default(),
+        );
+
+        assert_eq!(inference.region, locus_region());
+        assert_eq!(inference.weakest_provenance, Provenance::FittedHere);
+        assert_eq!(inference.passes, outcome.passes);
+        assert_eq!(inference.converged, outcome.converged);
+        assert!(
+            outcome.passes > 1,
+            "the fixture takes more than one pass, so `passes` is a real number here and not \
+             the constant 1"
+        );
+    }
+
+    /// **At ploidy one a call is all or nothing** — one allele named, and either every one of
+    /// the sample's reads expected to carry the alternative or none of them.
+    ///
+    /// The low end of the ploidy range this caller commits to, and the divisor's other
+    /// boundary: the module's other fixtures are diploid and tetraploid, so a mint or a
+    /// divisor that assumes at least two copies passes them all.
+    #[test]
+    fn at_ploidy_one_a_call_expects_all_or_none_of_its_reads() {
+        let mut alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
+        alleles.admit(Box::from(b"T".as_slice()));
+        let haploid = Ploidy::try_new(1).expect("a haploid");
+        let table = GenotypeTable::build(haploid, 2);
+        let view = table.view();
+        // Two genotypes at ploidy one: the reference allele, or the alternative.
+        assert_eq!(view.genotype_count(), 2);
+
+        let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let inference = call_locus(
+            &[vec![-4.0, 0.0]],
+            &evidence,
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &FixedLogPriors(vec![0.0, 0.0]),
+        );
+
+        let (genotype, _) = called(&inference, 0);
+        assert_eq!(
+            genotype.alleles(),
+            [AlleleId(1)],
+            "a haploid call names one allele, not two"
+        );
+        let counts = inference.artifact_test_counts().expect("a summary");
+        assert_eq!(counts.total_reads, 8.0);
+        assert_eq!(
+            counts.genotype_expected_alternative_reads, 8.0,
+            "the one copy is the alternative, so every read is expected to carry it"
+        );
+    }
+
+    proptest! {
+        /// **The minted genotype is the copy-count row read as a multiset**: allele `a`
+        /// appears exactly as many times as the row says, in ascending id order, and the
+        /// whole names one allele per copy of the genome.
+        ///
+        /// A property rather than a case, because the two end-to-end shapes the module's
+        /// other fixtures reach — `[0, 2]` at diploid and `[3, 1]` at tetraploid — cannot
+        /// separate a mint that drops a zero-copy allele's *position* from one that does not.
+        #[test]
+        fn mint_genotype_repeats_each_allele_as_many_times_as_the_row_says(
+            copies in proptest::collection::vec(0_u32..4, 1..6)
+                .prop_filter("a genotype has at least one copy", |row: &Vec<u32>| {
+                    row.iter().sum::<u32>() > 0
+                })
+        ) {
+            let minted = mint_genotype(&copies);
+            let total: u32 = copies.iter().sum();
+            proptest::prop_assert_eq!(minted.alleles().len(), total as usize);
+            for (allele, &want) in copies.iter().enumerate() {
+                let got = minted
+                    .alleles()
+                    .iter()
+                    .filter(|id| usize::from(id.get()) == allele)
+                    .count();
+                proptest::prop_assert_eq!(got, want as usize);
+            }
+            let mut sorted = minted.alleles().to_vec();
+            sorted.sort_by_key(|id| id.get());
+            proptest::prop_assert_eq!(&sorted[..], minted.alleles());
+        }
     }
 }

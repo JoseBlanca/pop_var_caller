@@ -1004,6 +1004,12 @@ mod tests {
         );
     }
 
+    /// A site quality standing in for one the worker computed — this stand-in looks at no
+    /// evidence, so it has none to compute one from.
+    fn a_worker_written_site_quality() -> Phred {
+        Phred::try_new(37.0).expect("a legal quality, and below the site-quality ceiling")
+    }
+
     /// A stand-in implementation, existing only so the seam is exercised by something. It
     /// calls one genotype for every sample and looks at no evidence at all — deliberately not
     /// a caller, so nothing here can be mistaken for a check of one.
@@ -1047,6 +1053,8 @@ mod tests {
                 1,
                 Provenance::FittedHere,
                 false,
+                a_worker_written_site_quality(),
+                None,
             )
         }
     }
