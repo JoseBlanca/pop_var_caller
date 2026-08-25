@@ -68,6 +68,12 @@ use std::time::Instant;
 
 fn ln_gamma(x: f64) -> f64 {
     // Lanczos, g = 7, n = 9 — the coefficients every implementation uses.
+    //
+    // Written to the digit count the published set is published with, so a reader
+    // checking them against a reference sees the same characters. 1.98's clippy asks
+    // for the last digit of the first one to go; it parses to the same `f64` either
+    // way, and matching the reference is worth more here than matching the lint.
+    #[allow(clippy::excessive_precision)]
     const C: [f64; 9] = [
         0.999_999_999_999_809_93,
         676.520_368_121_885_1,
@@ -205,7 +211,7 @@ impl Rng {
     fn binomial(&mut self, n: u32, p: f64) -> u32 {
         (0..n).filter(|_| self.uniform() < p).count() as u32
     }
-    fn from_weights(&mut self, weights: &[f64]) -> usize {
+    fn weighted_index(&mut self, weights: &[f64]) -> usize {
         let mut u = self.uniform() * weights.iter().sum::<f64>();
         for (i, w) in weights.iter().enumerate() {
             u -= w;
@@ -928,7 +934,7 @@ fn drawn_patterns(truth: &Truth, loci: usize, seed: u64) -> Weighted {
         let pattern: Pattern = (0..truth.samples)
             .map(|sample| {
                 let priors = genotype_frequencies(f, truth.inbreeding[sample]);
-                let genotype = rng.from_weights(&priors) as u32;
+                let genotype = rng.weighted_index(&priors) as u32;
                 alternative_copies += genotype;
                 let depth = rng.poisson(truth.depth_mean);
                 (depth, rng.binomial(depth, p_alt(genotype, eps)))
@@ -1411,6 +1417,10 @@ fn expected_heterozygosity_of(fitted: &Fitted, candidate: Candidate, grids: &Gri
     }
 }
 
+// Eight arguments against clippy's seven, and they are eight columns of one printed
+// line: bundling them into a struct would name the same eight fields one indirection
+// away from the `println!` that formats them.
+#[allow(clippy::too_many_arguments)]
 fn report(
     label: &str,
     truth: &Truth,

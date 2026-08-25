@@ -332,6 +332,10 @@ fn strata_borrowing(c: &mut Criterion) {
     let mut group = c.benchmark_group("ng_joint_fit/strata");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
+    #[allow(
+        clippy::single_element_loop,
+        reason = "one row today; the table is the shape, and a second stratum drops straight in"
+    )]
     for (name, tracts_each) in [("stands_alone", TRACTS_A_STRATUM)] {
         let config = ssr_config();
         check_the_strata_took_the_route_they_were_named_for(&strata, &excess, &config, tracts_each);

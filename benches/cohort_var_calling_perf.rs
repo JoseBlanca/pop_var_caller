@@ -107,7 +107,7 @@ const THREAD_COUNTS: &[usize] = &[1, 2, 8];
 /// entropy the DUST pre-pass produces a near-empty mask, matching the
 /// production hot path (most positions unmasked).
 fn fasta_base(i: u32) -> u8 {
-    const B: [u8; 4] = [b'A', b'C', b'G', b'T'];
+    const B: [u8; 4] = *b"ACGT";
     let mut x = i.wrapping_add(0x9E37_79B9);
     x = (x ^ (x >> 16)).wrapping_mul(0x7feb_352d);
     x = (x ^ (x >> 15)).wrapping_mul(0x846c_a68b);
@@ -167,7 +167,7 @@ fn support(num_obs: u32) -> AlleleSupportStats {
 /// (replicas), so every variant position is cohort-wide variable → kept by the
 /// producer's variant filter and called.
 fn build_records() -> Vec<PileupRecord> {
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     let mut records = Vec::with_capacity(RECORD_POSITIONS as usize);
     for pos in 1..=RECORD_POSITIONS {
         let ref_base = fasta_base(pos - 1);

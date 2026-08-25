@@ -81,7 +81,7 @@ fn writer_header(n_records: usize, sample: &str) -> WriterHeader {
 /// SNP-typical: one allele per record (~99.9 %), occasional 2-allele.
 fn build_snp_records(n: usize) -> Vec<PileupRecord> {
     let mut records = Vec::with_capacity(n);
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     for i in 0..n {
         let pos = (i as u32) + 1;
         let ref_base = bases[i & 3];
@@ -128,7 +128,7 @@ fn build_snp_records(n: usize) -> Vec<PileupRecord> {
 /// the lifecycle-marker mechanism is gone.
 fn build_phase_chain_heavy_records(n: usize) -> Vec<PileupRecord> {
     let mut records = Vec::with_capacity(n);
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     let mut next_id: u64 = 0;
     let mut active: Vec<u64> = Vec::new();
 
@@ -174,7 +174,7 @@ fn build_phase_chain_heavy_records(n: usize) -> Vec<PileupRecord> {
 /// longer alleles.
 fn build_multi_allele_records(n: usize) -> Vec<PileupRecord> {
     let mut records = Vec::with_capacity(n);
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     for i in 0..n {
         let pos = (i as u32) + 1;
         let r = bases[i & 3];

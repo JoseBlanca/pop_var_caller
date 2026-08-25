@@ -88,7 +88,7 @@ fn writer_header() -> WriterHeader {
 /// from `benches/psp_reader_perf.rs`.
 fn build_records() -> Vec<PileupRecord> {
     let mut records = Vec::with_capacity(NUM_RECORDS);
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     for i in 0..NUM_RECORDS {
         let pos = (i as u32) + 1;
         let n_alleles = 2 + (i % 3); // 2, 3, or 4 alleles per record

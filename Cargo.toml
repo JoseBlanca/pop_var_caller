@@ -50,6 +50,20 @@ fn_params_excessive_bools = "warn"
 # whole point.
 result_large_err = "allow"
 
+# Two lints 1.98's clippy added, both of which fire almost entirely inside the
+# frozen production caller (`src/var_calling/`, `src/vcf/`, `src/genetics.rs`),
+# which is not edited — see `src/ng/mod.rs`'s freeze paragraph. Nine of the
+# twelve `chunks_exact` sites are production's, and two of them sit under
+# comments explaining that the constant chunk size is what removes the bounds
+# check from the EM inner loop; rewriting those to `as_chunks` would be a
+# change to code whose whole value right now is that it does not change.
+#
+# `as_chunks::<N>()` is the better form and is stable from 1.98 — prefer it in
+# new ng code even though the lint no longer asks for it. Drop both `allow`s
+# when production is retired.
+chunks_exact_to_as_chunks = "allow"
+manual_slice_fill = "allow"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

@@ -246,7 +246,7 @@ pub fn fit_stratum(
     };
 
     let fit = fit_from_starts(
-        &objective,
+        objective,
         &starting_points(table.level_estimate()),
         precision,
     );

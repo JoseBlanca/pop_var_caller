@@ -71,6 +71,12 @@ use std::time::Instant;
 
 fn ln_gamma(x: f64) -> f64 {
     // Lanczos, g = 7, n = 9 — the coefficients every implementation uses.
+    //
+    // Written to the digit count the published set is published with, so a reader
+    // checking them against a reference sees the same characters. 1.98's clippy asks
+    // for the last digit of the first one to go; it parses to the same `f64` either
+    // way, and matching the reference is worth more here than matching the lint.
+    #[allow(clippy::excessive_precision)]
     const C: [f64; 9] = [
         0.999_999_999_999_809_93,
         676.520_368_121_885_1,
@@ -216,7 +222,7 @@ impl Rng {
     fn binomial(&mut self, n: u32, p: f64) -> u32 {
         (0..n).filter(|_| self.uniform() < p).count() as u32
     }
-    fn from_weights(&mut self, weights: &[f64]) -> usize {
+    fn weighted_index(&mut self, weights: &[f64]) -> usize {
         let mut u = self.uniform() * weights.iter().sum::<f64>();
         for (i, w) in weights.iter().enumerate() {
             u -= w;
@@ -585,7 +591,7 @@ impl Panel {
                     }
                 } else {
                     let priors = genotype_frequencies(frequency, truth.inbreeding);
-                    let genotype = rng.from_weights(&priors) as u32;
+                    let genotype = rng.weighted_index(&priors) as u32;
                     (1.0, p_alt(genotype, eps), genotype == 1, false)
                 };
                 if heterozygous {
