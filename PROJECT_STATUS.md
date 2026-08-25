@@ -19,7 +19,37 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-25):** **the calling loop's shared types, and a way for a
+> - **Last completed task (2026-08-25):** **the calling seam, and every switch of the loop as a
+> value that can be refused** (step A2 of
+> [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop` —
+> **Milestone A is complete, at Checkpoint A**). One boundary that every way of handling a
+> cohort crosses, and the configuration of the three nested loops, two of which ship switched
+> off. **The part with a consequence is the refusal.** The slippage re-fit and allele
+> discovery have no implementations yet, so a run that asks for one is stopped rather than
+> quietly given the default — and the message says what accepting it would have cost, because
+> a measurement harness that switched the re-fit on and got the frozen loop's answers back
+> would find the two arms agreeing exactly, which reads as a finding rather than as a bug.
+> **The review made that refusal unskippable**, which it was not: an agent built a
+> configuration with three faults, watched `validate()` refuse it, and then handed the same
+> value to the loop — it compiled and ran. `validate` is now the only way to make the type the
+> seam takes.
+> **Two more findings were built rather than argued.** A convergence threshold of 1.0 passed
+> validation, and would have stopped every locus in a run after one pass and flagged each as
+> settled: the loop's movement is already divided by the cohort's chromosomes, so it cannot
+> exceed 1, and production's own validator caps at 0.1 for exactly this reason. And a
+> sixteen-mutation battery found eight survivors, of which seven were real — three of the nine
+> shipped values were compared against the constants they were built from, which is an
+> identity that holds for any value. All seven are now killed, each re-checked against the
+> mutation it was written for.
+> **The best outcome was deleting checks rather than adding them.** Retyping three counts as
+> `NonZeroU32` and reusing the merge's own `MinAltReads` for discovery's evidence bar removed
+> three range checks and three error variants — the values they refused are no longer
+> expressible. The error enum is five variants where it was eight. Library target 4,488 →
+> **4,528** across the milestone.
+> [What A2 built](doc/devel/reports/implementations/ng_calling_loop_a2_2026-08-25.md),
+> [what the review found](doc/devel/reports/reviews/ng_calling_loop_a2_2026-08-25.md),
+> [what was done about it](doc/devel/reports/reviews/fixes_applied_2026-08-25_v2.md).
+> - **Previously (2026-08-25):** **the calling loop's shared types, and a way for a
 > locus to say a sample has no call** (step A1 of
 > [the calling loop](doc/devel/ng/impl_plan/calling_loop.md), branch `ng-calling-loop`). The
 > two arguments the calling seam takes — one locus's reads per sample, and everything the
@@ -94,29 +124,6 @@ Skills and agents are instructed to leave it untouched.
 > silently. Alongside it, the alignment spec's §5.2 stopped restating the distribution and now
 > points at the read-likelihood spec's §4.2, which owns it.
 > [What was renamed, what stayed, and why the tests did not need to change](doc/devel/reports/implementations/ng_calling_likelihood_e1_2026-08-24.md).
-> - **Previously (2026-08-24):** **some of a sample's reads came from somebody else, and
-> the likelihood now says so** (step C1 of
-> [the read likelihoods](doc/devel/ng/impl_plan/calling_read_likelihoods.md), branch
-> `ng-calling-likelihoods`). A read is scored as either something this individual's genotype can
-> produce or something a contaminating neighbour's DNA showed, mixed by how contaminated that
-> library is. **There is no separate path for a clean sample** — with nothing contaminated the
-> formula is the old one, and that had to be measured rather than asserted: over 3,552
-> comparisons the two agree to a relative 2.9 × 10⁻¹⁶, which is 2 × 10⁻¹² Phred where the
-> numbers are largest. On a diploid showing one alternative read, a 3% fraction moves the
-> heterozygote's lead over the reference homozygote from 6.019 nats to 5.981 where the
-> contaminant carries that allele at 1 in 1,000, and to 2.131 at 1 in 2 — **so it is the
-> contaminant's own frequency, not the fraction, that decides whether contamination changes a
-> call.**
-> **One decision taken two steps ago had to be reversed to get here.** The calibrated error the
-> row was built to charge was clamped at one half, and a clamp that binds on a single read but
-> not on the fold of that read with others breaks the property the whole formula is shaped
-> around: that pooling reads must not change the answer. On the row's own fixture the clamp
-> would have moved the result by 69 nats where the property is pinned to a relative 2 × 10⁻¹⁴.
-> **The reviews found two ways to get a confident wrong answer with nothing crashing:** a
-> not-a-number summed error came back as the most confident read the model can express, because
-> `f64::max` returns the other operand; and a spread table from the wrong ploidy truncated the
-> genotype walk in silence, leaving an unscored genotype the winner.
-> [What was built, what the reviews changed, and two questions for the owner](doc/devel/reports/implementations/ng_calling_likelihood_c1_2026-08-24.md).
 >
 > _Older entries are trimmed rather than kept: this log accumulated 44 of them,
 > some 580 lines. Every one is in git history — `git log -p PROJECT_STATUS.md`,
@@ -737,11 +744,12 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **⚠ The same three aggregate gates are red on `main`** as for the foundations plan, in files this branch does not touch.
 
 #### The calling loop (step 9, arm A) — the shared per-locus types, the seam, and the three nested loops
-- **Status:** fixes-applied — **A1 done; Milestone A continues at A2.** Branch `ng-calling-loop`, worktree `../pop_var_caller-calling-loop`, from `main` at `bbcf2165`. Running beside `ng-calling-likelihoods` (which owns `src/ng/calling/likelihood/`) and `ng-candidate-alleles` (which owns `src/ng/calling/allele_candidates/`); this branch consumes both and edits neither.
+- **Status:** fixes-applied — **Milestone A complete, at Checkpoint A.** A1 and A2 implemented, reviewed and fixes applied. Branch `ng-calling-loop`, worktree `../pop_var_caller-calling-loop`, from `main` at `bbcf2165` and carrying main's 1.98 compiler pin. Running beside `ng-calling-likelihoods` (which owns `src/ng/calling/likelihood/`) and `ng-candidate-alleles` (which owns `src/ng/calling/allele_candidates/`); this branch consumes both and edits neither.
 - **Plan:** [calling_loop.md](doc/devel/ng/impl_plan/calling_loop.md) (A–F, 12 steps, 6 checkpoints); **Spec:** [calling_em_loop.md](doc/devel/ng/spec/calling_em_loop.md); **Arch:** [calling_em_loop.md](doc/devel/ng/arch/calling_em_loop.md) (§2 owns every type A1 builds).
-- **Code:** [src/ng/calling/mod.rs](src/ng/calling/mod.rs) — `LocusEvidence` + `GenericLocusSample`, `FrozenParameters`, `CallingScratch` + `UNWRITTEN_SCRATCH_VALUE`, and `SampleGenotypeCall` turned from a struct into an enum so a sample the allele cap ruled uncallable can be emitted as missing.
-- **Impl report:** [A1](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md).
-- **Latest review:** [A1](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md) — Request-changes, 1 Blocker / 14 Majors / 13 Minors, four category agents in isolated worktrees; **fixes applied:** [2026-08-25](doc/devel/reports/reviews/fixes_applied_2026-08-25.md).
+- **Code:** [src/ng/calling/mod.rs](src/ng/calling/mod.rs) — `LocusEvidence` + `GenericLocusSample`, `FrozenParameters`, `CallingScratch` + `UNWRITTEN_SCRATCH_VALUE`, and `SampleGenotypeCall` turned from a struct into an enum so a sample the allele cap ruled uncallable can be emitted as missing. [src/ng/calling/inference/mod.rs](src/ng/calling/inference/mod.rs) — the `LocusGenotyper` seam, `CallingLoopConfig` with `SlippageRefitConfig` and `DiscoveryConfig`, and `RunnableCallingLoopConfig`, the token the seam takes.
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_calling_loop_a1_2026-08-25.md), [A2](doc/devel/reports/implementations/ng_calling_loop_a2_2026-08-25.md).
+- **Latest reviews:** [A1](doc/devel/reports/reviews/ng_calling_loop_a1_2026-08-25.md) — Request-changes, 1 Blocker / 14 Majors / 13 Minors, four category agents in isolated worktrees ([fixes](doc/devel/reports/reviews/fixes_applied_2026-08-25.md)); [A2](doc/devel/reports/reviews/ng_calling_loop_a2_2026-08-25.md) — Request-changes, 0 Blockers / 3 Majors / 13 Minors, five agents ([fixes](doc/devel/reports/reviews/fixes_applied_2026-08-25_v2.md)).
+- **A2 done (the seam, and every switch as a value):** `call_locus` is the one boundary every way of handling a cohort crosses, and `CallingLoopConfig` holds the frequency loop's two constants plus the two outer loops that ship switched off. **Their bodies are not built, and a run that asks for one is refused rather than quietly given the default** — the refusal says what accepting it would cost, because a harness that set the re-fit on and got the frozen loop's answers back would find the two arms agreeing exactly, which reads as a finding. **The refusal is not skippable:** `validate` is the only constructor of the type the seam takes. Library target 4,517 → **4,528** passing.
 - **A1 done (the three shared types + the missing genotype's carrier):** the two arguments the calling seam takes and the buffers a worker reuses at every locus, plus the enum that lets a locus say a sample has no call rather than inventing one for it. Every per-sample list is one entry per **run** sample in the run's sample order — the merge's own list holds only the covering samples, and joining the two positionally is the failure `spec/calling_em_loop.md` §5.0 names. Library target 4,488 → **4,517** passing.
 - **Open:**
   - **⚠ No CI gate holds this module's assertions to release, and its whole no-`Result` design rests on them** (`spec/calling_em_loop.md` §8). Measured during A1's review: downgrading all 16 of the module's release-held checks to `debug_assert!` and running under `--release` fails a test for 15 of them — but the only test command in `.github/workflows/ci.yml` is a debug run, where the two are indistinguishable. **The gate is blocked on another branch:** `cargo test --release --lib ng::calling` is `461 passed; 4 failed` at `5843f60a`, and all four failures are pre-existing `#[should_panic]` tests in `src/ng/calling/likelihood/`, which `ng-calling-likelihoods` owns. Raise there, then add the step.
@@ -749,7 +757,9 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **⚑ `arch/calling_em_loop.md` §2** still sketches `CallingScratch` with public fields and one `concentration: Vec<f64>`, and `SampleGenotypeCall` as a struct. The prior's real API needs three per-allele buffers at once and the missing genotype needs an enum; both divergences are recorded in A1's report §2.
   - **⚑ Step 13's quality spec landed on `main` while A1 ran, and it puts two more outputs in this plan's C3** ([calling_quality.md](doc/devel/ng/spec/calling_quality.md), `0bcff1f9`; the plan's C3 and Scope are amended in place). Two of its three numbers cannot be computed downstream, because their inputs are this loop's own scratch: the per-sample **posterior row** is one reused buffer, so the earlier samples' posteriors are gone once the last is scored, and the **genotype-likelihood table** is per-worker and overwritten at the next locus. So C3 takes the genotype quality per sample as it scores, and the site quality's baseline plus a nine-number artifact summary once the loop stops; only the correction and its output stage are elsewhere. `LocusInference` gains two fields with it. **A1 needs nothing changed for this** — §3.1 and §3.2 are written against the buffers it built, and §4 confirms its missing-genotype variant: such a sample's `GQ` is *absent*, not zero.
   - **One name in that spec no longer matches the code.** §3.2 calls the table `CallingScratch.lg_table`; A1's review renamed it `genotype_likelihoods`, because `Lg` is spec notation that appears nowhere else in `src/` and because the doc comments beside it called it the *read* likelihood, which the read-likelihood spec reserves for one read against one allele. Same buffer, and worth one word in that spec when someone next edits it.
-  - **The compiler pin is taken** — merged from `main` (`54a0fd96`, `f3c8c797`) after A1's commit. At 1.98 this branch is green on the **wider** gate too: `cargo clippy --all-targets --all-features -- -D warnings` exits 0, and `cargo test --lib` is 4,517 passed / 0 failed / 14 ignored.
+  - **The compiler pin is taken** — merged from `main` (`54a0fd96`, `f3c8c797`) after A1's commit. At 1.98 this branch is green on the **wider** gate too: `cargo clippy --all-targets --all-features -- -D warnings` exits 0.
+  - **⚑ `arch/calling_em_loop.md` §3.2 needs an error channel the seam does not have.** It requires calling arms B and C to *reject* a non-zero inbreeding coefficient rather than ignore it — *"a silently dropped `F` on a selfing panel is the failure this is guarding"* — and `call_locus` returns no `Result`. Those arms are [calling_bakeoffs.md](doc/devel/ng/impl_plan/calling_bakeoffs.md)'s; settle it there before either is written, because it changes the seam every arm shares.
+  - **`max_passes` has a floor and no ceiling**, where production caps its analogue at 500. Left open deliberately: the consequence is a slow locus rather than a wrong one, and picking a number now would give the bound less warrant than the value it bounds. Set it from the pass-count distribution, which is `spec/calling_em_loop.md` §12's fourth question.
   - **Follow-up (later steps):** `StratumFits` wants a named empty constructor the way `ContaminationMixture::uncontaminated` has one, in `parameter_estimation/joint/`; the prune must return its remapping, since `LocusInference::new` can only catch an out-of-range allele id and not one that stays in range after a renumber; and E1 owns the covering-samples-to-run-order conversion that `spec/calling_em_loop.md` §5.0 names as the most dangerous join in the design.
 
 #### Candidate alleles (step 6) — narrowing the merge's table to what a locus is called over

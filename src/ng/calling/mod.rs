@@ -30,8 +30,9 @@
 //! [`likelihood`], step 7, how probable this sample's reads are given each genotype
 //! (`doc/devel/ng/impl_plan/calling_read_likelihoods.md`); and
 //! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
-//! (`doc/devel/ng/impl_plan/calling_prior.md`). **The fourth is the loop that consumes all
-//! three**, and it and the shared types that borrow from them arrive with their own plan
+//! (`doc/devel/ng/impl_plan/calling_prior.md`). **The fourth is [`inference`], step 9, the
+//! loop that consumes all three** — it holds the seam every way of handling a cohort crosses
+//! and the configuration of the three nested loops, two of which ship switched off
 //! (`doc/devel/ng/impl_plan/calling_loop.md`).
 //!
 //! Beside this file rather than inside any one sub-module: [`genotype_table`], which
@@ -54,6 +55,7 @@ mod genotype_table_parity;
 pub mod allele_candidates;
 pub mod genotype_prior;
 pub mod genotype_table;
+pub mod inference;
 pub mod likelihood;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};

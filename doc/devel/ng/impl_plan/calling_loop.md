@@ -155,7 +155,7 @@ The ordering contract documented and asserted: one run-wide sample order indexes
 slice; `LocusEvidence`'s discriminant and `CandidateAlleles.kind` must agree — disagreement is a
 caller bug and asserts. *Source:* arch §2; spec §8.
 
-**A2. `LocusGenotyper` + `CallingLoopConfig`.**  ☐
+**A2. `LocusGenotyper` + `CallingLoopConfig`.**  ✅
 `inference/mod.rs`: the seam trait (`call_locus(evidence, parameters, candidates, config,
 scratch) -> LocusInference`); `CallingLoopConfig` with the inherited constants as named,
 soft-marked values — `DEFAULT_CONVERGENCE_THRESHOLD = 1e-3`, `DEFAULT_MAX_PASSES = 50` — plus
