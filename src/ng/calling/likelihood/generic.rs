@@ -1345,12 +1345,20 @@ mod tests {
 
     /// An observation of `num_reads` reads on one allele from one read group, carrying the
     /// summed log error the merge would have folded.
+    ///
+    /// **The two site-quality counters are set to half the reads and left alone**, because
+    /// nothing in this file reads them: they are the artifact correction's, not the read
+    /// model's (`doc/devel/ng/spec/calling_quality.md` §3.3). Half rather than zero so that a
+    /// fixture copied out of here into a test that *does* read them starts from a balanced
+    /// split rather than from one that looks like total strand bias.
     fn observation(allele: u16, read_group: u32, num_reads: u32, q_sum: f64) -> GenericObservation {
         GenericObservation {
             allele: AlleleId(allele),
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum,
+            forward_reads: num_reads / 2,
+            placed_left_reads: num_reads / 2,
         }
     }
 

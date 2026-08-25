@@ -1131,16 +1131,40 @@ pub struct GenericObservation {
     pub num_reads: u32,
     /// Σ `ln P(error)` over those reads — `q_sum_o`, straight off the merge's row.
     pub q_sum: f64,
+    /// Of those reads, how many were on the forward strand.
+    ///
+    /// **The read model does not use this, and it is carried anyway** — the same reason
+    /// [`Self::q_sum`]'s own comment gives for keeping a term that cancels. The site
+    /// quality's artifact correction compares the strand split of the reference allele's
+    /// reads against the alternative's, and the evidence it compares is released with the
+    /// locus (`doc/devel/ng/spec/calling_quality.md` §3.3). This view is where that
+    /// specification says the counts travel, and the merge's `AlleleSupport` already has
+    /// them; anything that gathered them a second way would be a second answer to the same
+    /// question.
+    pub forward_reads: u32,
+    /// Of those reads, how many started strictly left of the record they were seen at —
+    /// freebayes' `placedLeft`, and the read-position half of the same correction.
+    ///
+    /// **Counted against each record's own position, not the cohort locus's first base**, by
+    /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
+    /// sample's records this mixes as many questions as it has records. Carried forward from
+    /// [`AlleleSupport::placed_left`](crate::ng::run::cohort_merge::AlleleSupport::placed_left),
+    /// whose own comment is the one to read before drawing a conclusion from it.
+    pub placed_left_reads: u32,
 }
 
 impl GenericObservation {
-    /// The four numbers of one merge row, under the candidate id selection gave that row's
+    /// The six numbers of one merge row, under the candidate id selection gave that row's
     /// allele.
     ///
     /// **The id is an argument because this module cannot compute it.** The row's own
     /// `allele` field indexes the merge's unification table and [`AlleleId`] indexes the
     /// candidate table, and only selection knows how one maps onto the other (see the
     /// module's *Two allele tables* note).
+    ///
+    /// **Four of the six are the read model's and two are the site quality's**
+    /// ([`Self::forward_reads`], [`Self::placed_left_reads`]). They are copied here rather
+    /// than fetched later because the merge row they come from is released with the locus.
     #[must_use]
     pub fn of_supported_allele(row: &SupportedAllele, allele: AlleleId) -> Self {
         Self {
@@ -1148,6 +1172,8 @@ impl GenericObservation {
             read_group: row.read_group,
             num_reads: row.support.num_reads,
             q_sum: row.support.q_sum,
+            forward_reads: row.support.num_fwd,
+            placed_left_reads: row.support.placed_left,
         }
     }
 
@@ -1168,8 +1194,9 @@ impl GenericObservation {
     /// **`out` is caller scratch, cleared and refilled**, so a worker holds one buffer
     /// across every sample of every locus and the row function still allocates nothing
     /// (spec §8). There is no borrow to be had instead: a merge row is 48 bytes and this one
-    /// is 24, so no reinterpretation of the merge's `Vec` exists and somebody has to fill a
-    /// parallel buffer.
+    /// is 32 — it was 24 before the two site-quality counters joined it — so no
+    /// reinterpretation of the merge's `Vec` exists and somebody has to fill a parallel
+    /// buffer.
     ///
     /// **The output order is the input order**, so `out` is ascending on
     /// `(candidate allele, read group)` exactly when selection's mapping keeps alleles in
@@ -1881,14 +1908,33 @@ mod tests {
         assert_eq!(observation.q_sum, -41.25);
     }
 
-    /// The type's doc promises four scalars and cheap copying. A field owning heap would
+    /// **And the two the formula does not read**, which is the whole reason they are here:
+    /// the site quality's artifact correction compares the reference allele's strand and
+    /// read-position split against the alternative's, and the merge row they come from is
+    /// released with the locus (`doc/devel/ng/spec/calling_quality.md` §3.3).
+    ///
+    /// The fixture's `num_fwd` is 7 and its `placed_left` is 3 — deliberately different from
+    /// each other and from every other field, so a copy that crossed the two, or took
+    /// `num_reads` for either, changes this assertion.
+    #[test]
+    fn the_view_also_keeps_the_two_counts_the_site_quality_reads() {
+        let observation =
+            GenericObservation::of_supported_allele(&supported_row(3, 9, 17, -41.25), AlleleId(3));
+
+        assert_eq!(observation.forward_reads, 7);
+        assert_eq!(observation.placed_left_reads, 3);
+    }
+
+    /// The type's doc promises plain scalars and cheap copying. A field owning heap would
     /// make both false, and would also break the no-allocation contract the row function
     /// works under (spec §8), so the width is pinned rather than described.
     #[test]
-    fn the_observation_stays_four_scalars_wide() {
-        // 24 and not 18: the `f64` wants eight-byte alignment, so the two-byte allele id and
-        // the two four-byte counts are padded out to sixteen before it.
-        assert_eq!(std::mem::size_of::<GenericObservation>(), 24);
+    fn the_observation_stays_a_handful_of_scalars_wide() {
+        // **32, and it was 24 before the two site-quality counters joined it.** Not 34: the
+        // `f64` wants eight-byte alignment, so the two-byte allele id and the four
+        // four-byte counts are padded out to twenty-four before it. The two counters cost
+        // eight bytes on a struct the merge already pays 48 for.
+        assert_eq!(std::mem::size_of::<GenericObservation>(), 32);
         assert_eq!(std::mem::align_of::<GenericObservation>(), 8);
         assert!(!std::mem::needs_drop::<GenericObservation>());
     }
