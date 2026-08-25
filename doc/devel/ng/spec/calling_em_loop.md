@@ -73,9 +73,9 @@ decides which one ng keeps.
   and emission, step 11 of [`ng_proposal.md`](ng_proposal.md), and production's STR work found
   emission and genotyping behave independently. What this produces is genotypes and their
   confidence; what is done with them is a separate document.
-- **It does not select the candidate alleles from what the merge unified** — that step has no spec
-  yet and §4 says so. What this document does own is whether the loop may **add** to the set once
-  calling starts (§4.1, §12's Q3).
+- **It does not select the candidate alleles from what the merge unified** — that is step 6's,
+  and it has its own spec ([`candidate_alleles.md`](candidate_alleles.md)). What this document does
+  own is whether the loop may **add** to the set once calling starts (§4.1, §12's Q3).
 - **It fits nothing the parameter pre-pass fits.** Every error rate, contamination fraction and
   inbreeding coefficient arrives frozen and leaves unchanged. What the loop may move is §5's, and it
   is two things: this locus's allele frequencies, always; and this locus's slippage numbers, if
@@ -393,20 +393,25 @@ added *between two passes of the frequency loop*, because the third row plus the
 would leave the loop comparing a different quantity from one pass to the next. Add alleles between
 whole runs of the loop, as §2's outermost `repeat` does, and every row of the table is satisfied.
 
-**No document says how the candidate alleles are chosen, and one has to.**
-[`cohort_merge.md`](cohort_merge.md) §13 passes *"choosing candidate alleles from the table"* to
-"the calling steps' spec"; all three calling documents pass it to
-[`ng_proposal.md`](ng_proposal.md) step 6, which is a row in a table comparing five callers. Nobody
-has written the design.
+**This section recorded that no document said how the candidate alleles are chosen. One does
+now** ([`candidate_alleles.md`](candidate_alleles.md), with its architecture and a shipped
+`select_generic`; the repeat-tract half is
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) and is written but not built). The gap was
+found here — [`cohort_merge.md`](cohort_merge.md) §13 passed *"choosing candidate alleles from the
+table"* to "the calling steps' spec", all three calling documents passed it on to
+[`ng_proposal.md`](ng_proposal.md) step 6, which is a row in a table comparing five callers, and
+nobody had written the design. **What follows is kept because it is what the design had to
+answer**, not because it is still open.
 
-**One consequence is already blocking a formula, which is how the gap was noticed.** The SNP/indel
+**One consequence was blocking a formula, and that is how the gap was noticed.** The SNP/indel
 emission needs `q_sum_other`, the pooled error mass of reads matching no candidate
 ([`read_likelihoods.md`](read_likelihoods.md) §3.3), and **nothing upstream produces it**: the merge
 unifies *every* sequence a sample showed into the allele table ([`cohort_merge.md`](cohort_merge.md)
 §4.2), so there is no leftover until something narrows the table. **Selection is what creates that
 pool, so whoever specifies selection owes the pool** — the alleles it dropped, with their summed
-per-read error mass, not merely a count of them. Recorded here because a coder who writes the
-emission before selection exists will otherwise invent a producer for it.
+per-read error mass, not merely a count of them. **It does**: `LocusSelection::unmatched` carries
+the reads and the mass per covering sample, summed from the merge's own rows rather than
+re-derived from a count and a rate.
 
 **What is true of both paths today: neither invents a sequence.** A coder coming from HipSTR will
 expect otherwise. Production's STR candidate assembly admits a repeat length only where some
