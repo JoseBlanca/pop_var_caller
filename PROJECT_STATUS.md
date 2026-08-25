@@ -29,8 +29,17 @@ Skills and agents are instructed to leave it untouched.
 > truth-set column included. **The support share moved from 5 in 100 to 10** (owner's ruling): it
 > costs two true alleles at 300× that 5 keeps, and ships anyway, because recall is one side of the
 > trade and the count of admitted candidates is the other and nothing has measured the second yet.
-> **D2** is the standing check: a 47 kB and 73 kB fixture cut from the GIAB trio at both depths,
-> four tests, each one killed by mutating the module rather than trusted after reading it.
+> **D2** is the standing check: a 68 kB and 95 kB fixture cut from HG002 at both depths, four
+> tests, each one killed by mutating the module rather than trusted after reading it — 23
+> mutations tried, 15 caught.
+> **⚠ And the reviews found the benchmark is not what every document called it.** Every "GIAB
+> trio" figure in this step's spec is **HG002 alone**: HG003 and HG004 are sliced to their own
+> benchmark regions, so over HG002's BED they contribute 0 reads and 0 loci, and a three-file walk
+> is byte-identical to a one-file walk. The measurements stand; the label did not. It also means
+> the trio runs were the *single-sample* end of the committed range all along, and that four
+> mutations of the per-sample rule survive this fixture — a sum over one sample is that sample's
+> own count. The module's multi-sample unit tests are what cover that half; **no benchmark here
+> pairs a real cohort with a truth set**.
 > **⛦ The finding that mattered came from the owner asking why a real allele would sit below a
 > tenth of a sample's reads at 300×.** It would not. Of the four the 10-in-100 share drops, two
 > were a scoring artefact: at `chr1:90667287-90667293` HG002 carries a homozygous 2-base deletion
