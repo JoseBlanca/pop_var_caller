@@ -469,6 +469,22 @@ wrap onto the reference's index
 | GIAB trio, 30×, 572 kb | 4,177 | 0 | 0 |
 | GIAB trio, 300×, 572 kb | 7,478 | 0 | 4 (0.05%) |
 
+**At the bar this module actually ships — 2 reads or 10 in 100 — it binds less still, and that is
+now a measurement rather than the inequality this section used to carry** (2026-08-25). The same
+three runs:
+
+| cohort | loci above six alleles | loci above four | loci above three | widest locus |
+|---|---|---|---|---|
+| 63 tomato accessions, 400 kb | **16** (1 in 3,400) | 53 (0.10%) | 171 (0.32%) | 11 or more alternatives |
+| GIAB trio, 30×, 572 kb | 0 | 0 | 1 locus | 3 alternatives |
+| GIAB trio, 300×, 572 kb | **0** | 0 | **0** | **2 alternatives** |
+
+The trio at 300× is the striking one: with the shipped share the widest locus in 572 kb carries
+two alternatives, so **no cap of three or more could bind anywhere in that run**. The earlier
+table's counts stand as what a 2-in-100 share gives, which is what §3.3 swept. *"11 or more" is
+the histogram's top bucket rather than an exact width; at the 2-in-100 share the widest tomato
+locus carried 14.*
+
 **So at these cohort sizes the cap is a safety valve, not a working part**, and its exact value
 carries little. **But what it guards against grows with the cohort**, which is why it is here.
 Holding the allele table fixed at the 63-accession one and varying only how many samples the bar
@@ -680,6 +696,20 @@ a 2-in-100 share is added.
 more independent chances for one of them to reach the bar, so what is *admitted* grows even where
 the locus does not (§4.2's table). That is what the cap and its ranking are for, and it is the one
 part of this design whose behaviour at that size is extrapolated rather than measured.
+
+**And what the cap does at one sample, which this section owned and never said.** It is the same
+rule — nothing in it counts samples — but it is nearly inert there, and for a reason worth stating
+rather than leaving to be inferred. One sample can only put an allele among the cap's candidates
+by clearing the bar for it itself, so the cap can only ever cut sequences that one sample's own
+reads earned; and at three reads a position it takes six distinct earned sequences at one position
+before six alleles are reached at all. **Measured: holding the tomato allele table fixed and
+asking the rule of one accession, the widest locus of 53,935 carries two alternatives — three
+alleles, against a cap of six** (§4.2's growth table). That figure is at the merge's 2-in-100
+share, which is the bar that table was swept at; the shipped 10 in 100 admits no more, so the
+conclusion only strengthens. So at the thin end of the range the cap is not a working part, and the
+truncation policy §4.1 argues for — a cut allele making its carrier's genotype missing — has
+almost nothing to act on: the sample that would be emitted missing is the only sample there is,
+and the locus would have been called over its own sequences or not at all.
 
 ---
 

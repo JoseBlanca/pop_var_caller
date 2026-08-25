@@ -361,8 +361,13 @@ so every argument is an index expression.
 ///
 /// **One pass over the locus's rows.** For each sample: its reads at the locus are the sum of
 /// its rows, which is that sample's compared reads because the merge admits only complete
-/// observations onto alleles (spec §1.3); each row then feeds its allele's summary. A second
-/// pass admits the survivors in table order, applies the cap, and fills the leftover.
+/// observations onto alleles (spec §1.3); each row then feeds its allele's summary. **Then the
+/// cap chooses, the survivors are admitted in the merge table's own order, and the leftover is
+/// filled last** — that order is forced and this sentence used to give it wrong. The cap has to
+/// precede admission because `CandidateAlleles` only ever pushes, so an allele admitted before
+/// the cap has cut cannot be taken back out; and the leftover has to follow admission because it
+/// is defined against the finished remapping, which is what says whether a sample's allele
+/// survived.
 ///
 /// The reference is admitted first and is exempt from both the bar and the cap.
 pub fn select_generic(
@@ -399,9 +404,12 @@ for each covering sample i:
     }
 ```
 
-**`GenericSampleEvidence` gains a field.** `read_likelihoods.md` §2.1 declares `unmatched_q_sum`
-alone; the count of §2.3 has to travel with it or nothing downstream can tell a truncated sample
-from a clean one. *That is an edit to that document and is not made here.*
+**`GenericSampleEvidence` gained a field, and that edit has landed.**
+[`read_likelihoods.md`](read_likelihoods.md) §2.1 declared `unmatched_q_sum` alone, and the count
+of §2.3 had to travel with it or nothing downstream could tell a truncated sample from a clean
+one — the mass is identical under every genotype and cancels. **It now declares
+`genotype_must_be_missing` beside it**, so this paragraph records a closed hand-off rather than an
+outstanding one.
 
 ---
 
