@@ -627,6 +627,57 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         println!("# allele dump written to {path}");
     }
 
+    // **The same loci with the sample axis kept, which the dump above folds away.**
+    // `NG_SELECT_ROWS=<path>` writes one row per (locus, sample, allele): the sample's pooled
+    // reads on that allele and its compared reads at the locus. **The dump above cannot serve
+    // as a test fixture and this can**, because the admission rule is per sample — a checked-in
+    // test that re-derives it needs each sample's own numerator and denominator, where the
+    // dump carries a cohort total and one maximised share.
+    //
+    // **Read groups are pooled here, as the shipped fold pools them** (`one_run_per_allele`),
+    // so a fixture built from this exercises the rule but not the pooling; that half is the
+    // module's own unit tests'.
+    if let Ok(path) = std::env::var("NG_SELECT_ROWS") {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        writeln!(
+            out,
+            "contig\tstart\tend\tallele\tbases\tsample\treads\tcompared_reads"
+        )?;
+        for observation in &built {
+            for sample in &observation.per_sample {
+                let compared: u32 = sample
+                    .supported
+                    .iter()
+                    .map(|row| row.support.num_reads)
+                    .sum();
+                let mut pooled: Vec<u32> = vec![0; observation.alleles.len()];
+                for row in &sample.supported {
+                    pooled[row.allele] += row.support.num_reads;
+                }
+                for (allele, reads) in pooled.iter().enumerate() {
+                    if *reads == 0 {
+                        continue;
+                    }
+                    writeln!(
+                        out,
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        observation.region.contig.0,
+                        observation.region.start.get(),
+                        observation.region.end.get(),
+                        allele,
+                        String::from_utf8_lossy(&observation.alleles[allele]),
+                        sample.sample,
+                        reads,
+                        compared,
+                    )?;
+                }
+            }
+        }
+        out.flush()?;
+        println!("# per-sample allele rows written to {path}");
+    }
+
     // **Does the admitted allele count grow with the cohort?** The allele table is held
     // fixed — the whole run's — and only the number of samples the bar is asked of varies.
     // A per-sample bar asks the same question however many samples there are, but more
