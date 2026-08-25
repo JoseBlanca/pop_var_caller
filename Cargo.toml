@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 # Mi22: edition 2024 requires ≥ 1.85; the `let-chains` features
-# (e.g. `if let ... && ...` in header.rs) are stable since 1.88, so
-# 1.88 is the practical floor. `rust-toolchain.toml` pins 1.97.1 for
-# benchmark reproducibility — see its comment.
-rust-version = "1.88"
+# (e.g. `if let ... && ...` in header.rs) are stable since 1.88, which
+# was the floor until 2026-08-25.
+#
+# **Raised to 1.98 with the pin bump**, because the bump was made in
+# order to *use* what 1.98 added — `f64::algebraic_add` and its
+# siblings in the likelihood and EM reductions, among others — and a
+# floor below the features the code uses is a claim that does not hold.
+# `rust-toolchain.toml` pins 1.98.0 for benchmark reproducibility; this
+# says which compiler the source actually needs. The two now coincide,
+# so CI's MSRV job duplicates the main build until the pin next moves
+# ahead of the floor again.
+rust-version = "1.98"
 
 [lints.rust]
 # Mi23: pin the unsafe-free policy via the lint table so editor LSPs
