@@ -2017,9 +2017,21 @@ mod tests {
     /// site that concatenated two samples' rows, or applied a selection mapping that
     /// reordered the alleles, would break the order with nothing saying so — and
     /// floating-point addition is not associative, so the run's genotypes move with it.
+    /// **Debug-profile only, following the convention `genotype_prior/` already uses.** The
+    /// check this reaches is a `debug_assert!` by a recorded decision, not by oversight — see
+    /// [`GenericSampleEvidence::new`]'s doc: the scan is linear in the rows and the order is
+    /// the merge's property to hold rather than this constructor's to re-establish at every
+    /// call. Without the `cfg` the test fails under `--release` with *"test did not panic as
+    /// expected"*, which is what kept `cargo test --release --lib ng::calling` red and so kept
+    /// **every** release-held assertion in this folder outside CI's reach.
+    ///
+    /// **This attribute is not a way to quiet a failing test.** It says the check under it is
+    /// deliberately debug-only. A test on a check that is meant to hold in release must not
+    /// carry it, or the release gate stops meaning anything.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn rows_out_of_pair_order_are_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn rows_out_of_pair_order_are_refused_in_debug() {
         let out_of_order = [
             GenericObservation::of_supported_allele(&supported_row(1, 0, 3, -1.0), AlleleId(1)),
             GenericObservation::of_supported_allele(&supported_row(0, 0, 3, -1.0), AlleleId(0)),
@@ -2034,9 +2046,14 @@ mod tests {
     /// rows produces**, and the sum would then charge that evidence twice. The order check has
     /// to be strict rather than merely non-decreasing, and both fixtures below are strictly
     /// descending, so neither puts an equal pair in front of it.
+    /// **Debug-profile only** — the check it reaches is a `debug_assert!` by the recorded
+    /// decision in [`GenericSampleEvidence::new`]'s doc, not by oversight. See
+    /// [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute is here and what
+    /// it must never be used for.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn one_pair_appearing_twice_is_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn one_pair_appearing_twice_is_refused_in_debug() {
         let duplicated = [
             GenericObservation::of_supported_allele(&supported_row(1, 0, 3, -1.0), AlleleId(1)),
             GenericObservation::of_supported_allele(&supported_row(1, 0, 5, -2.0), AlleleId(1)),
@@ -2045,9 +2062,14 @@ mod tests {
         let _ = GenericSampleEvidence::new(&duplicated, 0.0, &[]);
     }
 
+    /// **Debug-profile only** — the check it reaches is a `debug_assert!` by the recorded
+    /// decision in [`GenericSampleEvidence::new`]'s doc, not by oversight. See
+    /// [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute is here and what
+    /// it must never be used for.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn rows_out_of_read_group_order_within_one_allele_are_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn rows_out_of_read_group_order_within_one_allele_are_refused_in_debug() {
         let out_of_order = [
             GenericObservation::of_supported_allele(&supported_row(2, 9, 3, -1.0), AlleleId(2)),
             GenericObservation::of_supported_allele(&supported_row(2, 4, 3, -1.0), AlleleId(2)),
@@ -3524,9 +3546,15 @@ mod tests {
     /// A sample that claims more copies than the batch it is one addend of means the two count
     /// paths have gone out of step — the check `fill_sample_concentration` makes for the same
     /// subtraction, at the same threshold.
+    /// **Debug-profile only** — `fill_contaminant_allele_frequencies`' own `# Panics` says so
+    /// in as many words (*"**In debug**, on a sample holding materially more copies than the
+    /// batch it is part of"*), mirroring `fill_sample_concentration`'s check for the same
+    /// subtraction. See [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute
+    /// is here and what it must never be used for.
     #[test]
     #[should_panic(expected = "count paths have gone out of step")]
-    fn a_sample_carrying_more_than_its_whole_batch_is_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn a_sample_carrying_more_than_its_whole_batch_is_refused_in_debug() {
         let batch_copies = [2.0, 0.0];
         let impossible = [4.0, 0.0];
         let mut out = [f64::NAN; 2];
