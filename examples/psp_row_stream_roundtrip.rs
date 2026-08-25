@@ -787,6 +787,569 @@ fn many(dir: &str, kind: &str, limit: usize) {
     }
 }
 
+// =====================================================================
+// The streaming store: big blocks, a small window, nothing fully inflated
+// =====================================================================
+//
+// The store above ties two things to one number, exactly as production's
+// `.psp` does: a frame is both how far back the compressor may look and how
+// much a reader must inflate before it can hand out a record. Shrinking it to
+// save memory costs bytes, and it multiplies the block index besides.
+//
+// This store separates them. A **block** is large — a megabyte of records, so
+// the compressor has plenty to work with and the index has few entries — while
+// the **window**, the reach the compressor is allowed, is capped at write time
+// and is what a reader has to hold. The reader never inflates a whole block:
+// it pulls decompressed bytes into a small rolling buffer, parses records out
+// of it, and drops them.
+//
+// Two conditions have to hold together for that to be worth anything, and only
+// the first is zstd's doing:
+//
+//   1. do not inflate the whole block  — the capped window and the streaming
+//      decoder below;
+//   2. do not accumulate what you inflated — the reader hands each record to
+//      the caller and keeps nothing, so the rolling buffer is the whole
+//      decoded footprint.
+//
+// Satisfy only the first and the memory reappears in the caller's arrays.
+
+const MAGIC_STREAM: &[u8; 4] = b"NGS1";
+
+/// How much decompressed data the reader keeps in front of the parser. One
+/// record has to fit; beyond that, bigger only means fewer refills.
+const ROLLING_BYTES: usize = 64 * 1024;
+/// How much compressed data is read from the file at a time.
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+fn encode_streaming(
+    psp: &str,
+    out_path: &str,
+    block_bytes: usize,
+    level: i32,
+    window_log: u32,
+    scales: Scales,
+) {
+    let t0 = Instant::now();
+    let mut comp = zstd::bulk::Compressor::new(level).expect("compressor");
+    comp.set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false))
+        .expect("content size");
+    // The cap that makes the block size and the reader's memory independent.
+    // Without it zstd sizes its window from the block and a reader must hold
+    // the whole thing.
+    comp.set_parameter(zstd::zstd_safe::CParameter::WindowLog(window_log))
+        .expect("window log");
+
+    let mut sink = BufWriter::with_capacity(1 << 20, File::create(out_path).expect("create"));
+    sink.write_all(MAGIC_STREAM).expect("write");
+    for scale in [scales.gc, scales.coverage, scales.q_sum] {
+        sink.write_all(&scale.to_le_bytes()).expect("write");
+    }
+    sink.write_all(&window_log.to_le_bytes()).expect("write");
+
+    let mut reader = PspReader::new(BufReader::with_capacity(
+        1 << 20,
+        File::open(psp).expect("open"),
+    ))
+    .expect("psp");
+    let mut fw = FrameWriter {
+        scales,
+        ..FrameWriter::default()
+    };
+    let mut raw = Vec::new();
+    let (mut n_records, mut n_blocks) = (0u64, 0u64);
+    let mut cur_chrom = u32::MAX;
+    {
+        let records = reader.records();
+        for rec in records {
+            let rec = rec.expect("record");
+            // A block never crosses a chromosome, so a reader that starts at
+            // one carries in no state.
+            if (rec.chrom_id != cur_chrom || fw.buf.len() >= block_bytes) && !fw.is_empty() {
+                fw.finish(&mut raw);
+                write_frame(&mut sink, &mut comp, &raw);
+                n_blocks += 1;
+            }
+            cur_chrom = rec.chrom_id;
+            fw.push(&rec);
+            n_records += 1;
+        }
+    }
+    if !fw.is_empty() {
+        fw.finish(&mut raw);
+        write_frame(&mut sink, &mut comp, &raw);
+        n_blocks += 1;
+    }
+    sink.flush().expect("flush");
+    drop(sink);
+
+    let bytes = std::fs::metadata(out_path).expect("stat").len();
+    let psp_bytes = std::fs::metadata(psp).expect("stat").len();
+    println!("phase\tencode-streaming");
+    println!("records\t{n_records}");
+    println!("blocks\t{n_blocks}");
+    println!("window-bytes\t{}", 1usize << window_log);
+    println!("out-bytes\t{bytes}");
+    println!("bytes-per-record\t{:.3}", bytes as f64 / n_records as f64);
+    println!("psp-bytes\t{psp_bytes}");
+    println!(
+        "psp-bytes-per-record\t{:.3}",
+        psp_bytes as f64 / n_records as f64
+    );
+    // What an index over these blocks would cost per open sample, at the 24
+    // bytes an entry production's costs.
+    println!("index-bytes-24b-per-block\t{}", n_blocks * 24);
+    println!("seconds\t{:.2}", t0.elapsed().as_secs_f64());
+    if let Some(k) = peak_rss_kib() {
+        println!("peak-rss-kib\t{k}");
+    }
+}
+
+/// A cursor that reports running out of bytes instead of indexing past the
+/// end. The streaming reader parses from a buffer that may hold only part of a
+/// record, so "not enough yet" has to be an answer rather than a panic.
+struct TryCursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> TryCursor<'a> {
+    #[inline]
+    fn varint(&mut self) -> Option<u64> {
+        let mut v = 0u64;
+        let mut shift = 0;
+        loop {
+            let b = *self.bytes.get(self.at)?;
+            self.at += 1;
+            v |= ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
+            shift += 7;
+        }
+    }
+    #[inline]
+    fn svarint(&mut self) -> Option<i64> {
+        let v = self.varint()?;
+        Some(((v >> 1) as i64) ^ -((v & 1) as i64))
+    }
+    #[inline]
+    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let s = self.bytes.get(self.at..self.at + n)?;
+        self.at += n;
+        Some(s)
+    }
+}
+
+/// One open sample. Everything it holds is bounded and none of it is the
+/// block: a compressed read chunk, the rolling decompressed buffer, zstd's own
+/// state sized by the window, and the record being built.
+struct StreamingStore {
+    scales: Scales,
+    src: BufReader<File>,
+    dctx: zstd::zstd_safe::DCtx<'static>,
+    in_buf: Vec<u8>,
+    in_pos: usize,
+    in_filled: usize,
+    /// Compressed bytes left in the block being read.
+    block_left: u64,
+    out: Vec<u8>,
+    out_at: usize,
+    /// True once the current block's frame has been fully decompressed.
+    block_done: bool,
+    eof: bool,
+    // The running state a record is parsed against.
+    chrom_id: u32,
+    pos: u32,
+    remaining: u64,
+    prev_cov_q: i64,
+    last_chain: u64,
+    first: bool,
+}
+
+impl StreamingStore {
+    fn open(path: &std::path::Path) -> Self {
+        let mut src = BufReader::with_capacity(1 << 16, File::open(path).expect("open"));
+        let mut magic = [0u8; 4];
+        src.read_exact(&mut magic).expect("magic");
+        assert_eq!(&magic, MAGIC_STREAM, "not a streaming store");
+        let mut b8 = [0u8; 8];
+        let mut read_scale = || {
+            src.read_exact(&mut b8).expect("scale");
+            f64::from_le_bytes(b8)
+        };
+        let scales = Scales {
+            gc: read_scale(),
+            coverage: read_scale(),
+            q_sum: read_scale(),
+        };
+        let mut b4 = [0u8; 4];
+        src.read_exact(&mut b4).expect("window log");
+        let window_log = u32::from_le_bytes(b4);
+
+        let mut dctx = zstd::zstd_safe::DCtx::create();
+        // Refuse a file whose window is larger than we budgeted for, rather
+        // than quietly allocating it.
+        dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(window_log))
+            .expect("window log max");
+
+        Self {
+            scales,
+            src,
+            dctx,
+            in_buf: vec![0u8; READ_CHUNK_BYTES],
+            in_pos: 0,
+            in_filled: 0,
+            block_left: 0,
+            out: Vec::with_capacity(ROLLING_BYTES),
+            out_at: 0,
+            block_done: true,
+            eof: false,
+            chrom_id: 0,
+            pos: 0,
+            remaining: 0,
+            prev_cov_q: 0,
+            last_chain: 0,
+            first: true,
+        }
+    }
+
+    /// Start the next block, or report that the file is finished.
+    fn next_block(&mut self) -> bool {
+        let mut hdr = [0u8; 8];
+        if self.src.read_exact(&mut hdr).is_err() {
+            self.eof = true;
+            return false;
+        }
+        self.block_left = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) as u64;
+        // hdr[4..8] is the uncompressed length, which a streaming reader does
+        // not need and deliberately does not use: needing it would mean
+        // sizing a buffer from the block.
+        self.in_pos = 0;
+        self.in_filled = 0;
+        self.out.clear();
+        self.out_at = 0;
+        self.block_done = false;
+        self.remaining = 0;
+        true
+    }
+
+    /// Decompress more of the current block into the rolling buffer. Returns
+    /// false when the block is finished and nothing more will arrive.
+    fn pump(&mut self) -> bool {
+        if self.block_done {
+            return false;
+        }
+        // Drop what the parser has already consumed before asking for more.
+        if self.out_at > 0 {
+            self.out.drain(..self.out_at);
+            self.out_at = 0;
+        }
+        if self.out.len() >= self.out.capacity() {
+            // One record needs more than the rolling buffer holds. Grow rather
+            // than fail — this is rare and bounded by the largest record.
+            self.out.reserve(self.out.capacity());
+        }
+        if self.in_pos == self.in_filled {
+            if self.block_left == 0 {
+                self.block_done = true;
+                return false;
+            }
+            let want = (self.block_left as usize).min(self.in_buf.len());
+            self.src
+                .read_exact(&mut self.in_buf[..want])
+                .expect("block bytes");
+            self.block_left -= want as u64;
+            self.in_pos = 0;
+            self.in_filled = want;
+        }
+        let mut input = zstd::zstd_safe::InBuffer {
+            src: &self.in_buf[..self.in_filled],
+            pos: self.in_pos,
+        };
+        let at = self.out.len();
+        let mut output = zstd::zstd_safe::OutBuffer::around_pos(&mut self.out, at);
+        let hint = self
+            .dctx
+            .decompress_stream(&mut output, &mut input)
+            .expect("decompress");
+        self.in_pos = input.pos;
+        if hint == 0 && self.block_left == 0 && self.in_pos == self.in_filled {
+            self.block_done = true;
+        }
+        true
+    }
+
+    /// The next record, or None at the end of the file. Nothing is retained:
+    /// the caller gets the record and the store keeps only its running state.
+    fn next(&mut self) -> Option<PileupRecord> {
+        loop {
+            if self.remaining == 0 {
+                if self.block_done && self.out_at >= self.out.len() && !self.next_block() {
+                    return None;
+                }
+                // A block opens with its chromosome, first position and count.
+                loop {
+                    let mut cur = TryCursor {
+                        bytes: &self.out[self.out_at..],
+                        at: 0,
+                    };
+                    match (cur.varint(), cur.varint(), cur.varint()) {
+                        (Some(c), Some(p), Some(n)) => {
+                            self.out_at += cur.at;
+                            self.chrom_id = c as u32;
+                            self.pos = p as u32;
+                            self.remaining = n;
+                            self.prev_cov_q = 0;
+                            self.last_chain = 0;
+                            self.first = true;
+                            break;
+                        }
+                        _ => {
+                            if !self.pump() {
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+            // Snapshot: a parse that runs out of bytes is retried from here
+            // once more has arrived, so it must start from the same state.
+            let (pos, prev_cov_q, last_chain, first) =
+                (self.pos, self.prev_cov_q, self.last_chain, self.first);
+            match self.parse_record() {
+                Some(rec) => {
+                    self.remaining -= 1;
+                    return Some(rec);
+                }
+                None => {
+                    self.pos = pos;
+                    self.prev_cov_q = prev_cov_q;
+                    self.last_chain = last_chain;
+                    self.first = first;
+                    if !self.pump() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse one record out of the rolling buffer, or None if it is not all
+    /// there yet. Mutates the running state only on success.
+    fn parse_record(&mut self) -> Option<PileupRecord> {
+        let mut cur = TryCursor {
+            bytes: &self.out[self.out_at..],
+            at: 0,
+        };
+        let delta = cur.varint()? as u32;
+        let mut pos = self.pos;
+        let mut first = self.first;
+        if first {
+            first = false;
+        } else {
+            pos += delta;
+        }
+        let n_alleles = cur.varint()? as usize;
+        let gc_code = cur.varint()?;
+        let windowed_gc = if gc_code == 0 {
+            f32::NAN
+        } else {
+            ((gc_code - 1) as f64 / self.scales.gc) as f32
+        };
+        let cov_code = cur.varint()?;
+        let mut prev_cov_q = self.prev_cov_q;
+        let windowed_coverage = if cov_code == 0 {
+            f32::NAN
+        } else {
+            let z = cov_code - 1;
+            let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
+            prev_cov_q += d;
+            (prev_cov_q as f64 / self.scales.coverage) as f32
+        };
+
+        let mut last_chain = self.last_chain;
+        let mut alleles = Vec::with_capacity(n_alleles);
+        for _ in 0..n_alleles {
+            let len = cur.varint()? as usize;
+            let seq = cur.bytes(len)?.to_vec();
+            let num_obs = cur.varint()? as u32;
+            let q_sum = cur.svarint()? as f64 / self.scales.q_sum;
+            let fwd = cur.varint()? as u32;
+            let placed_left = cur.varint()? as u32;
+            let placed_start = cur.varint()? as u32;
+            let mapq_sum = cur.varint()? as u32;
+            let mapq_sum_sq = cur.varint()?;
+            let n_chain = cur.varint()? as usize;
+            let mut chain_ids = Vec::with_capacity(n_chain);
+            for _ in 0..n_chain {
+                let d = cur.svarint()?;
+                last_chain = (last_chain as i64).wrapping_add(d) as u64;
+                chain_ids.push(last_chain);
+            }
+            alleles.push(AlleleObservation::new(
+                seq,
+                AlleleSupportStats::new(
+                    num_obs,
+                    q_sum,
+                    fwd,
+                    placed_left,
+                    placed_start,
+                    mapq_sum,
+                    mapq_sum_sq,
+                ),
+                chain_ids,
+            ));
+        }
+        // Committed: everything was there.
+        self.out_at += cur.at;
+        self.pos = pos;
+        self.first = first;
+        self.prev_cov_q = prev_cov_q;
+        self.last_chain = last_chain;
+        let mut rec = PileupRecord::new(self.chrom_id, pos, alleles);
+        rec.windowed_gc = windowed_gc;
+        rec.windowed_coverage = windowed_coverage;
+        Some(rec)
+    }
+}
+
+/// Walk one streaming store end to end, retaining nothing.
+fn decode_streaming(path: &str) {
+    let t0 = Instant::now();
+    let mut store = StreamingStore::open(std::path::Path::new(path));
+    let mut n_records = 0u64;
+    let mut checksum = 0u64;
+    while let Some(rec) = store.next() {
+        n_records += 1;
+        checksum = checksum.wrapping_add(rec.pos as u64);
+    }
+    println!("phase\tdecode-streaming");
+    println!("records\t{n_records}");
+    println!("checksum\t{checksum}");
+    println!("seconds\t{:.2}", t0.elapsed().as_secs_f64());
+    println!(
+        "records-per-second\t{:.0}",
+        n_records as f64 / t0.elapsed().as_secs_f64()
+    );
+    if let Some(k) = peak_rss_kib() {
+        println!("peak-rss-kib\t{k}");
+    }
+}
+
+/// Read the streaming store and the `.psp` it was made from in lockstep and
+/// fail on the first record that disagrees. A size or memory claim about a
+/// store that cannot be read back is worth nothing.
+fn verify_streaming(psp: &str, path: &str) {
+    let mut reader = PspReader::new(BufReader::with_capacity(
+        1 << 20,
+        File::open(psp).expect("open"),
+    ))
+    .expect("psp");
+    let mut store = StreamingStore::open(std::path::Path::new(path));
+    let scales = store.scales;
+    let (mut n, mut worst_gc, mut worst_cov, mut worst_q) = (0u64, 0f64, 0f64, 0f64);
+    {
+        let records = reader.records();
+        for want in records {
+            let want = want.expect("record");
+            let got = store.next().expect("store ended early");
+            assert_eq!(got.chrom_id, want.chrom_id, "chrom at record {n}");
+            assert_eq!(got.pos, want.pos, "pos at record {n}");
+            assert_eq!(
+                got.alleles.len(),
+                want.alleles.len(),
+                "allele count at record {n}"
+            );
+            track(&mut worst_gc, got.windowed_gc, want.windowed_gc);
+            track(
+                &mut worst_cov,
+                got.windowed_coverage,
+                want.windowed_coverage,
+            );
+            for (g, w) in got.alleles.iter().zip(&want.alleles) {
+                assert_eq!(g.seq, w.seq, "allele sequence at record {n}");
+                assert_eq!(g.chain_ids, w.chain_ids, "read names at record {n}");
+                assert_eq!(g.support.num_obs, w.support.num_obs, "num_obs at {n}");
+                assert_eq!(g.support.fwd, w.support.fwd, "fwd at {n}");
+                assert_eq!(g.support.mapq_sum, w.support.mapq_sum, "mapq_sum at {n}");
+                assert_eq!(
+                    g.support.mapq_sum_sq, w.support.mapq_sum_sq,
+                    "mapq_sum_sq at {n}"
+                );
+                let d = (g.support.q_sum - w.support.q_sum).abs();
+                if d > worst_q {
+                    worst_q = d;
+                }
+            }
+            n += 1;
+        }
+    }
+    assert!(
+        store.next().is_none(),
+        "store has records the .psp does not"
+    );
+    println!("phase\tverify-streaming");
+    println!("records\t{n}");
+    println!(
+        "worst-gc-error\t{worst_gc:.6}\ttolerance\t{:.6}",
+        1.0 / scales.gc
+    );
+    println!(
+        "worst-coverage-error\t{worst_cov:.6}\ttolerance\t{:.6}",
+        1.0 / scales.coverage
+    );
+    println!(
+        "worst-q-sum-error\t{worst_q:.6}\ttolerance\t{:.6}",
+        1.0 / scales.q_sum
+    );
+}
+
+/// Open every streaming store in a directory at once and walk them in
+/// lockstep, the way a cohort merge reads. This is the number the whole design
+/// is for: it is paid once per open sample.
+fn many_streaming(dir: &str, limit: usize) {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("ngs"))
+        .collect();
+    paths.sort();
+    paths.truncate(limit);
+    assert!(!paths.is_empty(), "no .ngs files in {dir}");
+
+    let t0 = Instant::now();
+    let n_open = paths.len();
+    let mut stores: Vec<StreamingStore> = paths.iter().map(|p| StreamingStore::open(p)).collect();
+    let mut live = vec![true; n_open];
+    let (mut n_records, mut checksum) = (0u64, 0u64);
+    let mut any = true;
+    while any {
+        any = false;
+        for i in 0..n_open {
+            if !live[i] {
+                continue;
+            }
+            match stores[i].next() {
+                Some(rec) => {
+                    n_records += 1;
+                    checksum = checksum.wrapping_add(rec.pos as u64);
+                    any = true;
+                }
+                None => live[i] = false,
+            }
+        }
+    }
+    println!("phase\tmany-ngs");
+    println!("open-files\t{n_open}");
+    println!("records\t{n_records}");
+    println!("checksum\t{checksum}");
+    println!("seconds\t{:.2}", t0.elapsed().as_secs_f64());
+    if let Some(k) = peak_rss_kib() {
+        println!("peak-rss-kib\t{k}");
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let psp = args
@@ -800,6 +1363,10 @@ fn main() {
     let mut level = 9i32;
     let mut dict_kib = 112usize;
     let mut limit = usize::MAX;
+    // The two knobs this store separates: how much the compressor may look
+    // back over (the block) and how much a reader must hold (the window).
+    let mut block_kib = 1024usize;
+    let mut window_log = 15u32; // 32 KiB
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -807,6 +1374,8 @@ fn main() {
             "--level" => level = args.next().expect("L").parse().expect("L"),
             "--dict-kib" => dict_kib = args.next().expect("K").parse().expect("K"),
             "--limit" => limit = args.next().expect("K").parse().expect("K"),
+            "--block-kib" => block_kib = args.next().expect("K").parse().expect("K"),
+            "--window-log" => window_log = args.next().expect("N").parse().expect("N"),
             "--gc-scale" => scales.gc = args.next().expect("S").parse().expect("S"),
             "--coverage-scale" => scales.coverage = args.next().expect("S").parse().expect("S"),
             "--q-sum-scale" => scales.q_sum = args.next().expect("S").parse().expect("S"),
@@ -827,6 +1396,12 @@ fn main() {
         "psp-read" => psp_read(&psp),
         "many-psp" => many(&psp, "psp", limit),
         "many-ngr" => many(&psp, "ngr", limit),
+        "encode-streaming" => {
+            encode_streaming(&psp, &store, block_kib * 1024, level, window_log, scales)
+        }
+        "decode-streaming" => decode_streaming(&store),
+        "verify-streaming" => verify_streaming(&psp, &store),
+        "many-ngs" => many_streaming(&psp, limit),
         other => panic!("unknown phase {other}"),
     }
 }
