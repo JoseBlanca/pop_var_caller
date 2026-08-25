@@ -301,6 +301,45 @@ both ways and timing the re-fetch inside a segment walk; the question is
 [`run_streaming.md`](run_streaming.md)'s, not this document's, and this is a leaning
 offered to it rather than a decision taken from it.
 
+### 5.1 The per-sample summary is not stored as text — settled 2026-08-25
+
+**A psp carries one more thing besides records: a summary of the whole sample.** Today that is a
+coverage-against-GC histogram and a count of heterozygous sites, and its consumers are the genotype
+prior, production's hidden-paralog filter, and — when it is built — **ng's own duplication filter,
+which does not exist yet but is coming** (the owner, 2026-08-25). The section is therefore permanent
+and its encoding is worth fixing rather than inheriting.
+
+**Production writes it as TOML — text — inside the metadata section, and that is what this decision
+reverses.** A histogram is a matrix of counts; written as text each count becomes digits, separators
+and indentation, and the parser must materialise the text before it can produce the matrix. Measured
+on a 50-accession tomato run at about three reads a position: **1.05 MB of text per open sample
+yielding a 0.52 MB parsed histogram** — and both are resident at once, because the reader keeps the
+decompressed text alive for the life of the reader while the parsed structure sits beside it.
+
+That cost is per open sample and nothing else moves it — not the block size, not the record layout,
+not the read names, not the depth. At 50 samples the two together are 23.1% of the whole run's live
+heap, against 12.7% for the compressed block decode this document spends most of its pages on.
+
+**So, for ng:**
+
+- **The sample summary is a binary section, not TOML.** Counts as variable-length integers, the bin
+  schemes as a small fixed head. The plain-text header stays text, because `head` and a TOML parser
+  reading a psp's identity is worth keeping (§1.3); the summary is not part of that and gains
+  nothing from being readable in a pager.
+- **The reader does not hold the encoded bytes once the summary is decoded.** Holding the source
+  representation beside the decoded one doubles a per-open-sample cost for nobody. On production this
+  was measured at 1.03 MB per sample of peak — 13.7% of the per-sample cost of a whole cohort run.
+- **Both properties are per-open-sample costs and belong in the same budget as the frames** (§3.1).
+  A design that gets a frame down to 36 kB and then spends 1.5 MB on a summary has not made an open
+  sample cheap.
+
+**Open, and small:** whether the decoded summary is itself held per sample for the whole run or
+folded into whatever the consumers need at startup. At 0.52 MB per sample it is 1.5 GB at three
+thousand samples, which is inside the working budget but not free. Measured by whoever builds the
+duplication filter, since the answer depends on what that filter reads and when.
+
+*Numbers from [`../../reports/reviews/psp_memory_milestone_z_2026-08-25.md`](../../reports/reviews/psp_memory_milestone_z_2026-08-25.md).*
+
 ---
 
 ## 6. The three quantities that arrive as floating point
