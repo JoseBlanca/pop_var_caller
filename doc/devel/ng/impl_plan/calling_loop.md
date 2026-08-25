@@ -35,10 +35,14 @@ together cannot say which of the two is wrong. What changes is Milestone E — a
 the generic path may now build its candidates by calling selection, and the end-to-end run on real
 data is no longer blocked for that path.
 
-**It is still blocked for repeat tracts, and for two reasons rather than one:** the STR read
-likelihood row does not exist (`SsrEmissionModel::censored_emission` is `unimplemented!()`), and
-neither does the STR candidate path — `allele_candidates/` holds `mod.rs` and `generic.rs` only,
-and [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's.
+**It is still blocked for repeat tracts, by two independent gaps.** The STR read-likelihood row
+does not exist — `censored_emission` is `unimplemented!()`
+([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1; the row is its H1 and H2) — and
+**that one blocks a tract genotype outright**, whatever candidates are supplied. Separately, the
+STR candidate path is unwritten: `allele_candidates/` holds `mod.rs` and `generic.rs` only, and
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's. The first must close
+before a tract can be called at all; the second only decides whether its candidates are chosen or
+handed in.
 
 ---
 
@@ -311,10 +315,16 @@ has to get right are named in
 [`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §5.1** — the prior takes the
 *total* allele count and not `alternative_allele_count()`; `LocusSelection::unmatched` is
 parallel to the merge's covering samples and not to the run's sample order; and
-`genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one. On the
-**repeat-tract path** the candidates stay fixture-supplied, because neither the STR row nor the
-STR selection path exists; say so in the test's own doc comment. *Depends:* D1, E1, E2, E2a.
-*Source:* spec §1, §9.
+`genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one.
+
+**The repeat-tract half of this step is blocked, and on the row rather than on the candidates.**
+Without the STR read-likelihood row there is no `Lg` for a tract genotype, so no supplied
+candidate set rescues it: `censored_emission` is `unimplemented!()`
+([`calling_read_likelihoods.md`](calling_read_likelihoods.md) G1) and the row itself is that
+plan's H1 and H2. When it lands, this step's tract candidates are still **fixture-supplied**,
+because the STR selection path is unwritten — a second and independent gap. Say both in the
+test's own doc comment, so a later reader does not read one as the other. *Depends:* D1, E1, E2,
+E2a; the STR half additionally on that plan's G1–H2. *Source:* spec §1, §9.
 
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
 > path, over supplied ones at a repeat tract. Pause for review.
