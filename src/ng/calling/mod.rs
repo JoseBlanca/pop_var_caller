@@ -57,6 +57,7 @@ pub mod genotype_prior;
 pub mod genotype_table;
 pub mod inference;
 pub mod likelihood;
+pub mod quality;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
@@ -77,6 +78,7 @@ pub use likelihood::{
 };
 
 use crate::ng::calling::genotype_prior::SpectrumSeed;
+use crate::ng::calling::quality::SiteQualityBuffers;
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
@@ -821,6 +823,20 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// `samples × alleles`, sample-major: each **sample's own** expected allele copies. The
     /// prior's leave-one-out term is the cohort's total minus this.
     per_sample_expected_copies: Vec<f64>,
+    /// `samples × (ploidy + 1)`, sample-major: the site quality's first step, each sample's
+    /// log-likelihood of carrying exactly `c` non-reference copies
+    /// (`doc/devel/ng/spec/calling_quality.md` §5.2).
+    copy_count_log_likelihoods: Vec<f64>,
+    /// The site quality's count axis, and the buffer its fold alternates with. Both are
+    /// `ploidy + samples × ploidy + 1` long — **padded by `ploidy` on the left**, so a
+    /// copy-count tap reads `[padding − copies]` without a bounds test in the quadratic inner
+    /// loop.
+    allele_count_distribution: Vec<f64>,
+    /// The other half of that alternation.
+    allele_count_distribution_next: Vec<f64>,
+    /// `samples × ploidy + 1`: the fold's result back in the log domain, then the
+    /// unnormalised log-posterior over the cohort's allele count once the prior is applied.
+    log_allele_count_distribution: Vec<f64>,
     /// The SNP/indel row's own scratch.
     generic_row: GenericRowScratch,
     /// The repeat-tract row's own scratch, including the emission model's.
@@ -927,6 +943,44 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         resize_and_fill(
             &mut self.per_sample_expected_copies,
             copies_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+
+        // The site quality's four buffers. **Sized from the genotype table's ploidy**, which
+        // is the one place this locus's ploidy is stated, so they cannot disagree with the
+        // table the fold walks (`doc/devel/ng/spec/calling_quality.md` §5.2, §9).
+        let ploidy = usize::from(genotypes.ploidy().get());
+        let copy_count_table_len = sample_count.checked_mul(ploidy + 1).unwrap_or_else(|| {
+            panic!(
+                "a locus of {sample_count} samples at ploidy {ploidy} needs a copy-count log-likelihood \
+                 table longer than a usize can index"
+            )
+        });
+        let largest_count = sample_count.checked_mul(ploidy).unwrap_or_else(|| {
+            panic!(
+                "a cohort of {sample_count} samples at ploidy {ploidy} carries more \
+                 chromosomes than a usize can count"
+            )
+        });
+        resize_and_fill(
+            &mut self.copy_count_log_likelihoods,
+            copy_count_table_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        let padded_axis = ploidy + largest_count + 1;
+        resize_and_fill(
+            &mut self.allele_count_distribution,
+            padded_axis,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.allele_count_distribution_next,
+            padded_axis,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.log_allele_count_distribution,
+            largest_count + 1,
             UNWRITTEN_SCRATCH_VALUE,
         );
 
@@ -1294,6 +1348,43 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         }
     }
 
+    /// The five buffers the **site quality** reads and writes: the likelihood table the loop
+    /// built, and the four the fold needs.
+    ///
+    /// **A third bundle, for the third reason of the same kind** — five fields of one
+    /// scratch, and the fold swaps two of them, which needs both to be borrowed at once from
+    /// the same call.
+    ///
+    /// **Called once per locus, after the loop has stopped.** The likelihood table it hands
+    /// over is the one the loop already built and never rebuilt, which is what makes the
+    /// site quality cost no emission evaluations of its own
+    /// (`doc/devel/ng/spec/calling_quality.md` §3.2).
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch.
+    #[inline]
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its only caller is `score_uncorrected_site_quality`, which step C3 of the \
+                      calling-loop plan is the first to call from outside a test"
+        )
+    )]
+    pub(crate) fn site_quality_buffers_mut(&mut self) -> SiteQualityBuffers<'_> {
+        self.assert_prepared();
+        SiteQualityBuffers {
+            sample_count: self.sample_count,
+            genotype_likelihoods: &self.genotype_likelihoods,
+            copy_count_log_likelihoods: &mut self.copy_count_log_likelihoods,
+            allele_count_distribution: &mut self.allele_count_distribution,
+            allele_count_distribution_next: &mut self.allele_count_distribution_next,
+            log_allele_count_distribution: &mut self.log_allele_count_distribution,
+        }
+    }
+
     /// Refuse a scratch that was never sized for a locus.
     ///
     /// # Panics
@@ -1501,7 +1592,7 @@ impl SampleGenotypeCall {
     /// quality, because no genotype was scored to have one.
     #[inline]
     #[must_use]
-    pub fn genotype_quality(&self) -> Option<Phred> {
+    pub fn score_best_genotype(&self) -> Option<Phred> {
         match self {
             Self::Called {
                 genotype_quality, ..
@@ -2101,7 +2192,7 @@ mod tests {
         );
         assert_eq!(
             inference.per_sample[1]
-                .genotype_quality()
+                .score_best_genotype()
                 .expect("a called sample")
                 .get(),
             25.0
@@ -2798,7 +2889,7 @@ mod tests {
         let missing = SampleGenotypeCall::Missing;
         assert!(missing.is_missing());
         assert_eq!(missing.genotype(), None);
-        assert_eq!(missing.genotype_quality(), None);
+        assert_eq!(missing.score_best_genotype(), None);
 
         let called = diploid_call(0, 1, 25.0);
         assert!(!called.is_missing());
@@ -2807,7 +2898,7 @@ mod tests {
             [AlleleId(0), AlleleId(1)]
         );
         assert_eq!(
-            called.genotype_quality().expect("a called sample").get(),
+            called.score_best_genotype().expect("a called sample").get(),
             25.0
         );
     }
