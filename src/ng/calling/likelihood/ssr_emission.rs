@@ -522,8 +522,99 @@ fn resize_at_the_end(candidate: &[u8], motif: &[u8], bp_diff: i64, out: &mut Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::alignment::MarginalAligner;
+    use crate::ng::alignment::ssr_marginal_sequence::{
+        SequenceMarginalScratch, SsrSequenceMarginal,
+    };
+    use crate::ng::alignment::stutter::MAX_WHOLE_REPEAT_SLIP;
     use crate::ng::calling::likelihood::stutter_rates::stutter_model_for;
     use crate::ng::parameter_estimation::joint::ssr_fit::Slippage;
+
+    /// **Model B — the comparator, and an oracle rather than an alternative.**
+    ///
+    /// `Σ_n S(n) · avg_v align(observation | candidate ⊕ n repeats)`: the whole-repeat
+    /// stutter mass marginalised **outside** a sequence-versus-sequence align that absorbs
+    /// whatever length is left over as slop at the tract's ends.
+    ///
+    /// # How it differs from Model A, which is the whole point
+    ///
+    /// **Model A picks one length change** — the one the observation actually shows — scores
+    /// its probability, and compares letters over sequences it has already made equal. **Model
+    /// B sums over every whole-repeat change**, and lets the aligner explain the residual.
+    /// Where A has an explicit part-repeat branch with its own two parameters, B has none: a
+    /// change that is not a whole number of repeats reaches B only as end-gap slop on a
+    /// neighbouring term.
+    ///
+    /// So the two explain a read's length by genuinely different routes, and that is what
+    /// makes agreement between them evidence. **What they share is the placement enumeration**
+    /// — production shares it too — so the independence is in how length is explained, not in
+    /// where a slip may land.
+    ///
+    /// **Test-only, deliberately.** It is worth more as a second opinion than as a model
+    /// anyone runs; production keeps its own Model B the same way (spec §9).
+    #[derive(Debug, Default, Clone, Copy)]
+    struct ClassicEmissionOracle;
+
+    #[derive(Debug, Default)]
+    struct ClassicOracleScratch {
+        placements: Vec<Vec<u8>>,
+        aligner: SequenceMarginalScratch,
+    }
+
+    impl SsrEmissionModel for ClassicEmissionOracle {
+        type Scratch = ClassicOracleScratch;
+
+        fn emission(
+            &self,
+            observation: &[u8],
+            candidate: &SsrCandidate<'_>,
+            context: &SsrScoringContext<'_>,
+            scratch: &mut Self::Scratch,
+        ) -> f64 {
+            let period = period_of(context.motif);
+            let period_bases = i64::from(period.get());
+            let motif = context.motif.as_bytes();
+            let aligner = SsrSequenceMarginal::try_new(context.substitution_rate.get())
+                .expect("an ErrorRate is a probability by construction");
+
+            let cutoff = i64::from(MAX_WHOLE_REPEAT_SLIP);
+            let mut total = 0.0;
+            for repeats in -cutoff..=cutoff {
+                let length_probability =
+                    context.stutter.probability(repeats * period_bases, period);
+                if length_probability <= 0.0 {
+                    continue;
+                }
+                enumerate_placements(candidate.bases, motif, repeats, &mut scratch.placements);
+                if scratch.placements.is_empty() {
+                    continue;
+                }
+                let each = 1.0 / scratch.placements.len() as f64;
+                let letters: f64 = scratch
+                    .placements
+                    .iter()
+                    .map(|placement| {
+                        each * aligner
+                            .marginal_probability(observation, placement, (), &mut scratch.aligner)
+                            .get()
+                            .exp()
+                    })
+                    .sum();
+                total += length_probability * letters;
+            }
+            total
+        }
+
+        fn censored_emission(
+            &self,
+            _witnessed_prefix: &[u8],
+            _candidate: &SsrCandidate<'_>,
+            _context: &SsrScoringContext<'_>,
+            _scratch: &mut Self::Scratch,
+        ) -> f64 {
+            unimplemented!("the oracle scores complete observations only")
+        }
+    }
 
     fn a_motif(bases: &[u8]) -> Motif {
         Motif::new(bases).expect("a valid test motif")
@@ -685,6 +776,178 @@ mod tests {
         );
         let mut scratch = StutterSubstitutionScratch::default();
         StutterSubstitutionEmission.emission(observation, &candidate, &context, &mut scratch)
+    }
+
+    /// Rank the candidates by one model's emission, best first.
+    fn ranking<M: SsrEmissionModel>(
+        model: &M,
+        observation: &[u8],
+        candidates: &[(Vec<u8>, u32)],
+        motif: &Motif,
+        stutter: &StutterModel,
+        epsilon: f64,
+        scratch: &mut M::Scratch,
+    ) -> (Vec<usize>, Vec<f64>) {
+        let scores: Vec<f64> = candidates
+            .iter()
+            .map(|(bases, count)| {
+                let candidate = SsrCandidate {
+                    bases,
+                    repeat_count: repeats(*count),
+                };
+                let context = SsrScoringContext::new(
+                    motif,
+                    stutter,
+                    &candidate,
+                    ErrorRate::try_new(epsilon).expect("a valid rate"),
+                    [Provenance::FittedHere],
+                );
+                model.emission(observation, &candidate, &context, scratch)
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..scores.len()).collect();
+        order.sort_by(|a, b| scores[*b].partial_cmp(&scores[*a]).expect("no NaN scores"));
+        (order, scores)
+    }
+
+    /// **The independent-implementation check: the two models rank candidates alike wherever
+    /// the observation's length differs from the candidate's by a whole number of repeats.**
+    ///
+    /// That is the case Model B is built for, and the two reach it by genuinely different
+    /// routes — A picks the single length change the read shows and compares letters over
+    /// equal-length sequences; B sums over *every* whole-repeat change and lets the aligner
+    /// absorb the residual. Agreement across that grid is evidence about both.
+    ///
+    /// Measured here: the full ranking is identical for every observation, and the winning
+    /// score agrees to better than one part in ten thousand.
+    #[test]
+    fn the_two_models_rank_candidates_alike_on_whole_repeat_differences() {
+        let stutter = a_model();
+        let motif = a_motif(b"CAG");
+        let epsilon = 0.001;
+        let candidates: Vec<(Vec<u8>, u32)> = (3..=6)
+            .map(|count| (b"CAG".repeat(count), count as u32))
+            .collect();
+
+        // Whole numbers of repeats, plus one carrying a substitution — every one a whole-repeat
+        // difference from every candidate.
+        let observations: Vec<Vec<u8>> = vec![
+            b"CAGCAGCAG".to_vec(),
+            b"CAGCAGCAGCAG".to_vec(),
+            b"CAGCAGCAGCAGCAG".to_vec(),
+            b"CAGCTGCAGCAG".to_vec(),
+        ];
+
+        for observation in &observations {
+            let mut a_scratch = StutterSubstitutionScratch::default();
+            let mut b_scratch = ClassicOracleScratch::default();
+            let (a_order, a_scores) = ranking(
+                &StutterSubstitutionEmission,
+                observation,
+                &candidates,
+                &motif,
+                &stutter,
+                epsilon,
+                &mut a_scratch,
+            );
+            let (b_order, b_scores) = ranking(
+                &ClassicEmissionOracle,
+                observation,
+                &candidates,
+                &motif,
+                &stutter,
+                epsilon,
+                &mut b_scratch,
+            );
+
+            assert_eq!(
+                a_order,
+                b_order,
+                "the two models ranked {} differently: {a_scores:?} against {b_scores:?}",
+                String::from_utf8_lossy(observation)
+            );
+
+            let winner = a_order[0];
+            let relative = (a_scores[winner] - b_scores[winner]).abs() / a_scores[winner];
+            assert!(
+                relative < 1e-4,
+                "the winning scores differ by {relative} on {}",
+                String::from_utf8_lossy(observation)
+            );
+        }
+    }
+
+    /// **Where the two part company, and why that is the choice rather than a defect.**
+    ///
+    /// A read whose length is *not* a whole number of repeats from the candidate is the one
+    /// case the two models explain differently by construction. **Model A charges the fitted
+    /// part-repeat share**; **Model B has no such branch at all** and absorbs the odd base as
+    /// slop at the tract's end, at the flat per-base rate.
+    ///
+    /// At ε = 0.001 the slop route is about nine times cheaper than the part-repeat event, so
+    /// **B keeps the shorter candidate and A prefers the one needing the smaller stutter
+    /// event**. Measured on a ten-base read against a three-repeat and a four-repeat
+    /// candidate: A scores 1.094e-4 and 1.869e-4 — the four-repeat candidate wins — while B
+    /// scores 9.706e-4 and 1.167e-5, and the three-repeat candidate wins.
+    ///
+    /// **Model A is the one to trust here**, and this divergence is the reason: an explicit
+    /// part-repeat branch with its own two fitted parameters is what the comparison behind
+    /// spec §4.1 chose it for. The test exists so the difference stays a measured, deliberate
+    /// thing rather than a surprise the first time a ranking disagrees.
+    #[test]
+    fn the_two_models_part_company_on_a_part_repeat_length() {
+        let stutter = a_model();
+        let motif = a_motif(b"CAG");
+        let epsilon = 0.001;
+        let candidates: Vec<(Vec<u8>, u32)> =
+            vec![(b"CAGCAGCAG".to_vec(), 3), (b"CAGCAGCAGCAG".to_vec(), 4)];
+        // Three repeats and one base over — a part-repeat difference from both candidates.
+        let observation = b"CAGCAGCAGC";
+
+        let mut a_scratch = StutterSubstitutionScratch::default();
+        let mut b_scratch = ClassicOracleScratch::default();
+        let (a_order, a_scores) = ranking(
+            &StutterSubstitutionEmission,
+            observation,
+            &candidates,
+            &motif,
+            &stutter,
+            epsilon,
+            &mut a_scratch,
+        );
+        let (b_order, b_scores) = ranking(
+            &ClassicEmissionOracle,
+            observation,
+            &candidates,
+            &motif,
+            &stutter,
+            epsilon,
+            &mut b_scratch,
+        );
+
+        assert_eq!(
+            a_order[0], 1,
+            "Model A should prefer the four-repeat candidate"
+        );
+        assert_eq!(
+            b_order[0], 0,
+            "Model B should prefer the three-repeat candidate"
+        );
+
+        // The sizes, so the mechanism is checkable and not merely asserted.
+        assert!((a_scores[0] - 1.094e-4).abs() < 1e-7, "{:?}", a_scores);
+        assert!((a_scores[1] - 1.869e-4).abs() < 1e-7, "{:?}", a_scores);
+        assert!((b_scores[0] - 9.706e-4).abs() < 1e-6, "{:?}", b_scores);
+        assert!((b_scores[1] - 1.167e-5).abs() < 1e-7, "{:?}", b_scores);
+
+        // B's route is the flat per-base rate; A's is the fitted part-repeat product.
+        let slop_route = b_scores[0] / stutter.same_length_share();
+        let part_repeat_route =
+            stutter.part_repeat_longer_share() * stutter.part_repeat_one_step_share();
+        assert!(
+            slop_route > part_repeat_route * 8.0,
+            "slop {slop_route} against a part-repeat event {part_repeat_route}"
+        );
     }
 
     /// **Spec §12's first test: a read matching its allele is dominated by the same-length

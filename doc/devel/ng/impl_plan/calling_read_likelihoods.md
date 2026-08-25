@@ -399,7 +399,7 @@ direction and size ordered as fitted (test 2), a whole repeat beats a stray base
 corrected condition** (test 3 — the product comparison, stated so it survives the shares being
 untied). *Depends:* F1, E3. *Source:* spec §4.2, §4.3; arch §4.1.
 
-**F3. `ClassicEmissionOracle` + the cross-model check.**  ☐
+**F3. `ClassicEmissionOracle` + the cross-model check.**  ✅
 Model B ported **test-only**, exactly as production keeps it
 ([`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)) — an independent
 implementation worth more as an oracle than as an alternative. Test: A and B agree on genotype
