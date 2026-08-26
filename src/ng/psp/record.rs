@@ -571,20 +571,23 @@ pub struct DecodedRecordBody {
 ///
 /// # Nothing here is a difference from another record, and the signature is the guarantee
 ///
-/// **A body stands on its own.** No field is coded as a step from the record before it: the
-/// coverage is absolute and, when Milestone E adds them, an observation's chain-id exceptions
-/// will be measured from zero rather than from the previous record. That is what a skipped body
-/// costs nothing — and it is not a convention, it is the shape of these two functions, which
-/// take no running state and are given none. The head is the half that carries state (spec
-/// §4.3), which is why the chain ids' live-set *changes* go there and their exception lists stay
-/// here.
+/// **A body stands on its own.** Every count it carries is written absolutely — the reads behind
+/// each observation, the reads that showed nothing, the reads the depth cap dropped — and when
+/// Milestone E adds them, an observation's chain-id exceptions will be measured from zero rather
+/// than from the previous record. **That is why a skipped body costs nothing**: a reader that
+/// never saw it has missed nothing the next record needs. The head is the half that carries
+/// state (spec §4.3), which is why the chain ids' live-set *changes* go there and their exception
+/// lists stay here.
 ///
-/// **It is worth what a skip is worth, and getting it wrong would be silent**: a body carrying a
-/// difference still round-trips under a walk that builds every record, and only misreads the
-/// records that follow a skipped one.
-/// `a_skipped_records_body_can_be_anything_and_the_kept_records_are_unchanged` is the test that
-/// can see it — verified by injecting exactly that defect, which failed six tests and left the
-/// round-trip tests green.
+/// **These two functions take no running state and are given none, which is most of the
+/// guarantee and not all of it.** A future edit could still reach state through a `static` or a
+/// thread-local without changing either signature — measured, that compiles — so the tests below
+/// are what actually holds the line.
+///
+/// **Getting it wrong would be silent**: a body carrying a difference still round-trips under a
+/// walk that builds every record, and misreads only the records that follow a skipped one. The
+/// tests under this module's `C3` banner are what see it; the injected-defect run that checked
+/// they can is in `doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md`.
 ///
 /// It cannot fail. Every field of a [`SampleLocusObservations`] has a representation here and
 /// the variable-length integers are unbounded; the one subtraction, a witnessed run's length,
@@ -643,8 +646,10 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
 /// bytes this process encoded itself and skips every check that function makes.
 ///
 /// **The chain-id lists come back empty** — see [`encode_record_body`], which also states the
-/// property this half has to keep: nothing read here depends on any record read before it, which
-/// is what lets a reader skip a body and still trust the next one.
+/// property this half has to keep: nothing this reads out of `bytes` depends on any record read
+/// before it, which is what lets a reader skip a body and still trust the next one. (`region`
+/// does come from every record before it, through the head's running offset — but it is a
+/// parameter, not something the body's bytes encode.)
 ///
 /// **Every sequence is copied out.** [`SampleLocusObservations`] owns its bases as `Box<[u8]>`,
 /// so a record costs one allocation for the reference bases and one per observation. The
@@ -3452,23 +3457,7 @@ mod tests {
     /// away, and the caller is committed to it.
     #[test]
     fn a_record_at_the_depth_the_caller_must_survive_round_trips_through_its_head() {
-        let mut deep = a_rich_record();
-        deep.observations.clear();
-        for read in 0..300u32 {
-            deep.observations.push(SequenceObservation {
-                // Not the reference's own bases, so every one of these reads is non-reference.
-                bases: b"ACGTACT".to_vec().into_boxed_slice(),
-                read_witness: ReadWitness::Complete,
-                read_group: ReadGroupId(read % 7),
-                num_obs: 1,
-                num_fwd: read % 2,
-                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
-                mapq_sum: 60,
-                mapq_sum_sq: 3_600,
-                placed_left: 1,
-                chain_ids: Vec::new(),
-            });
-        }
+        let deep = a_record_at_three_hundred_reads();
         let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&deep));
 
         let found = read_record_head(
@@ -3567,60 +3556,101 @@ mod tests {
     // C3 — the body stands on its own
     // -----------------------------------------------------------------
 
-    /// A block's worth of records, of every shape this codec can be handed, in coordinate order.
+    /// How many records [`twelve_records_in_order`] holds.
     ///
-    /// **Twelve records rather than three**, because the property C3 proves is about what one
-    /// record's body can do to another's, and three is too few for a skip pattern to have an
-    /// inside. The shapes vary deliberately: one-base and deletion-widened, generic and tract
-    /// and bundle, with and without observations, complete witnesses and holed ones, and one at
-    /// the top of the depth range whose head fields need more than a byte each.
+    /// **Twelve, and the number is load-bearing three times over**: the span list has that many
+    /// entries, the "only the last" skip pattern names the last by ordinal, and the exhaustive
+    /// mask test walks 2^12 patterns. Three records have no *inside* — every pattern over them is
+    /// the first, the last or the middle — and twelve gives patterns that skip runs.
+    const RECORDS_IN_THE_RUN: usize = 12;
+
+    // The exhaustive skip test indexes a mask by record, so the run has to fit one.
+    const _: () = assert!(RECORDS_IN_THE_RUN < 32);
+
+    /// A record at the top of the depth range — **three hundred reads a position**, which is
+    /// where a head's body length and its read count stop fitting in one byte each.
     ///
-    /// **The gaps between records are never the spans**, so a reader that took the distance to
-    /// the next record for this record's width fails on the first pair.
-    fn a_block_of_records() -> Vec<SampleLocusObservations> {
+    /// Shared by the head test that asserts those two widths and by the run below, so the depth
+    /// this caller is committed to is written down once.
+    fn a_record_at_three_hundred_reads() -> SampleLocusObservations {
+        let mut deep = a_rich_record();
+        deep.observations.clear();
+        for read in 0..300u32 {
+            deep.observations.push(SequenceObservation {
+                // Not the reference's own bases, so every one of these reads is non-reference.
+                bases: b"ACGTACT".to_vec().into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read % 7),
+                num_obs: 1,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            });
+        }
+        deep
+    }
+
+    /// Twelve records over one contig in coordinate order, of every shape this codec can be
+    /// handed.
+    ///
+    /// **Not called a block**, though a later milestone's blocks will hold runs like it: a psp
+    /// block is a span of reference compressed as one unit and cut on a 100 kb grid
+    /// (spec §2, §4.1), and this is 232 bases of records in memory. Blocks arrive at D1.
+    ///
+    /// What varies, and every clause of this is asserted by
+    /// `the_run_is_the_run_its_doc_describes` rather than left in prose:
+    ///
+    /// - **spans of one to twelve bases**, and **gaps that are never the record's own span**, so
+    ///   a reader that took the distance to the next record for this record's width fails;
+    /// - all three locus kinds, with **a different motif and different flanks on every tract
+    ///   record**, so a payload taken from the previous tract record rather than from this one's
+    ///   own bytes fails;
+    /// - **reference bases that differ between records of the same length**, for the same reason;
+    /// - records with no observations at all, records where every read agreed with the reference,
+    ///   and three at three hundred reads a position;
+    /// - **chain ids on some observations.** C1's encoder drops them, so the comparisons go
+    ///   through [`as_a_decode_can_return_it`] — and the day Milestone E writes them, that helper
+    ///   becomes the identity and this oracle covers the exception lists with no test touched.
+    fn twelve_records_in_order() -> Vec<SampleLocusObservations> {
+        let spans = [1u64, 7, 1, 3, 1, 12, 1, 1, 4, 9, 1, 2];
         let mut records = Vec::new();
+        // The block's first position. Inert: every offset in the file is relative, so starting
+        // at zero would give byte-identical output.
         let mut at = 1_000u64;
 
-        for (index, span) in [1u64, 7, 1, 3, 1, 12, 1, 1, 4, 1, 1, 2]
-            .into_iter()
-            .enumerate()
-        {
-            let mut record = match index.rem_euclid(4) {
+        for (index, span) in spans.into_iter().enumerate() {
+            let mut record = match index % 4 {
                 0 => {
-                    // A covered position where every read agreed — most of a real file.
-                    let mut quiet = a_rich_record();
-                    quiet.observations.truncate(1);
-                    quiet.reads_without_observation = 4 + index as u32;
-                    quiet
+                    // A covered position where every read agreed with the reference — most of a
+                    // real file. Its one observation's bases are set below, once the reference
+                    // this record carries is known.
+                    let mut every_read_agreed = a_rich_record();
+                    every_read_agreed.observations.truncate(1);
+                    every_read_agreed.observations[0].read_witness = ReadWitness::Complete;
+                    every_read_agreed.reads_without_observation = 4 + index as u32;
+                    every_read_agreed
                 }
-                1 => a_rich_record(),
+                1 => {
+                    // The rich fixture, whose partial witnesses name locus offsets up to seven —
+                    // so the spans on this arm are seven bases or more, or the record could not
+                    // occur.
+                    assert!(
+                        span >= 7,
+                        "record {index} inherits a witness reaching offset 7 and has {span} bases"
+                    );
+                    a_rich_record()
+                }
                 2 => {
-                    // Nothing but reads that showed nothing at all.
-                    let mut bare = a_rich_record();
-                    bare.observations.clear();
-                    bare.reads_without_observation = 11 + index as u32;
-                    bare.reads_discarded_by_cap = index as u32;
-                    bare
+                    let mut no_read_showed_anything = a_rich_record();
+                    no_read_showed_anything.observations.clear();
+                    no_read_showed_anything.reads_without_observation = 11 + index as u32;
+                    no_read_showed_anything.reads_discarded_by_cap = 1 + index as u32;
+                    no_read_showed_anything
                 }
-                _ => {
-                    let mut deep = a_rich_record();
-                    deep.observations.clear();
-                    for read in 0..300u32 {
-                        deep.observations.push(SequenceObservation {
-                            bases: b"ACGTACT".to_vec().into_boxed_slice(),
-                            read_witness: ReadWitness::Complete,
-                            read_group: ReadGroupId(read % 7),
-                            num_obs: 1,
-                            num_fwd: read % 2,
-                            q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
-                            mapq_sum: 60,
-                            mapq_sum_sq: 3_600,
-                            placed_left: 1,
-                            chain_ids: Vec::new(),
-                        });
-                    }
-                    deep
-                }
+                _ => a_record_at_three_hundred_reads(),
             };
 
             record.region = GenomeRegion {
@@ -3628,241 +3658,530 @@ mod tests {
                 start: Position(at),
                 end: Position(at + span - 1),
             };
-            record.reference_bases = vec![b'A'; span as usize].into_boxed_slice();
-            record.kind = match index.rem_euclid(3) {
+            // Different bases in records of the same length, so a reference taken from another
+            // record is visible here and not only in a property test that happens to differ.
+            record.reference_bases = (0..span)
+                .map(|offset| b"ACGT"[((index as u64 + offset) % 4) as usize])
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            if index % 4 == 0 {
+                record.observations[0].bases = record.reference_bases.clone();
+            }
+            record.kind = match index % 3 {
                 0 => LocusKind::Generic,
                 1 => LocusKind::Ssr(SsrDetail {
-                    motif: Motif::new(b"AT").expect("a dinucleotide is a motif"),
-                    left_flank: b"GGCC".to_vec().into_boxed_slice(),
-                    right_flank: b"TT".to_vec().into_boxed_slice(),
+                    // A different motif and different flanks on every tract record.
+                    motif: Motif::new(match index {
+                        1 => &b"AT"[..],
+                        4 => &b"CG"[..],
+                        7 => &b"AAT"[..],
+                        _ => &b"GCCT"[..],
+                    })
+                    .expect("each is a motif of one to six bases"),
+                    left_flank: vec![b'G'; index].into_boxed_slice(),
+                    right_flank: vec![b'T'; 1 + index % 3].into_boxed_slice(),
                 }),
                 _ => LocusKind::SsrBundle,
             };
+            // Chain ids on some observations, so that the oracle starts covering them the day
+            // Milestone E writes them. Distinct per record, so ids taken from another record's
+            // list would be visible.
+            for (which, observation) in record.observations.iter_mut().enumerate().take(2) {
+                if index % 3 == 1 {
+                    observation.chain_ids = vec![
+                        (index * 100 + which) as u64,
+                        (index * 100 + which + 7) as u64,
+                    ];
+                }
+            }
 
             // The next record starts past this one's end, by something that is not its span.
             at += span + 13 + index as u64;
             records.push(record);
         }
+        assert_eq!(records.len(), RECORDS_IN_THE_RUN);
         records
     }
 
-    /// Walk `bytes`, building the records `keep` says to build and reading only the head of the
-    /// rest. **Every head is read** — a skipping reader must, because the head carries the
-    /// running position and, from Milestone E3, the chain-id changes.
+    /// The record a decode can currently return for `record`: everything it carries except the
+    /// chain ids, which C1's encoder drops
+    /// (`chain_ids_come_back_empty_and_nothing_else_changes`).
     ///
-    /// Returns one entry per record: the built record where it was kept, `None` where it was
-    /// skipped.
-    fn walk_keeping(
-        bytes: &[u8],
-        block_starts_at: Position,
-        keep: impl Fn(usize) -> bool,
-    ) -> Vec<Option<SampleLocusObservations>> {
-        let layout = RecordLayout::as_this_build_writes_it();
-        let mut built = Vec::new();
-        let mut at = 0usize;
-        let mut measured_from = OffsetBase::at_block_start(block_starts_at);
-        let mut index = 0usize;
-        while at < bytes.len() {
-            if keep(index) {
-                let decoded = decode_record(&bytes[at..], A_CONTIG, measured_from, &layout)
-                    .unwrap_or_else(|refused| panic!("record {index} builds: {refused}"));
-                at += decoded.record_bytes;
-                measured_from = OffsetBase::after(&decoded.head);
-                built.push(Some(decoded.record));
-            } else {
-                let found = read_record_head(&bytes[at..], A_CONTIG, measured_from)
-                    .unwrap_or_else(|refused| panic!("record {index}'s head reads: {refused}"));
-                at += found.record_bytes;
-                measured_from = OffsetBase::after(&found.head);
-                built.push(None);
-            }
-            index += 1;
+    /// **When Milestone E starts writing them this becomes the identity and can be deleted**, and
+    /// the oracle covers the exception lists from that moment without a test being touched.
+    fn as_a_decode_can_return_it(record: &SampleLocusObservations) -> SampleLocusObservations {
+        let mut stripped = record.clone();
+        for observation in &mut stripped.observations {
+            observation.chain_ids.clear();
         }
-        assert_eq!(at, bytes.len(), "the walk consumed the block exactly");
-        built
+        stripped
     }
 
-    /// **The oracle C3 exists for.** A walk that builds only some of a block's records gets, for
+    /// One record as a walk met it: what its head said, how far it advanced, and the record
+    /// itself where the walk was asked to build one.
+    #[derive(Debug, Clone, PartialEq)]
+    struct WalkedRecord {
+        head: RecordHead,
+        record_bytes: usize,
+        built: Option<SampleLocusObservations>,
+    }
+
+    /// Walk `bytes`, building the records `is_kept` says to build and reading only the head of
+    /// the rest. **Every head is read** — a skipping reader must, because the head carries the
+    /// running position and, from Milestone E3, the chain-id changes.
+    ///
+    /// `what` names the walk, so a refusal from inside says which of a test's several patterns
+    /// was running.
+    ///
+    /// **It asserts that it built exactly what it was asked to.** Without that, a harness that
+    /// quietly built nothing would leave every test below green and proving nothing — which is
+    /// what a review measured before this assertion existed.
+    fn walk_records(
+        what: &str,
+        bytes: &[u8],
+        block_starts_at: Position,
+        layout: &RecordLayout,
+        is_kept: impl Fn(usize) -> bool,
+    ) -> Vec<WalkedRecord> {
+        let mut walked = Vec::new();
+        let mut at = 0usize;
+        let mut measured_from = OffsetBase::at_block_start(block_starts_at);
+        while at < bytes.len() {
+            let index = walked.len();
+            let found = read_record_head(&bytes[at..], A_CONTIG, measured_from)
+                .unwrap_or_else(|refused| panic!("{what}: record {index}'s head reads: {refused}"));
+            let built = if is_kept(index) {
+                let decoded = decode_record(&bytes[at..], A_CONTIG, measured_from, layout)
+                    .unwrap_or_else(|refused| panic!("{what}: record {index} builds: {refused}"));
+                assert_eq!(
+                    decoded.head, found.head,
+                    "{what}: record {index}'s head read the same both ways"
+                );
+                assert_eq!(
+                    decoded.record_bytes, found.record_bytes,
+                    "{what}: record {index}"
+                );
+                Some(decoded.record)
+            } else {
+                None
+            };
+            at += found.record_bytes;
+            measured_from = OffsetBase::after(&found.head);
+            walked.push(WalkedRecord {
+                head: found.head,
+                record_bytes: found.record_bytes,
+                built,
+            });
+        }
+        assert_eq!(at, bytes.len(), "{what}: the walk consumed the run exactly");
+        for (index, met) in walked.iter().enumerate() {
+            assert_eq!(
+                met.built.is_some(),
+                is_kept(index),
+                "{what}: record {index} was built exactly when the walk was asked to build it"
+            );
+        }
+        walked
+    }
+
+    /// Every record the walk met is where it was written, and every one it built is exactly the
+    /// record it was written from.
+    ///
+    /// **The evidence is the comparison against `records`, which is built independently of the
+    /// codec** — not the agreement between two walks, which would be arithmetic.
+    fn walk_matches(what: &str, walked: &[WalkedRecord], records: &[SampleLocusObservations]) {
+        assert_eq!(walked.len(), records.len(), "{what}: every record was met");
+        for (index, met) in walked.iter().enumerate() {
+            assert_eq!(
+                met.head.region, records[index].region,
+                "{what}: record {index} landed where it was written"
+            );
+            if let Some(built) = &met.built {
+                assert_eq!(
+                    built,
+                    &as_a_decode_can_return_it(&records[index]),
+                    "{what}: record {index}"
+                );
+            }
+        }
+    }
+
+    /// One skip pattern: what it is called, and which records it builds.
+    type SkipPattern = (&'static str, fn(usize) -> bool);
+
+    /// One way of damaging a skipped body: what it is called, and what to fill it with.
+    type BodyDamage = (&'static str, fn(usize) -> Vec<u8>);
+
+    /// The six skip patterns the hand-written tests below run: the edges, and the two halves.
+    fn the_skip_patterns() -> [SkipPattern; 6] {
+        [
+            ("every record", |_| true),
+            ("every even record", |index| index.is_multiple_of(2)),
+            ("every odd record", |index| !index.is_multiple_of(2)),
+            ("one record in four", |index| index.is_multiple_of(4)),
+            ("only the last", |index| index + 1 == RECORDS_IN_THE_RUN),
+            ("none at all", |_| false),
+        ]
+    }
+
+    /// **What `twelve_records_in_order` claims about itself.** Every number in that fixture is
+    /// chosen for a reason its doc gives, and this is where the reasons are checked — so that an
+    /// edit made for something else cannot quietly narrow what the oracle covers. A review
+    /// measured the previous fixture collapsing to twelve identical one-base records with the
+    /// whole suite still green.
+    #[test]
+    fn the_run_is_the_run_its_doc_describes() {
+        let records = twelve_records_in_order();
+        assert_eq!(records.len(), RECORDS_IN_THE_RUN);
+
+        let spans: Vec<u64> = records.iter().map(|record| record.region.len()).collect();
+        assert_eq!(spans.iter().copied().min(), Some(1), "a one-base record");
+        assert_eq!(spans.iter().copied().max(), Some(12), "and a widened one");
+        for pair in records.windows(2) {
+            let gap = pair[1].region.start.get() - pair[0].region.start.get();
+            assert_ne!(
+                gap,
+                pair[0].region.len(),
+                "a gap equal to its own record's span proves nothing about rebuilding positions"
+            );
+        }
+
+        assert!(records.iter().any(|record| record.observations.is_empty()));
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.kind, LocusKind::Generic))
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.kind, LocusKind::SsrBundle))
+        );
+        let tracts: Vec<&SsrDetail> = records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                LocusKind::Ssr(detail) => Some(detail),
+                _ => None,
+            })
+            .collect();
+        assert!(tracts.len() >= 2, "several tract records");
+        for pair in tracts.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "two tract records with the same payload cannot show one taken from the other"
+            );
+        }
+        assert!(
+            records
+                .iter()
+                .any(|record| record.observations.iter().any(|o| !o.chain_ids.is_empty())),
+            "chain ids, so Milestone E is covered the day it writes them"
+        );
+
+        // Two records of the same length whose reference bases differ.
+        let mut by_length: std::collections::BTreeMap<usize, Vec<&[u8]>> =
+            std::collections::BTreeMap::new();
+        for record in &records {
+            by_length
+                .entry(record.reference_bases.len())
+                .or_default()
+                .push(&record.reference_bases);
+        }
+        assert!(
+            by_length
+                .values()
+                .any(|bases| bases.windows(2).any(|pair| pair[0] != pair[1])),
+            "reference bases taken from another record of the same length must be visible"
+        );
+
+        // And at least one record whose head fields each need more than a byte.
+        let (bytes, block_starts_at) = a_run_of_records(&records);
+        let walked = walk_records(
+            "the fixture's own heads",
+            &bytes,
+            block_starts_at,
+            &RecordLayout::as_this_build_writes_it(),
+            |_| false,
+        );
+        assert!(
+            walked
+                .iter()
+                .any(|met| met.head.body_bytes > 255 && met.head.non_reference_reads > 255),
+            "no record at the top of the depth range"
+        );
+    }
+
+    /// **The oracle C3 exists for.** A walk that builds only some of a run's records gets, for
     /// each one it does build, exactly the record a walk that built them all gets — under every
-    /// skip pattern, including the ones that skip the first record, the last, and all but one.
+    /// pattern, including the ones that skip the first record, the last, and all but one.
     ///
     /// The failure this catches is silent by construction: if any field of a body were coded as
     /// a difference from an earlier record, the records *after* a skipped one would still decode,
     /// into plausible and wrong values.
     #[test]
-    fn a_walk_that_skips_records_matches_a_full_decode_on_the_ones_it_keeps() {
-        let records = a_block_of_records();
+    fn a_walk_that_skips_records_builds_the_kept_ones_exactly() {
+        let records = twelve_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
+        let layout = RecordLayout::as_this_build_writes_it();
 
-        /// One skip pattern: what it is called, and which records it builds.
-        type SkipPattern = (&'static str, fn(usize) -> bool);
-
-        let patterns: [SkipPattern; 6] = [
-            ("every record", |_| true),
-            ("every other record", |index| index.is_multiple_of(2)),
-            ("the other every other", |index| !index.is_multiple_of(2)),
-            ("one record in four", |index| index.is_multiple_of(4)),
-            ("only the last", |index| index == 11),
-            ("none at all", |_| false),
-        ];
-
-        for (what, keep) in patterns {
-            let built = walk_keeping(&bytes, block_starts_at, keep);
-            assert_eq!(built.len(), records.len(), "{what}: every record was met");
-            for (index, got) in built.iter().enumerate() {
-                if let Some(got) = got {
-                    assert_eq!(got, &records[index], "{what}: record {index}");
-                }
-            }
+        for (what, is_kept) in the_skip_patterns() {
+            let walked = walk_records(what, &bytes, block_starts_at, &layout, is_kept);
+            walk_matches(what, &walked, &records);
         }
     }
 
-    /// **A skipped record's body can be anything at all, and the records after it are
-    /// unchanged.** This is the strongest form of "the body stands on its own": the skipped
-    /// bytes are overwritten with a value the encoder never writes, and every kept record still
-    /// comes back exactly.
-    ///
-    /// If a body ever carried a difference from an earlier record — a coverage step, a chain-id
-    /// base — this is what would fail, and it is the only thing that would: the walk would still
-    /// consume the block exactly, because the *head* is what says how far to advance.
+    /// **Every** skip pattern a twelve-record run has — all 4,096 of them, enumerated rather than
+    /// sampled, so the test is deterministic and a defect that fires only under some particular
+    /// pattern cannot hide. It costs a few hundredths of a second.
     #[test]
-    fn a_skipped_records_body_can_be_anything_and_the_kept_records_are_unchanged() {
-        let records = a_block_of_records();
-        let (whole, block_starts_at) = a_run_of_records(&records);
-        let keep = |index: usize| index.is_multiple_of(2);
+    fn every_skip_pattern_builds_exactly_the_records_it_keeps() {
+        let records = twelve_records_in_order();
+        let (bytes, block_starts_at) = a_run_of_records(&records);
+        let layout = RecordLayout::as_this_build_writes_it();
 
-        // Fill every skipped record's body with a byte the encoder never lays down alone.
-        let mut scribbled = whole.clone();
+        for mask in 0u32..(1 << RECORDS_IN_THE_RUN) {
+            let what = format!("mask {mask:#05x}");
+            let walked = walk_records(&what, &bytes, block_starts_at, &layout, |index| {
+                mask & (1u32 << index) != 0
+            });
+            walk_matches(&what, &walked, &records);
+        }
+    }
+
+    /// Replace every skipped record's body with `filling`, leaving the heads alone, and hand back
+    /// the damaged bytes together with how many bodies were overwritten.
+    fn with_skipped_bodies_replaced(
+        bytes: &[u8],
+        block_starts_at: Position,
+        is_kept: impl Fn(usize) -> bool,
+        filling: impl Fn(usize) -> Vec<u8>,
+    ) -> (Vec<u8>, usize) {
+        let mut damaged = bytes.to_vec();
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         let mut index = 0usize;
-        let mut scribbled_over = 0usize;
-        while at < whole.len() {
+        let mut replaced = 0usize;
+        while at < bytes.len() {
             let found =
-                read_record_head(&whole[at..], A_CONTIG, measured_from).expect("every head reads");
-            let head_bytes = found.record_bytes - found.body.len();
-            if !keep(index) {
-                let body_at = at + head_bytes;
-                scribbled[body_at..body_at + found.body.len()].fill(0xff);
-                scribbled_over += found.body.len();
+                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("every head reads");
+            if !is_kept(index) && !found.body.is_empty() {
+                let body_at = at + found.record_bytes - found.body.len();
+                let written = filling(found.body.len());
+                assert_eq!(
+                    written.len(),
+                    found.body.len(),
+                    "a replacement body fits exactly"
+                );
+                damaged[body_at..body_at + found.body.len()].copy_from_slice(&written);
+                replaced += 1;
             }
             at += found.record_bytes;
             measured_from = OffsetBase::after(&found.head);
             index += 1;
         }
-        assert!(
-            scribbled_over > 0,
-            "the fixture has to have bodies to scribble over"
-        );
-        assert_ne!(scribbled, whole, "and they have to have changed");
+        (damaged, replaced)
+    }
 
-        let from_the_whole = walk_keeping(&whole, block_starts_at, keep);
-        let from_the_scribbled = walk_keeping(&scribbled, block_starts_at, keep);
-        assert_eq!(from_the_scribbled, from_the_whole);
-        for (index, got) in from_the_scribbled.iter().enumerate() {
-            if let Some(got) = got {
-                assert_eq!(got, &records[index], "record {index}");
+    /// A body of exactly `bytes` bytes that decodes: some reference bases, no observations, no
+    /// reads either way, and the generic kind tag.
+    fn a_decodable_body_of(bytes: usize) -> Option<Vec<u8>> {
+        for prefix_bytes in 1..=5usize {
+            let reference_bases = bytes.checked_sub(prefix_bytes + 4)?;
+            let mut body = Vec::new();
+            encode_u64_leb128(reference_bases as u64, &mut body);
+            if body.len() != prefix_bytes {
+                continue;
+            }
+            body.extend(std::iter::repeat_n(b'C', reference_bases));
+            body.extend_from_slice(&[0, 0, 0, 0]);
+            if body.len() == bytes {
+                return Some(body);
+            }
+        }
+        None
+    }
+
+    /// **A skipped record's body can be anything at all, and the records after it are
+    /// unchanged.** This is the strongest form of "the body stands on its own", and it runs under
+    /// every skip pattern and two kinds of damage.
+    ///
+    /// The two fillings catch different things and are cheap together. `0xff` is not a decodable
+    /// body — every byte carries a variable-length integer's continuation bit, so such a body can
+    /// never terminate — which turns *a reader touched this body* into a hard failure. A filling
+    /// that **is** a valid body catches the shape the first cannot: a reader that touches a
+    /// skipped body, decodes it successfully, and carries something out of it.
+    ///
+    /// If a body ever carried a difference from an earlier record, this is what would fail, and
+    /// the walk would still consume the run exactly — because the *head* is what says how far to
+    /// advance.
+    #[test]
+    fn a_skipped_records_body_can_be_anything_and_the_kept_records_are_unchanged() {
+        let records = twelve_records_in_order();
+        let (whole_bytes, block_starts_at) = a_run_of_records(&records);
+        let layout = RecordLayout::as_this_build_writes_it();
+
+        let fillings: [BodyDamage; 2] = [
+            ("filled with a byte no body can end on", |len| {
+                vec![0xff; len]
+            }),
+            ("filled with another record's body", |len| {
+                a_decodable_body_of(len).unwrap_or_else(|| vec![0xff; len])
+            }),
+        ];
+
+        for (what, is_kept) in the_skip_patterns() {
+            for (damage, filling) in fillings {
+                let (damaged_bytes, replaced) =
+                    with_skipped_bodies_replaced(&whole_bytes, block_starts_at, is_kept, filling);
+                let skipped = (0..records.len()).filter(|index| !is_kept(*index)).count();
+                assert_eq!(
+                    replaced, skipped,
+                    "{what}, {damage}: every skipped body was replaced"
+                );
+                if replaced > 0 {
+                    assert_ne!(damaged_bytes, whole_bytes, "{what}, {damage}");
+                }
+
+                let label = format!("{what}, {damage}");
+                let walked =
+                    walk_records(&label, &damaged_bytes, block_starts_at, &layout, is_kept);
+                walk_matches(&label, &walked, &records);
             }
         }
     }
 
     /// **A body decodes the same alone as it does after every record before it.** Handed nothing
-    /// but its own slice and its own region — no earlier record read, in reverse order so that
-    /// no prior state could have been built up even by accident — each body produces the record
-    /// a full forward walk produces.
+    /// but its own slice and its own region — no earlier record read, in reverse order so that no
+    /// prior state could have been built up even by accident — each body produces the record a
+    /// full forward walk produces.
     #[test]
     fn a_body_decodes_the_same_alone_as_it_does_after_every_record_before_it() {
-        let records = a_block_of_records();
+        let records = twelve_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
         let layout = RecordLayout::as_this_build_writes_it();
 
-        // Locate every record first, so each body can be decoded with nothing else in hand.
+        // Locate every record first, so each body can then be decoded with nothing else in hand.
         let mut located = Vec::new();
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         while at < bytes.len() {
             let found =
                 read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("the head reads");
-            located.push((at, found.head));
+            let body_at = at + found.record_bytes - found.body.len();
+            located.push((body_at..body_at + found.body.len(), found.head));
             at += found.record_bytes;
             measured_from = OffsetBase::after(&found.head);
         }
-        assert_eq!(located.len(), records.len());
+        assert_eq!(located.len(), records.len(), "every record was located");
 
-        for (index, (at, head)) in located.iter().enumerate().rev() {
-            let found = read_record_head(
-                &bytes[*at..],
-                A_CONTIG,
-                OffsetBase::at_block_start(head.region.start),
-            )
-            .expect("a record's head reads from its own start");
-            let alone = decode_record_body(found.body, head.region, &layout)
-                .expect("and its body decodes with no record before it");
-            assert_eq!(alone.record, records[index], "record {index}");
-            assert_eq!(alone.bytes_read, found.body.len());
+        for (index, (body, head)) in located.iter().enumerate().rev() {
+            let alone = decode_record_body(&bytes[body.clone()], head.region, &layout)
+                .unwrap_or_else(|refused| {
+                    panic!("record {index}'s body decodes with no record before it: {refused}")
+                });
+            assert_eq!(
+                alone.record,
+                as_a_decode_can_return_it(&records[index]),
+                "record {index}"
+            );
+            assert_eq!(alone.bytes_read, body.len(), "record {index}");
         }
     }
 
-    /// **The head is the half that carries state, and this is the contrast.** A reader may skip
-    /// any body it likes; it may not skip a head, because the position is a running difference —
-    /// so a reader that guessed a record's length instead of reading it lands in the middle of
-    /// the next one.
-    ///
-    /// From Milestone E3 the chain-id live-set changes ride in the head for exactly this reason,
-    /// and the exception lists stay in the body for exactly the reason the tests above prove.
+    /// **The skip the cohort's first pass actually makes.** It decides from the head's
+    /// `non_reference_reads` rather than from a record's ordinal, and never reads the body of a
+    /// position where every read matched the reference — about ninety-nine positions in a hundred
+    /// on the corner that was measured, the tomato panel at three reads a position.
     #[test]
-    fn the_head_carries_state_across_records_and_the_body_carries_none() {
-        let records = a_block_of_records();
+    fn a_walk_that_skips_by_what_the_head_says_builds_the_kept_ones_exactly() {
+        let records = twelve_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
+        let layout = RecordLayout::as_this_build_writes_it();
 
-        // Reading every head: every record lands where it was written.
-        let read_in_order = walk_keeping(&bytes, block_starts_at, |_| false);
-        assert_eq!(read_in_order.len(), records.len());
+        // What the head will say, worked out from the records rather than from the file.
+        let varies: Vec<bool> = records
+            .iter()
+            .map(|record| record.non_reference_and_compared_reads().0 > 100)
+            .collect();
+        assert!(
+            varies.iter().any(|it| *it) && varies.iter().any(|it| !it),
+            "the head has to separate the run, or this proves nothing"
+        );
 
-        // Skipping the second record's head as well as its body — advancing by its length but
-        // never taking its start as the next base — moves every record after it.
-        let first = read_record_head(
+        let walked = walk_records(
+            "skipping by what the head says",
             &bytes,
-            A_CONTIG,
-            OffsetBase::at_block_start(block_starts_at),
-        )
-        .expect("the first head reads");
-        let second = read_record_head(
-            &bytes[first.record_bytes..],
-            A_CONTIG,
-            OffsetBase::after(&first.head),
-        )
-        .expect("the second head reads");
-        let third_at = first.record_bytes + second.record_bytes;
-
-        let third_with_the_base_kept = read_record_head(
-            &bytes[third_at..],
-            A_CONTIG,
-            OffsetBase::after(&second.head),
-        )
-        .expect("the third head reads");
-        assert_eq!(third_with_the_base_kept.head.region, records[2].region);
-
-        let third_with_the_base_stale =
-            read_record_head(&bytes[third_at..], A_CONTIG, OffsetBase::after(&first.head))
-                .expect("and reads without error from the wrong base, which is the point");
-        assert_ne!(third_with_the_base_stale.head.region, records[2].region);
+            block_starts_at,
+            &layout,
+            |index| varies[index],
+        );
+        for (index, met) in walked.iter().enumerate() {
+            let (expected, _) = records[index].non_reference_and_compared_reads();
+            assert_eq!(
+                met.head.non_reference_reads, expected,
+                "record {index}: the head a skipping reader filters on"
+            );
+        }
+        walk_matches("skipping by what the head says", &walked, &records);
     }
 
-    proptest! {
-        /// The oracle over every skip pattern a twelve-record block has, rather than the six
-        /// hand-picked ones: whichever records a walk builds, it builds them exactly.
-        #[test]
-        fn any_skip_pattern_builds_exactly_the_records_it_keeps(mask in 0u16..4_096) {
-            let records = a_block_of_records();
-            let (bytes, block_starts_at) = a_run_of_records(&records);
-            let built = walk_keeping(&bytes, block_starts_at, |index| mask & (1 << index) != 0);
-            prop_assert_eq!(built.len(), records.len());
-            for (index, got) in built.iter().enumerate() {
-                if let Some(got) = got {
-                    prop_assert_eq!(got, &records[index]);
-                }
-            }
+    /// The same walk under a file written by a **later version** — one whose manifest declares
+    /// fields this reader does not know, at the end of every body.
+    ///
+    /// **That is the configuration the next per-record field arrives in**, and it is the one
+    /// spec psp_record_encoding.md §7 names as a trap: production stores a window's mean coverage
+    /// as a difference from the previous record. A field walked past with a length that depended
+    /// on an earlier record would fail here and nowhere else.
+    #[test]
+    fn a_walk_under_a_layout_with_unknown_trailing_fields_still_skips_cleanly() {
+        let records = twelve_records_in_order();
+        let mut fields = record_fields();
+        fields.push(FieldSpec {
+            name: FieldName("window-gc-percent".to_string()),
+            encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+        });
+        fields.push(FieldSpec {
+            name: FieldName("window-mean-coverage".to_string()),
+            encoding: FieldEncoding::LengthPrefixedBytes,
+        });
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
+            .expect("two unknown fields at the end are not a reason to refuse the file");
+        assert_eq!(layout.unknown_field_count(), 2);
+
+        // Write the run as that later version would: each body followed by the two extra fields.
+        let block_starts_at = records[0].region.start;
+        let mut encoder = RecordEncoder::for_block(block_starts_at);
+        let mut bytes = Vec::new();
+        for (index, record) in records.iter().enumerate() {
+            let mut one = Vec::new();
+            encoder
+                .encode_record(record, &mut one)
+                .expect("the fixture is in coordinate order");
+            let body_at = one.len() - record_body_length(record);
+            let mut widened = one[..body_at].to_vec();
+            let mut body = one[body_at..].to_vec();
+            body.extend_from_slice(&[7, 7, 7, index as u8]);
+            body.extend_from_slice(&[2, b'h', b'i']);
+            // The head's declared body length has to grow with the body it describes, so the
+            // head is rewritten rather than reused.
+            let mut head = FieldReader::new(&widened);
+            let offset = head.read_varint("position-offset").expect("the head reads");
+            let span = head.read_varint("reference-span").expect("the head reads");
+            let non_reference = head
+                .read_varint("non-reference-reads")
+                .expect("the head reads");
+            widened.clear();
+            put_varint(&mut widened, offset);
+            put_varint(&mut widened, span);
+            put_varint(&mut widened, non_reference);
+            put_varint(&mut widened, body.len() as u64);
+            widened.extend_from_slice(&body);
+            bytes.extend_from_slice(&widened);
+        }
+
+        for (what, is_kept) in the_skip_patterns() {
+            let walked = walk_records(what, &bytes, block_starts_at, &layout, is_kept);
+            walk_matches(what, &walked, &records);
         }
     }
 }
