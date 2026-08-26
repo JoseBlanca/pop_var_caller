@@ -38,9 +38,10 @@ and how it reaches the caller**.
 
 ### Non-goals
 
-- **Fitting the ordinary-site frequency spectrum.** That is the cohort gather's own content and is
-  much the largest piece here; §3.4 says what it buys and defers it with a home. This document
-  specifies the *diversity*, which is the rung below it, and how both reach the caller.
+- **Estimating anything.** Both numbers are already fitted, on both paths (§3.1, §4.1). This
+  document says which fitted quantity each prior takes, what happens where a fit is thin, and how
+  the numbers reach the caller. The one piece of arithmetic it does add is a **representation
+  change** — a fitted continuous density into allele-count classes (§3.2).
 - **Changing what the caller does with either number once it has it.** The projection from a
   spectrum to a seed pair is built and tested (`project_spectrum_seed`,
   `src/ng/calling/genotype_prior/seed_generic.rs:636`); this document does not touch it.
@@ -83,45 +84,62 @@ genome still puts thousands of tracts behind each stratum.
 
 ## 3. The ordinary-site path
 
-### 3.1 What is measured
+### 3.1 What is measured, and it is fitted today
 
-**Expected heterozygosity: how often two copies of an ordinary site, drawn at random from the panel,
-differ.** It is a property of the population, so an individual's inbreeding is divided out before it
-is a population statement (`parameter_prepass_cohort.md` §3):
+**The joint fit already produces both numbers**, and this section records where they are rather
+than proposing an estimator. `JointFit` (`src/ng/parameter_estimation/joint/fit.rs:198`) carries:
 
-```text
-Hobs = Hexp · (1 − F)          so      Hexp = mean over samples of  Hobs(sample) / (1 − F(sample))
-```
+- **`density: Estimate<FrequencyDensity>`** (`:207`) — the population's allele-frequency
+  distribution: a Beta over the positions that segregate, plus two point masses, one for positions
+  carrying only the reference base and one for the reference accession's own private alleles
+  (`:86-95`). **That is the site frequency spectrum**, in continuous parametric form rather than as
+  allele-count classes;
+- **`expected_heterozygosity: f64`** (`:223`) — read off that density as
+  `∫ π(f) · 2 f (1 − f) df`, *"with no finite-sample correction because there is no panel in it"*
+  (`:104-108`).
 
-**Both inputs are already fitted, per sample.** Each sample's genotype frequencies at each ploidy
-are `SampleRates` (`src/ng/parameter_estimation/generic/mod.rs:343`), carried on
-`GenericSampleParameters` beside that sample's inbreeding coefficient (`:446`, `:450`). What does
-not exist is the fold across samples, because the step that owns it — the cohort gather — has a
-specification and no code.
+**So the ordinary-site diversity is measured, not missing.** `ExpectedHeterozygosity`'s own
+documentation says so and names its producer (`src/ng/types.rs:685`).
 
-**Build it from observed heterozygosity, not from the non-reference rate.** A site where every
-sample is homozygous for the alternative is not polymorphism; it is a place where the reference
-accession carries the odd allele. Estimating diversity from "how often we see a non-reference
-allele" counts every quirk of the reference as cohort variation
-(`parameter_prepass_cohort.md` §3).
+**⚠ An earlier draft of this section said the opposite**, and the mistake is worth recording
+because it is one anybody repeating this search will make: it looked for a producer of the
+*calling-side type*, `FittedSpectrum`, found every construction inside the genotype prior's own
+tests, and concluded nothing fitted a spectrum. The pre-pass fits the same quantity under a
+different name and a different parameterisation, and emits the heterozygosity as a bare `f64`, so a
+search for the newtype's constructor misses it. **Search for what a step emits, not for the type its
+consumer takes.**
 
-**⚠ A constraint this places on an open choice elsewhere.** The inbreeding coefficient must *not*
-come from the ratio estimator `F = 1 − Hobs/Hexp`, because that estimator needs an expected
-heterozygosity to produce its answer, and feeding it back returns whatever was assumed. The
-runs-of-homozygosity estimator has no such problem — it reads inbreeding off the genomic
-distribution of heterozygosity and never needs a population expectation. Which estimator ships is
-open in [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §11; **this section is a
-constraint on that choice**, not a re-opening of it.
+### 3.2 What that leaves, and it is an adapter
 
-### 3.2 One sample
+**Two conversions at the seam, and nothing else:**
 
-**The formula returns that genome's own observed heterozygosity divided by its own `(1 − F)`, and
-that is a measurement rather than a fallback.** One diploid genome carries two copies of every site,
-and how often those two differ is exactly what the quantity asks; the inbreeding correction is what
-turns a statement about the individual into one about the population it was drawn from. So **this
-number is fitted at every cohort size down to one**, which the frequency spectrum is not.
+1. **Wrap the heterozygosity.** `JointFit::expected_heterozygosity` is an `f64`;
+   `project_spectrum_seed` takes an `ExpectedHeterozygosity`, whose constructor rejects a value
+   outside `[0, 1]`.
+2. **Project the density into allele-count classes.** `FittedSpectrum`
+   (`src/ng/calling/genotype_prior/seed_generic.rs:473`) takes `2N + 1` class weights for `N`
+   diploid individuals, plus two bookkeeping numbers — the regulariser's site weight and the count
+   of variable census sites. The fitted density is continuous, so the class weights are that density
+   evaluated into allele-count classes at the panel's own size: a Beta-binomial mixture with the two
+   point masses at the ends.
 
-### 3.3 The ladder, and what each rung means
+**Neither needs the cohort gather.** An earlier draft deferred this whole section to that step; the
+joint route already does the work, and what remains is a conversion between two representations of
+the same fit.
+
+### 3.3 One sample
+
+**The density is fitted at every cohort size down to one** (`src/ng/types.rs:686`), so the
+heterozygosity comes with it. The class-weight projection is the part that needs a panel — `2N + 1`
+classes at `N = 1` is three — and the consumer's ladder already handles that: with no spectrum it
+takes a neutral shape at the fitted diversity.
+
+**⚑ What is not settled is where the projection stops being worth doing.** A panel of one or two
+gives a spectrum with three or five classes, which carries almost no shape. The consumer's own
+documentation says the pre-pass emits the spectrum as absent below a panel-size floor; **no such
+floor exists in the code**, and §9's open question 4 is where it should sit.
+
+### 3.4 The ladder, and what each rung means
 
 The consumer already implements three regimes
 (`src/ng/calling/genotype_prior/seed_generic.rs:597`), and this document changes none of them — it
@@ -129,32 +147,28 @@ supplies the inputs they were written for:
 
 | rung | when | what the seed is |
 |---|---|---|
-| **fitted spectrum** | a panel large enough for one | shape and scale both from the spectrum; the diversity is not read |
-| **fitted diversity** | no spectrum | a neutral shape at the measured diversity |
-| **stated constant** | neither | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
+| **fitted spectrum** | a panel above the floor of §9's question 4 | shape and scale both from the spectrum; the diversity is not read |
+| **fitted diversity** | below that floor, or no fit | a neutral shape at the measured diversity |
+| **stated constant** | no fit at all | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
 
-**The middle rung is the one sample's rung**, and it is why the diversity is worth fitting even
-after the spectrum exists: at one sample there is never a spectrum. **This corrects a reading that
-the spectrum makes the diversity redundant** — true only where a spectrum exists.
+**The middle rung carries the small cohort**, and it is why the diversity is worth carrying even
+though the spectrum exists.
 
 **⚠ One sentence in the consumer's own documentation contradicts this** and should be re-derived
 rather than repeated when that file is next touched: `seed_generic.rs:604` says *"a cohort of five
 arrives here without one while a single sample arrives with one"*, which has the two cohort sizes
-the wrong way round against `parameter_prepass_cohort.md` §3. Nothing depends on it — the code
-branches on whether a spectrum arrived, never on cohort size — so it is a wrong sentence rather than
-a wrong behaviour.
+the wrong way round. Nothing depends on it — the code branches on whether a spectrum arrived, never
+on cohort size — so it is a wrong sentence rather than a wrong behaviour.
 
-### 3.4 Deferred: the frequency spectrum
+### 3.5 The other route, and why it is not this one
 
-**What it buys is the *shape* of variation, on panels large enough to have one**, and it is the
-larger half of this subject by a wide margin: fitting allele-count classes across a panel is the
-cohort gather's real content. **Deferred, with a home:**
-[`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4, which specifies it.
-
-**What deferring it costs, stated plainly:** with the diversity alone, the ordinary-site prior moves
-off a species-range constant onto a number measured on this cohort and keeps a neutral shape. That
-is most of the benefit for a small fraction of the work, which is why the two are separated here
-rather than built together.
+The **per-sample histogram route** (`parameter_estimation::generic`) supplies an *ingredient* rather
+than the number: each sample's observed genotype frequencies (`generic/mod.rs:343`) and its
+inbreeding coefficient (`:450`), of which the population value is the mean of `Hobs / (1 − F)`
+across samples. **Nothing computes that mean, and under this design nothing needs to** — the joint
+route reads heterozygosity off a fitted population density instead, which needs no per-sample fold
+and no finite-sample correction. **Deferred, with a home:** if a run ever uses the histogram route
+alone, the fold belongs in [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3.
 
 ---
 
@@ -210,9 +224,9 @@ preference:**
 commonest length differs from its stratum's centre is not distinguished from one that sits on it.
 **Unmeasured**, and §9's open question 1 says what would settle it.
 
-**The alternative that was live** was to build the cohort-wide repeat diversity in the cohort
-gather and keep §5's construction. It loses on all four points above and costs an unbuilt subsystem
-first.
+**The alternative that was live** was to build the cohort-wide repeat diversity and keep §5's
+construction. It loses on all four points above, and nothing emits that number — where the two the
+fit already produces are sitting in `StratumFit` today.
 
 ### 4.3 One sample is not the thin case here — a thin stratum is
 
@@ -314,9 +328,10 @@ only the producer is missing.
 
 ## 6. Cross-cutting concerns
 
-**Cost.** Both numbers are computed once per run. The ordinary-site diversity is a fold over
-per-sample values already in memory. The repeat numbers are already computed; carrying them across
-the seam adds one spectrum and one scalar per stratum — tens to a couple of hundred strata per run.
+**Cost.** Nothing here is fitted; everything is already computed once per run. The ordinary-site
+side adds one projection of a four-parameter density into `2N + 1` classes, once per run. The
+repeat side adds one spectrum and one scalar per stratum carried across the seam — tens to a couple
+of hundred strata per run.
 
 **Errors.** Neither number can fail a run. Every absence has a rung below it and the rung is
 reported; the only refusal in this document is a repeat tract in a run with no repeat-tract
@@ -333,7 +348,7 @@ read-only thereafter.
 |---|---|---|
 | the stratum's length spectrum and concentration | `joint/ssr_fit.rs:289`, `:291` | read as-is; nothing re-fitted |
 | the seam into calling | `joint/stratum_fits.rs` | widened to carry two more values and their rung |
-| per-sample genotype frequencies and inbreeding | `generic/mod.rs:343`, `:450` | the two inputs of the ordinary-site fold |
+| the population's allele-frequency density and its heterozygosity | `joint/fit.rs:207`, `:223` | read as-is; the density is projected into classes, nothing re-fitted |
 | the three-regime seed projection | `seed_generic.rs:636` | unchanged; this supplies its inputs |
 | the always-answers ladder discipline | `joint/share_curve.rs` | the principle, not the curve machinery (§4.4) |
 | the run-wide bundle | `calling/mod.rs:567` | two more fields, absent-or-present |
@@ -353,9 +368,10 @@ read-only thereafter.
    none.
 3. **The rung reaches the output.** A locus seeded from a stratum's own fit, one from its period's
    pool, and one from the stated constant are distinguishable in the run's record.
-4. **The ordinary-site fold is checked against a hand-computed cohort** at one sample and at
-   several, including a sample with a non-zero inbreeding coefficient, where the uncorrected and
-   corrected answers differ.
+4. **The class-weight projection reproduces the density it came from.** Summed back, the `2N + 1`
+   class weights return the density's own segregating share and its two point masses; and the
+   heterozygosity implied by the classes matches `FrequencyDensity::expected_heterozygosity` at a
+   panel large enough for the discretisation to be fine.
 5. **The two numbers cannot be crossed.** They are separate types; a test that hands one where the
    other belongs must not compile.
 6. **The end-to-end check** is a repeat tract called from real evidence, which is what this unblocks.
@@ -390,18 +406,25 @@ read-only thereafter.
    tracts genuinely spread over more lengths. **Leaning: leave it** until the loci it applies to are
    worth more than 7%. **What would settle it:** the spread of the pooled spectrum against repeat
    count within one period, on tomato, where the thin rung carries the larger share.
-3. **What concentration does the bottom rung state?** A flat shape has an obvious answer; its
+3. **Where does the class-weight projection stop being worth doing?** At `N` diploid individuals
+   the spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape. The
+   consumer's documentation refers to a panel-size floor below which the spectrum is emitted as
+   absent; **no such floor exists in the code**, and the ladder's top two rungs are otherwise
+   separated by nothing. **Leaning:** a floor low enough that it never fires on a real panel is
+   worse than none, so set it from measurement rather than from taste. **What would settle it:** the
+   projection is already instrumented for cost by panel size, and its fit reports how far its answer
+   sits from the measurement it was fitted to — sweep that divergence against panel size and put the
+   floor where it stops falling. **Confirm before code.**
+4. **What concentration does the bottom rung state?** A flat shape has an obvious answer; its
    strength does not. **Leaning:** the run's own median fitted concentration where the run fitted
    any stratum, and a stated constant only where it fitted none. **Confirm before code.**
 
 **Deferred, with a recommended home.**
 
-- **The ordinary-site frequency spectrum** —
-  [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 (§3.4 above).
-- **Where the ordinary-site diversity fold is computed.** It needs a home, and the cohort gather is
-  the specified one — but that step has no architecture document and no code, and the fold itself is
-  small. **Recommended home:** the cohort gather when it is built; until then, wherever the run
-  assembles `RunParameters`, marked as a temporary lodging.
+- **The per-sample fold, for a run that uses the histogram route alone.** Not needed under this
+  design — the joint route reads heterozygosity off its fitted density — but it is the ingredient
+  the other route supplies. **Home:**
+  [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3 (§3.5 above).
 - **Reconciling the per-stratum length spectra with the per-sample allele spectra** the per-sample
   STR route fits — they are the same kind of object at different grains
   (`parameter_prepass_ssr.md` §6). **Home:** `parameter_prepass_cohort.md` §3.

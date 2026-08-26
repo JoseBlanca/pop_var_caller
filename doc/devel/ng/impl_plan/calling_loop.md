@@ -502,10 +502,43 @@ because that plan's E1 shipped the function this replaces.
    reported. **Measured, and it is why the rung is a pooled fit rather than a curve**: the strata
    with no fit of their own hold about 2% of HG002's tracts and at most 7% of tomato's.
 
-**What it does not do:** the ordinary-site diversity fold, which blocks nothing here — the SNP/indel
-prior already runs, on a species-range constant, and says so. **Home:** spec §3.1 and §9's deferred
-list. *Depends:* E2c. *Source:*
+**What it does not do:** the ordinary-site side, which is a separate and smaller job and blocks
+nothing here. **Both its numbers are already fitted** — the joint fit emits the population's
+allele-frequency density and the heterozygosity read off it
+([`joint/fit.rs:207`](../../../../src/ng/parameter_estimation/joint/fit.rs), `:223`) — and what
+stands between them and the caller is a **representation change**: wrap the heterozygosity in its
+newtype, and project the density into the `2N + 1` allele-count classes the seed projection takes.
+**Home:** a step of its own, spec §3.2. *Depends:* E2c. *Source:*
 [`../spec/population_diversity.md`](../spec/population_diversity.md) §4, §5.
+
+**E2f. The ordinary-site prior's seed, from the fit.**  ☐
+
+**Both numbers are already fitted and neither reaches the caller.** `JointFit`
+([`joint/fit.rs:198`](../../../../src/ng/parameter_estimation/joint/fit.rs)) carries the
+population's allele-frequency density (`:207`) — a Beta over the segregating positions plus a point
+mass at each end — and the expected heterozygosity read off it (`:223`). The caller's seed
+projection takes an `ExpectedHeterozygosity` and a `FittedSpectrum` of `2N + 1` allele-count class
+weights, and its own seam is already built: `RunParameters::project_seed`
+([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)) takes both as arguments and
+nothing supplies them. **So this is a representation change, not an estimator.**
+
+**Two pieces:**
+
+1. **Wrap the heterozygosity** in its newtype, whose constructor rejects a value outside `[0, 1]`.
+2. **Project the density into allele-count classes** at the panel's own size — the Beta evaluated
+   into `2N + 1` classes with the two point masses at the ends — plus the two bookkeeping numbers
+   `FittedSpectrum` carries.
+
+**⚑ One decision this step must take rather than inherit: the panel-size floor.** At `N`
+individuals the spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no
+shape. The consumer's documentation refers to a floor below which the spectrum is emitted as absent;
+**no such floor exists in the code**, and without one the ladder's top two rungs are separated by
+nothing. Spec §9's question 3 says what would settle it and carries the leaning.
+
+**What this buys, and it is worth stating because the step is small:** the SNP/indel prior moves off
+`ExpectedHeterozygosity::SPECIES_FALLBACK` — a species-range constant — onto this cohort's own
+measurement, and gains a fitted shape wherever the panel supports one. *Depends:* E2. *Source:*
+[`../spec/population_diversity.md`](../spec/population_diversity.md) §3.
 
 **E3b. The repeat-tract path, end to end.**  ☐
 The same fixture at a tract, with the candidates and their repeat counts **fixture-supplied**
