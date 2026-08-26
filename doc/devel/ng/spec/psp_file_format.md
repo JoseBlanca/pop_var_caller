@@ -239,8 +239,14 @@ sample to yield a 0.52 MB parsed histogram**, and its reader holds both for the 
 [`psp_record_encoding.md`](psp_record_encoding.md) §4.1 owns that decision.
 
 **The container does not interpret the trailer.** It stores bytes and hands them back. What is in
-them is the writer's business, which is what lets ng's summary change shape without a container
-version bump.
+them is the writer's business.
+
+**And what is in them is deliberately not settled** (the owner, 2026-08-25). The per-sample summary
+is the case that exists today; the coverage-against-GC histogram and the census are expected to join
+it. **What the set finally is depends on the statistical work, which is not finished**, and the
+container is built so that it does not have to be: because the payload is opaque here, adding to it
+or reshaping it is a writer-side change and **not a container version bump**. That is the property
+this section exists to protect, and it is worth more than any particular list would be.
 
 ---
 
@@ -376,16 +382,36 @@ Timed on a tomato accession at three reads a position, 7.69 M records, one strea
 building records.** Only the last is avoided by knowing a record is unwanted. The middle one is
 avoided *only* by a record saying how long it is, which is what `record_length` is for.
 
-| design | a walk keeping one record in a hundred | memory at 5,000 samples |
-|---|---:|---:|
-| no head — build every record | 0.30 s | 1.14 GB |
-| head without `record_length` | 0.163 s *(measured)* | 1.14 GB |
-| **head with `record_length`** | **~0.126 s** *(estimated)* | **1.14 GB** |
-| a second stream | ~0.204 s *(composed)* | 2.27 GB |
+| design | a walk keeping one record in a hundred | file | memory at 5,000 samples |
+|---|---:|---:|---:|
+| no head — build every record | 0.29 s | 4.628 | 1.14 GB |
+| **head with `record_length`** | **0.141 s** | **5.056 (+9.2 %)** | **1.14 GB** |
+| a second stream | ~0.204 s *(composed)* | +1.7 % | 2.27 GB |
 
-**The second stream is last on both axes**, which is why it is gone. *The two estimated rows are
-composed from the measured components above and have not been run as readers; the 0.163 s row is a
-reader that exists.*
+**All but the second-stream row are now measured on a reader that exists.** The skipping walk is
+**2.06× faster** than a full one; reading heads and skipping bodies costs 0.027 s over 7.69 M
+records, and the rest of its 0.141 s is decompression, which nothing avoids. **The second stream is
+last on both axes**, which is why it is gone.
+
+**⚠ The head costs 9.2 % of the file at three reads a position and 5.8 % at 279 — not the 1.4 % an
+earlier draft quoted**, and the difference is the point of the next paragraph.
+
+#### Why a skippable body costs more than a length field
+
+**The body has to stand on its own, and that is most of the price.** A record's coverage and its read
+names are normally coded as differences from the *previous record* — which is cheap, because
+neighbouring positions are alike. **A reader that skips a body never sees those differences, so it
+loses the base both are measured from and every record after it decodes wrong.** So with a head,
+both restart at each record: the coverage is absolute, and the read-name difference is measured
+from zero rather than from the record before.
+
+That is what turns a 1.4 % length field into a 9.2 % head. **It is a real cost of skippability, not
+an implementation detail**, and it is why the earlier figure was wrong rather than merely imprecise.
+
+*Not measured: a head that carries the two differences itself — the coverage step and the advance in
+read-name numbering — so the body can keep its cross-record coding and a skipping reader still track
+both. It would move those fields rather than duplicate them, so it should recover much of the 9.2 %,
+at the cost of two more head fields and a reader that maintains state while skipping.*
 
 #### What the head carries, and why each field
 
