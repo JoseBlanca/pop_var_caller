@@ -670,7 +670,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: reads,
             num_fwd: reads,
-            q_sum: -10.0 * f64::from(reads),
+            q_sum: crate::ng::types::SummedLogError::from_nats(-10.0 * f64::from(reads)),
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: 0,

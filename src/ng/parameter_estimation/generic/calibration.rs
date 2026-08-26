@@ -282,7 +282,7 @@ pub fn minted_error_by_read_group(
             }
         };
         out[at].1.add(MintedReadErrors::of_observation(
-            observation.q_sum,
+            observation.q_sum.nats(),
             observation.num_obs,
         ));
     }
@@ -324,7 +324,7 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_obs,
             num_fwd: 0,
-            q_sum,
+            q_sum: crate::ng::types::SummedLogError::from_nats(q_sum),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,

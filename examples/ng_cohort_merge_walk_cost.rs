@@ -37,7 +37,7 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
             read_group: ReadGroupId(0),
             num_obs: 3,
             num_fwd: 3,
-            q_sum: -6.0,
+            q_sum: pop_var_caller::ng::types::SummedLogError::from_nats(-6.0),
             mapq_sum: 180,
             mapq_sum_sq: 10_800,
             placed_left: 0,

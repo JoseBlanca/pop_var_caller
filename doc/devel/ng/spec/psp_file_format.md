@@ -208,9 +208,14 @@ because coverage is smooth and a position difference that is slightly off still 
 
 ### 3.3 The block index and the footer
 
-**One entry per block**, in genomic order: the chromosome, the first position, the byte offset, and
-a summary of the one number a cohort scan reads (the largest non-reference support anywhere in the
-block), so a reader can decide whether to touch a block **without decompressing it**.
+**One entry per block**, in genomic order: the chromosome, the first position, and the byte offset.
+**And nothing else.** An earlier draft of this section had each entry also carry the largest
+non-reference support anywhere in the block, so a reader could decide whether to touch a block
+without decompressing it. At a 100 kb block with roughly one varying position in a hundred, every
+block holds about a thousand of them, so that field never says *skip*: it cost index bytes and
+writer bookkeeping for a decision that never fires, and it is gone (the owner, 2026-08-25 —
+[`psp_record_encoding.md`](psp_record_encoding.md) §2.4 carries the reasoning). *This paragraph
+described it as present until 2026-08-26; the removal had been agreed and was not finished here.*
 
 **A flat vector, decoded whole at open.** This is production's shape
 ([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs)) and it was going to have
@@ -326,16 +331,22 @@ withdrawn.** I had reasoned that larger blocks cost seek time, since a reader st
 decodes from that block's beginning. **The owner's ruling of 2026-08-25: seeking is not the common
 case — a run reads a file from the beginning to the end.** So seek cost should not set this number.
 
-**What still argues against a very large block is skipping, which is not the same thing.** The index
-carries a per-block summary so a scan can decide whether to touch a block at all (§3.3), and that
-decision is only as fine as the block. At 100 kb a scan skips in 100 kb units; at 1,000 kb it cannot
-skip anything smaller. **How much that costs is unmeasured**, and it is the same measurement that
-decides §12 question 1 — how much of a cohort scan the index summary alone can serve.
+**What argues against a very large block is where a reader may start, and nothing else.** A reader
+seeks to a block and streams from its beginning (§1.2), so the block size *is* the granularity of
+restarting: at 100 kb a reader that wants one position decodes at most 100 kb of records to reach it,
+and at 1,000 kb, ten times that.
+
+*An earlier version of this paragraph argued instead from block skipping — that the index's per-block
+summary lets a scan decide whether to touch a block at all, and that the decision is only as fine as
+the block. **That argument is void: the summary was removed** (§3.3), because at 100 kb essentially
+every block contains something and the field never fires. Skipping now happens a record at a time,
+through the record head of §4.3, and a record head does not care how large its block is.*
 
 **So 1,000 kb is live and may well be better.** It was smaller on both samples measured — 4.626
 against 4.627 on tomato, which is nothing, and **16.444 against 17.557 on the patchy human one,
-which is 6 %**. The case for moving rests entirely on that second figure, and on the skip measurement
-coming back saying blocks are rarely skipped.
+which is 6 %**. **The case for moving now rests on that second figure alone**, against a tenfold
+coarser restart granularity; the skip measurement the earlier version made it conditional on does
+not exist to be taken, since there is nothing left to skip at block grain.
 
 ### 4.2 The look-back window — declared, and the reader honours it
 
@@ -661,8 +672,9 @@ mid-block (§1.2), so the position asked for is where the *records* start, not w
 starts.
 
 **`blocks()` is the cheap survey.** Chromosome, first position and offset without decompressing
-anything. What it does *not* carry is a per-block summary of variation: §2.4 says why that field was
-removed rather than kept.
+anything. What it does *not* carry is a per-block summary of variation:
+[`psp_record_encoding.md`](psp_record_encoding.md) §2.4 says why that field was removed rather than
+kept, and §3.3 here says the same.
 
 **Skipping records is the reader's decision, not a separate call.** Every record opens with the head
 of §4.3, so a walk hands the caller the head and the caller says whether it wants the body:

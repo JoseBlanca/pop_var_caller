@@ -65,7 +65,7 @@ use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
 use crate::ng::ref_seq::RefSeq;
-use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 use crate::pileup_record::ChainId;
 
 use super::active_read_set::ActiveReads;
@@ -358,7 +358,9 @@ pub(super) fn try_ordinary_column(
                 read_group: o.read_group,
                 num_obs: o.num_obs,
                 num_fwd: o.fwd,
-                q_sum: o.q_sum,
+                // Rounded once, here, where the sum is finished — not per read. See
+                // `SummedLogError::from_nats`.
+                q_sum: SummedLogError::from_nats(o.q_sum),
                 mapq_sum: o.mapq_sum,
                 mapq_sum_sq: o.mapq_sum_sq,
                 placed_left: o.placed_left,

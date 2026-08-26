@@ -31,7 +31,7 @@ use super::WalkerConfig;
 use super::run;
 use crate::fasta::{ChromRefFetchError, MultiChromRefFetcher};
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation, WitnessedLocusPositions};
-use crate::ng::types::ReadGroupId;
+use crate::ng::types::{ReadGroupId, SummedLogError};
 
 // ---------------------------------------------------------------------
 // MockFasta
@@ -822,7 +822,8 @@ fn mate_overlap_bq_tie_prefers_first_mate_not_earlier_position() {
     // Net q_sum ≈ -2.0, NOT ≈ -10.0 (which would be the case if
     // the tie-break wrongly kept mate 2).
     assert!(
-        rec.reference_observation().q_sum > -3.0 && rec.reference_observation().q_sum < -1.0,
+        rec.reference_observation().q_sum.nats() > -3.0
+            && rec.reference_observation().q_sum.nats() < -1.0,
         "q_sum ≈ -2.0 (first mate kept); got {}",
         rec.reference_observation().q_sum
     );
@@ -850,7 +851,8 @@ fn mate_overlap_zeroes_lower_bq_contribution() {
     // (the BQ-summing change from S7 is invisible here because MQ
     // dominates; tests at low MQ_log_err pin the BQ math directly).
     assert!(
-        rec.reference_observation().q_sum > -4.0 && rec.reference_observation().q_sum < -2.0,
+        rec.reference_observation().q_sum.nats() > -4.0
+            && rec.reference_observation().q_sum.nats() < -2.0,
         "expected q_sum ≈ -3 (MQ-dominated), got {}",
         rec.reference_observation().q_sum
     );
@@ -894,7 +896,7 @@ fn mate_overlap_agree_keeper_carries_summed_bq() {
     // Keeper contribution: max(-9.21, -100) = -9.21.
     // Other contribution: max(ln_perr(0)=0, -100) = 0.
     // Total q_sum ≈ -9.21. Pre-S7 (Q=20 unsummed): ≈ -4.61.
-    let q = rec.reference_observation().q_sum;
+    let q = rec.reference_observation().q_sum.nats();
     assert!(
         q < -8.5 && q > -10.0,
         "q_sum should reflect summed BQ (≈ ln_perr(40) ≈ -9.21), got {q}",
@@ -930,7 +932,7 @@ fn mate_overlap_agree_combined_bq_caps_at_200() {
     let m1 = make(true, 150);
     let m2 = make(false, 100);
     let records = drive_walker(vec![m1, m2], fa);
-    let q = records[0].reference_observation().q_sum;
+    let q = records[0].reference_observation().q_sum.nats();
     // ln_perr(200) ≈ -46.05. Without the cap it would be
     // ln_perr(250) ≈ -57.56.
     assert!(
@@ -985,14 +987,15 @@ fn mate_overlap_disagree_winner_bq_scaled_by_0_8() {
     assert_eq!(snp_allele.num_obs, 1);
     // Winner BQ = (30 * 0.8) as u8 = 24. ln_perr(24) ≈ -5.53.
     // Pre-S7 (Q=30 unscaled): ≈ -6.91.
-    let q_ref = ref_allele.q_sum;
+    let q_ref = ref_allele.q_sum.nats();
     assert!(
         q_ref < -5.0 && q_ref > -6.0,
         "REF allele q_sum should reflect scaled BQ=24 (≈ -5.53), got {q_ref}",
     );
     // Loser BQ zeroed → ln_perr(0) = 0 → max(0, -100) = 0.
     assert_eq!(
-        snp_allele.q_sum, 0.0,
+        snp_allele.q_sum,
+        SummedLogError::NONE,
         "SNP allele's BQ was zeroed; q_sum should be 0",
     );
 }

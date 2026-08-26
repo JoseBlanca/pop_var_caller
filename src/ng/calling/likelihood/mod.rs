@@ -1862,7 +1862,7 @@ mod tests {
             read_group: ReadGroupId(2),
             num_obs,
             num_fwd: 5,
-            q_sum: -13.5,
+            q_sum: crate::ng::types::SummedLogError::from_nats(-13.5),
             mapq_sum: 240,
             mapq_sum_sq: 14_400,
             placed_left: 1,

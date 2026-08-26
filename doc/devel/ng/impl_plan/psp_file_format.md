@@ -91,14 +91,20 @@ is for. Unknown major version is `UnsupportedVersion`, not a parse failure.
 computed means both routes see the same number, and the store then stores an integer it was handed
 rather than approximating anything.
 
-☐ **B1 — the window's GC fraction becomes an integer type.** 0–100, rounded at construction.
+⛦ **B1 — the window's GC fraction becomes an integer type.** 0–100, rounded at construction.
 Terminal per-window statistic; its consumer bins its input.
 ***Source:*** [spec psp_record_encoding §5.1.1](../spec/psp_record_encoding.md).
+**BLOCKED, 2026-08-26 — ng does not compute this quantity anywhere.** It exists only in the frozen
+production tree (`src/sample_summary/coverage.rs:283`). It is the per-window statistic
+[`parameter_prepass_joint_fit.md`](../spec/parameter_prepass_joint_fit.md) §2.2 *proposes* and calls
+"the first new accumulator step 4 would add", and that accumulator is not built. Nothing can round
+where nothing computes.
 
-☐ **B2 — the window's mean coverage becomes an integer type**, in quarter-reads. Same argument.
+⛦ **B2 — the window's mean coverage becomes an integer type**, in quarter-reads. Same argument.
 ***Depends:*** B1 (the pattern). ***Source:*** as B1.
+**BLOCKED for the same reason as B1.**
 
-☐ **B3 — the summed log-error becomes an integer type**, in units of 1/4,096 of a natural log.
+✅ **B3 — the summed log-error becomes an integer type**, in units of 1/4,096 of a natural log.
 **Own commit, do not bundle**: it enters a likelihood, so a wrong scale is a wrong genotype and not a
 crash. The oracle is the calling comparison — the same records called before and after, with the
 count of changed genotypes and the movement in quality scores reported.

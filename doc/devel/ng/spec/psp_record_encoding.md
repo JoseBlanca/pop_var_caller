@@ -165,7 +165,7 @@ psp file
   psp block 1
   ...
   index                   one entry per block: chromosome, first position,
-                          the two byte offsets, and the block's scan summary
+                          and the byte offset — nothing else (§2.4)
   trailer                 locates the index; its absence means "interrupted"
 ```
 

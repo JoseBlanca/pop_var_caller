@@ -522,7 +522,7 @@ mod tests {
             })
             .map(|record| {
                 let sequence = &record.observations[0];
-                sequence.q_sum / f64::from(sequence.num_obs)
+                sequence.q_sum.nats() / f64::from(sequence.num_obs)
             })
             .fold(f64::NEG_INFINITY, f64::max);
         assert_eq!(
@@ -546,7 +546,7 @@ mod tests {
             crate::ng::run::cohort_merge::build::AlleleSupport {
                 num_reads: minted.num_obs,
                 num_fwd: minted.num_fwd,
-                q_sum: minted.q_sum,
+                q_sum: minted.q_sum.nats(),
                 mapq_sum: minted.mapq_sum,
                 mapq_sum_sq: minted.mapq_sum_sq,
                 placed_left: minted.placed_left,

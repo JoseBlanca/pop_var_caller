@@ -26,7 +26,7 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId};
+use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -321,7 +321,13 @@ pub struct SequenceObservation {
     pub num_fwd: u32,
     /// Σ per-read log-error over the supporting reads — the freebayes per-read error
     /// term (production's `q_sum`).
-    pub q_sum: f64,
+    ///
+    /// **An integer count of steps of 1/4,096 of a natural log, not a float** — see
+    /// [`SummedLogError`], which carries why. The rounding happens here, where the value is
+    /// computed, so that a run reading these observations straight from memory and a run
+    /// reading them back from a psp see the same number rather than two floats that agree to
+    /// a tolerance.
+    pub q_sum: SummedLogError,
     /// Σ MAPQ over the supporting reads. With `mapq_sum_sq` and `num_obs` it recovers
     /// the mean and variance the MAPQ Welch's-t multi-mapper filter reads.
     pub mapq_sum: u32,
@@ -1086,7 +1092,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs,
             num_fwd: 0,
-            q_sum: 0.0,
+            q_sum: SummedLogError::from_nats(0.0),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
@@ -1569,7 +1575,7 @@ mod tests {
                 read_group: ReadGroupId(0),
                 num_obs: 9,
                 num_fwd: 5,
-                q_sum: -12.0,
+                q_sum: SummedLogError::from_nats(-12.0),
                 mapq_sum: 540,
                 mapq_sum_sq: 32_400,
                 placed_left: 3,
@@ -1620,7 +1626,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: 1,
             num_fwd: 1,
-            q_sum: 0.0,
+            q_sum: SummedLogError::from_nats(0.0),
             mapq_sum: 60,
             mapq_sum_sq: 3_600,
             placed_left: 0,

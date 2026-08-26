@@ -241,11 +241,18 @@ pub const HEAD_SENTINEL: &[u8; 17] = b"---END-HEADER---\n";
 /// the TOML body.
 pub const HEADER_FRAMING_BYTES: usize = HEAD_MAGIC.len() + 8 + HEAD_SENTINEL.len();
 
-/// The largest TOML body this reader will read: 1 MiB less the framing.
+/// The largest TOML body this reader will read: 16 MiB less the framing.
 ///
 /// **Checked before anything is allocated**, so a corrupt or hostile length field cannot
 /// drive a large allocation on its own say-so.
-pub const MAX_HEADER_BODY_BYTES: u64 = (1024 * 1024) - HEADER_FRAMING_BYTES as u64;
+///
+/// **It is really a limit on how many contigs a reference may have**, and that is why it is
+/// 16 MiB rather than production's 1 MiB (the owner, 2026-08-26). Every contig costs a
+/// `[[contig]]` table in the body, so the cap measured out at about **11,300 contigs with
+/// their MD5s and about 35,000 without** — and a draft assembly with tens of thousands of
+/// scaffolds is ordinary in plant genomics, which is this caller's own domain. The header is
+/// written once and read once per file, so nothing on any hot path notices the room.
+pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES as u64;
 
 /// The format this writer produces and this reader understands. A file whose **major**
 /// differs is refused as [`PspReadError::UnsupportedVersion`], not read as damaged.
@@ -1546,6 +1553,34 @@ mod tests {
                 "got {refused}"
             );
         }
+    }
+
+    /// **The header's size cap is really a cap on how many contigs a reference may have**, so
+    /// what it has to be tested against is a fragmented assembly rather than a size.
+    ///
+    /// 30,000 scaffolds with their MD5s is an ordinary draft plant genome and is well past
+    /// what the original 1 MiB cap allowed — measured in review at about 11,300 contigs with
+    /// digests. Raised to 16 MiB by the owner, 2026-08-26.
+    #[test]
+    fn a_reference_of_thirty_thousand_scaffolds_still_fits_the_header() {
+        let mut fragmented = a_written_header();
+        fragmented.contigs = (0u32..30_000)
+            .map(|scaffold| ContigIdentity {
+                name: format!("scaffold_{scaffold}"),
+                length: 1_000 + u64::from(scaffold),
+                md5: Some([(scaffold % 256) as u8; 16]),
+            })
+            .collect();
+
+        let bytes = fragmented.encode().expect("a fragmented assembly encodes");
+        assert!(
+            bytes.len() > 1024 * 1024,
+            "the fixture must exceed the old 1 MiB cap to be testing anything; it is {} bytes",
+            bytes.len()
+        );
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back.contigs.len(), 30_000);
+        assert_eq!(read_back, fragmented);
     }
 
     /// A buffer too short to hold even the framing is refused rather than indexed into.
