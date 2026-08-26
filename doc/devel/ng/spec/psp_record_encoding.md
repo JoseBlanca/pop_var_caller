@@ -10,7 +10,7 @@ programs named in §14.*
 
 *What the revision changed, so a reader of the old version knows what moved: the block is
 now **large** and the compressor's **look-back window** is capped separately, where before both were one
-small frame (§2, §2.2); the **dictionary is gone**, because a large block warms its own
+small block (§2, §2.2); the **dictionary is gone**, because a large block warms its own
 context (§2.2); the **index question is closed**, because a large block has few entries
 (§2.4, §13 Q4); and the byte-identity oracle is replaced by an exact-plus-tolerance one,
 because block boundaries move QUAL in its last digits (§12). The measured result: **the cost
@@ -78,7 +78,7 @@ kilobytes, not megabytes*, at three thousand open samples.
    full record only where some sample might vary — about one position in a hundred. An
    encoding that forces a reader to inflate every field to read one throws that away.
 5. **Nothing about the writer's scheduling reaches the bytes.** Inherited from
-   [`run_streaming.md`](run_streaming.md) §12.1: a frame cut is a function of the
+   [`run_streaming.md`](run_streaming.md) §12.1: a psp block cut is a function of the
    observation stream alone, so the same sample gathered at any worker count gives the
    same file.
 
@@ -122,7 +122,7 @@ kilobytes, not megabytes*, at three thousand open samples.
   then the next record's, with the bytes cut into blocks and each block compressed on its own. It is
   the layout a reader can walk without having to inflate anything it does not need.
 - A **dictionary** is a few tens of kilobytes of representative bytes stored once in the
-  file and handed to the compressor before every frame, so that a small frame is not
+  file and handed to the compressor before every psp block, so that a small block is not
   compressed from a cold start. It is a standard zstd facility, not something we build.
 - **Reader memory** is the quantity every choice here is measured against: the bytes one
   open sample forces a reader to hold before it can produce a record.
@@ -132,7 +132,7 @@ kilobytes, not megabytes*, at three thousand open samples.
 ## 2. The proposal
 
 *Revised 2026-08-25 after the shape below was built and measured. The earlier proposal —
-small independent frames compressed against a shared dictionary — is superseded, and §2.2
+small independent blocks compressed against a shared dictionary — is superseded, and §2.2
 records why, because the reasoning that led to it was sound against a question that turned
 out to be the wrong one.*
 
@@ -183,16 +183,16 @@ about three reads a position:
 | columnar | 1024 KiB | 6.27 |
 | columnar | 256 KiB | 6.60 |
 | columnar | 64 KiB | 7.33 |
-| **record stream, 32 KiB frames + dictionary** | **36 KiB** | **7.39** |
-| record stream, 8 KiB frames + dictionary | 12 KiB | 7.57 |
+| **record-major, 32 KiB blocks + dictionary** | **36 KiB** | **7.39** |
+| record-major, 8 KiB blocks + dictionary | 12 KiB | 7.57 |
 
 **Going record-major costs about 18 % of the bytes and buys about one
 twenty-eighth of the memory.** That is the whole trade, and goal 1 decides it: three
 thousand open samples at a megabyte each is 3 GB before a single record is read, at 36 KiB
 each it is 108 MB.
 
-The second property is what makes the small frames work at all: **the record stream is
-nearly flat in frame size** — 132 KiB of reader memory down to 12 KiB costs 3 %, where the
+The second property is what makes the small blocks work at all: **the record stream is
+nearly flat in block size** — 132 KiB of reader memory down to 12 KiB costs 3 %, where the
 columnar shape over the same range costs a third of its size. A design whose memory knob
 is nearly free is a different kind of object from one whose memory knob is its ratio.
 
@@ -239,13 +239,13 @@ the genotype fit, and neither is sized by the block.*
 
 ### 2.2 Why the dictionary was proposed, and why it is no longer needed — a superseded conclusion, kept
 
-**This section used to argue for small frames with a shared dictionary, against one long
+**This section used to argue for small psp blocks with a shared dictionary, against one long
 stream with a capped look-back window. The measurement behind it was correct and the conclusion was
 wrong, and the reason is worth keeping** — it is a clean example of sweeping a grid that
 does not contain the answer.
 
 What was measured: on HG002, a continuous stream with a **512 KiB window** gave 6.54 bytes a
-record and 32 KiB frames with a dictionary gave 6.52 — the same size for fourteen times the
+record and 32 KiB blocks with a dictionary gave 6.52 — the same size for fourteen times the
 memory, so the window looked like something you pay for and do not get back.
 
 **What was never swept is the combination §2 proposes: a *large block* with a *small
@@ -257,13 +257,13 @@ distinction is invisible in a sweep where the two always move together.
 
 Two consequences:
 
-- **The dictionary is no longer part of the design.** It existed because a 32 KiB frame is
+- **The dictionary is no longer part of the design.** It existed because a 32 KiB block is
   compressed from a cold start; a 1 MB block warms its own context within the first few
   kilobytes. The measured store in §2.1 carries **no dictionary at all** and is still 35 %
   smaller a record than production's file.
 - **The trap it created goes with it.** A dictionary is held per open reader unless
   deliberately shared, and 112 KiB across three thousand samples is about 330 MB — larger
-  than the frames the whole design existed to shrink. That risk is now simply absent rather
+  than the blocks the whole design existed to shrink. That risk is now simply absent rather
   than mitigated.
 
 *Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
@@ -302,77 +302,55 @@ split spends memory to buy wall time and cores recover wall time.* The container
 open — exactly which numbers the first stream holds.
 
 This costs almost nothing and is not a compromise between the two shapes: **splitting a
-frame into more separately-compressed pieces was measured to help, not hurt** (on HG002 at
-512 KiB, fourteen field-frames give 5.44 bytes a record against 5.82 for one combined
-frame), because putting like values next to each other is most of what the columnar layout
+psp block into more separately-compressed pieces was measured to help, not hurt** (on HG002 at
+512 KiB, fourteen field-columns give 5.44 bytes a record against 5.82 for one combined
+stream), because putting like values next to each other is most of what the columnar layout
 was doing. The nearest field measured on its own, a small per-record varint, compressed to
 0.12 bytes a record on tomato; the summary stream is a few of those.
 
 **The unit of the summary stream is the record, and its blocks are cut with the record
 stream's** — one index entry names both. A reader that scans a segment reads only summary
-frames; a reader that then needs three records decompresses the three heavy frames holding
+blocks; a reader that then needs three records decompresses the three record streams holding
 them.
 
 ### 2.4 The index, and where a reader may start
 
-**Every frame is self-contained by construction.** It opens with its chromosome, its first
-position and its record count, and every running base inside it — the position difference,
-the coverage difference, the read-name difference — restarts at zero. A frame never crosses
-a chromosome. So the restart points are the frame boundaries, and there is no separate
-mechanism to build.
+**Every psp block is self-contained.** It opens with its chromosome, its first position and its
+record count, and every running difference inside it — the position difference, the coverage
+difference, the read-name difference — restarts at zero. A psp block never crosses a chromosome. So
+the restart points are the psp block boundaries, and there is no separate seek mechanism to build.
 
-At 32 KiB frames the measured tomato sample — 7.59 M covered positions, 56 MB — has 5,085
-of them, one about every 1,500 covered positions, **finer than the 100 kb the requirement
-asks for.** An entry naming a frame's chromosome, first position and two byte offsets is
-about ten bytes as variable-length integers: roughly 50 KB for that sample, one part in a
-thousand of the file.
+**The index has one entry per psp block**, in genomic order: the chromosome, the first position, the
+byte offsets of the block's two streams, and the largest non-reference support anywhere in the
+block. That last field is what lets a reader decide whether to touch a block **without decompressing
+it** — though at the settled block size it decides very little, and §2.3 says why.
 
-Two rules the index has to carry beyond that:
+#### How big the index is, at the settled block size
 
-- **A per-block summary of the non-reference support** — the largest anywhere in
-  the frame — reachable **without decompressing the frame**, so a reader can decide whether
-  to touch it at all. Whether that lives in the index or in the frame's own uncompressed head
-  depends on how the index is sized, which is open (question 4 below).
-- **A frame is cut at every 100 kb of reference as well as at its byte target.** A frame
-  holds a fixed number of *bytes*, so on a sample whose coverage is patchy it can span a
-  long stretch of reference and the guarantee in goal 3 would not hold. This costs frames
-  only where coverage is thin.
+**A genomic grid makes the block count arithmetic rather than a measurement**: one block per 100 kb
+of reference per chromosome. For tomato's 782 Mb across 13 chromosomes that is about **7,840
+blocks**, and at production's 24 bytes an entry
+([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs)) an index of about
+**190 kB per open sample** — under 40 kB if the entries are variable-length integers.
 
-**That 50 KB is a sliced benchmark sample, and the whole-genome number is the one that
-matters.** The measured file covers about one per cent of the tomato genome. A whole-genome
-sample at three reads a position covers most of 800 Mb, so at 1,500 positions a frame it
-holds roughly **500,000 frames — an index of about 5 MB per open file**, which is *worse*
-than the 3.8 MB [`run_streaming.md`](run_streaming.md) §7.2 rejects when it measures
-production's flat vector of one 24-byte entry per block
-([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs), decoded whole at
-open, [`decode_index`, `:110`](../../../../src/psp/index.rs)).
+That is the whole of the problem this section used to have. **The earlier design cut blocks by byte
+count at 32 KiB, which on a whole-genome sample gives roughly 500,000 blocks and a 5 MB index per
+open file** — worse than the 3.8 MB [`run_streaming.md`](run_streaming.md) §7.2 rejects when it
+measures production's flat vector, decoded whole at open
+([`decode_index`, `src/psp/index.rs:110`](../../../../src/psp/index.rs)). Small blocks were forced
+then because the block was also what a reader had to inflate; once the look-back window bounds that
+instead (§2), the block is sized for compression and for the index, and both want it large.
 
-#### The large block dissolves this — settled 2026-08-25
+**So the coarse-index-and-chain scheme this section once owed is not needed and must not be built.**
+A flat vector of one entry per block, decoded at open, is a couple of hundred kilobytes. §13's open
+question 4 is closed.
 
-**That paragraph was the strongest argument against small psp blocks and it is now moot, because a
-psp block no longer has to be small.** Once a reader holds the look-back window rather than the psp
-block, the psp block is sized for compression and for the index, and both want it large.
-
-Measured on one tomato accession, the same records written both ways:
-
-| | blocks in that sample | index at 24 bytes an entry |
-|---|---:|---:|
-| production `.psp`, 5 kb reference window | 1,674 | 40 kB |
-| this design, 1 MB blocks | **154** | **3.7 kB** |
-
-Scaled to a whole-genome sample — arithmetic from that measured block count — a 1 MB block
-gives roughly **14,000 blocks and 340 kB of index per open sample**, against 3.8 MB at
-production's 5 kb window and 18.8 MB at the 1 kb window that would otherwise be needed to
-get the memory down.
-
-**So the coarse-index-and-chain scheme this section owed is not needed and must not be
-built.** A flat vector of one entry per block, decoded at open, is a few hundred kilobytes —
-inside the per-open-sample budget on its own terms. Open question 4 is closed.
-
-**The 100 kb cut rule stays**, and for the original reason: a block holds a fixed number of
-*bytes*, so on a sparse sample it can span a long stretch of reference and goal 3's
-restart guarantee would not hold. At 1 MB blocks this rule will bind more often than it did
-at 32 KiB, and it is what keeps the restart grain honest rather than incidental.
+**And the extra cut rule it owed is gone too.** A byte-cut block can span an unbounded stretch of
+reference on a sparse sample, so that design needed a second rule — *also cut every 100 kb* — to keep
+goal 3's restart guarantee. **A block cut on a 100 kb genomic grid satisfies goal 3 by
+construction**, so there is no second rule. What survives is a byte *ceiling*, and it is there for
+the opposite case: at three hundred reads a position a fully covered 100 kb block is about 1.6 MB
+([`psp_file_format.md`](psp_file_format.md) §4.1).
 
 ---
 
@@ -416,7 +394,7 @@ reference bases should go in the file at all —
 a `Box<[u8]>` per record, so written out it is a per-sample copy of the reference over the
 analysed ground.
 
-**Leaning: do not store them, and re-fetch when a frame is decoded.** The measurement
+**Leaning: do not store them, and re-fetch when a psp block is decoded.** The measurement
 supporting it is indirect but firm: the allele sequences, which are the same kind of
 content, compressed to 0.32–0.34 bytes a record on both corners, and the reference bases
 are longer than the allele on every record where a deletion widened the footprint. The
@@ -453,8 +431,8 @@ heap, against 12.7% for the compressed block decode this document spends most of
 - **The reader does not hold the encoded bytes once the summary is decoded.** Holding the source
   representation beside the decoded one doubles a per-open-sample cost for nobody. On production this
   was measured at 1.03 MB per sample of peak — 13.7% of the per-sample cost of a whole cohort run.
-- **Both properties are per-open-sample costs and belong in the same budget as the frames** (§2.1).
-  A design that gets a frame down to 36 kB and then spends 1.5 MB on a summary has not made an open
+- **Both properties are per-open-sample costs and belong in the same budget as the blocks** (§2.1).
+  A design that gets a reader down to 36 kB and then spends 1.5 MB on a summary has not made an open
   sample cheap.
 
 **Open, and small:** whether the decoded summary is itself held per sample for the whole run or
@@ -475,7 +453,7 @@ same file. **There is no field width to choose** — the question that looks lik
 16?" is really "how big is the step?", and the compressor then charges for how much the
 numbers move rather than for a declared width.
 
-Swept one field at a time, at 32 KiB frames and level 9, in bytes a record for the whole
+Swept one field at a time, at 32 KiB blocks and level 9, in bytes a record for the whole
 file (so a row's distance from the baseline is that field's own contribution):
 
 | quantity | step | HG002 | tomato |
@@ -496,7 +474,7 @@ file (so a row's distance from the baseline is that field's own contribution):
 
 ### 5.1 Re-measured 2026-08-25, on the streaming store and at 279 reads a position
 
-**The sweep below was taken at 32 KiB frames and on samples at about 3 and 30 reads a position.
+**The sweep below was taken at 32 KiB blocks and on samples at about 3 and 30 reads a position.
 This one is on the shape the container spec settled — 1 MB blocks, a 32 kB window — and it adds the
 deep corner that was missing.** The deep sample is HG002 over chr21's tandem-repeat regions,
 **279 reads a position** by its own coverage histogram, 74,623 covered positions.
@@ -627,7 +605,7 @@ baseline, for no accuracy anything downstream consumes.**
 **The summed log-error is the one that needs a ruling and does not have one.** It goes
 straight into a likelihood: a step of 1/16 of a natural-log unit is a 6 % error in that
 term where 1/256 is 0.4 %. It is also the field whose magnitude grows with depth, which is
-the second reason a fixed 8- or 16-bit width is the wrong frame for it — at three hundred
+the second reason a fixed 8- or 16-bit width is the wrong shape for it — at three hundred
 reads a position the value needs more range than sixteen bits hold, while at three reads it
 needs six. **Proposed: 1/256 of a natural-log unit until the modelling side rules
 otherwise** (§13, open question 1); coarsening it to 1/16 would buy a further 5 %.
@@ -662,7 +640,7 @@ Production names about 3.4 % of the reads it folds
 so **its files say nothing about what this costs.** Measured instead from the alignments
 themselves — one identifier per read pair, allocated in order, the reference stretches taken
 from each read's CIGAR, the resulting per-position live sets written three ways and
-compressed identically at 32 KiB frames with a frame cut every 1,500 positions:
+compressed identically at 32 KiB blocks with a block cut every 1,500 positions:
 
 | | tomato slice, 11.4 reads a position | HG002 slice, 293 reads a position |
 |---|---|---|
@@ -696,7 +674,7 @@ Four things this settles that
   that assumes one stretch per read loses the second mate of nine reads in ten — silently,
   because the merge would simply see a read that was not there. **A re-entry form is part of
   the first version, not a later fix.**
-- **Restating the live set at every frame is affordable.** Cutting frames every 1,500
+- **Restating the live set at every block is affordable.** Cutting blocks every 1,500
   positions rather than by byte count — which is what §2.4 does — costs the differential form
   12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
   alternatives.
@@ -704,7 +682,7 @@ Four things this settles that
 **Proposal: delta-varints in the first version, the differential form second.** The first is
 a few lines inside the record encoder, has no interaction with anything else in this
 document, and takes the deep corner from 43.8 to 11.7 bytes a position. The second is worth
-another 5.3 bytes a position there and needs the live set restated at every frame, which is
+another 5.3 bytes a position there and needs the live set restated at every block, which is
 the one place these two documents' designs touch (§2.4).
 
 ---
@@ -735,18 +713,18 @@ the one place these two documents' designs touch (§2.4).
 - **A single record can exceed the rolling buffer.** Many alleles, many read names. The
   buffer has to grow rather than fail, and a fixed maximum record size is not a safe
   assumption to bake in.
-- **The look-back window must be written into the file and honoured on read.** zstd will refuse a frame
+- **The look-back window must be written into the file and honoured on read.** zstd will refuse a zstd frame
   whose window exceeds the decoder's configured maximum, so a reader that assumes 32 KiB will
   reject a legitimate file written with more. Read it from the header and configure the
   decoder from that.
 - **A dictionary is no longer part of this design (§2.2)**, and if one is ever reintroduced
   it is held *per open reader* unless deliberately shared: 112 KiB across three thousand
   samples is about 330 MB, larger than the buffers the whole design exists to shrink.
-- **A dictionary trained on the frames it is then measured against reports a saving no
+- **A dictionary trained on the blocks it is then measured against reports a saving no
   reader ever gets.** This is easy to do by accident and the number it produces is
   spectacular — in an early run of our own probe, a hundredfold. Train on one half of the
-  frames and measure on the other.
-- **A frame's size is in bytes, so its span in reference is whatever coverage makes it.**
+  blocks and measure on the other.
+- **A psp block's span in reference is fixed by the grid, but its size in bytes is not.**
   §2.4's 100 kb cut rule exists for that; without it goal 3 quietly fails on exactly the
   sparse samples that need it.
 - **The three quantised fields are lossy and the integer fields are not.** A round-trip test
@@ -754,9 +732,9 @@ the one place these two documents' designs touch (§2.4).
   corrupted. Compare the integer fields, the sequences and the name lists **exactly**, and
   only the three quantised fields against their step.
 - **The window's mean coverage is stored as a difference from the previous record**, so a
-  frame that does not reset that difference reads back wrong from its first record — and
+  psp block that does not reset that difference reads back wrong from its first record — and
   plausibly, because coverage is smooth. The same applies to the position and the read-name
-  bases. Every running base resets at a frame boundary; this is the property §2.4's restart
+  bases. Every running base resets at a psp block boundary; this is the property §2.4's restart
   guarantee rests on.
 - **Do not decode the whole index at open** — §2.4, and the 3.8 MB per file
   [`run_streaming.md`](run_streaming.md) §7.2 measures on production's.
@@ -765,8 +743,8 @@ the one place these two documents' designs touch (§2.4).
 
 ## 8. Cross-cutting concerns
 
-**Memory.** The point of the design. One open sample holds: the compressed frame it is
-reading, the decompressed frame (32 KiB), one record, and its share of the dictionary. The
+**Memory.** The point of the design. One open sample holds, per stream: a buffer of compressed
+bytes, a rolling buffer of decompressed ones, the decompressor's own state, and one record. The
 whole-cohort figure was measured — 63 tomato accessions open at once and advanced one record
 each per round, the shape the merge reads in: **22 MB peak against 170 MB for the same walk
 over the `.psp`s**, and the psp side is flattered there because those particular files
@@ -777,14 +755,14 @@ reader on the same sample, and the cohort walk finished in 22 s against 38 s. Th
 never builds a field array it must then walk again to assemble records. This is a
 single-threaded sequential-read measurement and says nothing about the seek path.
 
-**Errors.** A frame that decompresses to the wrong length, a record that runs off the end of
-its frame, a read-name list longer than the observation's read count: all are corrupt-input
+**Errors.** A zstd frame that decompresses to the wrong length, a record that runs off the end of
+its psp block, a read-name list longer than the observation's read count: all are corrupt-input
 failures belonging to the psp reader's error type, and none may reach the merge as a
 half-built record. The trailer's absence means the writer was interrupted and the file is
 refused rather than read as a short sample —
 [`run_streaming.md`](run_streaming.md) §9's rule, unchanged.
 
-**Concurrency.** Frames are independently decodable, so nothing here serialises. The frame
+**Concurrency.** psp blocks are independently decodable, so nothing here serialises. The block
 cut must depend only on the observation stream, never on scheduling, or the byte-identity
 oracle of [`run_streaming.md`](run_streaming.md) §12.1 breaks — a byte target counted over
 the records as they arrive satisfies this; a flush driven by a timer or a queue depth does
@@ -813,15 +791,12 @@ used only by tests, and the real reader compared against it record for record.
 - **The byte layout itself** — field order inside a record, the framing integers' widths, the
   trailer's bytes, the format version tag. To the implementation, guided by this document;
   it is small enough not to need its own spec once the shape is fixed.
-- **How the index stays small at 100,000 frames a file** — the coarse-index-plus-chaining
-  shape [`run_streaming.md`](run_streaming.md) §7.2 asks for. Named as open question 4 below
-  rather than deferred to another document, because nothing else can settle it.
 - **The read names' final encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md),
   whose experiment §6 here feeds rather than replaces.
 - **Whether the reference bases are stored** — [`run_streaming.md`](run_streaming.md) §11
   question 4; §5 offers a leaning and the measurement that would close it.
 - **Multi-library samples.** Both corners measured here are one read group. A sample with
-  several will have more distinct values per frame and compress somewhat worse; nobody has
+  several will have more distinct values per psp block and compress somewhat worse; nobody has
   measured how much. To the first run on a multi-library cohort.
 
 ---
@@ -867,12 +842,12 @@ ng stores all of them, and §7 measures that field separately.
    "tens of kilobytes". The probe does this at 8, 32 and 63 samples today.
 3. **Worker-count invariance**, inherited from [`run_streaming.md`](run_streaming.md) §12.1:
    one sample gathered at 1, 2, 4, 8, 16 workers gives byte-identical files apart from the
-   header's timestamp. This is what §8's frame-cut rule exists to preserve.
+   header's timestamp. This is what §8's block-cut rule exists to preserve.
 4. **The two-phase saving is still there.** Scanning the summary stream over a cohort segment
    must materialise about one record in a hundred, the ratio
    [`run_streaming.md`](run_streaming.md) §3.3 measured. A file that round-trips but forces
    every record to inflate has failed goal 4 while passing oracle 1.
-5. **Restart equals sequential.** Reading from an arbitrary frame gives exactly the records a
+5. **Restart equals sequential.** Reading from an arbitrary psp block gives exactly the records a
    full sequential read gives from that point — the test that catches a running base that was
    not reset (§7).
 6. **Mode equivalence**, [`run_streaming.md`](run_streaming.md) §12 oracle 3: the same cohort
@@ -917,8 +892,8 @@ will pass while a read-name list is being corrupted.
    one sequential read. *Leaning:* interleave, because
    [`run_streaming.md`](run_streaming.md) §3.4's reader serves segments rather than files.
    **Settled by:** timing a cohort merge over one chromosome both ways, once a writer exists.
-4. **How does the index stay small when a file has 100,000 frames?** — **CLOSED 2026-08-25:
-   the file does not have 100,000 frames.** The question only existed because the frame had to
+4. **How does the index stay small when a file has 100,000 blocks?** — **CLOSED 2026-08-25:
+   the file does not have 100,000 blocks.** The question only existed because a psp block had to
    be small to bound a reader's memory; once the look-back window does that instead, the psp block is sized
    for compression and for the index, and both want it large. Measured: 154 blocks in a tomato
    accession at 1 MB blocks against 1,674 in production's `.psp`, so a flat index of one entry
@@ -938,7 +913,7 @@ Two throwaway programs, both in the tree, both runnable:
 
 - **`examples/psp_record_stream_compression.rs`** — sweeps the grid of §2.1 and §2.2: field
   layout (record-major or columnar), field width (fixed-width, variable-length, fixed-point),
-  batch size, and framing (independent frames, with or without a dictionary; one continuous
+  batch size, and framing (independent blocks, with or without a dictionary; one continuous
   stream with a chosen window, flushed or not). Reports bytes a record against the reader
   memory each combination implies, and each field's own compressed bytes.
 - **`examples/psp_row_stream_roundtrip.rs`** — a working encoder, decoder and verifier for the
