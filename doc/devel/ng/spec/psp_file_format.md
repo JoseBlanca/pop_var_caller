@@ -70,7 +70,9 @@ any point on the curve above.
 - **It does not define the cohort reader's scheduling** — which blocks it fetches, in what order,
   with how much look-ahead. That is [`run_streaming.md`](run_streaming.md)'s.
 - **It does not specify a random-access API within a block.** A reader seeks to a block and streams
-  from its start; seeking to a record inside a block means decoding from that block's beginning.
+  from its start; reaching a record inside a block means decoding from that block's beginning. **This
+  is a deliberately cheap corner** — the owner's ruling of 2026-08-25 is that the common case is
+  reading a file from beginning to end, so the format is not shaped around fast arbitrary seeks.
 
 ---
 
@@ -275,8 +277,21 @@ emitting near-empty blocks earns its place.
 **Why 100 kb and not something else.** It is a round number that satisfies goal 2 directly, sits in
 the flat part of the tomato curve, and recovers most of the patchy-data penalty (17.557 against
 18.242 at 5 kb). **It is not an optimum** — 1,000 kb is smaller on both samples — and it is a
-starting value, not a derived one. The reason not to go further is seek cost: a reader starting
-mid-block decodes from the block's beginning, and that grows with the size.
+starting value, not a derived one — and **the argument that was holding it down has been
+withdrawn.** I had reasoned that larger blocks cost seek time, since a reader starting mid-block
+decodes from that block's beginning. **The owner's ruling of 2026-08-25: seeking is not the common
+case — a run reads a file from the beginning to the end.** So seek cost should not set this number.
+
+**What still argues against a very large block is skipping, which is not the same thing.** The index
+carries a per-block summary so a scan can decide whether to touch a block at all (§3.3), and that
+decision is only as fine as the block. At 100 kb a scan skips in 100 kb units; at 1,000 kb it cannot
+skip anything smaller. **How much that costs is unmeasured**, and it is the same measurement that
+decides §12 question 1 — how much of a cohort scan the index summary alone can serve.
+
+**So 1,000 kb is live and may well be better.** It was smaller on both samples measured — 4.626
+against 4.627 on tomato, which is nothing, and **16.444 against 17.557 on the patchy human one,
+which is 6 %**. The case for moving rests entirely on that second figure, and on the skip measurement
+coming back saying blocks are rarely skipped.
 
 ### 4.2 The look-back window — declared, and the reader honours it
 
@@ -635,8 +650,9 @@ corrupted.
    nothing measurable so far: a 100 kb grid with a 1 MiB ceiling gives 4.628 bytes a record against
    4.627 without, on tomato. *Leaning:* offer it, default it off, and let the first whole-genome
    deep-coverage run set it — at 279 reads a position a fully covered 100 kb block is about 1.6 MB,
-   which is a large thing to decode to reach one position. **Settled by:** the seek-time measurement
-   §12 question 5 now asks for.
+   which is a large thing to hold while writing. **Settled by:** the block-size distribution on a
+   whole-genome deep-coverage sample, which nothing here has produced. *Not* by seek time: the owner
+   ruled on 2026-08-25 that reading a file start to end is the common case.
 3. **How badly do near-empty blocks compress on a patchy sample?** — **ANSWERED 2026-08-25 (§4.1):
    about 10 % of the file.** A 5 kb grid on a sample with 74,623 covered positions scattered over 644
    regions gives blocks of about 119 records and costs 18.242 bytes a record against 16.444 at

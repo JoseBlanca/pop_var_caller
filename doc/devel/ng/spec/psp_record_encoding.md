@@ -51,8 +51,8 @@ for.
 
 Production's `.psp` groups records into blocks of a target uncompressed size
 ([`TARGET_BLOCK_BYTES`, `src/psp/writer.rs:72`](../../../../src/psp/writer.rs) — 1 MiB),
-transposes each block so that every field becomes its own buffer, and compresses each of
-those buffers as a separate zstd frame at level 9
+stores each block **columnar** — all the records' positions in one buffer, all their depths in
+the next, and so on — and compresses each of those buffers as a separate zstd frame at level 9
 ([`ZSTD_COMPRESSION_LEVEL`, `src/psp/block.rs:709`](../../../../src/psp/block.rs)). The
 block is therefore **both** the furthest back the compressor may look for a repeated
 pattern **and** the amount a reader must decode before it can hand out its first record.
@@ -107,11 +107,15 @@ kilobytes, not megabytes*, at three thousand open samples.
   [`SampleLocusObservations`](../../../../src/ng/locus_generation/mod.rs), which holds the
   region, the reference bases over it, a list of observed sequences with their support,
   and two counts of reads that produced no observation.
-- **Transposed** describes production's shape: inside a block, every field of every record
-  is gathered into its own buffer and compressed separately.
-- A **record stream** is the alternative this document proposes: each record's fields
-  written one after another, the bytes cut into **frames**, each frame compressed on its
-  own.
+- **Columnar** is how production lays a block out, and the word is the format's own: a psp header
+  carries a `[[column]]` array with one entry per field
+  ([`src/psp/header.rs:24`](../../../../src/psp/header.rs)). Rather than writing record 1's fields,
+  then record 2's fields, and so on, it gathers *all* the records' positions into one buffer — one
+  **column** — all their depths into a second, all their allele sequences into a third, and
+  compresses each column on its own.
+- **Record-major** is the alternative this document proposes: each record's fields written together,
+  then the next record's, with the bytes cut into blocks and each block compressed on its own. It is
+  the layout a reader can walk without having to inflate anything it does not need.
 - A **dictionary** is a few tens of kilobytes of representative bytes stored once in the
   file and handed to the compressor before every frame, so that a small frame is not
   compressed from a cold start. It is a standard zstd facility, not something we build.
@@ -195,27 +199,27 @@ megabyte, for its ratio and for a small index, while a reader holds tens of kilo
 
 Everything below is a consequence of that shape or a number that justifies it.
 
-### 3.1 Why a stream rather than the transposed blocks — priced
+### 3.1 Why record-major rather than columnar — priced
 
 Measured like for like, same field encodings and same compressor, on a tomato accession at
 about three reads a position:
 
 | shape | reader memory | bytes a record |
 |---|---|---|
-| transposed, one frame per field | 1024 KiB | 6.27 |
-| transposed, one frame per field | 256 KiB | 6.60 |
-| transposed, one frame per field | 64 KiB | 7.33 |
+| columnar | 1024 KiB | 6.27 |
+| columnar | 256 KiB | 6.60 |
+| columnar | 64 KiB | 7.33 |
 | **record stream, 32 KiB frames + dictionary** | **36 KiB** | **7.39** |
 | record stream, 8 KiB frames + dictionary | 12 KiB | 7.57 |
 
-**Dropping the transposition costs about 18 % of the bytes and buys about one
+**Going record-major costs about 18 % of the bytes and buys about one
 twenty-eighth of the memory.** That is the whole trade, and goal 1 decides it: three
 thousand open samples at a megabyte each is 3 GB before a single record is read, at 36 KiB
 each it is 108 MB.
 
 The second property is what makes the small frames work at all: **the record stream is
 nearly flat in frame size** — 132 KiB of reader memory down to 12 KiB costs 3 %, where the
-transposed shape over the same range costs a third of its size. A design whose memory knob
+columnar shape over the same range costs a third of its size. A design whose memory knob
 is nearly free is a different kind of object from one whose memory knob is its ratio.
 
 Against the file production writes today (11.85 bytes a record on that sample, 11.86 on
@@ -309,8 +313,8 @@ non-reference support — and nothing else. The heavy stream carries the record.
 This costs almost nothing and is not a compromise between the two shapes: **splitting a
 frame into more separately-compressed pieces was measured to help, not hurt** (on HG002 at
 512 KiB, fourteen field-frames give 5.44 bytes a record against 5.82 for one combined
-frame), because putting like values next to each other is most of what transposition was
-doing. The nearest field measured on its own, a small per-record varint, compressed to
+frame), because putting like values next to each other is most of what the columnar layout
+was doing. The nearest field measured on its own, a small per-record varint, compressed to
 0.12 bytes a record on tomato; the light stream is a few of those.
 
 **The unit of the light stream is the record, and its frames are cut with the heavy
@@ -912,7 +916,7 @@ will pass while a read-name list is being corrupted.
 Two throwaway programs, both in the tree, both runnable:
 
 - **`examples/psp_record_stream_compression.rs`** — sweeps the grid of §3.1 and §3.2: field
-  order (records or transposed), field width (fixed-width, variable-length, fixed-point),
+  layout (record-major or columnar), field width (fixed-width, variable-length, fixed-point),
   batch size, and framing (independent frames, with or without a dictionary; one continuous
   stream with a chosen window, flushed or not). Reports bytes a record against the reader
   memory each combination implies, and each field's own compressed bytes.
