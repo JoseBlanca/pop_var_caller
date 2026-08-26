@@ -1,7 +1,12 @@
 # ng — storing the chain ids in a psp file, and the experiment that decides how
 
-*Status: design spec, 2026-08-18. **No code, and none until the psp encoding spec lands** — this
-document defines one experiment to run on a branch afterwards, and what it must measure. It is a
+*Status: design spec, 2026-08-18; **the experiment it defined is no longer needed — the owner
+settled it on 2026-08-25: the changes-only form (§4) ships and the intermediate distances form is
+not built.** What survives here is §4's design, §5's traps and §8's rejected alternatives. §3's three
+arms and §7's experiment are kept as the record of what the decision was taken against, not as work
+to do. **One thing §4 did not anticipate**: the records are skippable now
+([`psp_record_encoding.md`](psp_record_encoding.md) §2.3), so the live-set changes go in a record's
+head and only the exception lists stay in its body — that document's §6 has it. It is a
 piece of the psp encoding, whose spec is still owed
 ([`run_streaming.md`](run_streaming.md) §10); that document owns the byte layout, blocks,
 compression, the index and versioning, and this one owns a single column inside it. Reads on
@@ -62,8 +67,9 @@ touches no calling code.
   trailer and versioning are [`run_streaming.md`](run_streaming.md) §10's spec, not this one.
 - **Changing what the merge consumes.** The in-memory `SequenceObservation::chain_ids` stays as it
   is; this is about the file. If the experiment ships, the reader reconstructs the same lists.
-- **Deciding the outcome.** This spec does not claim the differential encoding wins. It says how to
-  find out.
+- ~~**Deciding the outcome.**~~ **Decided 2026-08-25 by the owner, without the experiment: the
+  changes-only form ships.** This document's job is now to say what it is and what will bite the
+  coder, not how to choose it.
 
 **It does not** re-open the ruling, touch the in-memory shape, or propose a read-major file.
 

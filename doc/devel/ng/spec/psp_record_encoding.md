@@ -737,6 +737,61 @@ Four things this settles that
   12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
   alternatives.
 
+**Settled 2026-08-25 by the owner: changes-only ships, and distances are not built.** The
+intermediate form was proposed here as a first version because it is a few lines and has no
+interactions; the owner has taken the destination directly.
+
+#### What that means for the record head, because the two do collide
+
+**Changes-only works by carrying a set forward**: a reader knows which read pairs are live only
+because it applied every arrival and departure since the block began. **A reader that skips a
+record's body would never see that record's changes, so its set would go stale and every later
+record it wanted would be wrong.** Restating the live set at every record is not a fix — that *is*
+writing the whole list at every position, which is the form we are leaving.
+
+**The resolution falls out of the shape the encoding already has.**
+[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §4 splits the chain ids into two parts, and
+they sit on opposite sides of the skip:
+
+- **the live-set changes — who arrived, who left — go in the head.** They carry the state, so every
+  reader decodes them whether or not it wants the record.
+- **the exception lists — the ids of every observation except the residual one — stay in the
+  skippable body.** They carry no state and are only needed by a reader that is building the record.
+  They are the ~3.4 % of ids production stored before the 2026-08-17 ruling, so this half is small.
+
+A reader that wants a record then has everything: the live set from the heads it has been reading
+all along, and the exceptions from the body it just decoded. **The residual observation's ids are
+the live set minus the others**, which is what makes the whole scheme cheap and is also where it
+fails silently (§7).
+
+**What this costs, and it moves the wrong way with depth.** The live-set changes are 0.432 bytes a
+position at 11.4 reads and **6.42 at 293**. So at low depth the head stays small and a skipping
+reader avoids most of the record; **at high depth the head carries most of the bytes and the skip
+saves much less.** The chain-id saving and the skip saving therefore pull in opposite directions
+across the committed range, and **how much of the 2.06× survives at depth is unmeasured** — it is
+the first thing to measure once a writer exists.
+
+Four things this settles that
+[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §10 listed as open:
+
+- **The saving survives zstd** (its question 1). zstd is already very good at the repeated
+  lists — 679 MB of raw identifiers on tomato became 7.4 MB, ninety-two fold — which is why
+  the field looks cheap at low depth. At three hundred reads a position the same collapse
+  only reaches thirty-six fold, and that is where the gap opens.
+- **Delta-varints alone are worth having and may be enough** (its question 2). They capture
+  **60 % of the available saving at eleven reads a position and 86 % at three hundred**, with
+  no reader state, no residual arithmetic and no new error class.
+- **An identifier goes live more than once for most reads** (its question 4), and not
+  marginally: **83 % of identifiers on HG002 and 91 % on tomato** cover two stretches with a
+  gap between them, because a pair's mates rarely overlap. An arrivals-and-departures stream
+  that assumes one stretch per read loses the second mate of nine reads in ten — silently,
+  because the merge would simply see a read that was not there. **A re-entry form is part of
+  the first version, not a later fix.**
+- **Restating the live set at every block is affordable.** Cutting blocks every 1,500
+  positions rather than by byte count — which is what §2.4 does — costs the differential form
+  12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
+  alternatives.
+
 **Distances ship. Changes-only is now in doubt, and §2.3 is why.**
 
 Storing each identifier as its distance from the one before is a few lines inside the record
@@ -966,18 +1021,19 @@ will pass while a chain-id list is being corrupted.
    because it happens upstream of both routes, direct mode and psp mode see the same value — which is
    the point: approximating in the psp alone would have broken the oracle
    ([`run_streaming.md`](run_streaming.md) §1.2) that the whole psp path is checked against.
-2. **Does the differential chain-id encoding ship in the first version, or only
-   distances only?** — OPEN, and **§6 now records a conflict that did not exist when this was
-   written**: changes-only cannot coexist with the skippable records of §2.3, because a set carried
-   forward cannot survive a skipped record. So they are alternatives at depth rather than versions
-   one and two. *Leaning:* distances, since they keep the head; the differential
-   form second, because the first is a few lines with no interaction and takes the deep corner
-   from 43.8 to 11.7 bytes a position. **Settled by:**
-   [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §7's experiment, which now has its
-   sizes and needs its decode and merge times.
-3. **Are the summary and record streams interleaved block by block, or separated into two
-   regions of the file?** — OPEN, and not measured. Interleaving keeps a segment's summary and
-   records adjacent, so serving one segment is one seek; separating makes a whole-file summary scan
+2. **Does the changes-only chain-id encoding ship, or only
+   distances only?** — **SETTLED 2026-08-25: changes-only, and distances are not built.** The two
+   do collide with the skippable records of §2.3, because a set carried forward cannot survive a
+   skipped record — and §6 resolves it by putting the live-set changes in the head and leaving the
+   exception lists in the body. **What is not settled is what that costs at depth**: the changes are
+   0.432 bytes a position at 11.4 reads and 6.42 at 293, so the head grows with depth and the skip's
+   value shrinks. **Settled by:** measuring the skipping walk on a head that carries the changes,
+   once a writer exists.
+3. **Are a block's parts interleaved or separated into two regions of the file?** — **MOOT**: a psp
+   block is one stream (§2.3), so there is nothing to interleave. *Kept because the reasoning applies
+   again if the head's live-set changes are ever split off into a part of their own: interleaving
+   keeps a segment's parts adjacent, so serving one segment is one seek; separating makes a whole-file
+   scan of one part
    one sequential read. *Leaning:* interleave, because
    [`run_streaming.md`](run_streaming.md) §3.4's reader serves segments rather than files.
    **Settled by:** timing a cohort merge over one chromosome both ways, once a writer exists.
