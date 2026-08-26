@@ -557,6 +557,35 @@ value per allele** — `FrameWriter::push` writes it inside the per-allele loop.
 second and leaves the first alone, so at 279 reads a position the log-error is the expensive one and
 at three it is the coverage.
 
+#### The summed log-error on its own — measured 2026-08-25
+
+**The tables above move several fields at once, which makes the one field that carries a modelling
+risk hard to read.** This one moves only it, in the settled configuration — record head, 100 kb psp
+blocks, GC at 1/100, coverage at 1/4 of a read:
+
+| the summed log-error stored as | tomato 3× | HG002 279× |
+|---|---:|---:|
+| a raw `f64` — bit-exact, no approximation | 6.021 | 23.440 |
+| a count of 1/4,096 of a natural-log unit | 5.331 (−11.5 %) | 19.094 (−18.5 %) |
+| **a count of 1/1,024** | **5.056 (−16.0 %)** | **18.570 (−20.8 %)** |
+| a count of 1/256 | 4.927 (−18.2 %) | 18.270 (−22.1 %) |
+
+**Two things to read off it, and the second is the useful one.**
+
+**Storing this field as an integer at all is worth 16 % of the file at three reads a position and
+21 % at 279.** That is the size of the decision.
+
+**Which step barely matters.** From 1/256 to 1/1,024 — a quarter of the error — costs 2.6 % of the
+file on tomato and 1.6 % on HG002, against the 16–21 % that separates any of them from a raw `f64`.
+**So the precision is nearly free once the field is an integer**, and there is no reason to choose a
+coarse step to save bytes. Even 1/4,096, a sixteenth of 1/256's error, still keeps three quarters of
+the saving.
+
+*What the error means: the value is a log, so rounding it by δ is a relative error of about δ in the
+probability it stands for. 1/256 is 0.4 %, 1/1,024 is 0.1 %, 1/4,096 is 0.024 %. It is one rounding
+of an already-summed quantity, not one per read, so it does not compound across the reads that went
+into it.*
+
 #### The resolution: quantise in the type, not in the file — the owner, 2026-08-25
 
 The owner's proposal for the GC fraction is a **type** that holds it as an integer from 0 to 100, at
