@@ -135,6 +135,18 @@ struct FrameWriter {
     /// same skipped parsing with one decompressor instead of two. WRITE-SIDE
     /// ONLY — this measures what the prefix costs in bytes; no reader uses it.
     length_prefix: bool,
+    /// Write each record as a head a reader can judge it by — the position
+    /// offset, the reference span, the non-reference read count and the body's
+    /// byte length — followed by a body it can skip without decoding.
+    ///
+    /// **The body has to be self-contained for that to work**, which is not
+    /// free. The coverage and the read names are normally coded as differences
+    /// from the previous *record*, so a reader that skips a body loses the base
+    /// both are measured from and every record after it decodes wrong. With a
+    /// head, both restart at each record.
+    record_head: bool,
+    /// Scratch for building a body before its length is known.
+    body: Vec<u8>,
     scales: Scales,
     buf: Vec<u8>,
     n_records: u64,
@@ -151,6 +163,10 @@ impl FrameWriter {
     }
 
     fn push(&mut self, rec: &PileupRecord) {
+        if self.record_head {
+            self.push_with_head(rec);
+            return;
+        }
         let prefix_at = self.buf.len();
         if self.n_records == 0 {
             self.chrom_id = rec.chrom_id;
@@ -234,6 +250,93 @@ impl FrameWriter {
             let len = (self.buf.len() - prefix_at) as u64;
             put_varint(&mut self.buf, len);
         }
+        self.n_records += 1;
+    }
+
+    /// `record_head`'s layout: the head, then a body that stands on its own.
+    fn push_with_head(&mut self, rec: &PileupRecord) {
+        if self.n_records == 0 {
+            self.chrom_id = rec.chrom_id;
+            self.first_pos = rec.pos;
+            self.prev_pos = rec.pos;
+            put_varint(&mut self.buf, 0);
+        } else {
+            put_varint(&mut self.buf, (rec.pos - self.prev_pos) as u64);
+        }
+        self.prev_pos = rec.pos;
+
+        // Allele 0 is the reference bucket, so its sequence is the reference
+        // footprint: 1 base at a substitution, the deleted run plus its anchor
+        // at a deletion. That is cohort_merge.md's definition of the span.
+        let span = rec.alleles.first().map_or(1, |a| a.seq.len().max(1));
+        put_varint(&mut self.buf, span as u64);
+        let non_ref: u64 = rec
+            .alleles
+            .iter()
+            .skip(1)
+            .map(|a| u64::from(a.support.num_obs))
+            .sum();
+        put_varint(&mut self.buf, non_ref);
+
+        // The body, built apart so its length can precede it. Both running
+        // bases restart here; see `record_head`.
+        self.body.clear();
+        let mut prev_cov_q = 0i64;
+        let mut last_chain = 0u64;
+        put_varint(&mut self.body, rec.alleles.len() as u64);
+        if self.scales.gc == 0.0 {
+            self.body.extend_from_slice(&rec.windowed_gc.to_le_bytes());
+        } else {
+            let gc = if rec.windowed_gc.is_nan() {
+                0
+            } else {
+                1 + (f64::from(rec.windowed_gc).clamp(0.0, 1.0) * self.scales.gc).round() as u64
+            };
+            put_varint(&mut self.body, gc);
+        }
+        if self.scales.coverage == 0.0 {
+            self.body
+                .extend_from_slice(&rec.windowed_coverage.to_le_bytes());
+        } else {
+            let cov = if rec.windowed_coverage.is_nan() {
+                0
+            } else {
+                let q = (f64::from(rec.windowed_coverage).max(0.0) * self.scales.coverage).round()
+                    as i64;
+                let d = q - prev_cov_q;
+                prev_cov_q = q;
+                1 + (((d << 1) ^ (d >> 63)) as u64)
+            };
+            put_varint(&mut self.body, cov);
+        }
+        for allele in &rec.alleles {
+            put_varint(&mut self.body, allele.seq.len() as u64);
+            self.body.extend_from_slice(&allele.seq);
+            let st = &allele.support;
+            put_varint(&mut self.body, st.num_obs as u64);
+            if self.scales.q_sum == 0.0 {
+                self.body.extend_from_slice(&st.q_sum.to_le_bytes());
+            } else {
+                put_svarint(
+                    &mut self.body,
+                    (st.q_sum * self.scales.q_sum).round() as i64,
+                );
+            }
+            put_varint(&mut self.body, st.fwd as u64);
+            put_varint(&mut self.body, st.placed_left as u64);
+            put_varint(&mut self.body, st.placed_start as u64);
+            put_varint(&mut self.body, st.mapq_sum as u64);
+            put_varint(&mut self.body, st.mapq_sum_sq);
+            put_varint(&mut self.body, allele.chain_ids.len() as u64);
+            for &id in &allele.chain_ids {
+                put_svarint(&mut self.body, (id as i64).wrapping_sub(last_chain as i64));
+                last_chain = id;
+            }
+        }
+        put_varint(&mut self.buf, self.body.len() as u64);
+        let body = std::mem::take(&mut self.body);
+        self.buf.extend_from_slice(&body);
+        self.body = body;
         self.n_records += 1;
     }
 
@@ -903,6 +1006,7 @@ fn encode_streaming(
     genomic_block_bp: u32,
     light_only: bool,
     length_prefix: bool,
+    record_head: bool,
     level: i32,
     window_log: u32,
     scales: Scales,
@@ -922,7 +1026,8 @@ fn encode_streaming(
     for scale in [scales.gc, scales.coverage, scales.q_sum] {
         sink.write_all(&scale.to_le_bytes()).expect("write");
     }
-    sink.write_all(&[u8::from(light_only)]).expect("write");
+    sink.write_all(&[u8::from(light_only) | (u8::from(record_head) << 1)])
+        .expect("write");
     sink.write_all(&window_log.to_le_bytes()).expect("write");
 
     let mut reader = PspReader::new(BufReader::with_capacity(
@@ -933,6 +1038,7 @@ fn encode_streaming(
     let mut fw = FrameWriter {
         light_only,
         length_prefix,
+        record_head,
         scales,
         ..FrameWriter::default()
     };
@@ -987,6 +1093,7 @@ fn encode_streaming(
     println!("blocks\t{n_blocks}");
     println!("genomic-block-bp\t{genomic_block_bp}");
     println!("light-only\t{light_only}");
+    println!("record-head\t{record_head}");
     println!("window-bytes\t{}", 1usize << window_log);
     println!("out-bytes\t{bytes}");
     println!("bytes-per-record\t{:.3}", bytes as f64 / n_records as f64);
@@ -1044,6 +1151,7 @@ impl<'a> TryCursor<'a> {
 /// block: a compressed read chunk, the rolling decompressed buffer, zstd's own
 /// state sized by the window, and the record being built.
 struct StreamingStore {
+    record_head: bool,
     light_only: bool,
     scales: Scales,
     src: BufReader<File>,
@@ -1084,8 +1192,9 @@ impl StreamingStore {
             q_sum: read_scale(),
         };
         let mut b1 = [0u8; 1];
-        src.read_exact(&mut b1).expect("light-only flag");
-        let light_only = b1[0] != 0;
+        src.read_exact(&mut b1).expect("flags");
+        let light_only = b1[0] & 1 != 0;
+        let record_head = b1[0] & 2 != 0;
         let mut b4 = [0u8; 4];
         src.read_exact(&mut b4).expect("window log");
         let window_log = u32::from_le_bytes(b4);
@@ -1097,6 +1206,7 @@ impl StreamingStore {
             .expect("window log max");
 
         Self {
+            record_head,
             light_only,
             scales,
             src,
@@ -1217,6 +1327,28 @@ impl StreamingStore {
                     }
                 }
             }
+            if self.record_head {
+                // A head-carrying store is read through the head path, so that
+                // verify and a full walk see exactly what a skipping reader
+                // would have seen had it wanted every record.
+                let (pos, first) = (self.pos, self.first);
+                let mut want = |_p: u32, _s: u64, _n: u64| true;
+                match self.next_with_head(&mut want) {
+                    Some(Some(rec)) => {
+                        self.remaining -= 1;
+                        return Some(rec);
+                    }
+                    Some(None) => unreachable!("want said yes"),
+                    None => {
+                        self.pos = pos;
+                        self.first = first;
+                        if !self.pump() {
+                            return None;
+                        }
+                        continue;
+                    }
+                }
+            }
             // Snapshot: a parse that runs out of bytes is retried from here
             // once more has arrived, so it must start from the same state.
             let (pos, prev_cov_q, last_chain, first) =
@@ -1237,6 +1369,113 @@ impl StreamingStore {
                 }
             }
         }
+    }
+
+    /// Read one record's head and either build its body or step over it.
+    ///
+    /// `want` decides. When it says no, the body is never touched: the reader
+    /// advances by the length the head gave it, which is the whole point of the
+    /// head — the alternative is decoding every integer in the body to find out
+    /// where it ends.
+    fn next_with_head(
+        &mut self,
+        want: &mut impl FnMut(u32, u64, u64) -> bool,
+    ) -> Option<Option<PileupRecord>> {
+        let mut cur = TryCursor {
+            bytes: &self.out[self.out_at..],
+            at: 0,
+        };
+        let delta = cur.varint()? as u32;
+        let mut pos = self.pos;
+        let mut first = self.first;
+        if first {
+            first = false;
+        } else {
+            pos += delta;
+        }
+        let span = cur.varint()?;
+        let non_ref = cur.varint()?;
+        let body_len = cur.varint()? as usize;
+        let body_at = cur.at;
+        // Make sure the whole body is buffered before committing either way.
+        cur.bytes(body_len)?;
+
+        if !want(pos, span, non_ref) {
+            self.out_at += cur.at;
+            self.pos = pos;
+            self.first = first;
+            return Some(None);
+        }
+
+        let body = &self.out[self.out_at + body_at..self.out_at + body_at + body_len];
+        let mut b = TryCursor { bytes: body, at: 0 };
+        let n_alleles = b.varint()? as usize;
+        let windowed_gc = if self.scales.gc == 0.0 {
+            f32::from_le_bytes(b.bytes(4)?.try_into().expect("gc"))
+        } else {
+            let c = b.varint()?;
+            if c == 0 {
+                f32::NAN
+            } else {
+                ((c - 1) as f64 / self.scales.gc) as f32
+            }
+        };
+        let mut prev_cov_q = 0i64;
+        let windowed_coverage = if self.scales.coverage == 0.0 {
+            f32::from_le_bytes(b.bytes(4)?.try_into().expect("cov"))
+        } else {
+            let c = b.varint()?;
+            if c == 0 {
+                f32::NAN
+            } else {
+                let z = c - 1;
+                prev_cov_q += ((z >> 1) as i64) ^ -((z & 1) as i64);
+                (prev_cov_q as f64 / self.scales.coverage) as f32
+            }
+        };
+        let mut last_chain = 0u64;
+        let mut alleles = Vec::with_capacity(n_alleles);
+        for _ in 0..n_alleles {
+            let len = b.varint()? as usize;
+            let seq = b.bytes(len)?.to_vec();
+            let num_obs = b.varint()? as u32;
+            let q_sum = if self.scales.q_sum == 0.0 {
+                f64::from_le_bytes(b.bytes(8)?.try_into().expect("q_sum"))
+            } else {
+                b.svarint()? as f64 / self.scales.q_sum
+            };
+            let fwd = b.varint()? as u32;
+            let placed_left = b.varint()? as u32;
+            let placed_start = b.varint()? as u32;
+            let mapq_sum = b.varint()? as u32;
+            let mapq_sum_sq = b.varint()?;
+            let n_chain = b.varint()? as usize;
+            let mut chain_ids = Vec::with_capacity(n_chain);
+            for _ in 0..n_chain {
+                last_chain = (last_chain as i64).wrapping_add(b.svarint()?) as u64;
+                chain_ids.push(last_chain);
+            }
+            alleles.push(AlleleObservation::new(
+                seq,
+                AlleleSupportStats::new(
+                    num_obs,
+                    q_sum,
+                    fwd,
+                    placed_left,
+                    placed_start,
+                    mapq_sum,
+                    mapq_sum_sq,
+                ),
+                chain_ids,
+            ));
+        }
+        self.out_at += cur.at;
+        self.pos = pos;
+        self.first = first;
+        let mut rec = PileupRecord::new(self.chrom_id, pos, alleles);
+        rec.windowed_gc = windowed_gc;
+        rec.windowed_coverage = windowed_coverage;
+        Some(Some(rec))
     }
 
     /// Walk one record's bytes without building anything from them: decode every
@@ -1431,6 +1670,77 @@ fn decode_raw(path: &str) {
     }
     println!("phase\tdecode-raw");
     println!("decompressed-bytes\t{bytes}");
+    println!("seconds\t{:.3}", t0.elapsed().as_secs_f64());
+}
+
+/// Walk a head-carrying store the way a cohort's first pass does: read every
+/// record's head, build one record in `keep_one_in`, skip the rest by the length
+/// the head gave.
+fn decode_skip(path: &str, keep_one_in: u64) {
+    let t0 = Instant::now();
+    let mut store = StreamingStore::open(std::path::Path::new(path));
+    assert!(
+        store.record_head,
+        "store was not written with --record-head"
+    );
+    let (mut seen, mut built, mut checksum) = (0u64, 0u64, 0u64);
+    loop {
+        if store.remaining == 0 {
+            if store.block_done && store.out_at >= store.out.len() && !store.next_block() {
+                break;
+            }
+            let mut opened = false;
+            loop {
+                let mut cur = TryCursor {
+                    bytes: &store.out[store.out_at..],
+                    at: 0,
+                };
+                match (cur.varint(), cur.varint(), cur.varint()) {
+                    (Some(c), Some(p), Some(k)) => {
+                        store.out_at += cur.at;
+                        store.chrom_id = c as u32;
+                        store.pos = p as u32;
+                        store.remaining = k;
+                        store.first = true;
+                        opened = true;
+                        break;
+                    }
+                    _ => {
+                        if !store.pump() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !opened {
+                break;
+            }
+        }
+        let (pos, first) = (store.pos, store.first);
+        let n = seen;
+        let mut want = |_p: u32, _s: u64, _nr: u64| n % keep_one_in == 0;
+        match store.next_with_head(&mut want) {
+            Some(got) => {
+                store.remaining -= 1;
+                seen += 1;
+                if let Some(rec) = got {
+                    built += 1;
+                    checksum = checksum.wrapping_add(rec.pos as u64);
+                }
+            }
+            None => {
+                store.pos = pos;
+                store.first = first;
+                if !store.pump() {
+                    break;
+                }
+            }
+        }
+    }
+    println!("phase\tdecode-skip");
+    println!("records-seen\t{seen}");
+    println!("records-built\t{built}");
+    println!("checksum\t{checksum}");
     println!("seconds\t{:.3}", t0.elapsed().as_secs_f64());
 }
 
@@ -1669,6 +1979,8 @@ fn main() {
     let mut genomic_block_kb = 0u32;
     let mut light_only = false;
     let mut length_prefix = false;
+    let mut record_head = false;
+    let mut keep_one_in = 100u64;
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -1681,6 +1993,8 @@ fn main() {
             "--streams" => streams = args.next().expect("N").parse().expect("N"),
             "--light-only" => light_only = true,
             "--length-prefix" => length_prefix = true,
+            "--record-head" => record_head = true,
+            "--keep-one-in" => keep_one_in = args.next().expect("N").parse().expect("N"),
             "--genomic-block-kb" => genomic_block_kb = args.next().expect("K").parse().expect("K"),
             "--rolling-kib" => ROLLING_BYTES.store(
                 args.next().expect("K").parse::<usize>().expect("K") * 1024,
@@ -1717,6 +2031,7 @@ fn main() {
             genomic_block_kb * 1000,
             light_only,
             length_prefix,
+            record_head,
             level,
             window_log,
             scales,
@@ -1724,6 +2039,7 @@ fn main() {
         "decode-streaming" => decode_streaming(&store),
         "decode-raw" => decode_raw(&store),
         "decode-step" => decode_step(&store),
+        "decode-skip" => decode_skip(&store, keep_one_in),
         "verify-streaming" => verify_streaming(&psp, &store),
         "many-ngs" => many_streaming(&psp, limit, streams),
         other => panic!("unknown phase {other}"),
