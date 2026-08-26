@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-25):** **candidate selection is done on the SNP/indel path, and
+> - **Last completed task (2026-08-26):** **ng has a psp module, and a header that round-trips**
+> (steps A1 and A2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`). The store exists because an open file's cost is multiplied by the cohort
+> size: **2.6 MB per open sample on production's `.psp` is 7.7 GB at three thousand samples**,
+> and the measuring prototype's shape gets that to 0.34 MB with the file 35 % smaller and the
+> read 1.8× faster. A1 is declarations only — the plan's own "pure-scaffold step" — so it was
+> committed with A2 rather than reviewed alone. **The validation rules are written once and run
+> from both sides**, so the writer cannot produce a header its own reader would refuse; fourteen
+> broken headers are checked twice each. **The format version is read from a bare TOML table
+> before the body is deserialised**, which is what lets a file from a newer major come back as
+> *upgrade the reader* instead of as unparseable TOML.
+> **⛦ Four departures from the architecture document are waiting at Checkpoint A**, and the first
+> is the one to look at: the arch gives the header a `ReferenceInfo`, and the real type carries
+> each contig's `.fai` byte offsets and the FASTA's absolute path — so a parsed header would have
+> to invent geometry it never stored, and a written one would carry the producer's directory
+> layout to everyone the file reaches. It is a name and a whole-assembly digest instead. The other
+> three: the manifest carries no cardinality (arch against spec §4.5, and the cost is that an
+> unrecognised *list* field cannot be skipped); a fifth read-error class the spec's table of four
+> does not list; and a head magic of `NGP\n` rather than production's `PSP\n`, because both
+> formats use the extension `.psp`.
+> [What was built, and the nine choices the documents left open](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md).
+> - **Previously (2026-08-25):** **candidate selection is done on the SNP/indel path, and
 > the two true alleles it was said to lose were never lost** (Milestone D of
 > [candidate alleles](doc/devel/ng/impl_plan/candidate_alleles.md), branch
 > `ng-candidate-alleles`, merged to main). **D1** put the measurement onto the shipped code: the
@@ -680,6 +701,20 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **⛦ Three smaller design-document defects:** arch §1 declares `DEFAULT_MAX_COHORT_LOCUS_SPAN` twice; the arch calls the module crate-private while the code is `pub` (recorded in the module doc, with the reason); and two names fixed verbatim by spec/arch/plan would read better (`CohortLocusBuilderRegionsLen` is plural for one region's width; `MinAltObs` abbreviates *observation* for a count of *reads*).
   - **Owed by the design:** `max_cohort_locus_span`'s effective value must reach the run's output beside the failed-locus count, or two runs over the same records under different bounds are indistinguishable. The doc comment carries the obligation; the emission step owns the surface.
   - **⚠ `cargo clippy --all-targets --all-features -- -D warnings` is red on this branch and was red identically before the first commit** — 49 errors across 20 files in `examples/`, `benches/` and other modules' test code, two of them in `src/ssr/`, which ng may not edit. `cargo clippy --lib --all-features` is clean. The same standing item the census and STR-path blocks record.
+
+#### The psp store — one sample's evidence on disk, and what an open one costs
+- **Status:** `implemented` — steps **A1 and A2** of Milestone A, branch `ng-psp-encoding`. The module exists and a header round-trips; **no record, no block and no file yet**. A3 (`read_header` from a file on disk) is next, then Checkpoint A.
+- **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
+- **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
+- **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
+- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md).
+- **A1+A2 done (one loop iteration, deliberately):** A1 is declarations with no function bodies — the plan's own "pure-scaffold step" — so it was committed with A2, the first code its types exist for. **The validation rules are written once and run from both sides**: the writer refuses to produce a header its own reader would refuse, over fourteen broken headers checked twice each. **The version is read from a bare TOML table before the body is deserialised**, so a file from a newer major comes back as *upgrade the reader* rather than as unparseable TOML — which is the whole reason the header is plain text.
+- **Open — for Checkpoint A, four departures from the arch doc a reader would not expect** (all argued in the impl report §2):
+  - **`Header.reference` is a name and a digest, not `ReferenceInfo`.** The real `ReferenceInfo` carries `.fai` geometry and the FASTA's absolute path; a parsed header would have to invent geometry it never stored, and a stored path would carry the producer's directory layout to everyone the file reaches.
+  - **The manifest carries no cardinality**, following arch §3.2 against spec §4.5's list. The cost is that spec §4.5's skip-an-unrecognised-field property is not reachable for a *list*-shaped field, whose length a reader cannot measure from the encoding alone.
+  - **A fifth read-error class, `MalformedHeader`**, which spec §6.7's table of four does not list. Production distinguishes about a dozen header faults; they are one variant here because they share an instruction — *the file is damaged, rebuild it*.
+  - **The head magic is `NGP\n`, not production's `PSP\n`.** Both formats use the extension `.psp` and both will sit on the same disks, so the first four bytes are what tells them apart.
+- **Open — deferred with a home:** the observation reach ceiling [cohort_merge.md](doc/devel/ng/spec/cohort_merge.md) asks the header for is [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1's, not this module's; `FieldEncoding::Fixed`/`Ieee` widths are validated but nothing yet **chooses** them, which arch §7 asks be settled by a measurement once a writer exists.
 
 #### The alignment module — best-path aligners (plan 1 of 3)
 - **Status:** ✅ **MILESTONES A AND B COMPLETE, at Checkpoint B.** **⛦ THE ng STR LOCUS GENERATOR IS UNBLOCKED** — `align_read` exists, and [locus_generation_ssr.md](doc/devel/ng/impl_plan/locus_generation_ssr.md) Milestone D can proceed against `BestPathAligner`. Next in this plan: Milestone C (banding), then D (the two-penalty comparison); E is gated.

@@ -69,12 +69,12 @@ are in [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-
 
 ## Milestone A — the vocabulary and the header
 
-☐ **A1 — the types, no logic.** `RecordHead`, `Header`, `Manifest`, `FieldSpec`, `FieldEncoding`,
+✅ **A1 — the types, no logic.** `RecordHead`, `Header`, `Manifest`, `FieldSpec`, `FieldEncoding`,
 `BlockIndexEntry`, `Footer`, `PspReadError`, `PspWriteError`. Doc comments carry the invariant;
 no function bodies.
 ***Source:*** [arch §3, §4.3](../arch/psp_file_format.md).
 
-☐ **A2 — the header: build, encode, parse, validate.** Magic, `u64` length, TOML body, sentinel.
+✅ **A2 — the header: build, encode, parse, validate.** Magic, `u64` length, TOML body, sentinel.
 Round-trips, and `head` on the file shows the body.
 ***Depends:*** A1. ***Source:*** [arch §3.2](../arch/psp_file_format.md), [spec §3.1](../spec/psp_file_format.md).
 
