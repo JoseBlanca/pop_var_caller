@@ -425,9 +425,13 @@ produces. *Depends:* E2a, E3a. *Source:*
 generic path needed no library code that did not already exist, and the step is one fixture.
 **E3b is implementation** — the driver's emission build, its row assembly and its evidence
 accessor all take the SNP/indel path's per-sample evidence unconditionally, so a tract needs
-source changes in four places before any fixture can run — **and it carries one open question**,
-which is where a tract's two run-level prior inputs live. Doing both under one step id would have
+source changes in five places before any fixture can run. Doing both under one step id would have
 put a fixture and a subsystem behind one checkbox.
+
+**It carried one open question and no longer does.** Where a tract's prior belief comes from was
+undesigned; it is settled in
+[`../spec/population_diversity.md`](../spec/population_diversity.md) and built by **E2e**, which now
+sits between E2d and E3b.
 
 **E3a. The generic path, end to end.**  ✅
 One cohort locus's per-sample observations → the merge's allele unification and read attribution
@@ -463,6 +467,46 @@ run: the merge's allele unification and read attribution, `select_generic`,
 `shape_generic_locus`, and the loop. It lives in `tests/` so that the seams this path names are
 `pub`.
 
+**E2e. The repeat tract's prior seed, from the fit rather than from a construction.**  ☐
+
+**⚖ Design settled 2026-08-26 in [`../spec/population_diversity.md`](../spec/population_diversity.md),
+which supersedes [`../spec/calling_priors.md`](../spec/calling_priors.md) §5's construction.** A
+tract's prior belief about which lengths are plausible is no longer built as a geometric decay away
+from the cohort's commonest length and scaled to reproduce a measured diversity. It is read from
+what the joint repeat fit already produces per stratum: a **length spectrum** (the shape) and a
+**concentration** (the strength), both fitted from that stratum's own tracts and already run end to
+end on both benchmark cohorts.
+
+**Why this is a step of this plan and not only of the prior's.** It is the one thing between the
+loop and a called tract, and it touches three modules — the fit's seam, the prior's seed builder,
+and the run's frozen parameters. **It edits `genotype_prior/seed_ssr.rs`, which is
+[`calling_prior.md`](calling_prior.md)'s module**; recorded as a deviation rather than done quietly,
+because that plan's E1 shipped the function this replaces.
+
+**Three pieces:**
+
+1. **Carry the two values across the seam.** `StratumFits`
+   ([`joint/stratum_fits.rs`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)) gathers
+   each stratum's slippage numbers and their provenance and **drops the length spectrum and the
+   concentration** that `fit_strata` produced. They are carried, keyed the same way, with the rung
+   they came from beside them.
+2. **Rebuild the seed on them.** `fill_ssr_seed` takes the fitted pair and the locus's candidate
+   lengths, and maps the spectrum — indexed by offset from the **reference** tract length — onto
+   them. **Two inputs disappear**: the cohort's modal repeat count at the tract, which had no source
+   because repeat-tract selection is unwritten, and the run-wide repeat gene diversity, which
+   nothing emits. `SsrSeedOutcome::DiversityUnreachable` goes with them — the failure that fires at
+   *every* tract at one outbred sample exists only because a constructed shape had to be scaled to a
+   measurement.
+3. **The three-rung fallback**, spec §4.4: the stratum's own fit; failing that its motif period's
+   pooled tracts; failing that a flat spectrum at a stated concentration. Each marked, each
+   reported. **Measured, and it is why the rung is a pooled fit rather than a curve**: the strata
+   with no fit of their own hold about 2% of HG002's tracts and at most 7% of tomato's.
+
+**What it does not do:** the ordinary-site diversity fold, which blocks nothing here — the SNP/indel
+prior already runs, on a species-range constant, and says so. **Home:** spec §3.1 and §9's deferred
+list. *Depends:* E2c. *Source:*
+[`../spec/population_diversity.md`](../spec/population_diversity.md) §4, §5.
+
 **E3b. The repeat-tract path, end to end.**  ☐
 The same fixture at a tract, with the candidates and their repeat counts **fixture-supplied**
 rather than selected — the STR selection path is unwritten
@@ -478,37 +522,24 @@ fill; `call_locus` refuses a tract in front of all of them. The tract's own row 
 parameters are built (E2c), and with no contamination the row reads no frequency, so the table is
 assembled once per locus and D2's invariant holds unchanged.
 
-**The per-locus inputs a tract needs beyond its candidates**, all fixture-supplied here because the
-STR selection path is unwritten: each candidate's **repeat count** (not derivable from its bases —
-an interrupted tract holds fewer whole repeats than its length suggests) and the cohort's **modal
-repeat count** at the tract, which is what the prior's shape decays away from.
+**The one per-locus input a tract needs beyond its candidates**, fixture-supplied here because the
+STR selection path is unwritten: each candidate's **repeat count**, which is not derivable from its
+bases — an interrupted tract holds fewer whole repeats than its length suggests. *(The cohort's
+modal repeat count at the tract was a second such input until E2e retired it: the fitted spectrum is
+indexed by offset from the reference tract length, which every locus already knows.)*
 
-**⚑ The one open question: where a tract's two run-level prior inputs live.** `fill_ssr_seed` needs
-the cohort's **repeat gene diversity** and a **decay per repeat**. Both are checked types in
-`ng/types.rs` and both have a designed source — `arch/calling_priors.md` §5 names the pre-pass, and
-`spec/parameter_prepass_ssr.md` gives the diversity a **Home:** — but **nothing emits either yet**,
-and no document says how they reach the loop.
+**⚖ The open question this entry carried is closed**, by
+[`../spec/population_diversity.md`](../spec/population_diversity.md) and step E2e above: the tract's
+prior is seeded from the per-stratum length spectrum and concentration the fit already produces,
+carried on the run's frozen parameters, present or absent as a whole. Neither the cohort-wide repeat
+diversity nor the decay per repeat is needed. **What E3b still owes is the driver's tract branch and
+the fixture.**
 
-- **Recommendation: `FrozenParameters`, absent-or-present exactly as the contamination views are.**
-  A run with no STR fit carries none, and a tract on such a run is refused by name rather than
-  seeded from the SNP/indel spectrum. **The precedent is in the type already**: it carries two
-  run-level STR parameters, `ssr_slippage_fits` and the substitution-rate map, both added by E2.
-- **The alternative is `LocusEvidence::Ssr`.** What that costs: run-level numbers ride on a
-  per-locus type, so every locus of a run repeats them, and the axis confusion `FrozenParameters`'
-  own documentation exists to prevent — *"two different axes are in here and they are not
-  interchangeable"* — is reopened one type over. What it buys: `FrozenParameters` does not change,
-  and E3b's fixture supplies all three tract inputs in one place.
-- **The decay's shape is the smaller half of the same question.** It is documented as *fitted per
-  group of loci*, so strictly it is a lookup; with no producer, no test can tell a scalar from a
-  map. Recommendation: one scalar for the run, defaulting to `SeedDecayPerRepeat::FALLBACK`, named
-  as provisional — the constant already exists and the architecture already calls it the fallback.
-
-*Depends:* E3a. *Source:* spec §1, §5, §9;
+*Depends:* E3a, E2e. *Source:* spec §1, §5, §9;
 [`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
 
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
-> path (E3a, done), over supplied ones at a repeat tract (E3b, which carries one open question and
-> is otherwise implementation). Pause for review.
+> path (E3a, done), over supplied ones at a repeat tract (E3b). Pause for review.
 
 ### Milestone F — the two loop oracles
 
