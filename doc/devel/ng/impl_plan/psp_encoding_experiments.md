@@ -705,8 +705,8 @@ a reading off a curve this plan produces, not a separate study.
   numbers and break the oracle the whole psp path is checked against
   ([`../spec/run_streaming.md`](../spec/run_streaming.md) §1.2). Rounding where the value is computed
   makes both routes agree — and agree *better* than full precision would, since it absorbs the
-  last-bit differences of two summation orders. **Carried here so it reaches the implementation plan
-  that owns those types**; the same treatment applies to the window's GC fraction and its mean
+  last-bit differences of two summation orders. **Carried here so it reaches the psp implementation plan, which is
+  where the owner put it on 2026-08-25**; the same treatment applies to the window's GC fraction and its mean
   coverage.
 - **The per-sample summary does not go in ng's psp as TOML text.** Settled after Milestone Z
   measured it at 1.05 MB of text per open sample for a 0.52 MB parsed histogram, both resident at

@@ -619,8 +619,9 @@ property inherited from the type, not as a psp setting a writer chooses.** The s
 one of the knobs of §3, and a psp cannot be written with a different one than the types produce.
 
 **And it is not this document's change to make.** Rounding at the type touches every ng module that
-computes or carries these quantities, so **it is ng-wide work, carried in the implementation plan
-that owns those types** — recorded here so it is not lost, not owned here. The two remaining
+computes or carries these quantities, so it is ng-wide work. **It goes into the psp implementation
+plan when that is written** (the owner, 2026-08-25) — recorded here so it reaches it, not owned
+here. The two remaining
 consequences for the encoding are the ones above: an integer field, and a header that records the
 step it means.
 
@@ -684,6 +685,21 @@ themselves — one identifier per read pair, allocated in order, the reference s
 from each read's CIGAR, the resulting per-position live sets written three ways and
 compressed identically at 32 KiB blocks with a block cut every 1,500 positions:
 
+**The three ways, defined.** A position's chain ids are the identifiers of the read pairs covering
+it, so at 300 reads a position that is about 300 identifiers, and the same pair reappears at every
+one of the ~150 positions it covers.
+
+- **The whole list, as raw identifiers.** At each position, the count and then each identifier as a
+  fixed 8-byte integer. Identifiers run into the millions, so each costs its 8 bytes.
+- **The whole list, as differences.** Sort the identifiers, store the first, and store each one after
+  it as *the distance from the one before*. Because identifiers are allocated in order, pairs
+  covering the same position have nearby ones, so those distances are small — often 1 or 2 — and a
+  **variable-length integer** stores a small number in a single byte. The list is still written out at
+  every position; each entry is just cheaper.
+- **Only the changes.** Do not write the list at all. At each position write which pairs *started*
+  covering it and which *stopped*, and let a reader carry the set forward. A pair covering 150
+  positions then costs about two entries in total instead of appearing in 150 lists.
+
 | | tomato slice, 11.4 reads a position | HG002 slice, 293 reads a position |
 |---|---|---|
 | whole list per position, raw 8-byte identifiers | 1.020 bytes a position | 43.78 |
@@ -721,11 +737,33 @@ Four things this settles that
   12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
   alternatives.
 
-**Proposal: delta-varints in the first version, the differential form second.** The first is
-a few lines inside the record encoder, has no interaction with anything else in this
-document, and takes the deep corner from 43.8 to 11.7 bytes a position. The second is worth
-another 5.3 bytes a position there and needs the live set restated at every block, which is
-the one place these two documents' designs touch (§2.4).
+**Distances ship. Changes-only is now in doubt, and §2.3 is why.**
+
+Storing each identifier as its distance from the one before is a few lines inside the record
+encoder, and it takes the deep corner from 43.8 to 11.7 bytes a position. **It survives the record
+head** because a record's list can be made self-contained: the first identifier absolute, the rest
+distances within that record.
+
+**Changes-only cannot be made self-contained, and self-contained is what skipping requires.** The
+form works by carrying a set forward: a reader knows which pairs are live only because it applied
+every arrival and departure since the block began. **A reader that skips a record's body never sees
+that record's changes, so its set goes stale and every later record it does want is wrong.** That is
+the same failure that made the coverage and the identifier distances restart at each record (§2.3),
+but here it cannot be fixed by restarting — restating the live set at every record *is* writing the
+whole list at every position, which is the form we started from.
+
+**So the two are alternatives at depth, not a first and second version**, and which wins is
+unmeasured:
+
+- **the record head with distances** — records skippable, a walk 2.06× faster, chain ids 11.72 bytes
+  a position at 293 reads;
+- **changes-only** — chain ids 6.42 bytes a position, about 45 % less, but a reader must decode every
+  record's changes, so the head can only skip what is left. At 293 reads a position the chain ids are
+  most of a record, so that is most of the skip gone.
+
+*A third shape nobody has priced: the changes in the head and the rest of the record in the
+skippable body. It keeps both properties in form, but at depth the head then carries most of the
+bytes, and how much of the 2.06× survives that is exactly the unmeasured part.*
 
 ---
 
@@ -929,7 +967,10 @@ will pass while a chain-id list is being corrupted.
    the point: approximating in the psp alone would have broken the oracle
    ([`run_streaming.md`](run_streaming.md) §1.2) that the whole psp path is checked against.
 2. **Does the differential chain-id encoding ship in the first version, or only
-   delta-varints?** — OPEN. §6 measures both. *Leaning:* delta-varints first, the differential
+   distances only?** — OPEN, and **§6 now records a conflict that did not exist when this was
+   written**: changes-only cannot coexist with the skippable records of §2.3, because a set carried
+   forward cannot survive a skipped record. So they are alternatives at depth rather than versions
+   one and two. *Leaning:* distances, since they keep the head; the differential
    form second, because the first is a few lines with no interaction and takes the deep corner
    from 43.8 to 11.7 bytes a position. **Settled by:**
    [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §7's experiment, which now has its
