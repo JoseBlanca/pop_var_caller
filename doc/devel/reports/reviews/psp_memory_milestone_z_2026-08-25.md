@@ -15,7 +15,7 @@ stored as changes — and the objective is to cut the memory a cohort run needs.
 weeks on encodings, Milestone Z asks a cheaper question: **of the memory a run actually uses, how
 much is the store's to give back?**
 
-Three things came back, and the third was not being looked for.
+Three things came back.
 
 1. **A cohort run's peak is almost entirely a per-sample cost.** Measured over cohorts of 1 to 62
    samples, peak resident memory is `91 MB + 7.53 MB per sample`, a straight line to within half a

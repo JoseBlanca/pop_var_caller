@@ -22,9 +22,8 @@ one record per covered position, at three reads a position and at three hundred,
 one sample and of several thousand. A caller opens one per sample and holds them all open for the
 whole run.
 
-**That last sentence is the whole design problem.** Anything a psp costs to have open is multiplied
-by the cohort size, so at a thousand samples the only number that matters is what one open file
-costs. Measured on production's format: **2.6 MB per open sample**, which is 2.6 GB at a thousand
+Anything a psp costs to have open is multiplied by the cohort size, so at a thousand samples the
+number that decides whether a run fits on a machine is what one open file costs. Measured on production's format: **2.6 MB per open sample**, which is 2.6 GB at a thousand
 and 7.7 GB at three thousand.
 
 **The cause is that production ties two things to one number.** A `.psp` groups records into
@@ -76,10 +75,10 @@ any point on the curve above.
 
 ---
 
-## 2. Vocabulary — and a name collision that will bite
+## 2. Vocabulary
 
-**Read this section even if you skip others.** Production's code and this document use the word
-*trailer* for two different things, and a coder moving between them will get it wrong.
+Production's code and this document use the word *trailer* for two different things, and a coder
+moving between them will get it wrong.
 
 | this document | what it is | production's name for it |
 |---|---|---|
@@ -206,7 +205,7 @@ production's hidden-paralog filter, and by ng's duplication filter when that is 
 **The trailer's payload is binary, not text**, per the owner's ruling of 2026-08-25 and for a
 measured reason: production stores that histogram as TOML, which costs **1.05 MB of text per open
 sample to yield a 0.52 MB parsed histogram**, and its reader holds both for the length of the run.
-[`psp_record_encoding.md`](psp_record_encoding.md) §5.1 owns that decision.
+[`psp_record_encoding.md`](psp_record_encoding.md) §4.1 owns that decision.
 
 **The container does not interpret the trailer.** It stores bytes and hands them back. What is in
 them is the writer's business, which is what lets ng's summary change shape without a container
@@ -406,7 +405,7 @@ from 4.6 to 16.3 bytes.
 *Both are one sample's characteristics replicated, so this measures the reader's cost and not the
 variety of a real cohort.*
 
-Three things follow, and the third is a constraint on the design rather than a tuning note:
+Three things follow:
 
 - **The cost is per live decoder and it is linear.** The second decoder costs the same as the first,
   as it should for the same object.
@@ -420,7 +419,7 @@ Three things follow, and the third is a constraint on the design rather than a t
 *Measured with `--streams N`, which opens the same store N times per sample. A stream's buffers are
 the same size whatever it carries, so this measures the multiplier without needing the streams to
 differ — which is the quantity in question. It does **not** measure how much a real second stream
-would add to the file, which is [`psp_record_encoding.md`](psp_record_encoding.md) §3.3's.*
+would add to the file, which is [`psp_record_encoding.md`](psp_record_encoding.md) §2.3's.*
 
 ### 5.3 Where the 190 kB floor comes from, and why it is not currently reachable
 

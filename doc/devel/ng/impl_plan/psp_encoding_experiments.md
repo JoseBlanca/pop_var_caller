@@ -702,7 +702,7 @@ a reading off a curve this plan produces, not a separate study.
   measured it at 1.05 MB of text per open sample for a 0.52 MB parsed histogram, both resident at
   once. The section is permanent — ng's duplication filter is not built yet but is coming — so it is
   encoded as binary and the reader does not keep the encoded bytes after decoding.
-  [`../spec/psp_record_encoding.md`](../spec/psp_record_encoding.md) §5.1 owns it.
+  [`../spec/psp_record_encoding.md`](../spec/psp_record_encoding.md) §4.1 owns it.
 - **Wall time may be traded for memory, within reason, because cores can pay some of it back** —
   which is why E1b measures processor time and the thread-scaling curve separately, rather than
   reporting one wall-time figure.

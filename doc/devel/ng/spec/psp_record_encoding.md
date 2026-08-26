@@ -9,21 +9,21 @@ consequences, not quantities this document fixes.** Every one was taken on real 
 programs named in §14.*
 
 *What the revision changed, so a reader of the old version knows what moved: the block is
-now **large** and the compressor's **reach** is capped separately, where before both were one
-small frame (§3, §3.2); the **dictionary is gone**, because a large block warms its own
-context (§3.2); the **index question is closed**, because a large block has few entries
-(§3.4, §13 Q4); and the byte-identity oracle is replaced by an exact-plus-tolerance one,
+now **large** and the compressor's **look-back window** is capped separately, where before both were one
+small frame (§2, §2.2); the **dictionary is gone**, because a large block warms its own
+context (§2.2); the **index question is closed**, because a large block has few entries
+(§2.4, §13 Q4); and the byte-identity oracle is replaced by an exact-plus-tolerance one,
 because block boundaries move QUAL in its last digits (§12). The measured result: **the cost
 of an open sample falls 7.7-fold, 2,677 kB to 346 kB, while the file gets 35 % smaller, the
-index 11× smaller and the read 1.8× faster** (§3.1).*
+index 11× smaller and the read 1.8× faster** (§2.1).*
 
 *This is the document [`run_streaming.md`](run_streaming.md) §10 defers to when it says
 "the psp file's encoding — byte layout, compression, block sizing …, checksums, format
 versioning, the index, the trailer. Its own spec beside this one". It inherits that
-document's header fields (§6.1), its reader contract (§3.3), its per-open-file budget
+document's header fields (§6.1), its reader contract (§2.3), its per-open-file budget
 (§7.2) and its worker-count-invariance restriction (§12.1). The read names are a field
 big enough to have their own document —
-[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) — and §7 here reports the
+[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) — and §6 here reports the
 measurement that document's experiment was waiting for.*
 
 ---
@@ -44,7 +44,7 @@ depending on how it is set. Every figure below is a measurement of one such sett
 choices can be made on numbers; none of them is a property the format guarantees.
 
 **In production's design those two costs are one question**, because a block is both how far back the
-compressor may look and how much a reader must inflate. Separating them is what the shape in §3 is
+compressor may look and how much a reader must inflate. Separating them is what the shape in §2 is
 for.
 
 ### 1.1 The problem, in one paragraph
@@ -67,7 +67,7 @@ kilobytes, not megabytes*, at three thousand open samples.
    at **500 kB resident per open sample** on 2026-08-25 — 1.5 GB across three thousand — which
    is looser than the "tens of kilobytes" [`run_streaming.md`](run_streaming.md) §7.2 asks
    for; that document's §7.2 should be corrected when it is next touched. **Measured, the
-   shape in §3 costs 346 kB**, so the goal is met rather than argued.
+   shape in §2 costs 346 kB**, so the goal is met rather than argued.
 2. **The file is smaller than production's at a comparable reader memory**, not only where
    production is allowed to spend more.
 3. **A reader can start part-way through**, without reading what comes before, at the grain the
@@ -95,7 +95,7 @@ kilobytes, not megabytes*, at three thousand open samples.
   exactly those fields
   ([`census_file.rs:89-98`](../../../../src/ng/parameter_estimation/joint/census_file.rs)).
 - **It does not settle the read names' encoding.** That is
-  [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md)'s experiment; §7 here supplies
+  [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md)'s experiment; §6 here supplies
   numbers it was explicitly waiting for and states a leaning, nothing more.
 - **It does not specify compression of anything but the observation stream** — the
   header stays plain text so that `head` and a TOML parser can read it, as production's
@@ -124,41 +124,10 @@ kilobytes, not megabytes*, at three thousand open samples.
 
 ---
 
-## 2. What a record costs today, and which fields it is
-
-Before any layout question, the fields are not equal, and the two largest are not the ones
-anybody would guess. Per record, compressed, measured on a real per-sample file at 512 KiB
-blocks — GIAB HG002 at about thirty reads a position:
-
-| field | today, as written | as a fixed-point integer |
-|---|---|---|
-| mean coverage of the window | 2.762 bytes | 0.120 |
-| summed log-error per allele | 2.817 | 1.967 |
-| GC fraction of the window | 0.806 | 0.597 |
-| *the eleven other fields together* | 2.795 | 2.754 |
-| **total** | **9.180** | **5.438** |
-
-A tomato accession at about three reads a position gives the same shape: 2.788 + 2.905 +
-0.613 of 9.909 bytes a record, falling to 0.121 + 2.067 + 0.512 of 6.269.
-
-**Three floating-point fields are 70 % of the compressed file.** They are stored at full
-IEEE precision — two `f32`s and an `f64`
-([`src/psp/registry.rs:366,382,406`](../../../../src/psp/registry.rs)) — and the bottom
-bits of a window's mean coverage or a sum of log error probabilities are arithmetic noise,
-which is the one thing a compressor cannot shrink. §7 is about that, and it is worth more
-than every layout decision in this document put together.
-
-**One field measured here says nothing about ng, and it is the one that matters most at
-depth.** Production stores the names of about 3.4 % of the reads it folds
-([`src/pileup/walker/open_record.rs:150-160`](../../../../src/pileup/walker/open_record.rs)),
-ng stores all of them, and §8 measures that field separately.
-
----
-
-## 3. The proposal, in one page
+## 2. The proposal, in one page
 
 *Revised 2026-08-25 after the shape below was built and measured. The earlier proposal —
-small independent frames compressed against a shared dictionary — is superseded, and §3.2
+small independent frames compressed against a shared dictionary — is superseded, and §2.2
 records why, because the reasoning that led to it was sound against a question that turned
 out to be the wrong one.*
 
@@ -199,7 +168,7 @@ megabyte, for its ratio and for a small index, while a reader holds tens of kilo
 
 Everything below is a consequence of that shape or a number that justifies it.
 
-### 3.1 Why record-major rather than columnar — priced
+### 2.1 Why record-major rather than columnar — priced
 
 Measured like for like, same field encodings and same compressor, on a tomato accession at
 about three reads a position:
@@ -223,10 +192,10 @@ columnar shape over the same range costs a third of its size. A design whose mem
 is nearly free is a different kind of object from one whose memory knob is its ratio.
 
 Against the file production writes today (11.85 bytes a record on that sample, 11.86 on
-HG002), the record stream is 37 % and 43 % smaller — but most of that is §7's, not this
+HG002), the record stream is 37 % and 43 % smaller — but most of that is §6's, not this
 section's.
 
-**Those rows all price memory against bytes, and the shape in §3 does not have to pay
+**Those rows all price memory against bytes, and the shape in §2 does not have to pay
 that.** Built and walked against production's reader on the same 62-accession cohort, one
 record at a time, the way a merge reads — 1 MB blocks, a 32 KiB reach, no dictionary:
 
@@ -263,7 +232,7 @@ the table above:
 per-open-sample term only — a whole cohort run also carries the merger's projections and
 the genotype fit, and neither is sized by the block.*
 
-### 3.2 Why the dictionary was proposed, and why it is no longer needed — a superseded conclusion, kept
+### 2.2 Why the dictionary was proposed, and why it is no longer needed — a superseded conclusion, kept
 
 **This section used to argue for small frames with a shared dictionary, against one long
 stream with a capped reach. The measurement behind it was correct and the conclusion was
@@ -274,7 +243,7 @@ What was measured: on HG002, a continuous stream with a **512 KiB reach** gave 6
 record and 32 KiB frames with a dictionary gave 6.52 — the same size for fourteen times the
 memory, so the reach looked like something you pay for and do not get back.
 
-**What was never swept is the combination §3 proposes: a *large block* with a *small
+**What was never swept is the combination §2 proposes: a *large block* with a *small
 reach*.** Every streaming arm in that grid tied the reach to the block, or used an 8 MiB
 reach for both. The two were separate knobs in the measuring program and were never varied
 independently, so the one configuration that wins was not in the table. **The reach is not
@@ -285,7 +254,7 @@ Two consequences:
 
 - **The dictionary is no longer part of the design.** It existed because a 32 KiB frame is
   compressed from a cold start; a 1 MB block warms its own context within the first few
-  kilobytes. The measured store in §3.1 carries **no dictionary at all** and is still 35 %
+  kilobytes. The measured store in §2.1 carries **no dictionary at all** and is still 35 %
   smaller a record than production's file.
 - **The trap it created goes with it.** A dictionary is held per open reader unless
   deliberately shared, and 112 KiB across three thousand samples is about 330 MB — larger
@@ -294,7 +263,7 @@ Two consequences:
 
 *Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
 
-### 3.3 The light stream — how the two-phase decode survives
+### 2.3 The light stream — how the two-phase decode survives
 
 A record stream's one real loss is that a reader cannot read one field without decoding all
 of them, and [`run_streaming.md`](run_streaming.md) §3.3 depends on exactly that: psp mode's
@@ -322,7 +291,7 @@ stream's** — one index entry names both. A reader that scans a segment reads o
 frames; a reader that then needs three records decompresses the three heavy frames holding
 them.
 
-### 3.4 The index, and where a reader may start
+### 2.4 The index, and where a reader may start
 
 **Every frame is self-contained by construction.** It opens with its chromosome, its first
 position and its record count, and every running base inside it — the position difference,
@@ -385,13 +354,13 @@ at 32 KiB, and it is what keeps the restart grain honest rather than incidental.
 
 ---
 
-## 4. Settings, and what each is worth
+## 3. Settings, and what each is worth
 
 Every number below was measured on both corners; the spread is what makes each of these a
 knob rather than a constant.
 
 **The block and the reach are two settings, not one, and that is the point of the design.**
-Confusing them is what made the earlier proposal (§3.2) reach for a dictionary.
+Confusing them is what made the earlier proposal (§2.2) reach for a dictionary.
 
 | setting | proposed | what it moves |
 |---|---|---|
@@ -399,7 +368,7 @@ Confusing them is what made the earlier proposal (§3.2) reach for a dictionary.
 | **compressor reach** | **32 KiB** | **the reader's memory**, and almost nothing else once the block is large |
 | rolling buffer | 64 KiB | how often the reader refills; one record must fit, and it grows if one does not |
 | zstd level | 9 | 16 % of the file (tomato 8.15 / 7.44 / 6.86); write time 1.7 s / 4.0 s / 16.2 s |
-| dictionary | **none** | superseded — a 1 MB block warms its own context (§3.2) |
+| dictionary | **none** | superseded — a 1 MB block warms its own context (§2.2) |
 
 **Level 9 is inherited, not derived** — it is what production uses
 ([`src/psp/block.rs:709`](../../../../src/psp/block.rs)) and the sweep gives no reason to
@@ -417,7 +386,7 @@ the per-open-sample figure much — the reach is what that is made of.
 
 ---
 
-## 5. What is *not* stored
+## 4. What is *not* stored
 
 [`run_streaming.md`](run_streaming.md) §11 question 4 asks whether an observation's
 reference bases should go in the file at all —
@@ -434,7 +403,7 @@ both ways and timing the re-fetch inside a segment walk; the question is
 [`run_streaming.md`](run_streaming.md)'s, not this document's, and this is a leaning
 offered to it rather than a decision taken from it.
 
-### 5.1 The per-sample summary is not stored as text — settled 2026-08-25
+### 4.1 The per-sample summary is not stored as text — settled 2026-08-25
 
 **A psp carries one more thing besides records: a summary of the whole sample.** Today that is a
 coverage-against-GC histogram and a count of heterozygous sites, and its consumers are the genotype
@@ -462,7 +431,7 @@ heap, against 12.7% for the compressed block decode this document spends most of
 - **The reader does not hold the encoded bytes once the summary is decoded.** Holding the source
   representation beside the decoded one doubles a per-open-sample cost for nobody. On production this
   was measured at 1.03 MB per sample of peak — 13.7% of the per-sample cost of a whole cohort run.
-- **Both properties are per-open-sample costs and belong in the same budget as the frames** (§3.1).
+- **Both properties are per-open-sample costs and belong in the same budget as the frames** (§2.1).
   A design that gets a frame down to 36 kB and then spends 1.5 MB on a summary has not made an open
   sample cheap.
 
@@ -475,9 +444,9 @@ duplication filter, since the answer depends on what that filter reads and when.
 
 ---
 
-## 6. The three quantities that arrive as floating point
+## 5. The three quantities that arrive as floating point
 
-**They are 70 % of the compressed file (§2) and none of them needs the precision it is
+**They are 70 % of the compressed file (§11) and none of them needs the precision it is
 stored at.** Each is written instead as an integer count of steps, as a variable-length
 integer, so a value needing one byte takes one and a value needing three takes three in the
 same file. **There is no field width to choose** — the question that looks like "8 bits or
@@ -503,7 +472,7 @@ file (so a row's distance from the baseline is that field's own contribution):
 | | 1/16 ln | 6.415 | 7.091 |
 | | 1/4 ln | 6.041 | 6.732 |
 
-### 6.0 Re-measured 2026-08-25, on the streaming store and at 279 reads a position
+### 5.1 Re-measured 2026-08-25, on the streaming store and at 279 reads a position
 
 **The sweep below was taken at 32 KiB frames and on samples at about 3 and 30 reads a position.
 This one is on the shape the container spec settled — 1 MB blocks, a 32 kB window — and it adds the
@@ -563,7 +532,7 @@ field inside half its own step.
 as the right size rather than as precise. And a tomato row is not monotone at the finest end —
 1/16,384 came back at 5.782 against 5.793 for 1/4,096 — which is unexplained and too small to chase.*
 
-### 6.0.1 The bit-identity cost, and why the answer is to quantise *upstream*
+### 5.1.1 The bit-identity cost, and why the answer is to quantise *upstream*
 
 **Approximating a float in the psp alone breaks the oracle the whole psp path is checked against.**
 [`run_streaming.md`](run_streaming.md) §1.2 requirement 4: *"the same VCF from direct mode and from
@@ -622,7 +591,7 @@ at low depth and 28 % at high depth against the fully approximated row.
 ---
 
 **A record at 279 reads a position costs 16.3 bytes against 4.6 at three reads** — three and a half
-times, for a hundred times the depth. That is the read names, and it is §7's subject.
+times, for a hundred times the depth. That is the read names, and it is §6's subject.
 
 ---
 
@@ -654,7 +623,7 @@ coverage, 0.002 natural-log units in the summed log-error.
 
 ---
 
-## 7. The read names, and why they decide the file's size at depth
+## 6. The read names, and why they decide the file's size at depth
 
 **ng names every read at every position it covers.** This is the owner's ruling of
 2026-08-17 and it is already in the code: the fast single-base path pushes a chain id for
@@ -706,7 +675,7 @@ Four things this settles that
   because the merge would simply see a read that was not there. **A re-entry form is part of
   the first version, not a later fix.**
 - **Restating the live set at every frame is affordable.** Cutting frames every 1,500
-  positions rather than by byte count — which is what §3.4 does — costs the differential form
+  positions rather than by byte count — which is what §2.4 does — costs the differential form
   12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
   alternatives.
 
@@ -714,11 +683,11 @@ Four things this settles that
 a few lines inside the record encoder, has no interaction with anything else in this
 document, and takes the deep corner from 43.8 to 11.7 bytes a position. The second is worth
 another 5.3 bytes a position there and needs the live set restated at every frame, which is
-the one place these two documents' designs touch (§3.4).
+the one place these two documents' designs touch (§2.4).
 
 ---
 
-## 8. Traps — what will bite the coder
+## 7. Traps — what will bite the coder
 
 - **[`run_streaming.md`](run_streaming.md) §8 says chain ids are already omitted for reads
   that agree with the reference, "recorded so nobody re-adds them when the psp writer is
@@ -748,7 +717,7 @@ the one place these two documents' designs touch (§3.4).
   whose window exceeds the decoder's configured maximum, so a reader that assumes 32 KiB will
   reject a legitimate file written with more. Read it from the header and configure the
   decoder from that.
-- **A dictionary is no longer part of this design (§3.2)**, and if one is ever reintroduced
+- **A dictionary is no longer part of this design (§2.2)**, and if one is ever reintroduced
   it is held *per open reader* unless deliberately shared: 112 KiB across three thousand
   samples is about 330 MB, larger than the buffers the whole design exists to shrink.
 - **A dictionary trained on the frames it is then measured against reports a saving no
@@ -756,7 +725,7 @@ the one place these two documents' designs touch (§3.4).
   spectacular — in an early run of our own probe, a hundredfold. Train on one half of the
   frames and measure on the other.
 - **A frame's size is in bytes, so its span in reference is whatever coverage makes it.**
-  §3.4's 100 kb cut rule exists for that; without it goal 3 quietly fails on exactly the
+  §2.4's 100 kb cut rule exists for that; without it goal 3 quietly fails on exactly the
   sparse samples that need it.
 - **The three quantised fields are lossy and the integer fields are not.** A round-trip test
   that compares whole records with a tolerance will pass while the read-name list is being
@@ -765,14 +734,14 @@ the one place these two documents' designs touch (§3.4).
 - **The window's mean coverage is stored as a difference from the previous record**, so a
   frame that does not reset that difference reads back wrong from its first record — and
   plausibly, because coverage is smooth. The same applies to the position and the read-name
-  bases. Every running base resets at a frame boundary; this is the property §3.4's restart
+  bases. Every running base resets at a frame boundary; this is the property §2.4's restart
   guarantee rests on.
-- **Do not decode the whole index at open** — §3.4, and the 3.8 MB per file
+- **Do not decode the whole index at open** — §2.4, and the 3.8 MB per file
   [`run_streaming.md`](run_streaming.md) §7.2 measures on production's.
 
 ---
 
-## 9. Cross-cutting concerns
+## 8. Cross-cutting concerns
 
 **Memory.** The point of the design. One open sample holds: the compressed frame it is
 reading, the decompressed frame (32 KiB), one record, and its share of the dictionary. The
@@ -801,14 +770,14 @@ not.
 
 ---
 
-## 10. Reuse map
+## 9. Reuse map
 
 | what | existing code | how it is reused |
 |---|---|---|
 | variable-length integer codec | `src/psp/varint.rs` | as-is: LEB128 and zig-zag LEB128, already specified and tested |
 | plain-text header framing | `src/psp/header.rs` | the pattern — magic, length prefix, TOML, sentinel — so `head` still works on an ng psp |
 | the zstd seam | `new_column_compressor`, `zstd_compress_into` ([`src/psp/block.rs:718,730`](../../../../src/psp/block.rs)) | the shape: one long-lived compressor per writer, frame checksums on. The dictionary is new |
-| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the light/heavy split, reduced from fourteen columns to two streams (§3.3) |
+| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the light/heavy split, reduced from fourteen columns to two streams (§2.3) |
 | the eager whole-segment decode | [`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs) | the parity oracle's model: a simple decoder used only by tests, against which the real one is byte-compared |
 | the record | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | what is written and what must come back |
 
@@ -817,7 +786,7 @@ used only by tests, and the real reader compared against it record for record.
 
 ---
 
-## 11. Deferred, with a recommended home
+## 10. Deferred, with a recommended home
 
 - **The byte layout itself** — field order inside a record, the framing integers' widths, the
   trailer's bytes, the format version tag. To the implementation, guided by this document;
@@ -826,12 +795,42 @@ used only by tests, and the real reader compared against it record for record.
   shape [`run_streaming.md`](run_streaming.md) §7.2 asks for. Named as open question 4 below
   rather than deferred to another document, because nothing else can settle it.
 - **The read names' final encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md),
-  whose experiment §7 here feeds rather than replaces.
+  whose experiment §6 here feeds rather than replaces.
 - **Whether the reference bases are stored** — [`run_streaming.md`](run_streaming.md) §11
   question 4; §5 offers a leaning and the measurement that would close it.
 - **Multi-library samples.** Both corners measured here are one read group. A sample with
   several will have more distinct values per frame and compress somewhat worse; nobody has
   measured how much. To the first run on a multi-library cohort.
+
+---
+
+## 11. What a record costs today — the measurement the design was chosen against
+
+**This is where §2's shape came from.** Production's file, broken down by field, per record,
+compressed, at 512 KiB blocks — GIAB HG002 at about thirty reads a position:
+
+| field | today, as written | as a fixed-point integer |
+|---|---|---|
+| mean coverage of the window | 2.762 bytes | 0.120 |
+| summed log-error per allele | 2.817 | 1.967 |
+| GC fraction of the window | 0.806 | 0.597 |
+| *the eleven other fields together* | 2.795 | 2.754 |
+| **total** | **9.180** | **5.438** |
+
+A tomato accession at about three reads a position gives the same shape: 2.788 + 2.905 +
+0.613 of 9.909 bytes a record, falling to 0.121 + 2.067 + 0.512 of 6.269.
+
+**Three floating-point fields are 70 % of the compressed file.** They are stored at full
+IEEE precision — two `f32`s and an `f64`
+([`src/psp/registry.rs:366,382,406`](../../../../src/psp/registry.rs)) — and the bottom
+bits of a window's mean coverage or a sum of log error probabilities are arithmetic noise,
+which is the one thing a compressor cannot shrink. §6 is about that, and it is worth more
+than every layout decision in this document put together.
+
+**One field measured here says nothing about ng, and it is the one that matters most at
+depth.** Production stores the names of about 3.4 % of the reads it folds
+([`src/pileup/walker/open_record.rs:150-160`](../../../../src/pileup/walker/open_record.rs)),
+ng stores all of them, and §7 measures that field separately.
 
 ---
 
@@ -846,14 +845,14 @@ used only by tests, and the real reader compared against it record for record.
    "tens of kilobytes". The probe does this at 8, 32 and 63 samples today.
 3. **Worker-count invariance**, inherited from [`run_streaming.md`](run_streaming.md) §12.1:
    one sample gathered at 1, 2, 4, 8, 16 workers gives byte-identical files apart from the
-   header's timestamp. This is what §9's frame-cut rule exists to preserve.
+   header's timestamp. This is what §8's frame-cut rule exists to preserve.
 4. **The two-phase saving is still there.** Scanning the light stream over a cohort segment
    must materialise about one record in a hundred, the ratio
    [`run_streaming.md`](run_streaming.md) §3.3 measured. A file that round-trips but forces
    every record to inflate has failed goal 4 while passing oracle 1.
 5. **Restart equals sequential.** Reading from an arbitrary frame gives exactly the records a
    full sequential read gives from that point — the test that catches a running base that was
-   not reset (§8).
+   not reset (§7).
 6. **Mode equivalence**, [`run_streaming.md`](run_streaming.md) §12 oracle 3: the same cohort
    called through the direct route and through the psp route gives the same VCF. It is the
    sufficiency test for everything this document chose not to store.
@@ -885,7 +884,7 @@ will pass while a read-name list is being corrupted.
    unquantified change to a likelihood. **Settled by:** whoever owns the emission model saying
    what error in that term is acceptable.
 2. **Does the differential read-name encoding ship in the first version, or only
-   delta-varints?** — OPEN. §7 measures both. *Leaning:* delta-varints first, the differential
+   delta-varints?** — OPEN. §6 measures both. *Leaning:* delta-varints first, the differential
    form second, because the first is a few lines with no interaction and takes the deep corner
    from 43.8 to 11.7 bytes a position. **Settled by:**
    [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §7's experiment, which now has its
@@ -901,7 +900,7 @@ will pass while a read-name list is being corrupted.
    be small to bound a reader's memory; once the reach does that instead, the block is sized
    for compression and for the index, and both want it large. Measured: 154 blocks in a tomato
    accession at 1 MB blocks against 1,674 in production's `.psp`, so a flat index of one entry
-   per block is a few hundred kilobytes on a whole-genome sample (§3.4). **The coarse-index-
+   per block is a few hundred kilobytes on a whole-genome sample (§2.4). **The coarse-index-
    and-chain scheme must not be built.**
 5. **How much do the numbers move on a multi-library sample?** — OPEN. Both corners here are
    one read group, and the read group joins an observation's identity
@@ -915,15 +914,15 @@ will pass while a read-name list is being corrupted.
 
 Two throwaway programs, both in the tree, both runnable:
 
-- **`examples/psp_record_stream_compression.rs`** — sweeps the grid of §3.1 and §3.2: field
+- **`examples/psp_record_stream_compression.rs`** — sweeps the grid of §2.1 and §2.2: field
   layout (record-major or columnar), field width (fixed-width, variable-length, fixed-point),
   batch size, and framing (independent frames, with or without a dictionary; one continuous
   stream with a chosen window, flushed or not). Reports bytes a record against the reader
   memory each combination implies, and each field's own compressed bytes.
 - **`examples/psp_row_stream_roundtrip.rs`** — a working encoder, decoder and verifier for the
-  proposed shape, plus the many-sample walk of §9. `verify` walks the new store and the `.psp`
+  proposed shape, plus the many-sample walk of §8. `verify` walks the new store and the `.psp`
   in lockstep and fails on the first record that disagrees.
-- **`examples/ng_chain_id_column_cost.rs`** — §7's measurement, taken from a CRAM: read pairs
+- **`examples/ng_chain_id_column_cost.rs`** — §6's measurement, taken from a CRAM: read pairs
   given one identifier each, their reference stretches from the CIGAR, the per-position live
   sets written three ways.
 
@@ -932,7 +931,7 @@ The full report, with the sweeps these tables summarise, is
 
 **What was measured on, and what that covers.** A tomato accession at about three reads a
 position (`SRR7279540`, 7.59 M records) and GIAB HG002 at about thirty (0.60 M records) for
-everything but §7; for §7, a tomato benchmark slice at 11.4 reads a position and an HG002
+everything but §6; for §6, a tomato benchmark slice at 11.4 reads a position and an HG002
 benchmark slice at 293. Cohort figures are the 63-accession tomato panel. **One sample and one
 cohort of 63 is not the committed range** — nothing here was measured at one sample of a
 thousand-sample cohort, and the memory claims at three thousand samples are arithmetic from the
