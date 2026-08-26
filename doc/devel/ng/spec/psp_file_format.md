@@ -7,7 +7,7 @@ every number here was taken from it or from production.*
 *This document owns the **container**: the sections a file is made of, how a reader finds them,
 what a reader is allowed to hold, and what the writer and reader offer their callers. What goes
 **inside** a record — which fields, how each is encoded, what may be approximated — is
-[`psp_record_encoding.md`](psp_record_encoding.md), and the read names are
+[`psp_record_encoding.md`](psp_record_encoding.md), and the chain ids are
 [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md). The requirement both serve is a
 per-open-sample memory budget, stated in §1.1.*
 
@@ -119,6 +119,9 @@ Two more terms this document needs:
   `block_byte_ceiling`. Neither is called "block size" unqualified, and the unit is in the name
   because production's own `block_window_bp` sets that precedent and because the two will otherwise
   be read for each other.*
+- A **chain id** identifies the DNA fragment a piece of evidence came from: **one `u64` per read
+  *pair*, not per read**, mates collapsed onto a single id, allocated in order and never reused
+  ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
 - **the record head** — the fixed fields at the front of every record that let a reader decide
   whether it wants the record without building it: the position offset, the reference span, the
   non-reference read count, and the body's length (§4.3).
@@ -191,7 +194,7 @@ look-back window capped at the value the header declares.
 
 **Every block is self-contained.** It opens with its chromosome, its first position and its record
 count, and **every running difference inside it restarts** — the position difference, the coverage
-difference, the read-name difference. A block never crosses a chromosome. So the restart points are
+difference, the chain-id difference. A block never crosses a chromosome. So the restart points are
 the block boundaries and there is no separate seek mechanism to build.
 
 **This is the property goal 2 rests on, and the one most easily broken by accident.** A block that
@@ -402,14 +405,14 @@ earlier draft quoted**, and the difference is the point of the next paragraph.
 names are normally coded as differences from the *previous record* — which is cheap, because
 neighbouring positions are alike. **A reader that skips a body never sees those differences, so it
 loses the base both are measured from and every record after it decodes wrong.** So with a head,
-both restart at each record: the coverage is absolute, and the read-name difference is measured
+both restart at each record: the coverage is absolute, and the chain-id difference is measured
 from zero rather than from the record before.
 
 That is what turns a 1.4 % length field into a 9.2 % head. **It is a real cost of skippability, not
 an implementation detail**, and it is why the earlier figure was wrong rather than merely imprecise.
 
 *Not measured: a head that carries the two differences itself — the coverage step and the advance in
-read-name numbering — so the body can keep its cross-record coding and a skipping reader still track
+chain-id numbering — so the body can keep its cross-record coding and a skipping reader still track
 both. It would move those fields rather than duplicate them, so it should recover much of the 9.2 %,
 at the cost of two more head fields and a reader that maintains state while skipping.*
 
@@ -681,9 +684,9 @@ in the header.
 - **A record can straddle the rolling buffer, and the parse must be restartable.** The buffer holds
   whatever has been decompressed so far, which may be the first half of a record. Running out of
   bytes has to be an answer the parser can give — not a panic, not a short read — and the retry must
-  resume from the record's *start* with the running position, coverage and read-name bases restored.
+  resume from the record's *start* with the running position, coverage and chain-id bases restored.
   **A parse that half-advances that state before failing corrupts every record after it, plausibly.**
-- **A single record can exceed the rolling buffer** — many alleles, many read names. The buffer must
+- **A single record can exceed the rolling buffer** — many alleles, many chain ids. The buffer must
   grow; a fixed maximum record size is not a safe assumption.
 - **Every running difference resets at a block boundary** (§3.2), and a block that forgets one reads
   back wrong from its first record without failing.
@@ -711,7 +714,7 @@ in the header.
 
 **Parity oracle.** The prototype's `verify-streaming` walks the new store and the `.psp` it was
 written from in lockstep and fails on the first record that disagrees — 7,687,686 records, every
-integer field, allele sequence and read-name list compared exactly, the approximated fields against
+integer field, allele sequence and chain-id list compared exactly, the approximated fields against
 their own step. That is the model: a deliberately simple decoder used only by tests, against which
 the real reader is compared record for record.
 
@@ -720,8 +723,8 @@ the real reader is compared record for record.
 ## 10. How we know it works
 
 1. **Round-trip, with the right strictness per field.** Integer fields, allele sequences and
-   read-name lists identical; approximated fields inside their own step. A round-trip that compares
-   whole records with a blanket tolerance will pass while a read-name list is being corrupted.
+   chain-id lists identical; approximated fields inside their own step. A round-trip that compares
+   whole records with a blanket tolerance will pass while a chain-id list is being corrupted.
 2. **Restart equals sequential.** Reading from an arbitrary block gives exactly the records a full
    sequential read gives from that point. This is the test that catches a running difference that
    was not reset (§3.2), and it cannot be skipped because the failure is plausible rather than loud.
@@ -750,7 +753,7 @@ the differing records sit below QUAL 40, within reach of the gate.
 
 **So the oracle is: the site list, genotypes, GQ, DP and AD exactly; QUAL within a tolerance; and an
 explicit statement about what happens at the gate.** A test demanding byte-identity fails on a
-correct implementation. A test using a tolerance everywhere passes while a read-name list is being
+correct implementation. A test using a tolerance everywhere passes while a chain-id list is being
 corrupted.
 
 ---
@@ -760,7 +763,7 @@ corrupted.
 - **Which fields a record has and how each is encoded** —
   [`psp_record_encoding.md`](psp_record_encoding.md), which this document's manifest carries the
   declarations for.
-- **The read names' encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md).
+- **The chain ids' encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md).
 - **The cohort reader's scheduling** — which blocks to fetch, in what order, with how much
   look-ahead — [`run_streaming.md`](run_streaming.md).
 - **The header field for the observation reach ceiling** —

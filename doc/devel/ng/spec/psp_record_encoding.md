@@ -21,7 +21,7 @@ index 11× smaller and the read 1.8× faster** (§2.1).*
 "the psp file's encoding — byte layout, compression, block sizing …, checksums, format
 versioning, the index, the trailer. Its own spec beside this one". It inherits that
 document's header fields (§6.1), its reader contract (§2.3), its per-open-file budget
-(§7.2) and its worker-count-invariance restriction (§12.1). The read names are a field
+(§7.2) and its worker-count-invariance restriction (§12.1). The chain ids are a field
 big enough to have their own document —
 [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) — and §6 here reports the
 measurement that document's experiment was waiting for.*
@@ -94,7 +94,7 @@ kilobytes, not megabytes*, at three thousand open samples.
   §6.1 already does, and its list is binding because the census names a psp by digesting
   exactly those fields
   ([`census_file.rs:89-98`](../../../../src/ng/parameter_estimation/joint/census_file.rs)).
-- **It does not settle the read names' encoding.** That is
+- **It does not settle the chain ids' encoding.** That is
   [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md)'s experiment; §6 here supplies
   numbers it was explicitly waiting for and states a leaning, nothing more.
 - **It does not specify compression of anything but the observation stream** — the
@@ -107,6 +107,15 @@ kilobytes, not megabytes*, at three thousand open samples.
   [`SampleLocusObservations`](../../../../src/ng/locus_generation/mod.rs), which holds the
   region, the reference bases over it, a list of observed sequences with their support,
   and two counts of reads that produced no observation.
+- A **chain id** identifies the DNA fragment a piece of evidence came from. **One `u64` per read
+  *pair*, not per read** — mates are collapsed onto a single id — allocated in order from zero and
+  never reused
+  ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
+  **The merge never uses its value; it only asks whether two records name the same fragment**
+  ([`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §1.1), which is what leaves the stored form
+  free to be anything that preserves equality. *An earlier draft of this document called these "read
+  names", which is wrong twice: they are identifiers rather than names, and they are per pair rather
+  than per read.*
 - **psp block**, **zstd frame**, **zstd block** — three different things, and this document says
   which it means wherever either could be read. A psp block is a span of reference and the records
   in it; it becomes exactly one zstd frame; and a zstd block is zstd's own subdivision of a frame,
@@ -310,7 +319,7 @@ comparison; the short version is 2.27 GB against 1.14 GB at 5,000 samples, and s
 
 **Every psp block is self-contained.** It opens with its chromosome, its first position and its
 record count, and every running difference inside it — the position difference, the coverage
-difference, the read-name difference — restarts at zero. A psp block never crosses a chromosome. So
+difference, the chain-id difference — restarts at zero. A psp block never crosses a chromosome. So
 the restart points are the psp block boundaries, and there is no separate seek mechanism to build.
 
 **The index has one entry per psp block**, in genomic order: the chromosome, the first position, the
@@ -414,7 +423,7 @@ yielding a 0.52 MB parsed histogram** — and both are resident at once, because
 decompressed text alive for the life of the reader while the parsed structure sits beside it.
 
 That cost is per open sample and nothing else moves it — not the block size, not the record layout,
-not the read names, not the depth. At 50 samples the two together are 23.1% of the whole run's live
+not the chain ids, not the depth. At 50 samples the two together are 23.1% of the whole run's live
 heap, against 12.7% for the compressed block decode this document spends most of its pages on.
 
 **So, for ng:**
@@ -519,7 +528,7 @@ tell the difference pays for it four times over, and the file still ends up 13.6
 prototype at low depth.
 
 **Round-tripped at the proposed steps on both samples** — 7,687,686 tomato records and 74,623 human
-ones — with every integer field, allele sequence and read-name list identical and each approximated
+ones — with every integer field, allele sequence and chain-id list identical and each approximated
 field inside half its own step.
 
 *Two caveats. The human sample is 74,623 positions of tandem repeat, chosen because it is where the
@@ -536,7 +545,7 @@ built first precisely to be that oracle. If the psp rounds a value that direct m
 two routes see different numbers and the check degrades from *identical* to *within a tolerance* —
 which the block-boundary QUAL measurement in
 [`psp_file_format.md`](psp_file_format.md) §10.1 shows is a much weaker test, one that can pass while
-a read-name list is being corrupted.
+a chain-id list is being corrupted.
 
 **So it matters what quantisation is worth.** Measured with the writer storing raw IEEE bytes as the
 alternative — verified bit-exact, worst error 0.000000 on all three fields over 7,687,686 records —
@@ -615,7 +624,7 @@ at low depth and 28 % at high depth against the fully approximated row.
 ---
 
 **A record at 279 reads a position costs 16.3 bytes against 4.6 at three reads** — three and a half
-times, for a hundred times the depth. That is the read names, and it is §6's subject.
+times, for a hundred times the depth. That is the chain ids, and it is §6's subject.
 
 ---
 
@@ -640,16 +649,16 @@ window that does not exist — an `N` reference position — is a real state and
 the code 0 is reserved for it and every present value is shifted by one.
 
 **Round-tripping this is lossy by construction and must be checked as such**, which is
-§12's first oracle: every integer field, allele sequence and read-name list comes back
+§12's first oracle: every integer field, allele sequence and chain-id list comes back
 identical, and these three come back inside their own step. Measured over 7.59 M tomato
 records at the proposed steps: worst error 0.005 in GC fraction, 0.125 of a read in
 coverage, 0.002 natural-log units in the summed log-error.
 
 ---
 
-## 6. The read names, and why they decide the file's size at depth
+## 6. The chain ids, and why they decide the file's size at depth
 
-**ng names every read at every position it covers.** This is the owner's ruling of
+**ng gives every read pair an identifier and records it at every position the pair covers.** This is the owner's ruling of
 2026-08-17 and it is already in the code: the fast single-base path pushes a chain id for
 every read with no reference test
 ([`fast_column.rs:315`](../../../../src/ng/locus_generation/pileup/fast_column.rs)), and the
@@ -676,7 +685,7 @@ compressed identically at 32 KiB blocks with a block cut every 1,500 positions:
 regions; the depth is real and inside the committed range, but produced by that selection
 rather than by a 300× library.*
 
-Set against the roughly 5.4 bytes a record everything else costs, **the read names in
+Set against the roughly 5.4 bytes a record everything else costs, **the chain ids in
 production's shape are 16 % of ng's file at eleven reads a position and 89 % of it at three
 hundred.** As changes they are 7 % and 54 %. The reason to act is not the shallow corner: the
 naïve form grows faster than depth — 25.7 times the depth cost 43 times the bytes — while
@@ -732,9 +741,9 @@ the one place these two documents' designs touch (§2.4).
   buffer holds whatever has been decompressed so far, which may be the first half of a
   record. Running out of bytes has to be an answer the parser can give — not a panic and not
   a short read — and the retry must resume from the record's *start* with the running
-  position, coverage and read-name bases restored to what they were. A parse that half-
+  position, coverage and chain-id bases restored to what they were. A parse that half-
   advances that state before failing corrupts every record after it, plausibly.
-- **A single record can exceed the rolling buffer.** Many alleles, many read names. The
+- **A single record can exceed the rolling buffer.** Many alleles, many chain ids. The
   buffer has to grow rather than fail, and a fixed maximum record size is not a safe
   assumption to bake in.
 - **The look-back window must be written into the file and honoured on read.** zstd will refuse a zstd frame
@@ -752,12 +761,12 @@ the one place these two documents' designs touch (§2.4).
   §2.4's 100 kb cut rule exists for that; without it goal 3 quietly fails on exactly the
   sparse samples that need it.
 - **The three quantised fields are lossy and the integer fields are not.** A round-trip test
-  that compares whole records with a tolerance will pass while the read-name list is being
+  that compares whole records with a tolerance will pass while the chain-id list is being
   corrupted. Compare the integer fields, the sequences and the name lists **exactly**, and
   only the three quantised fields against their step.
 - **The window's mean coverage is stored as a difference from the previous record**, so a
   psp block that does not reset that difference reads back wrong from its first record — and
-  plausibly, because coverage is smooth. The same applies to the position and the read-name
+  plausibly, because coverage is smooth. The same applies to the position and the chain-id
   bases. Every running base resets at a psp block boundary; this is the property §2.4's restart
   guarantee rests on.
 - **Do not decode the whole index at open** — §2.4, and the 3.8 MB per file
@@ -780,7 +789,7 @@ never builds a field array it must then walk again to assemble records. This is 
 single-threaded sequential-read measurement and says nothing about the seek path.
 
 **Errors.** A zstd frame that decompresses to the wrong length, a record that runs off the end of
-its psp block, a read-name list longer than the observation's read count: all are corrupt-input
+its psp block, a chain-id list longer than the observation's read count: all are corrupt-input
 failures belonging to the psp reader's error type, and none may reach the merge as a
 half-built record. The trailer's absence means the writer was interrupted and the file is
 refused rather than read as a short sample —
@@ -815,7 +824,7 @@ used only by tests, and the real reader compared against it record for record.
 - **The byte layout itself** — field order inside a record, the framing integers' widths, the
   trailer's bytes, the format version tag. To the implementation, guided by this document;
   it is small enough not to need its own spec once the shape is fixed.
-- **The read names' final encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md),
+- **The chain ids' final encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md),
   whose experiment §6 here feeds rather than replaces.
 - **Whether the reference bases are stored** — [`run_streaming.md`](run_streaming.md) §11
   question 4; §5 offers a leaning and the measurement that would close it.
@@ -858,7 +867,7 @@ ng stores all of them, and §7 measures that field separately.
 ## 12. How we know it works
 
 1. **Round-trip, with the right strictness per field.** Every integer field, every allele
-   sequence and every read-name list identical; the three quantised fields inside their own
+   sequence and every chain-id list identical; the three quantised fields inside their own
    step. Already demonstrated on 7.59 M tomato records and 0.60 M HG002 records with the
    probe of §14.
 2. **The per-open-file budget, measured rather than argued.** N samples open and walked in
@@ -893,7 +902,7 @@ sits at QUAL 30.075 against a minimum of 30, and it is emitted at 20 kb and 80 k
 **So the oracle is: the site list, genotypes, GQ, DP and AD exactly; QUAL within a
 tolerance; and an explicit statement about the gate.** A test that demands byte-identity
 will fail on a correct implementation, and a test that compares everything with a tolerance
-will pass while a read-name list is being corrupted.
+will pass while a chain-id list is being corrupted.
 
 ---
 
@@ -904,7 +913,7 @@ will pass while a read-name list is being corrupted.
    a 0.4 % error in it and 1/16 is 6 %. *Leaning:* 1/256 — a 5 % file saving is not worth an
    unquantified change to a likelihood. **Settled by:** whoever owns the emission model saying
    what error in that term is acceptable.
-2. **Does the differential read-name encoding ship in the first version, or only
+2. **Does the differential chain-id encoding ship in the first version, or only
    delta-varints?** — OPEN. §6 measures both. *Leaning:* delta-varints first, the differential
    form second, because the first is a few lines with no interaction and takes the deep corner
    from 43.8 to 11.7 bytes a position. **Settled by:**
