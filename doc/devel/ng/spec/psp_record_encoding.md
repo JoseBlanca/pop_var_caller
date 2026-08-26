@@ -545,6 +545,64 @@ field inside half its own step.
 as the right size rather than as precise. And a tomato row is not monotone at the finest end —
 1/16,384 came back at 5.782 against 5.793 for 1/4,096 — which is unexplained and too small to chase.*
 
+### 6.0.1 The bit-identity cost, and why the answer is to quantise *upstream*
+
+**Approximating a float in the psp alone breaks the oracle the whole psp path is checked against.**
+[`run_streaming.md`](run_streaming.md) §1.2 requirement 4: *"the same VCF from direct mode and from
+psp mode with the parameters held fixed. This is the oracle for everything below."* Direct mode is
+built first precisely to be that oracle. If the psp rounds a value that direct mode uses whole, the
+two routes see different numbers and the check degrades from *identical* to *within a tolerance* —
+which the block-boundary QUAL measurement in
+[`psp_file_format.md`](psp_file_format.md) §10.1 shows is a much weaker test, one that can pass while
+a read-name list is being corrupted.
+
+**So it matters what quantisation is worth.** Measured with the writer storing raw IEEE bytes as the
+alternative — verified bit-exact, worst error 0.000000 on all three fields over 7,687,686 records —
+starting from the GC fraction already being an integer:
+
+| coverage · summed log-error | tomato 3× | HG002 279× |
+|---|---:|---:|
+| raw · raw | 8.842 | 22.043 |
+| **1/4 read** · raw | 5.513 (−37.7 %) | 20.841 (−5.5 %) |
+| raw · **1/1,024 ln** | 7.869 (−11.0 %) | 17.477 (−20.7 %) |
+| **1/4 read · 1/1,024 ln** | **4.629 (−47.6 %)** | **16.255 (−26.3 %)** |
+
+**Nearly half the file at three reads a position, and a quarter at 279.**
+
+**Which of the two dominates flips with depth, and the reason is structural rather than
+statistical.** The window's mean coverage is **one value per record**; the summed log-error is **one
+value per allele** — `FrameWriter::push` writes it inside the per-allele loop. Depth multiplies the
+second and leaves the first alone, so at 279 reads a position the log-error is the expensive one and
+at three it is the coverage.
+
+#### The resolution: quantise in the type, not in the file — the owner, 2026-08-25
+
+The owner's proposal for the GC fraction is a **type** that holds it as an integer from 0 to 100, at
+the point it is computed. **That is the general answer, and it dissolves the problem rather than
+trading against it:** if the rounding happens upstream of both routes, direct mode and psp mode both
+compute the same rounded value, the file stores an integer because the value *is* an integer by
+then, and there is nothing to diverge.
+
+It is better than raw storage on the oracle's own terms, not merely equal to it. Two modes that
+compute a sum in a different order differ in the last bits of a raw `f64`; rounding to 1/1,024
+**absorbs** that difference and makes them agree where full precision would not.
+
+**One of the three needs a ruling before it can move upstream, and two do not.** The window's GC
+fraction and its mean coverage are **terminal per-window statistics** — computed once, read by a
+curve that bins them, never added to again — so making them integer types is safe on this document's
+own evidence. The summed log-error is **an accumulator**, and whether anything downstream extends the
+sum decides whether rounding it early introduces drift. **That is the modelling side's question, not
+this document's.** *Leaning:* the same treatment, since 1/1,024 is a 0.1 % error in a term already
+carrying a fitted error rate. **Settled by:** whoever owns the emission model saying where in the
+pipeline the sum is final.
+
+**Until that ruling, the safe configuration is: GC and coverage as integer types upstream, the summed
+log-error raw in the file.** That is the `1/4 read · raw` row — 5.513 bytes a record at three reads a
+position and 20.841 at 279 — and it keeps the two modes bit-identical, at a cost of 19 % of the file
+at low depth and 28 % at high depth against the fully approximated row.
+
+---
+
 **A record at 279 reads a position costs 16.3 bytes against 4.6 at three reads** — three and a half
 times, for a hundred times the depth. That is the read names, and it is §7's subject.
 
