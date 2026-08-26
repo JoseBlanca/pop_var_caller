@@ -95,6 +95,12 @@ Two more terms this document needs:
   decoder must still be holding those bytes, so it must retain the last *window* bytes of what it
   has already decompressed, and nothing more. zstd takes it as a power of two, so a file declares
   the exponent.
+- **genomic block size** — how much reference one block covers, and the rule that cuts one.
+  **Default 100 kb** (§4.1). *Naming: there are now two "block sizes" — this one in base pairs and a
+  ceiling in bytes — so the field is `genomic_block_size_bp` and the ceiling is
+  `block_byte_ceiling`. Neither is called "block size" unqualified, and the unit is in the name
+  because production's own `block_window_bp` sets that precedent and because the two will otherwise
+  be read for each other.*
 - **stream** — a block may be cut into more than one separately-compressed piece, so that a reader
   wanting only one cheap number per record does not have to decompress whole records. Each piece a
   reader has open costs it a decoder. §5.2 measures that.
@@ -212,12 +218,18 @@ version bump.
 the values.** Block size and quantisation are the user's choices, so they cannot be constants in
 this document — but a reader must still be able to read any file, so every such choice is declared.
 
-### 4.1 The block cut rule — a span of reference, declared
+### 4.1 The genomic block size — the rule that cuts a block
 
-**A block is cut where the writer says, and the normal rule is a fixed span of reference
-coordinates**, not a fixed number of bytes. Production does this already
-(`block_window_bp`, default 5,000, [`src/psp/writer.rs:92,119`](../../../../src/psp/writer.rs)), and
-keeping it buys three things:
+**The genomic block size is how much reference a block covers**, and it is the rule that cuts one —
+not a count of bytes. **Default 100 kb** (the owner, 2026-08-25). Production has the same idea under
+another name (`block_window_bp`, default 5,000,
+[`src/psp/writer.rs:92,119`](../../../../src/psp/writer.rs)).
+
+**It is a grid on the coordinate, not a running total.** A block ends when a position crosses into
+the next multiple of the genomic block size. That distinction is the whole point: a grid makes every
+sample cut at the *same* coordinates, and a running count does not.
+
+Keeping the rule genomic rather than byte-based buys three things:
 
 - **Blocks align across samples.** Every sample cuts at the same coordinate, so a cohort reader
   stepping across a region touches one aligned block per sample instead of one in some samples and
@@ -236,9 +248,35 @@ compressor starts cold each time. **So the writer may declare a secondary rule**
 early if it exceeds a byte ceiling, and keep accumulating across empty spans rather than emitting
 near-empty blocks. Both are the user's choices and both are recorded.
 
-*Unmeasured: how badly the sparse case actually compresses, and at what depth it starts to matter.
-The tomato cohort at about three reads a position is the low corner we have, and its blocks are not
-small enough for this to show.*
+#### What the size actually costs — measured 2026-08-25
+
+Bytes a record and blocks per sample, byte ceiling off unless stated:
+
+| cut rule | tomato 3× | HG002 279× |
+|---|---|---|
+| byte count only, 1 MiB | 148 blocks · 4.629 | 3 blocks · 16.255 |
+| genomic 5 kb | 1,674 · 4.579 | 629 · 18.242 |
+| genomic 20 kb | 480 · 4.629 | 540 · 18.084 |
+| **genomic 100 kb — the default** | **160 · 4.627** | **281 · 17.557** |
+| genomic 1,000 kb | 90 · 4.626 | 34 · 16.444 |
+
+**On contiguously covered data the size barely matters — about 1 % of the file across a two-hundred
+fold range.** That is the capped window doing what §4.2 says it does: a match cannot reach past
+32 kB, so a larger block gives the match finder nothing extra, and the entropy tables are already
+amortised at the small end.
+
+**On patchy coverage it costs 10 %, and that is what the secondary rule is for.** The human sample
+here is 74,623 covered positions scattered over 644 small regions, so a 5 kb grid gives blocks of
+about 119 records and the compressor's cold start dominates. **Its patchiness is an artefact of the
+region-restricted pileup that produced it, not a property of a 279× sample** — but patchy coverage is
+real for exomes, panels and thin samples, so a writer that accumulates across empty spans rather than
+emitting near-empty blocks earns its place.
+
+**Why 100 kb and not something else.** It is a round number that satisfies goal 2 directly, sits in
+the flat part of the tomato curve, and recovers most of the patchy-data penalty (17.557 against
+18.242 at 5 kb). **It is not an optimum** — 1,000 kb is smaller on both samples — and it is a
+starting value, not a derived one. The reason not to go further is seek cost: a reader starting
+mid-block decodes from the block's beginning, and that grows with the size.
 
 ### 4.2 The look-back window — declared, and the reader honours it
 
@@ -593,14 +631,19 @@ corrupted.
    move:** the per-decoder floor is set by a zstd parameter the Rust bindings do not currently
    expose, and lowering it would make two parts cheap. **Settled by:** counting, on a real
    cohort segment, how many blocks the index summary alone lets a scan skip.
-2. **What byte ceiling, if any, should a writer put on a span-cut block?** — OPEN (§4.1). At three
-   hundred reads a position a 5 kb span is a lot of data. *Leaning:* offer the ceiling, default it
-   off, and let the first deep-coverage run set it. **Settled by:** the block-size distribution on a
-   high-depth sample, which nothing here has produced.
-3. **How badly do near-empty blocks compress on a sparse sample?** — OPEN (§4.1). The low corner we
-   have is about three reads a position and its blocks are not small enough to show it. *Leaning:*
-   accumulate across empty spans rather than emit near-empty blocks. **Settled by:** writing a 1×
-   sample both ways.
+2. **What byte ceiling, if any, should a writer put on a block?** — OPEN (§4.1), and it costs
+   nothing measurable so far: a 100 kb grid with a 1 MiB ceiling gives 4.628 bytes a record against
+   4.627 without, on tomato. *Leaning:* offer it, default it off, and let the first whole-genome
+   deep-coverage run set it — at 279 reads a position a fully covered 100 kb block is about 1.6 MB,
+   which is a large thing to decode to reach one position. **Settled by:** the seek-time measurement
+   §12 question 5 now asks for.
+3. **How badly do near-empty blocks compress on a patchy sample?** — **ANSWERED 2026-08-25 (§4.1):
+   about 10 % of the file.** A 5 kb grid on a sample with 74,623 covered positions scattered over 644
+   regions gives blocks of about 119 records and costs 18.242 bytes a record against 16.444 at
+   1,000 kb. **So the rule that accumulates across empty spans ships**, and the question that
+   replaces it is what threshold it uses. *Still unmeasured:* a genuinely thin whole-genome sample —
+   1× rather than a region-restricted one — where the gaps are between positions rather than between
+   regions.
 4. **What does the reader's buffer pair cost in speed as it shrinks?** — PARTLY MEASURED. Smaller
    was slightly *faster* at one stream (31 s against 35 s over 471 M records), which is the opposite
    of the expected direction and is not understood. *Leaning:* default to 16 kB, which is inside

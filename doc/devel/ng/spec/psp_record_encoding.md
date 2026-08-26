@@ -70,8 +70,9 @@ kilobytes, not megabytes*, at three thousand open samples.
    shape in §3 costs 346 kB**, so the goal is met rather than argued.
 2. **The file is smaller than production's at a comparable reader memory**, not only where
    production is allowed to spend more.
-3. **A reader can start part-way through**, at a grain no coarser than 100 kb of
-   reference, without reading what comes before.
+3. **A reader can start part-way through**, without reading what comes before, at the grain the
+   **genomic block size** sets — default 100 kb
+   ([`psp_file_format.md`](psp_file_format.md) §4.1).
 4. **The two-phase decode survives.** [`run_streaming.md`](run_streaming.md) §3.3 makes
    psp mode's saving come from scanning one cheap number per position and building the
    full record only where some sample might vary — about one position in a hundred. An
