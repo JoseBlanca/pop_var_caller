@@ -530,10 +530,10 @@ nothing supplies them. **So this is a representation change, not an estimator.**
    `FittedSpectrum` carries.
 
 **⚑ One decision this step must take rather than inherit: the panel-size floor.** At `N`
-individuals the spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no
-shape. The consumer's documentation refers to a floor below which the spectrum is emitted as absent;
-**no such floor exists in the code**, and without one the ladder's top two rungs are separated by
-nothing. Spec §9's question 3 says what would settle it and carries the leaning.
+individuals the frequency spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no
+shape. The consumer's documentation refers to a floor below which the frequency spectrum is emitted as absent;
+**no such floor exists in the code**, and without one the ordinary-site ladder's top two rungs are
+separated by nothing. Spec §9's question 3 says what would settle it and carries the leaning.
 
 **What this buys, and it is worth stating because the step is small:** the SNP/indel prior moves off
 `ExpectedHeterozygosity::SPECIES_FALLBACK` — a species-range constant — onto this cohort's own

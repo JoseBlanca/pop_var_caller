@@ -43,7 +43,7 @@ and how it reaches the caller**.
   the numbers reach the caller. The one piece of arithmetic it does add is a **representation
   change** — a fitted continuous density into allele-count classes (§3.2).
 - **Changing what the caller does with either number once it has it.** The projection from a
-  spectrum to a seed pair is built and tested (`project_spectrum_seed`,
+  frequency spectrum to a seed pair is built and tested (`project_spectrum_seed`,
   `src/ng/calling/genotype_prior/seed_generic.rs:636`); this document does not touch it.
 - **Repeat-tract candidate selection.** Which lengths a tract is called over is
   [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)'s.
@@ -65,6 +65,19 @@ correction to it (`parameter_prepass_cohort.md` §3). A consumer that applies th
 number to a tract badly understates how many alleles to expect there, and the current caller does
 exactly that.
 
+**Two words collide in this subject and this document keeps them apart.** Each path fits a
+distribution and the natural name for both is *spectrum*, so neither is ever called that on its own
+here:
+
+- **frequency spectrum** — ordinary sites: how allele frequencies are spread across the
+  **population**;
+- **length spectrum** — repeat tracts: how a stratum's chromosomes are spread across tract
+  **lengths**.
+
+Each path also has a **ladder** of its own — what the prior falls back to as the data thins — and
+their rungs are different. They are named *the ordinary-site ladder* (§3.4) and *the tract ladder*
+(§4.4), never just "the ladder".
+
 The two also differ in **shape**, and that is what makes them different design problems:
 
 | | ordinary site | repeat tract |
@@ -75,7 +88,7 @@ The two also differ in **shape**, and that is what makes them different design p
 | what one sample gives | that genome's own heterozygosity ÷ (1 − F) | thousands of tracts per stratum |
 
 **That third row is the whole of why the small-cohort answers differ**, and it is not obvious: the
-ordinary-site spectrum needs a panel because a frequency spectrum has no shape without one, while a
+ordinary-site frequency spectrum needs a panel to have a shape at all, while a
 stratum's length spectrum is estimated from every tract of that shape in the genome. Tomato holds
 462,701 kept tracts in 141 strata (`src/ng/parameter_estimation/joint/ssr_fit.rs:18`), so a single
 genome still puts thousands of tracts behind each stratum.
@@ -104,7 +117,7 @@ documentation says so and names its producer (`src/ng/types.rs:685`).
 **⚠ An earlier draft of this section said the opposite**, and the mistake is worth recording
 because it is one anybody repeating this search will make: it looked for a producer of the
 *calling-side type*, `FittedSpectrum`, found every construction inside the genotype prior's own
-tests, and concluded nothing fitted a spectrum. The pre-pass fits the same quantity under a
+tests, and concluded nothing fitted a frequency spectrum. The pre-pass fits the same quantity under a
 different name and a different parameterisation, and emits the heterozygosity as a bare `f64`, so a
 search for the newtype's constructor misses it. **Search for what a step emits, not for the type its
 consumer takes.**
@@ -131,15 +144,15 @@ the same fit.
 
 **The density is fitted at every cohort size down to one** (`src/ng/types.rs:686`), so the
 heterozygosity comes with it. The class-weight projection is the part that needs a panel — `2N + 1`
-classes at `N = 1` is three — and the consumer's ladder already handles that: with no spectrum it
-takes a neutral shape at the fitted diversity.
+classes at `N = 1` is three — and the ordinary-site ladder already handles that: with no
+frequency spectrum it takes a neutral shape at the fitted diversity.
 
-**⚑ What is not settled is where the projection stops being worth doing.** A panel of one or two
-gives a spectrum with three or five classes, which carries almost no shape. The consumer's own
-documentation says the pre-pass emits the spectrum as absent below a panel-size floor; **no such
-floor exists in the code**, and §9's open question 4 is where it should sit.
+**⚑ What is not settled is where the projection stops being worth doing** (§9's question 3). A panel of one or two
+gives a frequency spectrum with three or five classes, which carries almost no shape. The
+consumer's own documentation says the pre-pass emits it as absent below a panel-size floor; **no such
+floor exists in the code**.
 
-### 3.4 The ladder, and what each rung means
+### 3.4 The ordinary-site ladder
 
 The consumer already implements three regimes
 (`src/ng/calling/genotype_prior/seed_generic.rs:597`), and this document changes none of them — it
@@ -147,18 +160,18 @@ supplies the inputs they were written for:
 
 | rung | when | what the seed is |
 |---|---|---|
-| **fitted spectrum** | a panel above the floor of §9's question 4 | shape and scale both from the spectrum; the diversity is not read |
+| **fitted frequency spectrum** | a panel above the floor of §9's question 3 | shape and scale both from it; the diversity is not read |
 | **fitted diversity** | below that floor, or no fit | a neutral shape at the measured diversity |
 | **stated constant** | no fit at all | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
 
 **The middle rung carries the small cohort**, and it is why the diversity is worth carrying even
-though the spectrum exists.
+though the frequency spectrum exists.
 
 **⚠ One sentence in the consumer's own documentation contradicts this** and should be re-derived
 rather than repeated when that file is next touched: `seed_generic.rs:604` says *"a cohort of five
 arrives here without one while a single sample arrives with one"*, which has the two cohort sizes
-the wrong way round. Nothing depends on it — the code branches on whether a spectrum arrived, never
-on cohort size — so it is a wrong sentence rather than a wrong behaviour.
+the wrong way round. Nothing depends on it — the code branches on whether a frequency spectrum arrived,
+never on cohort size — so it is a wrong sentence rather than a wrong behaviour.
 
 ### 3.5 The other route, and why it is not this one
 
@@ -206,7 +219,7 @@ preference:**
 
 - **The constructed shape has one free parameter and the fitted one has none.** The decay is a
   single number per group of loci with a coded fallback of 0.5 (`src/ng/types.rs:810`); the fitted
-  spectrum is a distribution estimated from that stratum's own tracts.
+  length spectrum is a distribution estimated from that stratum's own tracts.
 - **The constructed version has a failure mode the fitted one does not have.** Scaling a shape to
   reproduce a measured diversity is only possible below a ceiling the shape itself sets, and
   `SsrSeedOutcome::DiversityUnreachable` is what happens above it
@@ -216,7 +229,7 @@ preference:**
   fail this way.
 - **It removes a per-locus input that has no source.** The constructed shape needs the cohort's
   commonest length *at this tract*, which is cohort-derived and would come from repeat-tract
-  candidate selection — unwritten. The fitted spectrum is indexed by offset from the **reference**
+  candidate selection — unwritten. The fitted length spectrum is indexed by offset from the **reference**
   tract length, which every locus already knows.
 - **It removes the need for a cohort-wide repeat diversity number entirely**, which nothing emits.
 
@@ -230,7 +243,7 @@ fit already produces are sitting in `StratumFit` today.
 
 ### 4.3 One sample is not the thin case here — a thin stratum is
 
-**The stratum's spectrum is fitted across tracts**, so cohort size is not what makes it thin. The
+**The stratum's length spectrum is fitted across tracts**, so cohort size is not what makes it thin. The
 fit's own refusal floor is measured in **tracts, and is 8** of them
 (`src/ng/parameter_estimation/joint/ssr_fit.rs:650`), chosen from draws run deliberately at both
 ends of this caller's range: at 8 tracts, 3 fits in 100 collapse on a single deep sample and none on
@@ -243,8 +256,8 @@ does not need them.
 ### 4.4 The fallback, and why it is not a curve
 
 **A stratum too thin to fit is furnished from its motif period's slippage curves, and such a stratum
-carries no length spectrum and no concentration at all** (`ssr_fit.rs:420`). So the ladder needs a
-rung below the stratum's own fit.
+carries no length spectrum and no concentration at all** (`ssr_fit.rs:420`). So the tract ladder needs
+a rung below the stratum's own fit.
 
 **The obvious move is the device this project already chose for slippage** — a curve per motif
 period through every stratum, each weighted by how precisely it holds its own answer, with a
@@ -255,7 +268,7 @@ machinery does not, and the reason is a measurement.
 
 **How much this rung actually carries**, from the two cohorts' real tables:
 
-| | strata with their own fit | strata furnished from curves (no spectrum) | strata with nothing |
+| | strata with their own fit | strata furnished from curves (no length spectrum) | strata with nothing |
 |---|---:|---:|---:|
 | HG002 (deep, one sample) | 79 of 117 | **38** | 15, holding 36 tracts |
 | tomato (3×, 63 accessions) | 17 of 39 | **22** | 10, holding 24 loci |
@@ -267,10 +280,10 @@ furnishing was 280 loci of 3,965, 7%. **A thin stratum is thin because few loci 
 **Contrast with the case the curve was built for.** The two slippage shares had a 4,000-slipped-read
 floor that only one motif period in twelve ever cleared, so **69 of HG002's strata and every one of
 tomato's got nothing at all** (`share_curve.rs:10-15`). That is why a curve was worth its machinery
-there. Here most strata have their own spectrum and the gap is a few percent of loci.
+there. Here most strata have their own length spectrum and the gap is a few percent of loci.
 
 **Decided: the rung below a stratum's own fit is its motif period's pooled tracts** — one fit over
-every tract of that period, giving a spectrum and a concentration in the same form. Three reasons,
+every tract of that period, giving a length spectrum and a concentration in the same form. Three reasons,
 and the first is the one that matters:
 
 - **proportionate to what it carries** (2–7% of loci, above);
@@ -283,13 +296,13 @@ and the first is the one that matters:
 lengths, and pooling flattens that. Bounded by the loci it applies to; §9's open question 2 says
 what would revisit it.
 
-**The ladder, in full:**
+**The tract ladder, in full:**
 
 | rung | when | provenance |
 |---|---|---|
-| the stratum's own fitted spectrum and concentration | ≥ 8 tracts in the stratum | fitted here |
-| its motif period's pooled spectrum and concentration | the stratum has no own fit | borrowed |
-| a stated flat spectrum over the reachable lengths at a named concentration | the period has no fitted stratum either | defaulted |
+| the stratum's own fitted length spectrum and concentration | ≥ 8 tracts in the stratum | fitted here |
+| its motif period's pooled length spectrum and concentration | the stratum has no own fit | borrowed |
+| a stated flat length spectrum over the reachable lengths at a named concentration | the period has no fitted stratum either | defaulted |
 
 **The bottom rung's two values are soft and are marked so**: a flat shape asserts no belief about
 which length is likelier, and the concentration below it is a stated constant with no measurement
@@ -321,7 +334,7 @@ and their provenance and **drops the length spectrum and the concentration**, wh
 produced. They must be carried, keyed the same way, with the rung recorded beside them.
 
 **The ordinary-site side needs no seam work.** `RunParameters::project_seed`
-(`src/ng/calling/run_parameters.rs:97`) already takes the spectrum and the diversity as arguments;
+(`src/ng/calling/run_parameters.rs:97`) already takes the frequency spectrum and the diversity as arguments;
 only the producer is missing.
 
 ---
@@ -330,7 +343,7 @@ only the producer is missing.
 
 **Cost.** Nothing here is fitted; everything is already computed once per run. The ordinary-site
 side adds one projection of a four-parameter density into `2N + 1` classes, once per run. The
-repeat side adds one spectrum and one scalar per stratum carried across the seam — tens to a couple
+repeat side adds one length spectrum and one scalar per stratum carried across the seam — tens to a couple
 of hundred strata per run.
 
 **Errors.** Neither number can fail a run. Every absence has a rung below it and the rung is
@@ -360,7 +373,7 @@ read-only thereafter.
 
 ## 8. How we know it works
 
-1. **The repeat prior reproduces the fit.** Seeded from a stratum's own spectrum and concentration,
+1. **The repeat prior reproduces the fit.** Seeded from a stratum's own length spectrum and concentration,
    the prior's implied length distribution matches the fitted one — a property of the mapping, not
    of any cohort.
 2. **One sample no longer fails at every tract.** The current construction refuses every tract at
@@ -386,8 +399,8 @@ read-only thereafter.
   constructed geometric shape scaled by a cohort-wide diversity (§4.2). Rejected because the
   construction has a free parameter with a coded fallback, fails at every tract at one sample, and
   needs two inputs nothing produces.
-- *Is the ordinary-site diversity redundant once the spectrum exists?* **No** — it is the
-  one-sample rung, and at one sample there is never a spectrum (§3.3).
+- *Is the ordinary-site diversity redundant once the frequency spectrum exists?* **No** — it is the
+  one-sample rung, and at one sample there is never a frequency spectrum (§3.3).
 - *Should a thin stratum borrow a neighbouring stratum?* **No.** That mechanism was deleted from
   this project on 2026-08-20 along with the floor and the copy rule; the replacement is a rung that
   always answers and says which rung it was (§4.4).
@@ -404,12 +417,12 @@ read-only thereafter.
    per-stratum grain for anything but the prior.
 2. **Should the thin rung keep the repeat-count trend?** Pooling a period flattens it, and longer
    tracts genuinely spread over more lengths. **Leaning: leave it** until the loci it applies to are
-   worth more than 7%. **What would settle it:** the spread of the pooled spectrum against repeat
+   worth more than 7%. **What would settle it:** the spread of the pooled length spectrum against repeat
    count within one period, on tomato, where the thin rung carries the larger share.
 3. **Where does the class-weight projection stop being worth doing?** At `N` diploid individuals
-   the spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape. The
-   consumer's documentation refers to a panel-size floor below which the spectrum is emitted as
-   absent; **no such floor exists in the code**, and the ladder's top two rungs are otherwise
+   the frequency spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape. The
+   consumer's documentation refers to a panel-size floor below which the frequency spectrum is emitted as
+   absent; **no such floor exists in the code**, and the ordinary-site ladder's top two rungs are otherwise
    separated by nothing. **Leaning:** a floor low enough that it never fires on a real panel is
    worse than none, so set it from measurement rather than from taste. **What would settle it:** the
    projection is already instrumented for cost by panel size, and its fit reports how far its answer
