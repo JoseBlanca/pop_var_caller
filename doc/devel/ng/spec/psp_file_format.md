@@ -341,7 +341,7 @@ Three things follow, and the third is a constraint on the design rather than a t
 - **The cost is per live decoder and it is linear.** The second decoder costs the same as the first,
   as it should for the same object.
 - **About 190 kB of it is zstd's own context state**, which no buffer choice reaches. That is the
-  floor for one stream.
+  floor for one stream, and §5.3 explains where it comes from and why we cannot currently move it.
 - **Against the 500 kB budget: one stream fits at any buffer size, two fit only with small buffers,
   and four do not fit at all.** So **one compressed stream per field — which is what a columnar
   layout amounts to — is ruled out on memory grounds**, not on preference. That is worth stating
@@ -352,7 +352,32 @@ the same size whatever it carries, so this measures the multiplier without needi
 differ — which is the quantity in question. It does **not** measure how much a real second stream
 would add to the file, which is [`psp_record_encoding.md`](psp_record_encoding.md) §3.3's.*
 
-### 5.3 Against production, on the same records
+### 5.3 Where the 190 kB floor comes from, and why it is not currently reachable
+
+**It is not the look-back window.** A 32 kB window explains 32 kB of it. The rest is zstd's own
+**internal block** — its private subdivision of a compressed frame, at most 128 KiB
+(`ZSTD_BLOCKSIZE_MAX`, defined as `1<<17` in the vendored `zstd-sys` C headers) — which the decoder sizes
+its working space from. 32 kB of window plus 128 KiB of block staging plus the entropy tables is
+about the 190 kB measured, which is why the floor sits where it does.
+
+**zstd 1.5.7 can be told to make that unit smaller**, on both sides: `ZSTD_c_maxBlockSize` when
+compressing and `ZSTD_d_maxBlockSize` when decompressing, the second being the one that actually
+reduces what a decoder allocates.
+
+**We cannot reach either from Rust as the dependency currently stands, and this was checked rather
+than assumed.** `zstd-safe` exposes `CParameter::MaxBlockSize` only behind its `experimental`
+feature, which this project does not enable; and it does not wrap the decompression-side parameter
+at all — `DParameter` carries `WindowLogMax` and three other experimental entries, and none of them
+is this one.
+
+**So the 190 kB is a property of the bindings, not of the format.** Recorded because it decides
+§12 question 1: if the floor could be brought down to, say, 60 kB, two parts would fit the budget
+comfortably and the light/heavy split would stop being a trade. **Settled by:** enabling
+`zstd-safe`'s experimental feature and calling `ZSTD_DCtx_setParameter` through `zstd-sys` for the
+decompression side, then re-running the sweep in §5.2. Neither is difficult; both are a dependency
+change and unsafe FFI for a question that is not blocking.
+
+### 5.4 Against production, on the same records
 
 | | production `.psp` | this format | |
 |---|---:|---:|---|
@@ -547,7 +572,9 @@ corrupted.
    fit the budget only with small buffers. What is not measured is what the second stream *buys*: how
    often a cohort scan can skip a block using only the index summary (§3.3), which may make a
    per-record scan stream unnecessary. *Leaning:* start with one stream and the index summary, and
-   add the second only if the skip rate is measured to be poor. **Settled by:** counting, on a real
+   add the second only if the skip rate is measured to be poor. **§5.3 is the other way this could
+   move:** the per-decoder floor is set by a zstd parameter the Rust bindings do not currently
+   expose, and lowering it would make two parts cheap. **Settled by:** counting, on a real
    cohort segment, how many blocks the index summary alone lets a scan skip.
 2. **What byte ceiling, if any, should a writer put on a span-cut block?** — OPEN (§4.1). At three
    hundred reads a position a 5 kb span is a lot of data. *Leaning:* offer the ceiling, default it
