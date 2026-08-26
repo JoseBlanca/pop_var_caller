@@ -53,6 +53,7 @@
 mod genotype_table_parity;
 
 pub mod allele_candidates;
+pub mod evidence_shaping;
 pub mod genotype_prior;
 pub mod genotype_table;
 pub mod inference;

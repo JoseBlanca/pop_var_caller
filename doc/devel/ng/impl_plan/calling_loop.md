@@ -267,7 +267,7 @@ the instrumented counter is the oracle. *Depends:* D1. *Source:* spec §13 tests
 
 ### Milestone E — the input edge: real evidence in, genotypes out
 
-**E1. Evidence shaping.**  ☐
+**E1. Evidence shaping.**  ✅
 Build `LocusEvidence::Generic` from a `CohortObservation` (the views over `SampleSupport`'s
 `(allele, read group)` rows and partials — data-shaping only, no arithmetic) and
 `LocusEvidence::Ssr` from the STR generator's `SequenceObservation`s + `SsrDetail`. *Depends:*
