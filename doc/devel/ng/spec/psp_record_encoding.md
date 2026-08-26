@@ -268,7 +268,7 @@ Two consequences:
 
 *Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
 
-### 2.3 Two streams, so the cohort's first pass need not decode records
+### 2.3 Two streams, so the cohort decodes only the records that might vary
 
 **Record-major has one real loss: a reader cannot read one field without decoding all of them.** The
 cohort's first pass is exactly that shape — before anything can be called at a position, the caller

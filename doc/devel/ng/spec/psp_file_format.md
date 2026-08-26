@@ -169,13 +169,20 @@ The header carries what is known *before* any record is written:
 - the writer's provenance and the parameters it ran with;
 - **the manifest** (§4.5) — the block cut rule, the look-back window, the stream layout, and each
   field's encoding with its parameters.
-- **the observation reach ceiling** — the widest reference span any observation in this file can
-  have, which is the generator's `max_record_span`
-  ([`src/ng/locus_generation/pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs)).
-  **This is the second of the two things [`cohort_merge.md`](cohort_merge.md) requires of this
-  document**, and it is here because a reader assembling cohort loci uses it to bound how far back
-  its observation cache must reach. A file whose observations exceed what it records is corrupt, and
-  that is one of the reader's named errors (§7).
+**One further field is wanted by the cohort merge and is not this document's to add.**
+[`cohort_merge.md`](cohort_merge.md) asks the header to record the **observation reach ceiling** —
+the widest reference span any observation in the file can have, the generator's `max_record_span`
+([`src/ng/locus_generation/pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs))
+— and routes it to [`run_streaming.md`](run_streaming.md) §6.1, which owns the header's contents. It
+is flagged there and not yet written.
+
+**It is worth knowing what it is and is not for, because it is easy to over-read.** It is *not* an
+artefact of the columnar layout: it is a fact about how wide a record can be, which is true whatever
+the layout. And it is *not* needed for correctness — that document says so in as many words: *"no
+refusal accompanies it, and none is needed"*. What it buys is that a reader can **size** its
+observation cache up front, taking the maximum over the cohort's files, instead of growing it. A
+forward reader learns each record's span from the position summary as it goes and never needs the
+ceiling at all.
 
 ### 3.2 Blocks
 
@@ -712,6 +719,11 @@ corrupted.
 - **The read names' encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md).
 - **The cohort reader's scheduling** — which blocks to fetch, in what order, with how much
   look-ahead — [`run_streaming.md`](run_streaming.md).
+- **The header field for the observation reach ceiling** —
+  [`run_streaming.md`](run_streaming.md) §6.1, which owns the header's contents.
+  [`cohort_merge.md`](cohort_merge.md) §13 routed it there and it is not yet written. Needed only so
+  a reader can size its observation cache up front; a forward reader learns each record's span from
+  the position summary and never needs it.
 - **Correcting [`run_streaming.md`](run_streaming.md) §7.2**, whose "tens of kilobytes" is
   superseded by the 500 kB budget. That document's owner should make the change; it is the sentence
   that made a columnar shape look impossible, and leaving it will send the next reader down that
