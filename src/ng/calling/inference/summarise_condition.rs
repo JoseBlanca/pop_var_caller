@@ -46,6 +46,7 @@ use crate::ng::calling::{
     fill_error_spreads,
 };
 use crate::ng::parameter_estimation::Provenance;
+use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
 use crate::ng::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
 
@@ -1197,7 +1198,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     candidates: CandidateAlleles,
     outcome: FrequencyLoopOutcome,
     weakest_provenance: Provenance,
-    seed_diversity_unreachable: bool,
+    length_spectrum_rung: Option<LengthSpectrumRung>,
 ) -> LocusInference {
     let inbreeding_by_sample = parameters.inbreeding_coefficient_by_sample();
     assert_eq!(
@@ -1333,7 +1334,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         outcome.converged,
         outcome.passes,
         weakest_provenance,
-        seed_diversity_unreachable,
+        length_spectrum_rung,
         site_quality,
         artifact_pool.map(|(_, primary)| pooled.into_summary(primary)),
     )
@@ -1950,10 +1951,12 @@ where
             candidates,
             outcome,
             weakest_warrant_at_the_locus(evidence, parameters),
-            // The repeat-tract seed marker, and on this path it is not a placeholder:
-            // `LocusInference::new` refuses a `true` at a SNP/indel locus, and a tract does
-            // not reach here at all until it is wired through this driver.
-            false,
+            // **Which rung of the tract ladder the prior's shape came from, and on this path
+            // it is not a placeholder**: an ordinary site seeds from a *frequency* spectrum,
+            // whose own ladder has different rungs, and `LocusInference::new` refuses a tract
+            // rung set at a SNP/indel locus. A repeat tract does not reach here at all until
+            // E3b wires one through this driver, which is where a `Some` comes from.
+            None,
         )
     }
 }
@@ -3833,7 +3836,7 @@ mod tests {
             capped.converged,
             capped.passes,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -4441,7 +4444,7 @@ mod tests {
             alleles.clone(),
             outcome,
             Provenance::FittedHere,
-            false,
+            None,
         )
     }
 
@@ -5106,7 +5109,7 @@ mod tests {
                 converged: true,
             },
             Provenance::FittedHere,
-            false,
+            None,
         );
     }
 
@@ -5146,7 +5149,7 @@ mod tests {
                 converged: true,
             },
             Provenance::FittedHere,
-            false,
+            None,
         );
     }
 
@@ -5218,7 +5221,7 @@ mod tests {
                 converged: true,
             },
             Provenance::FittedHere,
-            false,
+            None,
         );
     }
 
@@ -5279,7 +5282,7 @@ mod tests {
                 converged: true,
             },
             Provenance::FittedHere,
-            false,
+            None,
         );
     }
 

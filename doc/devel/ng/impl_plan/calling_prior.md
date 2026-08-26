@@ -221,6 +221,17 @@ total polymorphism as a biallelic one. *Depends:* D2. *Source:* spec §4; arch �
 
 ### Milestone E — the STR seed
 
+
+> **⛔ E1's seed builder was replaced on 2026-08-26**, by step E2e of
+> [`calling_loop.md`](calling_loop.md), on the design of
+> [`../spec/population_diversity.md`](../spec/population_diversity.md) §4. The geometric shape, the
+> decay, the scaling to a measured repeat gene diversity and the `DiversityUnreachable` refusal are
+> all gone; `fill_ssr_seed` now reads the length spectrum and concentration the joint repeat fit
+> produces per stratum. **`SeedDecayPerRepeat` was deleted with them**, so this plan's step A1 and
+> its checkpoint prose name a type that no longer exists, and spec Q2 — what to do at a locus the
+> geometry cannot hold — is a question the fitted pair cannot raise. The entries below are kept as
+> the record of what was built and replaced.
+
 **E1. `ssr_seed` — the shape ported, the total new.**  ✅ *(shipped as `fill_ssr_seed`, with the
 two scalars as checked types in `ng/types.rs` and the fallback decay as
 `SeedDecayPerRepeat::FALLBACK`; the refusal withholds the concentration rather than marking a

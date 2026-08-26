@@ -706,6 +706,19 @@ fn fit_pooled(
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> Option<StratumFit> {
+    // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
+    // public field with no lower bound, read from an environment variable by
+    // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
+    // a one-class length spectrum — which is a tract that can only ever be its reference length.
+    // Nothing downstream can use that: `StratumFits::over` refuses it with a message about a
+    // class count, naming the wrong thing. Refused here, where the message can name the knob.
+    assert!(
+        config.allele_span >= 1,
+        "the fit places allele mass from -{span} to +{span} whole repeat units either side of \
+         the reference length, so `SsrFitConfig::allele_span` must be at least 1; at {span} a \
+         tract could only ever carry its reference length",
+        span = config.allele_span
+    );
     let classes = (2 * config.allele_span + 1) as usize;
     let genotypes = genotype_pairs(classes);
     let live_groups = evidence.groups_with_reads();
@@ -953,6 +966,224 @@ pub fn fit_strata(
         derive_thin_strata(&mut outcomes, strata, &levels, &shares);
     }
     outcomes
+}
+
+// ---------------------------------------------------------------------
+// The tract prior's middle rung: one motif period's tracts pooled
+// ---------------------------------------------------------------------
+
+/// **One motif period's length spectrum and concentration, fitted over every tract of that
+/// period at once** — the middle rung of the tract ladder
+/// (`doc/devel/ng/spec/population_diversity.md` §4.4).
+///
+/// A stratum too thin to be fitted carries no length spectrum of its own
+/// ([`DerivedStratum`]), and the caller's genotype prior at such a tract needs one. This is
+/// what it falls back to: the same two numbers a [`StratumFit`] produces, estimated from every
+/// tract that shares the motif period rather than from the stratum's own eight.
+///
+/// **Why a pooled fit rather than a curve through the strata**, which is what the three
+/// slippage numbers get: a curve through a *distribution* means one curve per length class,
+/// refitted and renormalised, and the classes are not independent — a pooled fit is a real
+/// distribution by construction. The gap it covers is also far smaller than slippage's was:
+/// the strata with no fit of their own hold about 2 in 100 of HG002's tracts and at most 7 in
+/// 100 of tomato's, against most strata on both cohorts for slippage
+/// (`population_diversity.md` §4.4).
+///
+/// **What it gives up is the repeat-count trend within a period, and it gives it up twice.** A
+/// longer tract spreads over more lengths, and pooling flattens that directly. It also flattens
+/// it *indirectly*, and that half is easy to miss: the pooled climb fits **one** slippage triple
+/// per slippage group across every repeat count in the period, where slippage rises about
+/// 1.3-fold per repeat count over the measured range
+/// ([`StratumFits::at`](super::stratum_fits::StratumFits::at)). A read off the
+/// reference length is either a slip or a real allele, so the two trade off — the pooled spectrum
+/// is fitted against a slippage level too low at the period's long strata and too high at its
+/// short ones, which widens its tails at the long end and narrows them at the short. The slippage
+/// numbers a *caller* reads are unaffected: those come from the period's curves, and nothing here
+/// emits a slippage number. Bounded by the loci the rung applies to — 2 in 100 of HG002's tracts
+/// and at most 7 in 100 of tomato's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeriodLengthSpectrum {
+    /// The motif length these tracts share.
+    pub period: u8,
+    /// How the period's chromosomes are spread over tract lengths, indexed from
+    /// `-allele_span` to `+allele_span` in whole repeat units **from each tract's own
+    /// reference length**.
+    ///
+    /// **That the index is an offset is what makes pooling legitimate at all**: two strata of
+    /// one period sit at different absolute repeat counts, and it is only because every tract
+    /// is described relative to its own reference length that their evidence can be added up.
+    pub length_spectrum: Vec<f64>,
+    /// How monomorphic the period's tracts are. Small means most tracts carry one length.
+    pub concentration: f64,
+    /// Tracts with at least one spanning read that went into the pool.
+    pub tracts_fitted: usize,
+    /// How many of the period's strata contributed tracts to it.
+    pub strata_pooled: usize,
+    /// Whether the climb settled or ran out of rounds. **Running out is never reported as
+    /// convergence**, exactly as [`StratumFit::converged`].
+    pub converged: bool,
+}
+
+/// **Fit one length spectrum and concentration a motif period**, pooling every tract of that
+/// period — what a stratum with no fit of its own falls back to.
+///
+/// **Separate from [`fit_strata`] and opt-in, because it is the one thing on this path that
+/// costs a run more than it used to.** `population_diversity.md` §6 says nothing here is
+/// fitted; that is true of the seam and of the ordinary-site side, and not of this rung, which
+/// §4.4 settles as a pooled fit.
+///
+/// **What it costs, measured**: on two strata of 300 tracts each, 8 samples, allele span 1, this
+/// call takes **1.67–1.72 s against `fit_strata`'s 2.68 s** on the same evidence — about **60%
+/// on top**, three runs each. It is less than the strata cost between them because it runs one
+/// climb where they run two, over the same tracts. So a run that asks for the middle rung pays
+/// about 1.6 times for the repeat-tract half of its fit, not twice.
+///
+/// A run that does not ask still gets an answer at every tract — the ladder's bottom rung, a
+/// flat shape at a stated concentration — and the rung it lands on is reported either way, which
+/// is why this is a second call rather than a widened `fit_strata`.
+///
+/// **A period below the refusal floor is left out rather than fitted badly.** The floor is the
+/// same [`SsrFitConfig::refusal_floor`] a stratum is held to, measured in the same unit —
+/// tracts with a spanning read — because a pool of five tracts is exactly as thin as a stratum
+/// of five.
+///
+/// `homozygote_excess` is one number a sample, as [`fit_stratum`] takes it, and is held rather
+/// than fitted here too.
+///
+/// # Panics
+///
+/// When two strata of one period disagree about how many buckets a read's offset was recorded
+/// in, or about how many slippage groups the cohort declares. Both are properties of the run
+/// rather than of a stratum, so a disagreement means the evidence was assembled from two runs —
+/// and the symptom otherwise is an index past the end of a bucket row, inside the scorer,
+/// naming neither period nor stratum.
+#[must_use]
+pub fn fit_period_length_spectra(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> BTreeMap<u8, PeriodLengthSpectrum> {
+    let mut by_period: BTreeMap<u8, Vec<&StratumEvidence>> = BTreeMap::new();
+    for evidence in strata {
+        by_period
+            .entry(evidence.stratum.period)
+            .or_default()
+            .push(evidence);
+    }
+
+    let mut fitted = BTreeMap::new();
+    for (period, members) in by_period {
+        // **The floor is tested before anything is copied.** `pool_a_period` clones every
+        // `TractReads` of the period, and on a tomato-sized cohort the largest period's copy is
+        // a second copy of that period's whole STR evidence at peak — paid, under the old
+        // order, even for a period that was about to be discarded. The sum over members is the
+        // same number the pooled evidence would have reported.
+        let tracts: usize = members
+            .iter()
+            .map(|evidence| evidence.tracts_with_reads())
+            .sum();
+        if tracts < config.refusal_floor {
+            continue;
+        }
+        let pooled = pool_a_period(period, &members);
+        let Some(fit) = fit_pooled(&pooled, &[], homozygote_excess, config) else {
+            continue;
+        };
+        fitted.insert(
+            period,
+            PeriodLengthSpectrum {
+                period,
+                length_spectrum: fit.length_spectrum,
+                concentration: fit.concentration,
+                tracts_fitted: fit.tracts_fitted,
+                // **Strata that put a tract in, not strata of the period.** A stratum whose
+                // every tract went unread contributed nothing, and counting it would say the
+                // pool rested on more evidence than it did.
+                strata_pooled: members
+                    .iter()
+                    .filter(|evidence| evidence.tracts_with_reads() > 0)
+                    .count(),
+                converged: fit.converged,
+            },
+        );
+    }
+    fitted
+}
+
+/// Concatenate one period's strata into the single evidence set the pooled fit reads.
+///
+/// **The `stratum` field of the result is the smallest reference repeat count in the pool and
+/// means nothing.** [`fit_pooled`] copies it onto the [`StratumFit`] it returns and
+/// [`fit_period_length_spectra`] then keeps only the length spectrum and the concentration, so
+/// no repeat count is claimed for a pool that spans many. Nothing in the scorer reads it: a
+/// tract's evidence is buckets of reads at offsets from its own reference length, and the
+/// absolute length never enters.
+fn pool_a_period(period: u8, members: &[&StratumEvidence]) -> StratumEvidence {
+    let first = members
+        .first()
+        .expect("a period with no strata is not keyed");
+    for evidence in members {
+        assert_eq!(
+            evidence.read_span,
+            first.read_span,
+            "period {period}: the stratum at {} repeats recorded read offsets in {} buckets \
+             either side and the one at {} repeats in {} — the span is a property of the run, \
+             so two values mean the evidence came from two runs",
+            evidence.stratum.reference_repeats,
+            evidence.read_span,
+            first.stratum.reference_repeats,
+            first.read_span
+        );
+        assert_eq!(
+            evidence.groups,
+            first.groups,
+            "period {period}: the stratum at {} repeats declares {} slippage groups and the one \
+             at {} repeats declares {} — the count is a property of the run, so two values mean \
+             the evidence came from two runs",
+            evidence.stratum.reference_repeats,
+            evidence.groups,
+            first.stratum.reference_repeats,
+            first.groups
+        );
+    }
+    let smallest = members
+        .iter()
+        .map(|evidence| evidence.stratum.reference_repeats)
+        .min()
+        .expect("a period with no strata is not keyed");
+    StratumEvidence {
+        stratum: Stratum {
+            period,
+            reference_repeats: smallest,
+        },
+        tracts: members
+            .iter()
+            .flat_map(|evidence| evidence.tracts.iter().cloned())
+            .collect(),
+        read_span: first.read_span,
+        groups: first.groups,
+        // **The five diagnostic counters below are summed rather than zeroed, and nothing in the
+        // fit reads any of them.** The pooled evidence never leaves this function —
+        // `fit_period_length_spectra` keeps only the length spectrum and the concentration — so
+        // these are dead in the sense that removing them changes no output. They are summed
+        // anyway because a zero here would be a claim: *this period had no guarded tracts, no
+        // reads that reached without crossing, no bases compared*, which is false of every real
+        // period and is the shape a later reader would take at face value.
+        tracts_over_guard_threshold: members
+            .iter()
+            .map(|evidence| evidence.tracts_over_guard_threshold)
+            .sum(),
+        reads_reaching_not_crossing: members
+            .iter()
+            .map(|evidence| evidence.reads_reaching_not_crossing)
+            .sum(),
+        guard_reads: members.iter().map(|evidence| evidence.guard_reads).sum(),
+        bases_compared: members.iter().map(|evidence| evidence.bases_compared).sum(),
+        mismatching_bases: members
+            .iter()
+            .map(|evidence| evidence.mismatching_bases)
+            .sum(),
+    }
 }
 
 /// Turn a stratum too thin to fit anything of its own into one furnished from elsewhere.
@@ -2853,5 +3084,267 @@ mod tests {
             line(&after),
             "a second round of smoothing should move the curve, or this test proves nothing"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // The tract prior's middle rung: one motif period's tracts pooled
+    // ---------------------------------------------------------------
+
+    fn stratum_at(period: u8, reference_repeats: u64) -> Stratum {
+        Stratum {
+            period,
+            reference_repeats,
+        }
+    }
+
+    /// A drawn stratum, re-keyed — [`draw_stratum`] always stamps period 2 at 10 repeats, and
+    /// pooling is about strata that differ.
+    fn drawn_at(stratum: Stratum, spectrum: &[f64], tracts: usize, seed: u64) -> StratumEvidence {
+        let slippage = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let mut evidence = draw_stratum(slippage, spectrum, 0.5, 0.4, tracts, 8, 6, 1, seed);
+        evidence.stratum = stratum;
+        evidence
+    }
+
+    /// A three-class spectrum tilted towards one side, so that two strata drawn from two of
+    /// these are told apart by where their mass sits and not only by noise.
+    fn tilted(short: f64, middle: f64) -> Vec<f64> {
+        vec![short, middle, 1.0 - short - middle]
+    }
+
+    fn pooling_config() -> SsrFitConfig {
+        SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        }
+    }
+
+    /// **The positive control for the middle rung.** Two strata of one period, drawn from two
+    /// spectra tilted opposite ways, come back as one pooled spectrum that sits between them —
+    /// and the pool says it read both.
+    ///
+    /// **The two truths differ on purpose.** Drawn from one truth, a pool that quietly read only
+    /// its first stratum would recover that truth exactly and this test would pass; drawn from
+    /// two, reading one gives that one's tilt and the assertion on the middle class's neighbours
+    /// fails. The tract count and the stratum count are asserted for the same reason from the
+    /// other side.
+    #[test]
+    fn a_periods_pool_reads_every_stratum_of_it() {
+        let leans_short = tilted(0.55, 0.35);
+        let leans_long = tilted(0.10, 0.35);
+        let strata = [
+            drawn_at(stratum_at(2, 8), &leans_short, 300, 91),
+            drawn_at(stratum_at(2, 14), &leans_long, 300, 92),
+        ];
+        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+
+        let pool = pools.get(&2).expect("period 2 has 600 tracts");
+        assert_eq!(pool.strata_pooled, 2, "both strata of period 2 are in it");
+        assert_eq!(
+            pool.tracts_fitted, 600,
+            "300 tracts from each of the two strata"
+        );
+        assert_eq!(
+            pool.length_spectrum.len(),
+            3,
+            "2 x span + 1 classes at span 1"
+        );
+
+        let (short, long) = (pool.length_spectrum[0], pool.length_spectrum[2]);
+        assert!(
+            short > leans_long[0] && short < leans_short[0],
+            "the pooled share one repeat short is {short}, and pooling a stratum drawn at \
+             {} with one drawn at {} puts it between them",
+            leans_short[0],
+            leans_long[0]
+        );
+        assert!(
+            long > leans_short[2] && long < leans_long[2],
+            "the pooled share one repeat long is {long}, between the two truths {} and {}",
+            leans_short[2],
+            leans_long[2]
+        );
+    }
+
+    /// **Each motif period is pooled apart**, so a dinucleotide tract is never seeded from
+    /// trinucleotide evidence.
+    ///
+    /// The two periods are drawn from opposite tilts, so a pool that ran over every stratum of
+    /// the run at once would return one spectrum twice — which is what the last assertion
+    /// refuses.
+    #[test]
+    fn each_motif_period_is_pooled_apart() {
+        let leans_short = tilted(0.55, 0.35);
+        let leans_long = tilted(0.10, 0.35);
+        let strata = [
+            drawn_at(stratum_at(2, 8), &leans_short, 300, 93),
+            drawn_at(stratum_at(3, 8), &leans_long, 300, 94),
+        ];
+        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+
+        assert_eq!(pools.len(), 2, "one pool a period");
+        let dinucleotide = &pools[&2];
+        let trinucleotide = &pools[&3];
+        assert_eq!(dinucleotide.strata_pooled, 1);
+        assert_eq!(trinucleotide.strata_pooled, 1);
+        assert!(
+            dinucleotide.length_spectrum[0] > trinucleotide.length_spectrum[0] + 0.15,
+            "period 2 was drawn leaning short ({}) and period 3 leaning long ({}); pooled \
+             together they would be one number twice, and they are {} and {}",
+            leans_short[0],
+            leans_long[0],
+            dinucleotide.length_spectrum[0],
+            trinucleotide.length_spectrum[0]
+        );
+    }
+
+    /// **A period as thin as a stratum is refused as a stratum is**, by the same floor in the
+    /// same unit: pooling five tracts does not make them eight.
+    #[test]
+    fn a_period_below_the_refusal_floor_gets_no_pool() {
+        let spectrum = spectrum_of(3);
+        let strata = [
+            drawn_at(stratum_at(2, 8), &spectrum, 3, 95),
+            drawn_at(stratum_at(2, 14), &spectrum, 4, 96),
+        ];
+        let config = pooling_config();
+        assert_eq!(config.refusal_floor, DEFAULT_REFUSAL_FLOOR);
+
+        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &config);
+        assert!(
+            pools.is_empty(),
+            "seven tracts is below the floor of {}, and a pool below it is left out rather \
+             than fitted badly",
+            config.refusal_floor
+        );
+
+        // …and one more tract clears it, so the emptiness above is the floor and not the
+        // fixture being unfittable.
+        let over = [
+            drawn_at(stratum_at(2, 8), &spectrum, 4, 95),
+            drawn_at(stratum_at(2, 14), &spectrum, 4, 96),
+        ];
+        let pools = fit_period_length_spectra(&over, &[0.4; 8], &config);
+        assert_eq!(pools[&2].tracts_fitted, 8);
+    }
+
+    /// **An allele span of zero is refused where the knob is named**, not three modules later.
+    ///
+    /// It is a public field with no lower bound, read from an environment variable by
+    /// `examples/ng_joint_records_walk.rs` and parsed with no floor. At zero the fit returns a
+    /// one-class length spectrum — a tract that can only ever be its reference length — and
+    /// `StratumFits::over` then aborts the run with a message about a class count, which names
+    /// the symptom and not the setting.
+    #[test]
+    #[should_panic(expected = "`SsrFitConfig::allele_span` must be at least 1")]
+    fn a_fit_that_may_place_no_allele_mass_anywhere_is_refused() {
+        let spectrum = spectrum_of(3);
+        let evidence = drawn_at(stratum_at(2, 8), &spectrum, 20, 104);
+        let no_span = SsrFitConfig {
+            allele_span: 0,
+            ..SsrFitConfig::default()
+        };
+        let _ = fit_stratum(&evidence, &[0.4; 8], &no_span);
+    }
+
+    /// **The floor counts tracts a read crossed, not tracts.** A tract nobody sequenced
+    /// contributes a likelihood of exactly one whatever the parameters are, so eight of them
+    /// carry nothing — and every other fixture here draws reads at every tract, which makes the
+    /// two counts the same list and a floor measured in the wrong unit invisible.
+    #[test]
+    fn the_pools_floor_counts_tracts_a_read_crossed() {
+        let spectrum = spectrum_of(3);
+        let mut with_silent_tracts = drawn_at(stratum_at(2, 8), &spectrum, 4, 101);
+        // Four more tracts, present and unread: `tracts.len()` is 8, `tracts_with_reads()` 4.
+        with_silent_tracts
+            .tracts
+            .extend(std::iter::repeat_with(TractReads::default).take(4));
+        assert_eq!(with_silent_tracts.tracts.len(), 8);
+        assert_eq!(with_silent_tracts.tracts_with_reads(), 4);
+
+        let pools = fit_period_length_spectra(&[with_silent_tracts], &[0.4; 8], &pooling_config());
+        assert!(
+            pools.is_empty(),
+            "four tracts with reads is below the floor of {}, whatever the eight rows suggest",
+            DEFAULT_REFUSAL_FLOOR
+        );
+    }
+
+    /// **Whether the pooled climb settled is reported and not asserted true.** Running out of
+    /// rounds is a real answer and it must not come back as convergence.
+    ///
+    /// One round is far too few for 600 tracts, so this pins the `false` arm; the positive
+    /// control above reaches the `true` one at the default five.
+    #[test]
+    fn a_pool_that_ran_out_of_rounds_does_not_report_convergence() {
+        let spectrum = spectrum_of(3);
+        let strata = [drawn_at(stratum_at(2, 8), &spectrum, 300, 102)];
+        let one_round = SsrFitConfig {
+            max_rounds: 1,
+            ..pooling_config()
+        };
+        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &one_round);
+        assert!(
+            !pools[&2].converged,
+            "one round cannot settle a 300-tract pool, and running out is not convergence"
+        );
+    }
+
+    /// **The pooled fit reads the samples' homozygote excess**, which is how inbreeding is
+    /// divided out inside the estimator rather than afterwards. Every other fixture here passes
+    /// the same `0.4` to every sample, so a pool that ignored the argument entirely would
+    /// change nothing any of them assert.
+    #[test]
+    fn the_pool_reads_the_homozygote_excess_it_is_handed() {
+        let spectrum = spectrum_of(3);
+        let strata = [drawn_at(stratum_at(2, 8), &spectrum, 200, 103)];
+        let config = pooling_config();
+
+        let selfing = fit_period_length_spectra(&strata, &[0.9; 8], &config);
+        let outbred = fit_period_length_spectra(&strata, &[0.0; 8], &config);
+
+        let (selfing, outbred) = (&selfing[&2], &outbred[&2]);
+        // **The bar is "not the same number", not a size.** A fit that ignored the argument
+        // would return bit-identical results, because everything else about the two runs is
+        // identical down to the draw's seed. The 1% is there so that a difference in the last
+        // few bits would not pass for reading it; measured, the gap is **4.9%** — 0.5510
+        // against 0.5254 — on 200 tracts drawn at an excess of 0.4 and read at 0.9 and 0.0.
+        let gap = (selfing.concentration - outbred.concentration).abs() / outbred.concentration;
+        assert!(
+            gap > 0.01,
+            "the same tracts read as a selfing panel and as an outbred one give concentrations \
+             {} and {}, {:.1}% apart — at zero the excess is not reaching the fit at all",
+            selfing.concentration,
+            outbred.concentration,
+            gap * 100.0
+        );
+    }
+
+    /// Two strata of one period that recorded read offsets in different numbers of buckets came
+    /// from two runs, and pooling them would index past the end of a bucket row inside the
+    /// scorer.
+    #[test]
+    #[should_panic(expected = "recorded read offsets in")]
+    fn two_strata_of_one_period_disagreeing_about_the_read_span_are_refused() {
+        let spectrum = spectrum_of(3);
+        let mut wider = drawn_at(stratum_at(2, 14), &spectrum, 20, 98);
+        wider.read_span = 2;
+        let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 97), wider];
+        let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+    }
+
+    /// The same for the slippage-group count, which is also a property of the run.
+    #[test]
+    #[should_panic(expected = "slippage groups and the one at")]
+    fn two_strata_of_one_period_disagreeing_about_the_group_count_are_refused() {
+        let spectrum = spectrum_of(3);
+        let mut more_groups = drawn_at(stratum_at(2, 14), &spectrum, 20, 100);
+        more_groups.groups = 2;
+        let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 99), more_groups];
+        let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
     }
 }

@@ -58,8 +58,8 @@ use pop_var_caller::ng::locus_generation::{
 use pop_var_caller::ng::parameter_estimation::Provenance;
 use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use pop_var_caller::ng::parameter_estimation::ssr::StratumKey;
-use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::MinAltReads;
+use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
 use pop_var_caller::ng::types::{
     AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Ploidy, Position, ReadGroupId,
@@ -588,7 +588,11 @@ fn a_locus_with_two_alternatives_is_called_over_all_three_and_the_ids_are_select
     );
 
     assert_eq!(genotype_of(&inference, 0), vec![1, 1], "20 reads of T");
-    assert_eq!(genotype_of(&inference, 1), vec![0, 0], "3 G in 100 is not a candidate");
+    assert_eq!(
+        genotype_of(&inference, 1),
+        vec![0, 0],
+        "3 G in 100 is not a candidate"
+    );
     assert_eq!(genotype_of(&inference, 2), vec![2, 2], "20 reads of C");
     assert_eq!(genotype_of(&inference, 3), vec![0, 1], "10 A and 10 T");
     assert_eq!(genotype_of(&inference, 4), vec![0, 0], "20 reads of A");

@@ -62,9 +62,13 @@
 //! - [`seed_generic`] — the SNP/indel starting point, read off the pre-pass's fitted frequency
 //!   spectrum (plan step D). *Generic* is the crate's word for the non-STR path, as in
 //!   `parameter_estimation::generic`, so it pairs with [`seed_ssr`] on the same axis.
-//! - [`seed_ssr`] — the STR starting point: mass falling off geometrically from the
-//!   cohort's modal repeat count, totalling what the cohort's measured repeat diversity
-//!   implies (plan step E). **STR** in prose, `ssr` in module paths, as everywhere in ng.
+//! - [`seed_ssr`] — the STR starting point, read off the fitted **length spectrum** and
+//!   concentration the joint repeat fit produces for this tract's stratum (plan step E2e;
+//!   `doc/devel/ng/spec/population_diversity.md` §4). **Its two spectra are different
+//!   quantities and neither is ever called just "the spectrum"**: [`seed_generic`]'s is a
+//!   *frequency* spectrum, how allele frequencies are spread across the population;
+//!   [`seed_ssr`]'s is a *length* spectrum, how a stratum's chromosomes are spread over tract
+//!   lengths. **STR** in prose, `ssr` in module paths, as everywhere in ng.
 //! - [`hardy_weinberg`] — the comparator: Hardy–Weinberg at a single estimated frequency,
 //!   plugged in as though it were the truth, kept only so the change the marginalized prior
 //!   makes stays measurable (plan step F). Named for the distribution, like its sibling
@@ -85,7 +89,7 @@ pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{
     FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
 };
-pub use seed_ssr::{SsrSeedOutcome, fill_seed_share_per_candidate, fill_ssr_seed};
+pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
@@ -93,13 +97,14 @@ use crate::ng::types::InbreedingF;
 /// The five types whose invariants are checked at construction, in a module of their own so
 /// that **nothing else in this folder can build one without the check**.
 ///
-/// The scalars this folder introduced — [`RepeatGeneDiversity`](crate::ng::types::RepeatGeneDiversity)
-/// and [`SeedDecayPerRepeat`](crate::ng::types::SeedDecayPerRepeat) — are **not** here. They
-/// are the parameter pre-pass's outputs, like every other measured scalar the caller consumes,
-/// so they live in [`crate::ng::types`] beside
-/// [`ExpectedHeterozygosity`](crate::ng::types::ExpectedHeterozygosity) and reject with a
+/// The measured scalars the caller consumes are **not** here. They are the parameter pre-pass's
+/// outputs, so they live in [`crate::ng::types`] —
+/// [`ExpectedHeterozygosity`](crate::ng::types::ExpectedHeterozygosity) and
+/// [`RepeatGeneDiversity`](crate::ng::types::RepeatGeneDiversity) — and reject with a
 /// `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the caller
-/// should refuse with a message, not abort.
+/// should refuse with a message, not abort. *(`SeedDecayPerRepeat` stood beside them until step
+/// E2e; it was the decay of a constructed geometric shape the fitted length spectrum replaced,
+/// and it went with the construction.)*
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is
 /// visible to a module's *descendants*, and `dirichlet_multinomial`, `hardy_weinberg`,

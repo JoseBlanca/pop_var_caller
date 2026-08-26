@@ -378,6 +378,23 @@ the output.
 
 ## 5. The STR path
 
+> **⛔ Superseded, and the code no longer matches this section.**
+> [`../spec/population_diversity.md`](../spec/population_diversity.md) §4 replaces the repeat
+> tract's prior seed, and step E2e of [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)
+> built the replacement on 2026-08-26. **What the shipped `fill_ssr_seed` takes now** is the
+> locus's candidate repeat counts, the **tract's own reference repeat count**, and a
+> `LengthSpectrum` — the fitted length spectrum and concentration the joint repeat fit produces per
+> stratum, at one of three named rungs — and it returns a `Concentration` with no refusal in it.
+> **Three of the four items in the signature below no longer exist**: `modal_repeat_count`,
+> `SeedDecayPerRepeat` and `SsrSeedOutcome` are deleted, and `RepeatGeneDiversity` survives only
+> because [`../spec/parameter_prepass_cohort.md`](../spec/parameter_prepass_cohort.md) §3 still
+> asks the pre-pass to emit it. **Passing a candidate's repeat count where the tract's belongs is
+> now the mistake this section's `modal_repeat_count` invites**: it moves 0.595 of the prior's mass
+> off the reference length onto 0.091, measured in `seed_ssr`'s own tests.
+>
+> The rest of this document — §1 to §4, the concentration, the row, the SNP/indel path — is **not**
+> superseded. §5 is kept as the record of what was replaced.
+
 The projection does not reach here (spec §5); the seed is per locus, from three inputs the STR
 side already has:
 

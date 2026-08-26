@@ -467,7 +467,7 @@ run: the merge's allele unification and read attribution, `select_generic`,
 `shape_generic_locus`, and the loop. It lives in `tests/` so that the seams this path names are
 `pub`.
 
-**E2e. The repeat tract's prior seed, from the fit rather than from a construction.**  ☐
+**E2e. The repeat tract's prior seed, from the fit rather than from a construction.**  ✅
 
 **⚖ Design settled 2026-08-26 in [`../spec/population_diversity.md`](../spec/population_diversity.md),
 which supersedes [`../spec/calling_priors.md`](../spec/calling_priors.md) §5's construction.** A

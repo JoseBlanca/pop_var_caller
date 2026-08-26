@@ -1419,8 +1419,8 @@ log Lg(g)  =  Σ_o  n_o · log[ (1 − λ − c) · Σ_a (k_a/P) · Lr(o | a)
 
 λ    the outlier weight — reads no allele explains (§4.5), unchanged
 c    this read group's contamination fraction, from the pre-pass
-seed the prior's geometric decay away from the cohort's modal repeat count at this
-     locus, normalised to a distribution over lengths
+seed the prior's own belief about which lengths this tract can be — the stratum's fitted
+     length spectrum, normalised to a distribution over lengths
 ```
 
 **Three components rather than two, and folding them together would be wrong.** A junk read can show
@@ -1459,10 +1459,12 @@ caller's loop starts**, because contamination is frozen and must not move from o
 they are what the caller rewrites on every pass.
 
 **So the list comes from the genotype prior's starting shape**
-([`calling_priors.md`](calling_priors.md) §5.1): mass falling away geometrically from the commonest
-length the cohort actually showed at that tract, at a rate the parameters fit measured over a group
-of loci. It is specific to the locus, because the length it is centred on is that locus's own; and it
-is computed once from the observations rather than from the caller's estimates, so it does not move
+([`population_diversity.md`](population_diversity.md) §4.2, which superseded
+[`calling_priors.md`](calling_priors.md) §5.1 on 2026-08-26): the **length spectrum** the joint
+repeat fit produced for this tract's stratum, indexed in whole repeat units either side of the
+*reference* tract length. It is specific to the locus, because the reference length it is indexed
+from is that locus's own; and it is fitted before calling starts rather than taken from the caller's
+estimates, so it does not move
 while the caller iterates. **Both requirements met, and neither by accident.**
 
 **What is weaker here than at ordinary sites, and how much weaker.** At a SNP both halves of the
@@ -1510,9 +1512,10 @@ the length change, so both same-length alleles get the same one; §4.3's substit
 the read's letters against each candidate's own letters, so a read carrying the interruption scores
 higher against the interrupted allele and lower against the pure one, by `log(3(1−ε)/ε)` per
 distinguishing base — at an error rate of 1 in 200, 6.4 nats or 28 Phred. **So the read likelihood
-separates them and the genotype prior does not**: the prior's geometric seed is indexed by repeat
-count, so both alleles land on the same rung and the sibling document leaves how to divide that rung
-open as its own third question ([`calling_priors.md`](calling_priors.md) §5.2). Nothing here needs to
+separates them and the genotype prior does not**: the prior's seed is indexed by repeat count, so
+both alleles land on the same length class and the sibling document leaves how to divide that class
+open as its own third question ([`calling_priors.md`](calling_priors.md) §5.2, which
+[`population_diversity.md`](population_diversity.md) did not settle either). Nothing here needs to
 wait for that answer.
 
 **One thing does need care.** The placement enumeration of §4.2 is what makes an interrupted
@@ -2208,9 +2211,10 @@ wants them.
 good enough stand-in for what a contaminant shows?** §4.5.1 builds it and turns it on. Two things
 are unknown and only the first is cheap. *Does it move genotypes at all* — at the 1 to 3 in 100
 contamination that gets flagged in practice, against an outlier weight already set at 1 in 100, the
-term may be swamped by the floor it sits beside. *And is the second distribution right* — the seed is
-centred on this cohort's modal repeat count, so a contaminant from elsewhere is mis-attributed toward
-the mode, the direction in which this term hurts rather than helps. **Leaning: keep it on, and switch it off only
+term may be swamped by the floor it sits beside. *And is the second distribution right* — the seed is the
+stratum's own fitted length spectrum, so a contaminant from another population is mis-attributed
+toward wherever this cohort's tracts of that shape sit, the direction in which this term hurts rather
+than helps. **Leaning: keep it on, and switch it off only
 on evidence of harm** — contamination is a property of the sample rather than of the marker, so
 correcting for it at ordinary sites and not at repeat tracts would treat one number as two.
 **Settled by:** §12's item 17, in that order — the simulated panel first, because it is runnable

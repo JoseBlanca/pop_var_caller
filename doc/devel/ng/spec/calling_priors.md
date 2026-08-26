@@ -1,12 +1,25 @@
 # ng — the genotype prior
 
 *Design spec draft, 2026-08-18, amended 2026-08-19 (§4.1: the prior's starting point is read off the
-pre-pass's fitted spectrum rather than fixed at the neutral shape). **No code yet — this settles
-the design.** First of three
+pre-pass's fitted spectrum rather than fixed at the neutral shape). First of three
 documents on variant calling, written in pieces at the owner's direction; the siblings are the
 **read likelihood models** (one for the SNP/indel path, one with stutter for the STR path) and
 the **EM loop** that ties them together. Neither exists yet, and this document is written so it
 can be read before them.*
+
+> **⛔ §5 is superseded, and the code no longer matches it.**
+> [`population_diversity.md`](population_diversity.md) §4 replaces the repeat tract's prior seed:
+> the shape is no longer constructed as a geometric decay from the cohort's modal repeat count, and
+> the total is no longer scaled to reproduce a measured repeat gene diversity. It is the **length
+> spectrum and concentration the joint repeat fit already produces per stratum**, mapped onto the
+> locus's candidate lengths by their offset from the *reference* tract length. Step E2e of
+> [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) built that and deleted the
+> construction, `SeedDecayPerRepeat`, and `SsrSeedOutcome` with its `DiversityUnreachable` refusal.
+> **§5 and its open question Q2 are kept as the record of what was replaced and why** — Q2 asked
+> what to do at a locus the geometry could not hold, which is a question the fitted pair cannot
+> raise. §4, the ordinary-site half, is **not** superseded: `population_diversity.md` §3 supplies
+> its inputs and changes none of its rules.
+> *(The status line above said "no code yet" until 2026-08-26; §4 and §5 were both built.)*
 
 *Reads on: [`cohort_merge.md`](cohort_merge.md) — what a cohort observation is, the input to
 calling; [`parameter_prepass.md`](parameter_prepass.md) and

@@ -1,5 +1,17 @@
 # ng step 6 at a repeat tract — implementation plan
 
+
+> **⚠ 2026-08-26 — the repeat tract's genotype prior no longer indexes its seed by the
+> cohort's modal repeat count**, so every sentence below that justifies carrying the mode
+> *for the prior* has lost its reason. The seed is now the fitted **length spectrum** the
+> joint repeat fit produces per stratum, indexed by whole-repeat offset from the
+> **reference** tract length, which every locus already knows
+> ([`../spec/population_diversity.md`](../spec/population_diversity.md) §4.2; built by step
+> E2e of [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)). Handing the mode
+> where the reference length belongs is now a measured error: it moves 0.595 of the prior's
+> mass off the reference length onto 0.091 on `seed_ssr`'s own fixture. **Whether selection
+> should still carry the mode is undecided and is this document's to settle** — it may have
+> uses of its own; what it no longer has is this one.
 *Draft, 2026-08-24. Turns the settled design —
 [`../spec/candidate_alleles_ssr.md`](../spec/candidate_alleles_ssr.md) and
 [`../arch/candidate_alleles_ssr.md`](../arch/candidate_alleles_ssr.md) — into build order. **Not a

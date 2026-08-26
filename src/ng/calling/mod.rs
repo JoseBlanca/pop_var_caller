@@ -85,7 +85,9 @@ use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
-use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::ng::parameter_estimation::joint::stratum_fits::{
+    LengthSpectrum, LengthSpectrumRung, StratumFits,
+};
 use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::ng::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
@@ -989,6 +991,35 @@ impl<'a> FrozenParameters<'a> {
     #[must_use]
     pub fn ssr_slippage_fits(&self) -> &'a StratumFits {
         self.ssr_slippage_fits
+    }
+
+    /// **What this tract's genotype prior is seeded from: a shape and a strength**, with the
+    /// rung of the tract ladder they came from beside them
+    /// (`doc/devel/ng/spec/population_diversity.md` §4).
+    ///
+    /// **Keyed by the tract's own reference repeat count, where its two neighbours here are
+    /// keyed by the candidate's — and the three sit within a screen of each other in the
+    /// tract's parameter assembly.** [`Self::ssr_substitution_rate_at`] and
+    /// [`StratumFits::at`] answer *how does a read of **this candidate** go wrong*, which is a
+    /// property of the tract a read was copied from. This answers *which lengths can **this
+    /// tract** be*, which is one question per locus: the spectrum is indexed by whole-repeat
+    /// offset from the reference tract length, so passing a candidate's count would re-centre
+    /// the shape on that candidate and flatten the prior. The argument is named for the tract
+    /// for the same reason the others are named for the candidate.
+    ///
+    /// **It always answers**, at one of three rungs — the stratum's own fit, its motif period's
+    /// pooled tracts, or a flat shape at a stated concentration — so a repeat tract is never
+    /// left without a prior. Which rung it was is on the returned value and belongs in the
+    /// run's output.
+    #[inline]
+    #[must_use]
+    pub fn ssr_length_spectrum_at(
+        &self,
+        period: SsrPeriod,
+        reference_repeats: RepeatCount,
+    ) -> LengthSpectrum<'a> {
+        self.ssr_slippage_fits
+            .length_spectrum_at(period.get(), u64::from(reference_repeats.get()))
     }
 
     /// How many copies of the genome a sample carries.
@@ -2579,19 +2610,26 @@ pub struct LocusInference {
     /// `inference::repeat_tract_parameters` gathers, which no tract reaches until the driver
     /// scores one.
     pub weakest_provenance: Provenance,
-    /// Set when the STR prior's seed could not be scaled to reproduce the measured gene
-    /// diversity at this locus — the geometry has a ceiling and the measurement was
-    /// above it.
+    /// **Which rung of the tract ladder this repeat tract's prior shape came from** — the
+    /// stratum's own fitted length spectrum, its motif period's pooled tracts, or a flat
+    /// shape at a stated concentration (`doc/devel/ng/spec/population_diversity.md` §4.4).
     ///
-    /// The loop uses the ceiling and marks the locus rather than silently rescaling, so
-    /// that a call resting on a bent prior is distinguishable from one that is not.
-    /// **The ceiling is provisional**, not a settled rule: it stands until the STR
-    /// prior's own open question about what to do instead is answered
-    /// (`doc/devel/ng/arch/calling_priors.md` §5).
+    /// **A call resting on a measurement and one resting on a stated constant must be
+    /// distinguishable without re-running anything**, which is that spec's third goal, and
+    /// this is what carries it. Every rung answers, so this is never *no shape*; what it
+    /// says is how well founded the shape was.
     ///
-    /// Never set on the SNP/indel path, which seeds from a different quantity — and
-    /// [`Self::new`] refuses a locus that sets it there.
-    pub seed_diversity_unreachable: bool,
+    /// `None` on the SNP/indel path, which seeds from a frequency spectrum rather than
+    /// from a length spectrum — [`Self::new`] refuses a rung set there. **Also `None` at a
+    /// repeat tract today**, because the driver still refuses every tract at its front
+    /// door; step E3b of `doc/devel/ng/impl_plan/calling_loop.md` is what fills it.
+    ///
+    /// *(It replaced a `seed_diversity_unreachable` flag, whose whole subject was a
+    /// failure that no longer exists: the prior used to scale a constructed geometric
+    /// shape to reproduce a measured gene diversity, which was impossible above a ceiling
+    /// the shape itself set. Seeding from the fit asserts no such scaling —
+    /// `population_diversity.md` §4.2.)*
+    pub length_spectrum_rung: Option<LengthSpectrumRung>,
     /// **How unlikely it is that no sample here carries a copy of any non-reference
     /// allele** — the site quality, on the Phred scale, as the worker computed it and
     /// *before* the artifact correction that the first output stage applies
@@ -2657,10 +2695,11 @@ impl LocusInference {
     /// that was never incremented, and it would distort the distribution the pass cap is
     /// to be set from.
     ///
-    /// If `seed_diversity_unreachable` is set on a SNP/indel locus. That marker belongs
-    /// to the STR prior's seed; a generic locus seeds from a different quantity
-    /// (`doc/devel/ng/arch/calling_priors.md` §5) and can never raise it, so setting it
-    /// there means the marker was wired to the wrong path.
+    /// If `length_spectrum_rung` is set on a SNP/indel locus. The tract ladder belongs to
+    /// the repeat-tract prior; a generic locus seeds from a *frequency* spectrum, which has
+    /// a ladder of its own with different rungs
+    /// (`doc/devel/ng/spec/population_diversity.md` §3.4, §4.4), so a rung set there means
+    /// one path's ladder was wired onto the other.
     ///
     /// If any call is [`SampleGenotypeCall::Missing`] at a repeat tract or bundle. **A
     /// repeat tract sets no sample aside** — a discovery round there can put back a length
@@ -2721,7 +2760,7 @@ impl LocusInference {
         converged: bool,
         passes: u32,
         weakest_provenance: Provenance,
-        seed_diversity_unreachable: bool,
+        length_spectrum_rung: Option<LengthSpectrumRung>,
         site_quality: Phred,
         artifact_test_counts: Option<ArtifactTestCounts>,
     ) -> Self {
@@ -2742,9 +2781,9 @@ impl LocusInference {
              of zero is a counter that was never incremented"
         );
         assert!(
-            !(seed_diversity_unreachable && matches!(alleles.kind(), LocusKind::Generic)),
-            "the gene-diversity seed marker belongs to the STR prior: a SNP/indel locus \
-             seeds from a different quantity and can never raise it"
+            !(length_spectrum_rung.is_some() && matches!(alleles.kind(), LocusKind::Generic)),
+            "the tract ladder's rung belongs to the repeat-tract prior: a SNP/indel locus \
+             seeds from a frequency spectrum, whose own ladder has different rungs"
         );
         assert!(
             matches!(alleles.kind(), LocusKind::Generic)
@@ -2804,7 +2843,7 @@ impl LocusInference {
             converged,
             passes,
             weakest_provenance,
-            seed_diversity_unreachable,
+            length_spectrum_rung,
             site_quality,
             artifact_test_counts,
         }
@@ -3196,7 +3235,7 @@ mod tests {
             true,
             4,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3207,7 +3246,7 @@ mod tests {
         assert_eq!(inference.passes, 4);
         assert!(inference.converged);
         assert_eq!(inference.weakest_provenance, Provenance::FittedHere);
-        assert!(!inference.seed_diversity_unreachable);
+        assert_eq!(inference.length_spectrum_rung, None);
 
         // The per-sample calls are a sequence, in the run's sample order — the second
         // sample is the heterozygote, and swapping them would be a different record.
@@ -3240,9 +3279,9 @@ mod tests {
     /// point: a genotype from a loop that did not settle is a weaker claim, and nothing
     /// downstream can tell it from a settled one otherwise.
     ///
-    /// Built on the **repeat** path, because the seed marker this also carries cannot
-    /// arise on the SNP/indel one — a fixture that set it there would be pinning a state
-    /// its own field documents as impossible.
+    /// Built on the **repeat** path, because the tract ladder's rung this also carries
+    /// cannot arise on the SNP/indel one — a fixture that set it there would be pinning a
+    /// state its own field documents as impossible.
     #[test]
     fn a_locus_that_ran_out_of_passes_is_emitted_with_the_flag_set() {
         let (alleles, copies) = str_two_allele_locus();
@@ -3254,7 +3293,7 @@ mod tests {
             false,
             50,
             Provenance::Defaulted,
-            true,
+            Some(LengthSpectrumRung::PeriodsPooledTracts),
             a_worker_written_site_quality(),
             None,
         );
@@ -3272,7 +3311,10 @@ mod tests {
         );
         // And the two other warrants travel independently of it.
         assert_eq!(capped.weakest_provenance, Provenance::Defaulted);
-        assert!(capped.seed_diversity_unreachable);
+        assert_eq!(
+            capped.length_spectrum_rung,
+            Some(LengthSpectrumRung::PeriodsPooledTracts)
+        );
     }
 
     /// One pass is a legitimate answer and must be constructible, because the loop's
@@ -3291,7 +3333,7 @@ mod tests {
             true,
             1,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3326,7 +3368,7 @@ mod tests {
                 true,
                 2,
                 Provenance::FittedHere,
-                false,
+                None,
                 a_worker_written_site_quality(),
                 None,
             )
@@ -3357,7 +3399,7 @@ mod tests {
             true,
             0,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3378,19 +3420,19 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
     }
 
-    /// The gene-diversity seed marker belongs to the repeat prior. A SNP/indel locus
-    /// seeds from a different quantity and can never raise it, so a locus that sets it
-    /// there has had the marker wired onto the wrong path — which is exactly what an
+    /// The tract ladder belongs to the repeat prior. A SNP/indel locus seeds from a
+    /// *frequency* spectrum, whose own ladder has different rungs, so a locus carrying a
+    /// tract rung has had one path's ladder wired onto the other — which is exactly what an
     /// implementation slip in the seed's routing would look like.
     #[test]
-    #[should_panic(expected = "belongs to the STR prior")]
-    fn a_snp_locus_cannot_carry_the_repeat_seed_marker() {
+    #[should_panic(expected = "belongs to the repeat-tract prior")]
+    fn a_snp_locus_cannot_carry_a_tract_ladder_rung() {
         let (alleles, copies) = two_allele_locus();
         let _ = LocusInference::new(
             region(),
@@ -3400,7 +3442,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            true,
+            Some(LengthSpectrumRung::PeriodsPooledTracts),
             a_worker_written_site_quality(),
             None,
         );
@@ -3425,7 +3467,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3445,7 +3487,7 @@ mod tests {
             true,
             2,
             Provenance::Borrowed,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3489,7 +3531,7 @@ mod tests {
             true,
             3,
             Provenance::FittedHere,
-            false,
+            None,
             Phred::try_new(431.5).expect("a legal quality"),
             Some(artifact_counts_naming(AlleleId(1))),
         );
@@ -3515,7 +3557,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -3540,7 +3582,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             Phred::try_new(quality::MAX_SITE_QUALITY + 1.0).expect("a legal Phred"),
             None,
         );
@@ -3561,7 +3603,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             Phred::try_new(quality::MAX_SITE_QUALITY).expect("a legal Phred"),
             None,
         );
@@ -3586,7 +3628,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             Some(artifact_counts_naming(AlleleId::REFERENCE)),
         );
@@ -3607,7 +3649,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             Some(artifact_counts_naming(AlleleId(4))),
         );
@@ -3630,6 +3672,121 @@ mod tests {
 
     fn no_strata() -> StratumFits {
         StratumFits::over(&[], BTreeMap::new())
+    }
+
+    /// A run whose fit produced a length spectrum at one dinucleotide stratum and at one
+    /// trinucleotide stratum, with **different shapes and different concentrations** — so that a
+    /// lookup answering from the wrong stratum, or from the wrong period, is a different number
+    /// rather than the same one.
+    fn strata_with_length_spectra() -> StratumFits {
+        use crate::ng::parameter_estimation::joint::census::Stratum;
+        use crate::ng::parameter_estimation::joint::share_curve::ShareSource;
+        use crate::ng::parameter_estimation::joint::slippage_curve::LevelSource;
+        use crate::ng::parameter_estimation::joint::ssr_fit::{
+            LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+            StratumOutcome,
+        };
+
+        let level = LevelProvenance {
+            source: LevelSource::Cell,
+            curve: None,
+            reach: None,
+            slipped_reads: Some(400.0),
+        };
+        let share = ShareProvenance {
+            source: ShareSource::Stratum,
+            curve: None,
+            reach: None,
+        };
+        let one = |period: u8, repeats: u64, length_spectrum: Vec<f64>, concentration: f64| {
+            StratumOutcome::Fitted(Box::new(StratumFit {
+                stratum: Stratum {
+                    period,
+                    reference_repeats: repeats,
+                },
+                slippage: vec![Some(Slippage {
+                    level: 0.05,
+                    shorter_share: 0.83,
+                    fall_off: 0.25,
+                })],
+                length_spectrum,
+                concentration,
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                converged: true,
+                tracts_of_its_own: 40,
+                reads_crossing: 400,
+                level_provenance: vec![Some(level)],
+                shares_provenance: vec![Some(SharesProvenance {
+                    slipped_reads: Some(400.0),
+                    shorter_share: share,
+                    fall_off: share,
+                })],
+            }))
+        };
+        StratumFits::over(
+            &[
+                one(2, 10, vec![0.6, 0.3, 0.1], 4.0),
+                one(3, 10, vec![0.1, 0.3, 0.6], 25.0),
+            ],
+            BTreeMap::from([(ReadGroupId(0), 0)]),
+        )
+    }
+
+    /// **The run's frozen parameters answer a tract's prior shape from the tract's own stratum**,
+    /// and the accessor is keyed by the tract's reference repeat count where its two neighbours
+    /// on this type are keyed by the candidate's.
+    ///
+    /// **Three fixtures' worth of coincidence is removed on purpose.** The two strata carry
+    /// different motif periods, different shapes and different concentrations, and the repeat
+    /// count asked for is not one either stratum would answer by accident — so a lookup off by
+    /// one repeat, or reading the wrong period, is a visibly different answer.
+    #[test]
+    fn the_run_answers_a_tracts_prior_shape_from_its_own_stratum() {
+        use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+        use crate::ng::parameter_estimation::ssr::RepeatCount;
+
+        let strata = strata_with_length_spectra();
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let batching = SequencingBatches::all_together_over(1, 1);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &batching,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
+
+        let dinucleotide = parameters.ssr_length_spectrum_at(
+            SsrPeriod::try_new(2).expect("a dinucleotide"),
+            RepeatCount(10),
+        );
+        assert_eq!(dinucleotide.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(dinucleotide.fitted_weights(), Some(&[0.6, 0.3, 0.1][..]));
+        assert_eq!(dinucleotide.concentration(), 4.0);
+
+        // Same repeat count, other motif period: a different stratum and a different answer.
+        let trinucleotide = parameters.ssr_length_spectrum_at(
+            SsrPeriod::try_new(3).expect("a trinucleotide"),
+            RepeatCount(10),
+        );
+        assert_eq!(trinucleotide.fitted_weights(), Some(&[0.1, 0.3, 0.6][..]));
+        assert_eq!(trinucleotide.concentration(), 25.0);
+
+        // A repeat count neither stratum holds falls down the ladder rather than answering.
+        let elsewhere = parameters.ssr_length_spectrum_at(
+            SsrPeriod::try_new(2).expect("a dinucleotide"),
+            RepeatCount(11),
+        );
+        assert_eq!(elsewhere.rung(), LengthSpectrumRung::StatedFlat);
+        assert_eq!(
+            elsewhere.concentration(),
+            14.5,
+            "the run fitted 4.0 and 25.0, whose median is their mean"
+        );
     }
 
     fn diploid_ploidy() -> Ploidy {
@@ -4282,7 +4439,7 @@ mod tests {
             true,
             3,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -4611,7 +4768,7 @@ mod tests {
     /// A repeat tract sets no sample aside, so a missing call at one is the SNP/indel path's
     /// ruling wired onto the wrong path.
     ///
-    /// **The mirror of the gene-diversity marker's check**, which refuses the repeat path's
+    /// **The mirror of the tract-ladder rung's check**, which refuses the repeat path's
     /// ruling at a SNP/indel locus. What this one catches is a sample silently dropped from
     /// a tract's output: such a sample has no expected copies at all, so it also leaves the
     /// cohort's expected-copies denominator, and the locus's allele frequencies come out
@@ -4628,7 +4785,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );
@@ -4652,7 +4809,7 @@ mod tests {
             true,
             2,
             Provenance::FittedHere,
-            false,
+            None,
             a_worker_written_site_quality(),
             None,
         );

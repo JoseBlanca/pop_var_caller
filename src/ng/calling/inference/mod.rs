@@ -1053,7 +1053,7 @@ mod tests {
                 true,
                 1,
                 Provenance::FittedHere,
-                false,
+                None,
                 a_worker_written_site_quality(),
                 None,
             )

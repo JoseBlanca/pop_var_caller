@@ -103,6 +103,250 @@ pub enum NoSlippage {
     },
 }
 
+/// The one type in this module whose fields are private, in a module of its own so that
+/// **nothing else here can build one without the check**.
+///
+/// **The nesting is load-bearing rather than tidy**, and it is the same device
+/// `calling::genotype_prior` uses for the five types whose invariants matter: a private field is
+/// visible to a module's *descendants*, so a type declared directly in `stratum_fits` could be
+/// built field by field — skipping the constructor — from anywhere in this file, its test module
+/// included. One level of nesting makes those siblings instead, and the literal fails with
+/// `error[E0451]`.
+///
+/// **It is a struct rather than the enum it reads as, and that is why.** An enum's variant
+/// fields carry the enum's own visibility — there is no private field in a public variant — so
+/// three variants would have left every check optional.
+///
+/// **What the checks stop was measured rather than imagined.** Built by hand with an empty
+/// `weights`, [`LengthSpectrum::allele_span`] computed `(0 - 1) / 2`: a subtract-with-overflow
+/// panic in debug, and in **release** a span of `-1`, against which `offset.abs() <= -1` is never
+/// true — so every candidate at every tract of that stratum took the shape floor and the prior
+/// came back `[1e-12, 1e-12, …]`, degenerate and silent. An even class count did the same more
+/// quietly: `[0.1, 0.2, 0.3, 0.4]` gives a span of 1, which puts the *second* class at the
+/// reference offset and leaves the fourth unreachable.
+mod checked_spectrum {
+    use super::LengthSpectrumRung;
+
+    /// **Which of the two fitted rungs a length spectrum came from.**
+    ///
+    /// Two-valued where [`LengthSpectrumRung`] is three-valued, so that
+    /// [`LengthSpectrum::fitted`] has no unreachable arm for the rung that has no weights.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FittedFrom {
+        /// The stratum's own tracts.
+        ThisStratum,
+        /// Every tract of the stratum's motif period, pooled.
+        ItsPeriodsPooledTracts,
+    }
+
+    /// **What a repeat tract's genotype prior is seeded from: a shape and a strength**, and
+    /// which rung of the tract ladder they came from
+    /// (`doc/devel/ng/spec/population_diversity.md` §4.4).
+    ///
+    /// The shape is a **length spectrum** — how a stratum's chromosomes are spread over tract
+    /// lengths, one share per whole-repeat offset from the **reference** tract length,
+    /// `-span ..= +span`. It is not the ordinary-site path's **frequency spectrum**, which is how
+    /// allele frequencies are spread across the population; the two are separate quantities on
+    /// separate paths and this project keeps the two words apart in code as in prose
+    /// (`population_diversity.md` §2).
+    ///
+    /// **Every rung answers**: a run cannot get *no shape* at a tract, only a shape from further
+    /// down the ladder, and which rung it was travels with the numbers so that whoever carries
+    /// the rung into the run's output can tell a call resting on a measurement from one resting
+    /// on a stated constant.
+    ///
+    /// **The two spectra this caller fits cannot be crossed**, because they are separate types
+    /// with no conversion between them (`population_diversity.md` §8, check 5):
+    ///
+    /// ```compile_fail
+    /// use pop_var_caller::ng::calling::genotype_prior::FittedSpectrum;
+    /// use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::LengthSpectrum;
+    /// fn takes_a_length_spectrum(_: LengthSpectrum<'_>) {}
+    /// let weights = [0.25, 0.5, 0.25];
+    /// takes_a_length_spectrum(FittedSpectrum::new(&weights, 0.0, 10.0));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct LengthSpectrum<'a> {
+        /// **`None` on the bottom rung and `Some` on the other two**, which is the invariant the
+        /// two constructors hold and the reason the field is private.
+        weights: Option<&'a [f64]>,
+        concentration: f64,
+        rung: LengthSpectrumRung,
+    }
+
+    impl<'a> LengthSpectrum<'a> {
+        /// Wrap a fitted shape and the strength it is held with, at one of the two fitted rungs.
+        ///
+        /// `weights` sums to one; `concentration` is the Dirichlet total those shares are the
+        /// mean of.
+        ///
+        /// # Panics
+        ///
+        /// **On a class count that is not `2 · span + 1` for some span of at least one**, and on
+        /// a concentration that is not finite and strictly positive. Both are structural and
+        /// cost two comparisons at one lookup a locus, against a prior that is wrong at every
+        /// tract of the stratum — see this module's own documentation for what each of them
+        /// produced when they were absent.
+        ///
+        /// **That the shares sum to one is *not* checked here**, and deliberately: it is
+        /// `O(classes)` where these are `O(1)`, and it is already checked once per run where the
+        /// spectra are gathered — [`StratumFits::over`](super::StratumFits::over) and
+        /// [`with_period_length_spectra`](super::StratumFits::with_period_length_spectra), both
+        /// through `checked_length_spectrum`. A caller that builds one of these from weights
+        /// that did not come through the gather owes that check itself: the seed's total is
+        /// `concentration × (mass the candidates cover)`, which is a claim about conviction only
+        /// if the mass is a share.
+        #[must_use]
+        pub fn fitted(weights: &'a [f64], concentration: f64, from: FittedFrom) -> Self {
+            assert!(
+                weights.len() >= 3 && weights.len() % 2 == 1,
+                "a length spectrum runs from -span to +span in whole repeat units, so its class \
+                 count is odd and at least three; got {}",
+                weights.len()
+            );
+            assert!(
+                concentration.is_finite() && concentration > 0.0,
+                "a length spectrum is held with a finite, strictly positive number of \
+                 chromosomes' worth of belief; got {concentration}"
+            );
+            Self {
+                weights: Some(weights),
+                concentration,
+                rung: match from {
+                    FittedFrom::ThisStratum => LengthSpectrumRung::StratumsOwnFit,
+                    FittedFrom::ItsPeriodsPooledTracts => LengthSpectrumRung::PeriodsPooledTracts,
+                },
+            }
+        }
+
+        /// The ladder's bottom rung: a flat shape over whatever lengths the locus offers, at a
+        /// stated strength.
+        ///
+        /// # Panics
+        ///
+        /// On a concentration that is not finite and strictly positive — a Dirichlet with a
+        /// total of zero has no mean for a shape to be.
+        #[must_use]
+        pub fn stated_flat(concentration: f64) -> Self {
+            assert!(
+                concentration.is_finite() && concentration > 0.0,
+                "the stated-flat rung states a finite, strictly positive number of chromosomes' \
+                 worth of belief; got {concentration}"
+            );
+            Self {
+                weights: None,
+                concentration,
+                rung: LengthSpectrumRung::StatedFlat,
+            }
+        }
+
+        /// The fitted shares, or nothing on the bottom rung — where the shape is flat over the
+        /// locus's own candidate lengths and there is no vector to hand out.
+        ///
+        /// **The two fitted rungs are deliberately one answer here.** A consumer builds the same
+        /// seed from either; what differs is the provenance, which [`Self::rung`] carries.
+        #[inline]
+        #[must_use]
+        pub fn fitted_weights(&self) -> Option<&'a [f64]> {
+            self.weights
+        }
+
+        /// The Dirichlet total: how many chromosomes' worth of belief the shape is held with.
+        #[inline]
+        #[must_use]
+        pub fn concentration(&self) -> f64 {
+            self.concentration
+        }
+
+        /// How far either side of the reference tract length the fitted shares reach, in whole
+        /// repeat units — `None` on the bottom rung, which reaches nowhere in particular.
+        ///
+        /// A candidate further from the reference than this is outside everything the fit ever
+        /// saw, and the seed builder gives it a floor rather than the end class's weight.
+        ///
+        /// **The subtraction cannot underflow**, because [`Self::fitted`] is the only door onto
+        /// a `Some` and it refuses a class count below three.
+        #[inline]
+        #[must_use]
+        pub fn allele_span(&self) -> Option<i32> {
+            self.weights.map(|weights| ((weights.len() - 1) / 2) as i32)
+        }
+
+        /// Which rung of the tract ladder this came from — the value a run carries into its
+        /// output beside the call.
+        #[inline]
+        #[must_use]
+        pub fn rung(&self) -> LengthSpectrumRung {
+            self.rung
+        }
+    }
+}
+
+pub use checked_spectrum::{FittedFrom, LengthSpectrum};
+
+/// Which rung of the tract ladder a tract's prior shape came from — the value that **belongs**
+/// in the run's output beside the call (`doc/devel/ng/spec/population_diversity.md` §4.4 for the
+/// ladder, §1's third goal for why it has to travel).
+///
+/// **Nothing carries it there yet**, and saying so is the point: the driver refuses every repeat
+/// tract at its front door until step E3b of `impl_plan/calling_loop.md` wires one in, and that
+/// step is where this reaches [`LocusInference`](crate::ng::calling::LocusInference). Until then
+/// the rung is available and unread.
+///
+/// **Separate from [`LengthSpectrum`] because it outlives it.** The spectrum borrows the run's
+/// frozen parameters and dies with the locus; the rung is what an output carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LengthSpectrumRung {
+    /// Fitted here, from this stratum's own tracts.
+    StratumsOwnFit,
+    /// Borrowed from the stratum's motif period, pooled over every tract of it.
+    PeriodsPooledTracts,
+    /// Defaulted: no fit for this period at all.
+    StatedFlat,
+}
+
+/// One fitted length spectrum and the strength it is held with, owned.
+///
+/// Both a stratum's own fit and a period's pool produce exactly this, which is why the two
+/// rungs are one type here and two variants at the lookup.
+#[derive(Debug, Clone, PartialEq)]
+struct FittedLengthSpectrum {
+    weights: Vec<f64>,
+    concentration: f64,
+}
+
+/// **The concentration the tract ladder's bottom rung states where the run fitted no stratum
+/// at all.**
+///
+/// One chromosome's worth of belief, spread flat over whatever lengths the locus offers — the
+/// same quantity and the same reading [`ALPHA_REF`](crate::genetics::ALPHA_REF) carries on the
+/// ordinary-site path, where it is the *count of chromosomes* a neutral seed gives the reference
+/// allele. At one chromosome the reads move the prior from the first read onward, which is the
+/// honest posture for a number with no measurement behind it.
+///
+/// **The shape it is spread over is the locus's candidate lengths, where
+/// `population_diversity.md` §4.4's table says the *reachable* lengths** — every length the
+/// stutter model can produce from a candidate, which is a strictly larger support. The candidate
+/// set is what this builder is handed; the reachable lengths are built by the read likelihood
+/// (`likelihood::ssr`'s `fill_reachable_lengths`) and are not in the prior's hands. Recorded as a
+/// departure rather than taken silently: on the bottom rung the shape is flat either way, so the
+/// two differ only in how the *total* is spread — over `K` candidates here against the larger
+/// reachable set — and nothing has measured what that costs.
+///
+/// **It is soft, and naming it is what makes it movable**
+/// (`doc/devel/ng/spec/population_diversity.md` §4.4). It is reached only where the run fitted
+/// no stratum whatever: a run that fitted any takes its own median instead
+/// ([`StratumFits::stated_concentration`]), which is §9's question 4 and its leaning.
+pub const STATED_FLAT_CONCENTRATION: f64 = 1.0;
+
+/// How far a stratum's length spectrum may sum from one before it is refused as not a
+/// distribution.
+///
+/// The fit renormalises after every coordinate move, so a real one is within a few units in the
+/// last place; this leaves room for a caller that assembled a `StratumFit` by hand from rounded
+/// numbers, and refuses raw counts.
+const LENGTH_SPECTRUM_NORMALISATION_TOLERANCE: f64 = 1e-9;
+
 /// One stratum's numbers, per slippage group — the three vectors a [`StratumOutcome`] exposes,
 /// held together so a lookup indexes once.
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +367,21 @@ pub struct StratumFits {
     /// declaration, the same map [`gather_strata`](super::ssr_fit::gather_strata) was given.
     slippage_group_of: BTreeMap<ReadGroupId, u32>,
     by_stratum: BTreeMap<Stratum, StratumRow>,
+    /// **Per stratum, the length spectrum and concentration its own fit produced** — the tract
+    /// ladder's top rung, harvested from the same outcomes the slippage numbers come from.
+    ///
+    /// **Only a stratum fitted on its own tracts has an entry.** One furnished from its
+    /// period's slippage curves ([`DerivedStratum`](super::ssr_fit::DerivedStratum)) carries no
+    /// length spectrum at all, by construction — nothing about it was estimated — and that
+    /// absence is exactly what the middle rung exists to answer.
+    length_spectrum_by_stratum: BTreeMap<Stratum, FittedLengthSpectrum>,
+    /// **Per motif period, one length spectrum and concentration fitted over every tract of
+    /// that period pooled** — the tract ladder's middle rung. Empty unless the run asked for
+    /// it, which is what [`Self::with_period_length_spectra`] is.
+    length_spectrum_by_period: BTreeMap<u8, FittedLengthSpectrum>,
+    /// The strength the bottom rung states: the run's own median fitted concentration where any
+    /// stratum was fitted, and [`STATED_FLAT_CONCENTRATION`] where none was.
+    stated_concentration: f64,
 }
 
 impl StratumFits {
@@ -160,6 +419,7 @@ impl StratumFits {
         slippage_group_of: BTreeMap<ReadGroupId, u32>,
     ) -> Self {
         let mut by_stratum = BTreeMap::new();
+        let mut length_spectrum_by_stratum = BTreeMap::new();
         for outcome in outcomes {
             if matches!(outcome, StratumOutcome::Refused { .. }) {
                 continue;
@@ -196,11 +456,152 @@ impl StratumFits {
                 stratum.period,
                 stratum.reference_repeats,
             );
+            // **The stratum's own length spectrum, harvested from the same outcome**, and only
+            // where the fit produced one: a stratum furnished from its period's slippage curves
+            // carries none, which is the absence the middle rung answers.
+            if let StratumOutcome::Fitted(fit) = outcome {
+                length_spectrum_by_stratum.insert(
+                    stratum,
+                    checked_length_spectrum(
+                        &fit.length_spectrum,
+                        fit.concentration,
+                        &format_args!(
+                            "the fit of period {}, {} repeats",
+                            stratum.period, stratum.reference_repeats
+                        ),
+                    ),
+                );
+            }
         }
+        let stated_concentration = median_concentration(&length_spectrum_by_stratum);
         Self {
             slippage_group_of,
             by_stratum,
+            length_spectrum_by_stratum,
+            length_spectrum_by_period: BTreeMap::new(),
+            stated_concentration,
         }
+    }
+
+    /// **Set the tract ladder's middle rung**: one pooled length spectrum and concentration a
+    /// motif period, for the strata whose own fit does not exist.
+    ///
+    /// **It replaces rather than merges**, as a `with_` builder does: a second call keeps only
+    /// the second call's periods.
+    ///
+    /// **A second call rather than an argument to [`Self::over`], because the pool costs a run a
+    /// second pass over its tracts** ([`fit_period_length_spectra`](super::ssr_fit::fit_period_length_spectra)),
+    /// where everything else this type carries is already computed. A run that skips it is not
+    /// broken: [`Self::length_spectrum_at`] then answers from the ladder's bottom rung, a flat
+    /// shape at a stated concentration, and says so — so the omission shows up in the run's own
+    /// record as a rung rather than as a wrong number.
+    ///
+    /// **It does not move [`Self::stated_concentration`].** That median is over the strata's own
+    /// fits, and a period's pool is fitted from the very same tracts — counting both would weigh
+    /// one period's tracts twice.
+    ///
+    /// # Panics
+    ///
+    /// On a pool whose length spectrum is not a distribution, or whose concentration is not
+    /// finite and positive — the same checks [`Self::over`] runs on a stratum's own, and for the
+    /// same reason: every field of the fit's output types is public.
+    ///
+    /// On a pool filed under a motif period that is not its own. The period is carried twice —
+    /// as the map's key and on [`PeriodLengthSpectrum`](super::ssr_fit::PeriodLengthSpectrum)
+    /// itself — and the lookup reads the key, so a disagreement would file a period's tracts
+    /// under another period's tracts with nothing to say so.
+    #[must_use]
+    pub fn with_period_length_spectra(
+        mut self,
+        pools: BTreeMap<u8, super::ssr_fit::PeriodLengthSpectrum>,
+    ) -> Self {
+        self.length_spectrum_by_period = pools
+            .into_iter()
+            .map(|(period, pool)| {
+                assert_eq!(
+                    period, pool.period,
+                    "a pooled fit of motif period {} is filed under period {period}; the lookup \
+                     reads the key, so every tract of period {period} would be seeded from \
+                     period {}'s spread",
+                    pool.period, pool.period
+                );
+                let checked = checked_length_spectrum(
+                    &pool.length_spectrum,
+                    pool.concentration,
+                    &format_args!("the pooled fit of motif period {period}"),
+                );
+                (period, checked)
+            })
+            .collect();
+        self
+    }
+
+    /// **The shape and the strength a tract's genotype prior is seeded from**, and which rung of
+    /// the tract ladder they came from (`doc/devel/ng/spec/population_diversity.md` §4.4).
+    ///
+    /// **Fill the stratum from the *tract*, not from the candidate — the opposite of
+    /// [`Self::at`], and the two calls sit a screen apart in the same assembly.** Slippage is a
+    /// property of the tract a read was copied from, so it is looked up per candidate allele.
+    /// This is the population's belief about *which lengths this tract can be*, which is one
+    /// question per locus: the spectrum is indexed by whole-repeat offset from the **reference**
+    /// tract length, so the locus's own reference repeat count is what picks the stratum and
+    /// what the offsets are measured from. Looking it up from a candidate would re-centre every
+    /// candidate's own shape on itself and flatten the prior.
+    ///
+    /// **It always answers.** The three rungs are the stratum's own fit, its motif period's
+    /// pooled tracts, and a flat shape at [`Self::stated_concentration`]; a tract can land on
+    /// the last one, never on nothing.
+    #[must_use]
+    pub fn length_spectrum_at(&self, period: u8, reference_repeats: u64) -> LengthSpectrum<'_> {
+        let stratum = Stratum {
+            period,
+            reference_repeats,
+        };
+        if let Some(fitted) = self.length_spectrum_by_stratum.get(&stratum) {
+            return LengthSpectrum::fitted(
+                &fitted.weights,
+                fitted.concentration,
+                FittedFrom::ThisStratum,
+            );
+        }
+        if let Some(pooled) = self.length_spectrum_by_period.get(&period) {
+            return LengthSpectrum::fitted(
+                &pooled.weights,
+                pooled.concentration,
+                FittedFrom::ItsPeriodsPooledTracts,
+            );
+        }
+        LengthSpectrum::stated_flat(self.stated_concentration)
+    }
+
+    /// **The strength the tract ladder's bottom rung states**: the median of the concentrations
+    /// this run's strata fitted, or [`STATED_FLAT_CONCENTRATION`] where the run fitted none.
+    ///
+    /// **The run's own median rather than a constant wherever there is one**, because how
+    /// monomorphic a species' tracts are is a fact about the species and the run has measured it
+    /// at every stratum that could be fitted — where a stated constant is a fact about nothing
+    /// (`population_diversity.md` §9, question 4 and its leaning).
+    ///
+    /// **The median of an even count is the mean of the middle two**, which is the ordinary
+    /// definition and not a choice this file is making.
+    #[must_use]
+    pub fn stated_concentration(&self) -> f64 {
+        self.stated_concentration
+    }
+
+    /// How many strata carry a length spectrum of their own — the tract ladder's top rung,
+    /// which is **not** [`Self::strata`]: a stratum furnished from its period's slippage curves
+    /// carries slippage numbers and no spectrum, so the second count is the larger of the two.
+    #[must_use]
+    pub fn strata_with_a_length_spectrum(&self) -> usize {
+        self.length_spectrum_by_stratum.len()
+    }
+
+    /// How many motif periods carry a pooled length spectrum — zero unless the run called
+    /// [`Self::with_period_length_spectra`].
+    #[must_use]
+    pub fn periods_with_a_pooled_length_spectrum(&self) -> usize {
+        self.length_spectrum_by_period.len()
     }
 
     /// The numbers for one read group at one stratum.
@@ -288,6 +689,84 @@ impl StratumFits {
     }
 }
 
+/// Check one fitted length spectrum and its concentration, and own them.
+///
+/// **Checked where they are gathered rather than where they are read**, exactly as the three
+/// slippage vectors' lengths are, and for the same reason: every field of
+/// [`StratumFit`](super::ssr_fit::StratumFit) and
+/// [`PeriodLengthSpectrum`](super::ssr_fit::PeriodLengthSpectrum) is public, so a caller that
+/// assembled one by hand can hand over raw counts or a negative share. What that costs if it is
+/// not caught here is not a crash: a seed built from weights that do not sum to one is a prior
+/// that is wrong at **every tract of that stratum**, by an amount nothing downstream can see.
+///
+/// `what` names the fit in the message, because a run holds tens of these and the number alone
+/// says nothing about which.
+///
+/// # Panics
+///
+/// On a class count that is not `2 · span + 1` for some span of at least one; on a share that is
+/// negative or not finite; on shares that do not sum to one within
+/// [`LENGTH_SPECTRUM_NORMALISATION_TOLERANCE`]; and on a concentration that is not finite and
+/// strictly positive — a Dirichlet with a total of zero has no mean.
+fn checked_length_spectrum(
+    weights: &[f64],
+    concentration: f64,
+    what: &std::fmt::Arguments<'_>,
+) -> FittedLengthSpectrum {
+    assert!(
+        weights.len() >= 3 && weights.len() % 2 == 1,
+        "{what} holds {} length classes; the spectrum runs from -span to +span in whole repeat \
+         units, so the count is odd and at least three",
+        weights.len()
+    );
+    if let Some((class, weight)) = weights
+        .iter()
+        .enumerate()
+        .find(|(_, weight)| weight.is_nan() || **weight < 0.0)
+    {
+        panic!(
+            "{what} gives the offset of {} repeats a share of {weight}; a share of the \
+             stratum's chromosomes cannot be negative or NaN",
+            class as i64 - (weights.len() as i64 - 1) / 2
+        );
+    }
+    let total: f64 = weights.iter().sum();
+    assert!(
+        (total - 1.0).abs() <= LENGTH_SPECTRUM_NORMALISATION_TOLERANCE,
+        "{what} has length shares totalling {total}, where a spectrum sums to one within \
+         {LENGTH_SPECTRUM_NORMALISATION_TOLERANCE:e} — raw counts here would scale the tract \
+         prior by the count itself"
+    );
+    assert!(
+        concentration.is_finite() && concentration > 0.0,
+        "{what} was held with {concentration} chromosomes' worth of belief; a Dirichlet total is \
+         finite and strictly positive, and a zero has no mean to be the shape of"
+    );
+    FittedLengthSpectrum {
+        weights: weights.to_vec(),
+        concentration,
+    }
+}
+
+/// The median of the concentrations the run's strata fitted, or [`STATED_FLAT_CONCENTRATION`]
+/// where it fitted none.
+///
+/// **The mean of the middle two at an even count**, which is the ordinary definition. The values
+/// are finite and positive by [`checked_length_spectrum`], so the sort is total.
+fn median_concentration(fitted: &BTreeMap<Stratum, FittedLengthSpectrum>) -> f64 {
+    if fitted.is_empty() {
+        return STATED_FLAT_CONCENTRATION;
+    }
+    let mut totals: Vec<f64> = fitted.values().map(|fit| fit.concentration).collect();
+    totals.sort_by(f64::total_cmp);
+    let middle = totals.len() / 2;
+    if totals.len() % 2 == 1 {
+        totals[middle]
+    } else {
+        (totals[middle - 1] + totals[middle]) / 2.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +775,7 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::ng::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, ShareProvenance, StratumRefusal,
+        DerivedStratum, PeriodLengthSpectrum, ShareProvenance, StratumFit, StratumRefusal,
     };
 
     fn stratum(period: u8, reference_repeats: u64) -> Stratum {
@@ -674,5 +1153,411 @@ mod tests {
             ],
             one_group(),
         );
+    }
+
+    // ---------------------------------------------------------------
+    // The tract ladder: a length spectrum and a concentration per locus
+    // ---------------------------------------------------------------
+
+    /// A stratum fitted on its own tracts, carrying the length spectrum and concentration the
+    /// fit produced — built by hand so the tests do not pay for a climb.
+    ///
+    /// **The slippage numbers and the spectrum are given separately and never derived from one
+    /// another**, so a fixture can hold a stratum whose slippage says one thing and whose
+    /// spectrum says another — which is what tells the two lookups apart.
+    fn fitted(
+        at: Stratum,
+        level: f64,
+        length_spectrum: Vec<f64>,
+        concentration: f64,
+    ) -> StratumOutcome {
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            stratum: at,
+            slippage: vec![Some(slippage(level))],
+            length_spectrum,
+            concentration,
+            log_likelihood_a_tract: -1.5,
+            tracts_fitted: 40,
+            borrowed: Vec::new(),
+            converged: true,
+            tracts_of_its_own: 40,
+            reads_crossing: 400,
+            level_provenance: vec![Some(from_the_cell(400.0))],
+            shares_provenance: vec![Some(shares_from_a_curve(400.0))],
+        }))
+    }
+
+    /// A three-class spectrum leaning short, so that a sign-flipped offset is a different
+    /// number rather than the same one.
+    fn leaning_short() -> Vec<f64> {
+        vec![0.6, 0.3, 0.1]
+    }
+
+    /// A pooled period, built by hand.
+    fn pool(period: u8, length_spectrum: Vec<f64>, concentration: f64) -> PeriodLengthSpectrum {
+        PeriodLengthSpectrum {
+            period,
+            length_spectrum,
+            concentration,
+            tracts_fitted: 900,
+            strata_pooled: 5,
+            converged: true,
+        }
+    }
+
+    /// **The top rung.** A stratum fitted on its own tracts answers with its own spectrum and
+    /// its own concentration, and says the fit was its own.
+    #[test]
+    fn a_stratum_fitted_here_answers_from_its_own_length_spectrum() {
+        let fits = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
+            one_group(),
+        );
+
+        let spectrum = fits.length_spectrum_at(2, 10);
+        assert_eq!(spectrum.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(spectrum.fitted_weights(), Some(&leaning_short()[..]));
+        assert_eq!(spectrum.concentration(), 4.0);
+        assert_eq!(spectrum.allele_span(), Some(1));
+        assert_eq!(fits.strata_with_a_length_spectrum(), 1);
+    }
+
+    /// **The middle rung.** A stratum furnished from its period's slippage curves carries
+    /// slippage numbers and no spectrum of its own, so it falls to the period's pooled tracts —
+    /// and the two are told apart by their numbers, not only by the variant.
+    #[test]
+    fn a_stratum_with_no_fit_of_its_own_takes_its_periods_pooled_tracts() {
+        let fits = StratumFits::over(
+            &[
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
+                derived(
+                    stratum(2, 14),
+                    vec![Some(slippage(0.09))],
+                    vec![Some(from_the_cell(400.0))],
+                ),
+            ],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![0.2, 0.5, 0.3], 9.0))]));
+
+        // The derived stratum has slippage — it is not absent from the fit — and no spectrum.
+        assert!(fits.at(ReadGroupId(0), 2, 14).is_ok());
+        assert_eq!(fits.strata_with_a_length_spectrum(), 1);
+        assert_eq!(fits.periods_with_a_pooled_length_spectrum(), 1);
+
+        let spectrum = fits.length_spectrum_at(2, 14);
+        assert_eq!(spectrum.rung(), LengthSpectrumRung::PeriodsPooledTracts);
+        assert_eq!(spectrum.fitted_weights(), Some(&[0.2, 0.5, 0.3][..]));
+        assert_eq!(spectrum.concentration(), 9.0);
+
+        // …and the stratum that has its own does **not** read the pool.
+        let own = fits.length_spectrum_at(2, 10);
+        assert_eq!(own.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(own.concentration(), 4.0);
+    }
+
+    /// **A stratum that is not in the fit at all reads the pool too**, which is the case a
+    /// caller meets most often: a locus whose reference tract length no stratum was fitted at.
+    #[test]
+    fn a_stratum_the_fit_never_saw_reads_its_periods_pool() {
+        let fits = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![0.2, 0.5, 0.3], 9.0))]));
+
+        assert_eq!(
+            fits.at(ReadGroupId(0), 2, 31),
+            Err(NoSlippage::NoSuchStratum)
+        );
+        assert_eq!(
+            fits.length_spectrum_at(2, 31).rung(),
+            LengthSpectrumRung::PeriodsPooledTracts
+        );
+    }
+
+    /// **The bottom rung, and it is a different period's pool that must not be read.** A period
+    /// with no pool of its own falls to the stated flat shape rather than borrowing the
+    /// dinucleotides'.
+    #[test]
+    fn a_period_with_no_pool_falls_to_the_stated_flat_shape() {
+        let fits = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![0.2, 0.5, 0.3], 9.0))]));
+
+        let spectrum = fits.length_spectrum_at(3, 10);
+        assert_eq!(spectrum.rung(), LengthSpectrumRung::StatedFlat);
+        assert_eq!(spectrum.fitted_weights(), None);
+        assert_eq!(spectrum.allele_span(), None);
+        assert_eq!(
+            spectrum.concentration(),
+            4.0,
+            "the run fitted one stratum, at a concentration of 4, so its median is 4"
+        );
+    }
+
+    /// **A run that fitted no stratum states the constant**, which is the only place
+    /// [`STATED_FLAT_CONCENTRATION`] is reached.
+    #[test]
+    fn a_run_that_fitted_no_stratum_states_the_constant() {
+        let fits = StratumFits::over(&[], BTreeMap::new());
+        let spectrum = fits.length_spectrum_at(2, 10);
+        assert_eq!(spectrum.rung(), LengthSpectrumRung::StatedFlat);
+        assert_eq!(spectrum.concentration(), STATED_FLAT_CONCENTRATION);
+        assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
+    }
+
+    /// **The stated concentration is the run's own median**, at an odd count and at an even
+    /// one — and the two arms are checked apart, because a mid-point taken with the wrong
+    /// rounding is right at one of them and wrong at the other.
+    #[test]
+    fn the_stated_concentration_is_the_median_of_the_runs_own_fitted_ones() {
+        let three = StratumFits::over(
+            &[
+                fitted(stratum(2, 8), 0.05, leaning_short(), 1.0),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 30.0),
+                fitted(stratum(2, 12), 0.05, leaning_short(), 4.0),
+            ],
+            one_group(),
+        );
+        assert_eq!(
+            three.stated_concentration(),
+            4.0,
+            "1, 4 and 30 have a median of 4 — not the mean, 11.67, and not the first inserted"
+        );
+
+        let four = StratumFits::over(
+            &[
+                fitted(stratum(2, 8), 0.05, leaning_short(), 1.0),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 30.0),
+                fitted(stratum(2, 12), 0.05, leaning_short(), 4.0),
+                fitted(stratum(2, 14), 0.05, leaning_short(), 6.0),
+            ],
+            one_group(),
+        );
+        assert_eq!(
+            four.stated_concentration(),
+            5.0,
+            "1, 4, 6 and 30 have a median of (4 + 6) / 2"
+        );
+    }
+
+    /// **A period's pool does not move the stated concentration**, because it is fitted from
+    /// the very same tracts the strata's own fits read — counting both weighs one period twice.
+    #[test]
+    fn a_periods_pool_does_not_move_the_stated_concentration() {
+        let fits = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
+            one_group(),
+        );
+        let with_pool = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![0.2, 0.5, 0.3], 500.0))]));
+
+        assert_eq!(fits.stated_concentration(), 4.0);
+        assert_eq!(
+            with_pool.stated_concentration(),
+            4.0,
+            "a pool at 500 chromosomes does not drag the run's median off its strata's own"
+        );
+    }
+
+    /// **The two lookups are keyed by two different repeat counts, and this is the fixture that
+    /// can tell them apart.** The tract sits at 10 repeats and carries a candidate at 14; the
+    /// stratum at 10 and the stratum at 14 hold different slippage levels *and* different
+    /// spectra. A slippage lookup keyed by the tract, or a spectrum lookup keyed by the
+    /// candidate, changes both answers.
+    #[test]
+    fn slippage_is_keyed_by_the_candidate_and_the_length_spectrum_by_the_tract() {
+        let fits = StratumFits::over(
+            &[
+                fitted(stratum(2, 10), 0.05, vec![0.6, 0.3, 0.1], 4.0),
+                fitted(stratum(2, 14), 0.20, vec![0.1, 0.3, 0.6], 25.0),
+            ],
+            one_group(),
+        );
+
+        // The candidate's own stratum answers the slippage question…
+        let at_the_candidate = fits
+            .at(ReadGroupId(0), 2, 14)
+            .expect("the stratum at 14 repeats is in the fit");
+        assert_eq!(at_the_candidate.slippage.level, 0.20);
+
+        // …and the tract's own answers the prior question, at the same locus, differently.
+        let at_the_tract = fits.length_spectrum_at(2, 10);
+        assert_eq!(at_the_tract.fitted_weights(), Some(&[0.6, 0.3, 0.1][..]));
+        assert_eq!(at_the_tract.concentration(), 4.0);
+    }
+
+    /// **The counters count**, and no fixture that reads one had more than a single stratum or
+    /// a single pool until this one — so `.len().min(1)` survived both.
+    #[test]
+    fn the_two_counters_report_how_many_of_each_the_run_holds() {
+        let fits = StratumFits::over(
+            &[
+                fitted(stratum(2, 8), 0.05, leaning_short(), 1.0),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
+                derived(
+                    stratum(2, 14),
+                    vec![Some(slippage(0.09))],
+                    vec![Some(from_the_cell(400.0))],
+                ),
+            ],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([
+            (2, pool(2, vec![0.2, 0.5, 0.3], 9.0)),
+            (3, pool(3, vec![0.3, 0.4, 0.3], 6.0)),
+        ]));
+
+        assert_eq!(
+            fits.strata_with_a_length_spectrum(),
+            2,
+            "three outcomes, of which two were fitted here and one was furnished from curves"
+        );
+        assert_eq!(fits.periods_with_a_pooled_length_spectrum(), 2);
+        assert_eq!(
+            fits.strata(),
+            3,
+            "every one of the three carries slippage, which is the count `strata` is about — it \
+             is the larger of the two and they are not interchangeable"
+        );
+    }
+
+    /// **A pool filed under a period that is not its own is refused.** The period is carried
+    /// twice — as the map key and on the pool — and the lookup reads the key, so a disagreement
+    /// would seed every tract of one period from another period's spread.
+    #[test]
+    #[should_panic(expected = "is filed under period 3")]
+    fn a_pool_filed_under_another_period_is_refused() {
+        let _ = StratumFits::over(&[], BTreeMap::new())
+            .with_period_length_spectra(BTreeMap::from([(3, pool(2, vec![0.2, 0.5, 0.3], 9.0))]));
+    }
+
+    /// **A shape that misses being a distribution by a little is refused too**, which is what
+    /// the tolerance is for — the only other fixture is off by a factor of ten, so a tolerance
+    /// loosened from `1e-9` to `1e-2` would have changed nothing.
+    ///
+    /// A spectrum summing to 1.005 scales the tract prior by half a percent at every tract of
+    /// that stratum, silently.
+    #[test]
+    #[should_panic(expected = "length shares totalling")]
+    fn a_length_spectrum_off_by_half_a_percent_is_refused() {
+        let _ = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, vec![0.605, 0.3, 0.1], 4.0)],
+            one_group(),
+        );
+    }
+
+    /// …and one inside the tolerance is accepted, so the check is a tolerance rather than an
+    /// equality that only a renormalised vector could pass.
+    #[test]
+    fn a_length_spectrum_within_the_tolerance_is_accepted() {
+        let fits = StratumFits::over(
+            &[fitted(
+                stratum(2, 10),
+                0.05,
+                vec![0.6 + 5e-10, 0.3, 0.1],
+                4.0,
+            )],
+            one_group(),
+        );
+        assert_eq!(fits.strata_with_a_length_spectrum(), 1);
+    }
+
+    /// **The lookup's own type refuses a shape it cannot index**, and it is a second door: the
+    /// gather's checks run once per run, this one runs at every lookup, and only this one stands
+    /// between a hand-built `LengthSpectrum` and the seed builder.
+    ///
+    /// An empty `weights` is the case that was silent before the constructor existed: the span
+    /// is `(0 − 1) / 2`, which overflows in debug and is `-1` in release, and against `-1` no
+    /// candidate is ever in reach.
+    #[test]
+    #[should_panic(expected = "class count is odd and at least three")]
+    fn a_length_spectrum_with_no_classes_cannot_be_built() {
+        let _ = LengthSpectrum::fitted(&[], 4.0, FittedFrom::ThisStratum);
+    }
+
+    #[test]
+    #[should_panic(expected = "class count is odd and at least three")]
+    fn a_length_spectrum_with_an_even_class_count_cannot_be_built() {
+        let _ = LengthSpectrum::fitted(&[0.25; 4], 4.0, FittedFrom::ThisStratum);
+    }
+
+    #[test]
+    #[should_panic(expected = "chromosomes' worth of belief; got 0")]
+    fn a_length_spectrum_held_with_no_conviction_cannot_be_built() {
+        let _ = LengthSpectrum::fitted(&[0.25, 0.5, 0.25], 0.0, FittedFrom::ThisStratum);
+    }
+
+    #[test]
+    #[should_panic(expected = "the stated-flat rung states a finite")]
+    fn a_stated_flat_rung_with_no_conviction_cannot_be_built() {
+        let _ = LengthSpectrum::stated_flat(f64::NAN);
+    }
+
+    /// A stratum's spectrum that does not sum to one is raw counts or a truncated copy, and
+    /// seeding from it scales the prior by the total at every tract of that stratum.
+    #[test]
+    #[should_panic(expected = "the fit of period 3, 17 repeats has length shares totalling")]
+    fn a_length_spectrum_that_is_not_a_distribution_is_refused() {
+        // Period 3 at 17 repeats, so that the message's two interpolations cannot be swapped
+        // without the expectation failing — at period 2, 10 repeats either order reads
+        // plausibly and neither number is the other's.
+        let _ = StratumFits::over(
+            &[fitted(stratum(3, 17), 0.05, vec![6.0, 3.0, 1.0], 4.0)],
+            one_group(),
+        );
+    }
+
+    /// A negative share is refused apart from the total, because `[-0.1, 0.6, 0.5]` sums to
+    /// exactly one.
+    #[test]
+    #[should_panic(expected = "cannot be negative or NaN")]
+    fn a_negative_length_share_is_refused() {
+        let _ = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, vec![-0.1, 0.6, 0.5], 4.0)],
+            one_group(),
+        );
+    }
+
+    /// An even class count cannot be `2 · span + 1`, so the offsets it would be read at are not
+    /// the offsets it was fitted at.
+    ///
+    /// **Four classes rather than two, and that is the whole point of the fixture.** `[0.5, 0.5]`
+    /// fails the *count* check and the *even* check at once, so dropping `len() % 2 == 1` left it
+    /// panicking on the other half and all nineteen tests green. At four, only the even check
+    /// stands between the run and a span of `(4 − 1) / 2 = 1`, which puts the second class at the
+    /// reference offset and leaves the fourth unreachable.
+    #[test]
+    #[should_panic(expected = "length classes; the spectrum runs from")]
+    fn an_even_length_class_count_is_refused() {
+        let _ = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, vec![0.25; 4], 4.0)],
+            one_group(),
+        );
+    }
+
+    /// A Dirichlet with a total of zero has no mean for the shape to be.
+    #[test]
+    #[should_panic(expected = "chromosomes' worth of belief")]
+    fn a_concentration_of_zero_is_refused() {
+        let _ = StratumFits::over(
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 0.0)],
+            one_group(),
+        );
+    }
+
+    /// **The pool is checked the way a stratum's own fit is**, and by the same function — a
+    /// second door onto the same seam is a second place for raw counts to get in.
+    #[test]
+    #[should_panic(expected = "the pooled fit of motif period 2 has length shares totalling")]
+    fn a_pooled_length_spectrum_that_is_not_a_distribution_is_refused_too() {
+        let _ = StratumFits::over(&[], BTreeMap::new())
+            .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![6.0, 3.0, 1.0], 4.0))]));
     }
 }

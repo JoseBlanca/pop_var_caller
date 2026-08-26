@@ -1,11 +1,19 @@
 # ng — how the caller learns how variable the population is
 
-**Status:** 2026-08-26. **No code yet — this settles the design.** It supersedes part of
+**Status:** 2026-08-26; **built on the repeat-tract side 2026-08-26** by step E2e of
+[`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md). It supersedes
 [`calling_priors.md`](calling_priors.md) §5, which specifies the repeat tract's prior seed as a
 constructed geometric shape scaled by a measured diversity; §4.2 below replaces both halves of that
-construction. Nothing has been built against §5's version — `fill_ssr_seed` exists and its two
-run-level inputs have no producer — so this is a change of design, not a supersession anyone has to
-do archaeology on.
+construction.
+
+**⚠ The line above replaces one that said "nothing has been built against §5's version", and that
+was wrong when it was written.** §5's version *had* been built —
+[`calling_prior.md`](../impl_plan/calling_prior.md)'s step E1 shipped `fill_ssr_seed` with a
+`modal_repeat_count`, a `SeedDecayPerRepeat`, a `RepeatGeneDiversity` and an `SsrSeedOutcome` — and
+E2e deleted all four. What was true is the sentence's *reason*: nothing **consumed** it, because its
+two run-level inputs had no producer, so the supersession cost no archaeology downstream. The
+correction is recorded rather than quietly swapped, because the false half is exactly what a reader
+would have relied on to decide how much code was at stake.
 
 **Companions:** [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3 (the ordinary-site
 diversity, and the STR one it delegates), [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §6
