@@ -5,7 +5,7 @@ the compression scheme exist as a measuring program (`examples/psp_row_stream_ro
 every number here was taken from it or from production.*
 
 *This document owns the **container**: the sections a file is made of, how a reader finds them,
-what a reader is allowed to hold, and what the writer and reader offer their callers. What goes
+what a reader is allowed to hold, and what the module offers its callers (§6). What goes
 **inside** a record — which fields, how each is encoded, what may be approximated — is
 [`psp_record_encoding.md`](psp_record_encoding.md), and the chain ids are
 [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md). The requirement both serve is a
@@ -68,6 +68,9 @@ any point on the curve above.
   findings here apply to it unchanged and that is not a reason to touch it.
 - **It does not define the cohort reader's scheduling** — which blocks it fetches, in what order,
   with how much look-ahead. That is [`run_streaming.md`](run_streaming.md)'s.
+- **It does not fix the module's Rust types or names.** §6 fixes the operations a caller can
+  perform and what each guarantees and refuses; the signatures there are indicative and the
+  architecture doc may name things differently.
 - **It does not specify a random-access API within a block.** A reader seeks to a block and streams
   from its start; reaching a record inside a block means decoding from that block's beginning. **This
   is a deliberately cheap corner** — the owner's ruling of 2026-08-25 is that the common case is
@@ -605,45 +608,139 @@ fit that stops at 62, not a measurement.*
 
 ---
 
-## 6. The interface
+## 6. Using the module — what a caller can do
 
-**What a user of this format wants to do**, and what the container offers. The types are the
-implementation's; this fixes the operations and their guarantees.
+**This section fixes the operations, what each guarantees, and what each refuses.** The Rust is
+indicative: the exact types are the implementation's, and the names are a suggestion the arch doc may
+overrule. What is not negotiable is the set of operations and the guarantees attached to them.
 
-### 6.1 Reading
+### 6.1 The five things a caller does
 
-- **Open a file.** Reads the footer, then the index, then parses the header. No block is touched.
-  Fails if the footer is absent or the version is unknown.
-- **Get the header** — available immediately after open, including the manifest.
-- **Get the trailer** — one seek and one read.
-- **Walk the blocks without decoding them** — chromosome, span, and the scan summary, straight from
-  the index. **This is what lets a cohort skip regions where no sample varies**, and it is most of
-  why reading psp files is cheaper than re-reading alignments.
-- **Stream records from a chosen block, the first by default.**
-- **Stream records from a genomic position** — the index turns a coordinate into a block with one
-  lookup. Users think in coordinates, so a position-based entry point belongs here even though a
-  block-based one is what it is built on.
+| | operation | what it needs |
+|---|---|---|
+| **read** | open a finished file and get its header, its trailer, its block list or its records | a path |
+| **write** | create a file from nothing and fill it | a path and the header content |
+| **append** | reopen a finished file and add more records to it | a path |
+| **re-trailer** | reopen a finished file and replace only its trailer | a path and a payload |
+| **inspect** | read the header of a file without opening it as a reader | a path |
 
-### 6.2 Writing
+### 6.2 Reading
 
-- **Create a file, given the header content.** The manifest is fixed at this moment; a writer cannot
-  change a field's encoding half-way through a file.
-- **Push records**, in coordinate order. **The writer rejects an out-of-order record** — coordinate
-  order is what the index and every seek depend on, and a writer that accepts a stray record
-  produces a file that seeks wrongly rather than one that fails.
-- **Close, with a trailer payload that may be empty.** Closing writes the index, the trailer and the
-  footer, in that order. **Before the close there is no footer, so any reader correctly refuses the
-  file** — which is exactly what should happen to a killed run.
-- **Reopen an existing complete file to add more records.** The footer's index offset says where the
-  blocks end; the writer truncates there, discarding the old index, trailer and footer, and carries
-  on. The header — and therefore the manifest — is not rewritten, so the appended records must use
-  the encodings already declared.
+```rust
+let psp = PspReader::open(path)?;          // footer, then index, then header
+psp.header();                              // the manifest included
+psp.trailer();                             // one seek and one read; may be empty
+psp.blocks();                              // index entries: chromosome, first position, offset
+psp.records();                             // every record, from the first block
+psp.records_from(chromosome, position)?;   // from the block containing that position
+psp.records_from_block(n)?;                // the block-level entry point the above is built on
+```
 
-**Closing must be durable and this is easy to get wrong.** Flush the format, then surface the
-buffered writer's errors, then sync. A `BufWriter` dropped without that can swallow a failed flush,
-and a truncated footer on a billions-of-records file looks exactly like an interrupted run —
-production's writer carries this warning in its own doc comment
+**Opening touches no block.** It reads the footer for the offsets, the index, and the header. That is
+the cost a cohort pays per open sample before it reads anything, and §5 is about keeping it small.
+
+**`records_from` exists because callers think in coordinates.** The index turns a coordinate into a
+block with one lookup, and the reader then streams from that block's start — it cannot start
+mid-block (§1.2), so the position asked for is where the *records* start, not where the reading
+starts.
+
+**`blocks()` is the cheap survey.** Chromosome, first position and offset without decompressing
+anything. What it does *not* carry is a per-block summary of variation: §2.4 says why that field was
+removed rather than kept.
+
+**Skipping records is the reader's decision, not a separate call.** Every record opens with the head
+of §4.3, so a walk hands the caller the head and the caller says whether it wants the body:
+
+```rust
+psp.records_where(|head| head.non_reference_reads > 0)   // builds only what the predicate wants
+```
+
+This is the shape the cohort's first pass uses, and it is why a walk that keeps one record in a
+hundred is about twice as fast as one that keeps all of them (§4.3).
+
+### 6.3 Writing a new file
+
+```rust
+let mut out = PspWriter::create(path, header)?;   // the manifest is fixed here
+out.push(&record)?;                               // coordinate order, enforced
+out.finish(trailer_payload)?;                     // index, trailer, footer — then durable
+```
+
+**The manifest is fixed at `create` and cannot change afterwards.** A field's encoding, the genomic
+block size and the look-back window are all decided before the first record and recorded in the
+header. A writer that could change a field's encoding half-way through would produce a file no reader
+could interpret without re-reading the header per block.
+
+**`push` rejects an out-of-order record**, rather than accepting it and producing a file that seeks
+wrongly. Coordinate order is what the index and every seek depend on.
+
+**`finish` is what makes the file readable at all.** It writes the index, then the trailer, then the
+footer. **Before it, there is no footer, so every reader refuses the file** — which is exactly what
+should happen to a killed run, and is goal 3.
+
+**⚠ `finish` must be durable, and this is easy to get wrong.** Flush the format, *then* surface the
+buffered writer's errors, *then* sync. A `BufWriter` dropped without that can swallow a failed flush,
+and a truncated footer on a billions-of-records file looks exactly like an interrupted run.
+Production's writer carries this warning in its own doc comment
 ([`src/psp/writer.rs:694-702`](../../../../src/psp/writer.rs)) because it has bitten before.
+
+### 6.4 Appending to a finished file
+
+```rust
+let mut out = PspWriter::append(path)?;   // truncates at the index; header and manifest kept
+out.push(&record)?;
+out.finish(trailer_payload)?;
+```
+
+**The footer says where the blocks end**, so appending means truncating at the index offset —
+discarding the old index, trailer and footer — and carrying on. **The header is not rewritten**, so
+the appended records must use the encodings already declared, and `append` fails on a file whose
+manifest the writer cannot honour.
+
+**It also inherits the coordinate-order rule across the seam**: the first appended record must not
+precede the last one already in the file.
+
+**A file being appended to has no footer while the writer holds it open**, exactly like a new one. An
+append interrupted half-way leaves a file that every reader refuses — which is right, but note that
+it has *lost* the trailer the file had before, so an append is not a safe in-place edit of a file
+whose trailer matters. **Write to a new path and rename if that matters to the caller.**
+
+### 6.5 Replacing the trailer
+
+```rust
+psp::replace_trailer(path, payload)?;   // no writer, no records touched
+```
+
+**This is why the index sits before the trailer** (§3): the trailer's offset is where the rewrite
+starts, so the blocks and the index are untouched and only the trailer and the footer are written.
+It is the cheap operation, and it exists because the trailer is where things computed *after* the
+records land — the per-sample summary today, whatever the statistical work adds later (§3.4).
+
+### 6.6 Inspecting without opening
+
+```rust
+psp::read_header(path)?;   // header only; no footer, no index
+```
+
+**A file with no footer still has a header**, so this works on an interrupted file where
+`PspReader::open` correctly fails. That is its point: a tool that reports what a half-written file
+*was going to be* needs it, and so does anything that checks a cohort's files agree on a reference
+before committing to a run.
+
+### 6.7 What the caller sees when something is wrong
+
+The four error classes of §7, and which operation raises each:
+
+| | raised by |
+|---|---|
+| no valid footer — the run was interrupted | `open`, `append`, `replace_trailer` |
+| unknown format version | `open`, `read_header`, `append` |
+| the file's look-back window exceeds the reader's budget | `open` |
+| a block fails to decompress, or a record runs past its block | any record walk |
+| a record out of coordinate order | `push` |
+
+**None of these may reach a caller as a half-built record**, and none is a panic: a corrupt file is
+an input, not a bug.
 
 ---
 
