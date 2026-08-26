@@ -485,6 +485,71 @@ file (so a row's distance from the baseline is that field's own contribution):
 | | 1/16 ln | 6.415 | 7.091 |
 | | 1/4 ln | 6.041 | 6.732 |
 
+### 6.0 Re-measured 2026-08-25, on the streaming store and at 279 reads a position
+
+**The sweep below was taken at 32 KiB frames and on samples at about 3 and 30 reads a position.
+This one is on the shape the container spec settled — 1 MB blocks, a 32 kB window — and it adds the
+deep corner that was missing.** The deep sample is HG002 over chr21's tandem-repeat regions,
+**279 reads a position** by its own coverage histogram, 74,623 covered positions.
+
+Each field swept alone, the other two held at the prototype's settings, in bytes a record for the
+whole file:
+
+| quantity | step | tomato 3× | HG002 279× |
+|---|---|---:|---:|
+| GC fraction of the window | 1/100 | **4.659** | **16.104** |
+| | 1/1,000 | 5.241 | 16.401 |
+| | 1/10,000 | 5.356 | 16.630 |
+| | 1/100,000 | 5.459 | 16.729 |
+| mean coverage of the window | 1 read | 5.110 | 16.471 |
+| | 1/4 read | **5.179** | **16.532** |
+| | 1/16 read | 5.356 | 16.630 |
+| | 1/64 read | 5.508 | 16.775 |
+| summed log-error per allele | 1/64 ln | 5.296 | 16.383 |
+| | 1/256 ln | 5.356 | 16.630 |
+| | **1/1,024 ln** | **5.496** | **16.836** |
+| | 1/4,096 ln | 5.793 | 17.273 |
+
+**Three things this settles.**
+
+**The GC fraction is the expensive one, and it was set far finer than anything reads it.** Taking it
+from 1/10,000 to 1/100 is worth **13 % of the tomato file** and 3.2 % of the human one — more than
+the other two together. Its consumer bins its input, so 1 % of GC and 0.01 % of GC are the same
+number by the time anything uses it.
+
+**A finer summed log-error is cheap, and cheaper at depth.** 1/256 → 1/1,024 costs **2.6 % of the
+file at 3 reads a position and 1.2 % at 279** — a quarter of the error in the likelihood term
+(0.4 % → 0.1 %) for one part in forty of the file. *This corrects an expectation recorded here
+earlier:* the field's magnitude does grow with depth, so it costs more **bytes** at 279× (+0.206 a
+record against +0.140), but the record it sits in grows faster, so its **share** falls.
+
+**Combined, and the savings do not add — measured together:**
+
+| GC · coverage · log-error | tomato 3× | HG002 279× |
+|---|---:|---:|
+| 1/10,000 · 1/16 · 1/256 (the prototype) | 5.356 | 16.630 |
+| 1/10,000 · 1/16 · 1/1,024 | 5.496 (+2.6 %) | 16.836 (+1.2 %) |
+| **1/100 · 1/4 · 1/1,024 — proposed** | **4.629 (−13.6 %)** | **16.255 (−2.3 %)** |
+| 1/100 · 1/4 · 1/4,096 | 4.907 (−8.4 %) | 16.689 (+0.4 %) |
+
+**So the finer log-error is free and then some**: coarsening the two fields whose consumers cannot
+tell the difference pays for it four times over, and the file still ends up 13.6 % smaller than the
+prototype at low depth.
+
+**Round-tripped at the proposed steps on both samples** — 7,687,686 tomato records and 74,623 human
+ones — with every integer field, allele sequence and read-name list identical and each approximated
+field inside half its own step.
+
+*Two caveats. The human sample is 74,623 positions of tandem repeat, chosen because it is where the
+300× reads are; it is small and it is not a random slice of a genome, so treat its per-record figures
+as the right size rather than as precise. And a tomato row is not monotone at the finest end —
+1/16,384 came back at 5.782 against 5.793 for 1/4,096 — which is unexplained and too small to chase.*
+
+**A record at 279 reads a position costs 16.3 bytes against 4.6 at three reads** — three and a half
+times, for a hundred times the depth. That is the read names, and it is §7's subject.
+
+---
+
 **Two of the three are free to coarsen and one is not.** The GC fraction feeds a
 coverage-against-GC curve that bins its input, and the mean coverage feeds a ratio of
 observed to expected depth; neither consumer can tell 1 % of GC from 0.01 %, or a quarter of
