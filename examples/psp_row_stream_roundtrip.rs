@@ -817,10 +817,23 @@ fn many(dir: &str, kind: &str, limit: usize) {
 const MAGIC_STREAM: &[u8; 4] = b"NGS1";
 
 /// How much decompressed data the reader keeps in front of the parser. One
-/// record has to fit; beyond that, bigger only means fewer refills.
-const ROLLING_BYTES: usize = 64 * 1024;
-/// How much compressed data is read from the file at a time.
-const READ_CHUNK_BYTES: usize = 64 * 1024;
+/// record has to fit; beyond that, bigger only means fewer refills. Set by
+/// `--rolling-kib`, because it is one of the two things a reader's memory is
+/// actually made of and the right value differs between a stream carrying whole
+/// records and one carrying a single number per record.
+static ROLLING_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(64 * 1024);
+/// How much compressed data is read from the file at a time. Set by
+/// `--read-chunk-kib`.
+static READ_CHUNK_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(64 * 1024);
+
+fn rolling_bytes() -> usize {
+    ROLLING_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+fn read_chunk_bytes() -> usize {
+    READ_CHUNK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn encode_streaming(
     psp: &str,
@@ -997,11 +1010,11 @@ impl StreamingStore {
             scales,
             src,
             dctx,
-            in_buf: vec![0u8; READ_CHUNK_BYTES],
+            in_buf: vec![0u8; read_chunk_bytes()],
             in_pos: 0,
             in_filled: 0,
             block_left: 0,
-            out: Vec::with_capacity(ROLLING_BYTES),
+            out: Vec::with_capacity(rolling_bytes()),
             out_at: 0,
             block_done: true,
             eof: false,
@@ -1308,7 +1321,7 @@ fn verify_streaming(psp: &str, path: &str) {
 /// Open every streaming store in a directory at once and walk them in
 /// lockstep, the way a cohort merge reads. This is the number the whole design
 /// is for: it is paid once per open sample.
-fn many_streaming(dir: &str, limit: usize) {
+fn many_streaming(dir: &str, limit: usize, streams: usize) {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .expect("read dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1320,13 +1333,23 @@ fn many_streaming(dir: &str, limit: usize) {
 
     let t0 = Instant::now();
     let n_open = paths.len();
-    let mut stores: Vec<StreamingStore> = paths.iter().map(|p| StreamingStore::open(p)).collect();
-    let mut live = vec![true; n_open];
+    // `streams` live decoders per open sample. A block cut into several
+    // separately-compressed pieces — the records in one, the cheap scan scalar
+    // in another — needs one decoder, one read buffer and one rolling buffer
+    // per piece, and they are all the same size whatever a piece carries. So
+    // opening the same store `streams` times measures the multiplier without
+    // needing the pieces to differ, which is what the memory question turns on.
+    let mut stores: Vec<StreamingStore> = paths
+        .iter()
+        .flat_map(|p| (0..streams).map(move |_| StreamingStore::open(p)))
+        .collect();
+    let n_stores = stores.len();
+    let mut live = vec![true; n_stores];
     let (mut n_records, mut checksum) = (0u64, 0u64);
     let mut any = true;
     while any {
         any = false;
-        for i in 0..n_open {
+        for i in 0..n_stores {
             if !live[i] {
                 continue;
             }
@@ -1342,6 +1365,8 @@ fn many_streaming(dir: &str, limit: usize) {
     }
     println!("phase\tmany-ngs");
     println!("open-files\t{n_open}");
+    println!("streams-per-file\t{streams}");
+    println!("live-decoders\t{n_stores}");
     println!("records\t{n_records}");
     println!("checksum\t{checksum}");
     println!("seconds\t{:.2}", t0.elapsed().as_secs_f64());
@@ -1367,6 +1392,8 @@ fn main() {
     // back over (the block) and how much a reader must hold (the window).
     let mut block_kib = 1024usize;
     let mut window_log = 15u32; // 32 KiB
+    // How many separately-compressed pieces one block is cut into.
+    let mut streams = 1usize;
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -1376,6 +1403,15 @@ fn main() {
             "--limit" => limit = args.next().expect("K").parse().expect("K"),
             "--block-kib" => block_kib = args.next().expect("K").parse().expect("K"),
             "--window-log" => window_log = args.next().expect("N").parse().expect("N"),
+            "--streams" => streams = args.next().expect("N").parse().expect("N"),
+            "--rolling-kib" => ROLLING_BYTES.store(
+                args.next().expect("K").parse::<usize>().expect("K") * 1024,
+                std::sync::atomic::Ordering::Relaxed,
+            ),
+            "--read-chunk-kib" => READ_CHUNK_BYTES.store(
+                args.next().expect("K").parse::<usize>().expect("K") * 1024,
+                std::sync::atomic::Ordering::Relaxed,
+            ),
             "--gc-scale" => scales.gc = args.next().expect("S").parse().expect("S"),
             "--coverage-scale" => scales.coverage = args.next().expect("S").parse().expect("S"),
             "--q-sum-scale" => scales.q_sum = args.next().expect("S").parse().expect("S"),
@@ -1401,7 +1437,7 @@ fn main() {
         }
         "decode-streaming" => decode_streaming(&store),
         "verify-streaming" => verify_streaming(&psp, &store),
-        "many-ngs" => many_streaming(&psp, limit),
+        "many-ngs" => many_streaming(&psp, limit, streams),
         other => panic!("unknown phase {other}"),
     }
 }
