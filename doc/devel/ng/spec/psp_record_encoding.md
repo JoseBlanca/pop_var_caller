@@ -107,6 +107,11 @@ kilobytes, not megabytes*, at three thousand open samples.
   [`SampleLocusObservations`](../../../../src/ng/locus_generation/mod.rs), which holds the
   region, the reference bases over it, a list of observed sequences with their support,
   and two counts of reads that produced no observation.
+- **psp block**, **zstd frame**, **zstd block** — three different things, and this document says
+  which it means wherever either could be read. A psp block is a span of reference and the records
+  in it; it becomes exactly one zstd frame; and a zstd block is zstd's own subdivision of a frame,
+  at most 128 KiB, which nothing here chooses.
+  [`psp_file_format.md`](psp_file_format.md) §2 has the table.
 - **Columnar** is how production lays a block out, and the word is the format's own: a psp header
   carries a `[[column]]` array with one entry per field
   ([`src/psp/header.rs:24`](../../../../src/psp/header.rs)). Rather than writing record 1's fields,
@@ -131,19 +136,19 @@ small independent frames compressed against a shared dictionary — is supersede
 records why, because the reasoning that led to it was sound against a question that turned
 out to be the wrong one.*
 
-**Write the records as a stream, not as a grid — and make the block large while capping
-what a reader has to hold.** Each record's fields go one after another; the bytes are cut
-into large blocks; each block is compressed on its own, with the compressor's **reach**
-capped at write time. A reader never inflates a block: it pulls decompressed bytes into a
-small rolling buffer, parses one record out of it, hands that record over and keeps
-nothing. Beside the records runs a second, tiny stream carrying the one number the merge
-scans. A tail index names every block.
+**Write the records record-major, not columnar — and make the psp block large while capping what a
+reader has to hold.** Each record's fields go one after another; the bytes are cut into large **psp
+blocks**; each psp block becomes **one zstd frame**, compressed with the **look-back window** capped
+at write time. A reader never inflates a psp block: it pulls decompressed bytes into a small rolling
+buffer, parses one record out of it, hands that record over and keeps nothing. Beside the records
+runs a second, tiny stream carrying the one number the merge scans. A tail index names every psp
+block.
 
 ```
 psp file
   header                  plain-text, the fields run_streaming.md §6.1 fixes
   block 0   light         the scan scalar for each record in the block
-            heavy         the records themselves, compressed with a capped reach
+            heavy         the records themselves, compressed with a capped look-back window
   block 1   light
             heavy
   ...
@@ -155,12 +160,12 @@ psp file
 **The one idea the whole shape rests on: the block and the reader's memory are different
 numbers.** In production's `.psp` they are the same one — a block is both how far back the
 compressor may look for a repeat and how much must be inflated before the first record
-exists — so every setting is a trade. Capping the reach separates them: the block can be a
+exists — so every setting is a trade. Capping the window separates them: the block can be a
 megabyte, for its ratio and for a small index, while a reader holds tens of kilobytes.
 
 **Two conditions have to hold together, and only the first is the compressor's doing:**
 
-1. **Do not inflate the whole block.** The capped reach and an incremental decoder.
+1. **Do not inflate the whole block.** The capped look-back window and an incremental decoder.
 2. **Do not accumulate what you inflated.** The reader hands each record over and retains
    nothing. Satisfy only the first and the memory reappears in the caller's arrays — which
    is where the largest single mass of a cohort run's heap was found
@@ -197,7 +202,7 @@ section's.
 
 **Those rows all price memory against bytes, and the shape in §2 does not have to pay
 that.** Built and walked against production's reader on the same 62-accession cohort, one
-record at a time, the way a merge reads — 1 MB blocks, a 32 KiB reach, no dictionary:
+record at a time, the way a merge reads — 1 MB psp blocks, a 32 KiB look-back window, no dictionary:
 
 | samples open | production `.psp` | this shape |
 |---:|---:|---:|
@@ -235,18 +240,18 @@ the genotype fit, and neither is sized by the block.*
 ### 2.2 Why the dictionary was proposed, and why it is no longer needed — a superseded conclusion, kept
 
 **This section used to argue for small frames with a shared dictionary, against one long
-stream with a capped reach. The measurement behind it was correct and the conclusion was
+stream with a capped look-back window. The measurement behind it was correct and the conclusion was
 wrong, and the reason is worth keeping** — it is a clean example of sweeping a grid that
 does not contain the answer.
 
-What was measured: on HG002, a continuous stream with a **512 KiB reach** gave 6.54 bytes a
+What was measured: on HG002, a continuous stream with a **512 KiB window** gave 6.54 bytes a
 record and 32 KiB frames with a dictionary gave 6.52 — the same size for fourteen times the
-memory, so the reach looked like something you pay for and do not get back.
+memory, so the window looked like something you pay for and do not get back.
 
 **What was never swept is the combination §2 proposes: a *large block* with a *small
-reach*.** Every streaming arm in that grid tied the reach to the block, or used an 8 MiB
-reach for both. The two were separate knobs in the measuring program and were never varied
-independently, so the one configuration that wins was not in the table. **The reach is not
+window*.** Every streaming arm in that grid tied the window to the psp block, or used an 8 MiB
+window for both. The two were separate knobs in the measuring program and were never varied
+independently, so the one configuration that wins was not in the table. **The window is not
 what costs memory when a reader decodes incrementally — the inflated block is** — and that
 distinction is invisible in a sweep where the two always move together.
 
@@ -327,9 +332,9 @@ open, [`decode_index`, `:110`](../../../../src/psp/index.rs)).
 
 #### The large block dissolves this — settled 2026-08-25
 
-**That paragraph was the strongest argument against small frames and it is now moot, because
-the block no longer has to be small.** Once a reader holds its reach rather than the block,
-the block is sized for compression and for the index, and both want it large.
+**That paragraph was the strongest argument against small psp blocks and it is now moot, because a
+psp block no longer has to be small.** Once a reader holds the look-back window rather than the psp
+block, the psp block is sized for compression and for the index, and both want it large.
 
 Measured on one tomato accession, the same records written both ways:
 
@@ -359,13 +364,13 @@ at 32 KiB, and it is what keeps the restart grain honest rather than incidental.
 Every number below was measured on both corners; the spread is what makes each of these a
 knob rather than a constant.
 
-**The block and the reach are two settings, not one, and that is the point of the design.**
-Confusing them is what made the earlier proposal (§2.2) reach for a dictionary.
+**The psp block size and the look-back window are two settings, not one, and that is the point of
+the design.** Confusing them is what made the earlier proposal (§2.2) reach for a dictionary.
 
 | setting | proposed | what it moves |
 |---|---|---|
 | **block size** | **1 MB of records** | the compression ratio and the number of index entries. **Not the reader's memory.** |
-| **compressor reach** | **32 KiB** | **the reader's memory**, and almost nothing else once the block is large |
+| **look-back window** | **32 KiB** | **the reader's memory**, and almost nothing else once the psp block is large |
 | rolling buffer | 64 KiB | how often the reader refills; one record must fit, and it grows if one does not |
 | zstd level | 9 | 16 % of the file (tomato 8.15 / 7.44 / 6.86); write time 1.7 s / 4.0 s / 16.2 s |
 | dictionary | **none** | superseded — a 1 MB block warms its own context (§2.2) |
@@ -374,15 +379,15 @@ Confusing them is what made the earlier proposal (§2.2) reach for a dictionary.
 ([`src/psp/block.rs:709`](../../../../src/psp/block.rs)) and the sweep gives no reason to
 move: level 19 costs four times the write for 8 % of the file.
 
-**Neither the block size nor the reach is a format change**, provided the reach is written
+**Neither the psp block size nor the look-back window is a format change**, provided the window is written
 into the file and the reader takes what it finds there rather than assuming a value. A
 reader that assumes will either allocate more than it needs or refuse a legitimate file.
 
 **What has not been swept: the block size itself.** 1 MB was chosen as comfortably large
 and measured once; nothing here says whether 256 KB gives the same file and the same index
-or whether 16 MB gives a better one. The reach was capped at 32 KiB for the same reason.
+or whether 16 MB gives a better one. The window was capped at 32 KiB for the same reason.
 Both are cheap to sweep now that a working writer and reader exist, and neither can move
-the per-open-sample figure much — the reach is what that is made of.
+the per-open-sample figure much — the window is what that is made of.
 
 ---
 
@@ -713,7 +718,7 @@ the one place these two documents' designs touch (§2.4).
 - **A single record can exceed the rolling buffer.** Many alleles, many read names. The
   buffer has to grow rather than fail, and a fixed maximum record size is not a safe
   assumption to bake in.
-- **The reach must be written into the file and honoured on read.** zstd will refuse a frame
+- **The look-back window must be written into the file and honoured on read.** zstd will refuse a frame
   whose window exceeds the decoder's configured maximum, so a reader that assumes 32 KiB will
   reject a legitimate file written with more. Read it from the header and configure the
   decoder from that.
@@ -897,7 +902,7 @@ will pass while a read-name list is being corrupted.
    **Settled by:** timing a cohort merge over one chromosome both ways, once a writer exists.
 4. **How does the index stay small when a file has 100,000 frames?** — **CLOSED 2026-08-25:
    the file does not have 100,000 frames.** The question only existed because the frame had to
-   be small to bound a reader's memory; once the reach does that instead, the block is sized
+   be small to bound a reader's memory; once the look-back window does that instead, the psp block is sized
    for compression and for the index, and both want it large. Measured: 154 blocks in a tomato
    accession at 1 MB blocks against 1,674 in production's `.psp`, so a flat index of one entry
    per block is a few hundred kilobytes on a whole-genome sample (§2.4). **The coarse-index-

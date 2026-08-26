@@ -83,10 +83,23 @@ moving between them will get it wrong.
 | this document | what it is | production's name for it |
 |---|---|---|
 | **header** | plain text, at the start; what is known before any record is written | header |
-| **block** | a run of consecutive records, compressed as one unit | block |
-| **block index** | one entry per block, so a reader can seek | block index |
+| **psp block** | a run of consecutive records over one span of reference, compressed as one unit | block |
+| **block index** | one entry per psp block, so a reader can seek | block index |
 | **trailer** | a payload the writer supplies when it closes the file; may be empty | **metadata section** |
 | **footer** | fixed-size, at the very end; offsets and magic. Its presence means the file is complete | **trailer** — 32 bytes there ([`src/psp/trailer.rs:28`](../../../../src/psp/trailer.rs)); this one is wider, §3.3 |
+
+**⚠ zstd has its own "block", and it is not ours.** Three things end up called a block or a frame,
+so this document uses all three names in full wherever either could be meant:
+
+| term | what it is | who chooses its size |
+|---|---|---|
+| **psp block** | a span of reference and the records in it | **us** — the `genomic_block_size_bp` of §4.1 |
+| **zstd frame** | one independently decompressable compressed unit. **One per psp block** | follows the psp block |
+| **zstd block** | zstd's own subdivision of a frame, at most 128 KiB | **nobody here** — zstd makes them as it works |
+
+The zstd block is not a knob and appears in this document exactly once as anything but a caution:
+it is where most of the per-decoder memory floor comes from (§5.3). Everywhere else, an unqualified
+"block" in this document means a psp block.
 
 Two more terms this document needs:
 
