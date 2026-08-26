@@ -78,7 +78,7 @@ no function bodies.
 Round-trips, and `head` on the file shows the body.
 ***Depends:*** A1. ***Source:*** [arch §3.2](../arch/psp_file_format.md), [spec §3.1](../spec/psp_file_format.md).
 
-☐ **A3 — `read_header`, and refusal of a bad one.** Reads a header without a footer, which is what it
+✅ **A3 — `read_header`, and refusal of a bad one.** Reads a header without a footer, which is what it
 is for. Unknown major version is `UnsupportedVersion`, not a parse failure.
 ***Depends:*** A2. ***Source:*** [spec §6.6, §6.7](../spec/psp_file_format.md).
 

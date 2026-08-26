@@ -46,7 +46,9 @@
 //! `doc/devel/ng/spec/psp_chain_id_encoding.md` (the chain ids), and
 //! `doc/devel/ng/arch/psp_file_format.md` (the code shape).
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::ng::types::GenomeRegion;
 
@@ -71,6 +73,92 @@ pub use header::{
 };
 pub use index::BlockIndexEntry;
 pub use record::RecordHead;
+
+// ---------------------------------------------------------------------
+// Inspecting a file without opening it as a reader
+// ---------------------------------------------------------------------
+
+/// The header of a psp, read from the file and nothing else — no footer, no index, no block.
+///
+/// **It works where opening the file as a reader correctly fails**, and that is its purpose
+/// (spec §6.6). A file with no footer is one a run was killed part-way through writing, and
+/// every reader refuses it; but it still *has* a header, so a tool that reports what a
+/// half-written file was going to be needs this, and so does anything checking that a
+/// cohort's files agree on a reference before a run commits to them.
+///
+/// **A newer format comes back as [`PspReadError::UnsupportedVersion`], not as a parse
+/// failure** — *upgrade the reader*, not *rebuild the file*. That is the whole reason the
+/// header is plain text and the version is read before anything else in it.
+///
+/// **Nothing is allocated from a length this function has not checked.** The declared body
+/// length is read from a fixed 12-byte prefix and bounded against
+/// [`MAX_HEADER_BODY_BYTES`] before a buffer for it exists, so a corrupt or hostile file
+/// cannot ask for memory on its own say-so.
+pub fn read_header(path: &Path) -> Result<Header, PspReadError> {
+    let io = |while_doing: &'static str| {
+        move |source: std::io::Error| PspReadError::Io {
+            path: path.to_path_buf(),
+            while_doing,
+            source,
+        }
+    };
+
+    let mut file = File::open(path).map_err(io("opening the file"))?;
+
+    // The magic and the declared length are a fixed-size prefix. Reading exactly those first
+    // is what keeps the length from sizing a buffer before it has been believed.
+    let mut framing = [0u8; HEAD_MAGIC.len() + 8];
+    file.read_exact(&mut framing)
+        .map_err(|source| match source.kind() {
+            std::io::ErrorKind::UnexpectedEof => PspReadError::MalformedHeader {
+                path: path.to_path_buf(),
+                reason: "is too short to hold a header's magic and length".to_string(),
+                source: None,
+            },
+            _ => io("reading the header's magic and length")(source),
+        })?;
+
+    if framing[..HEAD_MAGIC.len()] != HEAD_MAGIC {
+        let mut found = [0u8; 4];
+        found.copy_from_slice(&framing[..HEAD_MAGIC.len()]);
+        return Err(PspReadError::NotAnNgPsp {
+            path: path.to_path_buf(),
+            found,
+            expected: HEAD_MAGIC,
+        });
+    }
+
+    let body_bytes = u64::from_le_bytes(
+        framing[HEAD_MAGIC.len()..]
+            .try_into()
+            .expect("the remainder of a 12-byte array after 4 bytes is 8 bytes"),
+    );
+    if body_bytes == 0 || body_bytes > MAX_HEADER_BODY_BYTES {
+        return Err(PspReadError::MalformedHeader {
+            path: path.to_path_buf(),
+            reason: format!(
+                "declares a {body_bytes}-byte header body; this reader allows 1 to \
+                 {MAX_HEADER_BODY_BYTES}"
+            ),
+            source: None,
+        });
+    }
+
+    // Bounded above, so this cannot be driven past a megabyte however damaged the file is.
+    let mut whole_header = framing.to_vec();
+    whole_header.resize(HEADER_FRAMING_BYTES + body_bytes as usize, 0);
+    file.read_exact(&mut whole_header[framing.len()..])
+        .map_err(|source| match source.kind() {
+            std::io::ErrorKind::UnexpectedEof => PspReadError::MalformedHeader {
+                path: path.to_path_buf(),
+                reason: format!("declares a {body_bytes}-byte header body and ends before it does"),
+                source: None,
+            },
+            _ => io("reading the header body")(source),
+        })?;
+
+    Header::decode(&whole_header, path).map(|(header, _)| header)
+}
 
 // ---------------------------------------------------------------------
 // Errors
@@ -370,5 +458,200 @@ mod tests {
             "SRR7279481.psp could not be read while reading the header"
         );
         assert!(std::error::Error::source(&refused).is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // A3 — read_header, from a file on disk
+    // -----------------------------------------------------------------
+
+    /// The same tomato-shaped header the encoder's own tests use, trimmed to what a file
+    /// needs.
+    fn a_header() -> Header {
+        Header {
+            format_version: FORMAT_VERSION,
+            sample: "SRR7279481".to_string(),
+            reference: ReferenceIdentity {
+                name: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
+                md5: Some([0x0a; 16]),
+            },
+            contigs: vec![ContigIdentity {
+                name: "SL4.0ch01".to_string(),
+                length: 90_863_682,
+                md5: Some([0x1b; 16]),
+            }],
+            writer: WriterProvenance {
+                tool: "ng".to_string(),
+                version: "0.1.0".to_string(),
+                subcommand: "pileup".to_string(),
+                input_alignments: vec!["SRR7279481.cram".to_string()],
+                input_reference: "S_lycopersicum_chromosomes.4.00.fa".to_string(),
+                command_line: "ng pileup --sample SRR7279481".to_string(),
+                parameters: std::collections::BTreeMap::from([(
+                    "depth-cap".to_string(),
+                    ParameterValue::Integer(300),
+                )]),
+                created: "2026-08-26T09:15:00Z".parse().expect("an RFC 3339 stamp"),
+            },
+            manifest: Manifest {
+                genomic_block_size_bp: DEFAULT_GENOMIC_BLOCK_SIZE_BP,
+                block_byte_ceiling: None,
+                look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
+                fields: vec![FieldSpec {
+                    name: FieldName("position-offset".to_string()),
+                    encoding: FieldEncoding::Varint,
+                }],
+            },
+        }
+    }
+
+    /// Put `bytes` in a file and hand back the directory that owns it, because dropping the
+    /// directory deletes the file.
+    fn a_file_holding(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("SRR7279481.psp");
+        std::fs::write(&path, bytes).expect("the fixture is written");
+        (dir, path)
+    }
+
+    /// **The case this function exists for.** A run killed part-way leaves a file with a
+    /// header, some blocks and no footer; every reader refuses it, and a tool reporting what
+    /// it was going to be still has to read the header. So the fixture is a header followed
+    /// by bytes that are not a footer.
+    #[test]
+    fn a_header_reads_from_a_file_that_has_no_footer() {
+        let written = a_header();
+        let mut on_disk = written.encode().expect("a valid header encodes");
+        on_disk.extend_from_slice(&[0x5a; 8_192]);
+        let (_dir, path) = a_file_holding(&on_disk);
+
+        assert_eq!(read_header(&path).expect("the header reads"), written);
+    }
+
+    /// And it reads a file that holds nothing but a header, which is what a writer that was
+    /// killed before its first block leaves behind.
+    #[test]
+    fn a_header_reads_from_a_file_that_holds_nothing_else() {
+        let written = a_header();
+        let (_dir, path) = a_file_holding(&written.encode().expect("encodes"));
+        assert_eq!(read_header(&path).expect("the header reads"), written);
+    }
+
+    /// **A newer format is `UnsupportedVersion`, not a parse failure** — spec §6.7's
+    /// distinction, and the reason the header is plain text. The body here carries a key no
+    /// 1.0 reader knows, which is what a real 2.0 file would do.
+    #[test]
+    fn a_file_from_a_newer_format_says_so_rather_than_failing_to_parse() {
+        let body = "format-version = \"2.0\"\n\
+                    whatever-version-two-added = { shape = \"nothing here knows\" }\n";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HEAD_MAGIC);
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.extend_from_slice(HEAD_SENTINEL);
+        let (_dir, path) = a_file_holding(&bytes);
+
+        match read_header(&path) {
+            Err(PspReadError::UnsupportedVersion {
+                found, supported, ..
+            }) => {
+                assert_eq!(found, (2, 0));
+                assert_eq!(supported, FORMAT_VERSION);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// Both formats use the extension `.psp`. Handed production's, this says which it was
+    /// given rather than reporting a damaged ng file.
+    #[test]
+    fn a_production_psp_on_disk_is_refused_as_a_foreign_file() {
+        let mut productions = Vec::new();
+        productions.extend_from_slice(&crate::psp::header::HEAD_MAGIC);
+        productions.extend_from_slice(&(1u64).to_le_bytes());
+        productions.push(b'x');
+        let (_dir, path) = a_file_holding(&productions);
+
+        match read_header(&path) {
+            Err(PspReadError::NotAnNgPsp { found, .. }) => {
+                assert_eq!(found, crate::psp::header::HEAD_MAGIC);
+            }
+            other => panic!("expected NotAnNgPsp, got {other:?}"),
+        }
+    }
+
+    /// A file cut short at any point inside its header is refused, at every cut. **The
+    /// interesting half is the twelve-byte prefix**: below it there is not even a length to
+    /// believe, and above it the file promises a body it does not have.
+    #[test]
+    fn a_file_cut_short_inside_its_header_is_refused_at_every_cut() {
+        let whole = a_header().encode().expect("encodes");
+        for cut in 0..whole.len() {
+            let (_dir, path) = a_file_holding(&whole[..cut]);
+            let refused = read_header(&path);
+            assert!(
+                refused.is_err(),
+                "a file of {cut} bytes must not yield a header"
+            );
+        }
+        let (_dir, path) = a_file_holding(&whole);
+        assert!(read_header(&path).is_ok(), "and the whole file still reads");
+    }
+
+    /// The declared length is bounded **before a buffer for it exists**, so a corrupt file
+    /// cannot ask this reader for four exabytes of memory. Each fixture is twelve bytes long:
+    /// if the bound were checked after the allocation, this test would not return.
+    ///
+    /// **Both ends of the bound, and a zero is one of them.** Dropping the zero check alone
+    /// survived every other test in this module — a zero-length body is caught further in,
+    /// where the file is refused for ending early rather than for the length it declared, and
+    /// those are different things to tell whoever is looking at the file.
+    #[test]
+    fn a_declared_length_outside_the_readers_bound_is_refused_without_allocating_for_it() {
+        for declared in [0u64, MAX_HEADER_BODY_BYTES + 1, u64::MAX] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&HEAD_MAGIC);
+            bytes.extend_from_slice(&declared.to_le_bytes());
+            let (_dir, path) = a_file_holding(&bytes);
+
+            let refused = match read_header(&path) {
+                Err(refused) => refused,
+                Ok(_) => panic!("a {declared}-byte body must be refused"),
+            };
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("this reader allows 1 to {MAX_HEADER_BODY_BYTES}")),
+                "for a declared length of {declared}, got {refused}"
+            );
+        }
+    }
+
+    /// A file that is not there is an I/O failure that names the file and what was being
+    /// done, not a bare operating-system message.
+    #[test]
+    fn a_missing_file_names_itself_and_the_operation() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("never-written.psp");
+
+        match read_header(&path) {
+            Err(PspReadError::Io {
+                while_doing,
+                source,
+                ..
+            }) => {
+                assert_eq!(while_doing, "opening the file");
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    /// An empty file has no magic to check, so it is refused for being too short rather than
+    /// for being some other format — there are no bytes to say which.
+    #[test]
+    fn an_empty_file_is_refused_for_being_too_short() {
+        let (_dir, path) = a_file_holding(&[]);
+        let refused = read_header(&path).expect_err("an empty file holds no header");
+        assert!(refused.to_string().contains("too short"), "got {refused}");
     }
 }
