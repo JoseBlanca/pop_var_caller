@@ -600,10 +600,27 @@ pub use checked::FittedSpectrum;
 ///   makes the diversity moot**: it carries its own scale, so `diversity` is not read and the
 ///   fallback cannot be reported here.
 /// - **No spectrum** — the pair is the neutral `(1, θ)` at the diversity the pre-pass *did* fit.
-///   The pre-pass emits the spectrum as absent below a panel-size floor rather than as a thin
-///   estimate, so a cohort of five arrives here without one while a single sample arrives with
-///   one. A spectrum too thin to emit and a panel with nothing to fit carry the same information
-///   about shape.
+///   **Which runs land here depends on which route produced the parameters, and there are two.**
+///   The **joint route** fits the population's allele-frequency density and the diversity
+///   together, so a run on it always has a spectrum to project, at one sample and at a thousand
+///   (`FittedFrequencySpectrum::of`). The **cohort gather**, which is unbuilt, is designed to
+///   emit the spectrum as *absent* below a panel-size floor rather than as a thin estimate
+///   (`doc/devel/ng/spec/parameter_prepass_cohort.md` §10, question 3 — still open, and it names
+///   the experiment that would set the floor). The **per-sample histogram route** supplies a
+///   diversity and no density at all (`population_diversity.md` §3.5). A spectrum too thin to
+///   emit and a panel with nothing to fit carry the same information about shape, which is why
+///   one variant covers all three.
+///
+///   **⚠ The sentence that used to stand here compressed three routes into one and read as
+///   nonsense**: *"the pre-pass emits the spectrum as absent below a panel-size floor, so a
+///   cohort of five arrives here without one while a single sample arrives with one."* Under
+///   `calling_priors.md` §4.1 each half has a route behind it — the floor is the cohort gather's,
+///   and the single sample's spectrum was to come from the per-sample histogram — but with the
+///   routes left out it says a floor lets the smaller panel through.
+///   **`population_diversity.md` §3.4 reads it as simply backwards; §4.1 of the spec above says
+///   the single-sample case rests on the histogram and yields `(1, θ)`, which is this same
+///   *absent* branch. The two cannot both be right, and neither is this module's to settle** —
+///   what is settled here is that nothing in this function branches on cohort size.
 /// - **No spectrum and no diversity either** — the same neutral pair at the species-range
 ///   fallback, and the run must say so.
 ///
@@ -2098,9 +2115,11 @@ mod projection_tests {
     /// **No spectrum: the pair is the neutral `(1, θ)` at the diversity the pre-pass did fit** —
     /// exactly, with no arithmetic in between, and the regime says where it came from.
     ///
-    /// The pre-pass emits the spectrum as *absent* below a panel-size floor rather than as a thin
-    /// estimate, so a cohort of five arrives here without one while a single sample arrives with
-    /// one. **A branch on absence, never on cohort size.**
+    /// A run arrives with no spectrum for one of three reasons — the per-sample histogram route,
+    /// which supplies a diversity and no density; the cohort gather below its designed panel-size
+    /// floor; or an assembly that chose not to project one. **A branch on absence, never on
+    /// cohort size** (see [`project_spectrum_seed`]'s three regimes, whose illustration of the
+    /// floor named two cohort sizes without the routes that explain them until 2026-08-26).
     #[test]
     fn an_absent_spectrum_is_the_neutral_pair_at_the_fitted_diversity() {
         let theta = ExpectedHeterozygosity::try_new(6e-4).unwrap();

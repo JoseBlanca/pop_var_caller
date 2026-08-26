@@ -44,9 +44,10 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
+use crate::genetics::lgamma;
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
-use crate::ng::types::{Ploidy, ReadGroupId};
+use crate::ng::types::{ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
@@ -105,12 +106,153 @@ impl FrequencyDensity {
     /// finite-sample correction because there is no panel in it (spec §5.3).
     ///
     /// Only the segregating part contributes: a population carrying one allele has none.
+    ///
+    /// **This is the number the caller's genotype prior takes as its diversity**, wrapped in
+    /// [`ExpectedHeterozygosity`] by [`JointFit::fitted_diversity`]
+    /// (`doc/devel/ng/spec/population_diversity.md` §3.1).
+    ///
+    /// **⚠ It is not what the *fitted pair* implies, and the two part company as the panel
+    /// grows.** [`Self::allele_count_classes`] carries this number exactly at every panel size —
+    /// the classes' own unbiased heterozygosity is this, at one individual and at two hundred.
+    /// What does not carry it is the two-parameter Dirichlet-multinomial fitted to those classes
+    /// (`genotype_prior::project_spectrum_seed`): it cannot represent a point mass, and the more
+    /// classes it is fitted over the more it trades the ends against the middle.
+    ///
+    /// **Measured on four densities in `examples/ng_spectrum_panel_floor.rs`, and the size
+    /// depends on the shape.** The pair reproduces this number to within 0.1% at one individual,
+    /// on every shape swept. At **63 individuals** — this project's tomato cohort — it sits
+    /// **9.9% below** on a strong rare-allele pile-up, **18.6%** below on a human-like shape,
+    /// **40.9%** below on a flat one and **53.9%** below where the population's alleles sit at
+    /// middling frequencies. At 200 individuals those become 15.4%, 25.8%, 49.4% and 61.0%.
+    ///
+    /// **So a consumer that wants the population's heterozygosity reads it here**, and one
+    /// reading it off the seed's pair is reading a number that shrinks with the panel.
     pub fn expected_heterozygosity(&self) -> f64 {
         let (a, b) = (self.a, self.b);
         // E[2f(1−f)] under Beta(a, b) is 2·a·b / ((a+b)(a+b+1)).
         self.p_segregating() * 2.0 * a * b / ((a + b) * (a + b + 1.0))
     }
+
+    /// **The density evaluated into the `2N + 1` allele-count classes a panel of `N` diploid
+    /// individuals has** — what share of positions carry the alternative allele on no chromosome
+    /// of the panel, on exactly one, and so on to every chromosome.
+    ///
+    /// This is the *frequency spectrum* in the form the caller's genotype prior takes
+    /// ([`FittedSpectrum`](crate::ng::calling::genotype_prior::FittedSpectrum)), and it is a
+    /// **change of representation and not a second estimate**: nothing here is fitted that this
+    /// density does not already carry (`doc/devel/ng/spec/population_diversity.md` §3.2).
+    ///
+    /// ```text
+    /// class k  =  p_segregating · BetaBinomial(k | 2N, a, b)      for every k
+    /// class 0     also carries p_invariant
+    /// class 2N    also carries p_fixed_alt
+    /// ```
+    ///
+    /// **Where each point mass lands is the whole of why they are separate parameters.** A
+    /// position where the population carries only the reference base is a position where no
+    /// chromosome of any panel carries the alternative, whatever the panel's size — class 0.
+    /// A position fixed for the reference accession's own private allele is the mirror — class
+    /// `2N`. Folding either into the Beta would make it a *frequency* the panel could sample
+    /// away from, which is exactly what it is not.
+    ///
+    /// **A panel size is not a sample size.** The classes are the *expected* spread of a panel of
+    /// `N` drawn from this population, not counts of anything; two runs at the same `N` on the
+    /// same density get the same weights.
+    ///
+    /// **What the two-parameter fit does with them afterwards is not exact, and that is
+    /// downstream of here.** The Dirichlet-multinomial family
+    /// ([`project_spectrum_seed`](crate::ng::calling::genotype_prior::project_spectrum_seed))
+    /// cannot represent a point mass, so the pair it returns depends on how many classes it was
+    /// fitted over — measured in `examples/ng_spectrum_panel_floor.rs`, and recorded on
+    /// [`Self::expected_heterozygosity`].
+    ///
+    /// # Panics
+    ///
+    /// On a panel of zero individuals, which has no chromosomes to spread anything over, and on
+    /// one above [`MAX_PROJECTED_PANEL`], which is the ceiling the consumer's own constructor
+    /// holds — refused here so the message names the panel rather than a class count.
+    #[must_use]
+    pub fn allele_count_classes(&self, individuals: u32) -> Vec<f64> {
+        assert!(
+            (1..=MAX_PROJECTED_PANEL).contains(&individuals),
+            "a frequency spectrum is projected at a panel of 1 to {MAX_PROJECTED_PANEL} diploid \
+             individuals, and this one names {individuals}"
+        );
+        // **Held in debug, because the renormalisation below would otherwise repair it into
+        // something well-formed and wrong.** `p_segregating()` clamps at zero, so two masses
+        // totalling 1.2 give a spectrum summing to 1.2, which the divide turns into a perfectly
+        // valid distribution claiming three quarters of positions are invariant — and
+        // `FittedSpectrum::new`'s own sum check, which exists to catch exactly that, has been
+        // divided away by this function. Debug rather than release because the M-step clamps both
+        // masses off a normalised branch total, so no converged fit can reach it; what it guards
+        // is this type's public fields.
+        debug_assert!(
+            self.p_invariant + self.p_fixed_alt <= 1.0,
+            "a density's two point masses are shares of the same positions, so they cannot total \
+             more than one: {} invariant plus {} fixed non-reference",
+            self.p_invariant,
+            self.p_fixed_alt
+        );
+        let chromosomes = 2 * individuals as usize;
+        let (a, b) = (self.a, self.b);
+        let segregating = self.p_segregating();
+
+        // `ln k!` for every count this call can reach, filled once — the same device
+        // `seed_generic::fill_expected_spectrum` uses, and for the same reason: the binomial
+        // coefficients repeat their arguments heavily and reading them from here is bit-identical
+        // to three `lgamma` calls apiece.
+        let ln_factorial: Vec<f64> = (0..=chromosomes).map(|k| lgamma(k as f64 + 1.0)).collect();
+        // **`ln B(k + a, 2N − k + b)`, with the third term hoisted**: its argument is
+        // `(k + a) + (2N − k + b)`, which is `2N + a + b` at every `k`. Recomputing it per class
+        // was a third of this loop's `lgamma` calls, for a value that cannot move.
+        let ln_gamma_over_the_panel = lgamma(chromosomes as f64 + a + b);
+        let ln_beta_at = |x: f64, y: f64| lgamma(x) + lgamma(y) - ln_gamma_over_the_panel;
+        let ln_beta_ab = lgamma(a) + lgamma(b) - lgamma(a + b);
+
+        let mut classes: Vec<f64> = (0..=chromosomes)
+            .map(|k| {
+                let ln_binomial =
+                    ln_factorial[chromosomes] - ln_factorial[k] - ln_factorial[chromosomes - k];
+                let ln_weight = ln_binomial
+                    + ln_beta_at(k as f64 + a, (chromosomes - k) as f64 + b)
+                    - ln_beta_ab;
+                segregating * ln_weight.exp()
+            })
+            .collect();
+        classes[0] += self.p_invariant;
+        classes[chromosomes] += self.p_fixed_alt;
+
+        // **Renormalised, because the consumer checks that the weights are a distribution and
+        // this arithmetic is not exact.** The Beta-binomial sums to one over its own classes in
+        // real arithmetic; in floating point the sum drifts, and **the drift tracks the size of
+        // the `lgamma` arguments rather than only the class count**: measured, `Beta(50, 50)`
+        // with no point masses is 8.9e-14 out at *one* individual, which is 401 units in the
+        // last place, and the worst over the shape range the fit itself clamps to
+        // (`a, b ∈ [0.02, 50]`) is 6.3e-11 at 10,000 individuals. That is still 16 times inside
+        // the consumer's `SPECTRUM_NORMALISATION_TOLERANCE` of 1e-9, so the divide is
+        // belt-and-braces rather than load-bearing — but the alternative is a producer leaning
+        // on a consumer's tolerance it does not own.
+        //
+        // **No test holds this divide, and that is the honest consequence of the sentence
+        // above**: deleting it leaves every test green, because at every shape the fit can reach
+        // the raw sum already clears the tolerance. A test written to fail without it would have
+        // to assert a property the code does not need.
+        let total: f64 = classes.iter().sum();
+        for slot in classes.iter_mut() {
+            *slot /= total;
+        }
+        classes
+    }
 }
+
+/// The largest panel a frequency spectrum is projected at.
+///
+/// **The consumer's ceiling, restated where the panel is named.**
+/// `FittedSpectrum::new` refuses more than `2 · 10_000 + 1` classes, and a caller that reached
+/// it through this function would meet that refusal talking about class counts. Ten thousand
+/// diploid individuals is well above the several thousand this caller commits to
+/// (`doc/devel/specs/design_principles.md` §0).
+pub const MAX_PROJECTED_PANEL: u32 = 10_000;
 
 /// Positions a **sample** carries more copies of than the reference does.
 ///
@@ -264,6 +406,34 @@ pub struct JointFit {
     pub converged: bool,
     /// The log-likelihood at the returned parameters.
     pub log_likelihood: f64,
+}
+
+impl JointFit {
+    /// **The population's expected heterozygosity, in the type the caller's genotype prior
+    /// takes** — how often two copies of an ordinary site drawn at random from the population
+    /// differ (`doc/devel/ng/spec/population_diversity.md` §3.1, §3.2).
+    ///
+    /// **A wrap, not a computation.** [`Self::expected_heterozygosity`] is the number; this puts
+    /// it behind the constructor that refuses a value outside `[0, 1]`, so a degenerate fit
+    /// cannot hand the caller something that is not a probability.
+    ///
+    /// **`None` means the fit produced something that is not a heterozygosity**, and the ladder
+    /// below it takes over: `project_spectrum_seed` seeds from
+    /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`] and marks the run `FallbackDiversity`, which
+    /// is `population_diversity.md` §6's rule that neither number may fail a run. **It is not a
+    /// refusal**, and an earlier draft of this sentence said it was.
+    ///
+    /// It is not reachable from a fit that converged — `p_segregating()` clamps at zero and
+    /// `2ab/((a+b)(a+b+1))` cannot exceed a half, so the product is a probability — and it exists
+    /// because the alternative is `unwrap`.
+    ///
+    /// **It is fitted at every cohort size down to one** (`src/ng/types.rs`), because the density
+    /// it is read off is: a single diploid genome carries two copies of every site, and how often
+    /// those two differ is exactly what this asks.
+    #[must_use]
+    pub fn fitted_diversity(&self) -> Option<ExpectedHeterozygosity> {
+        ExpectedHeterozygosity::try_new(self.expected_heterozygosity).ok()
+    }
 }
 
 /// Why a fit could not be produced.
@@ -2856,6 +3026,300 @@ mod tests {
         };
         let truth = 0.09 * 2.0 * 0.5 * 2.0 / (2.5 * 3.5);
         assert!((density.expected_heterozygosity() - truth).abs() < 1e-12);
+    }
+
+    /// A `JointFit` carrying one density and one heterozygosity, with everything else empty —
+    /// the two fields [`JointFit::fitted_diversity`] reads and nothing more.
+    ///
+    /// **The heterozygosity is given rather than derived from the density**, so a test can hand
+    /// over a value no density produces and see what the wrap does with it.
+    fn a_fit_carrying(density: FrequencyDensity, expected_heterozygosity: f64) -> JointFit {
+        JointFit {
+            noise: BTreeMap::new(),
+            noisy_share: 0.0,
+            density: Estimate {
+                value: density,
+                provenance: Provenance::FittedHere,
+                observations: 1_000,
+            },
+            duplicated: None,
+            hom_excess: BTreeMap::new(),
+            rates: BTreeMap::new(),
+            contamination: BTreeMap::new(),
+            expected_heterozygosity,
+            noisy_posterior: Vec::new(),
+            genotype_posterior: Vec::new(),
+            duplicated_posterior: Vec::new(),
+            trace: Vec::new(),
+            passes: 1,
+            converged: true,
+            log_likelihood: -1.0,
+        }
+    }
+
+    /// A density with **every parameter different from every other**, so that a projection
+    /// reading `a` for `b`, or `p_invariant` for `p_fixed_alt`, is a different vector.
+    fn a_lopsided_density() -> FrequencyDensity {
+        FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.50,
+            b: 2.00,
+        }
+    }
+
+    /// The unbiased heterozygosity a panel's allele-count classes imply: `2k(2N − k) / (2N(2N −
+    /// 1))` averaged over the classes, which is the textbook finite-sample correction.
+    fn heterozygosity_of(classes: &[f64]) -> f64 {
+        let chromosomes = (classes.len() - 1) as f64;
+        classes
+            .iter()
+            .enumerate()
+            .map(|(k, weight)| {
+                let k = k as f64;
+                weight * 2.0 * k * (chromosomes - k) / (chromosomes * (chromosomes - 1.0))
+            })
+            .sum()
+    }
+
+    /// **`population_diversity.md` §8's fourth check, first half**: summed back, the class
+    /// weights return the density's own segregating share and its two point masses.
+    ///
+    /// **The subtraction is the whole test, and the version this replaces left it out.** The
+    /// function's last act is to divide by the total, so `total == 1` holds whatever the body
+    /// did; and `total − p_invariant − p_fixed_alt` is then `p_segregating()` **by that value's
+    /// own definition**. Both halves were identities, and both were measured to be: with
+    /// `classes[0] += p_invariant` changed to `+= p_invariant * 0.5`, and again with the whole
+    /// body replaced by a flat vector, that version passed.
+    ///
+    /// What has content is taking each mass out of **its own end class** and asking what is left
+    /// over the whole vector — which reads the class weights rather than their total, and fails
+    /// if either mass lands in the wrong place, is scaled, or is dropped.
+    #[test]
+    fn the_class_weights_return_the_densitys_own_shares() {
+        let density = a_lopsided_density();
+        for individuals in [1_u32, 2, 5, 40] {
+            let classes = density.allele_count_classes(individuals);
+            let last = classes.len() - 1;
+            assert_eq!(classes.len(), 2 * individuals as usize + 1);
+
+            let segregating: f64 = (classes[0] - density.p_invariant)
+                + (classes[last] - density.p_fixed_alt)
+                + classes[1..last].iter().sum::<f64>();
+            assert!(
+                (segregating - density.p_segregating()).abs() < 1e-9,
+                "at {individuals} individuals the classes leave {segregating} once each point \
+                 mass is taken out of its own end class, where the density segregates at {}",
+                density.p_segregating()
+            );
+        }
+    }
+
+    /// **The projection is a Beta-binomial and this checks it class by class, at a panel where
+    /// the two ends are not each other's mirror.**
+    ///
+    /// **The mirror is the accident this exists to break**, and it was measured. Every other
+    /// fixture here was symmetric in one way or another: the heterozygosity check weights class
+    /// `k` by `2k(2N − k)`, which is unchanged under `k → 2N − k`; the point-mass check ran at
+    /// `a = b = 2`; and the only class-by-class check ran at **one** individual with both masses
+    /// zero. So swapping `a` and `b` at every panel above one individual — projecting a
+    /// rare-allele pile-up as a common-allele one — passed all 175 tests, and so did the adapter
+    /// handing the prior the finished vector reversed.
+    ///
+    /// This runs at five individuals, with `a ≠ b` and both point masses non-zero and different
+    /// from each other, against a Beta-binomial computed here from the ratio recurrence — which
+    /// shares no code with the implementation.
+    #[test]
+    fn the_projection_is_a_beta_binomial_class_by_class_at_a_panel_that_is_not_its_own_mirror() {
+        let density = a_lopsided_density();
+        let individuals = 5;
+        let chromosomes = 2 * individuals as usize;
+        let classes = density.allele_count_classes(individuals);
+
+        // The Beta-binomial by the ratio recurrence, which touches no `lgamma`:
+        //   w(0) ∝ Π_{j<2N} (b + j) / (a + b + j)
+        //   w(k) = w(k−1) · (2N − k + 1)/k · (a + k − 1)/(b + 2N − k)
+        let (a, b) = (density.a, density.b);
+        let mut expected = vec![0.0_f64; chromosomes + 1];
+        expected[0] = (0..chromosomes)
+            .map(|j| (b + j as f64) / (a + b + j as f64))
+            .product();
+        for k in 1..=chromosomes {
+            let k_f = k as f64;
+            expected[k] = expected[k - 1] * (chromosomes as f64 - k_f + 1.0) / k_f
+                * (a + k_f - 1.0)
+                / (b + chromosomes as f64 - k_f);
+        }
+        for slot in expected.iter_mut() {
+            *slot *= density.p_segregating();
+        }
+        expected[0] += density.p_invariant;
+        expected[chromosomes] += density.p_fixed_alt;
+
+        for (k, (shipped, independent)) in classes.iter().zip(&expected).enumerate() {
+            assert!(
+                (shipped - independent).abs() <= 1e-12 * independent.abs().max(1e-6),
+                "class {k} of {chromosomes} is {shipped} where the recurrence gives {independent}"
+            );
+        }
+
+        // …and the shape is genuinely lopsided, so the vector reversed is a different vector.
+        let reversed: Vec<f64> = classes.iter().rev().copied().collect();
+        assert!(
+            classes
+                .iter()
+                .zip(&reversed)
+                .any(|(forward, back)| (forward - back).abs() > 1e-6),
+            "the fixture must not be its own mirror, or this test cannot see a reversal"
+        );
+    }
+
+    /// **§8's fourth check, second half, and the sweep found it holds at *every* panel rather
+    /// than only at a large one**: the heterozygosity the classes imply is the density's own,
+    /// at one individual and at forty.
+    ///
+    /// **This is the projection's property and not the fit's.** The two-parameter pair fitted to
+    /// these classes does *not* carry the number at every panel — it reproduces it at one
+    /// individual and falls away as the panel grows, because the family cannot represent a point
+    /// mass. **On this fixture's own density, measured: −15.9% at 63 individuals and −24.3% at
+    /// two hundred**; `examples/ng_spectrum_panel_floor.rs` sweeps four other shapes and finds
+    /// between −9.9% and −53.9% at 63. A reader who conflates the two would take this test as
+    /// evidence for the pair.
+    #[test]
+    fn the_classes_carry_the_densitys_heterozygosity_at_every_panel() {
+        let density = a_lopsided_density();
+        let truth = density.expected_heterozygosity();
+        for individuals in [1_u32, 2, 5, 40] {
+            let implied = heterozygosity_of(&density.allele_count_classes(individuals));
+            assert!(
+                (implied - truth).abs() / truth < 1e-6,
+                "at {individuals} individuals the classes imply a heterozygosity of {implied} \
+                 against the density's own {truth}"
+            );
+        }
+    }
+
+    /// **The two point masses land in the two end classes and nowhere else**, which is why they
+    /// are separate parameters rather than part of the Beta.
+    ///
+    /// A position where the population carries only the reference base is a position where no
+    /// chromosome of any panel carries the alternative — class 0, at every panel size — and the
+    /// mirror for the reference accession's own private alleles. The fixture's masses are
+    /// different from each other (0.90 against 0.01), so a projection that swapped them fails.
+    #[test]
+    fn each_point_mass_lands_in_its_own_end_class() {
+        // A density that segregates almost nowhere, so the two end classes are almost entirely
+        // their point masses and the Beta's own contribution cannot hide a swap.
+        //
+        // **`a` and `b` differ**, where an earlier version had them equal: at `a == b` the Beta
+        // half of the vector is its own mirror, so this test could see the two masses move and
+        // nothing else — and a projection that swapped `a` for `b` passed it.
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 3.00,
+            b: 1.50,
+        };
+        let classes = density.allele_count_classes(20);
+        let last = classes.len() - 1;
+        assert!(
+            classes[0] > 0.89 && classes[0] < 0.92,
+            "class 0 holds {} and the invariant mass alone is 0.90",
+            classes[0]
+        );
+        assert!(
+            classes[last] > 0.009 && classes[last] < 0.03,
+            "the last class holds {} and the fixed-alternative mass alone is 0.01",
+            classes[last]
+        );
+    }
+
+    /// **A density with no point masses is a plain Beta-binomial**, which is the arithmetic this
+    /// projection is, checked against the closed form at three classes.
+    ///
+    /// At one diploid individual and `Beta(a, b)`, the three classes are `b(b+1)`, `2ab` and
+    /// `a(a+1)`, over `(a+b)(a+b+1)`.
+    #[test]
+    fn a_density_with_no_point_masses_is_the_beta_binomial_itself() {
+        let (a, b) = (0.5, 2.0);
+        let density = FrequencyDensity {
+            p_invariant: 0.0,
+            p_fixed_alt: 0.0,
+            a,
+            b,
+        };
+        let classes = density.allele_count_classes(1);
+        let scale = (a + b) * (a + b + 1.0);
+        for (slot, closed_form) in classes.iter().zip([
+            b * (b + 1.0) / scale,
+            2.0 * a * b / scale,
+            a * (a + 1.0) / scale,
+        ]) {
+            assert!(
+                (slot - closed_form).abs() < 1e-12,
+                "class weight {slot} against the closed form {closed_form}"
+            );
+        }
+    }
+
+    /// A panel of no individuals has no chromosomes to spread anything over.
+    #[test]
+    #[should_panic(expected = "1 to 10000 diploid individuals, and this one names 0")]
+    fn a_panel_of_nobody_is_refused() {
+        let _ = a_lopsided_density().allele_count_classes(0);
+    }
+
+    /// …and one past the consumer's own ceiling is refused here, where the message can name the
+    /// panel rather than a class count.
+    ///
+    /// The expected string names the value, which tracks the constant — pinned below so that
+    /// moving the ceiling fails on a sentence about the ceiling rather than on a `should_panic`
+    /// mismatch nobody can read.
+    #[test]
+    #[should_panic(expected = "and this one names 10001")]
+    fn a_panel_past_the_projections_ceiling_is_refused() {
+        let _ = a_lopsided_density().allele_count_classes(MAX_PROJECTED_PANEL + 1);
+    }
+
+    /// **The ceiling itself is accepted**, which neither `should_panic` test reaches: they sit at
+    /// 0 and at one past it, so `(1..=MAX)` narrowed to `(1..MAX)` refused the documented maximum
+    /// and nothing noticed.
+    #[test]
+    fn the_ceiling_panel_is_accepted() {
+        const {
+            assert!(
+                MAX_PROJECTED_PANEL == 10_000,
+                "the sibling should_panic test names 10001 in its expected message"
+            );
+        }
+        let classes = a_lopsided_density().allele_count_classes(MAX_PROJECTED_PANEL);
+        assert_eq!(classes.len(), 2 * MAX_PROJECTED_PANEL as usize + 1);
+        assert!(
+            classes
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.0)
+        );
+    }
+
+    /// **The diversity reaches the caller in the type that cannot be confused for the repeat
+    /// path's**, and it is a wrap rather than a computation.
+    #[test]
+    fn the_fitted_diversity_is_the_densitys_own_heterozygosity_wrapped() {
+        let density = a_lopsided_density();
+        let truth = density.expected_heterozygosity();
+        let fit = a_fit_carrying(density, truth);
+        let wrapped = fit
+            .fitted_diversity()
+            .expect("a heterozygosity of a real density is a probability");
+        assert_eq!(wrapped.get(), truth);
+    }
+
+    /// **A fit whose heterozygosity is not a probability hands back nothing**, so a run refuses
+    /// with a message rather than seeding from a value the type would have had to coerce.
+    #[test]
+    fn a_diversity_that_is_not_a_probability_does_not_reach_the_caller() {
+        let fit = a_fit_carrying(a_lopsided_density(), 1.5);
+        assert!(fit.fitted_diversity().is_none());
     }
 
     // The whole fit, against a cohort whose truth is known, is in `whole_fit_tests` below —

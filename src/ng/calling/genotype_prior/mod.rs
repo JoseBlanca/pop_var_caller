@@ -560,9 +560,16 @@ pub use checked::{CohortAlleleCopies, Concentration, PriorRow, SampleAlleleCopie
 /// `doc/devel/ng/spec/calling_priors.md` §4 makes about production's own fallback.
 ///
 /// **Every variant is a branch on what the pre-pass had, never on how many samples there
-/// are.** A single sample arrives with a fitted spectrum; a cohort of five arrives without
-/// one, because the pre-pass emits the spectrum as *absent* below a panel-size floor rather
-/// than as a thin estimate. Nothing downstream may test the cohort size (spec §4.1).
+/// are**, and nothing downstream may test the cohort size (spec §4.1). **⚠ The illustration that
+/// used to stand here — a cohort of five arriving without a spectrum while a single sample
+/// arrives with one — left out the three routes that are the whole of why that is not a
+/// cohort-size rule, and without them it reads as a floor that keeps out the larger panel.**
+/// What the routes do: the joint route fits the density and the diversity together, so a run on
+/// it always has a spectrum to project, at one sample and at a thousand
+/// (`ng::calling::run_parameters::FittedFrequencySpectrum`); the cohort gather, unbuilt, is
+/// designed to emit it as absent below a floor `parameter_prepass_cohort.md` §10's third question
+/// has not yet set; and the per-sample histogram route supplies a diversity and no density at
+/// all.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SeedRegime {
     /// Read off the pre-pass's fitted frequency spectrum by the projection of spec §4.1.
@@ -584,8 +591,15 @@ pub enum SeedRegime {
         spectrum_match: SpectrumMatch,
     },
     /// No spectrum was emitted, so the pair is the neutral `(1, θ)` at the heterozygosity the
-    /// pre-pass **did** fit. A spectrum too thin to emit and a panel with nothing to fit
-    /// carry the same information about shape, which is why one variant covers both.
+    /// pre-pass **did** fit.
+    ///
+    /// **Which routes reach this, because they are not all the same claim.** The joint fit
+    /// produces the density and the heterozygosity together, so a run on that route always has a
+    /// spectrum to project. This rung is reached by the per-sample histogram route, which
+    /// supplies a diversity and no density (`doc/devel/ng/spec/population_diversity.md` §3.5); by
+    /// the cohort gather below its designed panel-size floor
+    /// (`parameter_prepass_cohort.md` §10's third question); and by a run whose assembly chose
+    /// not to project one.
     NeutralShape,
     /// The same neutral `(1, θ)` pair as [`SeedRegime::NeutralShape`], but `θ` itself is a
     /// guess rather than a fit — too few sites, or no inbreeding coefficient for the sample —

@@ -58,10 +58,145 @@ use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
+use crate::ng::parameter_estimation::joint::fit::FrequencyDensity;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::ssr::StratumKey;
 use crate::ng::types::{ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId};
+
+/// **The run's frequency spectrum, owned** — the joint fit's allele-frequency density written
+/// out as the `2N + 1` allele-count class weights the genotype prior's projection takes.
+///
+/// **It exists because [`FittedSpectrum`] borrows.** The pre-pass emits a four-parameter density,
+/// the prior takes a vector of class weights, and something has to own that vector for as long as
+/// the seed is being projected. This is that owner and nothing more; the arithmetic is
+/// `FrequencyDensity::allele_count_classes`'.
+///
+/// **A change of representation, not a second estimate** (`population_diversity.md` §3.2):
+/// nothing here is fitted that the density does not already carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FittedFrequencySpectrum {
+    class_weights: Vec<f64>,
+    variable_census_sites: f64,
+}
+
+impl FittedFrequencySpectrum {
+    /// Project one run's fitted density at the panel it was fitted on.
+    ///
+    /// `individuals` is the panel's size in **diploid individuals** — the run's sample count.
+    /// It is not read off the density, which has no panel in it: the density describes a
+    /// population, and which panel it is projected at is the run's fact.
+    ///
+    /// **This function applies no panel-size floor, and does not settle whether one belongs.**
+    /// `population_diversity.md` §9's third question asks where to put one and ends *"Confirm
+    /// before code"*; the honest answer this step can give is that **the statistic that question
+    /// names cannot locate a floor**, and why.
+    ///
+    /// §9 says to sweep how far the fit's answer sits from the measurement it was fitted to and
+    /// *"put the floor where it stops falling"*. Swept across four densities in
+    /// `examples/ng_spectrum_panel_floor.rs`, it does not fall: the divergence is **smallest at
+    /// the smallest panel** — 1.5 × 10⁻⁹ nats at one individual against 6.4 × 10⁻⁴ at two
+    /// hundred — and rises monotonically. That is structural rather than a property of any
+    /// cohort: at one diploid individual the spectrum's three classes are, after normalisation,
+    /// two free numbers against the two-parameter family's two, and the Beta-binomial at two
+    /// draws *is* a Dirichlet-multinomial, so the family lands on the measurement exactly and
+    /// would do so whatever the measurement said.
+    ///
+    /// **And the sweep is the wrong experiment for the question, which is a sampling one.** It
+    /// projects one *exact* density at many panel sizes, so nothing in it is about a small panel's
+    /// estimate being noisy — which is what a floor is for. The experiment that would settle it is
+    /// already named, in `parameter_prepass_cohort.md` §10's third question: subsample the tomato
+    /// cohort and watch where the spectrum stops being stable. **That question is still open and
+    /// this step did not run it.**
+    ///
+    /// **Who applies a floor, if one is set:** not this function. It projects at the panel it is
+    /// given; whether the run's assembly hands the prior `Some(spectrum)` or `None` at a small
+    /// panel is the assembly's decision, and the assembly is unbuilt. So the ordinary-site
+    /// ladder's middle rung — `SeedRegime::NeutralShape`, a neutral shape at the fitted
+    /// diversity — stays reachable, by that decision and by the per-sample histogram route
+    /// (`population_diversity.md` §3.5).
+    ///
+    /// **⚑ What the sweep did find, and it is not this step's to fix.** The projected pair's
+    /// implied heterozygosity falls away from the density's as the panel grows, because the
+    /// two-parameter family cannot hold a point mass: at **63 individuals**, this project's tomato
+    /// cohort, it is **9.9% below** the measurement on a strong rare-allele pile-up, **18.6%**
+    /// below on a human-like shape, **40.9%** below on a flat one and **53.9%** below where the
+    /// population's alleles sit at middling frequencies. The projection itself is exact — the
+    /// classes carry the density's heterozygosity at every panel size, which
+    /// `fit::tests::the_classes_carry_the_densitys_heterozygosity_at_every_panel` pins. What loses
+    /// it is `project_spectrum_seed`, which `calling_priors.md` §4.1 owns and
+    /// `population_diversity.md` names as a non-goal here. **Read that way, the sweep argues for a
+    /// ceiling rather than against a floor** — at one individual the two rungs agree on the
+    /// diversity to within 0.1% and it is the large panels where the top rung loses it.
+    ///
+    /// **The two rungs are not interchangeable at one individual even so, and it is worth saying
+    /// which way.** They agree on the heterozygosity; they disagree on how much conviction it is
+    /// held with. On the tomato-like density at one individual the projection returns a total of
+    /// 0.223 chromosomes where the neutral rung's is 1.001 — a prior four and a half times more
+    /// easily moved by the reads. Nothing here has measured which is better.
+    ///
+    /// **Every number above is from an illustrative density, not a fitted one.** No cohort's
+    /// fitted `FrequencyDensity` is recorded in this repository; the sweep uses a grid of Beta
+    /// shapes at diversities spanning this project's two benchmark cohorts, and says so.
+    ///
+    /// # Panics
+    ///
+    /// On a panel of zero individuals or one above
+    /// [`MAX_PROJECTED_PANEL`](crate::ng::parameter_estimation::joint::fit::MAX_PROJECTED_PANEL).
+    #[must_use]
+    pub fn of(density: &Estimate<FrequencyDensity>, individuals: u32) -> Self {
+        let class_weights = density.value.allele_count_classes(individuals);
+        // **How many census positions came out variable *across this panel*, which is not the
+        // share that segregates in the population.** Both the field's own documentation and the
+        // consumer's ask for a panel count, and a position can segregate in the population and
+        // still show one allele in every chromosome a panel happens to hold — the rarer the
+        // allele, the more often. So it is one minus the two end classes, which are exactly *no
+        // chromosome of the panel carries the alternative* and *every one does*.
+        //
+        // **The difference is not small at the panels this caller works over.** On the tomato-like
+        // density used in this module's tests, `p_segregating` is 4.0 in 1,000 while the panel's
+        // variable share at one individual is 6.1 in 10,000 — the same 6.6-fold gap as between a
+        // population's diversity and one genome's heterozygosity, which is what it is.
+        //
+        // It is a count of sites and not of reads: `Estimate::observations` follows its quantity,
+        // and the density's is a per-site one.
+        let last = class_weights.len() - 1;
+        let variable_share = (1.0 - class_weights[0] - class_weights[last]).max(0.0);
+        Self {
+            variable_census_sites: variable_share * density.observations as f64,
+            class_weights,
+        }
+    }
+
+    /// The borrowed view the prior's projection takes.
+    ///
+    /// **The regulariser weight is zero, and it is a measurement rather than a placeholder.**
+    /// That field says how many sites' worth of pseudo-counts held the spectrum at the neutral
+    /// shape; the joint route holds it at nothing, because it fits the density by maximum
+    /// likelihood over the census positions with no pseudo-counts anywhere. So
+    /// `SeedRegime::FittedSpectrum`'s `census_sites_outweigh_regularizer` is true for this route
+    /// whenever any position segregates — which is the honest answer and not a flattering one:
+    /// the flag exists to catch a *regularised* spectrum whose real sites lost, and this route
+    /// has no regulariser to lose to.
+    #[must_use]
+    pub fn view(&self) -> FittedSpectrum<'_> {
+        FittedSpectrum::new(&self.class_weights, 0.0, self.variable_census_sites)
+    }
+
+    /// The class weights themselves, class 0 first — one per allele-count class.
+    #[must_use]
+    pub fn class_weights(&self) -> &[f64] {
+        &self.class_weights
+    }
+
+    /// How many census positions came out variable **across this panel** — one minus the two
+    /// end classes, times the positions the density was fitted on. Not the share that segregates
+    /// in the population, which is larger; see [`Self::of`].
+    #[must_use]
+    pub fn variable_census_sites(&self) -> f64 {
+        self.variable_census_sites
+    }
+}
 
 /// **The pre-pass's outputs, owned for the run** — what [`FrozenParameters`] borrows.
 ///
@@ -93,6 +228,10 @@ impl RunParameters {
     /// different places — the spectrum from the joint fit, the diversity from the same fit's
     /// density, the panel's inbreeding from the cohort. See
     /// [`project_spectrum_seed`] for what it does with each and what it falls back to.
+    ///
+    /// **Both of the first two now have a producer**, which they did not until plan step E2f:
+    /// [`FittedFrequencySpectrum::of`] and
+    /// [`JointFit::fitted_diversity`](crate::ng::parameter_estimation::joint::fit::JointFit::fitted_diversity).
     #[must_use]
     pub fn project_seed(
         spectrum: Option<FittedSpectrum<'_>>,
@@ -363,11 +502,200 @@ mod tests {
     use crate::ng::calling::genotype_prior::SeedRegime;
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::contamination::NotIdentifiedReason;
+    use crate::ng::parameter_estimation::joint::fit::MAX_PROJECTED_PANEL;
     use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum};
     use crate::ng::types::SsrPeriod;
 
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("a diploid")
+    }
+
+    /// A density whose four parameters are all different, at a diversity near this project's
+    /// tomato cohort's — 6 differences per 10,000 bases.
+    fn a_fitted_density() -> Estimate<FrequencyDensity> {
+        Estimate {
+            value: FrequencyDensity {
+                p_invariant: 0.9950,
+                p_fixed_alt: 0.0010,
+                a: 0.20,
+                b: 1.00,
+            },
+            provenance: Provenance::FittedHere,
+            observations: 250_000,
+        }
+    }
+
+    /// **The seam that was missing**: a fitted density and the panel it was fitted on produce the
+    /// class weights the prior's projection takes, and the run seeds from them rather than from a
+    /// species-range constant.
+    #[test]
+    fn a_fitted_density_seeds_the_run_from_its_own_spectrum() {
+        let density = a_fitted_density();
+        let spectrum = FittedFrequencySpectrum::of(&density, 63);
+        assert_eq!(
+            spectrum.class_weights().len(),
+            2 * 63 + 1,
+            "a panel of 63 diploids has 127 allele-count classes"
+        );
+
+        let seed = RunParameters::project_seed(Some(spectrum.view()), None, outbred());
+        assert!(
+            matches!(seed.regime(), SeedRegime::FittedSpectrum { .. }),
+            "a spectrum arrived, so the run is on its own measurement rather than a fallback: \
+             {:?}",
+            seed.regime()
+        );
+        assert!(
+            seed.alpha_alt_total() > 0.0 && seed.alpha_ref() > 0.0,
+            "the pair is ({}, {})",
+            seed.alpha_ref(),
+            seed.alpha_alt_total()
+        );
+    }
+
+    /// **The adapter hands the prior the density's own class weights, in order** — and until
+    /// this test nothing at this seam read a class weight's *value*.
+    ///
+    /// **Two mutations measured, both surviving the whole 175-test suite**: reversing the
+    /// finished vector, which on this fixture puts 0.995 of the population's weight into the last
+    /// class — a population read as nearly fixed for the *alternative* allele; and dropping both
+    /// point masses, which is the entire reason `FrequencyDensity` has four parameters and not
+    /// two. The four other tests at this seam assert a length, a regime discriminant fixed by
+    /// whether `Some(..)` was passed, two positivity checks true of anything the constructor
+    /// accepts, and a direction between two panels — none of which reads a weight.
+    #[test]
+    fn the_adapter_carries_the_densitys_own_class_weights_in_order() {
+        let density = a_fitted_density();
+        let spectrum = FittedFrequencySpectrum::of(&density, 8);
+        let projected = density.value.allele_count_classes(8);
+
+        assert_eq!(
+            spectrum.class_weights(),
+            projected.as_slice(),
+            "the adapter must not reshape, reorder or rescale what the density projects"
+        );
+        assert_eq!(
+            spectrum.view().class_weights(),
+            projected.as_slice(),
+            "and the borrowed view is the same vector"
+        );
+
+        // The fixture can see a reversal: its first class holds the invariant mass and its last
+        // holds almost nothing, so forwards and backwards are not the same vector.
+        let last = projected.len() - 1;
+        assert!(
+            projected[0] > 0.99 && projected[last] < 0.01,
+            "class 0 holds {} and the last {} — if these were alike, a reversed vector would \
+             pass",
+            projected[0],
+            projected[last]
+        );
+    }
+
+    /// **The two ceilings agree**, and nothing else ties them: `MAX_PROJECTED_PANEL` on the
+    /// producer's side restates `MAX_PROJECTION_INDIVIDUALS` on the consumer's, and they could
+    /// drift apart with no test between them. This is the one call that projects at the ceiling
+    /// and hands the result to the constructor that has the other.
+    #[test]
+    fn a_spectrum_projected_at_the_ceiling_is_one_the_prior_accepts() {
+        let density = a_fitted_density();
+        let spectrum = FittedFrequencySpectrum::of(&density, MAX_PROJECTED_PANEL);
+        let view = spectrum.view();
+        assert_eq!(view.individuals(), MAX_PROJECTED_PANEL);
+    }
+
+    /// **The panel is the run's fact and not the density's**, so the same density at two panel
+    /// sizes gives two different vectors — and the seed the caller would use moves with it.
+    ///
+    /// Measured on this density in `examples/ng_spectrum_panel_floor.rs`: the reference
+    /// concentration runs 0.222 at one individual to 0.145 at two hundred. This pins the
+    /// direction and that the two are not the same call, which is what a projection ignoring its
+    /// `individuals` argument would make them.
+    #[test]
+    fn the_same_density_at_two_panels_is_two_different_spectra() {
+        let density = a_fitted_density();
+        let small = FittedFrequencySpectrum::of(&density, 1);
+        let large = FittedFrequencySpectrum::of(&density, 63);
+
+        assert_eq!(small.class_weights().len(), 3);
+        assert_eq!(large.class_weights().len(), 127);
+
+        let small_seed = RunParameters::project_seed(Some(small.view()), None, outbred());
+        let large_seed = RunParameters::project_seed(Some(large.view()), None, outbred());
+        assert!(
+            small_seed.alpha_ref() > large_seed.alpha_ref(),
+            "the pair drifts down with the panel: {} at one individual against {} at 63",
+            small_seed.alpha_ref(),
+            large_seed.alpha_ref()
+        );
+    }
+
+    /// **The count of variable census sites is a count of sites in *this panel***, not the
+    /// population's segregating share times the positions — and the two are far apart at the
+    /// panels this caller works over.
+    ///
+    /// A position can segregate in the population and still show one allele in every chromosome a
+    /// small panel holds; the rarer the allele, the more often. So the count is one minus the two
+    /// end classes, which are exactly *no chromosome of the panel carries the alternative* and
+    /// *every one does*.
+    ///
+    /// **Measured on this fixture**: the density segregates at 4.0 in 1,000, and the share a
+    /// panel actually sees runs from 6.1 in 10,000 at one individual to 2.6 in 1,000 at 63 — so
+    /// the panel count **rises with the panel** and is below the population share at every size.
+    /// An earlier version of this test asserted the population share and locked the mismatch in.
+    #[test]
+    fn the_variable_site_count_is_what_this_panel_would_see() {
+        let density = a_fitted_density();
+        let positions = density.observations as f64;
+
+        let mut seen = Vec::new();
+        for individuals in [1_u32, 10, 63] {
+            let spectrum = FittedFrequencySpectrum::of(&density, individuals);
+            let classes = spectrum.class_weights();
+            let last = classes.len() - 1;
+            let expected = (1.0 - classes[0] - classes[last]) * positions;
+            assert!(
+                (spectrum.variable_census_sites() - expected).abs() < 1e-6,
+                "at {individuals} individuals: {} variable sites against the {expected} the two \
+                 end classes leave",
+                spectrum.variable_census_sites()
+            );
+            assert!(
+                spectrum.variable_census_sites() < density.value.p_segregating() * positions,
+                "at {individuals} individuals a panel sees fewer variable positions than the \
+                 population has segregating ones: {} against {}",
+                spectrum.variable_census_sites(),
+                density.value.p_segregating() * positions
+            );
+            seen.push(spectrum.variable_census_sites());
+        }
+        assert!(
+            seen[0] < seen[1] && seen[1] < seen[2],
+            "a larger panel sees more of the population's variation: {seen:?}"
+        );
+    }
+
+    /// **The regulariser weight is zero and the flag beside it says the real sites won**, which
+    /// is a fact about this route rather than a flattering default: the joint fit holds the
+    /// density at nothing, so there is no regulariser for the census sites to lose to.
+    #[test]
+    fn the_joint_route_carries_no_regulariser() {
+        let density = a_fitted_density();
+        let spectrum = FittedFrequencySpectrum::of(&density, 10);
+        assert_eq!(spectrum.view().regularizer_site_weight(), 0.0);
+
+        let seed = RunParameters::project_seed(Some(spectrum.view()), None, outbred());
+        match seed.regime() {
+            SeedRegime::FittedSpectrum {
+                regularizer_site_weight,
+                census_sites_outweigh_regularizer,
+                ..
+            } => {
+                assert_eq!(regularizer_site_weight, 0.0);
+                assert!(census_sites_outweigh_regularizer);
+            }
+            other => panic!("a spectrum was supplied and the regime came back {other:?}"),
+        }
     }
 
     fn outbred() -> InbreedingF {

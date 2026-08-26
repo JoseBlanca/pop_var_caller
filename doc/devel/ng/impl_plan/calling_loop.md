@@ -511,7 +511,7 @@ newtype, and project the density into the `2N + 1` allele-count classes the seed
 **Home:** a step of its own, spec §3.2. *Depends:* E2c. *Source:*
 [`../spec/population_diversity.md`](../spec/population_diversity.md) §4, §5.
 
-**E2f. The ordinary-site prior's seed, from the fit.**  ☐
+**E2f. The ordinary-site prior's seed, from the fit.**  ✅
 
 **Both numbers are already fitted and neither reaches the caller.** `JointFit`
 ([`joint/fit.rs:198`](../../../../src/ng/parameter_estimation/joint/fit.rs)) carries the
