@@ -563,8 +563,10 @@ frozen before the first pass and stays frozen.
 | cohort's expected allele copies | **every pass** — this is the loop | the M-step |
 | each sample's prior | every pass, but only through the line above | [`calling_priors.md`](calling_priors.md) §3, §6 |
 | this locus's slippage level, direction split and fall-off | **between runs of the loop, and only where per-locus re-fitting is switched on** — ng ships with it off (§5.1) | re-fitted from this locus's own reads, pulled back toward the frozen per-stratum value |
-| each sample's read likelihoods | **no** — rebuilt only when the line above changes | [`read_likelihoods.md`](read_likelihoods.md), computed once per set of slippage numbers |
-| per-read-group error rate, contamination, STR substitution rate | **no** — frozen by the parameter fit | [`read_likelihoods.md`](read_likelihoods.md) §6.1 |
+| each sample's **read** likelihoods — the emissions | **no** — recomputed only when the line above changes | [`read_likelihoods.md`](read_likelihoods.md) §6.1, computed once per set of slippage numbers |
+| each sample's **genotype** likelihood row, assembled from those emissions | **no, unless the run fitted a contamination fraction** — then **every pass**, because `q(o)` is on the line below | [`read_likelihoods.md`](read_likelihoods.md) §3.6 |
+| the contaminating population's frequency for an observation's allele, `q(o)` | **every pass** — it is the loop's own per-locus estimate, over the samples in that sample's sequencing batch | the M-step, leaving the scored sample's own copies out |
+| per-read-group error rate, the contamination **fraction**, STR substitution rate | **no** — frozen by the parameter fit | [`read_likelihoods.md`](read_likelihoods.md) §6.1 |
 | each sample's inbreeding coefficient | **no** — frozen by the parameter fit | [`calling_priors.md`](calling_priors.md) §7 |
 | the candidate alleles | **no while the loop runs** — a discovery round may add to them between whole runs of it, and ng ships with that off (§4.1) | candidate selection, plus discovery where switched on |
 
@@ -817,6 +819,16 @@ count as a data-quality signal.
 `(sample, observation, candidate)` — or once per re-fit round where §5.1's per-locus re-fitting is
 switched on, which is one build plus at most three more; the loop's own arithmetic is
 `passes × samples × genotypes`.
+
+**⚠ A third cost appears wherever the run fitted a contamination fraction, and it was added on
+2026-08-24's correction to [`read_likelihoods.md`](read_likelihoods.md) §3.6 without reaching this
+paragraph.** The emission is still computed once per `(sample, observation, candidate)` — it reads no
+allele frequency — but the **genotype-likelihood row assembled from it** does read one, `q(o)`, and
+that moves with the loop. So the row is assembled again at every pass: `passes × samples × genotypes`
+multiply-add-and-logarithm on top of the loop's own arithmetic of the same shape, plus one assembly
+before the first pass and one against the settled frequencies before the final pass. **Where no
+fraction was fitted the row reads no frequency and is assembled once**, which is what this paragraph
+described and still describes for that case.
 Since genotypes grow as `C(A + P − 1, P)` while candidates grow as `A`, **the loop's arithmetic
 overtakes the likelihood as the allele count rises**, and the crossover depends on how expensive
 each side's per-entry work is. A candidate's read likelihood on the STR path costs a stutter term

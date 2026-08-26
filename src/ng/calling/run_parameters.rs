@@ -58,6 +58,7 @@ use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
+use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::ssr::StratumKey;
 use crate::ng::types::{ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId};
@@ -71,6 +72,12 @@ use crate::ng::types::{ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, R
 pub struct RunParameters {
     calibration_by_read_group: Vec<ReadGroupCalibration>,
     contamination_by_read_group: Vec<ContaminationView>,
+    /// Who was sequenced beside whom, as the run was told — the grouping the contaminating
+    /// population is drawn from. **Owned even where no contamination was fitted**, because it
+    /// is a fact about the run rather than about the fit; what the view does with it then is
+    /// drop it, since a run with no mixture has nothing to read it
+    /// ([`FrozenParameters::uncontaminated`]).
+    sequencing_batches: SequencingBatches,
     inbreeding_coefficient_by_sample: Vec<InbreedingF>,
     prior_seed: SpectrumSeed,
     ssr_slippage_fits: StratumFits,
@@ -120,17 +127,25 @@ impl RunParameters {
     /// - **every read group that has a minted-error total has a fitted rate, or neither.**
     ///   The two come from the same pass over the same reads; one without the other means the
     ///   accumulator and the fit saw different data.
+    /// - **the batching covers this run's read groups and this run's samples.** Both axes, since
+    ///   a run of one library per sample cannot tell them apart.
+    ///
+    /// **`sequencing_batches` is the one argument here that is *declared* rather than fitted** —
+    /// who ran beside whom, as the run was told, which is the population a contaminant's
+    /// genotype is drawn against. Its default is one batch holding everything, which is what a
+    /// run that says nothing gets and what every benchmark cohort here has.
     #[allow(
         clippy::too_many_arguments,
-        reason = "these are the pre-pass's outputs, and the list is the point: a bundle would \
-                  be a second type naming the same eight things, and the constructor exists so \
-                  that a run cannot forget one of them"
+        reason = "these are the run's inputs to calling, and the list is the point: a bundle \
+                  would be a second type naming the same nine things, and the constructor exists \
+                  so that a run cannot forget one of them"
     )]
     #[must_use]
     pub fn assemble(
         error_rate_by_read_group: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
         minted_by_read_group: &BTreeMap<ReadGroupId, MintedReadErrors>,
         contamination_by_read_group: &BTreeMap<ReadGroupId, ContaminationEstimate>,
+        sequencing_batches: SequencingBatches,
         inbreeding_coefficient_by_sample: Vec<InbreedingF>,
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: StratumFits,
@@ -150,7 +165,7 @@ impl RunParameters {
              whose calibration inputs name none is one whose read-group axis went missing"
         );
 
-        let calibration_by_read_group = (0..read_group_count)
+        let calibration_by_read_group: Vec<ReadGroupCalibration> = (0..read_group_count)
             .map(|group| {
                 let group = ReadGroupId(group as u32);
                 // **Both halves are there by construction** — the count above refuses a rate
@@ -202,9 +217,31 @@ impl RunParameters {
                 .collect()
         };
 
+        // **The batching is checked against both axes here**, where the axes are minted, rather
+        // than at the first locus that carries a read. It is declared by the user and the
+        // parameters are fitted, so the two can disagree about how many libraries a run has
+        // without either being wrong on its own.
+        assert_eq!(
+            sequencing_batches.read_group_count(),
+            calibration_by_read_group.len(),
+            "the declared sequencing batching covers {} read groups and the run has {}; a \
+             batching minted over a different read-group set would score some library against \
+             the neighbours of another",
+            sequencing_batches.read_group_count(),
+            calibration_by_read_group.len()
+        );
+        assert_eq!(
+            sequencing_batches.sample_count(),
+            inbreeding_coefficient_by_sample.len(),
+            "the declared sequencing batching covers {} samples and the run has {}; the \
+             sample-keyed batching is read by the run's own sample index",
+            sequencing_batches.sample_count(),
+            inbreeding_coefficient_by_sample.len()
+        );
         Self {
             calibration_by_read_group,
             contamination_by_read_group,
+            sequencing_batches,
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
@@ -229,6 +266,7 @@ impl RunParameters {
             FrozenParameters::new(
                 &self.calibration_by_read_group,
                 &self.contamination_by_read_group,
+                &self.sequencing_batches,
                 &self.inbreeding_coefficient_by_sample,
                 self.prior_seed,
                 &self.ssr_slippage_fits,
@@ -242,6 +280,18 @@ impl RunParameters {
     #[must_use]
     pub fn read_group_count(&self) -> usize {
         self.calibration_by_read_group.len()
+    }
+
+    /// Who was sequenced beside whom, as the run was told.
+    ///
+    /// **The one thing here that is declared rather than fitted**, and the one an output has to
+    /// be able to report alongside a contamination fraction: two runs under different batchings
+    /// produce frequencies that are not comparable, and
+    /// [`SequencingBatches::is_default`] is the only thing that can tell a declared batching
+    /// from an assumed one (`doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
+    #[must_use]
+    pub fn sequencing_batches(&self) -> &SequencingBatches {
+        &self.sequencing_batches
     }
 }
 
@@ -332,6 +382,55 @@ mod tests {
         StratumFits::over(&[], BTreeMap::new())
     }
 
+    /// The default batching for the run these two maps describe, over `samples` samples — one
+    /// batch holding all of it, which is what a run that declared nothing gets.
+    ///
+    /// **The read-group count is taken from the maps rather than restated**, so that a fixture
+    /// which grows a read group cannot leave a batching behind describing the old run — which
+    /// `assemble` would then refuse, for a reason that has nothing to do with what the test is
+    /// about. Both counts are floored at one, because two of the tests here hand `assemble` an
+    /// empty axis on purpose and expect *its* refusal rather than this fixture's.
+    fn one_batch_for(
+        rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        totals: &BTreeMap<ReadGroupId, MintedReadErrors>,
+        samples: usize,
+    ) -> SequencingBatches {
+        let libraries = rates
+            .keys()
+            .chain(totals.keys())
+            .map(|group| group.get() as usize + 1)
+            .max()
+            .unwrap_or(1);
+        one_batch(libraries, samples.max(1))
+    }
+
+    /// The default batching for a run of `libraries` read groups over `samples` samples.
+    ///
+    /// **The two counts are separate arguments** because they are separate axes: the batching's
+    /// two views are keyed by different things and are different lengths whenever a sample has
+    /// more than one library.
+    fn one_batch(libraries: usize, samples: usize) -> SequencingBatches {
+        let names: Vec<(String, String)> = (0..libraries)
+            .map(|library| {
+                (
+                    format!("rg{library}"),
+                    format!("s{}", library.min(samples.saturating_sub(1))),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(id, sample)| (id.as_str(), sample.as_str()))
+            .collect();
+        let groups = crate::ng::read::input::read_groups::ReadGroups::of_libraries(&borrowed);
+        assert_eq!(
+            groups.read_groups_per_sample().len(),
+            samples,
+            "the fixture asked for {samples} samples over {libraries} libraries"
+        );
+        SequencingBatches::all_together(&groups)
+    }
+
     /// A fitted per-base error rate with the warrant the fit gave it.
     fn fitted_rate(rate: f64, provenance: Provenance) -> Estimate<ErrorRate> {
         Estimate {
@@ -392,6 +491,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -433,6 +533,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -464,6 +565,7 @@ mod tests {
             &rates,
             &totals,
             &contamination,
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -513,6 +615,7 @@ mod tests {
             &rates,
             &totals,
             &contamination,
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -548,14 +651,96 @@ mod tests {
         }
     }
 
+    /// **A declared batching minted over a different set of libraries is refused where the run
+    /// is assembled.** The batching comes from the user and the read-group axis from the fit, so
+    /// the two can disagree without either being wrong on its own — and what a run would get
+    /// instead is some library scored against the neighbours of another.
+    #[test]
+    #[should_panic(expected = "batching covers 2 read groups and the run has 1")]
+    fn a_batching_over_another_runs_libraries_is_refused_at_assembly() {
+        let (rates, totals) = one_read_group(
+            &[(0, fitted_rate(0.002, Provenance::FittedHere))],
+            &[(0, minted(0.004, 500))],
+        );
+        let _ = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            one_batch(2, 2),
+            vec![outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+    }
+
+    /// **And the other axis.** A run of one library per sample cannot tell the two apart, which
+    /// is why both are checked: the sample-keyed batching is read by the run's own sample index.
+    #[test]
+    #[should_panic(expected = "batching covers 1 samples and the run has 2")]
+    fn a_batching_over_another_runs_samples_is_refused_at_assembly() {
+        let (rates, totals) = one_read_group(
+            &[(0, fitted_rate(0.002, Provenance::FittedHere))],
+            &[(0, minted(0.004, 500))],
+        );
+        let _ = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            one_batch(1, 1),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+    }
+
+    /// **The batching travels to calling and back out**, because a run that reports a
+    /// contamination fraction has to be able to say what population it was drawn against —
+    /// and a defaulted batching and a declared one holding every library are the same dense
+    /// value.
+    #[test]
+    fn the_run_keeps_the_batching_it_was_assembled_with() {
+        let (rates, totals) = one_read_group(
+            &[(0, fitted_rate(0.002, Provenance::FittedHere))],
+            &[(0, minted(0.004, 500))],
+        );
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            one_batch(1, 1),
+            vec![outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+        assert!(run.sequencing_batches().is_default());
+        assert_eq!(run.sequencing_batches().batch_count(), 1);
+    }
+
     /// The inbreeding coefficients are the run's own order, stored as they arrive: the pre-pass
     /// keys them by sample name, and mapping that onto the run's order belongs where the run is
     /// assembled.
     #[test]
     fn the_inbreeding_coefficients_keep_the_order_they_arrive_in() {
+        // **One library per sample, because the batching this run carries covers both axes** —
+        // and a run of three samples reading one read group is one where two of them were never
+        // sequenced.
         let (rates, totals) = one_read_group(
-            &[(0, fitted_rate(0.002, Provenance::FittedHere))],
-            &[(0, minted(0.004, 500))],
+            &[
+                (0, fitted_rate(0.002, Provenance::FittedHere)),
+                (1, fitted_rate(0.002, Provenance::FittedHere)),
+                (2, fitted_rate(0.002, Provenance::FittedHere)),
+            ],
+            &[
+                (0, minted(0.004, 500)),
+                (1, minted(0.004, 500)),
+                (2, minted(0.004, 500)),
+            ],
         );
         // **Three distinct values, because a palindrome cannot see a reversal** — and reversal
         // is the wrong implementation a map-keyed source most easily produces. `[0.0, 0.9, 0.0]`
@@ -565,6 +750,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, arriving.len()),
             arriving
                 .iter()
                 .map(|f| InbreedingF::try_new(*f).expect("a legal coefficient"))
@@ -622,6 +808,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -665,6 +852,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -695,6 +883,7 @@ mod tests {
             &rates,
             &totals,
             &contamination,
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -717,6 +906,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -744,6 +934,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -782,6 +973,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -829,6 +1021,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -864,6 +1057,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -890,6 +1084,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -910,6 +1105,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),
@@ -931,6 +1127,7 @@ mod tests {
             &rates,
             &totals,
             &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
             Vec::new(),
             human_like_seed(),
             no_strata(),
@@ -948,6 +1145,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            one_batch(1, 1),
             vec![outbred()],
             human_like_seed(),
             no_strata(),

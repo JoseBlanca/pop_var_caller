@@ -84,11 +84,12 @@ use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::Provenance;
+use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::ng::types::{
-    AlleleId, ErrorRate, GenomeRegion, Genotype, InbreedingF, LogProb, Phred, Ploidy, ReadGroupId,
-    SsrPeriod,
+    AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
+    InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
 };
 use std::collections::BTreeMap;
 
@@ -566,6 +567,23 @@ fn locus_kind_word(kind: &LocusKind) -> &'static str {
 pub struct FrozenParameters<'a> {
     calibration_by_read_group: &'a [ReadGroupCalibration],
     contamination_by_read_group: &'a [ContaminationView],
+    /// **Which sequencing batch each read group ran in** — which row of the contaminant
+    /// frequency table this library's reads are scored against.
+    ///
+    /// **Empty exactly where [`Self::contamination_by_read_group`] is**, and that pairing is
+    /// this type's own rule rather than an accident: the batching's only consumer is the
+    /// mixture's second half, and a run the fit found no contamination in has no second half
+    /// to build. `ContaminationMixture::new` refuses one without the other for the same reason.
+    batch_of_each_read_group: &'a [BatchId],
+    /// **Which sequencing batch each sample ran in**, in the run's sample order — which batch
+    /// row a sample's expected allele copies are added into when the frequencies are built.
+    ///
+    /// Two views of one partition, and they are different lengths whenever a sample has more
+    /// than one library ([`BatchOfEachReadGroup`] says why they are two types).
+    batch_of_each_sample: &'a [BatchId],
+    /// How many batches the run declares — the number of rows the contaminant frequency table
+    /// has. **One under the default batching**, which is one batch holding the whole run.
+    batch_count: usize,
     inbreeding_coefficient_by_sample: &'a [InbreedingF],
     prior_seed: SpectrumSeed,
     ssr_slippage_fits: &'a StratumFits,
@@ -591,6 +609,13 @@ impl<'a> FrozenParameters<'a> {
     /// - `calibration_by_read_group` — one entry per read group, indexed by
     ///   [`ReadGroupId`](crate::ng::types::ReadGroupId).
     /// - `contamination_by_read_group` — one entry per read group as well.
+    /// - `batching` — who was sequenced beside whom, as the run was told. **It arrives with
+    ///   the contamination views rather than beside them**, because it has exactly one
+    ///   consumer: the frequency the contaminant's genotype is drawn against is the frequency
+    ///   among the samples that ran together, so a run with no fitted fraction has nothing to
+    ///   read it. The default — one batch holding the whole run — is what a run that declared
+    ///   nothing gets, and it costs that run nothing: the table is one row and every read group
+    ///   reads the cohort frequency.
     /// - `inbreeding_coefficient_by_sample` — one entry per sample, **in the run's sample
     ///   order**.
     /// - `prior_seed` — the genotype prior's starting concentration for the run: how many
@@ -617,14 +642,29 @@ impl<'a> FrozenParameters<'a> {
     /// contamination covers four is a caller bug the row could only find lazily — at
     /// whichever locus first held a read from the fifth, or never.
     ///
+    /// If `batching` does not cover this run's read groups, or does not cover its samples.
+    /// **Both axes, because a run of one library per sample cannot tell them apart** — which is
+    /// every sample of every benchmark cohort here. The batching is declared by the user and
+    /// the parameters are fitted, so the two can disagree about how many libraries a run has
+    /// without either being wrong on its own; what a run would get instead is one library
+    /// scored against the neighbours of another, or a sample dropped out of every batch's
+    /// copies.
+    ///
     /// If either per-axis list is empty. A run has at least one sample and at least one
     /// read group, so an empty list is that axis going missing — and the symptom would
     /// otherwise be an out-of-range index at whichever locus first carried a read, naming
     /// neither the axis nor the locus.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the run's frozen parameters, and the list is the point: every one of them is \
+                  another document's to define, and the constructor exists so that a run cannot \
+                  forget one"
+    )]
     #[must_use]
     pub fn new(
         calibration_by_read_group: &'a [ReadGroupCalibration],
         contamination_by_read_group: &'a [ContaminationView],
+        batching: &'a SequencingBatches,
         inbreeding_coefficient_by_sample: &'a [InbreedingF],
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: &'a StratumFits,
@@ -645,9 +685,32 @@ impl<'a> FrozenParameters<'a> {
             calibration_by_read_group.len(),
             contamination_by_read_group.len()
         );
+        assert_eq!(
+            batching.read_group_count(),
+            calibration_by_read_group.len(),
+            "the batching covers {} read groups and the run supplied {} calibrations, so the \
+             batching and the parameters describe different runs — and the mixture would score \
+             some library against a batch that is not the one it ran in",
+            batching.read_group_count(),
+            calibration_by_read_group.len()
+        );
+        assert_eq!(
+            batching.sample_count(),
+            inbreeding_coefficient_by_sample.len(),
+            "the batching covers {} samples and the run has {}; the sample-keyed batching is \
+             read by the run's own sample index, so a shorter one drops the last samples out \
+             of every batch's copies and a longer one belongs to another run",
+            batching.sample_count(),
+            inbreeding_coefficient_by_sample.len()
+        );
+        let BatchOfEachReadGroup(batch_of_each_read_group) = batching.of_each_read_group();
+        let BatchOfEachSample(batch_of_each_sample) = batching.of_each_sample();
         Self::gather(
             calibration_by_read_group,
             contamination_by_read_group,
+            batch_of_each_read_group,
+            batch_of_each_sample,
+            batching.batch_count(),
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
@@ -680,6 +743,13 @@ impl<'a> FrozenParameters<'a> {
         Self::gather(
             calibration_by_read_group,
             &[],
+            // **No batching either, and for the same reason the views are absent**: the
+            // grouping's only consumer is the mixture's second half, and there is no mixture.
+            // A batching carried here would be a value nothing reads, which is how a
+            // *declared* batching and a defaulted one come to be indistinguishable.
+            &[],
+            &[],
+            0,
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
@@ -689,9 +759,16 @@ impl<'a> FrozenParameters<'a> {
     }
 
     /// The checks both constructors share, and the only place the fields are written.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private gather behind two public constructors; its list is theirs"
+    )]
     fn gather(
         calibration_by_read_group: &'a [ReadGroupCalibration],
         contamination_by_read_group: &'a [ContaminationView],
+        batch_of_each_read_group: &'a [BatchId],
+        batch_of_each_sample: &'a [BatchId],
+        batch_count: usize,
         inbreeding_coefficient_by_sample: &'a [InbreedingF],
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: &'a StratumFits,
@@ -708,9 +785,34 @@ impl<'a> FrozenParameters<'a> {
             "every sample of the run carries an inbreeding coefficient and a run has at \
              least one sample, so an empty list is a run whose sample order went missing"
         );
+        // **The batching is present exactly where the contamination views are**, and this is
+        // what says so. **Held in debug only, and that is not an accident**: this function is
+        // private and its two callers are the only doors — [`Self::new`], which always passes
+        // a batching, and [`Self::uncontaminated`], which always passes none — so no test can
+        // reach either check, and a release check no test can reach is one the suite cannot
+        // keep honest. What it guards is a *third* caller being added without the pairing.
+        debug_assert_eq!(
+            contamination_by_read_group.is_empty(),
+            batch_of_each_read_group.is_empty(),
+            "the run carries {} contamination views and a batching over {} read groups; the \
+             batching's only consumer is the mixture's second half, so a run has both or \
+             neither",
+            contamination_by_read_group.len(),
+            batch_of_each_read_group.len()
+        );
+        debug_assert_eq!(
+            batch_of_each_read_group.is_empty(),
+            batch_count == 0,
+            "a run with a batching has at least one batch and a run without one has none, and \
+             this has {} read groups batched into {batch_count}",
+            batch_of_each_read_group.len()
+        );
         Self {
             calibration_by_read_group,
             contamination_by_read_group,
+            batch_of_each_read_group,
+            batch_of_each_sample,
+            batch_count,
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
@@ -745,6 +847,85 @@ impl<'a> FrozenParameters<'a> {
     #[must_use]
     pub fn contamination_is_absent(&self) -> bool {
         self.contamination_by_read_group.is_empty()
+    }
+
+    /// Which sequencing batch each read group ran in — **empty on an uncontaminated run**,
+    /// where there is no mixture to read it.
+    ///
+    /// The typed wrapper rather than the slice, because the sample-keyed batching is the same
+    /// slice type and means something else: the two agree in length at one library per sample,
+    /// which is every sample of every benchmark cohort here, so a transposition passes every
+    /// shape check and comes back as a wrong contaminant frequency
+    /// ([`BatchOfEachReadGroup`](crate::ng::types::BatchOfEachReadGroup)).
+    #[inline]
+    #[must_use]
+    pub fn batch_of_each_read_group(&self) -> BatchOfEachReadGroup<'a> {
+        BatchOfEachReadGroup(self.batch_of_each_read_group)
+    }
+
+    /// Which sequencing batch each sample ran in, in the run's sample order — **empty on an
+    /// uncontaminated run**.
+    #[inline]
+    #[must_use]
+    pub fn batch_of_each_sample(&self) -> BatchOfEachSample<'a> {
+        BatchOfEachSample(self.batch_of_each_sample)
+    }
+
+    /// The sequencing batch **one sample** ran in, by its index in the run's sample order.
+    ///
+    /// **It takes a `usize` where [`Self::batch_of_read_group`] takes a [`ReadGroupId`], and
+    /// that is the point.** The two batchings are the same slice type over different axes, and
+    /// at one library per sample — every sample of every benchmark cohort here — they are the
+    /// same length too, so an index handed to the wrong one passes every shape check and comes
+    /// back as a wrong contaminant frequency. Asking through these two makes the transposition
+    /// a type error rather than a number.
+    ///
+    /// # Panics
+    ///
+    /// On a sample past the run's own count, and on an uncontaminated run, which carries no
+    /// batching at all — asking one which neighbours a contaminant it does not have was drawn
+    /// from.
+    #[inline]
+    #[must_use]
+    pub fn batch_of_sample(&self, run_sample: usize) -> BatchId {
+        *self
+            .batch_of_each_sample
+            .get(run_sample)
+            .unwrap_or_else(|| {
+                panic!(
+                    "sample {run_sample} has no sequencing batch; this run's batching covers {} \
+                 samples",
+                    self.batch_of_each_sample.len()
+                )
+            })
+    }
+
+    /// The sequencing batch **one read group** ran in. See [`Self::batch_of_sample`] for why the
+    /// two are separate calls.
+    ///
+    /// # Panics
+    ///
+    /// On a read group the batching does not cover, and on an uncontaminated run.
+    #[inline]
+    #[must_use]
+    pub fn batch_of_read_group(&self, read_group: ReadGroupId) -> BatchId {
+        let at = read_group.get() as usize;
+        *self.batch_of_each_read_group.get(at).unwrap_or_else(|| {
+            panic!(
+                "read group {at} has no sequencing batch; this run's batching covers {} read \
+                 groups",
+                self.batch_of_each_read_group.len()
+            )
+        })
+    }
+
+    /// How many sequencing batches the run declares — **zero on an uncontaminated run**, one
+    /// under the default batching, and the number of rows the per-locus contaminant frequency
+    /// table has.
+    #[inline]
+    #[must_use]
+    pub fn batch_count(&self) -> usize {
+        self.batch_count
     }
 
     /// One inbreeding coefficient per sample, in the run's sample order.
@@ -831,28 +1012,63 @@ pub const UNWRITTEN_SCRATCH_VALUE: f64 = f64::NAN;
 /// **What building one locus's genotype-likelihood table cost** — the instrument
 /// `doc/devel/ng/spec/calling_em_loop.md` §13's test 5 reads.
 ///
-/// **The property it exists to pin is that the cost does not grow with the pass count.** The
-/// table is built once per set of slippage numbers and read by every pass of the frequency
-/// loop; a version that rebuilt it per pass would give identical genotypes, only slower, so
-/// nothing but a counter can tell the two apart (§2, §8).
+/// **The property it exists to pin is that the expensive part does not grow with the pass
+/// count.** A version that recomputed it per pass would give identical genotypes, only slower,
+/// so nothing but a counter can tell the two apart (§2, §8).
 ///
-/// **`emission_evaluations` is accumulated per row build from the shapes that build was
+/// # The build has two halves, and this has to say which it is counting
+///
+/// **With contamination on, a caller may no longer cache a whole row across iterations**:
+/// `q(o)`, the contaminating population's frequency for the allele an observation shows, is the
+/// locus's own number and moves with the loop
+/// (`doc/devel/ng/spec/read_likelihoods.md` §3.6, corrected 2026-08-24).
+///
+/// What it may still cache — and what the first three fields count — is the **emission**: the
+/// answer to how one copy of one allele produced one observed sequence. It reads no frequency,
+/// so it stays computed once per `(sample, observation, candidate)` per locus (§6.1). What runs
+/// again is the per-genotype **assembly** of the row from those emissions, which the last two
+/// fields count: one multiply and one add inside a logarithm the row was taking anyway.
+///
+/// **⚠ "Expensive" is the spec's word for the general case, and on the SNP/indel path with no
+/// partial reads it is the wrong way round.** Counted on this module's own three-sample
+/// contaminated fixture — 3 rows × 3 observations × 3 alleles, diploid, so 6 genotypes and 9
+/// assemblies — the assemblies cost about 486 multiply-adds and 54 logarithms against the
+/// emission fill's 9 charged-error calls. What the emission genuinely is expensive for is the
+/// per-`(partial read, candidate)` byte comparison, and, on the repeat-tract path, an alignment
+/// per `(observation, candidate)`. **What the split buys where the emission is cheap is not
+/// arithmetic but the count**: `emission_evaluations` cannot grow with the pass count, so the
+/// invariant §13's test 5 pins stays a statement about the model rather than about a fixture.
+///
+/// **An uncontaminated run assembles once too**, because with no frequency in the formula the
+/// assembled row is the same value at every pass — so it keeps exactly the behaviour it had
+/// before the split.
+///
+/// **`emission_evaluations` is accumulated per row fill from the shapes that fill was
 /// handed, not counted inside the emission.** The repeat-tract path has an emission seam a
 /// counting model could wrap; the SNP/indel path has none — its per-read term is inside the
-/// row function. So this counts what the driver *asked for*, which is what catches a rebuild,
-/// and does not catch a row function that evaluates the wrong number of terms. Saying which
+/// fill. So this counts what the driver *asked for*, which is what catches a rebuild,
+/// and does not catch a fill that evaluates the wrong number of terms. Saying which
 /// is which is the point of the field names.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct EmissionCost {
-    /// How many times the whole `rows × genotypes` table was built. **One** at the shipped
-    /// configuration, whatever the pass count.
-    pub(crate) table_builds: u64,
-    /// How many times a sibling row builder was called — one per sample per table build.
-    pub(crate) row_builds: u64,
-    /// Summed over those calls, `observations × candidates`: the emission evaluations the
-    /// builders were asked for. **`Σ_s`, not a three-way product** — a fixture whose samples
+    /// **The expensive half.** How many times the locus's frequency-free emissions were
+    /// computed for the whole cohort — **one**, whatever the pass count and whether or not the
+    /// run fitted a contamination fraction.
+    pub(crate) emission_builds: u64,
+    /// How many times one sample's emissions were filled — one per row per emission build.
+    pub(crate) emission_row_fills: u64,
+    /// Summed over those fills, `observations × candidates`: the emission evaluations the
+    /// fills were asked for. **`Σ_s`, not a three-way product** — a fixture whose samples
     /// hold equal observation counts is the one shape that hides the difference (§13 test 5).
     pub(crate) emission_evaluations: u64,
+    /// **The cheap half.** How many times the whole `rows × genotypes` table was assembled
+    /// from those emissions. **One** on an uncontaminated run, whatever the pass count; on a
+    /// contaminated one, one for the initialisation pass, one at the head of each pass, and one
+    /// more against the settled frequencies before the final pass.
+    pub(crate) table_assemblies: u64,
+    /// How many rows were assembled, counted one at a time — `rows × table_assemblies` on a
+    /// whole table, and less where an assembly stopped short.
+    pub(crate) row_assemblies: u64,
 }
 
 /// Every buffer one locus's calling fills — **allocated once per worker and reused at every
@@ -892,7 +1108,14 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// `samples × genotypes`, sample-major: how probable each sample's reads are under each
     /// candidate genotype — the **genotype** likelihood, written `Lg` in
     /// `doc/devel/ng/spec/read_likelihoods.md` §1, as against `Lr`, which is one read
-    /// against one allele. Built once per set of slippage numbers and read by every pass.
+    /// against one allele.
+    ///
+    /// **Assembled from the emissions below, and how often depends on contamination**: with no
+    /// fraction fitted the assembled row reads no allele frequency, so it is the same value at
+    /// every pass and is written once per locus; with one fitted it holds `q(o)`, which moves
+    /// with the loop, and is written again at every pass
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §3.6, §6.1). What is written once either way is
+    /// the emissions.
     genotype_likelihoods: Vec<LogProb>,
     /// One entry per genotype: the sample being scored, its log-prior.
     prior_row: Vec<LogProb>,
@@ -972,8 +1195,49 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// What the last `prepare_for_locus` reset and the table build has counted since — spec
     /// §13 test 5's instrument.
     emission_cost: EmissionCost,
-    /// The SNP/indel row's own scratch.
-    generic_row: GenericRowScratch,
+    /// **One SNP/indel emission cache per scratch row**, and one per row rather than one
+    /// reused, because with contamination on the loop reads them again after the next sample
+    /// has been scored: the emissions are filled once per locus and the rows are assembled from
+    /// them once per pass (`doc/devel/ng/spec/read_likelihoods.md` §6.1).
+    ///
+    /// **Grown to the locus's row count and never shrunk**, like every other buffer here —
+    /// and, like the repeat-tract row's, each one sizes itself per sample, which is why they
+    /// are outside [`buffer_fingerprints`](Self::buffer_fingerprints).
+    generic_rows: Vec<GenericRowScratch>,
+    /// `batches × alleles`, batch-major: how many copies of each allele the samples of each
+    /// sequencing batch are expected to carry, this locus, at the loop's current estimate —
+    /// the first half of spec §3.6's `q(o)`, and the half that does not depend on which
+    /// sample is being scored. Refilled **once per pass**.
+    ///
+    /// Empty on a run the fit found no contamination in, where nothing reads it.
+    batch_allele_copies: Vec<f64>,
+    /// `batches × alleles`, batch-major: the contaminant allele frequencies **one sample** is
+    /// scored against — the copies above turned into a distribution with that sample's own
+    /// copies taken out of its own batch. Refilled **once per sample per pass**, because the
+    /// subtraction is that sample's.
+    ///
+    /// Empty on a run the fit found no contamination in.
+    contaminant_allele_frequencies: Vec<f64>,
+    /// `run samples × alleles`, sample-major: the expected copies above, scattered from the
+    /// scratch rows back onto the **run's** sample axis, with zero at every sample this locus
+    /// has no row for.
+    ///
+    /// **It exists because the batching is the run's and the rows are the locus's.** A batch
+    /// whose samples were all ruled uncallable here has no row at all, and summing over rows
+    /// would leave that batch's row of the copy table unwritten — which the copy fill refuses,
+    /// by name, as a batching that does not describe the run. Scattering onto the run's axis
+    /// gives such a batch a row of zeros instead, which is what the M-step already does with an
+    /// uncallable sample: it contributes nothing.
+    ///
+    /// Empty on a run the fit found no contamination in.
+    expected_copies_by_run_sample: Vec<f64>,
+    /// How many sequencing batches the two tables above are sized for. **Zero means the
+    /// contaminant tables were not prepared**, which is what an uncontaminated locus leaves
+    /// behind and what every contaminant accessor refuses.
+    batch_count: usize,
+    /// How many of the run's samples [`expected_copies_by_run_sample`](Self::expected_copies_by_run_sample)
+    /// is sized for. Zero alongside `batch_count`.
+    run_sample_count: usize,
     /// The repeat-tract row's own scratch, including the emission model's.
     ssr_row: SsrRowScratch<SsrEmissionScratch>,
     /// How many **rows** the buffers above are sized for. Zero means never prepared.
@@ -1145,6 +1409,24 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.run_sample_of_each_row.clear();
         self.inbreeding_coefficient_by_row.clear();
         self.emission_cost = EmissionCost::default();
+
+        // **One emission cache per row**, grown and never shrunk. Each sizes itself when it is
+        // filled, so nothing here says how wide a sample is.
+        if self.generic_rows.len() < row_count {
+            self.generic_rows
+                .resize_with(row_count, GenericRowScratch::default);
+        }
+
+        // **The contaminant tables are un-sized here and re-sized by the driver**, and only on a
+        // run that fitted a fraction. Clearing rather than leaving them is what stops a locus
+        // called without contamination from reading the last contaminated locus's frequencies:
+        // every accessor refuses a zero batch count, and `resize` alone would have left a table
+        // of the right length holding another locus's numbers.
+        self.batch_count = 0;
+        self.run_sample_count = 0;
+        self.batch_allele_copies.clear();
+        self.contaminant_allele_frequencies.clear();
+        self.expected_copies_by_run_sample.clear();
 
         self.row_count = row_count;
         self.genotype_count = genotype_count;
@@ -1426,7 +1708,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         let range = self.genotype_row_range(row);
         GenericRowBuffers {
             error_spreads: &self.error_spreads,
-            row_scratch: &mut self.generic_row,
+            contaminant_allele_frequencies: &self.contaminant_allele_frequencies,
+            row_scratch: &mut self.generic_rows[row],
             genotype_likelihoods: &mut self.genotype_likelihoods[range],
         }
     }
@@ -1498,7 +1781,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// What this locus's table build has cost so far — the instrument spec §13's test 5 reads.
     ///
     /// **Nothing in a run reads it**, and that is what it is for: the cost it records is
-    /// invisible in the output, because a table rebuilt every pass gives the same genotypes.
+    /// invisible in the output, because emissions recomputed every pass give the same
+    /// genotypes.
     /// Step D2 of the calling loop's plan is what asserts on it.
     #[inline]
     #[must_use]
@@ -1515,35 +1799,68 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.emission_cost
     }
 
-    /// Record one row build over `observations` observations and `candidates` candidates.
-    pub(crate) fn charge_row_build(&mut self, observations: usize, candidates: usize) {
-        self.emission_cost.row_builds += 1;
+    /// Record one sample's emission fill over `observations` observations and `candidates`
+    /// candidates.
+    pub(crate) fn charge_emission_row_fill(&mut self, observations: usize, candidates: usize) {
+        self.emission_cost.emission_row_fills += 1;
         self.emission_cost.emission_evaluations += (observations * candidates) as u64;
     }
 
-    /// Record that the whole `samples × genotypes` table was built once more.
-    pub(crate) fn charge_table_build(&mut self) {
-        self.emission_cost.table_builds += 1;
+    /// Record that the locus's frequency-free emissions were computed once more.
+    pub(crate) fn charge_emission_build(&mut self) {
+        self.emission_cost.emission_builds += 1;
     }
 
-    /// **Where the seventeen per-locus buffers' bytes are and how many of them there are** —
+    /// Record that a fresh assembly of the whole `rows × genotypes` table has begun.
+    ///
+    /// **The rows are charged one at a time by [`charge_row_assembly`](Self::charge_row_assembly)
+    /// rather than added up here**, so that the two counts can disagree. Charged from the row
+    /// count, `row_assemblies` is `table_assemblies × rows` by construction and can only repeat
+    /// what the other says — measured: an assembly that stops one row short of the table then
+    /// leaves both counts untouched, and only the genotypes it did not write say so.
+    pub(crate) fn charge_table_assembly(&mut self) {
+        self.emission_cost.table_assemblies += 1;
+    }
+
+    /// Record one row of the current assembly.
+    pub(crate) fn charge_row_assembly(&mut self) {
+        self.emission_cost.row_assemblies += 1;
+    }
+
+    /// **Where the twenty per-locus buffers' bytes are and how many of them there are** —
     /// the cheap half of the loop's zero-allocation invariant
     /// (`doc/devel/ng/spec/calling_em_loop.md` §13's test 7).
     ///
     /// A `Vec` that **grew** during the loop moves its bytes, so its pointer changes; one
-    /// refilled in place does not. What this cannot see is a temporary allocated and dropped
-    /// inside a pass, which leaves no trace in any buffer — **that half is counted for real**,
-    /// by `tests/ng_calling_loop_allocation.rs`, which installs `dhat`'s counting allocator and
-    /// reads `total_blocks` across two runs at different pass counts. It lives in a test binary
-    /// of its own because a global allocator counts the whole process, and the lib suite runs
-    /// its tests in parallel.
+    /// refilled in place does not.
     ///
-    /// **The two row scratches are deliberately not here**, and their absence is the invariant
-    /// rather than a gap: `GenericRowScratch` sizes itself per *sample*, inside the table
-    /// build, so it legitimately grows within a locus when a wider sample arrives. The table
-    /// build happens once, outside the frequency loop, so a pass still allocates nothing —
-    /// which is what §13's test 7 claims. Fingerprinting them would make this test fail on
-    /// correct code.
+    /// **⚠ Two of them exchange pointers with every pass, and that is by design**:
+    /// [`advance_cohort_expected_copies`](Self::advance_cohort_expected_copies) `mem::swap`s the
+    /// cohort's expected copies with the previous pass's rather than copying either. So this
+    /// list's *order* depends on the parity of the pass count, and a caller comparing two runs
+    /// must compare it as a set — sorted — or compare only runs whose pass counts have the same
+    /// parity. Measured: a 2-pass run and a 7-pass run over identical evidence differ in exactly
+    /// those two entries, both still `(pointer, length)` pairs the other list holds.
+    ///
+    /// **What this cannot see is a buffer that was reallocated and came back to the same
+    /// address**, which is what a freed block of the same size usually gets — so a `Vec` cloned
+    /// once a row leaves this list unchanged after an even number of clones. It cannot see a
+    /// temporary allocated and dropped inside a pass either, which leaves no trace anywhere.
+    /// **Both halves are counted for real**, by `tests/ng_calling_loop_allocation.rs`, which
+    /// installs `dhat`'s counting allocator and reads `total_blocks` across runs at different
+    /// pass counts. Measured: reallocating the contaminant frequency table once a row once a
+    /// pass leaves every fingerprint here identical and takes that counter from 8 blocks to 24.
+    /// It lives in a test binary of its own because a global allocator counts the whole process,
+    /// and the lib suite runs its tests in parallel.
+    ///
+    /// **The row scratches are deliberately not here**, and their absence is the invariant
+    /// rather than a gap: each `GenericRowScratch` sizes itself per *sample*, inside the
+    /// emission build, so it legitimately grows within a locus when a wider sample arrives. The
+    /// emission build happens once, outside the frequency loop, so a pass still allocates
+    /// nothing — which is what §13's test 7 claims. Fingerprinting them would make this test
+    /// fail on correct code. **The three contaminant buffers above are here**, because they are
+    /// refilled inside the loop and sized outside it, which is exactly the property this
+    /// measures.
     ///
     /// Test-only, because the pointers are an implementation detail that no run should read.
     #[cfg(test)]
@@ -1570,13 +1887,213 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             of(&self.error_spreads),
             of(&self.run_sample_of_each_row),
             of(&self.inbreeding_coefficient_by_row),
+            of(&self.batch_allele_copies),
+            of(&self.contaminant_allele_frequencies),
+            of(&self.expected_copies_by_run_sample),
         ]
     }
 
-    /// The SNP/indel row's own scratch, which owns its own sizing.
+    /// **Size this locus's two contaminant tables** — one row per sequencing batch, and the
+    /// run's whole sample axis for the copies those rows are summed from.
+    ///
+    /// **Called only where the run fitted a contamination fraction**, and after
+    /// [`prepare_for_locus`](Self::prepare_for_locus), which un-sizes them. That order is what
+    /// makes an uncontaminated locus unable to read a contaminated one's frequencies: the
+    /// tables come back empty and every accessor below refuses them.
+    ///
+    /// **The run's sample axis and not the locus's rows.** The batching is declared over the
+    /// run, so a batch whose samples were all ruled uncallable at this locus still has a row in
+    /// the table; summing over rows would leave it unwritten, which
+    /// [`fill_batch_allele_copies`] refuses by name. Scattering onto the run's axis gives it a
+    /// row of zeros — the same thing the M-step already does with an uncallable sample.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch; on a run with no batches or no samples, which is a run whose
+    /// batching went missing rather than a run without one; and on a table longer than a
+    /// `usize` can index.
+    pub(crate) fn prepare_contaminant_tables(&mut self, batch_count: usize, run_samples: usize) {
+        self.assert_prepared();
+        assert!(
+            batch_count > 0,
+            "a contaminated run has at least one sequencing batch, the default being one that \
+             holds all of it, so a locus prepared for none is a run whose batching went missing"
+        );
+        // **The precondition the scatter actually has**, which is not `run_samples >=
+        // row_count`: the copies are written at `run_sample × alleles`, so what must hold is
+        // that every claimed row names a sample the run has. A one-row locus whose row names
+        // sample 5 of a two-sample run passes the count comparison and panics later on a slice
+        // range that names neither the row nor the sample.
+        self.assert_rows_claimed();
+        let highest_named = self
+            .run_sample_of_each_row
+            .iter()
+            .copied()
+            .max()
+            .expect("a prepared locus has claimed at least one row");
+        assert!(
+            highest_named < run_samples,
+            "this locus's rows name sample {highest_named} and the run has {run_samples}; a row \
+             is one of the run's samples, so a row naming one the run does not have is not this \
+             run's locus"
+        );
+        let batch_table_len = batch_count
+            .checked_mul(self.allele_count)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a run of {batch_count} sequencing batches over {} alleles needs a contaminant \
+                 table longer than a usize can index",
+                    self.allele_count
+                )
+            });
+        let run_table_len = run_samples
+            .checked_mul(self.allele_count)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a run of {run_samples} samples over {} alleles needs a copies table longer \
+                 than a usize can index",
+                    self.allele_count
+                )
+            });
+        // **All three take the unwritten sentinel here**, because none of them is read before
+        // something writes it: `batch_copy_buffers_mut` zeroes the run-keyed copies in the same
+        // call that scatters into them, and the two batch tables are written whole. The zero
+        // that matters is that one, and its reason lives beside it.
+        resize_and_fill(
+            &mut self.expected_copies_by_run_sample,
+            run_table_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.batch_allele_copies,
+            batch_table_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        resize_and_fill(
+            &mut self.contaminant_allele_frequencies,
+            batch_table_len,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
+        self.batch_count = batch_count;
+        self.run_sample_count = run_samples;
+    }
+
+    /// **Scatter this pass's per-row expected copies back onto the run's sample axis**, then
+    /// hand back that axis and the batch table to sum it into.
+    ///
+    /// The scatter is here rather than at the call site because it is the join the two axes
+    /// meet at: the row map is this scratch's and so is the run-keyed buffer, and a caller
+    /// writing the loop itself would be writing this scratch's row arithmetic a second time.
+    ///
+    /// # Panics
+    ///
+    /// On a scratch whose contaminant tables were not prepared.
+    pub(crate) fn batch_copy_buffers_mut(&mut self) -> BatchCopyBuffers<'_> {
+        self.assert_contaminant_tables_prepared();
+        self.assert_rows_claimed();
+        // **Zeroed here rather than at sizing, and the zero is an answer rather than a slot
+        // nobody filled.** Every sample this locus has no row for keeps it, and zero copies is
+        // exactly what an uncallable sample contributes to the cohort's expected copies too — so
+        // a batch made entirely of samples this locus set aside gets a row of zeros and takes
+        // the frequency's no-evidence fallback, rather than a row nobody wrote.
+        self.expected_copies_by_run_sample.fill(0.0);
+        let allele_count = self.allele_count;
+        for (row, &run_sample) in self.run_sample_of_each_row.iter().enumerate() {
+            let from = row * allele_count..(row + 1) * allele_count;
+            let onto = run_sample * allele_count..(run_sample + 1) * allele_count;
+            self.expected_copies_by_run_sample[onto]
+                .copy_from_slice(&self.per_sample_expected_copies[from]);
+        }
+        BatchCopyBuffers {
+            expected_copies_by_run_sample: &self.expected_copies_by_run_sample,
+            allele_count,
+            batch_allele_copies: &mut self.batch_allele_copies,
+        }
+    }
+
+    /// The three buffers one **sample's** contaminant frequencies are built between.
+    ///
+    /// # Panics
+    ///
+    /// On a scratch whose contaminant tables were not prepared, and on a row past what this
+    /// locus was prepared for.
+    pub(crate) fn contaminant_frequency_buffers_mut(
+        &mut self,
+        row: usize,
+    ) -> ContaminantFrequencyBuffers<'_> {
+        self.assert_contaminant_tables_prepared();
+        let range = self.allele_row_range(row);
+        ContaminantFrequencyBuffers {
+            batch_allele_copies: &self.batch_allele_copies,
+            own_expected_copies: &self.per_sample_expected_copies[range],
+            allele_count: self.allele_count,
+            contaminant_allele_frequencies: &mut self.contaminant_allele_frequencies,
+        }
+    }
+
+    /// How many sequencing batches this locus's contaminant tables hold — **zero where they
+    /// were never prepared**, which is every locus of an uncontaminated run.
+    ///
+    /// Test-only: a run reads the tables, never their shape.
+    #[cfg(test)]
     #[inline]
-    pub fn generic_row_mut(&mut self) -> &mut GenericRowScratch {
-        &mut self.generic_row
+    #[must_use]
+    pub(crate) fn contaminant_batch_count(&self) -> usize {
+        self.batch_count
+    }
+
+    /// The contaminant allele frequencies as the last row's fill left them, batch-major.
+    ///
+    /// Test-only: in a run they are read through
+    /// [`generic_row_buffers_mut`](Self::generic_row_buffers_mut), one row at a time and while
+    /// that row is being assembled, so nothing outside a test ever sees them afterwards.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn contaminant_allele_frequencies(&self) -> &[f64] {
+        &self.contaminant_allele_frequencies
+    }
+
+    /// Each sequencing batch's expected allele copies at this locus, batch-major, as the last
+    /// fill left them. Test-only, for [`contaminant_allele_frequencies`](Self::contaminant_allele_frequencies)'s
+    /// reason.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn batch_allele_copies(&self) -> &[f64] {
+        &self.batch_allele_copies
+    }
+
+    /// Refuse a scratch whose contaminant tables were never sized for this locus.
+    ///
+    /// **It says which table went missing, which is the whole of what it adds.** The fills do
+    /// refuse an empty table on their own — `fill_batch_allele_copies` compares the copies
+    /// against `samples × alleles` before anything else — but they refuse it as a shape
+    /// mismatch between two slices, at a locus, with nothing in the message about the one call
+    /// that was skipped. This names it.
+    #[inline]
+    fn assert_contaminant_tables_prepared(&self) {
+        self.assert_prepared();
+        assert!(
+            self.batch_count > 0,
+            "this locus's contaminant tables were not prepared: `prepare_contaminant_tables` \
+             runs after `prepare_for_locus` on a run that fitted a contamination fraction, and \
+             nothing else sizes them"
+        );
+    }
+
+    /// One scratch row's SNP/indel emission cache, which owns its own sizing.
+    ///
+    /// # Panics
+    ///
+    /// On a row past what [`prepare_for_locus`](Self::prepare_for_locus) sized this scratch
+    /// for.
+    #[inline]
+    pub fn generic_row_mut(&mut self, row: usize) -> &mut GenericRowScratch {
+        assert!(
+            row < self.row_count,
+            "row {row} is past the {} this scratch was prepared for",
+            self.row_count
+        );
+        &mut self.generic_rows[row]
     }
 
     /// The repeat-tract row's own scratch, which owns its own sizing.
@@ -1679,9 +2196,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// the same call.
     ///
     /// **Called once per locus, after the loop has stopped.** The likelihood table it hands
-    /// over is the one the loop already built and never rebuilt, which is what makes the
-    /// site quality cost no emission evaluations of its own
-    /// (`doc/devel/ng/spec/calling_quality.md` §3.2).
+    /// over is the one the loop leaves behind, which is what makes the site quality cost no
+    /// emission evaluations of its own (`doc/devel/ng/spec/calling_quality.md` §3.2) — and
+    /// where a fraction was fitted, the one assembled against the frequencies the loop settled
+    /// on, so the quality and the genotypes beside it come from the same table.
     ///
     /// # Panics
     ///
@@ -1789,7 +2307,7 @@ pub(crate) struct SampleScoringBuffers<'a> {
     /// own contribution included.
     pub cohort_expected_copies: &'a [f64],
     /// This sample's row of the genotype-likelihood table — one entry per candidate
-    /// genotype, built once per set of slippage numbers and read by every pass.
+    /// genotype, assembled from emissions the locus computed once.
     pub genotype_likelihoods: &'a [LogProb],
     /// One entry per allele, to fill: this sample's own concentration — the seed plus what
     /// the **other** samples showed here.
@@ -1816,10 +2334,44 @@ pub(crate) struct SampleScoringBuffers<'a> {
 pub(crate) struct GenericRowBuffers<'a> {
     /// The locus's per-allele error-spread table, filled once before the first row.
     pub(crate) error_spreads: &'a [f64],
-    /// The row builder's own partial-compatibility cache, which it sizes itself.
+    /// The contaminant allele frequencies **this row** is scored against, batch-major — empty
+    /// on a run the fit found no contamination in, where the mixture is absent and the row
+    /// computes the plain formula.
+    pub(crate) contaminant_allele_frequencies: &'a [f64],
+    /// This row's own emission cache, which it sizes itself.
     pub(crate) row_scratch: &'a mut GenericRowScratch,
     /// This sample's row of the genotype-likelihood table, to fill.
     pub(crate) genotype_likelihoods: &'a mut [LogProb],
+}
+
+/// The buffers each **sequencing batch's** expected allele copies are summed between, borrowed
+/// from one [`CallingScratch`] at once — [`CallingScratch::batch_copy_buffers_mut`] is the only
+/// way to make one, because it is what performs the scatter the first field's name implies.
+#[derive(Debug)]
+pub(crate) struct BatchCopyBuffers<'a> {
+    /// This pass's expected allele copies on the **run's** sample axis, sample-major, zero at
+    /// every sample this locus has no row for.
+    pub(crate) expected_copies_by_run_sample: &'a [f64],
+    /// How many alleles this locus is called over — the stride of both tables.
+    pub(crate) allele_count: usize,
+    /// One row per sequencing batch, to fill.
+    pub(crate) batch_allele_copies: &'a mut [f64],
+}
+
+/// The buffers **one sample's** contaminant allele frequencies are built between, borrowed from
+/// one [`CallingScratch`] at once.
+#[derive(Debug)]
+pub(crate) struct ContaminantFrequencyBuffers<'a> {
+    /// Every batch's expected allele copies at this locus, batch-major — this sample's own
+    /// among them, which is what the fill takes back out.
+    pub(crate) batch_allele_copies: &'a [f64],
+    /// This sample's own expected allele copies.
+    pub(crate) own_expected_copies: &'a [f64],
+    /// How many alleles this locus is called over — the stride of both tables.
+    pub(crate) allele_count: usize,
+    /// One row per sequencing batch, to fill: the frequencies **this** sample is scored
+    /// against.
+    pub(crate) contaminant_allele_frequencies: &'a mut [f64],
 }
 
 /// The two buffers the **M-step** works between, borrowed from one [`CallingScratch`] at once.
@@ -3107,9 +3659,15 @@ mod tests {
     /// The frozen parameters for a run of diploids, routed to whichever constructor the
     /// contamination list calls for — an empty one is the run where the fit identified
     /// none, which has its own named door.
+    ///
+    /// **The contaminated branch takes the batching as an argument**, because it is borrowed
+    /// for as long as the parameters are and a helper that built one inside would hand back a
+    /// borrow of something already dropped. A run with no mixture has nothing to read it, so
+    /// the uncontaminated branch never looks at it.
     fn frozen_parameters<'a>(
         calibration: &'a [ReadGroupCalibration],
         contamination: &'a [ContaminationView],
+        batching: &'a SequencingBatches,
         inbreeding: &'a [InbreedingF],
         strata: &'a StratumFits,
         substitution: &'a std::collections::BTreeMap<
@@ -3130,6 +3688,7 @@ mod tests {
             FrozenParameters::new(
                 calibration,
                 contamination,
+                batching,
                 inbreeding,
                 neutral_seed(),
                 strata,
@@ -3137,6 +3696,30 @@ mod tests {
                 diploid_ploidy(),
             )
         }
+    }
+
+    /// The default batching — one batch holding a run of `libraries` read groups over
+    /// `samples` samples, which is what a run that declared nothing gets.
+    pub(crate) fn one_batch(libraries: usize, samples: usize) -> SequencingBatches {
+        let names: Vec<(String, String)> = (0..libraries)
+            .map(|library| {
+                (
+                    format!("rg{library}"),
+                    format!("s{}", library.min(samples.saturating_sub(1))),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(id, sample)| (id.as_str(), sample.as_str()))
+            .collect();
+        let groups = crate::ng::read::input::read_groups::ReadGroups::of_libraries(&borrowed);
+        assert_eq!(
+            groups.read_groups_per_sample().len(),
+            samples,
+            "the fixture asked for {samples} samples over {libraries} libraries"
+        );
+        SequencingBatches::all_together(&groups)
     }
 
     /// A two-allele diploid locus: its allele table and the genotype table over it. Three
@@ -3162,9 +3745,12 @@ mod tests {
         let contamination = vec![measured_contamination(), measured_contamination()];
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
+        // A batching that matches neither list, so that what refuses this is the check the
+        // test is about rather than a fixture that happened to disagree first.
         let _ = frozen_parameters(
             &calibration,
             &contamination,
+            &one_batch(2, 2),
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3211,9 +3797,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let _ = FrozenParameters::new(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             neutral_seed(),
             &strata,
@@ -3235,9 +3823,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(3);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3256,7 +3846,65 @@ mod tests {
     fn frozen_parameters_refuse_a_run_with_no_read_groups() {
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
-        let _ = frozen_parameters(&[], &[], &inbreeding, &strata, &NO_SUBSTITUTION_RATES);
+        let no_declared_batching = one_batch(1, 1);
+        let _ = frozen_parameters(
+            &[],
+            &[],
+            &no_declared_batching,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
+    }
+
+    /// **A batching minted over a different set of libraries is refused where the run is
+    /// assembled**, not at whichever locus first carries a read from the library it misses.
+    ///
+    /// The batching is declared by the user and the parameters are fitted, so the two can
+    /// disagree about how many libraries a run has without either being wrong on its own — and
+    /// the symptom without this is a mixture scoring some library against the neighbours of
+    /// another.
+    #[test]
+    #[should_panic(expected = "the batching covers 2 read groups")]
+    fn a_batching_over_another_runs_read_groups_is_refused() {
+        let calibration = one_read_group();
+        let contamination = vec![measured_contamination()];
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let two_libraries = one_batch(2, 2);
+        let _ = FrozenParameters::new(
+            &calibration,
+            &contamination,
+            &two_libraries,
+            &inbreeding,
+            neutral_seed(),
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid_ploidy(),
+        );
+    }
+
+    /// **And the other axis**, which is the one a run of one library per sample cannot tell
+    /// apart from the first: the sample-keyed batching is read by the run's own sample index, so
+    /// a shorter one drops the last samples out of every batch's copies.
+    #[test]
+    #[should_panic(expected = "the batching covers 1 samples")]
+    fn a_batching_over_another_runs_samples_is_refused() {
+        let calibration = one_read_group();
+        let contamination = vec![measured_contamination()];
+        let inbreeding = outbred_samples(2);
+        let strata = no_strata();
+        let one_library_one_sample = one_batch(1, 1);
+        let _ = FrozenParameters::new(
+            &calibration,
+            &contamination,
+            &one_library_one_sample,
+            &inbreeding,
+            neutral_seed(),
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid_ploidy(),
+        );
     }
 
     /// A run whose sample order went missing is refused, rather than producing a locus with
@@ -3266,7 +3914,15 @@ mod tests {
     fn frozen_parameters_refuse_a_run_with_no_samples() {
         let calibration = one_read_group();
         let strata = no_strata();
-        let _ = frozen_parameters(&calibration, &[], &[], &strata, &NO_SUBSTITUTION_RATES);
+        let no_declared_batching = one_batch(1, 1);
+        let _ = frozen_parameters(
+            &calibration,
+            &[],
+            &no_declared_batching,
+            &[],
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
     }
 
     /// Evidence and the allele table have to be on the same path: the discriminant that
@@ -3283,9 +3939,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3308,9 +3966,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(3);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3335,9 +3995,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3643,9 +4305,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3668,9 +4332,11 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
         let parameters = frozen_parameters(
             &calibration,
             &[],
+            &no_declared_batching,
             &inbreeding,
             &strata,
             &NO_SUBSTITUTION_RATES,
@@ -3854,8 +4520,91 @@ mod tests {
 
         // The three sub-scratches are reachable, and are the worker's rather than a locus's.
         let _ = scratch.candidate_selection_mut();
-        let _ = scratch.generic_row_mut();
+        let _ = scratch.generic_row_mut(0);
         let _ = scratch.ssr_row_mut();
+    }
+
+    /// **The contaminant tables refuse to be read before they are sized**, and that refusal is
+    /// what the sizing's own separateness costs.
+    ///
+    /// `prepare_for_locus` un-sizes them and only a run that fitted a fraction re-sizes them, so
+    /// a driver that forgot the second call would otherwise sum every batch's copies into a
+    /// zero-length table: the fill writes nothing, returns having done nothing wrong, and the
+    /// mixture is built over an empty slice.
+    #[test]
+    #[should_panic(expected = "contaminant tables were not prepared")]
+    fn the_contaminant_tables_refuse_to_be_read_before_they_are_sized() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+        scratch.claim_row_for(0, InbreedingF::try_new(0.0).expect("an outbred sample"));
+        let _ = scratch.batch_copy_buffers_mut();
+    }
+
+    /// A locus prepared for no sequencing batches is a run whose batching went missing rather
+    /// than a run without one — the default is one batch holding all of it.
+    #[test]
+    #[should_panic(expected = "at least one sequencing batch")]
+    fn contaminant_tables_for_no_batches_are_refused() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+        scratch.claim_row_for(0, InbreedingF::try_new(0.0).expect("an outbred sample"));
+        scratch.prepare_contaminant_tables(0, 1);
+    }
+
+    /// **A row naming a sample the run does not have is not this run's locus**, and the copies
+    /// are scattered onto the run's axis by that name — so it would put one sample's copies
+    /// outside the table they are indexed in.
+    ///
+    /// **The row count is not what decides it.** A one-row locus whose row names sample 5 of a
+    /// two-sample run has fewer rows than the run has samples and is still wrong, which is what
+    /// this fixture is: one row, a run of two, and the row names sample 5.
+    #[test]
+    #[should_panic(expected = "rows name sample 5 and the run has 2")]
+    fn a_row_naming_a_sample_the_run_does_not_have_is_refused() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+        scratch.claim_row_for(5, InbreedingF::try_new(0.0).expect("an outbred sample"));
+        scratch.prepare_contaminant_tables(1, 2);
+    }
+
+    /// One emission cache per scratch row, and a row past the locus's own count is refused —
+    /// which is what a driver walking one row too far would otherwise fill, leaving the last
+    /// row's cache holding another sample's observations.
+    #[test]
+    #[should_panic(expected = "row 2 is past the 2 this scratch was prepared for")]
+    fn an_emission_cache_past_the_prepared_rows_is_a_caller_bug() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &table.view());
+        let _ = scratch.generic_row_mut(2);
+    }
+
+    /// **The contaminant tables are un-sized by every `prepare_for_locus`**, so a worker that
+    /// called a contaminated locus and then an uncontaminated one cannot read the first one's
+    /// frequencies at the second.
+    ///
+    /// Sizing them and then preparing another locus is the whole of the fixture: `resize` alone
+    /// would have left a table of the right length holding the last locus's numbers, and only
+    /// the count coming back to zero says the tables were released rather than reused.
+    #[test]
+    fn preparing_a_locus_releases_the_last_ones_contaminant_tables() {
+        let (alleles, table) = biallelic_locus();
+        let outbred = InbreedingF::try_new(0.0).expect("an outbred sample");
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+        scratch.claim_row_for(0, outbred);
+        scratch.prepare_contaminant_tables(3, 4);
+        assert_eq!(scratch.contaminant_batch_count(), 3);
+
+        scratch.prepare_for_locus(1, &alleles, &table.view());
+        assert_eq!(
+            scratch.contaminant_batch_count(),
+            0,
+            "the next locus has to size them again, and an uncontaminated one never will"
+        );
     }
 
     /// A repeat tract sets no sample aside, so a missing call at one is the SNP/indel path's

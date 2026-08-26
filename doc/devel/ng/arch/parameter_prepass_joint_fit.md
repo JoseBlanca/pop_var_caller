@@ -232,6 +232,26 @@ archive's `@RG` lines carry no `PU` and SRA rewrote the read names to
 `SRR7279481.37559618:TTAGGC:37559618`, keeping the barcode and losing the flowcell — and a pipeline
 that guessed it from what survives would be wrong silently.
 
+**⚠ Built 2026-08-26, at the calling loop's E2a, and the built type differs from the sketch below
+in five ways.** The sketch is kept because its *argument* is still the argument; what it got wrong is
+the shape, and the reasons are all the consumer's. The built form is
+[`src/ng/parameter_estimation/joint/sequencing_batches.rs`](../../../../src/ng/parameter_estimation/joint/sequencing_batches.rs):
+
+- **it holds two dense vectors, not a `Vec<BTreeSet<ReadGroupId>>`** — `BatchOfEachReadGroup` and
+  `BatchOfEachSample`, one entry per read group and one per sample, because the calling loop indexes
+  a table by the batch and never asks a batch who is in it. `batch_of` is therefore absent;
+- **the constructor is `declared`, not `from_groups`**, which says what the argument is rather than
+  what it is made of;
+- **the refusals are a `SequencingBatchError` of that module's own, not `JointFitError` variants.**
+  Nothing in the fit produces a batching — it is declared by the user and consumed by the caller —
+  so the fit's error type would have had to answer a question the fit never asks.
+  `ReadGroupNotBatched` keeps its name;
+- **there are five refusals and not one**: a read group left out, a read group in two batches, a
+  batch naming a read group the run does not have, an empty batch, and a declaration of no batches
+  at all (which is `all_together`, not an empty list);
+- **⚖ and a sample whose libraries ran in different batches is refused, which the paragraph above
+  says is allowed.** See below.
+
 ```rust
 /// Which read groups were sequenced together, as the run was told.
 pub struct SequencingBatches {
@@ -273,6 +293,18 @@ impl SequencingBatches {
 **Contract.** A partition: every read group in exactly one batch, checked at construction. The default
 is one batch holding everything, so the type is never optional and no consumer branches on its
 absence.
+
+**⚖ A sample whose libraries ran in different batches is refused (2026-08-26).** The paragraph above
+says the grain is the read group *because* one sample's libraries may have run on different
+flowcells, and that is true of the declaration. It is not true of what the calling loop needs from
+it: the loop adds a sample's expected allele copies into **one** batch's total, and takes them back
+out of **one** batch's row before scoring that sample — so a sample split across two batches has no
+single answer. The choices were to pick a majority batch, to average the two populations, or to
+refuse. **It refuses**, naming the sample and its batches, because the read likelihood deliberately
+declined to invent a rule here and because a majority batch would score half a sample's reads
+against the wrong neighbours with nothing said. **Under the default it cannot arise**, since one
+batch holds everything. *This follows the owner's stated recommendation and is not yet a ruling; a
+rule that admits the split case would replace it here.*
 
 **Where `PU` fits, and it is a default rather than an answer.** `ReadGroup`
 ([`read/input/read_groups.rs`](../../../../src/ng/read/input/read_groups.rs)) reads `ID`, `SM`, `LB`

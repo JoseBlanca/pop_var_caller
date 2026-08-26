@@ -26,9 +26,12 @@
 //!
 //! A temporary — a `Vec` allocated and dropped inside a pass — leaves no trace in any scratch
 //! buffer, so the pointer-and-length fingerprint the library suite compares cannot see it.
-//! Measured: this fixture's two runs allocate **8 blocks each**, and one `Vec::with_capacity`
-//! added to the frequency loop's seeded pass takes them apart — **8 against 10**, one block per
-//! extra pass — while every one of the library's 4,694 tests stays green.
+//! Measured on the uncontaminated arm: its two runs allocate **8 blocks each**, and one
+//! `Vec::with_capacity` added to the frequency loop's seeded pass takes them apart — **8 against
+//! 10**, one block per extra pass — while every one of the library's 4,694 tests stayed green.
+//! Measured again on the contaminated arm (2026-08-26): its two runs allocate **8 blocks each**,
+//! and one `Vec::with_capacity` added beside the per-pass table assembly gives **8 against 11**,
+//! again one block per extra pass.
 
 #![cfg(feature = "dhat-heap")]
 
@@ -41,10 +44,12 @@ use pop_var_caller::ng::calling::likelihood::ssr_emission::{
     StutterSubstitutionEmission, StutterSubstitutionScratch,
 };
 use pop_var_caller::ng::calling::{
-    CallingScratch, CandidateAlleles, FrozenParameters, GenericLocusSample, GenericObservation,
-    GenericSampleEvidence, LocusEvidence, ReadGroupCalibration,
+    CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
+    GenericObservation, GenericSampleEvidence, LocusEvidence, ReadGroupCalibration,
 };
 use pop_var_caller::ng::locus_generation::LocusKind;
+use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationSource;
+use pop_var_caller::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use pop_var_caller::ng::types::{
     AlleleId, ContigId, GenomeRegion, InbreedingF, Ploidy, Position, ReadGroupId,
@@ -66,12 +71,23 @@ fn observation(allele: u16, num_reads: u32) -> GenericObservation {
     }
 }
 
-/// **The same locus at two pass counts allocates the same number of blocks.**
+/// **The same locus at two pass counts allocates the same number of blocks — with and without
+/// contamination.**
 ///
 /// Three samples over three candidate alleles, called once with the pass cap at two and once at
-/// the shipped default, which takes four. The loop's buffers all belong to the worker's scratch
-/// and are sized once per locus, so the second run's two extra passes must cost nothing — and
-/// "nothing" here is a count, not an inference from a pointer.
+/// the shipped default. The loop's buffers all belong to the worker's scratch and are sized once
+/// per locus, so the extra passes must cost nothing — and "nothing" here is a count, not an
+/// inference from a pointer.
+///
+/// **The contaminated arm is the one that does per-pass work inside the loop.** With no fraction
+/// fitted the loop reads a table nothing touches; with one fitted it refills the batch copies,
+/// refills one sample's contaminant frequencies per row and assembles the whole table again, at
+/// every pass. Those three buffers are sized outside the loop and written inside it, which is
+/// exactly the shape a temporary hides in.
+///
+/// **Both arms live in this one test rather than in two**, because a `#[global_allocator]` counts
+/// the whole process and `cargo test` runs a binary's tests in parallel — a second test here would
+/// count the first one's allocations.
 ///
 /// **The pass counts are asserted too.** Two readings that happened to run the same number of
 /// passes would agree whatever the loop allocated, which is a test that cannot fail.
@@ -119,6 +135,25 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
         &substitution,
         Ploidy::try_new(2).expect("a diploid"),
     );
+    // The same run with a fraction fitted for its one library, over the default batching — one
+    // batch holding all of it, which is what a run that declared nothing gets.
+    let fractions = [ContaminationView {
+        fraction: 0.05,
+        markers_with_reads: 400,
+        reads_on_markers: 1_000,
+        source: ContaminationSource::ThisReadGroupsReads,
+    }];
+    let batching = SequencingBatches::all_together_over(1, 3);
+    let contaminated = FrozenParameters::new(
+        &calibration,
+        &fractions,
+        &batching,
+        &inbreeding,
+        SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+        &strata,
+        &substitution,
+        Ploidy::try_new(2).expect("a diploid"),
+    );
     let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
 
     let capped_at_two = CallingLoopConfig {
@@ -143,13 +178,24 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
         &shipped,
         &mut scratch,
     );
+    // **And warmed on the contaminated shape too**, which grows three buffers the clean run
+    // never sizes. Without this the contaminated arm's first reading pays for them.
+    let _ = arm.call_locus(
+        &evidence,
+        &contaminated,
+        alleles.clone(),
+        &shipped,
+        &mut scratch,
+    );
 
     // **Both allele tables are cloned before either reading, and this is not a detail.** The
     // loop takes its candidates by value, and cloning one inside a measured region charges that
     // run four blocks the other never paid — which is what the first draft of this test did,
     // reporting 10 blocks against 6 and pointing the finger at the loop.
     let candidates_for_two = alleles.clone();
-    let candidates_for_four = alleles;
+    let candidates_for_four = alleles.clone();
+    let candidates_for_dirty_two = alleles.clone();
+    let candidates_for_dirty_more = alleles;
 
     let before_two = dhat::HeapStats::get().total_blocks;
     let two = arm.call_locus(
@@ -171,6 +217,26 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
     );
     let after_four = dhat::HeapStats::get().total_blocks;
 
+    let before_dirty_two = dhat::HeapStats::get().total_blocks;
+    let dirty_two = arm.call_locus(
+        &evidence,
+        &contaminated,
+        candidates_for_dirty_two,
+        &capped_at_two,
+        &mut scratch,
+    );
+    let after_dirty_two = dhat::HeapStats::get().total_blocks;
+
+    let before_dirty_more = dhat::HeapStats::get().total_blocks;
+    let dirty_more = arm.call_locus(
+        &evidence,
+        &contaminated,
+        candidates_for_dirty_more,
+        &shipped,
+        &mut scratch,
+    );
+    let after_dirty_more = dhat::HeapStats::get().total_blocks;
+
     drop(profiler);
 
     assert_eq!(
@@ -186,5 +252,23 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
          worker's scratch and are sized once per locus",
         after_four - before_four,
         after_two - before_two
+    );
+
+    assert!(
+        dirty_more.passes > dirty_two.passes,
+        "the two contaminated runs must differ in their pass count, or the invariant is \
+         untested — {} against {}",
+        dirty_two.passes,
+        dirty_more.passes
+    );
+    assert_eq!(
+        after_dirty_two - before_dirty_two,
+        after_dirty_more - before_dirty_more,
+        "{} extra passes of a contaminated locus allocated {} blocks against the capped run's \
+         {}, so something inside a pass is allocating — and a contaminated pass refills three \
+         buffers and assembles the whole genotype-likelihood table again",
+        dirty_more.passes - dirty_two.passes,
+        after_dirty_more - before_dirty_more,
+        after_dirty_two - before_dirty_two
     );
 }

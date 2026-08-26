@@ -281,7 +281,7 @@ fitted zero), per-sample `F` in run order, the seed from `project_spectrum_seed`
 and is built inside the loop, at E2a. *Depends:* A1. *Source:* arch §2; the three parameter
 sources' plans.
 
-**E2a. The contaminant frequency, per locus and per sample.**  ☐
+**E2a. The contaminant frequency, per locus and per sample.**  ✅
 
 **⚖ Owner's ruling, 2026-08-26, taken when E2 finished and this step's shape turned out to
 contradict D2's.** [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6 says that with
