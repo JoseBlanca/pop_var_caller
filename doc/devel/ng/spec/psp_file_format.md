@@ -11,7 +11,9 @@ what a reader is allowed to hold, and what the module offers its callers (§6). 
 [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md). The requirement both serve is a
 per-open-sample memory budget, stated in §1.1.*
 
-*Companion measurements: [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-25.md).*
+*Downstream: [`../arch/psp_file_format.md`](../arch/psp_file_format.md) is the code shape,
+[`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md) the build order. Companion
+measurements: [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-25.md).*
 
 ---
 

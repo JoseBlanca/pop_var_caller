@@ -17,6 +17,10 @@ because block boundaries move QUAL in its last digits (§12). The measured resul
 of an open sample falls 7.7-fold, 2,677 kB to 346 kB, while the file gets 35 % smaller, the
 index 11× smaller and the read 1.8× faster** (§2.1).*
 
+*Downstream: [`../arch/psp_file_format.md`](../arch/psp_file_format.md) is the code shape for this
+and for the container, and [`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md) is the
+build order.*
+
 *This is the document [`run_streaming.md`](run_streaming.md) §10 defers to when it says
 "the psp file's encoding — byte layout, compression, block sizing …, checksums, format
 versioning, the index, the trailer. Its own spec beside this one". It inherits that

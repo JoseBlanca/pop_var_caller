@@ -13,6 +13,10 @@ compression, the index and versioning, and this one owns a single column inside 
 [`cohort_merge.md`](cohort_merge.md) §14 Q2 (the ruling that made the column big) and
 [`run_streaming.md`](run_streaming.md) §12.1 (the file must not depend on worker count).*
 
+*Downstream: [`../arch/psp_file_format.md`](../arch/psp_file_format.md) §3 and
+[`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md) Milestone E, which is where this
+document's silent-failure traps are built and guarded.*
+
 ---
 
 ## 1. Why this column suddenly matters
