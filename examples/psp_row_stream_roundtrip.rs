@@ -124,6 +124,11 @@ impl<'a> Cursor<'a> {
 
 #[derive(Default)]
 struct FrameWriter {
+    /// Write only what a cohort scan reads — the position and the summed
+    /// non-reference support — and drop the rest of the record. This is the
+    /// "light stream" of a two-part block, built here on its own so the time a
+    /// scan would save can be measured against a full walk.
+    light_only: bool,
     scales: Scales,
     buf: Vec<u8>,
     n_records: u64,
@@ -152,6 +157,19 @@ impl FrameWriter {
         }
         self.prev_pos = rec.pos;
 
+        if self.light_only {
+            // Allele 0 is the reference bucket, so the scan's number is the
+            // support summed over the rest.
+            let non_ref: u64 = rec
+                .alleles
+                .iter()
+                .skip(1)
+                .map(|a| u64::from(a.support.num_obs))
+                .sum();
+            put_varint(&mut self.buf, non_ref);
+            self.n_records += 1;
+            return;
+        }
         put_varint(&mut self.buf, rec.alleles.len() as u64);
         if self.scales.gc == 0.0 {
             self.buf.extend_from_slice(&rec.windowed_gc.to_le_bytes());
@@ -870,6 +888,7 @@ fn encode_streaming(
     out_path: &str,
     block_bytes: usize,
     genomic_block_bp: u32,
+    light_only: bool,
     level: i32,
     window_log: u32,
     scales: Scales,
@@ -889,6 +908,7 @@ fn encode_streaming(
     for scale in [scales.gc, scales.coverage, scales.q_sum] {
         sink.write_all(&scale.to_le_bytes()).expect("write");
     }
+    sink.write_all(&[u8::from(light_only)]).expect("write");
     sink.write_all(&window_log.to_le_bytes()).expect("write");
 
     let mut reader = PspReader::new(BufReader::with_capacity(
@@ -897,6 +917,7 @@ fn encode_streaming(
     ))
     .expect("psp");
     let mut fw = FrameWriter {
+        light_only,
         scales,
         ..FrameWriter::default()
     };
@@ -950,6 +971,7 @@ fn encode_streaming(
     println!("records\t{n_records}");
     println!("blocks\t{n_blocks}");
     println!("genomic-block-bp\t{genomic_block_bp}");
+    println!("light-only\t{light_only}");
     println!("window-bytes\t{}", 1usize << window_log);
     println!("out-bytes\t{bytes}");
     println!("bytes-per-record\t{:.3}", bytes as f64 / n_records as f64);
@@ -1007,6 +1029,7 @@ impl<'a> TryCursor<'a> {
 /// block: a compressed read chunk, the rolling decompressed buffer, zstd's own
 /// state sized by the window, and the record being built.
 struct StreamingStore {
+    light_only: bool,
     scales: Scales,
     src: BufReader<File>,
     dctx: zstd::zstd_safe::DCtx<'static>,
@@ -1045,6 +1068,9 @@ impl StreamingStore {
             coverage: read_scale(),
             q_sum: read_scale(),
         };
+        let mut b1 = [0u8; 1];
+        src.read_exact(&mut b1).expect("light-only flag");
+        let light_only = b1[0] != 0;
         let mut b4 = [0u8; 4];
         src.read_exact(&mut b4).expect("window log");
         let window_log = u32::from_le_bytes(b4);
@@ -1056,6 +1082,7 @@ impl StreamingStore {
             .expect("window log max");
 
         Self {
+            light_only,
             scales,
             src,
             dctx,
@@ -1211,6 +1238,16 @@ impl StreamingStore {
             first = false;
         } else {
             pos += delta;
+        }
+        if self.light_only {
+            let non_ref = cur.varint()?;
+            self.out_at += cur.at;
+            self.pos = pos;
+            self.first = first;
+            let mut rec = PileupRecord::new(self.chrom_id, pos, Vec::new());
+            // Park the scan number where the timing loop can see it.
+            rec.windowed_coverage = non_ref as f32;
+            return Some(rec);
         }
         let n_alleles = cur.varint()? as usize;
         let windowed_gc = if self.scales.gc == 0.0 {
@@ -1458,6 +1495,7 @@ fn main() {
     // The genomic block size, in kilobases. 0 leaves the cut to the byte target
     // alone, which is what every measurement before 2026-08-25 used.
     let mut genomic_block_kb = 0u32;
+    let mut light_only = false;
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -1468,6 +1506,7 @@ fn main() {
             "--block-kib" => block_kib = args.next().expect("K").parse().expect("K"),
             "--window-log" => window_log = args.next().expect("N").parse().expect("N"),
             "--streams" => streams = args.next().expect("N").parse().expect("N"),
+            "--light-only" => light_only = true,
             "--genomic-block-kb" => genomic_block_kb = args.next().expect("K").parse().expect("K"),
             "--rolling-kib" => ROLLING_BYTES.store(
                 args.next().expect("K").parse::<usize>().expect("K") * 1024,
@@ -1502,6 +1541,7 @@ fn main() {
             &store,
             block_kib * 1024,
             genomic_block_kb * 1000,
+            light_only,
             level,
             window_log,
             scales,
