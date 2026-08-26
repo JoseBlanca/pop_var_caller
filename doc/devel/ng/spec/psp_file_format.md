@@ -44,10 +44,11 @@ any point on the curve above.
 
 ### 1.1 Goals
 
-1. **An open file costs no more than 500 kB of resident memory**, whatever the block size, the
-   depth, or the length of the genome. *(The owner's working budget, 2026-08-25: 1.5 GB across three
-   thousand samples. It supersedes the "tens of kilobytes" of [`run_streaming.md`](run_streaming.md)
-   §7.2, which should be corrected when that document is next touched.)*
+1. **An open file costs no more than 500 kB of resident memory**, and does not grow with the block
+   size, the depth or the length of the genome. *(The owner's working budget, 2026-08-25: 1.5 GB
+   across three thousand samples. It supersedes the "tens of kilobytes" of
+   [`run_streaming.md`](run_streaming.md) §7.2, which should be corrected when that document is next
+   touched.)* **The independence from depth is measured, not assumed — §5.2.**
 2. **A reader can start at any block** without reading what comes before it.
 3. **A file that is not complete is refused, not read short.** A run killed part-way must not look
    like a sample with less of the genome.
@@ -335,6 +336,22 @@ the file's:
 | 64 kB each | 346 kB | 691 kB |
 | 16 kB each | 250 kB | 501 kB |
 | **4 kB each** | **227 kB** | **453 kB** |
+
+**And it barely moves with depth**, which goal 1 asserts and this is the evidence for. The same walk
+over 62 copies of a sample at **279 reads a position** — a hundred times the tomato cohort's depth:
+
+| | per open sample | R² |
+|---|---:|---:|
+| tomato, 3 reads a position | 346.3 kB | 1.0000 |
+| HG002, 279 reads a position | 367.1 kB | 1.0000 |
+
+**6 % more memory for 93 times the depth**, both fits straight to four digits. That is what the
+design predicts and the reason it predicts it: what a reader holds is its decoder and its two
+buffers, none of which is a function of the data. The 6 % is the record being built, which grows
+from 4.6 to 16.3 bytes.
+
+*Both are one sample's characteristics replicated, so this measures the reader's cost and not the
+variety of a real cohort.*
 
 Three things follow, and the third is a constraint on the design rather than a tuning note:
 

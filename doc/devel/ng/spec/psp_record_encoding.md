@@ -1,9 +1,12 @@
 # ng — how the psp stores one sample's observations
 
 *Status: design spec, 2026-08-19; **revised 2026-08-25, when the shape was built and
-measured.** This settles what a psp record costs and how much memory a reader spends to get
-it back; it does not fix a byte layout. Every number in it was measured on real files with
-the programs named in §14.*
+measured.** This settles **what a record holds and in what form** — which fields, how each is
+encoded, which may be stored approximately and at what step, and what a reader is required to hold
+while reading one back. It does not fix a byte layout. **What that costs in disk and in memory
+follows from those choices and from the settings a user picks; the figures throughout are measured
+consequences, not quantities this document fixes.** Every one was taken on real files with the
+programs named in §14.*
 
 *What the revision changed, so a reader of the old version knows what moved: the block is
 now **large** and the compressor's **reach** is capped separately, where before both were one
@@ -29,10 +32,20 @@ measurement that document's experiment was waiting for.*
 
 A psp holds, for one sample, everything its reads showed at every position the run
 analysed — one record per covered reference position, at three reads a position and at
-three hundred, for a cohort of one sample and of several thousand. **This document
-settles how much of the disk one of those records costs and how much memory a reader
-has to spend to get it back.** Those two are the same question asked twice, and the
-current production format ties them together in a way ng should not inherit.
+three hundred, for a cohort of one sample and of several thousand. **This document settles what one
+of those records holds and in what form**: which fields, how each is encoded, which may be stored
+approximately and at what step, and what a reader must hold while reading one back.
+
+**It does not settle what a record costs, and cannot.** The disk it takes and the memory a reader
+spends are *consequences* of those choices together with settings that are deliberately the user's —
+the block size and the approximation steps are declared per file, not fixed here
+([`psp_file_format.md`](psp_file_format.md) §4). The same design gives 4.6 or 8.8 bytes a record
+depending on how it is set. Every figure below is a measurement of one such setting, reported so the
+choices can be made on numbers; none of them is a property the format guarantees.
+
+**In production's design those two costs are one question**, because a block is both how far back the
+compressor may look and how much a reader must inflate. Separating them is what the shape in §3 is
+for.
 
 ### 1.1 The problem, in one paragraph
 
@@ -55,8 +68,8 @@ kilobytes, not megabytes*, at three thousand open samples.
    is looser than the "tens of kilobytes" [`run_streaming.md`](run_streaming.md) §7.2 asks
    for; that document's §7.2 should be corrected when it is next touched. **Measured, the
    shape in §3 costs 346 kB**, so the goal is met rather than argued.
-2. **The file is smaller than production's at every point on that curve**, not merely at
-   the memory-hungry end.
+2. **The file is smaller than production's at a comparable reader memory**, not only where
+   production is allowed to spend more.
 3. **A reader can start part-way through**, at a grain no coarser than 100 kb of
    reference, without reading what comes before.
 4. **The two-phase decode survives.** [`run_streaming.md`](run_streaming.md) §3.3 makes
