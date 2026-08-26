@@ -282,6 +282,23 @@ and is built inside the loop, at E2a. *Depends:* A1. *Source:* arch §2; the thr
 sources' plans.
 
 **E2a. The contaminant frequency, per locus and per sample.**  ☐
+
+**⚖ Owner's ruling, 2026-08-26, taken when E2 finished and this step's shape turned out to
+contradict D2's.** [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6 says that with
+contamination on *"a caller may no longer cache a whole row across iterations"* — because `q(o)`,
+the contaminating population's frequency for the allele an observation shows, is the locus's own
+number and moves with the loop. D2 pins the opposite: the genotype-likelihood table built **once**
+per locus, asserted as `EmissionCost { table_builds: 1 }`.
+
+**The build splits in two.** The **emission** values — one per `(sample, observation, candidate)` —
+read no frequency and stay computed once per locus. The per-genotype **row assembly** runs once per
+pass, **and only when contamination is on**. So D2's invariant is kept in the form it was really
+about — the expensive half, `candidates × Σ_s (observations in sample s) × builds`, is independent
+of the pass count — and an uncontaminated run keeps today's behaviour exactly, which is why D2's
+existing fixtures pass unchanged.
+
+**This step therefore edits D1's table build and D2's instrument**, which is more than the entry
+below describes. What `EmissionCost` counts has to say which half it is counting.
 Wire the two halves the read likelihood built: `fill_batch_allele_copies` once per locus per
 iteration from the loop's current expected copies, then `fill_contaminant_allele_frequencies`
 **once per sample**, leaving that sample's own copies out of its own batch, into the
