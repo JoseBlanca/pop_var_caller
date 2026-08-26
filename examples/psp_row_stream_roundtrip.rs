@@ -39,6 +39,11 @@ const MAGIC: &[u8; 4] = b"NGR1";
 /// scale. A scale of 16 on the window's mean coverage means 1/16 of a read.
 /// The scales are written into the file, so a reader never has to be told them.
 #[derive(Copy, Clone)]
+/// A scale of `0.0` means **store the value as raw IEEE bytes**, not as a
+/// count of steps. That is the setting that keeps psp mode bit-identical to
+/// direct mode: an approximated field makes the two routes see different
+/// numbers, and `run_streaming.md` §1.2 makes their agreement the oracle for
+/// the whole psp path.
 struct Scales {
     gc: f64,
     coverage: f64,
@@ -148,29 +153,42 @@ impl FrameWriter {
         self.prev_pos = rec.pos;
 
         put_varint(&mut self.buf, rec.alleles.len() as u64);
-        let gc = if rec.windowed_gc.is_nan() {
-            0
+        if self.scales.gc == 0.0 {
+            self.buf.extend_from_slice(&rec.windowed_gc.to_le_bytes());
         } else {
-            1 + (f64::from(rec.windowed_gc).clamp(0.0, 1.0) * self.scales.gc).round() as u64
-        };
-        put_varint(&mut self.buf, gc);
-        let cov = if rec.windowed_coverage.is_nan() {
-            0
+            let gc = if rec.windowed_gc.is_nan() {
+                0
+            } else {
+                1 + (f64::from(rec.windowed_gc).clamp(0.0, 1.0) * self.scales.gc).round() as u64
+            };
+            put_varint(&mut self.buf, gc);
+        }
+        if self.scales.coverage == 0.0 {
+            self.buf
+                .extend_from_slice(&rec.windowed_coverage.to_le_bytes());
         } else {
-            let q =
-                (f64::from(rec.windowed_coverage).max(0.0) * self.scales.coverage).round() as i64;
-            let d = q - self.prev_cov_q;
-            self.prev_cov_q = q;
-            1 + (((d << 1) ^ (d >> 63)) as u64)
-        };
-        put_varint(&mut self.buf, cov);
+            let cov = if rec.windowed_coverage.is_nan() {
+                0
+            } else {
+                let q = (f64::from(rec.windowed_coverage).max(0.0) * self.scales.coverage).round()
+                    as i64;
+                let d = q - self.prev_cov_q;
+                self.prev_cov_q = q;
+                1 + (((d << 1) ^ (d >> 63)) as u64)
+            };
+            put_varint(&mut self.buf, cov);
+        }
 
         for allele in &rec.alleles {
             put_varint(&mut self.buf, allele.seq.len() as u64);
             self.buf.extend_from_slice(&allele.seq);
             let s = &allele.support;
             put_varint(&mut self.buf, s.num_obs as u64);
-            put_svarint(&mut self.buf, (s.q_sum * self.scales.q_sum).round() as i64);
+            if self.scales.q_sum == 0.0 {
+                self.buf.extend_from_slice(&s.q_sum.to_le_bytes());
+            } else {
+                put_svarint(&mut self.buf, (s.q_sum * self.scales.q_sum).round() as i64);
+            }
             put_varint(&mut self.buf, s.fwd as u64);
             put_varint(&mut self.buf, s.placed_left as u64);
             put_varint(&mut self.buf, s.placed_start as u64);
@@ -279,20 +297,28 @@ impl<'a> FrameReader<'a> {
             self.pos += delta;
         }
         let n_alleles = self.cur.varint() as usize;
-        let gc_code = self.cur.varint();
-        let windowed_gc = if gc_code == 0 {
-            f32::NAN
+        let windowed_gc = if self.scales.gc == 0.0 {
+            f32::from_le_bytes(self.cur.bytes(4).try_into().expect("gc bytes"))
         } else {
-            ((gc_code - 1) as f64 / self.scales.gc) as f32
+            let gc_code = self.cur.varint();
+            if gc_code == 0 {
+                f32::NAN
+            } else {
+                ((gc_code - 1) as f64 / self.scales.gc) as f32
+            }
         };
-        let cov_code = self.cur.varint();
-        let windowed_coverage = if cov_code == 0 {
-            f32::NAN
+        let windowed_coverage = if self.scales.coverage == 0.0 {
+            f32::from_le_bytes(self.cur.bytes(4).try_into().expect("coverage bytes"))
         } else {
-            let z = cov_code - 1;
-            let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
-            self.prev_cov_q += d;
-            (self.prev_cov_q as f64 / self.scales.coverage) as f32
+            let cov_code = self.cur.varint();
+            if cov_code == 0 {
+                f32::NAN
+            } else {
+                let z = cov_code - 1;
+                let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
+                self.prev_cov_q += d;
+                (self.prev_cov_q as f64 / self.scales.coverage) as f32
+            }
         };
 
         let mut alleles = Vec::with_capacity(n_alleles);
@@ -300,7 +326,11 @@ impl<'a> FrameReader<'a> {
             let len = self.cur.varint() as usize;
             let seq = self.cur.bytes(len).to_vec();
             let num_obs = self.cur.varint() as u32;
-            let q_sum = self.cur.svarint() as f64 / self.scales.q_sum;
+            let q_sum = if self.scales.q_sum == 0.0 {
+                f64::from_le_bytes(self.cur.bytes(8).try_into().expect("q_sum bytes"))
+            } else {
+                self.cur.svarint() as f64 / self.scales.q_sum
+            };
             let fwd = self.cur.varint() as u32;
             let placed_left = self.cur.varint() as u32;
             let placed_start = self.cur.varint() as u32;
@@ -1164,21 +1194,29 @@ impl StreamingStore {
             pos += delta;
         }
         let n_alleles = cur.varint()? as usize;
-        let gc_code = cur.varint()?;
-        let windowed_gc = if gc_code == 0 {
-            f32::NAN
+        let windowed_gc = if self.scales.gc == 0.0 {
+            f32::from_le_bytes(cur.bytes(4)?.try_into().expect("gc bytes"))
         } else {
-            ((gc_code - 1) as f64 / self.scales.gc) as f32
+            let gc_code = cur.varint()?;
+            if gc_code == 0 {
+                f32::NAN
+            } else {
+                ((gc_code - 1) as f64 / self.scales.gc) as f32
+            }
         };
-        let cov_code = cur.varint()?;
         let mut prev_cov_q = self.prev_cov_q;
-        let windowed_coverage = if cov_code == 0 {
-            f32::NAN
+        let windowed_coverage = if self.scales.coverage == 0.0 {
+            f32::from_le_bytes(cur.bytes(4)?.try_into().expect("coverage bytes"))
         } else {
-            let z = cov_code - 1;
-            let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
-            prev_cov_q += d;
-            (prev_cov_q as f64 / self.scales.coverage) as f32
+            let cov_code = cur.varint()?;
+            if cov_code == 0 {
+                f32::NAN
+            } else {
+                let z = cov_code - 1;
+                let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
+                prev_cov_q += d;
+                (prev_cov_q as f64 / self.scales.coverage) as f32
+            }
         };
 
         let mut last_chain = self.last_chain;
@@ -1187,7 +1225,11 @@ impl StreamingStore {
             let len = cur.varint()? as usize;
             let seq = cur.bytes(len)?.to_vec();
             let num_obs = cur.varint()? as u32;
-            let q_sum = cur.svarint()? as f64 / self.scales.q_sum;
+            let q_sum = if self.scales.q_sum == 0.0 {
+                f64::from_le_bytes(cur.bytes(8)?.try_into().expect("q_sum bytes"))
+            } else {
+                cur.svarint()? as f64 / self.scales.q_sum
+            };
             let fwd = cur.varint()? as u32;
             let placed_left = cur.varint()? as u32;
             let placed_start = cur.varint()? as u32;
