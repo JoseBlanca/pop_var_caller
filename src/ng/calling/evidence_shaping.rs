@@ -916,7 +916,8 @@ mod tests {
     /// is invariant in its element type, so a list hoisted out of the loop holds the first
     /// locus's borrow of the scratch open into the second. Compiled and rejected while this
     /// test was written: hoisting `views` is an `E0499` here and an `E0502` on the two-step
-    /// form. **This test is the shape E3's caller has to copy.**
+    /// form. **That caller now exists** — `tests/ng_calling_loop_calls_genotypes.rs`, which runs
+    /// this shape end to end over a cohort locus and asserts the genotypes that come out.
     #[test]
     fn a_worker_shapes_one_locus_after_another_on_one_scratch() {
         let mut first = merged_locus(

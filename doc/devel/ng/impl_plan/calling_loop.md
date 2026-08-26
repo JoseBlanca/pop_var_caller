@@ -59,7 +59,7 @@ scores complete observations only.
    sentence *"supplying the candidates is enough"* was retired.
 3. **The driver has no route from a tract's evidence to that row.** Its emission build and its row
    assembly both take the SNP/indel path's per-sample evidence, so `call_locus` still refuses every
-   repeat tract at its front door. That is **E3**.
+   repeat tract at its front door. That is **E3b**.
 
 ---
 
@@ -372,13 +372,13 @@ borrow the stutter models, so the models and the contexts cannot live in one str
 contamination** rather than handing back the two-term form, and the panic names E2d — a
 mechanism rather than a doc comment, because the two-term row returns perfectly plausible
 numbers. *(The driver's own refusal is unchanged and unconditional: it still turns away every
-repeat tract, because it has no route from a tract's evidence to the row. That is E3.)*
+repeat tract, because it has no route from a tract's evidence to the row. That is E3b.)*
 *Depends:* D1, E1, E2. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.2, §4.3, §4.4, §4.5;
 [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §4.1, §4.2.
 
 **E2d. The contaminant seed at a repeat tract.**  ☐
-**Runs after E3, not before it**: E2c refuses a contaminated run by name, so E3's tract fixture
+**Runs after E3b, not before it**: E2c refuses a contaminated run by name, so E3b's tract fixture
 does not need this and nothing else reaches a tract yet. The third term of §4.5.1's mixture, which
 is the one field of the row's locus parameters E2c leaves empty.
 
@@ -397,7 +397,7 @@ place. *Depends:* E2a, E2c. *Source:*
 [`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
 
 **E2b. The run says what contamination it used, per sample.**  ☐
-**Runs after E3, not before it** — its own *Depends* line says so, and it is listed here because
+**Runs after E3a, not before it** — its own *Depends* line says so, and it is listed here because
 it belongs beside E2a rather than because it comes next.
 **Spec §3.6 requires it and nothing owned it until now** (added 2026-08-24, on the owner's
 instruction, after C1's and C2's reviews both found it homeless): *the run's output must still
@@ -416,42 +416,99 @@ dense `BatchOfEachReadGroup` the mixture holds cannot (C2's review).
 the output**, and a decision this step must take rather than inherit: per sample or per read
 group. The fraction is fitted per read group and a sample may hold several, so a per-sample line
 either picks one or summarises; §3.6 asks for per sample and the finer grain is what the fit
-produces. *Depends:* E2a, E3. *Source:*
+produces. *Depends:* E2a, E3a. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6.
 
-**E3. The integration fixture — ng calls genotypes.**  ☐
-End-to-end over a small fixture: reads → merge → E1's shaping → `call_locus` →
-`LocusInference` asserted against hand-derived genotypes, on both paths, at one sample and at
-several. Provenance and `seed_diversity_unreachable` reach the output. **This is the milestone
-where ng calls genotypes.**
+**E3. The integration fixture — ng calls genotypes.**  **split into E3a ✅ and E3b ☐, 2026-08-26**
+
+**Why it split, and it is a change of character rather than a blockage.** E3a is a **test**: the
+generic path needed no library code that did not already exist, and the step is one fixture.
+**E3b is implementation** — the driver's emission build, its row assembly and its evidence
+accessor all take the SNP/indel path's per-sample evidence unconditionally, so a tract needs
+source changes in four places before any fixture can run — **and it carries one open question**,
+which is where a tract's two run-level prior inputs live. Doing both under one step id would have
+put a fixture and a subsystem behind one checkbox.
+
+**E3a. The generic path, end to end.**  ✅
+One cohort locus's per-sample observations → the merge's allele unification and read attribution
+→ `select_generic` → `shape_generic_locus` → `call_locus` → `LocusInference`, asserted against
+hand-derived genotypes at one sample and at several. **This is where ng calls genotypes.**
+*Depends:* D1, E1, E2. *Source:* spec §1, §9;
+[`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §5.1.
 
 **Where the candidates come from, restated 2026-08-25 now that selection exists.** On the
-**generic path**, run `select_generic` on the merged locus, so the fixture is reads → merge →
-selection → shaping → loop and nothing in it is supplied by hand. **The three joins that step
+**generic path**, run `select_generic` on the merged locus, so the candidates are chosen rather
+than supplied. **The three joins that step
 has to get right are named in
 [`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §5.1** — the prior takes the
 *total* allele count and not `alternative_allele_count()`; `LocusSelection::unmatched` is
 parallel to the merge's covering samples and not to the run's sample order; and
-`genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one.
+`genotype_must_be_missing` needs a carrier in `SampleGenotypeCall` — **added by C3b**, which is
+`SampleGenotypeCall::Missing`.
 
-**The repeat-tract half of this step is blocked on the candidates and on the assembly, and no
-longer on the row** *(corrected 2026-08-25, when this paragraph still said the row did not exist;
-corrected again 2026-08-26, when it said the candidates were the only thing left)*. The STR
-read-likelihood row landed with [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1
-and H2 and is merged, so a tract has an `Lg` to be genotyped from. **What is unwritten is the STR
-selection path**, so this step's tract candidates are **fixture-supplied** rather than chosen —
-which is a smaller claim than the old paragraph made, and the test's own doc comment must say
-which of the two it is, so that a later reader does not read a supplied candidate set as a
-selected one.
+**The tract's candidates are supplied where the generic path's are chosen**, and E3b's fixture
+must say which of the two it is so that a later reader does not read one as the other. **What is
+unwritten is the STR selection path** ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)) —
+not the row, which landed with [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1
+and H2, and not its scoring parameters, which landed with E2c.
 
-**E2d is not a dependency of this step and that is deliberate.** A tract's third mixture term is
-needed only where the run's fit found contamination, and E2c refuses exactly that case by name —
-so this step's tract fixture is an uncontaminated run, which is also what a single sample gets.
-What E2d gates is a *contaminated* run reaching a tract, which nothing does until the loop is
-wired into the merge's builder. *Depends:* D1, E1, E2, E2a, E2c. *Source:* spec §1, §9.
+**What E3a runs and what it supplies, because the difference is the test's whole worth.** It
+supplies the per-sample **observations** — what each sample's reads showed, as the locus generator
+emits them, since turning aligned reads into observations is step 5's and outside this plan's
+Scope — and it supplies the **`ClosedLocus`** the merge is handed, because `LocusCloser`'s
+chaining walk is a different subsystem. What it reproduces rather than assumes is that walk's
+**keep rule**, so a fixture the real walk would discard as too quiet is refused rather than
+scored; that check caught one such fixture on its first run. Everything after the closed locus is
+run: the merge's allele unification and read attribution, `select_generic`,
+`shape_generic_locus`, and the loop. It lives in `tests/` so that the seams this path names are
+`pub`.
+
+**E3b. The repeat-tract path, end to end.**  ☐
+The same fixture at a tract, with the candidates and their repeat counts **fixture-supplied**
+rather than selected — the STR selection path is unwritten
+([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)), so the test's own doc comment must say
+which of the two it is, and a later reader must not read a supplied candidate set as a selected
+one.
+
+**The implementation, which needs no ruling.** Five places in
+`inference/summarise_condition.rs` take the generic path's per-sample evidence unconditionally and
+each needs a tract branch: `generic_evidence_of`, `build_locus_emissions`,
+`assemble_genotype_likelihood_table`, `weakest_warrant_at_the_locus` and the locus concentration
+fill; `call_locus` refuses a tract in front of all of them. The tract's own row and its scoring
+parameters are built (E2c), and with no contamination the row reads no frequency, so the table is
+assembled once per locus and D2's invariant holds unchanged.
+
+**The per-locus inputs a tract needs beyond its candidates**, all fixture-supplied here because the
+STR selection path is unwritten: each candidate's **repeat count** (not derivable from its bases —
+an interrupted tract holds fewer whole repeats than its length suggests) and the cohort's **modal
+repeat count** at the tract, which is what the prior's shape decays away from.
+
+**⚑ The one open question: where a tract's two run-level prior inputs live.** `fill_ssr_seed` needs
+the cohort's **repeat gene diversity** and a **decay per repeat**. Both are checked types in
+`ng/types.rs` and both have a designed source — `arch/calling_priors.md` §5 names the pre-pass, and
+`spec/parameter_prepass_ssr.md` gives the diversity a **Home:** — but **nothing emits either yet**,
+and no document says how they reach the loop.
+
+- **Recommendation: `FrozenParameters`, absent-or-present exactly as the contamination views are.**
+  A run with no STR fit carries none, and a tract on such a run is refused by name rather than
+  seeded from the SNP/indel spectrum. **The precedent is in the type already**: it carries two
+  run-level STR parameters, `ssr_slippage_fits` and the substitution-rate map, both added by E2.
+- **The alternative is `LocusEvidence::Ssr`.** What that costs: run-level numbers ride on a
+  per-locus type, so every locus of a run repeats them, and the axis confusion `FrozenParameters`'
+  own documentation exists to prevent — *"two different axes are in here and they are not
+  interchangeable"* — is reopened one type over. What it buys: `FrozenParameters` does not change,
+  and E3b's fixture supplies all three tract inputs in one place.
+- **The decay's shape is the smaller half of the same question.** It is documented as *fitted per
+  group of loci*, so strictly it is a lookup; with no producer, no test can tell a scalar from a
+  map. Recommendation: one scalar for the run, defaulting to `SeedDecayPerRepeat::FALLBACK`, named
+  as provisional — the constant already exists and the architecture already calls it the fallback.
+
+*Depends:* E3a. *Source:* spec §1, §5, §9;
+[`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
 
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
-> path, over supplied ones at a repeat tract. Pause for review.
+> path (E3a, done), over supplied ones at a repeat tract (E3b, which carries one open question and
+> is otherwise implementation). Pause for review.
 
 ### Milestone F — the two loop oracles
 
@@ -459,14 +516,14 @@ wired into the merge's builder. *Depends:* D1, E1, E2, E2a, E2c. *Source:* spec 
 Given the same likelihood table, the same prior parameters and the same candidate set,
 production's loop ([`posterior_engine.rs:2733`](../../../../src/var_calling/posterior_engine.rs))
 and ng's produce the same genotypes — any difference traced to a decision one of the three
-calling documents records, and the trace written into the test. *Depends:* E3. *Source:* spec
+calling documents records, and the trace written into the test. *Depends:* E3a. *Source:* spec
 §10; §13 test 8.
 
 **F2. The STR differential.**  ☐
 On the same likelihood table, run ng's loop under **production's convergence rule and
 tolerance** (π at `1e-6`) and require matching genotypes against production's STR loop; then
 restore ng's rule (copies over chromosomes at `1e-3`) and **report what moved**. A differential
-with a failing state, not parity with an escape clause. *Depends:* E3. *Source:* spec §10.
+with a failing state, not parity with an escape clause. *Depends:* E3b. *Source:* spec §10.
 
 > **Checkpoint F:** ng's loop is anchored to production on both paths. **Arm A is complete; ng
 > calls genotypes.** Pause for review.
@@ -481,7 +538,7 @@ with a failing state, not parity with an escape clause. *Depends:* E3. *Source:*
 | B | hand-computed E-step case; **bitwise M-step mutation check on summed copies** |
 | C | the flat-pass trap test; one-sample bitwise fixed point; capped-emit flag; **the two-cohort-size division test** |
 | D | **instrumented emission-call count** (`candidates × Σ_s obs × 1`); zero-allocation-per-pass |
-| E | the integration fixture — hand-derived genotypes from real evidence, both paths; **selected** candidates on the generic path, supplied at a repeat tract; and, behind the tract's half of it, an assembly whose every lookup changes a row when it is dropped |
+| E | the integration fixture — hand-derived genotypes from real evidence; **selected** candidates on the generic path (E3a), supplied at a repeat tract (E3b); and, behind the tract's half of it, an assembly whose every lookup changes a row when it is dropped |
 | F | **production parity (SNP/indel)** and **the STR convergence differential** |
 
 ## Out of scope (next plans)

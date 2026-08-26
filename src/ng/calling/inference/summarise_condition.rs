@@ -1821,7 +1821,7 @@ where
             "the repeat tract at {} cannot be scored yet: its row exists and its scoring \
              parameters are assembled (inference::repeat_tract_parameters), but this driver's \
              emission build and row assembly still take the SNP/indel path's per-sample \
-             evidence — step E3 of the calling loop's plan is where a tract is scored through \
+             evidence — step E3b of the calling loop's plan is where a tract is scored through \
              them",
             evidence.region()
         );
