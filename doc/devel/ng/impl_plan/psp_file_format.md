@@ -123,7 +123,7 @@ sequences, `read_witness`, `read_group`, the support moments, and the two counts
 nothing. Round-trips exactly.
 ***Depends:*** A1, B3. ***Source:*** [arch §2](../arch/psp_file_format.md), [spec psp_record_encoding §5](../spec/psp_record_encoding.md).
 
-☐ **C2 — the record head, and the skip.** `position_offset | reference_span | non_reference_reads |
+✅ **C2 — the record head, and the skip.** `position_offset | reference_span | non_reference_reads |
 body_bytes | body`, and a decoder that takes the head and either builds the body or advances past it.
 ***Depends:*** C1. ***Source:*** [spec §4.3](../spec/psp_file_format.md).
 

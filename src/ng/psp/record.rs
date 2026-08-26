@@ -4,7 +4,10 @@
 //! # The head
 //!
 //! The fixed fields at the front of every record, which let a reader decide without building
-//! anything.
+//! anything. [`RecordEncoder::push`] writes one and hands it back; [`read_record_head`] reads
+//! one and bounds the body behind it, which is the whole of the skip — a reader that does not
+//! want the record advances past it and touches no byte of its body. [`decode_record`] does
+//! both halves and checks that the head's declared length and the body's real shape agree.
 //!
 //! ```text
 //! record = position_offset | reference_span | non_reference_reads | body_bytes
@@ -52,7 +55,7 @@ use crate::ng::locus_generation::{
     WitnessedLocusPositions,
 };
 use crate::ng::psp::header::{FieldEncoding, FieldName, FieldSpec, Manifest};
-use crate::ng::types::{GenomeRegion, Motif, ReadGroupId, SummedLogError};
+use crate::ng::types::{ContigId, GenomeRegion, Motif, Position, ReadGroupId, SummedLogError};
 use crate::psp::errors::VarintError;
 use crate::psp::varint::{
     decode_i64_svarint, decode_u64_leb128, encode_i64_svarint, encode_u64_leb128,
@@ -90,6 +93,32 @@ pub struct RecordHead {
 // The body: one record's fields to bytes and back
 // ---------------------------------------------------------------------
 
+/// Every field a record's **head** carries, in encoding order — the fixed part in front of the
+/// body, which a reader decodes for every record whether or not it wants the record.
+///
+/// **Variable-length integers, and that is an implementation choice with a measurement owed.**
+/// Spec `psp_file_format.md` §4.3 leaves the width to the manifest and records that a fixed width
+/// is quicker to read and costs less than it looks after compression — the four head fields
+/// together compressed to 0.077 bytes a record when measured on their own — but that the two
+/// encodings have never been compared *in place*. That comparison needs a compressor, which
+/// arrives at Milestone D2, so the choice here is the one that composes with every other field and
+/// **the sweep belongs to D2**. Changing it later is a manifest change, not a format change.
+const HEAD_FIELDS: [(&str, FieldEncoding); 4] = [
+    ("position-offset", FieldEncoding::Varint),
+    ("reference-span", FieldEncoding::Varint),
+    ("non-reference-reads", FieldEncoding::Varint),
+    ("body-bytes", FieldEncoding::Varint),
+];
+
+const fn head_field(position: usize) -> &'static str {
+    HEAD_FIELDS[position].0
+}
+
+const POSITION_OFFSET: &str = head_field(0);
+const REFERENCE_SPAN: &str = head_field(1);
+const NON_REFERENCE_READS: &str = head_field(2);
+const BODY_BYTES: &str = head_field(3);
+
 /// Every field a record's **body** carries, in encoding order.
 ///
 /// **A field list, not a count of values per record.** Nine of these nineteen are written once
@@ -100,9 +129,9 @@ pub struct RecordHead {
 /// body holds is read from the counts the body itself carries.
 ///
 /// **What it is for: a file's fingerprint of its own layout, and a reader's check against it.**
-/// A writer declares this array ([`record_body_fields`]) and a reader refuses any file
-/// declaring something else ([`RecordBodyLayout::from_manifest`]), so a file from another
-/// version is rejected rather than decoded into plausible nonsense.
+/// A writer declares this array after [`HEAD_FIELDS`] ([`record_fields`]) and a reader refuses any
+/// file declaring something else ([`RecordLayout::from_manifest`]), so a file from another version
+/// is rejected rather than decoded into plausible nonsense.
 ///
 /// **It does not drive the codec, and the compiler cannot make it.** [`encode_record_body`] and
 /// [`decode_record_body`] write and read these fields in this order by hand — which they must,
@@ -247,15 +276,24 @@ const MOST_BYTES_A_BODY_CAN_DECLARE: u64 = u32::MAX as u64;
 /// **The manifest is how a reader is driven by the file rather than by an assumption**
 /// (spec §4.5). It is a fingerprint rather than a parsing recipe — see [`BODY_FIELDS`] for what
 /// it does and does not promise.
-pub fn record_body_fields() -> Vec<FieldSpec> {
-    BODY_FIELDS
+pub fn record_fields() -> Vec<FieldSpec> {
+    declared_fields().collect()
+}
+
+/// The head's four fields and then the body's nineteen, as the manifest spells them.
+fn declared_fields() -> impl Iterator<Item = FieldSpec> {
+    HEAD_FIELDS
         .iter()
+        .chain(BODY_FIELDS.iter())
         .map(|(name, encoding)| FieldSpec {
             name: FieldName((*name).to_string()),
             encoding: *encoding,
         })
-        .collect()
 }
+
+/// How many fields a record declares before anything a later writer added: the head's four and
+/// the body's nineteen.
+const DECLARED_FIELD_COUNT: usize = HEAD_FIELDS.len() + BODY_FIELDS.len();
 
 /// How this reader must read the bodies in one particular file.
 ///
@@ -278,7 +316,7 @@ pub fn record_body_fields() -> Vec<FieldSpec> {
 /// later writer adding a per-observation field must raise the format version, which a reader
 /// does refuse (`header.rs`, `UnsupportedVersion`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordBodyLayout {
+pub struct RecordLayout {
     /// The encodings of the fields this reader does not recognise, in the order they appear at
     /// the end of every body. Empty for a file this version wrote.
     ///
@@ -289,7 +327,7 @@ pub struct RecordBodyLayout {
     unknown_final_encodings: Vec<FieldEncoding>,
 }
 
-impl RecordBodyLayout {
+impl RecordLayout {
     /// The layout this build of the code writes: every field it knows, and nothing after them.
     ///
     /// # When this is right
@@ -310,25 +348,25 @@ impl RecordBodyLayout {
     /// are the shapes that would otherwise decode into plausible values rather than failing.
     /// Whatever the manifest lists *after* them is carried as something to walk past
     /// (see the type's own documentation, including what that cannot do).
-    pub fn from_manifest(manifest: &Manifest) -> Result<Self, RecordBodyLayoutError> {
-        for (position, (name, encoding)) in BODY_FIELDS.iter().enumerate() {
+    pub fn from_manifest(manifest: &Manifest) -> Result<Self, RecordLayoutError> {
+        for (position, expected) in declared_fields().enumerate() {
             let Some(declared) = manifest.fields.get(position) else {
-                return Err(RecordBodyLayoutError::MissingField {
+                return Err(RecordLayoutError::MissingField {
                     position,
-                    expected: FieldName((*name).to_string()),
+                    expected: expected.name,
                 });
             };
-            if declared.name.0 != *name {
-                return Err(RecordBodyLayoutError::UnexpectedField {
+            if declared.name != expected.name {
+                return Err(RecordLayoutError::UnexpectedField {
                     position,
-                    expected: FieldName((*name).to_string()),
+                    expected: expected.name,
                     found: declared.name.clone(),
                 });
             }
-            if declared.encoding != *encoding {
-                return Err(RecordBodyLayoutError::WrongEncoding {
+            if declared.encoding != expected.encoding {
+                return Err(RecordLayoutError::WrongEncoding {
                     field: declared.name.clone(),
-                    expected: *encoding,
+                    expected: expected.encoding,
                     found: declared.encoding,
                 });
             }
@@ -337,7 +375,7 @@ impl RecordBodyLayout {
             unknown_final_encodings: manifest
                 .fields
                 .iter()
-                .skip(BODY_FIELDS.len())
+                .skip(DECLARED_FIELD_COUNT)
                 .map(|field| field.encoding)
                 .collect(),
         })
@@ -357,7 +395,7 @@ impl RecordBodyLayout {
 /// record.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RecordBodyLayoutError {
+pub enum RecordLayoutError {
     #[error("the manifest ends before field {position}, which must be {:?}", expected.0)]
     MissingField {
         position: usize,
@@ -507,7 +545,7 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
 /// no coordinate of its own (spec §4.3), and nothing here checks the region against the
 /// reference bases the body holds, because a record's reference bases are not required to
 /// cover its region. `layout` comes from the file's manifest, once, at open
-/// ([`RecordBodyLayout::from_manifest`]); [`RecordBodyLayout::as_this_build_writes_it`] is for
+/// ([`RecordLayout::from_manifest`]); [`RecordLayout::as_this_build_writes_it`] is for
 /// bytes this process encoded itself and skips every check that function makes.
 ///
 /// **The chain-id lists come back empty** — see [`encode_record_body`].
@@ -526,7 +564,7 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
 pub fn decode_record_body(
     bytes: &[u8],
     region: GenomeRegion,
-    layout: &RecordBodyLayout,
+    layout: &RecordLayout,
 ) -> Result<DecodedRecordBody, RecordDecodeError> {
     let mut body = BodyReader::new(bytes);
 
@@ -885,7 +923,7 @@ impl<'a> BodyReader<'a> {
     }
 
     /// Walk past one field of a declared encoding without interpreting it — how a reader
-    /// meets a field a later writer added (see [`RecordBodyLayout`]).
+    /// meets a field a later writer added (see [`RecordLayout`]).
     ///
     /// **Exhaustive with no wildcard**, so an encoding added to the closed set has to say
     /// here how long one of its values is, rather than inheriting a guess.
@@ -921,10 +959,251 @@ fn entries_to_reserve(declared: u64, least_bytes_each: usize, bytes_left: usize)
     let could_be_there = (bytes_left / least_bytes_each).min(MOST_ENTRIES_RESERVED);
     declared.min(could_be_there as u64) as usize
 }
+
+// ---------------------------------------------------------------------
+// The head, and the skip it exists for
+// ---------------------------------------------------------------------
+
+/// Why a record could not be laid down.
+///
+/// **Every variant is a record the writer was handed that the format cannot hold**, not an
+/// internal fault. The body encoder cannot fail at all; these are the three things the *head*
+/// has to be able to say no to, because each of them would otherwise be written as a number
+/// that means something else.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecordEncodeError {
+    /// A record starting before the one before it. The head stores the distance from the
+    /// previous record's start, and a distance backwards has no representation.
+    ///
+    /// **Refused rather than accepted**: coordinate order is what the block index and every
+    /// seek rest on, and a file that breaks it seeks wrongly rather than failing. The writer
+    /// of Milestone F3 turns this into `PspWriteError::OutOfOrder`, which names the file.
+    #[error(
+        "a record starting at {} starts before {}, where the previous record began",
+        offered.get(), previous.get()
+    )]
+    StartsBeforeThePreviousRecord {
+        previous: Position,
+        offered: Position,
+    },
+
+    /// A body longer than the head can describe. `body-bytes` is what a reader advances to skip
+    /// a record, so a length it cannot hold is a record nothing could skip.
+    #[error(
+        "a record body of {bytes} bytes, longer than the {} a head can describe",
+        u32::MAX
+    )]
+    BodyTooLong { bytes: usize },
+
+    /// A region covering no bases, which is `end` before `start`. `GenomeRegion` has public
+    /// fields and no constructor, so this is reachable and is a caller's mistake rather than a
+    /// state the format has a spelling for.
+    #[error("a record over {region}, which covers no reference base")]
+    EmptyRegion { region: GenomeRegion },
+}
+
+/// Lays records down, and keeps the one buffer a record needs while it is being written.
+///
+/// **A record's head cannot be written until its body has been**, because the head ends with
+/// the body's length in bytes — that field is the whole reason a reader can skip a record
+/// rather than decoding every variable-length integer in it to find where it ends. So the body
+/// goes into a scratch buffer first and is copied out behind its head. **The scratch is kept
+/// across records**, which is what stops a writer allocating one per record on a path that runs
+/// at about twenty million records a second (spec §4.5).
+#[derive(Debug, Default)]
+pub struct RecordEncoder {
+    body: Vec<u8>,
+}
+
+impl RecordEncoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `record` to `out` as a head and then a body, and hand back the head that was
+    /// written.
+    ///
+    /// **`previous_position` is what the head's position offset is measured from**: the block's
+    /// own first position for a block's first record, and the previous record's start after
+    /// that. Every running difference restarts at a block boundary (spec §3.2), and that reset
+    /// is what makes a reader able to start at any block — so a caller that carries the wrong
+    /// base here writes a file that reads back at the wrong coordinates and does not fail.
+    ///
+    /// The head's `non_reference_reads` is **derived here, not supplied**: it is the reads at
+    /// this locus that showed something other than the reference, which the record already
+    /// knows and which a caller could otherwise get wrong.
+    pub fn push(
+        &mut self,
+        record: &SampleLocusObservations,
+        previous_position: Position,
+        out: &mut Vec<u8>,
+    ) -> Result<RecordHead, RecordEncodeError> {
+        if record.region.is_empty() {
+            return Err(RecordEncodeError::EmptyRegion {
+                region: record.region,
+            });
+        }
+        let offset = record
+            .region
+            .start
+            .get()
+            .checked_sub(previous_position.get())
+            .ok_or(RecordEncodeError::StartsBeforeThePreviousRecord {
+                previous: previous_position,
+                offered: record.region.start,
+            })?;
+
+        self.body.clear();
+        encode_record_body(record, &mut self.body);
+        let body_bytes =
+            u32::try_from(self.body.len()).map_err(|_| RecordEncodeError::BodyTooLong {
+                bytes: self.body.len(),
+            })?;
+
+        let (non_reference_reads, _) = record.non_reference_and_compared_reads();
+
+        put_varint(out, offset);
+        put_varint(out, record.region.len());
+        put_varint(out, u64::from(non_reference_reads));
+        put_varint(out, u64::from(body_bytes));
+        out.extend_from_slice(&self.body);
+
+        Ok(RecordHead {
+            region: record.region,
+            non_reference_reads,
+            body_bytes,
+        })
+    }
+}
+
+/// One record found at the front of a buffer: what its head says, where its body sits, and how
+/// many bytes the whole record takes.
+///
+/// **This is the skip.** A reader that does not want the record advances
+/// [`bytes_read`](Self::bytes_read) and touches nothing else; a reader that does hands
+/// [`body`](Self::body) to [`decode_record_body`]. Measured on a tomato accession at three reads
+/// a position, 7.69 M records: a walk keeping one record in a hundred takes 0.141 s against
+/// 0.29 s for one that builds every record — **2.06× faster** (spec §4.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordInBuffer<'a> {
+    pub head: RecordHead,
+    /// **Exactly `head.body_bytes` bytes, and bounded here.** A body handed a slice of its own
+    /// record cannot read into the next one however damaged it is, so a length field that
+    /// disagrees with the body's real shape is caught rather than absorbed.
+    pub body: &'a [u8],
+    /// The head and the body together — what a reader advances to reach the next record.
+    pub bytes_read: usize,
+}
+
+/// Read one record's head, and bound its body.
+///
+/// `contig` comes from the block, which never crosses one (spec §3.2), and
+/// `previous_position` is what the head's offset is measured from — see
+/// [`RecordEncoder::push`], which must be given the same base.
+///
+/// **Nothing in the body is touched**, which is the point: this is what the cohort's first pass
+/// runs, and at about 99 positions in 100 it is all that runs.
+pub fn read_record_head(
+    bytes: &[u8],
+    contig: ContigId,
+    previous_position: Position,
+) -> Result<RecordInBuffer<'_>, RecordDecodeError> {
+    let mut head = BodyReader::new(bytes);
+
+    let offset = head.read_varint(POSITION_OFFSET)?;
+    let start = previous_position.get().checked_add(offset).ok_or_else(|| {
+        head.malformed(
+            POSITION_OFFSET,
+            format!(
+                "{offset} past {}, which is off the coordinate axis",
+                previous_position.get()
+            ),
+        )
+    })?;
+
+    let span = head.read_varint(REFERENCE_SPAN)?;
+    if span == 0 {
+        return Err(head.malformed(
+            REFERENCE_SPAN,
+            "a record covering no reference base; every record covers at least one".to_string(),
+        ));
+    }
+    // `end` is the last base covered, so a one-base record has `end == start`.
+    let end = start.checked_add(span - 1).ok_or_else(|| {
+        head.malformed(
+            REFERENCE_SPAN,
+            format!("{span} bases from {start}, which runs off the coordinate axis"),
+        )
+    })?;
+
+    let non_reference_reads = head.read_u32(NON_REFERENCE_READS)?;
+    let body_bytes = head.read_u32(BODY_BYTES)?;
+
+    let body = head.take(body_bytes as usize, BODY_BYTES)?;
+
+    Ok(RecordInBuffer {
+        head: RecordHead {
+            region: GenomeRegion {
+                contig,
+                start: Position(start),
+                end: Position(end),
+            },
+            non_reference_reads,
+            body_bytes,
+        },
+        body,
+        bytes_read: head.bytes_read(),
+    })
+}
+
+/// One whole record, read back.
+#[derive(Debug, Clone, PartialEq)]
+#[must_use]
+pub struct DecodedRecord {
+    pub record: SampleLocusObservations,
+    /// What the head said before the body was built — including
+    /// [`non_reference_reads`](RecordHead::non_reference_reads), which the body does not carry.
+    pub head: RecordHead,
+    /// The head and the body together: what a reader advances to reach the next record.
+    pub bytes_read: usize,
+}
+
+/// Read one whole record — head, then body — and check that the two agree.
+///
+/// **The check is the reason this exists rather than being two calls.** The head declares how
+/// long the body is and the body says how much of itself it used; the two disagreeing means the
+/// file and this reader disagree about the record's shape, which is what a version mismatch or a
+/// corrupt block looks like. Split across two calls it is a comparison a caller can forget to
+/// make, and forgetting it is silent.
+pub fn decode_record(
+    bytes: &[u8],
+    contig: ContigId,
+    previous_position: Position,
+    layout: &RecordLayout,
+) -> Result<DecodedRecord, RecordDecodeError> {
+    let found = read_record_head(bytes, contig, previous_position)?;
+    let body = decode_record_body(found.body, found.head.region, layout)?;
+    if body.bytes_read != found.body.len() {
+        return Err(RecordDecodeError::Malformed {
+            field: BODY_BYTES,
+            bytes_in: found.bytes_read - found.body.len() + body.bytes_read,
+            reason: format!(
+                "a head declaring {} body bytes over a body that used {}",
+                found.body.len(),
+                body.bytes_read
+            ),
+        });
+    }
+    Ok(DecodedRecord {
+        record: body.record,
+        head: found.head,
+        bytes_read: found.bytes_read,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::types::{ContigId, Position};
 
     /// A head is read once per record on a path that runs at about twenty million records
     /// a second, and a reader that had to clone one — or that paid a pointer chase to
@@ -1069,7 +1348,7 @@ mod tests {
         let decoded = decode_record_body(
             &bytes,
             record.region,
-            &RecordBodyLayout::as_this_build_writes_it(),
+            &RecordLayout::as_this_build_writes_it(),
         )
         .expect("what this encoder wrote, this decoder reads");
         (decoded, bytes)
@@ -1080,7 +1359,7 @@ mod tests {
         decode_record_body(
             bytes,
             a_region(1, 1),
-            &RecordBodyLayout::as_this_build_writes_it(),
+            &RecordLayout::as_this_build_writes_it(),
         )
     }
 
@@ -1374,14 +1653,18 @@ mod tests {
     /// [`BODY_FIELDS`] with itself; this one is the copy that has to be edited on purpose, so a
     /// rename that would change what a written file declares cannot pass unnoticed.
     #[test]
-    fn record_body_fields_declares_the_names_a_written_file_carries() {
-        let names: Vec<String> = record_body_fields()
+    fn record_fields_declares_the_names_a_written_file_carries() {
+        let names: Vec<String> = record_fields()
             .into_iter()
             .map(|field| field.name.0)
             .collect();
         assert_eq!(
             names,
             vec![
+                "position-offset",
+                "reference-span",
+                "non-reference-reads",
+                "body-bytes",
                 "reference-bases",
                 "observation-count",
                 "observation-bases",
@@ -1409,9 +1692,9 @@ mod tests {
     /// version wrote has nothing in it this version does not know.
     #[test]
     fn the_manifest_a_writer_declares_is_the_one_this_reader_checks() {
-        let layout = RecordBodyLayout::from_manifest(&a_manifest_declaring(record_body_fields()))
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(record_fields()))
             .expect("the fields this writer declares are the fields this reader reads");
-        assert_eq!(layout, RecordBodyLayout::as_this_build_writes_it());
+        assert_eq!(layout, RecordLayout::as_this_build_writes_it());
         assert_eq!(layout.unknown_field_count(), 0);
     }
 
@@ -1442,7 +1725,7 @@ mod tests {
                 parameters: std::collections::BTreeMap::new(),
                 created: "2026-08-26T09:15:00Z".parse().expect("an RFC 3339 stamp"),
             },
-            manifest: a_manifest_declaring(record_body_fields()),
+            manifest: a_manifest_declaring(record_fields()),
         };
 
         let bytes = header
@@ -1450,10 +1733,10 @@ mod tests {
             .expect("a writer's own manifest must be a legal header");
         let (back, _) = Header::decode(&bytes, std::path::Path::new("SRR7279481.psp"))
             .expect("and its own reader must read it");
-        assert_eq!(back.manifest.fields, record_body_fields());
+        assert_eq!(back.manifest.fields, record_fields());
         assert_eq!(
-            RecordBodyLayout::from_manifest(&back.manifest).expect("and drive this reader"),
-            RecordBodyLayout::as_this_build_writes_it()
+            RecordLayout::from_manifest(&back.manifest).expect("and drive this reader"),
+            RecordLayout::as_this_build_writes_it()
         );
     }
 
@@ -1463,8 +1746,12 @@ mod tests {
     #[test]
     fn the_declared_step_is_the_types_step_and_is_four_thousand_and_ninety_six() {
         assert_eq!(SummedLogError::STEPS_PER_NAT, 4_096);
+        let summed_log_error = record_fields()
+            .into_iter()
+            .find(|field| field.name.0 == "summed-log-error")
+            .expect("the field is declared");
         assert_eq!(
-            record_body_fields()[9].encoding,
+            summed_log_error.encoding,
             FieldEncoding::FixedPoint {
                 steps_per_unit: 4_096
             }
@@ -1478,7 +1765,7 @@ mod tests {
     #[test]
     fn a_manifest_that_declares_a_different_step_for_the_summed_log_error_is_refused() {
         let quarter_of_the_real_step = SummedLogError::STEPS_PER_NAT as u32 / 4;
-        let mut fields = record_body_fields();
+        let mut fields = record_fields();
         let position = fields
             .iter()
             .position(|field| field.name.0 == "summed-log-error")
@@ -1487,8 +1774,8 @@ mod tests {
             steps_per_unit: quarter_of_the_real_step,
         };
 
-        match RecordBodyLayout::from_manifest(&a_manifest_declaring(fields)) {
-            Err(RecordBodyLayoutError::WrongEncoding { field, found, .. }) => {
+        match RecordLayout::from_manifest(&a_manifest_declaring(fields)) {
+            Err(RecordLayoutError::WrongEncoding { field, found, .. }) => {
                 assert_eq!(field.0, "summed-log-error");
                 assert_eq!(
                     found,
@@ -1508,18 +1795,18 @@ mod tests {
     /// what tells whoever holds the file which of its fields is wrong.
     #[test]
     fn a_manifest_that_renames_reorders_or_drops_a_field_is_refused() {
-        let declared = record_body_fields();
+        let declared = record_fields();
         for position in 0..declared.len() {
             let mut renamed = declared.clone();
             renamed[position].name = FieldName("something-else".to_string());
-            match RecordBodyLayout::from_manifest(&a_manifest_declaring(renamed)) {
-                Err(RecordBodyLayoutError::UnexpectedField {
+            match RecordLayout::from_manifest(&a_manifest_declaring(renamed)) {
+                Err(RecordLayoutError::UnexpectedField {
                     position: at,
                     expected,
                     found,
                 }) => {
                     assert_eq!(at, position);
-                    assert_eq!(expected.0, BODY_FIELDS[position].0);
+                    assert_eq!(expected.0, declared[position].name.0);
                     assert_eq!(found.0, "something-else");
                 }
                 other => panic!("field {position} renamed: expected UnexpectedField, {other:?}"),
@@ -1528,7 +1815,7 @@ mod tests {
             let mut dropped = declared.clone();
             dropped.remove(position);
             assert!(
-                RecordBodyLayout::from_manifest(&a_manifest_declaring(dropped)).is_err(),
+                RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_err(),
                 "field {position} dropped"
             );
 
@@ -1536,7 +1823,7 @@ mod tests {
                 let mut swapped = declared.clone();
                 swapped.swap(position, position + 1);
                 assert!(
-                    RecordBodyLayout::from_manifest(&a_manifest_declaring(swapped)).is_err(),
+                    RecordLayout::from_manifest(&a_manifest_declaring(swapped)).is_err(),
                     "fields {position} and {} swapped",
                     position + 1
                 );
@@ -1548,12 +1835,12 @@ mod tests {
     /// message knows what the file is missing rather than that it is short.
     #[test]
     fn a_manifest_that_ends_early_names_the_field_it_stopped_before() {
-        let mut fields = record_body_fields();
+        let mut fields = record_fields();
         fields.truncate(2);
-        match RecordBodyLayout::from_manifest(&a_manifest_declaring(fields)) {
-            Err(RecordBodyLayoutError::MissingField { position, expected }) => {
+        match RecordLayout::from_manifest(&a_manifest_declaring(fields)) {
+            Err(RecordLayoutError::MissingField { position, expected }) => {
                 assert_eq!(position, 2);
-                assert_eq!(expected.0, BODY_FIELDS[2].0);
+                assert_eq!(expected.0, record_fields()[2].name.0);
             }
             other => panic!("expected MissingField, got {other:?}"),
         }
@@ -1600,12 +1887,12 @@ mod tests {
         ];
 
         for (encoding, written) in later_versions {
-            let mut fields = record_body_fields();
+            let mut fields = record_fields();
             fields.push(FieldSpec {
                 name: FieldName("a-field-from-a-later-writer".to_string()),
                 encoding,
             });
-            let layout = RecordBodyLayout::from_manifest(&a_manifest_declaring(fields))
+            let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
                 .expect("an unknown field at the end is not a reason to refuse the file");
             assert_eq!(layout.unknown_field_count(), 1);
 
@@ -1633,7 +1920,7 @@ mod tests {
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
 
-        let mut fields = record_body_fields();
+        let mut fields = record_fields();
         fields.push(FieldSpec {
             name: FieldName("window-gc-percent".to_string()),
             encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
@@ -1642,7 +1929,7 @@ mod tests {
             name: FieldName("window-mean-coverage".to_string()),
             encoding: FieldEncoding::LengthPrefixedBytes,
         });
-        let layout = RecordBodyLayout::from_manifest(&a_manifest_declaring(fields))
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("two unknown fields at the end are fine");
         assert_eq!(layout.unknown_field_count(), 2);
 
@@ -1660,12 +1947,12 @@ mod tests {
         let record = a_rich_record();
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
-        let mut fields = record_body_fields();
+        let mut fields = record_fields();
         fields.push(FieldSpec {
             name: FieldName("window-mean-coverage".to_string()),
             encoding: FieldEncoding::IeeeFloat { width_bytes: 8 },
         });
-        let layout = RecordBodyLayout::from_manifest(&a_manifest_declaring(fields))
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("an unknown field at the end is fine");
 
         let whole = body.len();
@@ -1695,7 +1982,7 @@ mod tests {
             match decode_record_body(
                 &whole[..cut],
                 record.region,
-                &RecordBodyLayout::as_this_build_writes_it(),
+                &RecordLayout::as_this_build_writes_it(),
             ) {
                 Err(RecordDecodeError::Truncated { .. }) => {}
                 other => panic!(
@@ -1708,7 +1995,7 @@ mod tests {
             decode_record_body(
                 &whole,
                 record.region,
-                &RecordBodyLayout::as_this_build_writes_it()
+                &RecordLayout::as_this_build_writes_it()
             )
             .is_ok(),
             "and the whole body still reads"
@@ -1874,7 +2161,7 @@ mod tests {
         let decoded = decode_record_body(
             &stream,
             record.region,
-            &RecordBodyLayout::as_this_build_writes_it(),
+            &RecordLayout::as_this_build_writes_it(),
         )
         .expect("the record is complete; what follows it is another record's");
         assert_eq!(decoded.record, record);
@@ -1987,7 +2274,7 @@ mod tests {
         match decode_record_body(
             &body,
             record.region,
-            &RecordBodyLayout::as_this_build_writes_it(),
+            &RecordLayout::as_this_build_writes_it(),
         ) {
             Err(RecordDecodeError::Unsupported { field, tag, .. }) => {
                 assert_eq!(field, "locus-kind");
@@ -2108,7 +2395,7 @@ mod tests {
             let decoded = decode_record_body(
                 &bytes,
                 written.region,
-                &RecordBodyLayout::as_this_build_writes_it(),
+                &RecordLayout::as_this_build_writes_it(),
             )
             .expect("what this encoder wrote, this decoder reads");
             prop_assert_eq!(decoded.record, written);
@@ -2124,6 +2411,461 @@ mod tests {
             if let Ok(decoded) = decoded(&body) {
                 prop_assert!(decoded.bytes_read <= body.len());
             }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // C2 — the record head, and the skip it exists for
+    // -----------------------------------------------------------------
+
+    /// The contig every fixture here sits on. A block never crosses one, so a reader takes it
+    /// from the block rather than from each record.
+    const A_CONTIG: ContigId = ContigId(3);
+
+    /// Lay `records` down one after another, the way a block holds them, and hand back the
+    /// bytes together with the position each record's offset was measured from.
+    ///
+    /// The first record's base is its own start — which is what a block's first position is —
+    /// so the first offset is zero, and every later one is measured from the record before.
+    fn a_run_of_records(records: &[SampleLocusObservations]) -> (Vec<u8>, Position) {
+        let mut encoder = RecordEncoder::new();
+        let mut bytes = Vec::new();
+        let block_starts_at = records
+            .first()
+            .map(|first| first.region.start)
+            .unwrap_or(Position(0));
+        let mut previous = block_starts_at;
+        for record in records {
+            encoder
+                .push(record, previous, &mut bytes)
+                .expect("the fixtures are in coordinate order");
+            previous = record.region.start;
+        }
+        (bytes, block_starts_at)
+    }
+
+    /// Three records over one contig, at increasing positions, of three different shapes: the
+    /// rich one, a bare covered position where every read agreed, and a tract.
+    fn three_records_in_order() -> Vec<SampleLocusObservations> {
+        let mut quiet = SampleLocusObservations {
+            region: GenomeRegion {
+                contig: A_CONTIG,
+                start: Position(90_667_294),
+                end: Position(90_667_294),
+            },
+            reference_bases: b"A".to_vec().into_boxed_slice(),
+            observations: Vec::new(),
+            reads_without_observation: 9,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        };
+        quiet.observations.push(SequenceObservation {
+            bases: b"A".to_vec().into_boxed_slice(),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(1),
+            num_obs: 31,
+            num_fwd: 15,
+            q_sum: SummedLogError::from_steps(-900),
+            mapq_sum: 1_860,
+            mapq_sum_sq: 111_600,
+            placed_left: 12,
+            chain_ids: Vec::new(),
+        });
+
+        let mut tract = a_rich_record();
+        tract.region = GenomeRegion {
+            contig: A_CONTIG,
+            start: Position(90_670_000),
+            end: Position(90_670_011),
+        };
+        tract.reference_bases = b"ATATATATATAT".to_vec().into_boxed_slice();
+        tract.kind = LocusKind::Ssr(SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide is a motif"),
+            left_flank: b"GGCC".to_vec().into_boxed_slice(),
+            right_flank: b"TTAA".to_vec().into_boxed_slice(),
+        });
+
+        vec![a_rich_record(), quiet, tract]
+    }
+
+    /// The whole of C2: a record laid down as a head and a body comes back as the same record,
+    /// with the head's own fields intact and the byte count covering both halves.
+    #[test]
+    fn a_record_round_trips_through_its_head_and_its_body() {
+        let written = a_rich_record();
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&written));
+
+        let decoded = decode_record(
+            &bytes,
+            A_CONTIG,
+            block_starts_at,
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect("what this encoder wrote, this decoder reads");
+
+        assert_eq!(decoded.record, written);
+        assert_eq!(decoded.head.region, written.region);
+        assert_eq!(decoded.bytes_read, bytes.len());
+    }
+
+    /// **The head's non-reference read count is derived, not carried by the body**, and it
+    /// counts only observations that spanned the whole locus — a partial one's bases stop where
+    /// its read's witness stopped, so there is nothing to compare them against.
+    ///
+    /// The rich fixture is the zero case: its one complete observation shows the reference's own
+    /// bases, and its two partial ones are scored by neither half. So a second record is built
+    /// here with two complete observations, one of them a variant, and the head has to report
+    /// that one's reads and no others.
+    #[test]
+    fn the_head_carries_the_reads_that_showed_something_other_than_the_reference() {
+        let quiet = a_rich_record();
+        assert_eq!(
+            quiet.non_reference_and_compared_reads(),
+            (0, 137),
+            "every read that could be compared showed the reference"
+        );
+
+        let mut varying = a_rich_record();
+        varying.observations.push(SequenceObservation {
+            bases: b"ACGTACT".to_vec().into_boxed_slice(),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(1),
+            num_obs: 19,
+            num_fwd: 8,
+            q_sum: SummedLogError::from_steps(-400),
+            mapq_sum: 1_140,
+            mapq_sum_sq: 68_400,
+            placed_left: 5,
+            chain_ids: Vec::new(),
+        });
+        assert_eq!(varying.non_reference_and_compared_reads(), (19, 156));
+
+        for (record, expected) in [(quiet, 0u32), (varying, 19)] {
+            let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+            let found =
+                read_record_head(&bytes, A_CONTIG, block_starts_at).expect("the head reads");
+            assert_eq!(found.head.non_reference_reads, expected);
+        }
+    }
+
+    /// **The head, spelled out**, for the same reason the body has one: the encoder and the
+    /// decoder move together, so only a byte string says where a field went. A change here is a
+    /// format change.
+    #[test]
+    fn the_head_this_version_writes_is_these_exact_bytes() {
+        let record = SampleLocusObservations {
+            region: GenomeRegion {
+                contig: A_CONTIG,
+                start: Position(1_040),
+                end: Position(1_046),
+            },
+            reference_bases: b"ACGTACG".to_vec().into_boxed_slice(),
+            observations: Vec::new(),
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        };
+        let mut bytes = Vec::new();
+        RecordEncoder::new()
+            .push(&record, Position(1_000), &mut bytes)
+            .expect("a record forty bases past the base it is measured from");
+
+        let body_bytes = record_body_length(&record);
+        assert_eq!(
+            bytes[..4],
+            [
+                40, // position-offset: 1,040 − 1,000
+                7,  // reference-span: seven bases, inclusive
+                0,  // non-reference-reads: no observation showed anything
+                body_bytes as u8,
+            ]
+        );
+        assert_eq!(bytes.len(), 4 + body_bytes);
+    }
+
+    /// The head's four fields are declared in the manifest ahead of the body's nineteen, and a
+    /// file that says otherwise is refused — the same property the body's fields have, extended
+    /// over the whole record.
+    #[test]
+    fn the_manifest_declares_the_head_before_the_body() {
+        let declared: Vec<String> = record_fields()
+            .into_iter()
+            .map(|field| field.name.0)
+            .collect();
+        assert_eq!(
+            declared[..4],
+            [
+                "position-offset",
+                "reference-span",
+                "non-reference-reads",
+                "body-bytes"
+            ]
+        );
+        assert_eq!(declared.len(), 23);
+        assert_eq!(declared[4], "reference-bases");
+    }
+
+    // -----------------------------------------------------------------
+    // The skip
+    // -----------------------------------------------------------------
+
+    /// **A reader that does not want a record advances past it and touches no byte of its
+    /// body.** Walking three records by head alone gives the same regions, spans and
+    /// non-reference counts as building all three, and lands on the same final byte.
+    #[test]
+    fn a_walk_over_heads_alone_reaches_the_same_records_as_a_full_decode() {
+        let records = three_records_in_order();
+        let (bytes, block_starts_at) = a_run_of_records(&records);
+
+        let mut heads = Vec::new();
+        let mut built = Vec::new();
+        let (mut skipping_at, mut building_at) = (0usize, 0usize);
+        let (mut skipping_from, mut building_from) = (block_starts_at, block_starts_at);
+
+        while skipping_at < bytes.len() {
+            let found = read_record_head(&bytes[skipping_at..], A_CONTIG, skipping_from)
+                .expect("every record's head reads");
+            skipping_at += found.bytes_read;
+            skipping_from = found.head.region.start;
+            heads.push(found.head);
+
+            let decoded = decode_record(
+                &bytes[building_at..],
+                A_CONTIG,
+                building_from,
+                &RecordLayout::as_this_build_writes_it(),
+            )
+            .expect("and every record builds");
+            building_at += decoded.bytes_read;
+            building_from = decoded.record.region.start;
+            built.push(decoded);
+        }
+
+        assert_eq!(
+            skipping_at,
+            bytes.len(),
+            "the skipping walk consumed the run"
+        );
+        assert_eq!(building_at, bytes.len(), "and so did the building one");
+        assert_eq!(heads.len(), records.len());
+        for (at, (head, decoded)) in heads.iter().zip(&built).enumerate() {
+            assert_eq!(*head, decoded.head, "record {at}");
+            assert_eq!(head.region, records[at].region, "record {at}");
+            assert_eq!(decoded.record, records[at], "record {at}");
+        }
+    }
+
+    /// A record's position is rebuilt from the block's first position and the differences since,
+    /// so a run of records at increasing coordinates comes back at exactly those coordinates —
+    /// including a record widened by a deletion, whose span is a field rather than the distance
+    /// to the next record's start.
+    #[test]
+    fn positions_are_rebuilt_from_the_blocks_first_position_and_the_offsets_since() {
+        let records = three_records_in_order();
+        let (bytes, block_starts_at) = a_run_of_records(&records);
+
+        let mut at = 0usize;
+        let mut measured_from = block_starts_at;
+        for expected in &records {
+            let found =
+                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("the head reads");
+            assert_eq!(found.head.region, expected.region);
+            assert_eq!(
+                found.head.region.len(),
+                expected.region.len(),
+                "the span is the record's own, not the gap to the next record"
+            );
+            at += found.bytes_read;
+            measured_from = found.head.region.start;
+        }
+        assert_eq!(at, bytes.len());
+    }
+
+    /// A body is handed a slice of exactly its own record, so however damaged it is it cannot
+    /// read into the record after it.
+    #[test]
+    fn a_records_body_is_bounded_by_what_its_head_declared() {
+        let records = three_records_in_order();
+        let (bytes, block_starts_at) = a_run_of_records(&records);
+
+        let found = read_record_head(&bytes, A_CONTIG, block_starts_at).expect("the head reads");
+        assert_eq!(found.body.len(), found.head.body_bytes as usize);
+        assert!(
+            found.bytes_read < bytes.len(),
+            "the first record is not the whole run"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Records the format cannot hold, and heads it cannot believe
+    // -----------------------------------------------------------------
+
+    /// A record starting before the one before it has no representation — the head stores a
+    /// distance forwards — so it is refused where it would otherwise be written as a distance
+    /// that means something else.
+    #[test]
+    fn a_record_that_starts_before_the_previous_one_is_refused() {
+        let mut record = a_rich_record();
+        record.region.start = Position(900);
+        record.region.end = Position(900);
+
+        let mut bytes = Vec::new();
+        match RecordEncoder::new().push(&record, Position(1_000), &mut bytes) {
+            Err(RecordEncodeError::StartsBeforeThePreviousRecord { previous, offered }) => {
+                assert_eq!(previous, Position(1_000));
+                assert_eq!(offered, Position(900));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A region covering no reference base is a caller's mistake rather than a state the format
+    /// spells, and `GenomeRegion` has public fields, so it is reachable.
+    #[test]
+    fn a_record_over_no_reference_base_is_refused() {
+        let mut record = a_rich_record();
+        record.region.start = Position(1_010);
+        record.region.end = Position(1_000);
+
+        let mut bytes = Vec::new();
+        assert!(matches!(
+            RecordEncoder::new().push(&record, Position(1_000), &mut bytes),
+            Err(RecordEncodeError::EmptyRegion { .. })
+        ));
+        assert!(bytes.is_empty(), "and nothing was written before refusing");
+    }
+
+    /// The same on the way back: a head declaring a span of zero is damage, not a record over
+    /// nothing.
+    #[test]
+    fn a_head_declaring_no_reference_span_is_refused() {
+        // offset 0, span 0.
+        let bytes = vec![0u8, 0, 0, 0];
+        match read_record_head(&bytes, A_CONTIG, Position(1_000)) {
+            Err(RecordDecodeError::Malformed { field, .. }) => {
+                assert_eq!(field, "reference-span");
+            }
+            other => panic!("expected a refused span, got {other:?}"),
+        }
+    }
+
+    /// **A head whose declared length disagrees with the body's real shape is refused.** The two
+    /// are written by the same encoder, so they can only disagree in a file this reader did not
+    /// write — a version mismatch or a corrupt block — and absorbing the difference would leave
+    /// the next record starting in the middle of this one.
+    #[test]
+    fn a_head_that_declares_more_body_than_the_body_uses_is_refused() {
+        let record = a_rich_record();
+        let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+
+        // Lengthen the declared body by one and give it a byte to cover, so the body is
+        // complete and simply shorter than the head says. The declared length is the head's
+        // last field, and the head is whatever the record is not.
+        let body_bytes = record_body_length(&record);
+        let declared_at = bytes.len() - body_bytes - 1;
+        assert_eq!(
+            usize::from(bytes[declared_at]),
+            body_bytes,
+            "the head's last byte is the body's length"
+        );
+        bytes[declared_at] = (body_bytes + 1) as u8;
+        bytes.push(0);
+
+        match decode_record(
+            &bytes,
+            A_CONTIG,
+            block_starts_at,
+            &RecordLayout::as_this_build_writes_it(),
+        ) {
+            Err(RecordDecodeError::Malformed { field, reason, .. }) => {
+                assert_eq!(field, "body-bytes");
+                assert!(
+                    reason.contains(&(body_bytes + 1).to_string()),
+                    "got {reason}"
+                );
+                assert!(reason.contains(&body_bytes.to_string()), "got {reason}");
+            }
+            other => panic!("expected a refused body length, got {other:?}"),
+        }
+    }
+
+    fn record_body_length(record: &SampleLocusObservations) -> usize {
+        let mut body = Vec::new();
+        encode_record_body(record, &mut body);
+        body.len()
+    }
+
+    /// A head cut short at any point is `Truncated` — the class Milestone D reads more bytes
+    /// for — and never a panic. A head straddling the rolling buffer is the ordinary case, not
+    /// damage.
+    #[test]
+    fn a_head_cut_short_is_truncated_at_every_cut() {
+        let record = a_rich_record();
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+
+        for cut in 0..bytes.len() {
+            match read_record_head(&bytes[..cut], A_CONTIG, block_starts_at) {
+                Err(RecordDecodeError::Truncated { .. }) => {}
+                other => panic!("{cut} bytes of a record must be Truncated, got {other:?}"),
+            }
+        }
+        assert!(read_record_head(&bytes, A_CONTIG, block_starts_at).is_ok());
+    }
+
+    /// A position offset that would run off the coordinate axis is damage rather than a
+    /// wrapped coordinate, and so is a span that runs off it from a legal start.
+    #[test]
+    fn a_head_that_runs_off_the_coordinate_axis_is_refused() {
+        let mut runaway_offset = Vec::new();
+        encode_u64_leb128(u64::MAX, &mut runaway_offset);
+        runaway_offset.extend_from_slice(&[1, 0, 0]);
+        match read_record_head(&runaway_offset, A_CONTIG, Position(1_000)) {
+            Err(RecordDecodeError::Malformed { field, .. }) => {
+                assert_eq!(field, "position-offset");
+            }
+            other => panic!("expected a refused offset, got {other:?}"),
+        }
+
+        let mut runaway_span = vec![0u8];
+        encode_u64_leb128(u64::MAX, &mut runaway_span);
+        runaway_span.extend_from_slice(&[0, 0]);
+        match read_record_head(&runaway_span, A_CONTIG, Position(1_000)) {
+            Err(RecordDecodeError::Malformed { field, .. }) => {
+                assert_eq!(field, "reference-span");
+            }
+            other => panic!("expected a refused span, got {other:?}"),
+        }
+    }
+
+    proptest! {
+        /// Any head this encoder writes reads back as the head it wrote, from any base — the
+        /// offset is the one running quantity in the head and the only thing a wrong base moves.
+        #[test]
+        fn any_head_round_trips_from_any_base(
+            base in 0u64..1_000_000_000,
+            forward in 0u64..1_000_000,
+            span in 1u64..500,
+        ) {
+            let record = SampleLocusObservations {
+                region: GenomeRegion {
+                    contig: A_CONTIG,
+                    start: Position(base + forward),
+                    end: Position(base + forward + span - 1),
+                },
+                reference_bases: vec![b'A'; span as usize].into_boxed_slice(),
+                observations: Vec::new(),
+                reads_without_observation: 1,
+                reads_discarded_by_cap: 0,
+                kind: LocusKind::Generic,
+            };
+            let mut bytes = Vec::new();
+            RecordEncoder::new()
+                .push(&record, Position(base), &mut bytes)
+                .expect("a record at or past its base");
+            let found = read_record_head(&bytes, A_CONTIG, Position(base))
+                .expect("what this encoder wrote, this decoder reads");
+            prop_assert_eq!(found.head.region, record.region);
+            prop_assert_eq!(found.bytes_read, bytes.len());
         }
     }
 }
