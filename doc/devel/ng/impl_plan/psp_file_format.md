@@ -118,7 +118,7 @@ count of changed genotypes and the movement in quality scores reported.
 No compression, no file — a record encoded into a `Vec<u8>` and decoded from it. **This is where the
 correctness work is, and it is all testable in memory.**
 
-☐ **C1 — encode and decode a record body**, every field except the chain ids: the observations, their
+✅ **C1 — encode and decode a record body**, every field except the chain ids: the observations, their
 sequences, `read_witness`, `read_group`, the support moments, and the two counts of reads that showed
 nothing. Round-trips exactly.
 ***Depends:*** A1, B3. ***Source:*** [arch §2](../arch/psp_file_format.md), [spec psp_record_encoding §5](../spec/psp_record_encoding.md).

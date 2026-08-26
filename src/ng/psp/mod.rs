@@ -72,7 +72,10 @@ pub use header::{
     ReferenceIdentity, WriterProvenance,
 };
 pub use index::BlockIndexEntry;
-pub use record::RecordHead;
+pub use record::{
+    RecordBodyLayout, RecordDecodeError, RecordHead, RecordLayoutError, decode_body, encode_body,
+    record_body_fields,
+};
 
 // ---------------------------------------------------------------------
 // Inspecting a file without opening it as a reader

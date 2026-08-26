@@ -204,9 +204,14 @@ pub enum FieldEncoding {
     /// that arrive as floating point are 70 % of the compressed file when stored this way
     /// (spec psp_record_encoding.md §5).
     IeeeFloat { width_bytes: u8 },
-    /// A count of steps of `1 / steps_per_unit`, written as a varint. The name says which
-    /// way round the arithmetic goes: 4,096 steps to one natural log, so the stored integer
-    /// is the value multiplied by it.
+    /// A count of steps of `1 / steps_per_unit`, written as a **zig-zag** variable-length
+    /// integer. The name says which way round the arithmetic goes: 4,096 steps to one
+    /// natural log, so the stored integer is the value multiplied by it.
+    ///
+    /// Signed, because the one field carrying this today is a sum of log error
+    /// probabilities and every probability's log is at most zero. Zig-zag frames its bytes
+    /// exactly as the unsigned form does, so a reader walking past a field of this kind that
+    /// it does not recognise measures it without knowing the sign convention.
     ///
     /// **The step is inherited from the type that produced the value, not chosen by the
     /// writer.** The rounding happens where the value is computed, so a run reading its
