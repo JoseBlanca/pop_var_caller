@@ -129,6 +129,12 @@ struct FrameWriter {
     /// "light stream" of a two-part block, built here on its own so the time a
     /// scan would save can be measured against a full walk.
     light_only: bool,
+    /// Prefix each record with its own byte length, so a reader that has read
+    /// the position and the support can skip the rest without parsing it. This
+    /// is the one-stream alternative to a separate summary stream: it buys the
+    /// same skipped parsing with one decompressor instead of two. WRITE-SIDE
+    /// ONLY — this measures what the prefix costs in bytes; no reader uses it.
+    length_prefix: bool,
     scales: Scales,
     buf: Vec<u8>,
     n_records: u64,
@@ -145,6 +151,7 @@ impl FrameWriter {
     }
 
     fn push(&mut self, rec: &PileupRecord) {
+        let prefix_at = self.buf.len();
         if self.n_records == 0 {
             self.chrom_id = rec.chrom_id;
             self.first_pos = rec.pos;
@@ -220,6 +227,12 @@ impl FrameWriter {
                 );
                 self.last_chain = id;
             }
+        }
+        if self.length_prefix {
+            // Measure-only: append the length the prefix would have carried, so
+            // its compressed cost is real even though nothing reads it.
+            let len = (self.buf.len() - prefix_at) as u64;
+            put_varint(&mut self.buf, len);
         }
         self.n_records += 1;
     }
@@ -889,6 +902,7 @@ fn encode_streaming(
     block_bytes: usize,
     genomic_block_bp: u32,
     light_only: bool,
+    length_prefix: bool,
     level: i32,
     window_log: u32,
     scales: Scales,
@@ -918,6 +932,7 @@ fn encode_streaming(
     .expect("psp");
     let mut fw = FrameWriter {
         light_only,
+        length_prefix,
         scales,
         ..FrameWriter::default()
     };
@@ -1325,6 +1340,37 @@ impl StreamingStore {
     }
 }
 
+/// Decompress every byte of a store without parsing a single record.
+///
+/// This separates the two halves of a walk. A reader cannot decompress one
+/// record out of a psp block: the block is one zstd frame and comes out
+/// sequentially from its start, so the decompression is paid whatever the reader
+/// intends to keep. Only the parse can be skipped. This measures the half that
+/// cannot.
+fn decode_raw(path: &str) {
+    let t0 = Instant::now();
+    let mut store = StreamingStore::open(std::path::Path::new(path));
+    let mut bytes = 0u64;
+    loop {
+        if store.block_done && store.out_at >= store.out.len() && !store.next_block() {
+            break;
+        }
+        // Consume whatever has been decompressed and ask for more.
+        bytes += (store.out.len() - store.out_at) as u64;
+        store.out_at = store.out.len();
+        if !store.pump()
+            && store.block_done
+            && store.out_at >= store.out.len()
+            && !store.next_block()
+        {
+            break;
+        }
+    }
+    println!("phase\tdecode-raw");
+    println!("decompressed-bytes\t{bytes}");
+    println!("seconds\t{:.3}", t0.elapsed().as_secs_f64());
+}
+
 /// Walk one streaming store end to end, retaining nothing.
 fn decode_streaming(path: &str) {
     let t0 = Instant::now();
@@ -1496,6 +1542,7 @@ fn main() {
     // alone, which is what every measurement before 2026-08-25 used.
     let mut genomic_block_kb = 0u32;
     let mut light_only = false;
+    let mut length_prefix = false;
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -1507,6 +1554,7 @@ fn main() {
             "--window-log" => window_log = args.next().expect("N").parse().expect("N"),
             "--streams" => streams = args.next().expect("N").parse().expect("N"),
             "--light-only" => light_only = true,
+            "--length-prefix" => length_prefix = true,
             "--genomic-block-kb" => genomic_block_kb = args.next().expect("K").parse().expect("K"),
             "--rolling-kib" => ROLLING_BYTES.store(
                 args.next().expect("K").parse::<usize>().expect("K") * 1024,
@@ -1542,11 +1590,13 @@ fn main() {
             block_kib * 1024,
             genomic_block_kb * 1000,
             light_only,
+            length_prefix,
             level,
             window_log,
             scales,
         ),
         "decode-streaming" => decode_streaming(&store),
+        "decode-raw" => decode_raw(&store),
         "verify-streaming" => verify_streaming(&psp, &store),
         "many-ngs" => many_streaming(&psp, limit, streams),
         other => panic!("unknown phase {other}"),
