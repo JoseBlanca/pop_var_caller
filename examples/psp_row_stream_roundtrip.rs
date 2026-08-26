@@ -869,6 +869,7 @@ fn encode_streaming(
     psp: &str,
     out_path: &str,
     block_bytes: usize,
+    genomic_block_bp: u32,
     level: i32,
     window_log: u32,
     scales: Scales,
@@ -902,18 +903,35 @@ fn encode_streaming(
     let mut raw = Vec::new();
     let (mut n_records, mut n_blocks) = (0u64, 0u64);
     let mut cur_chrom = u32::MAX;
+    let mut cur_grid = u64::MAX;
     {
         let records = reader.records();
         for rec in records {
             let rec = rec.expect("record");
+            // The genomic block size is a grid on the reference coordinate, not
+            // a running count: a block ends when a position crosses into the
+            // next multiple of it. That is what makes every sample cut at the
+            // same coordinates, so a cohort reader advancing over a region
+            // touches one aligned block per sample rather than one in some and
+            // two in others. A running count would not align.
+            let grid = if genomic_block_bp > 0 {
+                u64::from(rec.pos) / u64::from(genomic_block_bp)
+            } else {
+                0
+            };
+            let span_closed = genomic_block_bp > 0 && grid != cur_grid;
+            // The byte ceiling is the secondary rule: at high depth one span can
+            // hold a great deal of data.
+            let bytes_closed = block_bytes > 0 && fw.buf.len() >= block_bytes;
             // A block never crosses a chromosome, so a reader that starts at
             // one carries in no state.
-            if (rec.chrom_id != cur_chrom || fw.buf.len() >= block_bytes) && !fw.is_empty() {
+            if (rec.chrom_id != cur_chrom || span_closed || bytes_closed) && !fw.is_empty() {
                 fw.finish(&mut raw);
                 write_frame(&mut sink, &mut comp, &raw);
                 n_blocks += 1;
             }
             cur_chrom = rec.chrom_id;
+            cur_grid = grid;
             fw.push(&rec);
             n_records += 1;
         }
@@ -931,6 +949,7 @@ fn encode_streaming(
     println!("phase\tencode-streaming");
     println!("records\t{n_records}");
     println!("blocks\t{n_blocks}");
+    println!("genomic-block-bp\t{genomic_block_bp}");
     println!("window-bytes\t{}", 1usize << window_log);
     println!("out-bytes\t{bytes}");
     println!("bytes-per-record\t{:.3}", bytes as f64 / n_records as f64);
@@ -1436,6 +1455,9 @@ fn main() {
     let mut window_log = 15u32; // 32 KiB
     // How many separately-compressed pieces one block is cut into.
     let mut streams = 1usize;
+    // The genomic block size, in kilobases. 0 leaves the cut to the byte target
+    // alone, which is what every measurement before 2026-08-25 used.
+    let mut genomic_block_kb = 0u32;
     let mut scales = Scales::default();
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -1446,6 +1468,7 @@ fn main() {
             "--block-kib" => block_kib = args.next().expect("K").parse().expect("K"),
             "--window-log" => window_log = args.next().expect("N").parse().expect("N"),
             "--streams" => streams = args.next().expect("N").parse().expect("N"),
+            "--genomic-block-kb" => genomic_block_kb = args.next().expect("K").parse().expect("K"),
             "--rolling-kib" => ROLLING_BYTES.store(
                 args.next().expect("K").parse::<usize>().expect("K") * 1024,
                 std::sync::atomic::Ordering::Relaxed,
@@ -1474,9 +1497,15 @@ fn main() {
         "psp-read" => psp_read(&psp),
         "many-psp" => many(&psp, "psp", limit),
         "many-ngr" => many(&psp, "ngr", limit),
-        "encode-streaming" => {
-            encode_streaming(&psp, &store, block_kib * 1024, level, window_log, scales)
-        }
+        "encode-streaming" => encode_streaming(
+            &psp,
+            &store,
+            block_kib * 1024,
+            genomic_block_kb * 1000,
+            level,
+            window_log,
+            scales,
+        ),
         "decode-streaming" => decode_streaming(&store),
         "verify-streaming" => verify_streaming(&psp, &store),
         "many-ngs" => many_streaming(&psp, limit, streams),
