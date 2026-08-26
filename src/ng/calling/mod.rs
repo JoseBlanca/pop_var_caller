@@ -59,6 +59,7 @@ pub mod genotype_table;
 pub mod inference;
 pub mod likelihood;
 pub mod quality;
+pub mod run_parameters;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
@@ -81,9 +82,15 @@ pub use likelihood::{
 use crate::ng::calling::genotype_prior::SpectrumSeed;
 use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
+use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
-use crate::ng::types::{AlleleId, GenomeRegion, Genotype, InbreedingF, LogProb, Phred, Ploidy};
+use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
+use crate::ng::types::{
+    AlleleId, ErrorRate, GenomeRegion, Genotype, InbreedingF, LogProb, Phred, Ploidy, ReadGroupId,
+    SsrPeriod,
+};
+use std::collections::BTreeMap;
 
 /// The alleles one locus is called over: the reference allele, and every alternative
 /// the candidate step admitted — each stored as the bases it spells.
@@ -562,6 +569,18 @@ pub struct FrozenParameters<'a> {
     inbreeding_coefficient_by_sample: &'a [InbreedingF],
     prior_seed: SpectrumSeed,
     ssr_slippage_fits: &'a StratumFits,
+    /// **The fourth fitted number a repeat tract's scoring context needs, and the one
+    /// [`StratumFits`] does not carry.** The slippage lookup holds the level, the direction
+    /// split and the fall-off; the per-base substitution rate is fitted alongside them, per
+    /// `(read group, stratum)`, and the pre-pass emits it as a map of its own
+    /// (`parameter_estimation::ssr::substitution_rates`).
+    ///
+    /// **Never the SNP/indel path's ε and never a read's own summed quality**
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §4.3): a read's error probability is a
+    /// per-*read* number, and this term needs a per-*base* rate applied once for each of the
+    /// tract's twenty or forty bases. Using the first as the second overcharges by the tract's
+    /// length.
+    ssr_substitution_rate: &'a BTreeMap<StratumKey, Estimate<ErrorRate>>,
     ploidy: Ploidy,
 }
 
@@ -609,6 +628,7 @@ impl<'a> FrozenParameters<'a> {
         inbreeding_coefficient_by_sample: &'a [InbreedingF],
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: &'a StratumFits,
+        ssr_substitution_rate: &'a BTreeMap<StratumKey, Estimate<ErrorRate>>,
         ploidy: Ploidy,
     ) -> Self {
         assert!(
@@ -631,6 +651,7 @@ impl<'a> FrozenParameters<'a> {
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
+            ssr_substitution_rate,
             ploidy,
         )
     }
@@ -653,6 +674,7 @@ impl<'a> FrozenParameters<'a> {
         inbreeding_coefficient_by_sample: &'a [InbreedingF],
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: &'a StratumFits,
+        ssr_substitution_rate: &'a BTreeMap<StratumKey, Estimate<ErrorRate>>,
         ploidy: Ploidy,
     ) -> Self {
         Self::gather(
@@ -661,6 +683,7 @@ impl<'a> FrozenParameters<'a> {
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
+            ssr_substitution_rate,
             ploidy,
         )
     }
@@ -672,6 +695,7 @@ impl<'a> FrozenParameters<'a> {
         inbreeding_coefficient_by_sample: &'a [InbreedingF],
         prior_seed: SpectrumSeed,
         ssr_slippage_fits: &'a StratumFits,
+        ssr_substitution_rate: &'a BTreeMap<StratumKey, Estimate<ErrorRate>>,
         ploidy: Ploidy,
     ) -> Self {
         assert!(
@@ -690,6 +714,7 @@ impl<'a> FrozenParameters<'a> {
             inbreeding_coefficient_by_sample,
             prior_seed,
             ssr_slippage_fits,
+            ssr_substitution_rate,
             ploidy,
         }
     }
@@ -748,6 +773,34 @@ impl<'a> FrozenParameters<'a> {
     #[must_use]
     pub fn prior_seed(&self) -> SpectrumSeed {
         self.prior_seed
+    }
+
+    /// **The fitted per-base substitution rate for one read group at one candidate's
+    /// stratum**, or nothing where the fit has no such stratum — which is ordinary, since a
+    /// candidate several repeats from its reference tract's length lands there on perfectly
+    /// good data and a caller owes an answer for it.
+    ///
+    /// **Keyed by the *candidate's* repeat count, never the reference tract's**, which is the
+    /// rule [`StratumFits::at`] states and for the same reason: a read's chance of mismatching
+    /// is a property of the tract it was copied from, and that is the candidate allele
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §4.4). The argument is named for the candidate
+    /// so that handing over the locus's own tract length is a mistake somebody has to type on
+    /// purpose — the same device that lookup uses.
+    ///
+    /// The key carries the run's ploidy because the pre-pass fits each ploidy's loci apart.
+    #[inline]
+    #[must_use]
+    pub fn ssr_substitution_rate_at(
+        &self,
+        read_group: ReadGroupId,
+        period: SsrPeriod,
+        candidate_repeats: RepeatCount,
+    ) -> Option<&'a Estimate<ErrorRate>> {
+        self.ssr_substitution_rate.get(&StratumKey {
+            read_group,
+            stratum: SsrStratum::new(period, candidate_repeats),
+            ploidy: self.ploidy,
+        })
     }
 
     /// The fitted slippage numbers, looked up by read group and stratum.
@@ -2526,6 +2579,18 @@ mod tests {
         Phred::try_new(37.0).expect("a legal quality, and below the site-quality ceiling")
     }
 
+    /// A run whose repeat-tract substitution rates were never fitted — the empty map, which is
+    /// what a fixture calling no tract needs, and what
+    /// `FrozenParameters::ssr_substitution_rate_at` answers `None` from.
+    ///
+    /// A `static` rather than a function, so that a call site can borrow it for as long as the
+    /// parameters live: `BTreeMap::new` is a `const fn`, and a temporary would be freed at the
+    /// end of the statement that built the view.
+    static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
+        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+    > = std::collections::BTreeMap::new();
+
     fn diploid_call(first: u16, second: u16, quality: f32) -> SampleGenotypeCall {
         SampleGenotypeCall::Called {
             genotype: Genotype::new(vec![AlleleId(first), AlleleId(second)]),
@@ -3047,6 +3112,10 @@ mod tests {
         contamination: &'a [ContaminationView],
         inbreeding: &'a [InbreedingF],
         strata: &'a StratumFits,
+        substitution: &'a std::collections::BTreeMap<
+            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+        >,
     ) -> FrozenParameters<'a> {
         if contamination.is_empty() {
             FrozenParameters::uncontaminated(
@@ -3054,6 +3123,7 @@ mod tests {
                 inbreeding,
                 neutral_seed(),
                 strata,
+                substitution,
                 diploid_ploidy(),
             )
         } else {
@@ -3063,6 +3133,7 @@ mod tests {
                 inbreeding,
                 neutral_seed(),
                 strata,
+                substitution,
                 diploid_ploidy(),
             )
         }
@@ -3091,7 +3162,13 @@ mod tests {
         let contamination = vec![measured_contamination(), measured_contamination()];
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
-        let _ = frozen_parameters(&calibration, &contamination, &inbreeding, &strata);
+        let _ = frozen_parameters(
+            &calibration,
+            &contamination,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
     }
 
     /// No contamination anywhere has a **named** door, and it is a different claim from a
@@ -3107,6 +3184,7 @@ mod tests {
             &inbreeding,
             neutral_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             diploid_ploidy(),
         );
 
@@ -3139,6 +3217,7 @@ mod tests {
             &inbreeding,
             neutral_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             diploid_ploidy(),
         );
     }
@@ -3156,7 +3235,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(3);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         assert_eq!(parameters.read_group_count(), 1);
         assert_eq!(parameters.sample_count(), 3);
@@ -3171,7 +3256,7 @@ mod tests {
     fn frozen_parameters_refuse_a_run_with_no_read_groups() {
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
-        let _ = frozen_parameters(&[], &[], &inbreeding, &strata);
+        let _ = frozen_parameters(&[], &[], &inbreeding, &strata, &NO_SUBSTITUTION_RATES);
     }
 
     /// A run whose sample order went missing is refused, rather than producing a locus with
@@ -3181,7 +3266,7 @@ mod tests {
     fn frozen_parameters_refuse_a_run_with_no_samples() {
         let calibration = one_read_group();
         let strata = no_strata();
-        let _ = frozen_parameters(&calibration, &[], &[], &strata);
+        let _ = frozen_parameters(&calibration, &[], &[], &strata, &NO_SUBSTITUTION_RATES);
     }
 
     /// Evidence and the allele table have to be on the same path: the discriminant that
@@ -3198,7 +3283,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         let per_sample = [GenericLocusSample {
             evidence: GenericSampleEvidence::empty(),
@@ -3217,7 +3308,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(3);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         let per_sample = [GenericLocusSample {
             evidence: GenericSampleEvidence::empty(),
@@ -3238,7 +3335,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(2);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         let (generic_alleles, _) = two_allele_locus();
         let generic_samples = [
@@ -3540,7 +3643,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
         let detail = ssr_detail();
@@ -3559,7 +3668,13 @@ mod tests {
         let calibration = one_read_group();
         let inbreeding = outbred_samples(1);
         let strata = no_strata();
-        let parameters = frozen_parameters(&calibration, &[], &inbreeding, &strata);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
 
         let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
         let per_sample = [GenericLocusSample {

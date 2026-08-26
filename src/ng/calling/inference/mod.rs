@@ -1081,6 +1081,7 @@ mod tests {
             &[],
             std::collections::BTreeMap::new(),
         );
+        let substitution = std::collections::BTreeMap::new();
         let parameters = FrozenParameters::uncontaminated(
             &calibration,
             &inbreeding,
@@ -1090,6 +1091,7 @@ mod tests {
                 crate::ng::calling::genotype_prior::SeedRegime::NeutralShape,
             ),
             &strata,
+            &substitution,
             crate::ng::types::Ploidy::try_new(2).expect("a diploid"),
         );
         let per_sample = [crate::ng::calling::GenericLocusSample {

@@ -273,7 +273,7 @@ Build `LocusEvidence::Generic` from a `CohortObservation` (the views over `Sampl
 `LocusEvidence::Ssr` from the STR generator's `SequenceObservation`s + `SsrDetail`. *Depends:*
 A1. *Source:* arch §2, §7; [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §2.
 
-**E2. `FrozenParameters` assembly.**  ☐
+**E2. `FrozenParameters` assembly.**  ✅
 One constructor per run from the pre-pass's outputs: calibration scales from the accumulator
 (scale 1 + `Defaulted` where no rate), contamination views (absent at one sample — absent, not a
 fitted zero), per-sample `F` in run order, the seed from `project_spectrum_seed`, the

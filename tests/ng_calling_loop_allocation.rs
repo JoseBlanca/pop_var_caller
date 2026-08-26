@@ -108,11 +108,15 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
     let outbred = InbreedingF::try_new(0.0).expect("an outbred sample");
     let inbreeding = vec![outbred; 3];
     let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
+    // No repeat-tract substitution rates: this fixture is a SNP/indel locus, and the map is
+    // what `FrozenParameters::ssr_substitution_rate_at` answers `None` from.
+    let substitution = std::collections::BTreeMap::new();
     let parameters = FrozenParameters::uncontaminated(
         &calibration,
         &inbreeding,
         SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
         &strata,
+        &substitution,
         Ploidy::try_new(2).expect("a diploid"),
     );
     let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);

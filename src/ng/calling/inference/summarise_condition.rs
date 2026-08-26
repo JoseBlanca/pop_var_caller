@@ -1730,6 +1730,18 @@ mod tests {
         Ploidy::try_new(2).expect("a diploid")
     }
 
+    /// A run whose repeat-tract substitution rates were never fitted — the empty map, which is
+    /// what a fixture calling no tract needs, and what
+    /// `FrozenParameters::ssr_substitution_rate_at` answers `None` from.
+    ///
+    /// A `static` rather than a function, so that a call site can borrow it for as long as the
+    /// parameters live: `BTreeMap::new` is a `const fn`, and a temporary would be freed at the
+    /// end of the statement that built the view.
+    static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
+        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+    > = std::collections::BTreeMap::new();
+
     /// A site quality standing in for one the worker computed, where what the test is about
     /// is something else.
     ///
@@ -4090,6 +4102,7 @@ mod tests {
             &inbreeding,
             human_like_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             view.ploidy(),
         );
         let callable: Vec<usize> = (0..evidence.sample_count())
@@ -4775,6 +4788,7 @@ mod tests {
             &inbreeding,
             human_like_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             diploid(),
         );
         let mut scratch = CallingScratch::<()>::default();
@@ -4814,6 +4828,7 @@ mod tests {
             &inbreeding,
             human_like_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             diploid(),
         );
         let mut scratch = CallingScratch::<()>::default();
@@ -4857,7 +4872,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, view.ploidy());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            view.ploidy(),
+        );
         let mut scratch = CallingScratch::<()>::default();
         // Two rows where the locus can call one, and both claimed — the shape the driver
         // cannot produce and a hand-assembled call site can.
@@ -4915,7 +4936,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, view.ploidy());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            view.ploidy(),
+        );
         let mut scratch = CallingScratch::<()>::default();
         scratch.prepare_for_locus(3, &alleles, &view);
         for run_sample in 0..3 {
@@ -5244,9 +5271,20 @@ mod tests {
         calibration: &'a [ReadGroupCalibration],
         inbreeding: &'a [InbreedingF],
         strata: &'a StratumFits,
+        substitution: &'a std::collections::BTreeMap<
+            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+        >,
         ploidy: Ploidy,
     ) -> FrozenParameters<'a> {
-        FrozenParameters::uncontaminated(calibration, inbreeding, human_like_seed(), strata, ploidy)
+        FrozenParameters::uncontaminated(
+            calibration,
+            inbreeding,
+            human_like_seed(),
+            strata,
+            substitution,
+            ploidy,
+        )
     }
 
     /// **The driver calls genotypes from evidence** — reads in, `LocusInference` out, with the
@@ -5272,7 +5310,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5338,7 +5382,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5394,7 +5444,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
         let _ = shipped_arm().call_locus(
             &evidence,
@@ -5431,7 +5487,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
         let _ = shipped_arm().call_locus(
             &evidence,
@@ -5468,6 +5530,7 @@ mod tests {
             &inbreeding,
             human_like_seed(),
             &strata,
+            &NO_SUBSTITUTION_RATES,
             diploid(),
         );
         let mut scratch = worker_scratch();
@@ -5542,7 +5605,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5584,7 +5653,13 @@ mod tests {
         assert_eq!(calibration[0].provenance, Provenance::Defaulted);
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5612,7 +5687,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5643,7 +5724,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference =
@@ -5675,7 +5762,13 @@ mod tests {
             InbreedingF::try_new(0.9).expect("a highly inbred sample"),
         ];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5717,7 +5810,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let _ = shipped_arm().call_locus(
@@ -5761,7 +5860,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let _ = shipped_arm().call_locus(
@@ -5806,7 +5911,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5847,7 +5958,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let inference = shipped_arm().call_locus(
@@ -5947,7 +6064,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = vec![outbred(); 3];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
 
         let candidates = 3_u64;
         let observations: u64 = [1, 2, 3].iter().sum();
@@ -6010,7 +6133,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = vec![outbred(); 3];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let two_passes = shipped_arm().call_locus(
@@ -6059,7 +6188,13 @@ mod tests {
         let calibration = [ReadGroupCalibration::defaulted()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(&calibration, &inbreeding, &strata, diploid());
+        let parameters = uncontaminated_run(
+            &calibration,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+            diploid(),
+        );
         let mut scratch = worker_scratch();
 
         let _ = shipped_arm().call_locus(
