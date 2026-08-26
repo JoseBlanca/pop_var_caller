@@ -1239,6 +1239,69 @@ impl StreamingStore {
         }
     }
 
+    /// Walk one record's bytes without building anything from them: decode every
+    /// variable-length integer so the next record can be found, but allocate no
+    /// vectors and copy no sequences.
+    ///
+    /// This is the middle of the three costs a walk can pay. Decompression is
+    /// unavoidable; materialising a record is avoidable if the caller does not
+    /// want it; and *finding where the record ends* is avoidable only if the
+    /// record says how long it is, because the bytes carry no separators.
+    fn step_over_record(&mut self) -> Option<()> {
+        let mut cur = TryCursor {
+            bytes: &self.out[self.out_at..],
+            at: 0,
+        };
+        let delta = cur.varint()? as u32;
+        let mut pos = self.pos;
+        let mut first = self.first;
+        if first {
+            first = false;
+        } else {
+            pos += delta;
+        }
+        let n_alleles = cur.varint()? as usize;
+        if self.scales.gc == 0.0 {
+            cur.bytes(4)?;
+        } else {
+            cur.varint()?;
+        }
+        let mut prev_cov_q = self.prev_cov_q;
+        if self.scales.coverage == 0.0 {
+            cur.bytes(4)?;
+        } else {
+            let cov_code = cur.varint()?;
+            if cov_code != 0 {
+                let z = cov_code - 1;
+                prev_cov_q += ((z >> 1) as i64) ^ -((z & 1) as i64);
+            }
+        }
+        let mut last_chain = self.last_chain;
+        for _ in 0..n_alleles {
+            let len = cur.varint()? as usize;
+            cur.bytes(len)?;
+            cur.varint()?;
+            if self.scales.q_sum == 0.0 {
+                cur.bytes(8)?;
+            } else {
+                cur.svarint()?;
+            }
+            for _ in 0..5 {
+                cur.varint()?;
+            }
+            let n_chain = cur.varint()? as usize;
+            for _ in 0..n_chain {
+                last_chain = (last_chain as i64).wrapping_add(cur.svarint()?) as u64;
+            }
+        }
+        self.out_at += cur.at;
+        self.pos = pos;
+        self.first = first;
+        self.prev_cov_q = prev_cov_q;
+        self.last_chain = last_chain;
+        Some(())
+    }
+
     /// Parse one record out of the rolling buffer, or None if it is not all
     /// there yet. Mutates the running state only on success.
     fn parse_record(&mut self) -> Option<PileupRecord> {
@@ -1368,6 +1431,69 @@ fn decode_raw(path: &str) {
     }
     println!("phase\tdecode-raw");
     println!("decompressed-bytes\t{bytes}");
+    println!("seconds\t{:.3}", t0.elapsed().as_secs_f64());
+}
+
+/// Walk every record's bytes without building any of them — the cost of finding
+/// where each record ends, with no materialising. The middle of the three
+/// numbers `decode-raw` and `decode-streaming` bracket.
+fn decode_step(path: &str) {
+    let t0 = Instant::now();
+    let mut store = StreamingStore::open(std::path::Path::new(path));
+    let mut n = 0u64;
+    loop {
+        if store.remaining == 0 {
+            if store.block_done && store.out_at >= store.out.len() && !store.next_block() {
+                break;
+            }
+            let mut opened = false;
+            loop {
+                let mut cur = TryCursor {
+                    bytes: &store.out[store.out_at..],
+                    at: 0,
+                };
+                match (cur.varint(), cur.varint(), cur.varint()) {
+                    (Some(c), Some(p), Some(k)) => {
+                        store.out_at += cur.at;
+                        store.chrom_id = c as u32;
+                        store.pos = p as u32;
+                        store.remaining = k;
+                        store.prev_cov_q = 0;
+                        store.last_chain = 0;
+                        store.first = true;
+                        opened = true;
+                        break;
+                    }
+                    _ => {
+                        if !store.pump() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !opened {
+                break;
+            }
+        }
+        let (pos, cov, chain, first) = (store.pos, store.prev_cov_q, store.last_chain, store.first);
+        match store.step_over_record() {
+            Some(()) => {
+                store.remaining -= 1;
+                n += 1;
+            }
+            None => {
+                store.pos = pos;
+                store.prev_cov_q = cov;
+                store.last_chain = chain;
+                store.first = first;
+                if !store.pump() {
+                    break;
+                }
+            }
+        }
+    }
+    println!("phase\tdecode-step");
+    println!("records\t{n}");
     println!("seconds\t{:.3}", t0.elapsed().as_secs_f64());
 }
 
@@ -1597,6 +1723,7 @@ fn main() {
         ),
         "decode-streaming" => decode_streaming(&store),
         "decode-raw" => decode_raw(&store),
+        "decode-step" => decode_step(&store),
         "verify-streaming" => verify_streaming(&psp, &store),
         "many-ngs" => many_streaming(&psp, limit, streams),
         other => panic!("unknown phase {other}"),
