@@ -103,6 +103,10 @@ it is where most of the per-decoder memory floor comes from (§5.3). Everywhere 
 
 Two more terms this document needs:
 
+- **⚠ "reach" is not used in this document for anything to do with compression.**
+  [`cohort_merge.md`](cohort_merge.md) defines it as *the last reference position an observation
+  covers*, `start + span − 1`, and the word and the arithmetic are production's. An earlier draft
+  here used it for the compressor's look-back distance; that was a collision and it is gone.
 - **look-back window** — when a compressor finds a repeated byte sequence it stores a
   back-reference: *copy 40 bytes from 3,000 bytes ago*. The look-back window caps how far back
   "ago" may be. **It is the reason a reader needs memory at all**: to resolve a back-reference the
@@ -165,6 +169,13 @@ The header carries what is known *before* any record is written:
 - the writer's provenance and the parameters it ran with;
 - **the manifest** (§4.5) — the block cut rule, the look-back window, the stream layout, and each
   field's encoding with its parameters.
+- **the observation reach ceiling** — the widest reference span any observation in this file can
+  have, which is the generator's `max_record_span`
+  ([`src/ng/locus_generation/pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs)).
+  **This is the second of the two things [`cohort_merge.md`](cohort_merge.md) requires of this
+  document**, and it is here because a reader assembling cohort loci uses it to bound how far back
+  its observation cache must reach. A file whose observations exceed what it records is corrupt, and
+  that is one of the reader's named errors (§7).
 
 ### 3.2 Blocks
 
@@ -354,15 +365,26 @@ seventy-eight-second run and took the twenty seconds.
 **A reader opens only the streams it needs**, which keeps the cost a function of what the reader is
 doing rather than of the file: a first pass opens the small one alone and pays for one decoder.
 
-**Open, and small: exactly which numbers the first stream carries.** The measurement above used the
-position and the summed non-reference support. That subsumes *is there an alternative allele here*
-— an allele exists only because reads showed it, so support above zero and an alternative allele are
-the same condition — and it is strictly more useful, because a scan can apply a threshold rather
-than only asking whether anything varies. **A record's reference span may have to join it**, since a
-record widened by a deletion covers more than one position and a scan indexed by position needs to
-know that. *Leaning:* position, non-reference support, span. **Settled by:** the cohort merge saying
-what its first pass tests. The cost of getting this wrong is small — the whole stream is under 2 % of
-the file, so an extra field is in the noise.
+#### What the summary stream carries — settled
+
+**Three things per record: the position, the reference span, and the summed non-reference support.**
+
+The name is not this document's to invent: [`cohort_merge.md`](cohort_merge.md) calls it the
+**position summary** and defines it as *"the cheap facts a builder needs about a position before it
+decides anything: what a record there covers, and whether any sample recorded something other than
+the reference."* Both halves of that sentence are a field — *what a record covers* is the span, and
+*whether any sample recorded something other than the reference* is the support.
+
+**The span is a requirement, not a choice.** That document's non-goals name it as one of exactly two
+things it imposes on this one: *"the position summary must carry the reference span."* It is needed
+because a record widened by a deletion covers more than one position — an insertion's span is 1, a
+deletion's is the deleted run plus its anchor — so a pass indexed by position cannot work out what a
+record reaches from its start alone.
+
+**The support rather than a count of alternative alleles** (the owner, 2026-08-25, correcting his own
+first suggestion). The two answer *does anything vary here* identically, since an allele exists only
+because reads showed it — but the support also lets a pass apply a threshold instead of only asking
+whether anything varies at all.
 
 ### 4.4 The reader's two buffers — 4 kB each
 

@@ -147,9 +147,9 @@ block.
 ```
 psp file
   header                  plain-text, the fields run_streaming.md §6.1 fixes
-  block 0   light         the scan scalar for each record in the block
+  block 0   summary       the position summary for each record in the block
             heavy         the records themselves, compressed with a capped look-back window
-  block 1   light
+  block 1   summary
             heavy
   ...
   index                   one entry per block: chromosome, first position,
@@ -289,7 +289,7 @@ is time. Measured on a tomato accession at three reads a position:
 | | bytes a record | walk speed |
 |---|---:|---:|
 | the whole record | 4.628 | 18.7 M records/s |
-| the first pass's numbers alone | **0.077** | **151.6 M records/s** |
+| the position summary alone | **0.077** | **151.6 M records/s** |
 
 **1.7 % of the bytes and about eight times faster to read**; at 279 reads a position, 3.9 % and about
 nine times. Against that, at 5,000 open samples the second stream takes the run from **1.14 GB to
@@ -306,10 +306,10 @@ frame into more separately-compressed pieces was measured to help, not hurt** (o
 512 KiB, fourteen field-frames give 5.44 bytes a record against 5.82 for one combined
 frame), because putting like values next to each other is most of what the columnar layout
 was doing. The nearest field measured on its own, a small per-record varint, compressed to
-0.12 bytes a record on tomato; the light stream is a few of those.
+0.12 bytes a record on tomato; the summary stream is a few of those.
 
-**The unit of the light stream is the record, and its frames are cut with the heavy
-stream's** — one index entry names both. A reader that scans a segment reads only light
+**The unit of the summary stream is the record, and its blocks are cut with the record
+stream's** — one index entry names both. A reader that scans a segment reads only summary
 frames; a reader that then needs three records decompresses the three heavy frames holding
 them.
 
@@ -329,7 +329,7 @@ thousand of the file.
 
 Two rules the index has to carry beyond that:
 
-- **A per-frame summary of the scan scalar** — the largest non-reference support anywhere in
+- **A per-block summary of the non-reference support** — the largest anywhere in
   the frame — reachable **without decompressing the frame**, so a reader can decide whether
   to touch it at all. Whether that lives in the index or in the frame's own uncompressed head
   depends on how the index is sized, which is open (question 4 below).
@@ -799,7 +799,7 @@ not.
 | variable-length integer codec | `src/psp/varint.rs` | as-is: LEB128 and zig-zag LEB128, already specified and tested |
 | plain-text header framing | `src/psp/header.rs` | the pattern — magic, length prefix, TOML, sentinel — so `head` still works on an ng psp |
 | the zstd seam | `new_column_compressor`, `zstd_compress_into` ([`src/psp/block.rs:718,730`](../../../../src/psp/block.rs)) | the shape: one long-lived compressor per writer, frame checksums on. The dictionary is new |
-| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the light/heavy split, reduced from fourteen columns to two streams (§2.3) |
+| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the summary/record split, reduced from fourteen columns to two streams (§2.3) |
 | the eager whole-segment decode | [`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs) | the parity oracle's model: a simple decoder used only by tests, against which the real one is byte-compared |
 | the record | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | what is written and what must come back |
 
@@ -868,7 +868,7 @@ ng stores all of them, and §7 measures that field separately.
 3. **Worker-count invariance**, inherited from [`run_streaming.md`](run_streaming.md) §12.1:
    one sample gathered at 1, 2, 4, 8, 16 workers gives byte-identical files apart from the
    header's timestamp. This is what §8's frame-cut rule exists to preserve.
-4. **The two-phase saving is still there.** Scanning the light stream over a cohort segment
+4. **The two-phase saving is still there.** Scanning the summary stream over a cohort segment
    must materialise about one record in a hundred, the ratio
    [`run_streaming.md`](run_streaming.md) §3.3 measured. A file that round-trips but forces
    every record to inflate has failed goal 4 while passing oracle 1.
@@ -911,9 +911,9 @@ will pass while a read-name list is being corrupted.
    from 43.8 to 11.7 bytes a position. **Settled by:**
    [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §7's experiment, which now has its
    sizes and needs its decode and merge times.
-3. **Are the light and heavy streams interleaved frame by frame, or separated into two
-   regions of the file?** — OPEN, and not measured. Interleaving keeps a segment's light and
-   heavy adjacent, so serving one segment is one seek; separating makes a whole-file light scan
+3. **Are the summary and record streams interleaved block by block, or separated into two
+   regions of the file?** — OPEN, and not measured. Interleaving keeps a segment's summary and
+   records adjacent, so serving one segment is one seek; separating makes a whole-file summary scan
    one sequential read. *Leaning:* interleave, because
    [`run_streaming.md`](run_streaming.md) §3.4's reader serves segments rather than files.
    **Settled by:** timing a cohort merge over one chromosome both ways, once a writer exists.
