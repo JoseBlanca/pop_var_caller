@@ -443,23 +443,34 @@ width is quicker to read, and costs less than it looks after compression because
 repetitive values collapses — the four head fields together compressed to 0.077 bytes a record when
 measured on their own. *Unmeasured: the two encodings against each other in place.*
 
-### 4.4 The reader's two buffers — 4 kB each
+### 4.4 The reader's two buffers — 16 kB each
 
 A reader holds a buffer of compressed bytes read from the file and a rolling buffer of decompressed
-bytes it parses records out of. **Both are the reader's choice, not the file's**, and at cohort scale
-they are the difference between fitting and not:
+bytes it parses records out of. **Both are the reader's choice, not the file's.**
 
-| buffers | per open sample | at 5,000 samples |
-|---|---:|---:|
-| 64 kB each | 330 kB | 1.57 GB |
-| **4 kB each** | **239 kB** | **1.14 GB** |
+**Bigger is not faster, which is the opposite of what one would assume.** Re-measured 2026-08-26 on a
+machine with nothing else running, median of three runs — a walk over 7.69 M records keeping one in a
+hundred, and the same store held open 62 times:
 
-**4 kB is recommended and it costs nothing to take.** Smaller buffers were slightly *faster* in the
-sweep — 31 s against 35 s over 471 M records — so this is not a trade. One record must still fit, and
-the rolling buffer grows if one does not (§8).
+| buffers | walk | per open sample | at 5,000 samples |
+|---|---:|---:|---:|
+| 4 kB | 0.149 s | 233 kB | 1.11 GB |
+| **16 kB** | **0.143 s** | **257 kB** | **1.23 GB** |
+| 64 kB | 0.161 s | 353 kB | 1.69 GB |
+| 256 kB | 0.200 s | — | — |
 
-**At 4 kB buffers an open sample is 239 kB against a 500 kB budget**, which leaves room to spend
-later — on a second stream, if one is ever justified, or on larger buffers if a machine wants them.
+**There is an optimum rather than a trend, and it is near 16 kB.** Going up from there costs both
+memory and time: 64 kB is 13 % slower than 16 kB and 256 kB is 40 % slower. Going down costs a
+little time and saves a little memory.
+
+**So 16 kB, and there is no trade to weigh.** *Why the curve turns is not established. Buffers
+falling out of cache is the obvious guess and it is a guess; nothing here measured it.*
+
+**Against the 500 kB budget an open sample is 257 kB**, which leaves room to spend later if something
+justifies it.
+
+*An earlier draft of this section recommended 4 kB on a sweep taken while other work was running on
+the same machine, and that sweep's timings were not usable. The memory figures were.*
 
 ### 4.5 The manifest
 
@@ -527,11 +538,14 @@ decoder's own state, and the record being built. **None of those is a function o
 reads in. `rolling` and `read chunk` are the reader's two buffers, which are its own choice and not
 the file's:
 
-| reader buffers | 1 stream | 2 streams |
-|---|---:|---:|
-| 64 kB each | 346 kB | 691 kB |
-| 16 kB each | 250 kB | 501 kB |
-| **4 kB each** | **227 kB** | **453 kB** |
+| reader buffers | per open sample |
+|---|---:|
+| 64 kB each | 353 kB |
+| **16 kB each — settled, §4.4** | **257 kB** |
+| 4 kB each | 233 kB |
+
+*A second column here once priced a second compressed stream per block, at roughly double each of
+these. That design is gone (§4.3), and what it would have cost is recorded there rather than here.*
 
 **And it barely moves with depth**, which goal 1 asserts and this is the evidence for. The same walk
 over 62 copies of a sample at **279 reads a position** — a hundred times the tomato cohort's depth:
@@ -902,8 +916,8 @@ corrupted.
    replaces it is what threshold it uses. *Still unmeasured:* a genuinely thin whole-genome sample —
    1× rather than a region-restricted one — where the gaps are between positions rather than between
    regions.
-4. **What does the reader's buffer pair cost in speed as it shrinks?** — PARTLY MEASURED. Smaller
-   was slightly *faster* at one stream (31 s against 35 s over 471 M records), which is the opposite
-   of the expected direction and is not understood. *Leaning:* default to 16 kB, which is inside
-   budget with room to spare and near the fast end. **Settled by:** repeating the sweep on a machine
-   that is not sharing its cores, which this one was.
+4. **What does the reader's buffer pair cost in speed as it shrinks?** — **CLOSED 2026-08-26**
+   (§4.4). Re-measured on a quiet machine with repeats: there is an optimum near 16 kB rather than a
+   trend, and both larger and smaller are slower. 64 kB is 13 % slower and 256 kB is 40 % slower, so
+   the earlier draft's puzzle — smaller coming out faster — was half of a curve, not a paradox. *Why
+   it turns is still not established.*
