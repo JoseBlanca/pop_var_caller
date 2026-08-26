@@ -63,7 +63,7 @@ any point on the curve above.
   [`psp_record_encoding.md`](psp_record_encoding.md). This document fixes only that the file
   *declares* those choices and where the declaration lives.
 - **It does not choose a block size, a compression level, or a quantisation step.** Those are the
-  user's, per the owner's ruling of 2026-08-25. §4.4 says how they travel.
+  user's, per the owner's ruling of 2026-08-25. §4.5 says how they travel.
 - **It does not change production's `.psp`.** ng replaces it; production stays as it is. Several
   findings here apply to it unchanged and that is not a reason to touch it.
 - **It does not define the cohort reader's scheduling** — which blocks it fetches, in what order,
@@ -163,7 +163,7 @@ The header carries what is known *before* any record is written:
   problem the first time the binary layout changed.
 - the sample name, the reference it was called against, the contig list with lengths and checksums;
 - the writer's provenance and the parameters it ran with;
-- **the manifest** (§4.4) — the block cut rule, the look-back window, the stream layout, and each
+- **the manifest** (§4.5) — the block cut rule, the look-back window, the stream layout, and each
   field's encoding with its parameters.
 
 ### 3.2 Blocks
@@ -319,18 +319,71 @@ good file written with more, and the error it produces says nothing useful. *"Th
 512 kB window and this reader is configured for 32 kB"* is an actionable message; a zstd error code
 is not.
 
-### 4.3 How many streams a block is cut into
+### 4.3 A psp block has two streams — settled 2026-08-25
 
-**Declared, and it is the one parameter with a hard ceiling — see §5.2 for the measurement.** A
-block may be one compressed stream carrying whole records, or two — the records, plus a small one
-carrying the single number a cohort scan reads per record so a scan need not decompress records at
-all.
+**A psp block is cut into two separately-compressed streams: a small one carrying what the cohort's
+first pass reads, and one carrying the records.** Declared in the manifest, because the count is a
+per-file fact a reader is told rather than a constant here — but two is what ng writes.
 
-**A reader opens only the streams it needs**, which is what keeps the cost a function of what the
-reader is doing rather than of the file. A scanning reader opens the small one; a materialising
-reader opens the records one; a reader doing both at once pays for both.
+**What the first pass needs, and why it is worth its own stream.** Before anything can be called at
+a position, the caller has to know whether *any* sample shows something other than the reference
+there. At about 99 positions in 100 none does — production measured 28,718 positions worth calling
+out of 2.83 million. Answering that needs only the position and **the number of reads that supported
+something other than the reference**; the allele sequences, the per-allele statistics, the read
+names and the window statistics are needed only where the answer is yes.
 
-### 4.4 The manifest
+Measured on a tomato accession at three reads a position, storing those alone against storing whole
+records:
+
+| | bytes a record | walk speed |
+|---|---:|---:|
+| the whole record | 4.628 | 18.7 M records/s |
+| the first pass's two numbers | **0.077** | **151.6 M records/s** |
+
+**1.7 % of the bytes, and about eight times faster to read.** At 279 reads a position it is 3.9 % of
+the bytes and about nine times faster.
+
+**What it costs, and the ruling.** A stream costs a reader a decompressor and two buffers whatever
+it carries, so the small one is not cheap: it doubles the per-open-sample memory. Measured at
+**5,000 open samples** — 1.14 GB with one stream against **2.27 GB with two**, at the 4 kB buffers
+of §4.4. **The owner's decision, 2026-08-25: that memory is affordable and the speed-up is worth
+it.** The recommendation this reverses was mine, on the grounds that the split spends memory to buy
+wall time and cores recover wall time; the owner priced the gigabyte against twenty seconds of a
+seventy-eight-second run and took the twenty seconds.
+
+**A reader opens only the streams it needs**, which keeps the cost a function of what the reader is
+doing rather than of the file: a first pass opens the small one alone and pays for one decoder.
+
+**Open, and small: exactly which numbers the first stream carries.** The measurement above used the
+position and the summed non-reference support. That subsumes *is there an alternative allele here*
+— an allele exists only because reads showed it, so support above zero and an alternative allele are
+the same condition — and it is strictly more useful, because a scan can apply a threshold rather
+than only asking whether anything varies. **A record's reference span may have to join it**, since a
+record widened by a deletion covers more than one position and a scan indexed by position needs to
+know that. *Leaning:* position, non-reference support, span. **Settled by:** the cohort merge saying
+what its first pass tests. The cost of getting this wrong is small — the whole stream is under 2 % of
+the file, so an extra field is in the noise.
+
+### 4.4 The reader's two buffers — 4 kB each
+
+A reader holds a buffer of compressed bytes read from the file and a rolling buffer of decompressed
+bytes it parses records out of. **Both are the reader's choice, not the file's**, and at cohort scale
+they are the difference between fitting and not:
+
+| buffers | one stream | two streams |
+|---|---:|---:|
+| 64 kB each | 330 kB a sample · 1.57 GB at 5,000 | 659 kB · 3.14 GB |
+| **4 kB each** | **239 kB · 1.14 GB** | **477 kB · 2.27 GB** |
+
+**4 kB is recommended and it costs nothing to take.** Smaller buffers were slightly *faster* in the
+sweep — 31 s against 35 s over 471 M records — so this is not a trade. One record must still fit, and
+the rolling buffer grows if one does not (§8).
+
+**⚠ At two streams and 4 kB buffers an open sample is 477 kB against a 500 kB budget.** That is
+inside it with 5 % to spare, so there is room for neither a third stream nor larger buffers without
+revisiting the budget.
+
+### 4.5 The manifest
 
 The header carries, for each field of a record: its name, its cardinality, its encoding, and that
 encoding's parameters. Encodings come from a **fixed, named menu** — plain variable-length integer,
@@ -348,19 +401,19 @@ buy flexibility nobody has asked for and cost speed on the hot path — decoding
 provided the manifest says how to measure its length. That is a better compatibility story than a
 version number alone, and it comes free.
 
-### 4.5 How records are serialised — by hand, not through `serde`
+### 4.6 How records are serialised — by hand, not through `serde`
 
 **Decided: the record encoder and decoder are written by hand against the manifest.** Three reasons,
 in order of weight:
 
-1. **A `serde` derive fixes the layout at compile time, and §4.4 requires it to be a per-file
+1. **A `serde` derive fixes the layout at compile time, and §4.5 requires it to be a per-file
    choice.** Expressing *"this value is a float stored as a variable-length integer count of a step
    declared in the header"* needs a custom serialiser — at which point the encoder has been written
    by hand and a `serde` layer added on top of it.
 2. **Speed.** Decoding is the hot loop, measured at about 20 million records a second in the
    prototype, and a generic serialiser gives up borrowing directly from the decompression buffer.
 3. **Compatibility.** `bincode`-style formats have no field identity, so a reader meeting an
-   unfamiliar field misparses silently. The manifest handles this properly (§4.4).
+   unfamiliar field misparses silently. The manifest handles this properly (§4.5).
 
 **`serde` is right for the header** — it already is, through TOML — **and for the trailer's
 payload**, which is small, written once and read once. Spending the convenience there costs nothing
@@ -576,7 +629,7 @@ in the header.
 | what | existing code | how it is reused |
 |---|---|---|
 | header framing | [`src/psp/header.rs`](../../../../src/psp/header.rs) | the pattern as-is — magic, length prefix, TOML body, sentinel — so `head` still works on an ng psp |
-| the field manifest | the `[[column]]` array, [`src/psp/header.rs:24`](../../../../src/psp/header.rs) + [`src/psp/registry.rs`](../../../../src/psp/registry.rs) | the shape; §4.4 widens it to carry encoding parameters |
+| the field manifest | the `[[column]]` array, [`src/psp/header.rs:24`](../../../../src/psp/header.rs) + [`src/psp/registry.rs`](../../../../src/psp/registry.rs) | the shape; §4.5 widens it to carry encoding parameters |
 | footer | [`src/psp/trailer.rs`](../../../../src/psp/trailer.rs) | the layout and the tail-magic-last trick; widened for the trailer's offsets |
 | block index | [`src/psp/index.rs`](../../../../src/psp/index.rs) | the flat vector, unchanged — §3.3 says why it no longer needs replacing |
 | variable-length integers | [`src/psp/varint.rs`](../../../../src/psp/varint.rs) | as-is: LEB128 and zig-zag LEB128, specified and tested |
@@ -649,14 +702,18 @@ corrupted.
 
 ## 12. Open questions
 
-1. **How many streams does a block have — one or two?** — OPEN, and §5.2 gives it a hard ceiling
-   rather than an answer. One stream is 227–346 kB per open sample and two are 453–691 kB, so two
-   fit the budget only with small buffers. What is not measured is what the second stream *buys*: how
-   often a cohort scan can skip a block using only the index summary (§3.3), which may make a
-   per-record scan stream unnecessary. *Leaning:* start with one stream and the index summary, and
-   add the second only if the skip rate is measured to be poor. **§5.3 is the other way this could
-   move:** the per-decoder floor is set by a zstd parameter the Rust bindings do not currently
-   expose, and lowering it would make two parts cheap. **Settled by:** counting, on a real
+1. **How many streams does a block have?** — **SETTLED 2026-08-25: two** (§4.3). The first pass's
+   numbers are 1.7 % of the bytes and about eight times faster to read on their own; the second
+   stream doubles the per-open-sample memory, which at 5,000 samples is 1.14 GB against 2.27 GB. The
+   owner priced the gigabyte against twenty seconds of a seventy-eight-second run and took the
+   seconds. **This reverses my recommendation**, which was one stream on the grounds that cores
+   recover wall time and nothing recovers memory.
+
+   *One thing the ruling did not need to settle, and §4.3 carries as open: exactly which numbers the
+   first stream holds. And a note that goes with the index rather than against it — the per-block
+   summary of §3.3 cannot substitute for this stream: at a 100 kb block with roughly one varying
+   position in a hundred, every block holds about a thousand of them, so no block is ever skippable
+   and the summary is inert at that size.* **Settled by:** counting, on a real
    cohort segment, how many blocks the index summary alone lets a scan skip.
 2. **What byte ceiling, if any, should a writer put on a block?** — OPEN (§4.1), and it costs
    nothing measurable so far: a 100 kb grid with a 1 MiB ceiling gives 4.628 bytes a record against

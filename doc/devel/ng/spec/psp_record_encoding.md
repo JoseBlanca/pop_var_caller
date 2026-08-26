@@ -268,21 +268,38 @@ Two consequences:
 
 *Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
 
-### 2.3 The light stream — how the two-phase decode survives
+### 2.3 Two streams, so the cohort's first pass need not decode records
 
-A record stream's one real loss is that a reader cannot read one field without decoding all
-of them, and [`run_streaming.md`](run_streaming.md) §3.3 depends on exactly that: psp mode's
-saving is scanning a cheap number per position across the cohort and inflating only the
-positions some sample varied at — production's `TwoPhaseSegment` decodes the light columns
-for every row and leaves the heavy ones compressed
-([`src/var_calling/sample_reader.rs:698-712`](../../../../src/var_calling/sample_reader.rs)),
-then inflates the kept rows
-([`:789`](../../../../src/var_calling/sample_reader.rs)). An earlier measurement of that
-saving on the cohort reader materialised 28,718 loci instead of 2.83 million.
+**Record-major has one real loss: a reader cannot read one field without decoding all of them.** The
+cohort's first pass is exactly that shape — before anything can be called at a position, the caller
+asks whether *any* sample shows something other than the reference there, and at about 99 positions
+in 100 none does. Production measured that as 28,718 positions worth calling out of 2.83 million.
 
-**So the file has two streams, not fourteen and not one.** The light stream carries, per
-record, what phase one needs — the position, the record's reference span, and the summed
-non-reference support — and nothing else. The heavy stream carries the record.
+**So a psp block is cut into two separately-compressed streams**: a small one carrying what that
+first pass reads — the position and the summed non-reference support — and one carrying the records.
+
+**Why this is a different decision from production's, even though it looks the same.** Production's
+two-phase decode *saves* memory: it inflates a block whole, so leaving the heavy columns compressed
+avoids materialising rows nobody wants
+([`TwoPhaseSegment`, `src/var_calling/sample_reader.rs:698-712`](../../../../src/var_calling/sample_reader.rs),
+then [`:789`](../../../../src/var_calling/sample_reader.rs)). **Here it costs memory**, because a
+reader never inflates a block anyway and a second stream means a second decompressor. What it buys
+is time. Measured on a tomato accession at three reads a position:
+
+| | bytes a record | walk speed |
+|---|---:|---:|
+| the whole record | 4.628 | 18.7 M records/s |
+| the first pass's numbers alone | **0.077** | **151.6 M records/s** |
+
+**1.7 % of the bytes and about eight times faster to read**; at 279 reads a position, 3.9 % and about
+nine times. Against that, at 5,000 open samples the second stream takes the run from **1.14 GB to
+2.27 GB**.
+
+**Settled 2026-08-25 by the owner: two streams.** The gigabyte is affordable and the speed-up is
+worth having. *This reverses the recommendation I gave, which was one stream on the grounds that the
+split spends memory to buy wall time and cores recover wall time.* The container spec's
+[`psp_file_format.md`](psp_file_format.md) §4.3 owns the decision and carries the one part still
+open — exactly which numbers the first stream holds.
 
 This costs almost nothing and is not a compromise between the two shapes: **splitting a
 frame into more separately-compressed pieces was measured to help, not hurt** (on HG002 at
