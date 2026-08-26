@@ -52,7 +52,7 @@ mod tests {
         let early_on_the_second = entry(1, 1, 8_192);
         assert!(late_on_the_first_contig < early_on_the_second);
 
-        let mut blocks = vec![early_on_the_second, late_on_the_first_contig];
+        let mut blocks = [early_on_the_second, late_on_the_first_contig];
         blocks.sort();
         assert_eq!(blocks[0], late_on_the_first_contig);
     }

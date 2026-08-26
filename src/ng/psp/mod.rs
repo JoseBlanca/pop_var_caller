@@ -73,8 +73,8 @@ pub use header::{
 };
 pub use index::BlockIndexEntry;
 pub use record::{
-    RecordBodyLayout, RecordDecodeError, RecordHead, RecordLayoutError, decode_body, encode_body,
-    record_body_fields,
+    DecodedRecordBody, RecordBodyLayout, RecordBodyLayoutError, RecordDecodeError, RecordHead,
+    decode_record_body, encode_record_body, record_body_fields,
 };
 
 // ---------------------------------------------------------------------
@@ -262,6 +262,15 @@ pub enum PspReadError {
 
     /// A block failed to decompress, or a record ran past the end of its block. The file
     /// is damaged.
+    ///
+    /// **⚠ Do not fold a [`RecordDecodeError`] through this variant.** Its
+    /// [`Truncated`](RecordDecodeError::Truncated) means *the body stopped early*, which the
+    /// streaming reader of Milestone D reads more bytes for, and its
+    /// [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the reader* — and this
+    /// variant says *the file is damaged*, which is the wrong instruction for both. It also
+    /// takes a `std::io::Error` as its cause, so a record's own error could only reach it as a
+    /// string. **Milestone D adds the variants that carry the class**; this note is here
+    /// because that is the point at which it would be lost (the C1 review, M13).
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,

@@ -1602,6 +1602,11 @@ mod tests {
     // The rules — every one, from both sides
     // -----------------------------------------------------------------
 
+    /// One broken header: the rule it breaks, the change that breaks it, and the words the
+    /// refusal has to carry. Named because the triple is otherwise complex enough that clippy
+    /// asks for a name, and it reads better with one.
+    type BrokenHeaderCase = (&'static str, Box<dyn Fn(&mut Header)>, &'static str);
+
     /// Each rule is written once and checked on both sides, so the writer refuses to make a
     /// file the reader would refuse to read. The table names the rule, a header that breaks
     /// it, and the words the message has to carry.
@@ -1613,7 +1618,7 @@ mod tests {
     /// lowercase clause be deleted.
     #[test]
     fn every_rule_is_refused_by_the_writer_and_by_the_reader_alike() {
-        let broken: Vec<(&str, Box<dyn Fn(&mut Header)>, &str)> = vec![
+        let broken: Vec<BrokenHeaderCase> = vec![
             (
                 "an empty sample name",
                 Box::new(|header| header.sample = "  ".to_string()),
@@ -1967,7 +1972,7 @@ mod tests {
     #[test]
     fn decode_refuses_damaged_bytes_without_panicking() {
         let good = a_written_header().encode().expect("a valid header encodes");
-        let mut seed = 0x2026_08_26_u64;
+        let mut seed = 0x2026_0826_u64;
         let mut next = move || {
             seed ^= seed << 13;
             seed ^= seed >> 7;
