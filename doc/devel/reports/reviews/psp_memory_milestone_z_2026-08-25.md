@@ -260,7 +260,7 @@ The sections above are diagnosis. This one is the change itself, built as a work
 reader (`examples/psp_row_stream_roundtrip.rs`, phases `encode-streaming` / `verify-streaming` /
 `many-ngs`) and walked over the same 62 accessions against production's `.psp`.
 
-**The design, in one sentence.** A block is a megabyte of records — so the compressor has plenty to
+**The design.** A block is a megabyte of records — so the compressor has plenty to
 look back over and the index has few entries — while the *window*, the reach the compressor is
 allowed, is capped when the file is written and is what a reader has to hold.
 

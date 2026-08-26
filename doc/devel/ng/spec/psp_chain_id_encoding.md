@@ -93,7 +93,7 @@ that a much simpler change also delivers.
 
 ## 4. The differential encoding
 
-**The idea in one paragraph.** A read of length L is named at every one of the L positions it
+**The idea.** A read of length L is named at every one of the L positions it
 covers, so the column stores each read about L times. What changes between adjacent positions is
 only which reads arrived and which left. Store *that* stream instead, and a read costs about two
 entries for its whole length rather than L. Everything else about the column then follows from a

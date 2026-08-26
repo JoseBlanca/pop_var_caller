@@ -193,6 +193,28 @@ where it sits. A sentence about how remarkable it is carries none.
 - **Fake suspense of any kind**: withholding the finding for one sentence to
   announce that a finding is coming.
 
+### The same failure in a heading: describing your own writing instead of the subject
+
+**A heading names what the section is about. It does not report how long the section
+is.** The owner, 2026-08-25, on "The problem, in one paragraph" and "The proposal, in
+one page":
+
+> "I also hate this kind of writting. What does 'in one paragraph' add? If you're
+> stating the problem, just do it."
+
+| ❌ | ✅ |
+|---|---|
+| `### 1.1 The problem, in one paragraph` | `### 1.1 The problem` |
+| `## 2. The proposal, in one page` | `## 2. The proposal` |
+| `## 1. What this is, in one page` | `## 1. What this is` |
+| **"The design, in one sentence."** | **"The design."** |
+| **"The idea in one paragraph."** | **"The idea."** |
+
+The promise is empty in both directions. If the section *is* short the reader can see
+that; if it grows past a page — and these do — the heading is now false, and nobody
+ever goes back to fix it. The same applies to *"briefly"*, *"in short"*, *"at a high
+level"* and *"a quick note on"*.
+
 **Two things this rule does not forbid.** Saying a result *corrects* something —
 "this contradicts the expectation recorded in §4" — is information, because it
 tells the reader a specific belief is now wrong. And marking a number as soft

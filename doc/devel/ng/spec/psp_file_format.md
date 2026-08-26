@@ -15,7 +15,7 @@ per-open-sample memory budget, stated in §1.1.*
 
 ---
 
-## 1. What this is, in one page
+## 1. What this is
 
 A **psp** holds everything one sample's reads showed at every reference position a run analysed —
 one record per covered position, at three reads a position and at three hundred, for a cohort of

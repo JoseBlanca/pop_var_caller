@@ -47,7 +47,7 @@ choices can be made on numbers; none of them is a property the format guarantees
 compressor may look and how much a reader must inflate. Separating them is what the shape in §2 is
 for.
 
-### 1.1 The problem, in one paragraph
+### 1.1 The problem
 
 Production's `.psp` groups records into blocks of a target uncompressed size
 ([`TARGET_BLOCK_BYTES`, `src/psp/writer.rs:72`](../../../../src/psp/writer.rs) — 1 MiB),
@@ -124,7 +124,7 @@ kilobytes, not megabytes*, at three thousand open samples.
 
 ---
 
-## 2. The proposal, in one page
+## 2. The proposal
 
 *Revised 2026-08-25 after the shape below was built and measured. The earlier proposal —
 small independent frames compressed against a shared dictionary — is superseded, and §2.2
