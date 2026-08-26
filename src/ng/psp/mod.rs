@@ -73,9 +73,9 @@ pub use header::{
 };
 pub use index::BlockIndexEntry;
 pub use record::{
-    DecodedRecord, DecodedRecordBody, RecordDecodeError, RecordEncodeError, RecordEncoder,
-    RecordHead, RecordInBuffer, RecordLayout, RecordLayoutError, decode_record, decode_record_body,
-    encode_record_body, read_record_head, record_fields,
+    BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
+    RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
+    decode_record_body, encode_record_body, read_record_head, record_fields,
 };
 
 // ---------------------------------------------------------------------

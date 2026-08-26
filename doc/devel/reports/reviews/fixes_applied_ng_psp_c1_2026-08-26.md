@@ -8,7 +8,7 @@ finding. Branch `ng-psp-encoding`.*
 ## What changed, in one paragraph
 
 **The Blocker is closed by two assertions that do not come from the code they test** — the
-fixture's exact 75 bytes, and the nineteen declared names written out longhand — and by a doc
+fixture's exact bytes, and the nineteen declared names written out longhand — and by a doc
 comment that stops claiming the array drives the codec. **Twelve of the thirteen Majors are fixed;
 one is deferred to Milestone D with its hazard named.** Three claims the commit message led with
 were measured wrong and are corrected here rather than quietly dropped. The record test count goes
@@ -29,7 +29,9 @@ in it must never be regenerated to make a test pass.
 ### Blocker
 
 **B1 — `BODY_FIELDS` and the codec are two lists.** *Fixed.*
-Two golden tests: `the_fixture_encodes_to_these_exact_bytes` (75 bytes, annotated field by field)
+Two golden tests: `the_fixture_encodes_to_these_exact_bytes` (**77 bytes**, annotated field by
+field — the C2 review caught this report saying 75, which was the fixture's size *before* these
+fixes widened its reference bases and one observation's)
 and `record_body_fields_declares_the_names_a_written_file_carries` (the nineteen names longhand).
 Between them, reordering the codec fails the first and reordering the array fails the second.
 The array's doc comment no longer says it drives the codec; it says what the array is — **a file's
