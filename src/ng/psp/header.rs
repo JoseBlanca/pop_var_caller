@@ -43,7 +43,7 @@ pub struct Header {
     /// coordinate space every record in the file is written against.
     ///
     /// [`ContigId`]: crate::ng::types::ContigId
-    pub contigs: Vec<ContigEntry>,
+    pub contigs: Vec<ContigIdentity>,
     /// What produced the file and what it ran with.
     pub writer: WriterProvenance,
     /// How this file encodes what it holds.
@@ -84,7 +84,7 @@ pub struct ReferenceIdentity {
 /// round-trip test that silently dropped every digest would still pass. Equality here is
 /// plain field equality, which is what a test of the header's encoding needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContigEntry {
+pub struct ContigIdentity {
     /// The contig's name: the first word of the FASTA `>` header, the same string as a SAM
     /// `@SQ SN`.
     pub name: String,
@@ -161,7 +161,7 @@ pub struct Manifest {
     /// **A reader configures its decoder from this**; assuming a value makes it reject
     /// legitimate files with an error that names a zstd code rather than a number anyone
     /// can act on (spec §4.2).
-    pub window_log: u8,
+    pub look_back_window_log: u8,
     /// One entry per field of a record, **in encoding order**.
     pub fields: Vec<FieldSpec>,
 }
@@ -197,14 +197,16 @@ pub enum FieldEncoding {
     /// Zig-zag LEB128, for values that go negative — a difference from the previous
     /// record, typically.
     SignedVarint,
-    /// A fixed-width little-endian integer of `bytes` width.
-    Fixed { bytes: u8 },
+    /// A fixed-width little-endian integer, `width_bytes` wide.
+    FixedWidthInteger { width_bytes: u8 },
     /// Raw IEEE bytes. **The escape hatch, not the default** — a float stored raw is a
     /// float two callers can disagree about in its last bits, and the three quantities
     /// that arrive as floating point are 70 % of the compressed file when stored this way
     /// (spec psp_record_encoding.md §5).
-    Ieee { bytes: u8 },
-    /// A count of steps of `1 / scale`, written as a varint.
+    IeeeFloat { width_bytes: u8 },
+    /// A count of steps of `1 / steps_per_unit`, written as a varint. The name says which
+    /// way round the arithmetic goes: 4,096 steps to one natural log, so the stored integer
+    /// is the value multiplied by it.
     ///
     /// **The step is inherited from the type that produced the value, not chosen by the
     /// writer.** The rounding happens where the value is computed, so a run reading its
@@ -212,7 +214,7 @@ pub enum FieldEncoding {
     /// same number — which is the oracle the whole psp path is checked against. This field
     /// exists so a reader can *interpret* the integer; it cannot make a file with a step
     /// the types did not produce (spec psp_record_encoding.md §5.1.1).
-    FixedPoint { scale: u32 },
+    FixedPoint { steps_per_unit: u32 },
     /// Bytes with a varint length in front — an allele's sequence, a chain-id list.
     LengthPrefixedBytes,
 }
@@ -248,6 +250,43 @@ pub const MAX_HEADER_BODY_BYTES: u64 = (1024 * 1024) - HEADER_FRAMING_BYTES as u
 /// The format this writer produces and this reader understands. A file whose **major**
 /// differs is refused as [`PspReadError::UnsupportedVersion`], not read as damaged.
 pub const FORMAT_VERSION: (u16, u16) = (1, 0);
+
+/// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
+///
+/// **A limit of the file's own syntax, not a choice.** Two of the header's numbers are `u64`
+/// in Rust — a contig's length and the genomic block size — and the `toml` crate will
+/// *serialise* a value above this that its own parser then refuses. So the rule belongs in
+/// [`check_rules`] with the others, or the writer produces a file its own reader rejects.
+const MAX_TOML_INTEGER: u64 = i64::MAX as u64;
+
+/// The smallest look-back window zstd will accept, as its exponent: 2^10 bytes.
+pub const MIN_LOOK_BACK_WINDOW_LOG: u8 = 10;
+
+/// The largest look-back window zstd will accept, as its exponent: 2^31 bytes.
+///
+/// **This is what zstd allows, not what a reader should budget for.** A file may legally
+/// declare a 2 GiB window and a cohort reader holding one file per sample cannot afford it —
+/// that refusal is [`PspReadError::WindowTooLarge`], a reader's budget rather than a format
+/// rule, and it belongs to the reader that Milestone D builds.
+pub const MAX_LOOK_BACK_WINDOW_LOG: u8 = 31;
+
+/// The look-back window a writer takes when nothing else says otherwise: 2^15 = 32 kB.
+///
+/// **This is what the memory measurements were taken at** (spec §4.2, §5.2), and it is the
+/// number that makes an open file cost 0.34 MB rather than production's 2.6 MB. It is a
+/// starting value recorded in every file it writes, not a property of the format — a reader
+/// is driven by what the file declares.
+pub const DEFAULT_LOOK_BACK_WINDOW_LOG: u8 = 15;
+
+/// The genomic block size a writer takes when nothing else says otherwise: 100 kb of
+/// reference per psp block (the owner, 2026-08-25; spec §4.1).
+///
+/// **Not an optimum, and the spec says so.** Measured on a tomato accession at three reads a
+/// position, bytes a record barely moves across a two-hundred-fold range of this number —
+/// 4.629 at 20 kb against 4.626 at 1,000 kb — because the capped look-back window means a
+/// larger block gives the match finder nothing extra. 100 kb is a round number in the flat
+/// part of that curve, and spec §4.1 records that 1,000 kb is live and may be better.
+pub const DEFAULT_GENOMIC_BLOCK_SIZE_BP: Bp = Bp(100_000);
 
 // ---------------------------------------------------------------------
 // Build, encode, parse, validate
@@ -333,41 +372,56 @@ impl Header {
         let malformed = |reason: String| PspReadError::MalformedHeader {
             path: path.to_path_buf(),
             reason,
+            source: None,
+        };
+        let malformed_by = |reason: &str, cause: Box<dyn std::error::Error + Send + Sync>| {
+            PspReadError::MalformedHeader {
+                path: path.to_path_buf(),
+                reason: format!("{reason}: {cause}"),
+                source: Some(cause),
+            }
         };
 
-        if bytes.len() < HEAD_MAGIC.len() + 8 {
+        // The magic and the length are read from a fixed-size prefix, so this is the one
+        // place the length of `bytes` has to be checked before anything is indexed.
+        let Some((magic, after_magic)) = bytes.split_at_checked(HEAD_MAGIC.len()) else {
             return Err(malformed(format!(
-                "the file is {} bytes, too short to hold a header's magic and length",
+                "the file is {} bytes, too short to hold a header's magic",
                 bytes.len()
             )));
+        };
+        if magic != HEAD_MAGIC {
+            let mut found = [0u8; 4];
+            found.copy_from_slice(magic);
+            return Err(PspReadError::NotAnNgPsp {
+                path: path.to_path_buf(),
+                found,
+                expected: HEAD_MAGIC,
+            });
         }
-        if bytes[..HEAD_MAGIC.len()] != HEAD_MAGIC {
+        let Some((declared_length, _)) = after_magic.split_first_chunk::<8>() else {
             return Err(malformed(format!(
-                "does not start with {:?}; it is not an ng psp",
-                String::from_utf8_lossy(&HEAD_MAGIC).trim_end()
+                "the file is {} bytes, too short to hold the header body's length",
+                bytes.len()
             )));
-        }
+        };
 
-        let length_at = HEAD_MAGIC.len();
-        let body_bytes = u64::from_le_bytes(
-            bytes[length_at..length_at + 8]
-                .try_into()
-                .expect("the slice is eight bytes long"),
-        );
+        let body_bytes = u64::from_le_bytes(*declared_length);
         if body_bytes == 0 || body_bytes > MAX_HEADER_BODY_BYTES {
             return Err(malformed(format!(
-                "declares a {body_bytes}-byte header body; the format allows 1 to \
+                "declares a {body_bytes}-byte header body; this reader allows 1 to \
                  {MAX_HEADER_BODY_BYTES}"
             )));
         }
 
-        let body_at = length_at + 8;
+        let body_at = HEAD_MAGIC.len() + 8;
+        // `body_bytes` is at most `MAX_HEADER_BODY_BYTES`, checked above, so neither sum can
+        // overflow a `usize` on any target this builds for.
         let sentinel_at = body_at + body_bytes as usize;
         let header_bytes = sentinel_at + HEAD_SENTINEL.len();
         if bytes.len() < header_bytes {
             return Err(malformed(format!(
-                "declares a {body_bytes}-byte header body but only {} bytes follow the \
-                 length",
+                "declares a {body_bytes}-byte header body but only {} bytes follow the length",
                 bytes.len() - body_at
             )));
         }
@@ -378,9 +432,13 @@ impl Header {
         }
 
         let body = std::str::from_utf8(&bytes[body_at..sentinel_at])
-            .map_err(|e| malformed(format!("the header body is not valid UTF-8: {e}")))?;
+            .map_err(|e| malformed_by("the header body is not valid UTF-8", Box::new(e)))?;
 
-        let format_version = version_of(body, path)?;
+        let table: toml::Table = body
+            .parse()
+            .map_err(|e| malformed_by("the header body is not valid TOML", Box::new(e)))?;
+
+        let format_version = version_in(&table, path)?;
         if format_version.0 != FORMAT_VERSION.0 {
             return Err(PspReadError::UnsupportedVersion {
                 path: path.to_path_buf(),
@@ -389,8 +447,19 @@ impl Header {
             });
         }
 
-        let wire: WireHeader = toml::from_str(body)
-            .map_err(|e| malformed(format!("the header body is not valid TOML: {e}")))?;
+        // **The body is parsed twice, and it has to be.** The version must be read before the
+        // body is interpreted as this version's shape, so it comes from the bare table above.
+        // Feeding that table to the wire types instead of re-reading the text loses the one
+        // thing a `toml::Table` cannot carry back out: `writer.created` arrives as a string
+        // rather than as a TOML datetime, and every header fails to parse. A header is about a
+        // kilobyte and is read once per file open, so the second pass costs nothing that
+        // matters — and the alternative was measured by trying it.
+        let wire: WireHeader = toml::from_str(body).map_err(|e| {
+            malformed_by(
+                "the header body is not a header this reader can read",
+                Box::new(e),
+            )
+        })?;
         let header = wire
             .into_header(format_version)
             .map_err(|broken| malformed(format!("{}: {}", broken.field, broken.reason)))?;
@@ -401,30 +470,40 @@ impl Header {
     }
 }
 
-/// The format version alone, read without interpreting anything else in the body.
+/// The format version alone, read from the body's bare TOML table before anything else in it
+/// is interpreted.
 ///
-/// **This is what keeps the header plain text.** A reader has to be able to learn the
-/// version of a file it cannot otherwise read, so the version is taken from a bare TOML
-/// table before the body is deserialised into types this version's reader knows
-/// (spec §3.1).
-fn version_of(body: &str, path: &Path) -> Result<(u16, u16), PspReadError> {
+/// **This is what keeps the header plain text.** A reader has to be able to learn the version
+/// of a file it cannot otherwise read, so the version is taken from the table before the body
+/// is deserialised into types this version's reader knows (spec §3.1).
+fn version_in(table: &toml::Table, path: &Path) -> Result<(u16, u16), PspReadError> {
     let malformed = |reason: String| PspReadError::MalformedHeader {
         path: path.to_path_buf(),
         reason,
+        source: None,
     };
 
-    let table: toml::Table = body
-        .parse()
-        .map_err(|e| malformed(format!("the header body is not valid TOML: {e}")))?;
-    let spelled = table
-        .get("format-version")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| malformed("the header has no format-version".to_string()))?;
-    let (major, minor) = spelled
-        .split_once('.')
-        .ok_or_else(|| malformed(format!("format-version {spelled:?} is not MAJOR.MINOR")))?;
-    let parsed = major.parse::<u16>().ok().zip(minor.parse::<u16>().ok());
-    parsed.ok_or_else(|| malformed(format!("format-version {spelled:?} is not MAJOR.MINOR")))
+    let Some(spelled) = table.get("format-version") else {
+        return Err(malformed("the header has no format-version".to_string()));
+    };
+    let Some(spelled) = spelled.as_str() else {
+        return Err(malformed(format!(
+            "format-version is {spelled}, which is not a MAJOR.MINOR string"
+        )));
+    };
+    let Some((major, minor)) = spelled.split_once('.') else {
+        return Err(malformed(format!(
+            "format-version {spelled:?} is not MAJOR.MINOR"
+        )));
+    };
+    match (major.parse::<u16>(), minor.parse::<u16>()) {
+        (Ok(major), Ok(minor)) => Ok((major, minor)),
+        _ => Err(malformed(format!(
+            "format-version {spelled:?} is not MAJOR.MINOR, each part a number below \
+             {}",
+            u16::MAX
+        ))),
+    }
 }
 
 /// Every rule a header must satisfy, in one place, checked on both sides.
@@ -455,6 +534,16 @@ fn check_rules(header: &Header) -> Result<(), BrokenRule> {
             return Err(BrokenRule::new(
                 "contig.length",
                 format!("{} is zero bases long", contig.name),
+            ));
+        }
+        if contig.length > MAX_TOML_INTEGER {
+            return Err(BrokenRule::new(
+                "contig.length",
+                format!(
+                    "{} is {} bases; a TOML integer is signed, so a header cannot carry more \
+                     than {MAX_TOML_INTEGER}",
+                    contig.name, contig.length
+                ),
             ));
         }
         if !seen.insert(contig.name.as_str()) {
@@ -495,7 +584,15 @@ fn check_basename(field: &str, spelled: &str) -> Result<(), BrokenRule> {
     if spelled.trim().is_empty() {
         return Err(BrokenRule::new(field, "is empty"));
     }
-    if Path::new(spelled).components().count() > 1 {
+    // **One ordinary component, not merely one component.** Counting components alone lets
+    // `/`, `.` and `..` through, because each of those is a single component of its own kind —
+    // so the rule read as enforced while `..` recorded a directory the same way a path would.
+    let mut components = Path::new(spelled).components();
+    let sole_ordinary_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !sole_ordinary_component {
         return Err(BrokenRule::new(
             field,
             format!("{spelled:?} holds a directory component; only a basename is recorded"),
@@ -511,20 +608,31 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
             "is zero; the block cut is a grid on the coordinate and a zero grid has no cells",
         ));
     }
+    if manifest.genomic_block_size_bp.get() > MAX_TOML_INTEGER {
+        return Err(BrokenRule::new(
+            "manifest.genomic-block-size-bp",
+            format!(
+                "is {}; a TOML integer is signed, so a header cannot carry more than \
+                 {MAX_TOML_INTEGER}",
+                manifest.genomic_block_size_bp.get()
+            ),
+        ));
+    }
     if manifest.block_byte_ceiling == Some(0) {
         return Err(BrokenRule::new(
             "manifest.block-byte-ceiling",
             "is zero; a ceiling no block can stay under closes every block empty",
         ));
     }
-    // zstd's own bounds on `windowLog`: 2^10 is the smallest window it will take and 2^31
-    // the largest. A file outside them cannot be decompressed by any reader, ours included.
-    if !(10..=31).contains(&manifest.window_log) {
+    if !(MIN_LOOK_BACK_WINDOW_LOG..=MAX_LOOK_BACK_WINDOW_LOG)
+        .contains(&manifest.look_back_window_log)
+    {
         return Err(BrokenRule::new(
-            "manifest.window-log",
+            "manifest.look-back-window-log",
             format!(
-                "is {}; zstd takes a look-back window between 2^10 and 2^31 bytes",
-                manifest.window_log
+                "is {}; zstd takes a look-back window between 2^{MIN_LOOK_BACK_WINDOW_LOG} and \
+                 2^{MAX_LOOK_BACK_WINDOW_LOG} bytes",
+                manifest.look_back_window_log
             ),
         ));
     }
@@ -555,33 +663,44 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
     Ok(())
 }
 
+/// The widths a fixed-width integer field may declare.
+///
+/// **Named rather than spelled once into the check and again into the message.** The two
+/// drifted apart under review: widening the bound in one and leaving the other alone passed
+/// every test while admitting a file no decoder can read.
+pub const FIXED_INTEGER_WIDTHS_BYTES: [u8; 4] = [1, 2, 4, 8];
+
+/// The widths a raw IEEE float field may declare — `f32` and `f64`. No other width has an
+/// IEEE meaning.
+pub const IEEE_FLOAT_WIDTHS_BYTES: [u8; 2] = [4, 8];
+
 fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), BrokenRule> {
     let field = "manifest.field.encoding";
     match encoding {
-        FieldEncoding::Fixed { bytes } => {
-            if !matches!(bytes, 1 | 2 | 4 | 8) {
+        FieldEncoding::FixedWidthInteger { width_bytes } => {
+            if !FIXED_INTEGER_WIDTHS_BYTES.contains(&width_bytes) {
                 return Err(BrokenRule::new(
                     field,
                     format!(
-                        "{:?} is a {bytes}-byte fixed integer; the widths are 1, 2, 4 and 8",
-                        name.0
+                        "{:?} is a {width_bytes}-byte fixed-width integer; the widths are {:?}",
+                        name.0, FIXED_INTEGER_WIDTHS_BYTES
                     ),
                 ));
             }
         }
-        FieldEncoding::Ieee { bytes } => {
-            if !matches!(bytes, 4 | 8) {
+        FieldEncoding::IeeeFloat { width_bytes } => {
+            if !IEEE_FLOAT_WIDTHS_BYTES.contains(&width_bytes) {
                 return Err(BrokenRule::new(
                     field,
                     format!(
-                        "{:?} is a {bytes}-byte IEEE float; the widths are 4 and 8",
-                        name.0
+                        "{:?} is a {width_bytes}-byte IEEE float; the widths are {:?}",
+                        name.0, IEEE_FLOAT_WIDTHS_BYTES
                     ),
                 ));
             }
         }
-        FieldEncoding::FixedPoint { scale } => {
-            if scale == 0 {
+        FieldEncoding::FixedPoint { steps_per_unit } => {
+            if steps_per_unit == 0 {
                 return Err(BrokenRule::new(
                     field,
                     format!("{:?} counts steps of 1/0", name.0),
@@ -631,7 +750,7 @@ fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRule> {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireHeader {
     format_version: String,
     sample: String,
@@ -643,7 +762,7 @@ struct WireHeader {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireReference {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,7 +770,7 @@ struct WireReference {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireContig {
     name: String,
     length: u64,
@@ -660,7 +779,7 @@ struct WireContig {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireWriter {
     tool: String,
     version: String,
@@ -674,29 +793,33 @@ struct WireWriter {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireManifest {
     genomic_block_size_bp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_byte_ceiling: Option<u32>,
-    window_log: u8,
+    look_back_window_log: u8,
     #[serde(default)]
     field: Vec<WireFieldSpec>,
 }
 
 /// One field's declaration, **flat rather than nested**: `encoding` names the scheme and
-/// `bytes` or `scale` carries its one parameter. A nested table per field would read as
-/// `[manifest.field.encoding]` inside an array of tables, which is legal TOML and hard to
-/// read in `head` — and readability is the reason the header is text at all.
+/// `width-bytes` or `steps-per-unit` carries its one parameter. A nested table per field
+/// would read as `[manifest.field.encoding]` inside an array of tables, which is legal TOML
+/// and hard to read in `head` — and readability is the reason the header is text at all.
+///
+/// The two parameters are named for what they are rather than for their Rust types: a
+/// header carries `fixed-width-integer` four lines from `fixed-point`, and *width* against
+/// *step* is what tells a person reading it which is which.
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct WireFieldSpec {
     name: String,
     encoding: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<u8>,
+    width_bytes: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    scale: Option<u32>,
+    steps_per_unit: Option<u32>,
 }
 
 impl From<&Header> for WireHeader {
@@ -730,29 +853,18 @@ impl From<&Header> for WireHeader {
             manifest: WireManifest {
                 genomic_block_size_bp: header.manifest.genomic_block_size_bp.get(),
                 block_byte_ceiling: header.manifest.block_byte_ceiling,
-                window_log: header.manifest.window_log,
+                look_back_window_log: header.manifest.look_back_window_log,
                 field: header
                     .manifest
                     .fields
                     .iter()
                     .map(|field| {
-                        let (encoding, bytes, scale) = match field.encoding {
-                            FieldEncoding::Varint => ("varint", None, None),
-                            FieldEncoding::SignedVarint => ("signed-varint", None, None),
-                            FieldEncoding::Fixed { bytes } => ("fixed", Some(bytes), None),
-                            FieldEncoding::Ieee { bytes } => ("ieee", Some(bytes), None),
-                            FieldEncoding::FixedPoint { scale } => {
-                                ("fixed-point", None, Some(scale))
-                            }
-                            FieldEncoding::LengthPrefixedBytes => {
-                                ("length-prefixed-bytes", None, None)
-                            }
-                        };
+                        let (encoding, width_bytes, steps_per_unit) = field.encoding.spelled();
                         WireFieldSpec {
                             name: field.name.0.clone(),
                             encoding: encoding.to_string(),
-                            bytes,
-                            scale,
+                            width_bytes,
+                            steps_per_unit,
                         }
                     })
                     .collect(),
@@ -775,7 +887,7 @@ impl WireHeader {
             .contig
             .into_iter()
             .map(|contig| {
-                Ok(ContigEntry {
+                Ok(ContigIdentity {
                     name: contig.name,
                     length: contig.length,
                     md5: contig
@@ -815,19 +927,61 @@ impl WireHeader {
             manifest: Manifest {
                 genomic_block_size_bp: Bp(self.manifest.genomic_block_size_bp),
                 block_byte_ceiling: self.manifest.block_byte_ceiling,
-                window_log: self.manifest.window_log,
+                look_back_window_log: self.manifest.look_back_window_log,
                 fields,
             },
         })
     }
 }
 
+/// Every scheme the format has, listed once.
+///
+/// **This is the list, and both sides read it.** The writer takes each scheme's spelling
+/// from [`FieldEncoding::spelled`] and the reader recognises exactly what this array
+/// produces, so a seventh scheme cannot reach one side without reaching the other. When they
+/// were two independent lists a scheme added to the writer's alone made
+/// [`Header::encode`] write a file that [`Header::decode`] refused — the exact failure the
+/// two-sided rule set exists to prevent, and it passed the whole suite.
+///
+/// The parameters here are placeholders: the array names the schemes, and each field's own
+/// parameter is read from the header beside it.
+const ALL_ENCODINGS: [FieldEncoding; 6] = [
+    FieldEncoding::Varint,
+    FieldEncoding::SignedVarint,
+    FieldEncoding::FixedWidthInteger { width_bytes: 1 },
+    FieldEncoding::IeeeFloat { width_bytes: 4 },
+    FieldEncoding::FixedPoint { steps_per_unit: 1 },
+    FieldEncoding::LengthPrefixedBytes,
+];
+
+impl FieldEncoding {
+    /// What this scheme is called in the header, and the one parameter it carries there.
+    ///
+    /// **The only place a scheme's spelling is written.** Exhaustive on purpose: adding a
+    /// scheme is a compile error here, which is what makes [`ALL_ENCODINGS`] the whole list
+    /// rather than most of it.
+    fn spelled(self) -> (&'static str, Option<u8>, Option<u32>) {
+        match self {
+            FieldEncoding::Varint => ("varint", None, None),
+            FieldEncoding::SignedVarint => ("signed-varint", None, None),
+            FieldEncoding::FixedWidthInteger { width_bytes } => {
+                ("fixed-width-integer", Some(width_bytes), None)
+            }
+            FieldEncoding::IeeeFloat { width_bytes } => ("ieee-float", Some(width_bytes), None),
+            FieldEncoding::FixedPoint { steps_per_unit } => {
+                ("fixed-point", None, Some(steps_per_unit))
+            }
+            FieldEncoding::LengthPrefixedBytes => ("length-prefixed-bytes", None, None),
+        }
+    }
+}
+
 /// The declared scheme and its one parameter, together.
 ///
 /// **A parameter that belongs to another scheme is refused rather than ignored.** A file
-/// saying `encoding = "varint"` beside `scale = 4096` was written by something that meant
-/// one of the two, and reading it as a plain varint would silently divide every value in
-/// that field by 4,096.
+/// saying `encoding = "varint"` beside `steps-per-unit = 4096` was written by something that
+/// meant one of the two, and reading it as a plain varint would silently multiply every
+/// value in that field by 4,096.
 fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
     let named = "manifest.field.encoding";
     let wrong_parameter = |wanted: &str| {
@@ -849,49 +1003,50 @@ fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
         )
     };
 
-    let encoding = match field.encoding.as_str() {
-        "varint" => FieldEncoding::Varint,
-        "signed-varint" => FieldEncoding::SignedVarint,
-        "length-prefixed-bytes" => FieldEncoding::LengthPrefixedBytes,
-        "fixed" => FieldEncoding::Fixed {
-            bytes: field.bytes.ok_or_else(|| missing("width"))?,
-        },
-        "ieee" => FieldEncoding::Ieee {
-            bytes: field.bytes.ok_or_else(|| missing("width"))?,
-        },
-        "fixed-point" => FieldEncoding::FixedPoint {
-            scale: field.scale.ok_or_else(|| missing("step"))?,
-        },
-        unknown => {
-            return Err(BrokenRule::new(
+    let scheme = ALL_ENCODINGS
+        .iter()
+        .find(|candidate| candidate.spelled().0 == field.encoding)
+        .ok_or_else(|| {
+            let known: Vec<&str> = ALL_ENCODINGS
+                .iter()
+                .map(|candidate| candidate.spelled().0)
+                .collect();
+            BrokenRule::new(
                 named,
                 format!(
-                    "{:?} is {unknown:?}, which is not one of varint, signed-varint, fixed, \
-                     ieee, fixed-point, length-prefixed-bytes",
-                    field.name
+                    "{:?} is {:?}, which is not one of {}",
+                    field.name,
+                    field.encoding,
+                    known.join(", ")
                 ),
-            ));
-        }
+            )
+        })?;
+
+    // Exhaustive, no wildcard: a scheme added to `ALL_ENCODINGS` has to say here which of the
+    // two parameters it reads, rather than inheriting "takes none" in silence.
+    let encoding = match scheme {
+        FieldEncoding::Varint => FieldEncoding::Varint,
+        FieldEncoding::SignedVarint => FieldEncoding::SignedVarint,
+        FieldEncoding::LengthPrefixedBytes => FieldEncoding::LengthPrefixedBytes,
+        FieldEncoding::FixedWidthInteger { .. } => FieldEncoding::FixedWidthInteger {
+            width_bytes: field.width_bytes.ok_or_else(|| missing("width"))?,
+        },
+        FieldEncoding::IeeeFloat { .. } => FieldEncoding::IeeeFloat {
+            width_bytes: field.width_bytes.ok_or_else(|| missing("width"))?,
+        },
+        FieldEncoding::FixedPoint { .. } => FieldEncoding::FixedPoint {
+            steps_per_unit: field.steps_per_unit.ok_or_else(|| missing("step"))?,
+        },
     };
-    match encoding {
-        FieldEncoding::Fixed { .. } | FieldEncoding::Ieee { .. } => {
-            if field.scale.is_some() {
-                return Err(wrong_parameter("step"));
-            }
-        }
-        FieldEncoding::FixedPoint { .. } => {
-            if field.bytes.is_some() {
-                return Err(wrong_parameter("width"));
-            }
-        }
-        _ => {
-            if field.bytes.is_some() {
-                return Err(wrong_parameter("width"));
-            }
-            if field.scale.is_some() {
-                return Err(wrong_parameter("step"));
-            }
-        }
+
+    // Which parameters this scheme carries is the same answer the writer gives, so a
+    // parameter it did not put there is one the file should not have.
+    let (_, carries_width, carries_step) = encoding.spelled();
+    if carries_width.is_none() && field.width_bytes.is_some() {
+        return Err(wrong_parameter("width"));
+    }
+    if carries_step.is_none() && field.steps_per_unit.is_some() {
+        return Err(wrong_parameter("step"));
     }
     Ok(encoding)
 }
@@ -899,51 +1054,12 @@ fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
 mod tests {
     use super::*;
 
-    /// The header's contig list is what pins ng's coordinate space, so its equality has to
-    /// be plain field equality. `crate::fasta::ContigEntry` — the same name, one module
-    /// over — treats an absent MD5 as a wildcard, and a round-trip test written against
-    /// *that* would pass while the encoder dropped every digest in the file.
-    #[test]
-    fn a_dropped_contig_md5_is_a_difference_here_and_a_wildcard_in_the_fasta_type() {
-        let with_digest = ContigEntry {
-            name: "SL4.0ch01".to_string(),
-            length: 90_863_682,
-            md5: Some([7u8; 16]),
-        };
-        let without = ContigEntry {
-            md5: None,
-            ..with_digest.clone()
-        };
-        assert_ne!(with_digest, without);
+    // -----------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------
 
-        let fasta_with_digest = crate::fasta::ContigEntry {
-            name: "SL4.0ch01".to_string(),
-            length: 90_863_682,
-            md5: Some([7u8; 16]),
-        };
-        let fasta_without = crate::fasta::ContigEntry {
-            md5: None,
-            ..fasta_with_digest.clone()
-        };
-        assert_eq!(
-            fasta_with_digest, fasta_without,
-            "the fasta type's wildcard MD5 is why the header mints its own contig row"
-        );
-    }
-
-    /// A field's encoding is part of the file's identity: two files whose manifests differ
-    /// only in a fixed-point step hold different numbers behind the same integers, so the
-    /// step has to take part in equality rather than being carried alongside it.
-    #[test]
-    fn a_fixed_point_step_is_part_of_the_encoding_not_a_note_beside_it() {
-        let quarter_read = FieldEncoding::FixedPoint { scale: 4 };
-        let sixteenth_read = FieldEncoding::FixedPoint { scale: 16 };
-        assert_ne!(quarter_read, sixteenth_read);
-        assert_ne!(quarter_read, FieldEncoding::Varint);
-    }
-
-    /// A header that says what a real tomato run says, minus the 11 contigs the shape of
-    /// the test does not need.
+    /// A header that says what a real tomato run says, minus the eleven contigs the shape of
+    /// these tests does not need.
     fn a_written_header() -> Header {
         Header {
             format_version: FORMAT_VERSION,
@@ -953,12 +1069,12 @@ mod tests {
                 md5: Some([0x0a; 16]),
             },
             contigs: vec![
-                ContigEntry {
+                ContigIdentity {
                     name: "SL4.0ch00".to_string(),
                     length: 9_643_250,
                     md5: Some([0x1b; 16]),
                 },
-                ContigEntry {
+                ContigIdentity {
                     name: "SL4.0ch01".to_string(),
                     length: 90_863_682,
                     md5: None,
@@ -985,11 +1101,13 @@ mod tests {
         }
     }
 
+    /// One field per encoding the format has, so anything that walks the manifest meets all
+    /// six rather than the two a minimal fixture would carry.
     fn a_manifest() -> Manifest {
         Manifest {
-            genomic_block_size_bp: Bp(100_000),
+            genomic_block_size_bp: DEFAULT_GENOMIC_BLOCK_SIZE_BP,
             block_byte_ceiling: Some(1_048_576),
-            window_log: 15,
+            look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
             fields: vec![
                 FieldSpec {
                     name: FieldName("position-offset".to_string()),
@@ -1001,7 +1119,7 @@ mod tests {
                 },
                 FieldSpec {
                     name: FieldName("body-bytes".to_string()),
-                    encoding: FieldEncoding::Fixed { bytes: 4 },
+                    encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
                 },
                 FieldSpec {
                     name: FieldName("allele-bases".to_string()),
@@ -1009,19 +1127,100 @@ mod tests {
                 },
                 FieldSpec {
                     name: FieldName("window-mean-coverage".to_string()),
-                    encoding: FieldEncoding::FixedPoint { scale: 4 },
+                    encoding: FieldEncoding::FixedPoint { steps_per_unit: 4 },
                 },
                 FieldSpec {
                     name: FieldName("summed-log-error".to_string()),
-                    encoding: FieldEncoding::FixedPoint { scale: 4_096 },
+                    encoding: FieldEncoding::FixedPoint {
+                        steps_per_unit: 4_096,
+                    },
+                },
+                FieldSpec {
+                    name: FieldName("raw-escape-hatch".to_string()),
+                    encoding: FieldEncoding::IeeeFloat { width_bytes: 8 },
                 },
             ],
+        }
+    }
+
+    /// The error a call had to produce. `expect_err` would do, but it needs `Debug` on the
+    /// success type and gives no room for a formatted message naming which row failed.
+    fn refusal<T, E>(outcome: Result<T, E>, what: &str) -> E {
+        match outcome {
+            Err(refused) => refused,
+            Ok(_) => panic!("{what}"),
         }
     }
 
     fn decoded(bytes: &[u8]) -> Result<(Header, usize), PspReadError> {
         Header::decode(bytes, Path::new("SRR7279481.psp"))
     }
+
+    /// The TOML body alone, sliced out by the declared length.
+    ///
+    /// **Never `String::from_utf8` over the whole framed header.** The eight bytes of length
+    /// between the magic and the body are binary, and whether they happen to be valid UTF-8
+    /// depends on how long the body is — so a test that decodes the whole frame passes until
+    /// somebody adds a header key, then panics inside the helper instead of failing its own
+    /// assertion. It happened during this module's review.
+    fn body_of(bytes: &[u8]) -> &str {
+        let declared = u64::from_le_bytes(
+            bytes[HEAD_MAGIC.len()..HEAD_MAGIC.len() + 8]
+                .try_into()
+                .expect("eight bytes"),
+        ) as usize;
+        let body_at = HEAD_MAGIC.len() + 8;
+        std::str::from_utf8(&bytes[body_at..body_at + declared]).expect("the body is UTF-8")
+    }
+
+    /// Frame a TOML body into a header's bytes **without running the writer's rules over
+    /// it**, so a file holding a value the writer would never produce can be handed to the
+    /// reader.
+    fn framed(body: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HEAD_MAGIC);
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.extend_from_slice(HEAD_SENTINEL);
+        bytes
+    }
+
+    /// Frame a header that breaks a rule, so the reader meets it in a file.
+    ///
+    /// A non-finite parameter has no TOML spelling at all, so it is written as the string
+    /// `nan` and the reader meets it as a bad value rather than a bad float; every other
+    /// broken header here serialises as itself.
+    fn smuggle(header: &Header) -> Vec<u8> {
+        let body = toml::to_string_pretty(&WireHeader::from(header)).unwrap_or_else(|_| {
+            let mut without_the_unspellable = header.clone();
+            without_the_unspellable.writer.parameters.insert(
+                "share".to_string(),
+                ParameterValue::String("nan".to_string()),
+            );
+            toml::to_string_pretty(&WireHeader::from(&without_the_unspellable))
+                .expect("everything else has a TOML spelling")
+        });
+        framed(&body)
+    }
+
+    /// Frame a header whose manifest holds exactly the one field declaration given, so a
+    /// declaration no `FieldEncoding` can represent can still be put in a file.
+    fn one_field_declared_as(declaration: &str) -> Vec<u8> {
+        let whole = a_written_header();
+        let body = toml::to_string_pretty(&WireHeader::from(&whole)).expect("encodes");
+        let up_to_the_fields = body
+            .split("[[manifest.field]]")
+            .next()
+            .expect("the manifest declares fields")
+            .to_string();
+        framed(&format!(
+            "{up_to_the_fields}[[manifest.field]]\n{declaration}"
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // The round trip
+    // -----------------------------------------------------------------
 
     /// Everything in the header comes back, field for field. **Equality here is strict** —
     /// the contig row is this module's own type precisely so that a dropped MD5 is a
@@ -1032,15 +1231,36 @@ mod tests {
         let bytes = written.encode().expect("a valid header encodes");
         let (read_back, header_bytes) = decoded(&bytes).expect("its own bytes parse");
         assert_eq!(read_back, written);
+        assert_eq!(header_bytes, bytes.len());
+    }
+
+    /// The second half of `decode`'s return is **where block 0 begins**, and on a real file
+    /// that is not the end of the buffer. A header alone cannot tell the two apart: the
+    /// round-trip fixture's correct answer and its buffer length are the same number, so
+    /// returning the buffer's length instead passed every test in this module.
+    #[test]
+    fn decode_reports_the_header_length_and_not_the_buffer_length() {
+        let header = a_written_header();
+        let encoded = header.encode().expect("a valid header encodes");
+        let header_only = encoded.len();
+
+        let mut with_a_block = encoded;
+        with_a_block.extend_from_slice(&[0xAA; 4_096]);
+
+        let (read_back, first_block_at) = decoded(&with_a_block).expect("the header parses");
+        assert_eq!(read_back, header);
         assert_eq!(
-            header_bytes,
-            bytes.len(),
-            "the reported length is where the first block begins"
+            first_block_at, header_only,
+            "block 0 begins where the header ends, not where the buffer does"
+        );
+        assert_eq!(
+            with_a_block[first_block_at], 0xAA,
+            "and that byte is the block's first"
         );
     }
 
-    /// The two fields that would round-trip through a wrong scale without complaining: a
-    /// step of 1/4 of a read and one of 1/4,096 of a natural log sit in the same manifest,
+    /// The two fields that would round-trip through a wrong step without complaining: a step
+    /// of a quarter of a read and one of 1/4,096 of a natural log sit in the same manifest,
     /// so a decoder that read the step from the wrong field would still produce integers.
     #[test]
     fn two_fixed_point_steps_in_one_manifest_stay_apart() {
@@ -1052,7 +1272,9 @@ mod tests {
             .fields
             .iter()
             .filter_map(|field| match field.encoding {
-                FieldEncoding::FixedPoint { scale } => Some((field.name.0.as_str(), scale)),
+                FieldEncoding::FixedPoint { steps_per_unit } => {
+                    Some((field.name.0.as_str(), steps_per_unit))
+                }
                 _ => None,
             })
             .collect();
@@ -1062,30 +1284,113 @@ mod tests {
         );
     }
 
-    /// The reason the header is text: `head` on a psp tells you what it is. The magic ends
-    /// in a newline so the body starts on its own line, and the body is TOML a person can
-    /// read.
+    /// Every encoding the format has survives the trip, at every width the rules allow.
+    /// Without this, five of the seven legal widths were never written to a file at all —
+    /// dropping `8` from the accepted set passed the whole suite.
+    #[test]
+    fn every_encoding_at_every_legal_width_round_trips() {
+        let mut fields = vec![
+            FieldSpec {
+                name: FieldName("varint".to_string()),
+                encoding: FieldEncoding::Varint,
+            },
+            FieldSpec {
+                name: FieldName("signed".to_string()),
+                encoding: FieldEncoding::SignedVarint,
+            },
+            FieldSpec {
+                name: FieldName("bytes".to_string()),
+                encoding: FieldEncoding::LengthPrefixedBytes,
+            },
+            FieldSpec {
+                name: FieldName("finest-step".to_string()),
+                encoding: FieldEncoding::FixedPoint { steps_per_unit: 1 },
+            },
+            FieldSpec {
+                name: FieldName("widest-step".to_string()),
+                encoding: FieldEncoding::FixedPoint {
+                    steps_per_unit: u32::MAX,
+                },
+            },
+        ];
+        for width in FIXED_INTEGER_WIDTHS_BYTES {
+            fields.push(FieldSpec {
+                name: FieldName(format!("fixed-{width}")),
+                encoding: FieldEncoding::FixedWidthInteger { width_bytes: width },
+            });
+        }
+        for width in IEEE_FLOAT_WIDTHS_BYTES {
+            fields.push(FieldSpec {
+                name: FieldName(format!("ieee-{width}")),
+                encoding: FieldEncoding::IeeeFloat { width_bytes: width },
+            });
+        }
+
+        let mut written = a_written_header();
+        written.manifest.fields = fields;
+        let bytes = written.encode().expect("every legal width encodes");
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back.manifest.fields, written.manifest.fields);
+    }
+
+    /// A contig as long as a TOML integer goes, and one base longer. **The wire format sets
+    /// this limit, not the rule set**, which is how it was missed: `encode` wrote a `u64`
+    /// above `i64::MAX` that its own reader then refused.
+    #[test]
+    fn the_widest_number_toml_can_carry_round_trips_and_one_more_is_refused() {
+        let mut at_the_edge = a_written_header();
+        at_the_edge.contigs[0].length = MAX_TOML_INTEGER;
+        at_the_edge.manifest.genomic_block_size_bp = Bp(MAX_TOML_INTEGER);
+        let bytes = at_the_edge
+            .encode()
+            .expect("the widest TOML integer encodes");
+        let (read_back, _) = decoded(&bytes).expect("and decodes");
+        assert_eq!(read_back, at_the_edge);
+
+        for (what, break_it) in [
+            (
+                "a contig one base too long",
+                Box::new(|header: &mut Header| header.contigs[0].length = MAX_TOML_INTEGER + 1)
+                    as Box<dyn Fn(&mut Header)>,
+            ),
+            (
+                "a block grid one base too wide",
+                Box::new(|header: &mut Header| {
+                    header.manifest.genomic_block_size_bp = Bp(MAX_TOML_INTEGER + 1)
+                }),
+            ),
+        ] {
+            let mut header = a_written_header();
+            break_it(&mut header);
+            let refused = refusal(header.encode(), &format!("the writer must refuse {what}"));
+            let _ = refused;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // What the file looks like
+    // -----------------------------------------------------------------
+
+    /// The reason the header is text: `head` on a psp tells you what it is. The magic ends in
+    /// a newline so the body starts on its own line, and the body is TOML a person can read.
     #[test]
     fn the_body_is_readable_toml_after_a_newline_terminated_magic() {
         let bytes = a_written_header().encode().expect("a valid header encodes");
         assert_eq!(&bytes[..4], b"NGP\n");
-        let body_bytes = u64::from_le_bytes(bytes[4..12].try_into().expect("eight bytes")) as usize;
-        let body = std::str::from_utf8(&bytes[12..12 + body_bytes]).expect("UTF-8");
-        assert!(
-            body.contains("format-version = \"1.0\""),
-            "body was: {body}"
-        );
-        assert!(body.contains("sample = \"SRR7279481\""), "body was: {body}");
-        assert!(
-            body.contains("genomic-block-size-bp = 100000"),
-            "body was: {body}"
-        );
-        assert!(
-            body.contains("encoding = \"fixed-point\""),
-            "body was: {body}"
-        );
-        assert!(body.contains("scale = 4096"), "body was: {body}");
-        assert_eq!(&bytes[12 + body_bytes..], b"---END-HEADER---\n");
+        let body = body_of(&bytes);
+        for expected in [
+            "format-version = \"1.0\"",
+            "sample = \"SRR7279481\"",
+            "genomic-block-size-bp = 100000",
+            "look-back-window-log = 15",
+            "encoding = \"fixed-point\"",
+            "steps-per-unit = 4096",
+            "encoding = \"fixed-width-integer\"",
+            "width-bytes = 4",
+        ] {
+            assert!(body.contains(expected), "{expected:?} missing from: {body}");
+        }
+        assert_eq!(&bytes[bytes.len() - HEAD_SENTINEL.len()..], HEAD_SENTINEL);
     }
 
     /// A parameter is written as the value itself, not as a tagged pair, because the header
@@ -1093,37 +1398,48 @@ mod tests {
     #[test]
     fn a_parameter_is_written_as_its_bare_value() {
         let bytes = a_written_header().encode().expect("a valid header encodes");
-        let body = String::from_utf8(bytes).expect("UTF-8");
+        let body = body_of(&bytes);
         assert!(body.contains("depth-cap = 300"), "body was: {body}");
         assert!(body.contains("realign = true"), "body was: {body}");
     }
 
     /// Goal 5 is that the same sample gathered at any worker count gives the same bytes, so
-    /// nothing in the header may depend on the order a map happened to be filled in.
+    /// nothing in the header may depend on the order a map happened to be filled in. The
+    /// parameters are built here in reverse alphabetical order and inserted one at a time,
+    /// which is what a `HashMap` would reorder and a `BTreeMap` must not.
     #[test]
     fn the_same_header_encodes_to_the_same_bytes_whatever_order_it_was_built_in() {
+        let canonical = a_written_header().encode().expect("encodes");
+
         let mut backwards = a_written_header();
-        let parameters: Vec<_> = backwards.writer.parameters.clone().into_iter().collect();
-        backwards.writer.parameters = parameters.into_iter().rev().collect();
-        assert_eq!(
-            backwards.encode().expect("encodes"),
-            a_written_header().encode().expect("encodes")
-        );
+        let mut reversed = BTreeMap::new();
+        let mut entries: Vec<_> = backwards.writer.parameters.iter().collect();
+        entries.sort_by(|left, right| right.0.cmp(left.0));
+        let entries: Vec<_> = entries
+            .into_iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        for (key, value) in entries {
+            reversed.insert(key, value);
+        }
+        backwards.writer.parameters = reversed;
+
+        assert_eq!(backwards.encode().expect("encodes"), canonical);
     }
+
+    // -----------------------------------------------------------------
+    // Versions
+    // -----------------------------------------------------------------
 
     /// A file from a later format has to say so. The version is read from a bare TOML table
     /// before the body is deserialised, so a body full of keys this reader has never seen
     /// still yields the right answer instead of a parse failure.
     #[test]
     fn a_newer_major_version_is_refused_as_a_version_and_not_as_damage() {
-        let body = "format-version = \"2.0\"\n\
-                    whatever-version-two-added = { shape = \"nothing here knows\" }\n";
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&HEAD_MAGIC);
-        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(body.as_bytes());
-        bytes.extend_from_slice(HEAD_SENTINEL);
-
+        let bytes = framed(
+            "format-version = \"2.0\"\n\
+             whatever-version-two-added = { shape = \"nothing here knows\" }\n",
+        );
         match decoded(&bytes) {
             Err(PspReadError::UnsupportedVersion {
                 found, supported, ..
@@ -1135,47 +1451,67 @@ mod tests {
         }
     }
 
-    /// A later *minor* of the same major is this reader's to read: that is what the split
-    /// into major and minor is for.
+    /// A later *minor* of the same major is this reader's to read — that is what splitting
+    /// the version into major and minor is **for**, and it only means something if a minor
+    /// that actually added something still reads.
+    ///
+    /// The key added here is the one spec §3.1 says the header will gain: the observation
+    /// reach ceiling. Before this test the module refused it as a damaged file, because the
+    /// wire types were `deny_unknown_fields` and the only later-minor fixture added nothing.
     #[test]
-    fn a_newer_minor_version_is_not_refused_by_the_version_check() {
+    fn a_later_minor_that_added_a_key_still_reads() {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
-        let body_bytes = u64::from_le_bytes(bytes[4..12].try_into().expect("eight bytes")) as usize;
-        let body = std::str::from_utf8(&bytes[12..12 + body_bytes])
-            .expect("UTF-8")
-            .replace("format-version = \"1.0\"", "format-version = \"1.7\"");
-        let mut later_minor = Vec::new();
-        later_minor.extend_from_slice(&HEAD_MAGIC);
-        later_minor.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        later_minor.extend_from_slice(body.as_bytes());
-        later_minor.extend_from_slice(HEAD_SENTINEL);
+        let body = body_of(&bytes)
+            .replace("format-version = \"1.0\"", "format-version = \"1.4\"")
+            .replace(
+                "sample = ",
+                "observation-reach-ceiling-bp = 4000\nsample = ",
+            );
 
-        written.format_version = (1, 7);
-        let (read_back, _) = decoded(&later_minor).expect("a later minor of this major reads");
-        assert_eq!(read_back, written);
+        written.format_version = (1, 4);
+        let (read_back, _) = decoded(&framed(&body)).expect("a later minor of this major reads");
+        assert_eq!(
+            read_back, written,
+            "everything this reader knows comes back; the key it does not know is ignored"
+        );
     }
 
-    /// Both formats use the extension `.psp`, so the first four bytes are what tells them
-    /// apart. A production `.psp` handed to this reader must be refused here rather than
-    /// misread further in.
+    /// This writer produces one version. A caller that asks for another is told so, rather
+    /// than being handed a file stamped with a version whose layout the writer does not
+    /// actually produce.
     #[test]
-    fn a_production_psp_is_refused_at_the_magic() {
+    fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
+        let mut header = a_written_header();
+        header.format_version = (1, 7);
+        let refused = header.encode().expect_err("this writer produces 1.0");
+        assert!(
+            refused.to_string().contains("produces 1.0"),
+            "got {refused}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Framing
+    // -----------------------------------------------------------------
+
+    /// Both formats use the extension `.psp`, so the first four bytes are what tells them
+    /// apart — and being handed the wrong file is a different instruction from being handed a
+    /// damaged one, so it is a different error.
+    #[test]
+    fn a_production_psp_is_refused_as_a_foreign_file_not_as_a_damaged_one() {
         let mut productions = Vec::new();
         productions.extend_from_slice(&crate::psp::header::HEAD_MAGIC);
         productions.extend_from_slice(&(1u64).to_le_bytes());
         productions.push(b'x');
         productions.extend_from_slice(HEAD_SENTINEL);
 
-        let refused = decoded(&productions).expect_err("production's magic is not ours");
-        assert!(
-            matches!(refused, PspReadError::MalformedHeader { .. }),
-            "got {refused:?}"
-        );
-        assert!(
-            refused.to_string().contains("not an ng psp"),
-            "got {refused}"
-        );
+        match decoded(&productions) {
+            Err(PspReadError::NotAnNgPsp { found, .. }) => {
+                assert_eq!(found, crate::psp::header::HEAD_MAGIC);
+            }
+            other => panic!("expected NotAnNgPsp, got {other:?}"),
+        }
     }
 
     /// The declared length is authoritative and the sentinel is the cross-check on it. A
@@ -1193,23 +1529,48 @@ mod tests {
         );
     }
 
-    /// The length field is read before anything is allocated, so a corrupt one cannot ask
-    /// for a large buffer on its own say-so.
+    /// The length field is read before anything is allocated, so a corrupt one cannot ask for
+    /// a large buffer on its own say-so — and the ceiling is this reader's, so moving it has
+    /// to fail a test rather than pass quietly.
     #[test]
-    fn an_enormous_declared_length_is_refused_before_anything_is_allocated() {
-        let mut bytes = a_written_header().encode().expect("a valid header encodes");
-        bytes[4..12].copy_from_slice(&u64::MAX.to_le_bytes());
-
-        let refused = decoded(&bytes).expect_err("a header cannot be that big");
-        assert!(
-            refused.to_string().contains("the format allows 1 to"),
-            "got {refused}"
-        );
+    fn a_declared_length_beyond_the_readers_ceiling_is_refused() {
+        let good = a_written_header().encode().expect("a valid header encodes");
+        for declared in [0u64, MAX_HEADER_BODY_BYTES + 1, u64::MAX] {
+            let mut bytes = good.clone();
+            bytes[4..12].copy_from_slice(&declared.to_le_bytes());
+            let refused = decoded(&bytes).expect_err("a header cannot be that size");
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("this reader allows 1 to {MAX_HEADER_BODY_BYTES}")),
+                "got {refused}"
+            );
+        }
     }
+
+    /// A buffer too short to hold even the framing is refused rather than indexed into.
+    #[test]
+    fn a_buffer_shorter_than_the_framing_is_refused_at_every_length() {
+        let good = a_written_header().encode().expect("a valid header encodes");
+        for cut in 0..HEADER_FRAMING_BYTES {
+            let refused = decoded(&good[..cut]);
+            assert!(refused.is_err(), "a {cut}-byte buffer must not parse");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The rules — every one, from both sides
+    // -----------------------------------------------------------------
 
     /// Each rule is written once and checked on both sides, so the writer refuses to make a
     /// file the reader would refuse to read. The table names the rule, a header that breaks
     /// it, and the words the message has to carry.
+    ///
+    /// **Every fixture sits one step over its rule's boundary**, not far beyond it. Three of
+    /// them did not, and the mutations that widened those bounds survived the whole suite: a
+    /// five-component absolute path let a one-directory relative path through, a look-back
+    /// window of 40 let the floor drop from 10 to 0, and a three-character digest let the
+    /// lowercase clause be deleted.
     #[test]
     fn every_rule_is_refused_by_the_writer_and_by_the_reader_alike() {
         let broken: Vec<(&str, Box<dyn Fn(&mut Header)>, &str)> = vec![
@@ -1219,16 +1580,34 @@ mod tests {
                 "sample",
             ),
             (
-                "a reference recorded with its directory",
-                Box::new(|header| {
-                    header.reference.name = "/home/jose/genomes/tomato.fa".to_string()
-                }),
+                "a reference recorded with one directory above it",
+                Box::new(|header| header.reference.name = "genomes/tomato.fa".to_string()),
                 "directory component",
+            ),
+            (
+                "a reference recorded as a parent directory",
+                Box::new(|header| header.reference.name = "..".to_string()),
+                "directory component",
+            ),
+            (
+                "an empty reference name",
+                Box::new(|header| header.reference.name = " ".to_string()),
+                "reference.name",
             ),
             (
                 "no contigs",
                 Box::new(|header| header.contigs.clear()),
                 "contig",
+            ),
+            (
+                "an empty contig name",
+                Box::new(|header| header.contigs[0].name = String::new()),
+                "contig.name",
+            ),
+            (
+                "a contig name holding a space",
+                Box::new(|header| header.contigs[0].name = "SL4.0 ch00".to_string()),
+                "holds whitespace",
             ),
             (
                 "one contig named twice",
@@ -1239,6 +1618,23 @@ mod tests {
                 "a contig of no length",
                 Box::new(|header| header.contigs[0].length = 0),
                 "zero bases long",
+            ),
+            (
+                "a contig longer than a TOML integer",
+                Box::new(|header| header.contigs[0].length = MAX_TOML_INTEGER + 1),
+                "a TOML integer is signed",
+            ),
+            (
+                "the input reference recorded with its directory",
+                Box::new(|header| header.writer.input_reference = "genomes/tomato.fa".to_string()),
+                "writer.input-reference",
+            ),
+            (
+                "an input alignment recorded with its directory",
+                Box::new(|header| {
+                    header.writer.input_alignments = vec!["runs/SRR7279481.cram".to_string()]
+                }),
+                "writer.input-alignments",
             ),
             (
                 "a parameter that is not a number",
@@ -1256,19 +1652,38 @@ mod tests {
                 "grid has no cells",
             ),
             (
+                "a block grid wider than a TOML integer",
+                Box::new(|header| header.manifest.genomic_block_size_bp = Bp(MAX_TOML_INTEGER + 1)),
+                "a TOML integer is signed",
+            ),
+            (
                 "a byte ceiling no block can stay under",
                 Box::new(|header| header.manifest.block_byte_ceiling = Some(0)),
                 "closes every block empty",
             ),
             (
-                "a look-back window zstd cannot take",
-                Box::new(|header| header.manifest.window_log = 40),
+                "a look-back window one step below zstd's floor",
+                Box::new(|header| {
+                    header.manifest.look_back_window_log = MIN_LOOK_BACK_WINDOW_LOG - 1
+                }),
+                "2^10 and 2^31",
+            ),
+            (
+                "a look-back window one step above zstd's ceiling",
+                Box::new(|header| {
+                    header.manifest.look_back_window_log = MAX_LOOK_BACK_WINDOW_LOG + 1
+                }),
                 "2^10 and 2^31",
             ),
             (
                 "no declared fields",
                 Box::new(|header| header.manifest.fields.clear()),
                 "there are none",
+            ),
+            (
+                "an empty field name",
+                Box::new(|header| header.manifest.fields[0].name = FieldName(" ".to_string())),
+                "manifest.field.name",
             ),
             (
                 "one field declared twice",
@@ -1278,23 +1693,25 @@ mod tests {
                 "appears twice",
             ),
             (
-                "a fixed integer of a width that is not a power of two",
+                "a fixed-width integer one byte off a legal width",
                 Box::new(|header| {
-                    header.manifest.fields[2].encoding = FieldEncoding::Fixed { bytes: 3 }
+                    header.manifest.fields[2].encoding =
+                        FieldEncoding::FixedWidthInteger { width_bytes: 3 }
                 }),
-                "1, 2, 4 and 8",
+                "the widths are [1, 2, 4, 8]",
             ),
             (
-                "an IEEE float of no legal width",
+                "an IEEE float one byte off a legal width",
                 Box::new(|header| {
-                    header.manifest.fields[2].encoding = FieldEncoding::Ieee { bytes: 2 }
+                    header.manifest.fields[6].encoding = FieldEncoding::IeeeFloat { width_bytes: 5 }
                 }),
-                "4 and 8",
+                "the widths are [4, 8]",
             ),
             (
                 "a fixed-point field counting steps of nothing",
                 Box::new(|header| {
-                    header.manifest.fields[4].encoding = FieldEncoding::FixedPoint { scale: 0 }
+                    header.manifest.fields[4].encoding =
+                        FieldEncoding::FixedPoint { steps_per_unit: 0 }
                 }),
                 "1/0",
             ),
@@ -1304,147 +1721,308 @@ mod tests {
             let mut header = a_written_header();
             break_it(&mut header);
 
-            let refused = header
-                .encode()
-                .expect_err(&format!("the writer must refuse {what}"));
+            let refused = refusal(header.encode(), &format!("the writer must refuse {what}"));
             assert!(
                 refused.to_string().contains(expected),
                 "the writer's message for {what} was {refused:?}, which does not say \
                  {expected:?}"
             );
 
-            // The same rule, met from the other side: a file that already holds the broken
+            // The same rule met from the other side: a file that already holds the broken
             // value has to be refused when it is read, not only when it is written.
+            //
+            // **Two rows are refused earlier than the rule**, and that is the point of them:
+            // a number above `i64::MAX` has no TOML spelling a parser will take back, so the
+            // reader stops at the syntax. The rule exists so the *writer* stops first, rather
+            // than producing a file only its own parser discovers is unreadable.
+            let stopped_at_the_syntax = expected == "a TOML integer is signed";
+            let expected_of_the_reader = if stopped_at_the_syntax {
+                "is not valid TOML"
+            } else {
+                expected
+            };
             let smuggled = smuggle(&header);
-            let refused = decoded(&smuggled).expect_err(&format!("the reader must refuse {what}"));
+            let refused = refusal(
+                decoded(&smuggled),
+                &format!("the reader must refuse {what}"),
+            );
             assert!(
-                refused.to_string().contains(expected),
+                refused.to_string().contains(expected_of_the_reader),
                 "the reader's message for {what} was {refused:?}, which does not say \
-                 {expected:?}"
+                 {expected_of_the_reader:?}"
             );
         }
     }
 
-    /// Frame a header's TOML **without** running the writer's rules over it, so a file
-    /// holding a value the writer would never produce can be handed to the reader.
-    ///
-    /// A NaN parameter has no TOML spelling at all, so it is written as the string `nan`
-    /// and the reader meets it as a bad value rather than a bad float; every other broken
-    /// header here serialises as itself.
-    fn smuggle(header: &Header) -> Vec<u8> {
-        let body = toml::to_string_pretty(&WireHeader::from(header)).unwrap_or_else(|_| {
-            let mut without_the_unspellable = header.clone();
-            without_the_unspellable.writer.parameters.insert(
-                "share".to_string(),
-                ParameterValue::String("nan".to_string()),
+    /// An MD5 is 32 **lowercase** hex characters, which is what a SAM `@SQ M5` is. The
+    /// uppercase clause is not decoration: a digest that came back in another case would
+    /// re-encode to different bytes, and goal 5's byte identity would be gone.
+    #[test]
+    fn a_digest_is_refused_for_its_length_and_for_its_case_alike() {
+        let lower = hex_of([0x1b; 16]);
+        for (what, spelled) in [
+            ("too short", "1b1b1b".to_string()),
+            ("too long", format!("{lower}ab")),
+            ("uppercase", lower.to_uppercase()),
+            ("not hex at all", "z".repeat(32)),
+        ] {
+            let whole = a_written_header();
+            let body = toml::to_string_pretty(&WireHeader::from(&whole))
+                .expect("encodes")
+                .replace(&lower, &spelled);
+            let refused = refusal(
+                decoded(&framed(&body)),
+                &format!("a digest that is {what} must be refused"),
             );
-            toml::to_string_pretty(&WireHeader::from(&without_the_unspellable))
-                .expect("everything else has a TOML spelling")
-        });
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&HEAD_MAGIC);
-        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(body.as_bytes());
-        bytes.extend_from_slice(HEAD_SENTINEL);
-        bytes
+            assert!(
+                refused.to_string().contains("32 lowercase hex"),
+                "for {what}, got {refused}"
+            );
+        }
     }
 
+    // -----------------------------------------------------------------
+    // The manifest's encodings
+    // -----------------------------------------------------------------
+
     /// A field carrying a parameter that belongs to another scheme was written by something
-    /// that meant one of the two. Reading it as the scheme it names would silently divide
+    /// that meant one of the two. Reading it as the scheme it names would silently multiply
     /// every value in that field by the step it was not supposed to have.
+    ///
+    /// **All three arms**, because only one was covered and the check had a catch-all.
     #[test]
     fn an_encoding_carrying_the_wrong_parameter_is_refused() {
-        let body = one_field_declared_as(
-            "name = \"summed-log-error\"\nencoding = \"varint\"\nscale = 4096\n",
-        );
-        let refused = decoded(&body).expect_err("a varint has no step");
-        assert!(
-            refused.to_string().contains("has no use for"),
-            "got {refused}"
-        );
+        for (declaration, what) in [
+            (
+                "name = \"x\"\nencoding = \"varint\"\nsteps-per-unit = 4096\n",
+                "a varint with a step",
+            ),
+            (
+                "name = \"x\"\nencoding = \"varint\"\nwidth-bytes = 4\n",
+                "a varint with a width",
+            ),
+            (
+                "name = \"x\"\nencoding = \"fixed-width-integer\"\nwidth-bytes = 4\nsteps-per-unit = 4096\n",
+                "a fixed-width integer with a step",
+            ),
+            (
+                "name = \"x\"\nencoding = \"fixed-point\"\nsteps-per-unit = 4096\nwidth-bytes = 4\n",
+                "a fixed-point field with a width",
+            ),
+        ] {
+            let refused = refusal(
+                decoded(&one_field_declared_as(declaration)),
+                &format!("{what} must be refused"),
+            );
+            assert!(
+                refused.to_string().contains("has no use for"),
+                "for {what}, got {refused}"
+            );
+        }
     }
 
     /// A width or a step that is simply missing is the same class of error as one that does
     /// not belong: the file does not say how to read the field.
     #[test]
-    fn a_fixed_width_field_without_its_width_is_refused() {
-        let body = one_field_declared_as("name = \"body-bytes\"\nencoding = \"fixed\"\n");
-        let refused = decoded(&body).expect_err("a fixed integer needs a width");
-        assert!(
-            refused.to_string().contains("carries no width"),
-            "got {refused}"
-        );
+    fn a_scheme_without_its_parameter_is_refused() {
+        for (declaration, wanted) in [
+            (
+                "name = \"body-bytes\"\nencoding = \"fixed-width-integer\"\n",
+                "carries no width",
+            ),
+            (
+                "name = \"raw\"\nencoding = \"ieee-float\"\n",
+                "carries no width",
+            ),
+            (
+                "name = \"q-sum\"\nencoding = \"fixed-point\"\n",
+                "carries no step",
+            ),
+        ] {
+            let refused = refusal(
+                decoded(&one_field_declared_as(declaration)),
+                &format!("{declaration:?} must be refused"),
+            );
+            assert!(refused.to_string().contains(wanted), "got {refused}");
+        }
     }
 
-    /// An encoding this reader has never heard of is refused rather than guessed at. The
-    /// message lists what it does know, because that is what tells the reader whether to
-    /// upgrade or to rebuild.
+    /// An encoding this reader has never heard of is refused rather than guessed at, and the
+    /// message lists what it does know — which is what tells whoever sees it whether to
+    /// upgrade the reader or rebuild the file.
     #[test]
     fn an_unknown_encoding_is_refused_and_the_message_lists_the_known_ones() {
-        let body = one_field_declared_as("name = \"chain-ids\"\nencoding = \"roaring-bitmap\"\n");
-        let refused = decoded(&body).expect_err("that is not one of the six");
-        assert!(
-            refused.to_string().contains("roaring-bitmap"),
-            "got {refused}"
-        );
-        assert!(
-            refused.to_string().contains("length-prefixed-bytes"),
-            "got {refused}"
-        );
+        let refused = decoded(&one_field_declared_as(
+            "name = \"chain-ids\"\nencoding = \"roaring-bitmap\"\n",
+        ))
+        .expect_err("that is not one of the six");
+        let said = refused.to_string();
+        assert!(said.contains("roaring-bitmap"), "got {said}");
+        for known in ALL_ENCODINGS {
+            assert!(
+                said.contains(known.spelled().0),
+                "the message must list {:?}; got {said}",
+                known.spelled().0
+            );
+        }
     }
 
-    /// Frame a header whose manifest holds exactly the one field declaration given, so a
-    /// declaration that no `FieldEncoding` can represent can still be put in a file.
-    fn one_field_declared_as(declaration: &str) -> Vec<u8> {
-        let whole = a_written_header();
-        let body = toml::to_string_pretty(&WireHeader::from(&whole)).expect("encodes");
-        let up_to_the_fields = body
-            .split("[[manifest.field]]")
-            .next()
-            .expect("the manifest declares fields")
-            .to_string();
-        let body = format!("{up_to_the_fields}[[manifest.field]]\n{declaration}");
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&HEAD_MAGIC);
-        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(body.as_bytes());
-        bytes.extend_from_slice(HEAD_SENTINEL);
-        bytes
-    }
-
-    /// An MD5 is 32 lowercase hex characters, which is what a SAM `@SQ M5` is. A digest of
-    /// the wrong length is not a shorter digest; it is a different file's.
+    /// The writer's spellings and the reader's are one list. When they were two, a scheme
+    /// added to the writer's alone made `encode` produce a file `decode` refused — and the
+    /// whole suite stayed green.
     #[test]
-    fn a_contig_digest_that_is_not_thirty_two_hex_characters_is_refused() {
-        let whole = a_written_header();
-        let body = toml::to_string_pretty(&WireHeader::from(&whole))
-            .expect("encodes")
-            .replace(&hex_of([0x1b; 16]), "1b1b1b");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&HEAD_MAGIC);
-        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(body.as_bytes());
-        bytes.extend_from_slice(HEAD_SENTINEL);
+    fn every_scheme_the_writer_can_spell_is_one_the_reader_recognises() {
+        for scheme in ALL_ENCODINGS {
+            let mut header = a_written_header();
+            header.manifest.fields = vec![FieldSpec {
+                name: FieldName("the-one-field".to_string()),
+                encoding: scheme,
+            }];
+            let bytes = header
+                .encode()
+                .unwrap_or_else(|e| panic!("{scheme:?} must encode: {e}"));
+            let (read_back, _) =
+                decoded(&bytes).unwrap_or_else(|e| panic!("{scheme:?} must decode: {e}"));
+            assert_eq!(read_back.manifest.fields[0].encoding, scheme);
+        }
+    }
 
-        let refused = decoded(&bytes).expect_err("that is not a digest");
-        assert!(
-            refused.to_string().contains("32 lowercase hex"),
-            "got {refused}"
+    /// `ALL_ENCODINGS` has to be all of them. The exhaustive match is what makes adding a
+    /// seventh scheme a compile error here rather than a file one side cannot read.
+    #[test]
+    fn the_encoding_list_holds_every_scheme_the_type_has() {
+        let sample = FieldEncoding::Varint;
+        let named = match sample {
+            FieldEncoding::Varint
+            | FieldEncoding::SignedVarint
+            | FieldEncoding::FixedWidthInteger { .. }
+            | FieldEncoding::IeeeFloat { .. }
+            | FieldEncoding::FixedPoint { .. }
+            | FieldEncoding::LengthPrefixedBytes => 6,
+        };
+        assert_eq!(
+            ALL_ENCODINGS.len(),
+            named,
+            "a scheme was added to the type without being added to the list both sides read"
+        );
+        let mut spellings: Vec<&str> = ALL_ENCODINGS.iter().map(|e| e.spelled().0).collect();
+        spellings.sort_unstable();
+        spellings.dedup();
+        assert_eq!(
+            spellings.len(),
+            ALL_ENCODINGS.len(),
+            "two schemes share a name"
         );
     }
 
-    /// This writer produces one version. A caller that asks for another is told so, rather
-    /// than being handed a file stamped with a version whose layout the writer does not
-    /// actually produce.
+    // -----------------------------------------------------------------
+    // The parser, over bytes it did not write
+    // -----------------------------------------------------------------
+
+    /// `decode` reads a file. **It must refuse damage rather than panic on it**, and nothing
+    /// else in this module puts a byte in front of it that the writer did not produce.
+    ///
+    /// Deterministic on purpose — a fixed seed, so a failure is reproducible from the test
+    /// name alone.
     #[test]
-    fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
-        let mut header = a_written_header();
-        header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 1.0");
+    fn decode_refuses_damaged_bytes_without_panicking() {
+        let good = a_written_header().encode().expect("a valid header encodes");
+        let mut seed = 0x2026_08_26_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut accepted = 0usize;
+        for _ in 0..20_000 {
+            let mut damaged = good.clone();
+            for _ in 0..1 + (next() % 4) {
+                let at = (next() as usize) % damaged.len();
+                damaged[at] ^= 1u8 << (next() % 8);
+            }
+            if next() % 3 == 0 {
+                damaged.truncate((next() as usize) % good.len());
+            }
+            if decoded(&damaged).is_ok() {
+                accepted += 1;
+            }
+        }
+        // Some flips land inside a sample name or a command line and leave a header that is
+        // still well-formed — that is the format working, not a hole. What matters is that
+        // every input either parsed or was refused, and none of them panicked.
         assert!(
-            refused.to_string().contains("produces 1.0"),
-            "got {refused}"
+            accepted < 20_000,
+            "damage that changes the framing must not parse"
         );
+
+        for length in 0..400usize {
+            let mut arbitrary = Vec::with_capacity(length);
+            for _ in 0..length {
+                arbitrary.push((next() % 256) as u8);
+            }
+            assert!(
+                decoded(&arbitrary).is_err(),
+                "random bytes must not parse as a header"
+            );
+        }
+    }
+
+    /// A header that came off disk re-encodes to the bytes it came from. This is what lets an
+    /// append reuse the header it finds rather than rewriting it, and it is the property a
+    /// silently-dropped field would break.
+    #[test]
+    fn a_decoded_header_re_encodes_to_the_bytes_it_came_from() {
+        let bytes = a_written_header().encode().expect("a valid header encodes");
+        let (read_back, _) = decoded(&bytes).expect("its own bytes parse");
+        assert_eq!(read_back.encode().expect("and re-encode"), bytes);
+    }
+
+    // -----------------------------------------------------------------
+    // The types themselves
+    // -----------------------------------------------------------------
+
+    /// The header's contig list is what pins ng's coordinate space, so its equality has to be
+    /// plain field equality. `crate::fasta::ContigEntry` — three fields the same — treats an
+    /// absent MD5 as a wildcard, and a round-trip test written against *that* would pass while
+    /// the encoder dropped every digest in the file.
+    #[test]
+    fn a_dropped_contig_md5_is_a_difference_here_and_a_wildcard_in_the_fasta_type() {
+        let with_digest = ContigIdentity {
+            name: "SL4.0ch01".to_string(),
+            length: 90_863_682,
+            md5: Some([7u8; 16]),
+        };
+        let without = ContigIdentity {
+            md5: None,
+            ..with_digest.clone()
+        };
+        assert_ne!(with_digest, without);
+
+        let fasta_with_digest = crate::fasta::ContigEntry {
+            name: "SL4.0ch01".to_string(),
+            length: 90_863_682,
+            md5: Some([7u8; 16]),
+        };
+        let fasta_without = crate::fasta::ContigEntry {
+            md5: None,
+            ..fasta_with_digest.clone()
+        };
+        assert_eq!(
+            fasta_with_digest, fasta_without,
+            "the fasta type's wildcard MD5 is why the header mints its own contig row"
+        );
+    }
+
+    /// A field's encoding is part of the file's identity: two files whose manifests differ
+    /// only in a fixed-point step hold different numbers behind the same integers, so the
+    /// step has to take part in equality rather than being carried alongside it.
+    #[test]
+    fn a_fixed_point_step_is_part_of_the_encoding_not_a_note_beside_it() {
+        let quarter_read = FieldEncoding::FixedPoint { steps_per_unit: 4 };
+        let sixteenth_read = FieldEncoding::FixedPoint { steps_per_unit: 16 };
+        assert_ne!(quarter_read, sixteenth_read);
+        assert_ne!(quarter_read, FieldEncoding::Varint);
     }
 }

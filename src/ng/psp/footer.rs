@@ -16,7 +16,14 @@
 
 /// Bytes the footer occupies: five `u64` offsets and counts, the index checksum, and the
 /// magic.
-pub const FOOTER_BYTES: usize = 5 * 8 + 4 + 4;
+pub const FOOTER_BYTES: usize = 5 * 8 + 4 + FOOTER_MAGIC.len();
+
+/// The magic at the very end of a finished file — `NGPE`, ng psp end.
+///
+/// **Last, so a four-byte read at end-of-file rejects a truncated or foreign file before
+/// anything else is touched**, and different from the head magic so that a truncation which
+/// happened to copy the head's bytes would not pass the tail check.
+pub const FOOTER_MAGIC: [u8; 4] = *b"NGPE";
 
 /// The fixed tail of a finished file.
 ///
@@ -46,34 +53,51 @@ mod tests {
     use super::*;
 
     /// The footer is read by seeking that many bytes back from the end of the file, so its
-    /// width is part of the format rather than a consequence of the struct's layout. This
-    /// pins the two together: a field added without widening the constant would make every
-    /// reader seek to the wrong place.
+    /// width is part of the format. **This adds up the fields' own wire widths** rather than
+    /// asking for `size_of::<Footer>()`: a sixth field of four bytes lands in the struct's
+    /// tail padding, so `size_of` does not move while the bytes on disk do — and every reader
+    /// then seeks four bytes into the middle of the footer it was looking for.
     #[test]
-    fn the_footer_is_forty_eight_bytes_and_wider_than_productions() {
+    fn the_footer_constant_is_the_width_of_the_fields_it_stands_for() {
+        let footer = a_footer();
+        let on_the_wire = footer.index_offset.to_le_bytes().len()
+            + footer.index_bytes.to_le_bytes().len()
+            + footer.trailer_offset.to_le_bytes().len()
+            + footer.trailer_bytes.to_le_bytes().len()
+            + footer.n_blocks.to_le_bytes().len()
+            + footer.index_checksum.to_le_bytes().len()
+            + FOOTER_MAGIC.len();
+        assert_eq!(FOOTER_BYTES, on_the_wire);
         assert_eq!(FOOTER_BYTES, 48);
-        assert_eq!(
-            FOOTER_BYTES,
-            crate::psp::trailer::TRAILER_BYTES + 16,
-            "two more offsets than production's tail, because this format has a trailer \
-             section to locate and production has none"
-        );
+    }
+
+    /// Production's tail is 32 bytes and this one is wider, because it locates a section
+    /// production has no equivalent of. Stated as prose against a literal rather than as
+    /// arithmetic on production's constant: `FOOTER_BYTES` is not a port of that number, so a
+    /// change to production's tail should not fail an ng test.
+    #[test]
+    fn the_footer_is_two_offsets_wider_than_productions_tail() {
+        assert_eq!(FOOTER_BYTES, 32 + 2 * 8);
     }
 
     /// A footer holds only offsets and counts, so it can be read into a fixed buffer and
     /// copied out without an allocation.
     #[test]
     fn a_footer_is_plain_data_and_holds_no_allocation() {
-        let footer = Footer {
+        let footer = a_footer();
+        let copied = footer;
+        assert_eq!(copied, footer);
+        assert!(std::mem::size_of::<Footer>() <= FOOTER_BYTES);
+    }
+
+    fn a_footer() -> Footer {
+        Footer {
             index_offset: 4_096,
             index_bytes: 2_464,
             trailer_offset: 6_560,
             trailer_bytes: 0,
             n_blocks: 154,
             index_checksum: 0xDEAD_BEEF,
-        };
-        let copied = footer;
-        assert_eq!(copied, footer);
-        assert!(std::mem::size_of::<Footer>() <= FOOTER_BYTES);
+        }
     }
 }

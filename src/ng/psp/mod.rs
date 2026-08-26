@@ -50,14 +50,23 @@ use std::path::PathBuf;
 
 use crate::ng::types::GenomeRegion;
 
-pub mod footer;
-pub mod header;
-pub mod index;
-pub mod record;
+// **`pub(crate)`, with the surface re-exported below.** The split into files is how the code
+// is arranged — a reader crosses the container's seams one at a time — not a second set of
+// paths for callers. Left `pub`, every type here would have two public spellings, rustdoc
+// would render each twice, and the first example to reach for `ng::psp::header::Header` would
+// pin the path the re-export list exists to make canonical. Production does the same for two
+// of its own submodules.
+pub(crate) mod footer;
+pub(crate) mod header;
+pub(crate) mod index;
+pub(crate) mod record;
 
-pub use footer::{FOOTER_BYTES, Footer};
+pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{
-    ContigEntry, FieldEncoding, FieldName, FieldSpec, Header, Manifest, ParameterValue,
+    ContigIdentity, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
+    FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding, FieldName, FieldSpec, HEAD_MAGIC,
+    HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header, IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES,
+    MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue,
     ReferenceIdentity, WriterProvenance,
 };
 pub use index::BlockIndexEntry;
@@ -120,19 +129,45 @@ pub enum PspReadError {
         allowed_bytes: u64,
     },
 
-    /// The header is not a header this reader can make sense of: the magic is wrong, the
-    /// declared body length disagrees with the sentinel, the TOML does not parse, or a
-    /// field in it breaks a rule the format requires — an empty contig list, an MD5 that is
-    /// not 32 hex characters, a field encoding with no width.
+    /// The file is not an ng psp at all: its first four bytes are not this format's magic.
+    ///
+    /// **Its own class because the instruction is different from every other one here** —
+    /// not *rebuild this file* but *you handed me the wrong file*. The everyday case is a
+    /// production `.psp`, which shares the extension and nothing else; a BAM, a gzip or a
+    /// text file lands here too, and `found` is what tells them apart.
+    #[error(
+        "{} does not begin with {}; it is not an ng psp (its first bytes are {found:02x?})",
+        path.display(),
+        String::from_utf8_lossy(expected.as_slice()).escape_debug()
+    )]
+    NotAnNgPsp {
+        path: PathBuf,
+        found: [u8; 4],
+        expected: [u8; 4],
+    },
+
+    /// The header is an ng psp's, and this reader cannot make sense of it: the declared body
+    /// length disagrees with the sentinel, the TOML does not parse, or a field in it breaks a
+    /// rule the format requires — an empty contig list, an MD5 that is not 32 hex characters,
+    /// a field encoding with no width.
     ///
     /// **One class rather than the dozen production distinguishes**, because they share an
-    /// instruction: the file is damaged, rebuild it. `reason` carries which rule broke.
+    /// instruction: the file is damaged, rebuild it. `reason` carries which rule broke, and
+    /// `source` carries the parser's own account of it where there is one.
     ///
     /// **Not the same thing as [`UnsupportedVersion`](Self::UnsupportedVersion)**, and the
     /// order the two are checked in is the point: a file written by a newer format must say
     /// so, not come back as unparseable TOML (spec §3.1).
     #[error("{}: {reason}", path.display())]
-    MalformedHeader { path: PathBuf, reason: String },
+    MalformedHeader {
+        path: PathBuf,
+        reason: String,
+        /// The TOML or UTF-8 error underneath, when the fault was a parser's rather than a
+        /// rule's. Kept as a source rather than flattened into `reason` so that a caller
+        /// walking the chain reaches the parser's own span.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A block failed to decompress, or a record ran past the end of its block. The file
     /// is damaged.
@@ -144,8 +179,21 @@ pub enum PspReadError {
         source: std::io::Error,
     },
 
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    /// Reading the file's bytes failed.
+    ///
+    /// **It names the file and what was being done to it**, because a bare
+    /// `No such file or directory (os error 2)` from a cohort opening a thousand samples
+    /// says nothing anyone can act on. Not `#[from]`: every site that raises this knows the
+    /// path, and a blanket conversion is how that gets lost.
+    #[error("{} could not be read while {while_doing}", path.display())]
+    Io {
+        path: PathBuf,
+        /// What the reader was doing, as a phrase that follows "while": `reading the
+        /// header`, `seeking to block 12`.
+        while_doing: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Everything that can go wrong writing a psp.
@@ -158,8 +206,14 @@ pub enum PspWriteError {
     /// A record was pushed that starts before the one before it. **Refused rather than
     /// accepted**: coordinate order is what the block index and every seek rest on, and a
     /// file that breaks it seeks wrongly rather than failing (spec §6.3).
-    #[error("record at {offered} starts before the previous record at {previous}")]
+    #[error(
+        "{}: record at {offered} starts before the previous record at {previous}",
+        path.display()
+    )]
     OutOfOrder {
+        /// Which file was being written. **The one write error raised per record**, so in a
+        /// cohort gathering sixty samples at once it is the only thing that says which.
+        path: PathBuf,
         previous: GenomeRegion,
         offered: GenomeRegion,
     },
@@ -178,11 +232,24 @@ pub enum PspWriteError {
     /// Reopening a finished file failed. **Append and trailer replacement read before they
     /// write** — the footer for the offsets, the header for the manifest — so both surface
     /// the read-side classes (spec §6.7) rather than restating them here.
-    #[error(transparent)]
-    Reopen(#[from] PspReadError),
+    #[error("{}: the file could not be reopened", path.display())]
+    Reopen {
+        path: PathBuf,
+        #[source]
+        source: PspReadError,
+    },
 
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    /// Writing the file's bytes failed. Named and sourced the way
+    /// [`PspReadError::Io`] is, and for the same reason.
+    #[error("{} could not be written while {while_doing}", path.display())]
+    Io {
+        path: PathBuf,
+        /// What the writer was doing, as a phrase that follows "while": `writing the
+        /// header`, `flushing block 12`, `syncing`.
+        while_doing: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -224,37 +291,84 @@ mod tests {
         );
     }
 
-    /// An out-of-order push names both regions, because the useful question is which pair
-    /// of records disagreed and not merely that some pair did.
+    /// An out-of-order push names the file and both regions. It is the one write error
+    /// raised per record, so in a cohort gathering sixty samples at once the file's name is
+    /// the only thing that says which of them stopped.
     #[test]
-    fn an_out_of_order_push_names_both_regions() {
+    fn an_out_of_order_push_names_the_file_and_both_regions() {
         let at = |start: u64, end: u64| GenomeRegion {
             contig: ContigId(0),
             start: Position(start),
             end: Position(end),
         };
         let refused = PspWriteError::OutOfOrder {
+            path: PathBuf::from("SRR7279481.psp"),
             previous: at(1_000, 1_000),
             offered: at(900, 900),
         };
         assert_eq!(
             refused.to_string(),
-            "record at contig 0:900-900 starts before the previous record at contig 0:1000-1000"
+            "SRR7279481.psp: record at contig 0:900-900 starts before the previous record at \
+             contig 0:1000-1000"
         );
     }
 
-    /// Reopening for an append or a trailer rewrite reads the footer first, so a file with
-    /// no footer must surface as the read-side class through `?` without a second variant
-    /// restating it.
+    /// Reopening for an append or a trailer rewrite reads the footer first, so a file with no
+    /// footer surfaces as the read-side class. **The wrapper says a write was in progress and
+    /// the chain still reaches the read error** — a transparent wrapper would have said
+    /// neither.
     #[test]
-    fn a_reopen_carries_the_read_side_error_through() {
-        let interrupted = PspReadError::Incomplete {
+    fn a_reopen_says_a_write_was_in_progress_and_still_carries_its_cause() {
+        let refused = PspWriteError::Reopen {
             path: PathBuf::from("half-written.psp"),
+            source: PspReadError::Incomplete {
+                path: PathBuf::from("half-written.psp"),
+            },
         };
-        let as_write_error: PspWriteError = interrupted.into();
         assert_eq!(
-            as_write_error.to_string(),
+            refused.to_string(),
+            "half-written.psp: the file could not be reopened"
+        );
+
+        let cause = std::error::Error::source(&refused).expect("the read error is the cause");
+        assert_eq!(
+            cause.to_string(),
             "half-written.psp has no valid footer — the writer did not finish"
         );
+    }
+
+    /// Handing this reader a production `.psp` — the same extension, a different format — is
+    /// not the same instruction as handing it a damaged ng one, so it is not the same error.
+    /// The message has to carry what the bytes actually were, or a BAM and a gzip are
+    /// indistinguishable in a log.
+    #[test]
+    fn a_foreign_file_is_its_own_class_and_the_message_names_the_bytes_found() {
+        let refused = PspReadError::NotAnNgPsp {
+            path: PathBuf::from("SRR7279481.psp"),
+            found: *b"PSP\n",
+            expected: header::HEAD_MAGIC,
+        };
+        let said = refused.to_string();
+        assert!(said.contains("it is not an ng psp"), "got {said}");
+        assert!(
+            said.contains("50, 53, 50, 0a"),
+            "the message must show the bytes that were there; got {said}"
+        );
+    }
+
+    /// An I/O failure from a cohort opening a thousand samples has to say which file and what
+    /// was being done to it. `No such file or directory (os error 2)` on its own does not.
+    #[test]
+    fn an_io_failure_names_the_file_and_what_was_being_done_to_it() {
+        let refused = PspReadError::Io {
+            path: PathBuf::from("SRR7279481.psp"),
+            while_doing: "reading the header",
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            refused.to_string(),
+            "SRR7279481.psp could not be read while reading the header"
+        );
+        assert!(std::error::Error::source(&refused).is_some());
     }
 }

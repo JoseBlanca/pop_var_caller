@@ -2,9 +2,18 @@
 //! decide whether it wants the record without building it.
 //!
 //! ```text
-//! record = position_offset | reference_span | non_reference_reads | body_bytes | body
-//!          └─────────────────────── the head ──────────────────────────┘   └─ skip ─┘
+//! record = position_offset | reference_span | non_reference_reads | body_bytes
+//!          | chain_id_changes | body
+//!          └──────────────────────── the head ─────────────────────┘   └─ skip ─┘
 //! ```
+//!
+//! **[`RecordHead`] is the fixed part of that head, and only the fixed part.** The chain-id
+//! live-set changes — which reads arrived at this position and which left — are in the head
+//! too, because they carry state a skipping reader must keep up to date or the merge composes
+//! an allele for a read that was never there (spec psp_record_encoding.md §6). They are a
+//! variable-length list, 6.42 bytes a position at 293 reads a position, so they are handed
+//! straight to the reader's live set rather than stored in a `Copy` struct. Milestone E3 is
+//! where they land; nothing in this type has to change for them.
 //!
 //! A reader takes the head, decides, and either builds the body or advances `body_bytes`
 //! past it; nothing else in the block has to be touched to make that decision. **Measured
@@ -58,6 +67,10 @@ mod tests {
     /// a second, and a reader that had to clone one — or that paid a pointer chase to
     /// reach it — would be paying that on every record it skips. `Copy` is the property
     /// that says it does not.
+    ///
+    /// **This is a bound on the type, not on the head on disk.** The chain-id changes are
+    /// part of the record's head and are not part of this struct (see the module doc), so a
+    /// growing wire head does not have to move this number.
     #[test]
     fn a_head_is_copied_not_cloned_and_stays_small() {
         let head = RecordHead {
