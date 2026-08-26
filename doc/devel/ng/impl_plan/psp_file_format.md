@@ -17,10 +17,10 @@ are in [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-
 
 **In:**
 
-- `src/ng/store/` — the whole module: header, block, record, index, footer, chain ids
+- `src/ng/psp/` — the whole module: header, block, record, index, footer, chain ids
   ([arch §1](../arch/psp_file_format.md)).
 - **The three approximated quantities becoming integers at the type**, which reaches outside
-  `store/`. The owner put this work here on 2026-08-25 rather than in a plan of its own.
+  `psp/`. The owner put this work here on 2026-08-25 rather than in a plan of its own.
 - The oracles: a parity check against the measuring prototype, restart-equals-sequential, refusal of
   an interrupted file, worker-count invariance.
 
@@ -40,7 +40,7 @@ are in [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-
 - **Types first, then implementation**, inside every milestone (project rule).
 - **The algorithmic heart before the plumbing.** A record round-trips in memory (C) before anything
   compresses (D) or writes a file (F). The hardest correctness work is then testable with no I/O.
-- **Rounding moves upstream before the encoder depends on it.** B changes types outside `store/`, and
+- **Rounding moves upstream before the encoder depends on it.** B changes types outside `psp/`, and
   it comes early because C's `FixedPoint` encoding stores what those types produce. Building C first
   would mean writing an encoder that rounds, then removing the rounding.
 - **Reuse over rewrite.** `encode_u64_leb128` and friends are called as-is
@@ -70,7 +70,7 @@ are in [the memory review](../../reports/reviews/psp_memory_milestone_z_2026-08-
 ## Milestone A — the vocabulary and the header
 
 ☐ **A1 — the types, no logic.** `RecordHead`, `Header`, `Manifest`, `FieldSpec`, `FieldEncoding`,
-`BlockIndexEntry`, `Footer`, `StoreReadError`, `StoreWriteError`. Doc comments carry the invariant;
+`BlockIndexEntry`, `Footer`, `PspReadError`, `PspWriteError`. Doc comments carry the invariant;
 no function bodies.
 ***Source:*** [arch §3, §4.3](../arch/psp_file_format.md).
 
@@ -86,7 +86,7 @@ is for. Unknown major version is `UnsupportedVersion`, not a parse failure.
 
 ## Milestone B — the approximated quantities become integers upstream
 
-**This milestone changes code outside `store/`**, and it is here because the owner put it here
+**This milestone changes code outside `psp/`**, and it is here because the owner put it here
 (2026-08-25). It is what keeps direct mode and psp mode bit-identical: rounding where the value is
 computed means both routes see the same number, and the store then stores an integer it was handed
 rather than approximating anything.
@@ -224,7 +224,7 @@ order across the seam and **fails on a manifest it cannot honour**.
 
 ## Milestone H — the oracles, and the numbers
 
-☐ **H1 — parity with the prototype.** A store written by `store/` and one written by
+☐ **H1 — parity with the prototype.** A store written by `psp/` and one written by
 `examples/psp_row_stream_roundtrip.rs` yield the same records, compared with the strictness each
 field requires: integers, sequences, witnesses and chain-id lists **exactly**; the fixed-point fields
 inside their own step. **A blanket tolerance would pass while a chain-id list was being corrupted.**

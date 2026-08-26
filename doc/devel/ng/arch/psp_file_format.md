@@ -15,7 +15,7 @@ touched.*
 ## 1. Module home
 
 ```
-src/ng/store/
+src/ng/psp/
 ├── mod.rs        – PspReader, PspWriter, the free functions, the error enums, re-exports
 ├── header.rs     – Header, Manifest, FieldEncoding: build, encode, parse, validate
 ├── block.rs      – the psp block: cutting it, compressing it, streaming it back
@@ -25,9 +25,12 @@ src/ng/store/
 └── chain_ids.rs  – the live set and its changes (spec psp_chain_id_encoding.md)
 ```
 
-**`store/`, not `psp/`.** The module is named for what it owns — a per-sample store of observations —
-rather than for the file extension, which is a fact about one serialization of it. `psp` stays the
-extension and the type prefix.
+**`psp/`, mirroring production's `src/psp/`** (the owner, 2026-08-26). *An earlier draft called it
+`store/`, reasoning that a module should be named for what it owns rather than for a file
+extension. That was wrong here twice over: `psp` **is** the project's name for this artifact — it
+titles all three specs, it is the extension and it is the type prefix — and the parallel with
+`src/psp/` tells a reader moving between the two what the relationship is, which `store/` would
+have hidden.*
 
 **A folder, not a file**, because the container splits along seams a reader crosses one at a time:
 opening touches `footer` then `index` then `header` and no block; a walk touches `block` and
@@ -214,11 +217,11 @@ pub struct Footer {
 impl PspReader {
     /// Footer, then index, then header. **No block is touched**, so this is the cost a
     /// cohort pays per open sample before reading anything.
-    pub fn open(path: &Path) -> Result<Self, StoreReadError>;
+    pub fn open(path: &Path) -> Result<Self, PspReadError>;
 
     pub fn header(&self) -> &Header;
     /// The writer's closing payload. Opaque here; the caller interprets it.
-    pub fn trailer(&mut self) -> Result<&[u8], StoreReadError>;
+    pub fn trailer(&mut self) -> Result<&[u8], PspReadError>;
     pub fn blocks(&self) -> &[BlockIndexEntry];
 
     /// Every record, from the first block.
@@ -226,7 +229,7 @@ impl PspReader {
     /// From the block holding `position`. **Reading starts at that block's first
     /// record**, not at `position` — a reader cannot start mid-block.
     pub fn records_from(&mut self, contig: ContigId, position: GenomePosition)
-        -> Result<RecordIter<'_>, StoreReadError>;
+        -> Result<RecordIter<'_>, PspReadError>;
 
     /// The cohort's first pass: `want` sees each record's head and says whether to
     /// build the body. A record the predicate declines costs the head plus a pointer
@@ -251,30 +254,30 @@ already paid to build every record, which is the cost the head exists to avoid.
 ```rust
 impl PspWriter {
     /// The manifest is fixed here and cannot change for the life of the file.
-    pub fn create(path: &Path, header: Header) -> Result<Self, StoreWriteError>;
+    pub fn create(path: &Path, header: Header) -> Result<Self, PspWriteError>;
 
     /// **Coordinate order is enforced**: a record that starts before the previous one
     /// is `OutOfOrder`, not a file that seeks wrongly.
-    pub fn push(&mut self, record: &SampleLocusObservations) -> Result<(), StoreWriteError>;
+    pub fn push(&mut self, record: &SampleLocusObservations) -> Result<(), PspWriteError>;
 
     /// Index, then trailer, then footer — then flush, surface the buffered writer's
     /// errors, and sync. **Consumes the writer**: there is no way to hold one that has
     /// finished, and no way to produce a readable file without calling this.
-    pub fn finish(self, trailer: &[u8]) -> Result<WriteStats, StoreWriteError>;
+    pub fn finish(self, trailer: &[u8]) -> Result<WriteStats, PspWriteError>;
 
     /// Reopen a finished file and add records. Truncates at the index offset, keeping
     /// the header and therefore the manifest — so appended records must use the
     /// encodings already declared, and **the old trailer is discarded with the index**.
-    pub fn append(path: &Path) -> Result<Self, StoreWriteError>;
+    pub fn append(path: &Path) -> Result<Self, PspWriteError>;
 }
 
 /// Replace a finished file's trailer, touching neither blocks nor index. Cheap because
 /// the index sits before the trailer (spec §3).
-pub fn replace_trailer(path: &Path, trailer: &[u8]) -> Result<(), StoreWriteError>;
+pub fn replace_trailer(path: &Path, trailer: &[u8]) -> Result<(), PspWriteError>;
 
 /// The header of a file that may have no footer. Works where `PspReader::open` correctly
 /// fails, which is its purpose.
-pub fn read_header(path: &Path) -> Result<Header, StoreReadError>;
+pub fn read_header(path: &Path) -> Result<Header, PspReadError>;
 ```
 
 **Contract.** A `PspWriter` dropped without `finish` leaves a file with no footer — refused by every
@@ -288,7 +291,7 @@ read**. `finish` consuming `self` is what makes that unambiguous in the type sys
 /// these is a panic.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub enum StoreReadError {
+pub enum PspReadError {
     /// No valid footer: the writer was interrupted. Rebuild the file.
     #[error("{path} has no valid footer — the writer did not finish")]
     Incomplete { path: PathBuf },
@@ -315,7 +318,7 @@ reader, raise a limit, the data is damaged. Collapsing them into one loses that.
 
 ## 5. Design decisions — decided
 
-- **The module is `src/ng/store/`, a folder, not a pipeline step.** No trait, no bake-off: there is
+- **The module is `src/ng/psp/`, a folder, not a pipeline step.** No trait, no bake-off: there is
   one implementation. §1.
 - **`RecordHead` carries `GenomeRegion`, not a position and a span** — the newtype exists and holds
   that pair. §3.1.
@@ -351,7 +354,7 @@ Every row read before it was written down.
 | `BlockIndexEntry` | [`src/psp/index.rs:42`](../../../../src/psp/index.rs) | same shape, same flat vector decoded at open. ng's drops nothing and adds nothing |
 | varints | `encode_u64_leb128` / `decode_u64_leb128` / `encode_i64_svarint`, [`src/psp/varint.rs:46,83,119`](../../../../src/psp/varint.rs) | **called as-is.** Specified and tested; ng mints no second implementation |
 | the compression seam | `ZSTD_COMPRESSION_LEVEL = 9`, [`src/psp/block.rs:709`](../../../../src/psp/block.rs) | the level and the long-lived-compressor shape. **The window cap is new** — production never set one |
-| `StoreReadError` / `StoreWriteError` | `PspReadError` / `PspWriteError`, [`src/psp/errors.rs:204,596`](../../../../src/psp/errors.rs) | the `#[non_exhaustive]` `thiserror` shape and the per-variant doc comment. Not shared: ng's surface is different |
+| `ng::psp::PspReadError` / `PspWriteError` | production's same-named pair, [`src/psp/errors.rs:204,596`](../../../../src/psp/errors.rs) | the `#[non_exhaustive]` `thiserror` shape and the per-variant doc comment. **Same names, different types, different modules** — ng's surface is its own, and the two must not be confused at a `use` site |
 | the record | `SampleLocusObservations`, [`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs) | **what is written and what must come back.** Not production's `PileupRecord` — §2 |
 | `ReadWitness` | [`src/ng/locus_generation/witness.rs:259`](../../../../src/ng/locus_generation/witness.rs) | encoded as-is; the variable-length field the prototype never carried |
 | `GenomeRegion`, `ContigId`, `Bp`, `ReadGroupId` | [`src/ng/types.rs:79,13,185,210`](../../../../src/ng/types.rs) | used, not re-minted |
