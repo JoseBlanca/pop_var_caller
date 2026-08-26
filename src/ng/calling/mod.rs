@@ -2575,8 +2575,9 @@ pub struct LocusInference {
     ///
     /// **What the loop folds today is the calibrations of the read groups whose reads reached
     /// the locus**, and nothing else: the prior's fitted spectrum carries no provenance at
-    /// all, and a repeat tract's slippage warrants travel on scoring contexts the loop does
-    /// not yet assemble.
+    /// all, and a repeat tract's slippage warrants travel on the scoring contexts
+    /// `inference::repeat_tract_parameters` gathers, which no tract reaches until the driver
+    /// scores one.
     pub weakest_provenance: Provenance,
     /// Set when the STR prior's seed could not be scaled to reproduce the measured gene
     /// diversity at this locus — the geometry has a ceiling and the measurement was

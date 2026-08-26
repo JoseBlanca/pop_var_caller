@@ -35,19 +35,31 @@ together cannot say which of the two is wrong. What changes is Milestone E — a
 the generic path may now build its candidates by calling selection, and the end-to-end run on real
 data is no longer blocked for that path.
 
-**It is still blocked for repeat tracts, but by one gap rather than two — and this paragraph
-replaces the one that named two** (corrected 2026-08-25, during C3b's review, which re-derived the
-claim instead of re-reading it). The paragraph said the STR read-likelihood row did not exist
-because `censored_emission` was `unimplemented!()`. **The row exists**: it is
+**It is still blocked for repeat tracts, and this paragraph has been wrong about how many gaps
+there are twice** — it named two in the original, one after C3b's review of 2026-08-25, and the
+count below is the third answer. Each correction was a real finding and each replaced the sentence
+rather than appending to it, which is why the history is recorded here rather than in the prose.
+
+**What is not a gap: the row.** The original said the STR read-likelihood row did not exist because
+`censored_emission` was `unimplemented!()`. It exists — it is
 [`likelihood/ssr.rs`](../../../../src/ng/calling/likelihood/ssr.rs)'s
 `genotype_log_likelihood_row` over the shipped `StutterSubstitutionEmission`, landed as
 [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1 and H2 and merged; the one
 `unimplemented!()` left anywhere under `src/ng/calling/` belongs to a `#[cfg(test)]` oracle that
-scores complete observations only. **What remains is the STR candidate path**, which is unwritten:
-`allele_candidates/` holds `mod.rs` and `generic.rs` only, and
-[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's. So a tract's
-candidates are **fixture-supplied** rather than selected, and with them supplied a tract can now be
-scored end to end.
+scores complete observations only.
+
+**What is a gap, as of 2026-08-26, is three things, and E2c closes the middle one.**
+
+1. **The STR candidate path is unwritten**: `allele_candidates/` holds `mod.rs` and `generic.rs`
+   only, and [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) is a later session's — so a
+   tract's candidates are **fixture-supplied** rather than selected.
+2. **Nothing assembled what the row takes.** It takes a scoring context per
+   `(read group, candidate)`, and nothing outside `likelihood/ssr.rs`'s own tests had ever built
+   one — the gap the owner's ruling of 2026-08-26 turned into **E2c**, which is where the
+   sentence *"supplying the candidates is enough"* was retired.
+3. **The driver has no route from a tract's evidence to that row.** Its emission build and its row
+   assembly both take the SNP/indel path's per-sample evidence, so `call_locus` still refuses every
+   repeat tract at its front door. That is **E3**.
 
 ---
 
@@ -316,7 +328,77 @@ gets, and that is a complete answer rather than a stub. *Depends:* C1, E2. *Sour
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6;
 [`calling_read_likelihoods.md`](calling_read_likelihoods.md) C2.
 
+**E2c. The repeat tract's scoring parameters — the assembly nobody had written.**  ✅
+
+**⚖ Owner's ruling, 2026-08-26, taken when E2a finished.** The generic path is ready end to end
+and the repeat-tract path is not, and what is missing is neither the row nor a parameter but the
+**assembly between them**. The row takes a scoring context per `(read group, candidate)`
+([`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4), and when the ruling was taken
+nothing outside `likelihood/ssr.rs`'s own tests had ever built one: `SsrScoringContext::new` had
+no production caller, `fill_reachable_lengths` had none, and the outlier weight had no source at
+all. **Build it as its own step, before E3** — E3's job is showing that genotypes come out of real
+evidence, not inventing the parameters they come out of.
+
+**What it composes, all of it already built.** `StratumFits::at` for the stutter numbers, keyed
+by the **candidate's** repeat count and never the tract's (§4.4); `stutter_model_for` for the
+conversion into the seven shares; `FrozenParameters::ssr_substitution_rate_at` for the fourth
+fitted number, which E2 made reachable; `fill_reachable_lengths` for the length support the
+outlier weight is spread over (§4.5). **It has a borrowing shape of its own** — the contexts
+borrow the stutter models, so the models and the contexts cannot live in one struct.
+
+**What it owes beyond the wiring: three answers, and only the first is written down.**
+
+- **Where the outlier weight comes from.** §4.5 settles the number — `DEFAULT_OUTLIER_WEIGHT`,
+  0.01, *inherited from production and declared inherited*, with no source in the parameters fit.
+  What is not settled is whether that inheritance enters the locus's warrant. **It must not**:
+  the warrant is per `(read group, candidate)` and this is one run-wide constant, so folding it
+  in would make **every** repeat tract's call `Defaulted` and erase the fitted-against-borrowed
+  distinction §4.4 says the warrant exists to carry. The same line is already drawn for
+  `PART_REPEAT_SHARE_OF_WHOLE`, a placeholder inside every fitted stutter model that no
+  provenance mentions.
+- **What a candidate whose stratum the fit never reached is scored under.** `NoSlippage`'s own
+  documentation says a caller owes an answer — *"a candidate several repeats from its reference
+  tract's length can land here on perfectly good data"* — and names four different absences.
+  Nothing in the three calling documents rules on it. **Answered** with
+  `StutterModel::hipstr_shipped()` and a `Defaulted` warrant, with the two absences that mean
+  *the run is not what it claims* counted apart from the two that are ordinary.
+- **The same for the substitution rate**, whose emitter records the gap in so many words: *"there
+  is no rung below [`FittedHere`] for this parameter … a case the design has not ruled on"*.
+  **Answered** with a stated constant, defined as the SNP/indel path's default so that a run
+  cannot default its two error parameters to two different guesses.
+
+**What it does not build**, so that the boundary is a sentence rather than a discovery: the
+**contaminant seed at a tract**, which is E2d's. The assembly **refuses a run whose fit found
+contamination** rather than handing back the two-term form, and the panic names E2d — a
+mechanism rather than a doc comment, because the two-term row returns perfectly plausible
+numbers. *(The driver's own refusal is unchanged and unconditional: it still turns away every
+repeat tract, because it has no route from a tract's evidence to the row. That is E3.)*
+*Depends:* D1, E1, E2. *Source:*
+[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.2, §4.3, §4.4, §4.5;
+[`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §4.1, §4.2.
+
+**E2d. The contaminant seed at a repeat tract.**  ☐
+**Runs after E3, not before it**: E2c refuses a contaminated run by name, so E3's tract fixture
+does not need this and nothing else reaches a tract yet. The third term of §4.5.1's mixture, which
+is the one field of the row's locus parameters E2c leaves empty.
+
+The prior's seed shape is built **per candidate**
+(`genotype_prior::seed_ssr::fill_seed_share_per_candidate`) and `c · seed(o)` asks for a
+probability per observed **length**; converting the first into the second over
+`fill_reachable_lengths`' support is *"the calling loop's job … the only place that holds both
+the candidate table and this support"* (`SsrContaminationMixture::contaminant_length_frequencies`).
+The conversion itself is settled there — two candidates spelling one length sum into one entry, a
+length no candidate reaches gets nothing and its reads fall to the outlier floor, a read that ran
+out gets the mass at or above what it witnessed. **What is *not* settled and must not be decided
+here is `calling_priors.md` §5's open question 3**, how two candidates spelling one length should
+share that length's mass in the *prior*; keying to lengths is what keeps that one question in one
+place. *Depends:* E2a, E2c. *Source:*
+[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.5.1;
+[`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
+
 **E2b. The run says what contamination it used, per sample.**  ☐
+**Runs after E3, not before it** — its own *Depends* line says so, and it is listed here because
+it belongs beside E2a rather than because it comes next.
 **Spec §3.6 requires it and nothing owned it until now** (added 2026-08-24, on the owner's
 instruction, after C1's and C2's reviews both found it homeless): *the run's output must still
 carry the fraction used, per sample, because a genotype computed at `c = 0.03` and one at
@@ -352,14 +434,21 @@ has to get right are named in
 parallel to the merge's covering samples and not to the run's sample order; and
 `genotype_must_be_missing` has no carrier in `SampleGenotypeCall` until this plan adds one.
 
-**The repeat-tract half of this step is no longer blocked on the row — only on the candidates**
-*(corrected 2026-08-25; this paragraph used to say the row did not exist)*. The STR
+**The repeat-tract half of this step is blocked on the candidates and on the assembly, and no
+longer on the row** *(corrected 2026-08-25, when this paragraph still said the row did not exist;
+corrected again 2026-08-26, when it said the candidates were the only thing left)*. The STR
 read-likelihood row landed with [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1
 and H2 and is merged, so a tract has an `Lg` to be genotyped from. **What is unwritten is the STR
 selection path**, so this step's tract candidates are **fixture-supplied** rather than chosen —
 which is a smaller claim than the old paragraph made, and the test's own doc comment must say
 which of the two it is, so that a later reader does not read a supplied candidate set as a
-selected one. *Depends:* D1, E1, E2, E2a. *Source:* spec §1, §9.
+selected one.
+
+**E2d is not a dependency of this step and that is deliberate.** A tract's third mixture term is
+needed only where the run's fit found contamination, and E2c refuses exactly that case by name —
+so this step's tract fixture is an uncontaminated run, which is also what a single sample gets.
+What E2d gates is a *contaminated* run reaching a tract, which nothing does until the loop is
+wired into the merge's builder. *Depends:* D1, E1, E2, E2a, E2c. *Source:* spec §1, §9.
 
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
 > path, over supplied ones at a repeat tract. Pause for review.
@@ -392,7 +481,7 @@ with a failing state, not parity with an escape clause. *Depends:* E3. *Source:*
 | B | hand-computed E-step case; **bitwise M-step mutation check on summed copies** |
 | C | the flat-pass trap test; one-sample bitwise fixed point; capped-emit flag; **the two-cohort-size division test** |
 | D | **instrumented emission-call count** (`candidates × Σ_s obs × 1`); zero-allocation-per-pass |
-| E | the integration fixture — hand-derived genotypes from real evidence, both paths; **selected** candidates on the generic path, supplied at a repeat tract |
+| E | the integration fixture — hand-derived genotypes from real evidence, both paths; **selected** candidates on the generic path, supplied at a repeat tract; and, behind the tract's half of it, an assembly whose every lookup changes a row when it is dropped |
 | F | **production parity (SNP/indel)** and **the STR convergence differential** |
 
 ## Out of scope (next plans)

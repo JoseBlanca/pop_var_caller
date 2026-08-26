@@ -1409,9 +1409,11 @@ fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
 ///
 /// **What is not in it yet, and it is not nothing.** The prior's fitted spectrum carries no
 /// provenance at all ([`SpectrumSeed`](crate::ng::calling::genotype_prior::SpectrumSeed) is
-/// three numbers), and at a repeat tract the slippage numbers' warrants live on the scoring
-/// contexts step E2 gathers. So this is the weakest of *the calibrations*, which is the whole
-/// of what a SNP/indel locus reads today.
+/// three numbers), and at a repeat tract the slippage and substitution warrants travel on the
+/// scoring contexts rather than on the calibrations — they are gathered by
+/// [`TractScoringFits::weakest_warrant`](super::repeat_tract_parameters::TractScoringFits::weakest_warrant)
+/// and folded in by the step that wires a tract into this driver. So this is the weakest of
+/// *the calibrations*, which is the whole of what a SNP/indel locus reads today.
 ///
 /// **A locus no read reached comes back [`Provenance::FittedHere`]**, because nothing weaker
 /// entered it: every sample is decided by the prior alone, and the prior has no warrant to
@@ -1456,9 +1458,9 @@ fn weakest_warrant_at_the_locus(
                 }
             }
         }
-        // Unreachable: a repeat tract is refused at the seam's front door until step E2, and
-        // its warrants travel on the scoring contexts that step gathers rather than on the
-        // calibrations read above.
+        // Unreachable: a repeat tract is refused at the seam's front door until it is wired
+        // into this driver, and its warrants travel on the scoring contexts
+        // `repeat_tract_parameters` gathers rather than on the calibrations read above.
         LocusEvidence::Ssr { .. } => {}
     }
     weakest
@@ -1469,13 +1471,14 @@ fn weakest_warrant_at_the_locus(
 ///
 /// # The repeat-tract half is refused rather than approximated
 ///
-/// The repeat-tract row exists and is shipped (`likelihood::ssr`), but what it takes is a
-/// per-locus **scoring context per `(read group, candidate)`** holding two fitted parameters
-/// beside the motif — the stutter model and the STR substitution rate. Assembling one here would
-/// mean inventing the outlier weight's source and the reachable-length buffer's shape, which is
-/// a step of its own. **So a repeat tract is refused loudly rather than scored against invented
-/// parameters** — the same rule the two unbuilt loop settings follow, and the refusal itself is
-/// at the seam's front door, in [`SummariseConditionLoop::call_locus`].
+/// The repeat-tract row is shipped (`likelihood::ssr`) and what it takes is now assembled —
+/// [`repeat_tract_parameters`](super::repeat_tract_parameters) builds the scoring context per
+/// `(read group, candidate)`, the reachable-length support and the outlier weight. **What is
+/// still unwritten is the wiring**: this function, the emission build and the row assembly all
+/// take the generic path's per-sample evidence, and a tract's evidence is a different shape. So
+/// a repeat tract is still refused loudly at the seam's front door, in
+/// [`SummariseConditionLoop::call_locus`] — the same rule the two unbuilt loop settings
+/// follow.
 fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocusSample<'a>] {
     match evidence {
         LocusEvidence::Generic {
@@ -1815,10 +1818,11 @@ where
         // well, and is now called.)*
         assert!(
             !matches!(evidence, LocusEvidence::Ssr { .. }),
-            "the repeat tract at {} cannot be scored yet: its row exists, but the \
-             per-(read group, candidate) scoring contexts that row takes need the STR \
-             substitution rate, which FrozenParameters does not carry — step E2 of the \
-             calling loop's plan is where the pre-pass's outputs are gathered",
+            "the repeat tract at {} cannot be scored yet: its row exists and its scoring \
+             parameters are assembled (inference::repeat_tract_parameters), but this driver's \
+             emission build and row assembly still take the SNP/indel path's per-sample \
+             evidence — step E3 of the calling loop's plan is where a tract is scored through \
+             them",
             evidence.region()
         );
         let table = GenotypeTable::build(parameters.ploidy(), candidates.len());
@@ -1948,7 +1952,7 @@ where
             weakest_warrant_at_the_locus(evidence, parameters),
             // The repeat-tract seed marker, and on this path it is not a placeholder:
             // `LocusInference::new` refuses a `true` at a SNP/indel locus, and a tract does
-            // not reach here at all until step E2.
+            // not reach here at all until it is wired through this driver.
             false,
         )
     }
@@ -6743,9 +6747,9 @@ mod tests {
     }
 
     /// **A repeat tract is refused, and the message names what it is waiting for.** The row
-    /// exists; what does not is the STR substitution rate on `FrozenParameters`, which step E2
-    /// gathers from the pre-pass. Scoring the tract against an invented rate would be a
-    /// genotype nobody could trace.
+    /// exists and its parameters are assembled (`inference::repeat_tract_parameters`); what
+    /// does not is this driver's route from a tract's evidence to that row. Scoring the tract
+    /// through the SNP/indel path's evidence would be a genotype nobody could trace.
     #[test]
     #[should_panic(expected = "cannot be scored yet")]
     fn a_repeat_tract_is_refused_by_the_driver_rather_than_scored_against_invented_parameters() {
@@ -7303,9 +7307,10 @@ mod tests {
     }
 
     /// **Spec §5.0.1's ruling, as a unit**, because no end-to-end fixture can reach it: a
-    /// repeat tract is refused at the driver's front door until step E2, so the callable count
-    /// it computes there is never observable. A discovery round at a tract can put back a
-    /// length the cap cut, so no sample is locked out of the locus for the rest of its calling.
+    /// repeat tract is refused at the driver's front door until it is wired through, so the
+    /// callable count it computes there is never observable. A discovery round at a tract can
+    /// put back a length the cap cut, so no sample is locked out of the locus for the rest of
+    /// its calling.
     #[test]
     fn is_callable_rules_no_sample_out_on_a_repeat_tract() {
         let detail = SsrDetail {
