@@ -465,14 +465,14 @@ file (so a row's distance from the baseline is that field's own contribution):
 | GC fraction of the window | 1/100,000 | 6.948 | 7.610 |
 | | 1/10,000 | 6.727 | 7.443 |
 | | 1/1,000 | 6.658 | 7.394 |
-| | **1/100 — proposed** | **6.026** | **6.792** |
+| | **1/100 — settled** | **6.026** | **6.792** |
 | | 1/20 | 5.767 | 6.567 |
 | mean coverage of the window | 1/256 read | 7.085 | 7.808 |
 | | 1/16 read | 6.727 | 7.443 |
-| | **1/4 read — proposed** | **6.566** | **7.288** |
+| | **1/4 read — settled** | **6.566** | **7.288** |
 | | 1 read | 6.480 | 7.198 |
 | summed log-error per allele | 1/4,096 ln | 7.047 | 7.774 |
-| | **1/256 ln — proposed** | **6.727** | **7.443** |
+| | 1/256 ln | 6.727 | 7.443 |
 | | 1/16 ln | 6.415 | 7.091 |
 | | 1/4 ln | 6.041 | 6.732 |
 
@@ -520,14 +520,14 @@ record against +0.140), but the record it sits in grows faster, so its **share**
 |---|---:|---:|
 | 1/10,000 · 1/16 · 1/256 (the prototype) | 5.356 | 16.630 |
 | 1/10,000 · 1/16 · 1/1,024 | 5.496 (+2.6 %) | 16.836 (+1.2 %) |
-| **1/100 · 1/4 · 1/1,024 — proposed** | **4.629 (−13.6 %)** | **16.255 (−2.3 %)** |
-| 1/100 · 1/4 · 1/4,096 | 4.907 (−8.4 %) | 16.689 (+0.4 %) |
+| 1/100 · 1/4 · 1/1,024 | 4.629 (−13.6 %) | 16.255 (−2.3 %) |
+| **1/100 · 1/4 · 1/4,096 — settled** | **4.907 (−8.4 %)** | **16.689 (+0.4 %)** |
 
 **So the finer log-error is free and then some**: coarsening the two fields whose consumers cannot
 tell the difference pays for it four times over, and the file still ends up 13.6 % smaller than the
 prototype at low depth.
 
-**Round-tripped at the proposed steps on both samples** — 7,687,686 tomato records and 74,623 human
+**Round-tripped at the settled steps on both samples** — 7,687,686 tomato records and 74,623 human
 ones — with every integer field, allele sequence and chain-id list identical and each approximated
 field inside half its own step.
 
@@ -595,31 +595,39 @@ probability it stands for. 1/256 is 0.4 %, 1/1,024 is 0.1 %, 1/4,096 is 0.024 %.
 of an already-summed quantity, not one per read, so it does not compound across the reads that went
 into it.*
 
-#### The resolution: quantise in the type, not in the file — the owner, 2026-08-25
+#### Settled: the rounding happens in the type, at ng level — the owner, 2026-08-25
 
-The owner's proposal for the GC fraction is a **type** that holds it as an integer from 0 to 100, at
-the point it is computed. **That is the general answer, and it dissolves the problem rather than
-trading against it:** if the rounding happens upstream of both routes, direct mode and psp mode both
-compute the same rounded value, the file stores an integer because the value *is* an integer by
-then, and there is nothing to diverge.
+**The three quantities are rounded where they are computed, not where they are written**, and the
+step for the summed log-error is **1/4,096 of a natural-log unit**.
 
-It is better than raw storage on the oracle's own terms, not merely equal to it. Two modes that
-compute a sum in a different order differ in the last bits of a raw `f64`; rounding to 1/1,024
-**absorbs** that difference and makes them agree where full precision would not.
+**This dissolves the bit-identity problem rather than trading against it.** If the rounding is
+upstream of both routes, direct mode and psp mode compute the same rounded value; the file stores an
+integer because the value *is* an integer by then; and there is nothing left to diverge. It is
+better than storing a raw `f64` on the oracle's own terms, not merely equal to it: two routes that
+sum in a different order differ in the last bits of an `f64`, and rounding to 1/4,096 **absorbs**
+that difference and makes them agree where full precision would not.
 
-**One of the three needs a ruling before it can move upstream, and two do not.** The window's GC
-fraction and its mean coverage are **terminal per-window statistics** — computed once, read by a
-curve that bins them, never added to again — so making them integer types is safe on this document's
-own evidence. The summed log-error is **an accumulator**, and whether anything downstream extends the
-sum decides whether rounding it early introduces drift. **That is the modelling side's question, not
-this document's.** *Leaning:* the same treatment, since 1/1,024 is a 0.1 % error in a term already
-carrying a fitted error rate. **Settled by:** whoever owns the emission model saying where in the
-pipeline the sum is final.
+**Why 1/4,096 rather than the 1/1,024 this document proposed.** Once the field is an integer at all,
+the step is nearly free: 1/4,096 is a sixteenth of 1/256's error and still keeps three quarters of
+the saving — 5.331 bytes a record against 5.056 at 1/1,024 and 6.021 raw. **The owner took the
+precision** because the cost of taking it is 5 % of the file and the cost of being wrong about a
+likelihood term is not measured in bytes.
 
-**Until that ruling, the safe configuration is: GC and coverage as integer types upstream, the summed
-log-error raw in the file.** That is the `1/4 read · raw` row — 5.513 bytes a record at three reads a
-position and 20.841 at 279 — and it keeps the two modes bit-identical, at a cost of 19 % of the file
-at low depth and 28 % at high depth against the fully approximated row.
+**What this means for this document, precisely.** The psp does not approximate anything. It stores
+an integer it was handed, and the header records the step so a reader can interpret it — **as a
+property inherited from the type, not as a psp setting a writer chooses.** The step is therefore not
+one of the knobs of §3, and a psp cannot be written with a different one than the types produce.
+
+**And it is not this document's change to make.** Rounding at the type touches every ng module that
+computes or carries these quantities, so **it is ng-wide work, carried in the implementation plan
+that owns those types** — recorded here so it is not lost, not owned here. The two remaining
+consequences for the encoding are the ones above: an integer field, and a header that records the
+step it means.
+
+*The window's GC fraction and its mean coverage take the same treatment, and were never in doubt:
+they are terminal per-window statistics — computed once, read by a curve that bins them, never added
+to again. The owner's own proposal for the GC fraction is a type holding it as an integer from 0 to
+100.*
 
 ---
 
@@ -635,9 +643,10 @@ a read from a sixteenth. Taking those two to the proposed steps and leaving the 
 alone gives **5.843 bytes a record on HG002 and 6.621 on tomato — 11–13 % below the
 baseline, for no accuracy anything downstream consumes.**
 
-**The summed log-error is the one that needs a ruling and does not have one.** It goes
+**The summed log-error is the one that carried a modelling risk, and §5.1.1 records how it was
+settled: 1/4,096 of a natural-log unit, rounded in the type rather than in the file.** It goes
 straight into a likelihood: a step of 1/16 of a natural-log unit is a 6 % error in that
-term where 1/256 is 0.4 %. It is also the field whose magnitude grows with depth, which is
+term, where 1/256 is 0.4 % and the settled 1/4,096 is 0.024 %. It is also the field whose magnitude grows with depth, which is
 the second reason a fixed 8- or 16-bit width is the wrong shape for it — at three hundred
 reads a position the value needs more range than sixteen bits hold, while at three reads it
 needs six. **Proposed: 1/256 of a natural-log unit until the modelling side rules
@@ -908,11 +917,17 @@ will pass while a chain-id list is being corrupted.
 
 ## 13. Open questions
 
-1. **What step may the summed log-error be stored at?** — OPEN, and it is a modelling
-   question, not an encoding one. The term enters a likelihood; 1/256 of a natural-log unit is
-   a 0.4 % error in it and 1/16 is 6 %. *Leaning:* 1/256 — a 5 % file saving is not worth an
-   unquantified change to a likelihood. **Settled by:** whoever owns the emission model saying
-   what error in that term is acceptable.
+1. **What step may the summed log-error be stored at?** — **SETTLED 2026-08-25: 1/4,096 of a
+   natural-log unit, rounded in the type rather than in the file** (§5.1.1). A 0.024 % error in the
+   term, against 0.4 % at 1/256. The step was taken finer than this document proposed because it is
+   nearly free once the field is an integer at all: 1/4,096 costs 5 % of the file against 1/1,024 and
+   still keeps three quarters of the 16–21 % that separates any integer step from a raw `f64`.
+
+   **Two things follow and neither is this document's to build.** The rounding happens where the
+   value is computed, so it is ng-wide work in whichever implementation plan owns those types. And
+   because it happens upstream of both routes, direct mode and psp mode see the same value — which is
+   the point: approximating in the psp alone would have broken the oracle
+   ([`run_streaming.md`](run_streaming.md) §1.2) that the whole psp path is checked against.
 2. **Does the differential chain-id encoding ship in the first version, or only
    delta-varints?** — OPEN. §6 measures both. *Leaning:* delta-varints first, the differential
    form second, because the first is a few lines with no interaction and takes the deep corner

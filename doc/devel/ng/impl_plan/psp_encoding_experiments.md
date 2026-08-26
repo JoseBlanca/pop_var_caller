@@ -696,8 +696,18 @@ a reading off a curve this plan produces, not a separate study.
   encoding preference.
 - **500 kB resident per open sample is affordable**, so the memory constraint is not what chooses
   the design. This reopened B0.
-- **1/256 of a natural-log unit is the coarsest step the summed log-error may take**, and the sweep
-  runs from there towards full precision rather than past it.
+- **The summed log-error's step is 1/4,096 of a natural-log unit** (the owner, 2026-08-25),
+  superseding the earlier "1/256 is the coarsest tolerable". Measured: once the field is an integer
+  at all it is worth 16 % of the file at three reads a position and 21 % at 279, and which step is
+  chosen barely matters — 1/4,096 costs 5 % against 1/1,024 and buys a sixteenth of 1/256's error.
+- **⚠ The rounding happens in the type, not in the psp writer, and that is ng-wide work this plan
+  does not own.** Approximating in the psp alone would make direct mode and psp mode see different
+  numbers and break the oracle the whole psp path is checked against
+  ([`../spec/run_streaming.md`](../spec/run_streaming.md) §1.2). Rounding where the value is computed
+  makes both routes agree — and agree *better* than full precision would, since it absorbs the
+  last-bit differences of two summation orders. **Carried here so it reaches the implementation plan
+  that owns those types**; the same treatment applies to the window's GC fraction and its mean
+  coverage.
 - **The per-sample summary does not go in ng's psp as TOML text.** Settled after Milestone Z
   measured it at 1.05 MB of text per open sample for a 0.52 MB parsed histogram, both resident at
   once. The section is permanent — ng's duplication filter is not built yet but is coming — so it is
