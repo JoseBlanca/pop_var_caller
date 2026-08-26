@@ -119,9 +119,9 @@ Two more terms this document needs:
   `block_byte_ceiling`. Neither is called "block size" unqualified, and the unit is in the name
   because production's own `block_window_bp` sets that precedent and because the two will otherwise
   be read for each other.*
-- **stream** — a block may be cut into more than one separately-compressed piece, so that a reader
-  wanting only one cheap number per record does not have to decompress whole records. Each piece a
-  reader has open costs it a decoder. §5.2 measures that.
+- **the record head** — the fixed fields at the front of every record that let a reader decide
+  whether it wants the record without building it: the position offset, the reference span, the
+  non-reference read count, and the body's length (§4.3).
 
 ---
 
@@ -131,11 +131,11 @@ Two more terms this document needs:
 +---------------------------+
 | header                    |  plain text: magic, length, TOML body, sentinel
 +---------------------------+
-| block 0                   |  one or more compressed streams
-| block 1                   |
+| psp block 0               |  records, one compressed stream, each record
+| psp block 1               |    opening with the head of §4.3
 | ...                       |
 +---------------------------+
-| block index               |  one entry per block
+| block index               |  one entry per psp block
 +---------------------------+
 | trailer                   |  the writer's closing payload; may be empty
 +---------------------------+
@@ -337,61 +337,79 @@ good file written with more, and the error it produces says nothing useful. *"Th
 512 kB window and this reader is configured for 32 kB"* is an actionable message; a zstd error code
 is not.
 
-### 4.3 A psp block has two streams — settled 2026-08-25
+### 4.3 The record head — how a reader judges a record without building it
 
-**A psp block is cut into two separately-compressed streams: a small one carrying what the cohort's
-first pass reads, and one carrying the records.** Declared in the manifest, because the count is a
-per-file fact a reader is told rather than a constant here — but two is what ng writes.
+**Settled 2026-08-25, and it replaces a two-stream design that was adopted and then measured
+away.** A psp block is **one** compressed stream. Each record in it opens with a fixed head that
+answers, cheaply, the two questions a reader has before it decides whether it wants the record:
 
-**What the first pass needs, and why it is worth its own stream.** Before anything can be called at
-a position, the caller has to know whether *any* sample shows something other than the reference
-there. At about 99 positions in 100 none does — production measured 28,718 positions worth calling
-out of 2.83 million. Answering that needs only the position and **the number of reads that supported
-something other than the reference**; the allele sequences, the per-allele statistics, the read
-names and the window statistics are needed only where the answer is yes.
+```
+record = position_offset | reference_span | non_reference_reads | record_length | body
+         └────────────────── the head ──────────────────────┘   └── skip this ──┘
+```
 
-Measured on a tomato accession at three reads a position, storing those alone against storing whole
-records:
+A reader takes the head, decides, and either builds the body or advances `record_length` bytes past
+it. **Nothing else in the block has to be touched to make that decision.**
 
-| | bytes a record | walk speed |
+#### Why a head and not a second stream
+
+**Because the alternative does not save what it appears to.** The obvious design — and the one this
+document carried until it was measured — puts those numbers in their own separately-compressed
+stream so a scan can read them without touching records at all. It is what production's two-phase
+decode does with its columns.
+
+**A reader still has to walk the records.** It cannot seek to record *N* inside a psp block: the
+block is one zstd frame, it comes out sequentially from its start, and the decompressed bytes carry
+no separators — so finding where record *N* begins means decoding every variable-length integer in
+the records before it. A second stream therefore adds its own walk **on top of** that one rather
+than replacing it, and it costs a second decompressor.
+
+Timed on a tomato accession at three reads a position, 7.69 M records, one stream:
+
+| what a walk does | time |
+|---|---:|
+| decompress only, nothing else | 0.104 s |
+| + walk each record's bytes to find where it ends | 0.163 s |
+| + build the record objects — a full walk | 0.30 s |
+
+**So the three costs are 0.104 s of decompression, 0.059 s of finding record ends, and 0.137 s of
+building records.** Only the last is avoided by knowing a record is unwanted. The middle one is
+avoided *only* by a record saying how long it is, which is what `record_length` is for.
+
+| design | a walk keeping one record in a hundred | memory at 5,000 samples |
 |---|---:|---:|
-| the whole record | 4.628 | 18.7 M records/s |
-| the first pass's two numbers | **0.077** | **151.6 M records/s** |
+| no head — build every record | 0.30 s | 1.14 GB |
+| head without `record_length` | 0.163 s *(measured)* | 1.14 GB |
+| **head with `record_length`** | **~0.126 s** *(estimated)* | **1.14 GB** |
+| a second stream | ~0.204 s *(composed)* | 2.27 GB |
 
-**1.7 % of the bytes, and about eight times faster to read.** At 279 reads a position it is 3.9 % of
-the bytes and about nine times faster.
+**The second stream is last on both axes**, which is why it is gone. *The two estimated rows are
+composed from the measured components above and have not been run as readers; the 0.163 s row is a
+reader that exists.*
 
-**What it costs, and the ruling.** A stream costs a reader a decompressor and two buffers whatever
-it carries, so the small one is not cheap: it doubles the per-open-sample memory. Measured at
-**5,000 open samples** — 1.14 GB with one stream against **2.27 GB with two**, at the 4 kB buffers
-of §4.4. **The owner's decision, 2026-08-25: that memory is affordable and the speed-up is worth
-it.** The recommendation this reverses was mine, on the grounds that the split spends memory to buy
-wall time and cores recover wall time; the owner priced the gigabyte against twenty seconds of a
-seventy-eight-second run and took the twenty seconds.
+#### What the head carries, and why each field
 
-**A reader opens only the streams it needs**, which keeps the cost a function of what the reader is
-doing rather than of the file: a first pass opens the small one alone and pays for one decoder.
+- **`position_offset`** — the distance from the previous record. Every running difference restarts at
+  a block boundary (§3.2).
+- **`reference_span`** — how many reference bases the record covers. **Required rather than chosen**:
+  [`cohort_merge.md`](cohort_merge.md) names it as one of two things it asks of this document, because
+  a record widened by a deletion covers more than one position, so a reader indexed by position
+  cannot work out what a record reaches from its start alone.
+- **`non_reference_reads`** — the reads at this position that supported something other than the
+  reference. **The owner's correction of his own first suggestion, 2026-08-25**: a count of
+  alternative *alleles* answers *does anything vary here* identically, since an allele exists only
+  because reads showed it — but the read count also lets a reader apply a threshold.
+- **`record_length`** — the body's length in bytes, so an unwanted record is skipped rather than
+  decoded. Measured cost: **1.4 % of the file** at three reads a position, 3.3 % at 279.
 
-#### What the summary stream carries — settled
+Together these are what [`cohort_merge.md`](cohort_merge.md) calls the **position summary** —
+*"the cheap facts a builder needs about a position before it decides anything"* — and the name is
+that document's, not this one's.
 
-**Three things per record: the position, the reference span, and the summed non-reference support.**
-
-The name is not this document's to invent: [`cohort_merge.md`](cohort_merge.md) calls it the
-**position summary** and defines it as *"the cheap facts a builder needs about a position before it
-decides anything: what a record there covers, and whether any sample recorded something other than
-the reference."* Both halves of that sentence are a field — *what a record covers* is the span, and
-*whether any sample recorded something other than the reference* is the support.
-
-**The span is a requirement, not a choice.** That document's non-goals name it as one of exactly two
-things it imposes on this one: *"the position summary must carry the reference span."* It is needed
-because a record widened by a deletion covers more than one position — an insertion's span is 1, a
-deletion's is the deleted run plus its anchor — so a pass indexed by position cannot work out what a
-record reaches from its start alone.
-
-**The support rather than a count of alternative alleles** (the owner, 2026-08-25, correcting his own
-first suggestion). The two answer *does anything vary here* identically, since an allele exists only
-because reads showed it — but the support also lets a pass apply a threshold instead of only asking
-whether anything varies at all.
+**Fixed-width or variable-length is the manifest's to say** (§4.5), not this section's. A fixed
+width is quicker to read, and costs less than it looks after compression because a column of small,
+repetitive values collapses — the four head fields together compressed to 0.077 bytes a record when
+measured on their own. *Unmeasured: the two encodings against each other in place.*
 
 ### 4.4 The reader's two buffers — 4 kB each
 
@@ -399,18 +417,17 @@ A reader holds a buffer of compressed bytes read from the file and a rolling buf
 bytes it parses records out of. **Both are the reader's choice, not the file's**, and at cohort scale
 they are the difference between fitting and not:
 
-| buffers | one stream | two streams |
+| buffers | per open sample | at 5,000 samples |
 |---|---:|---:|
-| 64 kB each | 330 kB a sample · 1.57 GB at 5,000 | 659 kB · 3.14 GB |
-| **4 kB each** | **239 kB · 1.14 GB** | **477 kB · 2.27 GB** |
+| 64 kB each | 330 kB | 1.57 GB |
+| **4 kB each** | **239 kB** | **1.14 GB** |
 
 **4 kB is recommended and it costs nothing to take.** Smaller buffers were slightly *faster* in the
 sweep — 31 s against 35 s over 471 M records — so this is not a trade. One record must still fit, and
 the rolling buffer grows if one does not (§8).
 
-**⚠ At two streams and 4 kB buffers an open sample is 477 kB against a 500 kB budget.** That is
-inside it with 5 % to spare, so there is room for neither a third stream nor larger buffers without
-revisiting the budget.
+**At 4 kB buffers an open sample is 239 kB against a 500 kB budget**, which leaves room to spend
+later — on a second stream, if one is ever justified, or on larger buffers if a machine wants them.
 
 ### 4.5 The manifest
 
@@ -472,7 +489,7 @@ achieved nothing.
 So one open sample holds: the declared window, one read buffer, one rolling decompressed buffer, the
 decoder's own state, and the record being built. **None of those is a function of the block size.**
 
-### 5.2 What it costs, measured — and the ceiling on stream count
+### 5.2 What it costs, measured
 
 62 tomato accessions opened at once and advanced one record each per round, the shape a cohort merge
 reads in. `rolling` and `read chunk` are the reader's two buffers, which are its own choice and not
@@ -505,16 +522,17 @@ Three things follow:
 - **The cost is per live decoder and it is linear.** The second decoder costs the same as the first,
   as it should for the same object.
 - **About 190 kB of it is zstd's own context state**, which no buffer choice reaches. That is the
-  floor for one stream, and §5.3 explains where it comes from and why we cannot currently move it.
-- **Against the 500 kB budget: one stream fits at any buffer size, two fit only with small buffers,
-  and four do not fit at all.** So **one compressed stream per field — which is what a columnar
-  layout amounts to — is ruled out on memory grounds**, not on preference. That is worth stating
-  plainly because the columnar shape is what production uses and what a port would reach for.
+  floor for a stream, and §5.3 explains where it comes from and why we cannot currently move it.
+- **Against the 500 kB budget, one stream fits at any buffer size and four do not fit at all.** So
+  **one compressed stream per field — which is what a columnar layout amounts to — is ruled out on
+  memory grounds**, not on preference. That is worth stating plainly because the columnar shape is
+  what production uses and what a port would reach for. It is also why §4.3 puts the cheap fields in
+  a record's head rather than in a stream of their own.
 
-*Measured with `--streams N`, which opens the same store N times per sample. A stream's buffers are
+*Measured with `--streams N`, which opens the same store N times per sample. This is why a second
+stream is priced the way §4.3 prices it. A stream's buffers are
 the same size whatever it carries, so this measures the multiplier without needing the streams to
-differ — which is the quantity in question. It does **not** measure how much a real second stream
-would add to the file, which is [`psp_record_encoding.md`](psp_record_encoding.md) §2.3's.*
+differ — which is the quantity in question.*
 
 ### 5.3 Where the 190 kB floor comes from, and why it is not currently reachable
 
@@ -736,19 +754,14 @@ corrupted.
 
 ## 12. Open questions
 
-1. **How many streams does a block have?** — **SETTLED 2026-08-25: two** (§4.3). The first pass's
-   numbers are 1.7 % of the bytes and about eight times faster to read on their own; the second
-   stream doubles the per-open-sample memory, which at 5,000 samples is 1.14 GB against 2.27 GB. The
-   owner priced the gigabyte against twenty seconds of a seventy-eight-second run and took the
-   seconds. **This reverses my recommendation**, which was one stream on the grounds that cores
-   recover wall time and nothing recovers memory.
+1. **Does a psp block ever need a second compressed stream?** — **NO, settled 2026-08-25** (§4.3).
+   It was adopted on 2026-08-25 and reversed the same day when the walk was timed in three parts: a
+   second stream adds its own pass on top of the walk over the records rather than replacing it,
+   because a reader cannot seek inside a zstd frame. It is slower than a record head *and* costs a
+   second decompressor — 2.27 GB against 1.14 GB at 5,000 samples. **The reversal is mine to own: I
+   priced the split as though a separate stream of cheap fields removed the walk over the records, and it does
+   not.**
 
-   *One thing the ruling did not need to settle, and §4.3 carries as open: exactly which numbers the
-   first stream holds. And a note that goes with the index rather than against it — the per-block
-   summary of §3.3 cannot substitute for this stream: at a 100 kb block with roughly one varying
-   position in a hundred, every block holds about a thousand of them, so no block is ever skippable
-   and the summary is inert at that size.* **Settled by:** counting, on a real
-   cohort segment, how many blocks the index summary alone lets a scan skip.
 2. **What byte ceiling, if any, should a writer put on a block?** — OPEN (§4.1), and it costs
    nothing measurable so far: a 100 kb grid with a 1 MiB ceiling gives 4.628 bytes a record against
    4.627 without, on tomato. *Leaning:* offer it, default it off, and let the first whole-genome
@@ -766,5 +779,5 @@ corrupted.
 4. **What does the reader's buffer pair cost in speed as it shrinks?** — PARTLY MEASURED. Smaller
    was slightly *faster* at one stream (31 s against 35 s over 471 M records), which is the opposite
    of the expected direction and is not understood. *Leaning:* default to 16 kB, which is inside
-   budget at two streams and near the fast end. **Settled by:** repeating the sweep on a machine that
-   is not sharing its cores, which this one was.
+   budget with room to spare and near the fast end. **Settled by:** repeating the sweep on a machine
+   that is not sharing its cores, which this one was.

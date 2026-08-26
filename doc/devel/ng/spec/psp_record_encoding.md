@@ -73,7 +73,7 @@ kilobytes, not megabytes*, at three thousand open samples.
 3. **A reader can start part-way through**, without reading what comes before, at the grain the
    **genomic block size** sets — default 100 kb
    ([`psp_file_format.md`](psp_file_format.md) §4.1).
-4. **The two-phase decode survives.** [`run_streaming.md`](run_streaming.md) §3.3 makes
+4. **The cheap first pass survives.** [`run_streaming.md`](run_streaming.md) §3.3 makes
    psp mode's saving come from scanning one cheap number per position and building the
    full record only where some sample might vary — about one position in a hundred. An
    encoding that forces a reader to inflate every field to read one throws that away.
@@ -147,10 +147,9 @@ block.
 ```
 psp file
   header                  plain-text, the fields run_streaming.md §6.1 fixes
-  block 0   summary       the position summary for each record in the block
-            heavy         the records themselves, compressed with a capped look-back window
-  block 1   summary
-            heavy
+  psp block 0             the records, one compressed stream, each record opening
+                          with the head that lets a reader skip it (file format §4.3)
+  psp block 1
   ...
   index                   one entry per block: chromosome, first position,
                           the two byte offsets, and the block's scan summary
@@ -268,50 +267,44 @@ Two consequences:
 
 *Kept rather than deleted so that nobody re-derives the dictionary from the same table.*
 
-### 2.3 Two streams, so the cohort decodes only the records that might vary
+### 2.3 The record head, so the cohort builds only the records that might vary
 
 **Record-major has one real loss: a reader cannot read one field without decoding all of them.** The
 cohort's first pass is exactly that shape — before anything can be called at a position, the caller
 asks whether *any* sample shows something other than the reference there, and at about 99 positions
 in 100 none does. Production measured that as 28,718 positions worth calling out of 2.83 million.
 
-**So a psp block is cut into two separately-compressed streams**: a small one carrying what that
-first pass reads — the position and the summed non-reference support — and one carrying the records.
+**So every record opens with a fixed head carrying what that first pass reads**, and the head ends
+with the body's length so an unwanted record is skipped rather than decoded:
 
-**Why this is a different decision from production's, even though it looks the same.** Production's
-two-phase decode *saves* memory: it inflates a block whole, so leaving the heavy columns compressed
-avoids materialising rows nobody wants
+```
+position_offset | reference_span | non_reference_reads | record_length | body
+```
+
+[`psp_file_format.md`](psp_file_format.md) §4.3 owns the layout and the field-by-field reasons. What
+belongs here is the cost, because it is a cost this document's record pays.
+
+**Three levels of work, timed on a tomato accession at three reads a position, 7.69 M records:**
+
+| what a walk does | time |
+|---|---:|
+| decompress only, nothing else | 0.104 s |
+| + walk each record's bytes to find where it ends | 0.163 s |
+| + build the record objects — a full walk | 0.30 s |
+
+**Decompression is 0.104 s, finding record ends is 0.059 s, building records is 0.137 s.** A reader
+that wants one record in a hundred pays the first, skips the third, and the head's `record_length`
+is what lets it skip most of the second: **about 0.126 s against 0.30 s.** The length costs a
+measured 1.4 % of the file at three reads a position and 3.3 % at 279.
+
+**Why not the columns production uses for this.** Its two-phase decode leaves the heavy columns
+compressed while it reads the light ones
 ([`TwoPhaseSegment`, `src/var_calling/sample_reader.rs:698-712`](../../../../src/var_calling/sample_reader.rs),
-then [`:789`](../../../../src/var_calling/sample_reader.rs)). **Here it costs memory**, because a
-reader never inflates a block anyway and a second stream means a second decompressor. What it buys
-is time. Measured on a tomato accession at three reads a position:
-
-| | bytes a record | walk speed |
-|---|---:|---:|
-| the whole record | 4.628 | 18.7 M records/s |
-| the position summary alone | **0.077** | **151.6 M records/s** |
-
-**1.7 % of the bytes and about eight times faster to read**; at 279 reads a position, 3.9 % and about
-nine times. Against that, at 5,000 open samples the second stream takes the run from **1.14 GB to
-2.27 GB**.
-
-**Settled 2026-08-25 by the owner: two streams.** The gigabyte is affordable and the speed-up is
-worth having. *This reverses the recommendation I gave, which was one stream on the grounds that the
-split spends memory to buy wall time and cores recover wall time.* The container spec's
-[`psp_file_format.md`](psp_file_format.md) §4.3 owns the decision and carries the one part still
-open — exactly which numbers the first stream holds.
-
-This costs almost nothing and is not a compromise between the two shapes: **splitting a
-psp block into more separately-compressed pieces was measured to help, not hurt** (on HG002 at
-512 KiB, fourteen field-columns give 5.44 bytes a record against 5.82 for one combined
-stream), because putting like values next to each other is most of what the columnar layout
-was doing. The nearest field measured on its own, a small per-record varint, compressed to
-0.12 bytes a record on tomato; the summary stream is a few of those.
-
-**The unit of the summary stream is the record, and its blocks are cut with the record
-stream's** — one index entry names both. A reader that scans a segment reads only summary
-blocks; a reader that then needs three records decompresses the three record streams holding
-them.
+then [`:789`](../../../../src/var_calling/sample_reader.rs)) — and *there* that saves memory, because
+a block is inflated whole. **Here it would cost memory** and save nothing, because a reader never
+inflates a block and cannot seek inside one: a separate stream of cheap fields adds its own pass on
+top of the walk over the records rather than replacing it. §4.3 of the container spec has the
+comparison; the short version is 2.27 GB against 1.14 GB at 5,000 samples, and slower.
 
 ### 2.4 The index, and where a reader may start
 
@@ -321,9 +314,11 @@ difference, the read-name difference — restarts at zero. A psp block never cro
 the restart points are the psp block boundaries, and there is no separate seek mechanism to build.
 
 **The index has one entry per psp block**, in genomic order: the chromosome, the first position, the
-byte offsets of the block's two streams, and the largest non-reference support anywhere in the
-block. That last field is what lets a reader decide whether to touch a block **without decompressing
-it** — though at the settled block size it decides very little, and §2.3 says why.
+and its byte offset. **And nothing else**: an earlier draft had each entry carry the largest
+non-reference support in the block, so a reader could skip a whole block without decompressing it.
+At a 100 kb block with roughly one varying position in a hundred, every block holds about a thousand
+of them, so that field never says *skip*. It cost index bytes and writer bookkeeping for a decision
+that never fires, and it is gone (the owner, 2026-08-25).
 
 #### How big the index is, at the settled block size
 
@@ -777,7 +772,7 @@ not.
 | variable-length integer codec | `src/psp/varint.rs` | as-is: LEB128 and zig-zag LEB128, already specified and tested |
 | plain-text header framing | `src/psp/header.rs` | the pattern — magic, length prefix, TOML, sentinel — so `head` still works on an ng psp |
 | the zstd seam | `new_column_compressor`, `zstd_compress_into` ([`src/psp/block.rs:718,730`](../../../../src/psp/block.rs)) | the shape: one long-lived compressor per writer, frame checksums on. The dictionary is new |
-| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the summary/record split, reduced from fourteen columns to two streams (§2.3) |
+| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | **the idea, not the shape.** Its light/heavy split becomes a head on each record rather than separate columns, for the reason in §2.3 |
 | the eager whole-segment decode | [`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs) | the parity oracle's model: a simple decoder used only by tests, against which the real one is byte-compared |
 | the record | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | what is written and what must come back |
 
@@ -843,10 +838,10 @@ ng stores all of them, and §7 measures that field separately.
 3. **Worker-count invariance**, inherited from [`run_streaming.md`](run_streaming.md) §12.1:
    one sample gathered at 1, 2, 4, 8, 16 workers gives byte-identical files apart from the
    header's timestamp. This is what §8's block-cut rule exists to preserve.
-4. **The two-phase saving is still there.** Scanning the summary stream over a cohort segment
-   must materialise about one record in a hundred, the ratio
+4. **The cheap first pass is still cheap.** Walking a segment reading only record heads must
+   build about one record in a hundred, the ratio
    [`run_streaming.md`](run_streaming.md) §3.3 measured. A file that round-trips but forces
-   every record to inflate has failed goal 4 while passing oracle 1.
+   every record to be built has failed goal 4 while passing oracle 1.
 5. **Restart equals sequential.** Reading from an arbitrary psp block gives exactly the records a
    full sequential read gives from that point — the test that catches a running base that was
    not reset (§7).
