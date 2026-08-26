@@ -127,7 +127,7 @@ nothing. Round-trips exactly.
 body_bytes | body`, and a decoder that takes the head and either builds the body or advances past it.
 ***Depends:*** C1. ***Source:*** [spec §4.3](../spec/psp_file_format.md).
 
-☐ **C3 — the body stands on its own.** Every difference the body carries restarts at the record, so a
+✅ **C3 — the body stands on its own.** Every difference the body carries restarts at the record, so a
 skipped body strands nothing. **Own commit, do not bundle**: getting this wrong is the failure the
 head exists to avoid, and it is silent — the records after a skipped one decode plausibly and wrong.
 The oracle is a decode that skips every other record and still matches a full decode on those it
