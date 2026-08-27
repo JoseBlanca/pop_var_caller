@@ -184,12 +184,16 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(3);
 /// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
 /// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
 /// stated on both and pinned by a test rather than left for a reader to discover.
-const BODY_FIELDS: [(&str, FieldEncoding); 21] = [
+const BODY_FIELDS: [(&str, FieldEncoding); 22] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
     // Which observation's reads are derived rather than stored, or the observation count for
     // "none of them" — see `residual_observation_of`.
     ("residual-observation", FieldEncoding::Varint),
+    // How many reads that observation names. **Written only when there is one**, and it is what
+    // turns the reader's guard from an inequality with slack into an equality — see
+    // `check_a_derived_read_list`.
+    ("residual-read-count", FieldEncoding::Varint),
     // The next ten, once per observation:
     ("observation-bases", FieldEncoding::LengthPrefixedBytes),
     ("witness-run-count", FieldEncoding::Varint),
@@ -205,7 +209,7 @@ const BODY_FIELDS: [(&str, FieldEncoding); 21] = [
     ("reads-starting-left-of-the-locus", FieldEncoding::Varint),
     // Every observation except the residual one — the half of the chain-id column that carries
     // no state, so it stays in the skippable body (spec psp_record_encoding.md §6).
-    ("observation-reads", FieldEncoding::ChainIdChanges),
+    ("observation-reads", FieldEncoding::ChainIdList),
     // Once per record again:
     ("reads-without-observation", FieldEncoding::Varint),
     ("reads-discarded-by-the-depth-cap", FieldEncoding::Varint),
@@ -230,24 +234,25 @@ const fn body_field(position: usize) -> &'static str {
 const REFERENCE_BASES: &str = body_field(0);
 const OBSERVATION_COUNT: &str = body_field(1);
 const RESIDUAL_OBSERVATION: &str = body_field(2);
-const OBSERVATION_BASES: &str = body_field(3);
-const WITNESS_RUN_COUNT: &str = body_field(4);
-const WITNESS_RUN_START: &str = body_field(5);
-const WITNESS_RUN_LENGTH: &str = body_field(6);
-const READ_GROUP: &str = body_field(7);
-const READS_SHOWING_THE_SEQUENCE: &str = body_field(8);
-const READS_ON_THE_FORWARD_STRAND: &str = body_field(9);
-const SUMMED_LOG_ERROR: &str = body_field(10);
-const MAPQ_SUM: &str = body_field(11);
-const MAPQ_SUM_OF_SQUARES: &str = body_field(12);
-const READS_STARTING_LEFT: &str = body_field(13);
-const OBSERVATION_READS: &str = body_field(14);
-const READS_WITHOUT_OBSERVATION: &str = body_field(15);
-const READS_DISCARDED_BY_THE_DEPTH_CAP: &str = body_field(16);
-const LOCUS_KIND: &str = body_field(17);
-const REPEAT_MOTIF: &str = body_field(18);
-const REPEAT_LEFT_FLANK: &str = body_field(19);
-const REPEAT_RIGHT_FLANK: &str = body_field(20);
+const RESIDUAL_READ_COUNT: &str = body_field(3);
+const OBSERVATION_BASES: &str = body_field(4);
+const WITNESS_RUN_COUNT: &str = body_field(5);
+const WITNESS_RUN_START: &str = body_field(6);
+const WITNESS_RUN_LENGTH: &str = body_field(7);
+const READ_GROUP: &str = body_field(8);
+const READS_SHOWING_THE_SEQUENCE: &str = body_field(9);
+const READS_ON_THE_FORWARD_STRAND: &str = body_field(10);
+const SUMMED_LOG_ERROR: &str = body_field(11);
+const MAPQ_SUM: &str = body_field(12);
+const MAPQ_SUM_OF_SQUARES: &str = body_field(13);
+const READS_STARTING_LEFT: &str = body_field(14);
+const OBSERVATION_READS: &str = body_field(15);
+const READS_WITHOUT_OBSERVATION: &str = body_field(16);
+const READS_DISCARDED_BY_THE_DEPTH_CAP: &str = body_field(17);
+const LOCUS_KIND: &str = body_field(18);
+const REPEAT_MOTIF: &str = body_field(19);
+const REPEAT_LEFT_FLANK: &str = body_field(20);
+const REPEAT_RIGHT_FLANK: &str = body_field(21);
 
 /// The witness as a whole, for the two faults that are about the set rather than about one of
 /// its numbers. Not a declared field: the three `witness-run-*` entries are.
@@ -334,7 +339,7 @@ pub fn record_fields() -> Vec<FieldSpec> {
     fields_this_build_knows().collect()
 }
 
-/// The head's five fields and then the body's nineteen — **this build's**, not a file's, which
+/// The head's five fields and then the body's twenty-two — **this build's**, not a file's, which
 /// is the distinction that matters where `manifest.fields` is in scope beside it.
 fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
     RECORD_HEAD_FIELDS
@@ -347,14 +352,14 @@ fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
 }
 
 /// How many fields this build knows, before anything a later writer added: the head's four and
-/// the body's nineteen. The fields past it were declared too — by that later writer — which is
+/// the body's twenty-two. The fields past it were declared too — by that later writer — which is
 /// why the name says whose set it is.
 const KNOWN_FIELD_COUNT: usize = RECORD_HEAD_FIELDS.len() + BODY_FIELDS.len();
 
 /// How this reader must read the records in one particular file.
 ///
 /// Built once per file from its manifest and then used for every record, because checking a
-/// twenty-four-field declaration per record on a path that decodes about twenty million records a
+/// twenty-seven-field declaration per record on a path that decodes about twenty million records a
 /// second (spec §4.5) is work with one possible answer.
 ///
 /// **What it carries is the part that differs between files: the fields this reader does not
@@ -617,22 +622,39 @@ pub struct DecodedRecordBody {
 ///
 /// A derived list is the live set minus what the other observations named, and getting it wrong
 /// by one gives the reference allele a read that does not exist — which the cohort merge composes
-/// an allele for without complaint (spec `psp_chain_id_encoding.md` §5). There is no second copy
-/// to compare against, so the check is an inequality against a number the record already carries:
+/// an allele for without complaint (spec `psp_chain_id_encoding.md` §5). **There is no second copy
+/// of the list to compare against**, so the record carries its *length*: one varint against the
+/// several bytes the list itself would cost, and it makes the check an equality.
 ///
-/// - **at most `num_obs`**, because an identifier names at least one read and the list is
-///   deduplicated;
-/// - **at least half of it**, because at most two mates share an identifier.
+/// **⚠ An inequality alone is not enough, and this was measured.** Spec §5 proposes bounding the
+/// derived count by the observation's read count — at most `num_obs`, at least half of it, since
+/// an identifier names one read or two. That window is `num_obs / 2` wide, and its slack is
+/// exactly the number of read pairs whose two mates both cover this record — which is the shape
+/// paired-end data has. Measured on a record whose residual names two reads with `num_obs = 4`: a
+/// live set carrying **two identifiers no observation named** derives a list of four, passes
+/// `4 <= 4` and `8 >= 4`, and the reference allele silently gains two reads. The declared length
+/// closes that.
 ///
-/// It is the same inequality the walk's own differential against production asserts
-/// (`src/ng/locus_generation/pileup/parity.rs`). It does not catch every wrong answer — nothing
-/// cheap does — but it catches the shapes that matter: a derivation that lost the subtraction, one
-/// that subtracted the wrong set, and a live set carrying reads no observation named.
+/// The inequality is kept beside it, because it is a second, independent statement: it says the
+/// *declared* count could describe those reads at all. ⚠ It is the same inequality the walk's own
+/// differential against production asserts **on one side only** — `parity.rs` asserts the lower
+/// bound; the upper is this reader's own.
 fn check_a_derived_read_list(
     body: &FieldReader<'_>,
     derived: &[ChainId],
+    declared: u64,
     num_obs: u32,
 ) -> Result<(), RecordDecodeError> {
+    if derived.len() as u64 != declared {
+        return Err(body.malformed(
+            OBSERVATION_READS,
+            format!(
+                "a derived list of {} reads where the record says {declared}; the live set and \
+                 the lists stored beside it do not agree",
+                derived.len()
+            ),
+        ));
+    }
     if !check_a_read_list_against_its_read_count(derived.len(), num_obs) {
         let names = derived.len();
         let reads = u64::from(num_obs);
@@ -739,17 +761,21 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
 /// # Nothing here is a difference from another record, and the signature is the guarantee
 ///
 /// **A body stands on its own.** Every count it carries is written absolutely — the reads behind
-/// each observation, the reads that showed nothing, the reads the depth cap dropped — and when
-/// Milestone E adds them, an observation's chain-id exceptions will be measured from zero rather
-/// than from the previous record. **That is why a skipped body costs nothing**: a reader that
-/// never saw it has missed nothing the next record needs. The head is the half that carries
-/// state (spec §4.3), which is why the chain ids' live-set *changes* go there and their exception
-/// lists stay here.
+/// each observation, the reads that showed nothing, the reads the depth cap dropped — and each
+/// observation's own list of reads is written from zero rather than from the previous record's.
+/// **That is why a skipped body costs nothing**: a reader that never saw it has missed nothing
+/// the next record needs. The head is the half that carries state (spec §4.3), which is why the
+/// chain ids' live-set *changes* go there and their exception lists stay here.
 ///
-/// **These two functions take no running state and are given none, which is most of the
-/// guarantee and not all of it.** A future edit could still reach state through a `static` or a
-/// thread-local without changing either signature — measured, that compiles — so the tests below
-/// are what actually holds the line.
+/// **⚠ With one exception, and it is the whole of Milestone E4**: the decoder takes a `&LiveSet`,
+/// because one observation's reads are not in the body at all — they are the live set minus every
+/// other observation's. That is a difference from the records before this one, and it is the one
+/// thing here a skipped body *would* have stranded had it been stored rather than derived. It is
+/// safe because the set is built from the record *heads*, which a skipping reader decodes anyway.
+///
+/// **⚠ The live set the decoder is given must be the one this record's head produced** — after
+/// its changes are applied, not before. Anything else is accepted quietly whenever the derived
+/// count still matches what the record declares.
 ///
 /// **Getting it wrong would be silent**: a body carrying a difference still round-trips under a
 /// walk that builds every record, and misreads only the records that follow a skipped one. The
@@ -777,6 +803,9 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
     put_varint(out, observations.len() as u64);
     let residual_at = residual_observation_of(record);
     put_varint(out, residual_at as u64);
+    if let Some(residual) = observations.get(residual_at) {
+        put_varint(out, residual.chain_ids.len() as u64);
+    }
     for (at, observation) in observations.iter().enumerate() {
         let SequenceObservation {
             bases,
@@ -801,6 +830,11 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
         put_varint(out, u64::from(*placed_left));
         // **Every observation except the residual one.** Its reads are the live set minus these,
         // which is where most of this column's saving is (spec `psp_chain_id_encoding.md` §4).
+        //
+        // **`encode_read_list` makes the list a set itself**, because the bytes are gaps and
+        // `SequenceObservation::chain_ids` says what the ids mean rather than what order they are
+        // in. A precondition here instead would be one a `debug_assert` cannot hold in the
+        // profile that writes real files.
         if at != residual_at {
             encode_read_list(chain_ids, out);
         }
@@ -836,6 +870,9 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
 /// LEB128 admits a non-canonical encoding of a small number, so two different bodies can
 /// produce one record. Compare records, never bytes, when checking a reader against a writer:
 /// `encode(decode(b)) == b` is not a property this format has.
+///
+/// **⚠ `live_reads` must be the set this record's head produced.** See
+/// [`decode_the_body_of`], which is the call a reader that has read a head should be making.
 pub fn decode_record_body(
     bytes: &[u8],
     region: GenomeRegion,
@@ -857,6 +894,11 @@ pub fn decode_record_body(
             ),
         ));
     }
+    let residual_reads_declared = if residual_at < declared_observations {
+        Some(body.read_count(RESIDUAL_READ_COUNT, LEAST_BYTES_PER_OBSERVATION)?)
+    } else {
+        None
+    };
     let mut observations = Vec::with_capacity(entries_to_reserve(
         declared_observations,
         LEAST_BYTES_PER_OBSERVATION,
@@ -902,7 +944,12 @@ pub fn decode_record_body(
         as_a_read_set(&mut named_elsewhere);
         let mut derived = Vec::new();
         residual_reads(live_reads, &named_elsewhere, &mut derived);
-        check_a_derived_read_list(&body, &derived, observations[at].num_obs)?;
+        check_a_derived_read_list(
+            &body,
+            &derived,
+            residual_reads_declared.unwrap_or_default(),
+            observations[at].num_obs,
+        )?;
         observations[at].chain_ids = derived;
     }
 
@@ -1286,6 +1333,15 @@ impl<'a> FieldReader<'a> {
                 }
                 let arrivals = self.read_count(field, 1)?;
                 for _ in 0..arrivals {
+                    self.read_varint(field)?;
+                }
+            }
+            // One counted run, where the changes above are two. ⚠ The two shared a scheme
+            // briefly, and stepping over a list under the changes' rule measures the wrong number
+            // of bytes: `[5, 9]` is three bytes as a list and seven as a set of changes.
+            FieldEncoding::ChainIdList => {
+                let reads = self.read_count(field, 1)?;
+                for _ in 0..reads {
                     self.read_varint(field)?;
                 }
             }
@@ -1823,6 +1879,12 @@ pub fn decode_record(
 /// head applies that record's chain-id changes to the live set and doing it twice would apply
 /// them twice — a read arriving into a set it is already in, refused as damage, on a file that is
 /// perfectly good.
+///
+/// **⚠ `live_reads` must be the set this record's head produced** — after
+/// [`read_record_head`] applied its changes, not before, and not a fresh one. One observation's
+/// reads are not in the body: they are that set minus every other observation's. A different set
+/// is refused only when the count it derives disagrees with the one the record declares, which is
+/// most wrong sets and not all of them.
 pub fn decode_the_body_of(
     found: &LocatedRecord<'_>,
     live_reads: &LiveSet,
@@ -2268,26 +2330,42 @@ mod tests {
         let (decoded, bytes) = round_trip(&written);
         assert_eq!(decoded.record, written, "every list, exactly");
 
-        // And the saving is real: the largest list is not in the body at all.
-        let mut every_list_stored = written.clone();
-        let mut all_stored = Vec::new();
-        for observation in &every_list_stored.observations {
-            encode_read_list(&observation.chain_ids, &mut all_stored);
-        }
-        let mut only_the_others = Vec::new();
-        for observation in every_list_stored.observations.iter().skip(1) {
-            encode_read_list(&observation.chain_ids, &mut only_the_others);
-        }
-        assert!(
-            only_the_others.len() < all_stored.len(),
-            "deriving the largest list has to save bytes to be worth the arithmetic"
+        // **And the saving is real**, measured against the same record with its residual made
+        // underivable. ⚠ Two assertions stood here that a writer deriving *nothing* satisfied
+        // just as well: one compared two direct `encode_read_list` calls and never touched the
+        // writer's choice, the other only said a record with fewer identifiers is shorter.
+        assert_eq!(
+            residual_observation_of(&written),
+            0,
+            "the largest list is the one derived"
         );
-        every_list_stored.observations[0].chain_ids.clear();
-        let mut without_the_largest = Vec::new();
-        encode_record_body(&every_list_stored, &mut without_the_largest);
+        let mut nothing_derived = written.clone();
+        // A read named by two observations: the derivation cannot reproduce it, so every list is
+        // stored — the same record, the same identifiers, one list more on disk.
+        nothing_derived.observations[1].chain_ids.push(4);
+        nothing_derived.observations[1].chain_ids.sort_unstable();
+        nothing_derived.observations[1].num_obs += 1;
+        assert_eq!(
+            residual_observation_of(&nothing_derived),
+            nothing_derived.observations.len(),
+            "no observation can be derived from this one"
+        );
+        let mut stored = Vec::new();
+        encode_record_body(&nothing_derived, &mut stored);
+
+        let mut the_residuals_list = Vec::new();
+        encode_read_list(&written.observations[0].chain_ids, &mut the_residuals_list);
         assert!(
-            bytes.len() > without_the_largest.len(),
-            "a record whose largest list is empty is smaller, so something was stored for it"
+            the_residuals_list.len() > 1,
+            "the residual has to name reads for its absence to be worth measuring"
+        );
+        assert!(
+            bytes.len() + the_residuals_list.len() <= stored.len() + 2,
+            "the derived body is about the residual's list shorter: {} against {}, and that \
+             list is {} bytes",
+            bytes.len(),
+            stored.len(),
+            the_residuals_list.len()
         );
     }
 
@@ -2400,6 +2478,7 @@ mod tests {
                 "reference-bases",
                 "observation-count",
                 "residual-observation",
+                "residual-read-count",
                 "observation-bases",
                 "witness-run-count",
                 "witness-run-start",
@@ -2419,6 +2498,28 @@ mod tests {
                 "repeat-left-flank",
                 "repeat-right-flank",
             ]
+        );
+
+        // **And the two chain-id fields are declared under the schemes that describe their
+        // bytes**, which is what a *later* reader stepping over one is driven by. ⚠ They shared a
+        // scheme when the second landed: `observation-reads` is one counted run of gaps and
+        // `chain-id-changes` is two, so a reader measuring a list under the changes' rule reads
+        // its identifiers as a departure count and then asks for an arrival count that is not
+        // there. Nothing round-trips a manifest here, so this is the assertion that holds it.
+        let declared: Vec<(String, FieldEncoding)> = record_fields()
+            .into_iter()
+            .map(|field| (field.name.0, field.encoding))
+            .collect();
+        assert!(
+            declared.contains(&(
+                "chain-id-changes".to_string(),
+                FieldEncoding::ChainIdChanges
+            )),
+            "the head's live-set changes are two counted runs"
+        );
+        assert!(
+            declared.contains(&("observation-reads".to_string(), FieldEncoding::ChainIdList)),
+            "an observation's own reads are one counted run"
         );
     }
 
@@ -2899,7 +3000,9 @@ mod tests {
             });
         assert_eq!(
             bytes_of(&with_one_that_is_derived) - bytes_of(&empty),
-            LEAST_BYTES_PER_OBSERVATION
+            LEAST_BYTES_PER_OBSERVATION + 1,
+            "a derived observation costs the constant plus the record's residual-read-count, \
+             which is per record and only written when something is derived"
         );
         assert_eq!(
             bytes_of(&with_one) - bytes_of(&empty),
@@ -4098,8 +4201,9 @@ mod tests {
         // record the writer *did* derive: the read count of the derived observation.
         //
         // reference-bases(1 + 7) + observation-count(1) + residual-observation(1)
-        // + observation-bases(1 + 7) + witness-run-count(1) + read-group(1) = 20.
-        const AT_THE_DERIVED_OBSERVATIONS_READ_COUNT: usize = 20;
+        // + residual-read-count(1) + observation-bases(1 + 7) + witness-run-count(1)
+        // + read-group(1) = 21.
+        const AT_THE_DERIVED_OBSERVATIONS_READ_COUNT: usize = 21;
         assert_eq!(
             bytes[AT_THE_DERIVED_OBSERVATIONS_READ_COUNT], 3,
             "the byte damaged below has to be the read count this fixture wrote"
@@ -4120,6 +4224,200 @@ mod tests {
             assert_eq!(field, "observation-reads", "{what}");
             assert!(reason.contains("derived list"), "{what}: {reason}");
         }
+    }
+
+    /// **A list that is not a set is written as one, rather than as different reads.**
+    ///
+    /// An observation's reads go on the wire as ascending gaps, so a repeated or out-of-order
+    /// identifier has no honest spelling. ⚠ Measured on the version that trusted its caller: an
+    /// observation handed `[3, 3]` wrote bytes that read back as the reads `[3, 4]` — gaining
+    /// read 4, which nothing folded, with neither side reporting anything. That is spec §5's
+    /// failure reached from the writer.
+    ///
+    /// `SequenceObservation::chain_ids` is a `pub` field documenting what the ids *mean* and not
+    /// what order they are in, and `encode_record_body` is a `pub` function. Both of ng's pileup
+    /// paths do sort and deduplicate; the codec no longer depends on it.
+    #[test]
+    fn a_list_that_is_not_a_set_is_written_as_the_set_it_names() {
+        for (what, given, wanted) in [
+            ("a repeat", vec![3u64, 3], vec![3u64]),
+            ("out of order", vec![7u64, 3], vec![3u64, 7]),
+            ("both", vec![5u64, 5, 1, 5], vec![1u64, 5]),
+        ] {
+            let mut record = a_record_naming_reads(&[&[], &[]]);
+            record.observations[0].chain_ids = given.clone();
+            record.observations[0].num_obs = given.len() as u32;
+            // The other observation names more, so the first one's list is the stored one.
+            record.observations[1].chain_ids = vec![100, 101, 102, 103];
+            record.observations[1].num_obs = 4;
+
+            let mut bytes = Vec::new();
+            encode_record_body(&record, &mut bytes);
+            let live = LiveSet::from_sorted_ids({
+                let mut every = wanted.clone();
+                every.extend_from_slice(&record.observations[1].chain_ids);
+                as_a_read_set(&mut every);
+                every
+            });
+            let decoded = decode_record_body(
+                &bytes,
+                record.region,
+                &live,
+                &RecordLayout::as_this_build_writes_it(),
+            )
+            .unwrap_or_else(|refused| panic!("{what}: {refused}"));
+            assert_eq!(
+                decoded.record.observations[0].chain_ids, wanted,
+                "{what}: {given:?} names the reads {wanted:?} and no others"
+            );
+        }
+    }
+
+    /// **A later writer's chain-id *list* is measured as a list**, which is one counted run where
+    /// the changes are two.
+    ///
+    /// ⚠ The two shared a scheme when this field first landed, and nothing noticed: stepping over
+    /// a list under the changes' rule reads its identifiers as a departure count and then asks
+    /// for an arrival count that is not there. `[5, 9]` is three bytes as a list and seven as a
+    /// set of changes.
+    #[test]
+    fn a_later_writers_chain_id_list_is_measured_as_a_list() {
+        let record = a_rich_record();
+        let mut fields = record_fields();
+        fields.push(FieldSpec {
+            name: FieldName("some-later-read-list".to_string()),
+            encoding: FieldEncoding::ChainIdList,
+        });
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
+            .expect("one unknown field at the end is not a reason to refuse the file");
+
+        let mut trailing = Vec::new();
+        encode_read_list(&[5, 9], &mut trailing);
+        assert_eq!(trailing.len(), 3, "a count and two gaps");
+
+        let mut body = Vec::new();
+        encode_record_body(&record, &mut body);
+        body.extend_from_slice(&trailing);
+
+        let decoded =
+            decode_record_body(&body, record.region, &the_live_reads_of(&record), &layout)
+                .expect("a field this reader does not know is measured, not refused");
+        assert_eq!(decoded.record, record);
+        assert_eq!(
+            decoded.bytes_read,
+            body.len(),
+            "the whole of the later writer's list was stepped over, and nothing else"
+        );
+    }
+
+    /// **A residual index past the record's own observations is damage.**
+    ///
+    /// ⚠ The bound had no test: deleting it left all 241 `ng::psp` tests green while a body
+    /// claiming observation 200 of a one-observation record flipped from refused to accepted.
+    /// The index is a `usize` the reader would then compare against a `Vec`'s length — which is
+    /// safe by luck rather than by check, and reports nothing.
+    #[test]
+    fn a_residual_index_past_the_records_observations_is_damage() {
+        // An empty reference, one observation, residual index 200.
+        let body = vec![0u8, 1, 200, 1];
+        let refused = decode_record_body(
+            &body,
+            a_region(1, 1),
+            &LiveSet::new(),
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect_err("observation 200 of a record holding one");
+        let RecordDecodeError::Malformed { field, reason, .. } = refused else {
+            panic!("got {refused:?}")
+        };
+        assert_eq!(field, "residual-observation");
+        assert!(reason.contains("200"), "{reason}");
+
+        // And the count itself is the sentinel for "none", which must still be accepted. Built
+        // through the encoder rather than by hand, so the tail of the body is whatever this
+        // build writes.
+        let names_nothing = a_record_naming_reads(&[&[]]);
+        assert_eq!(
+            residual_observation_of(&names_nothing),
+            names_nothing.observations.len(),
+            "an observation naming no reads is not worth deriving, so nothing is"
+        );
+        let mut none = Vec::new();
+        encode_record_body(&names_nothing, &mut none);
+        let decoded = decode_record_body(
+            &none,
+            names_nothing.region,
+            &LiveSet::new(),
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect("the observation count means no observation is derived");
+        assert_eq!(decoded.record, names_nothing);
+    }
+
+    /// **A live set carrying reads no observation named is refused**, which an inequality alone
+    /// could not do.
+    ///
+    /// Spec §5 proposes bounding the derived count by the observation's read count. That window
+    /// is `num_obs / 2` wide, and its slack is exactly the number of read pairs whose two mates
+    /// both cover this record — the shape paired-end data has. Measured by the review: a residual
+    /// naming two reads with `num_obs = 4`, against a live set carrying two identifiers no
+    /// observation named, derives a list of four, passes `4 <= 4` and `8 >= 4`, and the reference
+    /// allele silently gains two reads.
+    ///
+    /// The record carries the residual's *length* now, so the check is an equality and that
+    /// record is refused.
+    #[test]
+    fn a_live_set_carrying_reads_no_observation_named_is_refused() {
+        let mut record = a_record_naming_reads(&[&[10, 11], &[20]]);
+        // Both mates of each pair cover here, so the read count is twice the identifier count —
+        // the regime where the inequality has slack.
+        record.observations[0].num_obs = 4;
+        record.observations[1].num_obs = 2;
+
+        let mut bytes = Vec::new();
+        encode_record_body(&record, &mut bytes);
+
+        // What the writer meant: reads 10, 11 and 20 are live.
+        let honest = LiveSet::from_sorted_ids(vec![10, 11, 20]);
+        let decoded = decode_record_body(
+            &bytes,
+            record.region,
+            &honest,
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect("the record this writer wrote");
+        assert_eq!(decoded.record.observations[0].chain_ids, [10, 11]);
+
+        // And a live set with two reads nobody named: four derived where the record says two.
+        let phantom = LiveSet::from_sorted_ids(vec![10, 11, 12, 13, 20]);
+        let refused = decode_record_body(
+            &bytes,
+            record.region,
+            &phantom,
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect_err("two reads no observation named");
+        let RecordDecodeError::Malformed { field, reason, .. } = refused else {
+            panic!("got {refused:?}")
+        };
+        assert_eq!(field, "observation-reads");
+        assert!(
+            reason.contains("where the record says"),
+            "the equality is what catches this, not the inequality: {reason}"
+        );
+    }
+
+    /// **A tie for the largest list goes to the lower index**, which is what makes the choice a
+    /// function of the record alone — and so the file the same at any worker count.
+    ///
+    /// ⚠ Reversing the tie-break left all 4,778 library tests green.
+    #[test]
+    fn a_tie_for_the_largest_list_goes_to_the_lower_index() {
+        let record = a_record_naming_reads(&[&[3, 4], &[10, 11], &[20]]);
+        assert_eq!(residual_observation_of(&record), 0);
+
+        let the_other_way = a_record_naming_reads(&[&[20], &[10, 11], &[3, 4]]);
+        assert_eq!(residual_observation_of(&the_other_way), 1);
     }
 
     /// **The reads a record names are the union over all of its observations**, not the first
@@ -4587,15 +4885,25 @@ mod tests {
                 }),
                 _ => LocusKind::SsrBundle,
             };
-            // Chain ids on some observations, so that the oracle starts covering them the day
-            // Milestone E writes them. Distinct per record, so ids taken from another record's
-            // list would be visible.
+            // Chain ids on some observations, distinct per record so ids taken from another
+            // record's list would be visible.
+            //
+            // ⚠ **`num_obs` moves with the list, and that is what makes these records exercise
+            // the residual at all.** The writer refuses to derive a list whose length cannot
+            // describe its observation's read count, so while these observations kept
+            // `a_rich_record`'s 137 reads against two identifiers, **not one of the twelve
+            // records ever derived anything** — every one fell back to storing every list, and
+            // the whole record-level oracle below ran past the step it was extended for.
+            // Measured by the review that found it: a probe that panics on the derive path fired
+            // in 8 tests of 241 before this line, and 16 after.
             for (which, observation) in record.observations.iter_mut().enumerate().take(2) {
                 if index % 3 == 1 {
                     observation.chain_ids = vec![
                         (index * 100 + which) as u64,
                         (index * 100 + which + 7) as u64,
                     ];
+                    observation.num_obs = observation.chain_ids.len() as u32;
+                    observation.num_fwd = observation.num_fwd.min(observation.num_obs);
                 }
             }
 

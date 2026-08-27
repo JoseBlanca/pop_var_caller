@@ -19,7 +19,32 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **one observation's reads are not stored — they are the
+> - **Last completed task (2026-08-28):** **E4 reviewed — a change made in that very step removed
+> a guard rather than adding one, and the fixtures never reached the step at all**
+> (the eight-checklist review of step E4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). **Milestone E is complete and this is Checkpoint E.** Three agents, 29
+> mutations, **14,720,000 fuzzed inputs**, two Blockers. **The first was mine, made an hour
+> earlier.** A read list goes on the wire as ascending gaps; a list that is not ascending used to
+> produce bytes the reader *refused by name*, and I made that arithmetic saturate instead — after
+> which the same list is accepted and names **different reads**: `[3, 3]` reads back as `[3, 4]`.
+> An observation gains a read nothing folded, silently, which is exactly the failure the spec
+> names. All three agents found it. Fixed by removing the precondition rather than documenting it:
+> the codec makes the list a set itself. **The second: the residual index bound had no test** —
+> deleting it left all 241 tests green while a body claiming observation 200 of a one-observation
+> record flipped from refused to accepted. **And the fixtures never derived anything.** The
+> multi-record fixture gave reads to two observations but left the read count at 137, so two
+> identifiers against 137 reads failed the writer's own check and not one of twelve records ever
+> derived a residual — a probe that panics on that path fired in 8 tests of 241, and in 20 after
+> the fix. **One design change came out of it**: the guard was an inequality whose slack is
+> exactly the number of read pairs whose two mates both cover a record — the shape paired-end data
+> has — so a live set carrying two reads nobody named passed it. The record carries the residual's
+> *length* now, one varint, and the check is an equality. Ten defects re-injected, nine caught and
+> the tenth reported as unreachable.
+> [the review](doc/devel/reports/reviews/ng_psp_e4_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e4_2026-08-28.md).
+>
+> - **Previously (2026-08-27):** **one observation's reads are not stored — they are the
 > live set minus every other observation's** (step E4 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). **Milestone E is complete and this is Checkpoint E.** The changes in a record's

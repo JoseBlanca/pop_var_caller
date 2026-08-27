@@ -270,15 +270,26 @@ fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], merged_ids: &mut Vec<
 /// **This is the half of the column that carries no state**, so it lives in a record's skippable
 /// body while the changes live in its head (spec `psp_record_encoding.md` §6). It is the ~3.4 % of
 /// ids production stored before the 2026-08-17 ruling.
-/// **⚠ `ids` must be ascending and distinct**, which is what both of ng's pileup paths produce —
-/// each sorts and deduplicates before it hands an observation over. A caller that cannot promise
-/// it should pass the list through [`as_a_read_set`] first: the gaps below are `next - previous
-/// - 1`, so an out-of-order pair underflows.
+/// **`ids` need not arrive ascending or distinct, and that is the point of the check below.**
+/// The bytes are gaps, so a list that is not a set cannot be written as it stands — and the
+/// alternative to normalising here was a precondition on a `pub` path whose only enforcement was
+/// a `debug_assert` the shipped profile removes. ⚠ Measured on that version: an observation handed
+/// `[3, 3]` wrote bytes that read back as the reads `[3, 4]`, gaining a read nothing folded.
+///
+/// **It costs one pass and no allocation in the case that happens.** Both of ng's pileup paths
+/// sort and deduplicate before handing an observation over, so the copy below is the branch
+/// nothing takes.
 pub(super) fn encode_read_list(ids: &[ChainId], out: &mut Vec<u8>) {
-    debug_assert!(
-        ids.windows(2).all(|pair| pair[0] < pair[1]),
-        "an observation's reads are ascending and distinct: {ids:?}"
-    );
+    if ids.windows(2).all(|pair| pair[0] < pair[1]) {
+        write_a_read_list(ids, out);
+    } else {
+        let mut a_set = ids.to_vec();
+        as_a_read_set(&mut a_set);
+        write_a_read_list(&a_set, out);
+    }
+}
+
+fn write_a_read_list(ids: &[ChainId], out: &mut Vec<u8>) {
     put_varint(out, ids.len() as u64);
     let mut previous: Option<u64> = None;
     for id in ids {
@@ -503,12 +514,22 @@ fn encode_changes(changes: &LiveSetChanges, live: &LiveSet, out: &mut Vec<u8>) {
 fn gap_from(previous: Option<u64>, value: u64) -> u64 {
     match previous {
         None => value,
-        // **Saturating, and it cannot fire on a caller keeping its promise.** Every run written
-        // through here is ascending and distinct — the arrivals and the departure positions by
-        // construction, an observation's reads by its producer's — and a caller that broke that
-        // would otherwise get a panic in a writer rather than a wrong byte. `debug_assert`s at
-        // both call sites are what catch it in a test.
-        Some(previous) => value.saturating_sub(previous).saturating_sub(1),
+        // ⚠ **Wrapping, and deliberately not saturating — and today unreachable.** Every run
+        // written through here is ascending and distinct: the arrivals and the departure
+        // positions by construction, an observation's reads because [`encode_read_list`] makes
+        // them so before it gets here. So no test can reach this arm, and swapping wrapping for
+        // saturating fails nothing — which is reported rather than left implying otherwise.
+        //
+        // It is wrapping anyway, because neither a panic nor a plausible wrong byte is the right
+        // answer if that ever stops being true.
+        //
+        // A wrapped gap is enormous, so [`value_after`]'s `checked_add` refuses it and the reader
+        // names the file as damaged. **Saturating instead, which this line briefly was, turns
+        // that refusal into silence**: measured, an observation handed `[3, 3]` wrote bytes that
+        // read back as the reads `[3, 4]`, so it gained read 4 — a read nothing folded, which is
+        // spec §5's failure reached from the writer. A reader that cannot trust the bytes must at
+        // least be able to refuse them.
+        Some(previous) => value.wrapping_sub(previous).wrapping_sub(1),
     }
 }
 

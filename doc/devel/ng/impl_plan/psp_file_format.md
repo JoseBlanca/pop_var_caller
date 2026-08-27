@@ -199,6 +199,17 @@ at most the observation's read count and at least half of it, since at most two 
 ***Depends:*** E3. ***Source:*** [spec psp_chain_id_encoding §5](../spec/psp_chain_id_encoding.md).
 
 > **Checkpoint E: chain ids round-trip exactly, including ids that go live twice. Pause for review.**
+>
+> ✅ **Reviewed** — four rounds of eight checklists (E1–E4), each in isolated worktrees:
+> [E1](../../reports/reviews/ng_psp_e1_2026-08-27.md) ·
+> [E2](../../reports/reviews/ng_psp_e2_2026-08-27.md) ·
+> [E3](../../reports/reviews/ng_psp_e3_2026-08-27.md) ·
+> [E4](../../reports/reviews/ng_psp_e4_2026-08-28.md), with their fix reports beside them.
+> **What Milestone E leaves unmeasured is what the column costs**: spec
+> [`psp_chain_id_encoding.md`](../spec/psp_chain_id_encoding.md) §7 wants the compressed bytes, the
+> reader's peak resident live set, and a full scan against a seek, on both corpora. None of that
+> can be taken until Milestone F opens a file, and every figure quoted through E is the spec's own,
+> from a prototype over alignments rather than from this writer.
 
 ## Milestone F — the container
 

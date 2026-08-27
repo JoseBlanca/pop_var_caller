@@ -4904,6 +4904,10 @@ mod tests {
                     })
                     .collect();
                 let mut record = a_record(0, at + 1, 1);
+                // **`num_obs` moves with the list**, or the writer refuses to derive this
+                // record's residual and the fixture never reaches the path it was built for.
+                record.observations[0].num_obs = live.len() as u32;
+                record.observations[0].num_fwd = 0;
                 record.observations[0].chain_ids = live;
                 record
             })
@@ -4974,8 +4978,10 @@ mod tests {
         let records: Vec<_> = (1..1_400u64)
             .map(|at| {
                 let mut record = an_incompressible_record(at);
-                record.observations[0].chain_ids =
-                    (at.saturating_sub(19)..=at).map(|id| id * 3).collect();
+                let live: Vec<ChainId> = (at.saturating_sub(19)..=at).map(|id| id * 3).collect();
+                record.observations[0].num_obs = live.len() as u32;
+                record.observations[0].num_fwd = 0;
+                record.observations[0].chain_ids = live;
                 record
             })
             .collect();

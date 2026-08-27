@@ -257,6 +257,16 @@ pub enum FieldEncoding {
     /// or renames; what the measure-and-step-over path exists for is a *later* writer putting
     /// another one at the end of a body, which nothing today does.
     ChainIdChanges,
+    /// **One observation's own reads**: a count, then the identifiers as ascending gaps.
+    ///
+    /// A different shape from [`ChainIdChanges`](Self::ChainIdChanges), which is *two* counted
+    /// runs — so the two cannot share a scheme even though both are runs of identifiers. ⚠ They
+    /// briefly did, and a reader stepping over a field of one under the other's rule measures the
+    /// wrong number of bytes: `[5, 9]` is three bytes as a list and seven as a set of changes.
+    ///
+    /// **This one may be stepped over**, unlike the changes, because it carries no state: it is
+    /// the half of the chain-id column that lives in a record's skippable body.
+    ChainIdList,
 }
 
 // ---------------------------------------------------------------------
@@ -771,7 +781,8 @@ fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), Broke
         FieldEncoding::Varint
         | FieldEncoding::SignedVarint
         | FieldEncoding::LengthPrefixedBytes
-        | FieldEncoding::ChainIdChanges => {}
+        | FieldEncoding::ChainIdChanges
+        | FieldEncoding::ChainIdList => {}
     }
     Ok(())
 }
@@ -1007,7 +1018,7 @@ impl WireHeader {
 ///
 /// The parameters here are placeholders: the array names the schemes, and each field's own
 /// parameter is read from the header beside it.
-const ALL_ENCODINGS: [FieldEncoding; 7] = [
+const ALL_ENCODINGS: [FieldEncoding; 8] = [
     FieldEncoding::Varint,
     FieldEncoding::SignedVarint,
     FieldEncoding::FixedWidthInteger { width_bytes: 1 },
@@ -1015,6 +1026,7 @@ const ALL_ENCODINGS: [FieldEncoding; 7] = [
     FieldEncoding::FixedPoint { steps_per_unit: 1 },
     FieldEncoding::LengthPrefixedBytes,
     FieldEncoding::ChainIdChanges,
+    FieldEncoding::ChainIdList,
 ];
 
 impl FieldEncoding {
@@ -1036,6 +1048,7 @@ impl FieldEncoding {
             }
             FieldEncoding::LengthPrefixedBytes => ("length-prefixed-bytes", None, None),
             FieldEncoding::ChainIdChanges => ("chain-id-changes", None, None),
+            FieldEncoding::ChainIdList => ("chain-id-list", None, None),
         }
     }
 }
@@ -1093,6 +1106,7 @@ fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
         FieldEncoding::SignedVarint => FieldEncoding::SignedVarint,
         FieldEncoding::LengthPrefixedBytes => FieldEncoding::LengthPrefixedBytes,
         FieldEncoding::ChainIdChanges => FieldEncoding::ChainIdChanges,
+        FieldEncoding::ChainIdList => FieldEncoding::ChainIdList,
         FieldEncoding::FixedWidthInteger { .. } => FieldEncoding::FixedWidthInteger {
             width_bytes: field.width_bytes.ok_or_else(|| missing("width"))?,
         },
@@ -1953,7 +1967,7 @@ mod tests {
         let refused = decoded(&one_field_declared_as(
             "name = \"chain-ids\"\nencoding = \"roaring-bitmap\"\n",
         ))
-        .expect_err("that is not one of the seven");
+        .expect_err("that is not one of the eight");
         let said = refused.to_string();
         assert!(said.contains("roaring-bitmap"), "got {said}");
         for known in ALL_ENCODINGS {
@@ -1997,7 +2011,8 @@ mod tests {
             | FieldEncoding::IeeeFloat { .. }
             | FieldEncoding::FixedPoint { .. }
             | FieldEncoding::LengthPrefixedBytes
-            | FieldEncoding::ChainIdChanges => 7,
+            | FieldEncoding::ChainIdChanges
+            | FieldEncoding::ChainIdList => 8,
         };
         assert_eq!(
             ALL_ENCODINGS.len(),
