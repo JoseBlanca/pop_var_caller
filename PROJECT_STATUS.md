@@ -24,8 +24,8 @@ Skills and agents are instructed to leave it untouched.
 > [prepass_calling_handover.md](doc/devel/ng/impl_plan/prepass_calling_handover.md)). The pre-pass
 > reports a run three ways — per sample from the SNP/indel path, per sample from the repeat tracts,
 > and once over the whole cohort — and calling reads one object. **Nothing built that object**: its
-> constructor had ten callers and all ten were its own tests, each handing it values written by
-> hand. One function now does it and computes nothing of its own. **A sample whose inbreeding
+> constructor was called from 28 places and every one was its own tests, each handing it values
+> written by hand. One function now does it and computes nothing of its own. **A sample whose inbreeding
 > coefficient was never fitted stops the run and is named** — not defaulted, and not taken from the
 > cohort fit's homozygote excess, which is measured by the very fit whose diversity the coefficient
 > exists to correct.

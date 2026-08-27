@@ -10,8 +10,10 @@ run**.
 The parameter pre-pass measures what a run's data is like and reports it three ways: one value per
 sample from the SNP/indel path, one value per sample from the repeat tracts, and one fit over the
 whole cohort at once. Calling reads a single object, `RunParameters`. **Nothing built that object
-from what the pre-pass produced** — the constructor had ten callers and all ten were in its own
-test module, each handing it values written by hand. There is now one function that does it,
+from what the pre-pass produced** — the constructor was called from 28 places at the branch point
+and every one of them was inside its own test module, each handing it values written by hand. (The
+plan says ten; counted at `629e84ff` it is 28, and the point is the same: none of them was a run.)
+There is now one function that does it,
 `RunParameters::from_prepass`, and it computes nothing: every number it hands on was measured by
 one of the three.
 
