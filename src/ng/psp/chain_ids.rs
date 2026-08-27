@@ -105,6 +105,18 @@ impl LiveSet {
         self.ids.is_empty()
     }
 
+    /// Build a set straight from ids that are already ascending and distinct.
+    ///
+    /// **For a caller that has the whole set in hand** — the writer deciding which observation
+    /// it can derive — rather than one stepping through changes.
+    pub(super) fn from_sorted_ids(ids: Vec<ChainId>) -> Self {
+        debug_assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "a live set is ascending and without duplicates"
+        );
+        Self { ids }
+    }
+
     /// Whether `id` is live. A binary search, because the set is sorted.
     #[must_use]
     pub fn contains(&self, id: ChainId) -> bool {
@@ -247,6 +259,84 @@ fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], merged_ids: &mut Vec<
     merged_ids.extend_from_slice(&live.ids[was..]);
     merged_ids.extend_from_slice(&arrived[arriving..]);
     std::mem::swap(&mut live.ids, merged_ids);
+}
+
+/// Write one observation's own list of reads: a count, then the identifiers as ascending gaps.
+///
+/// **The same shape as the arrivals half of a record's changes**, for the same reason — the ids
+/// are ascending and distinct, so consecutive ones differ by at least one and a dense run costs a
+/// byte each.
+///
+/// **This is the half of the column that carries no state**, so it lives in a record's skippable
+/// body while the changes live in its head (spec `psp_record_encoding.md` §6). It is the ~3.4 % of
+/// ids production stored before the 2026-08-17 ruling.
+/// **⚠ `ids` must be ascending and distinct**, which is what both of ng's pileup paths produce —
+/// each sorts and deduplicates before it hands an observation over. A caller that cannot promise
+/// it should pass the list through [`as_a_read_set`] first: the gaps below are `next - previous
+/// - 1`, so an out-of-order pair underflows.
+pub(super) fn encode_read_list(ids: &[ChainId], out: &mut Vec<u8>) {
+    debug_assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "an observation's reads are ascending and distinct: {ids:?}"
+    );
+    put_varint(out, ids.len() as u64);
+    let mut previous: Option<u64> = None;
+    for id in ids {
+        put_varint(out, gap_from(previous, *id));
+        previous = Some(*id);
+    }
+}
+
+/// Read one observation's own list of reads into `into`, which is cleared first.
+///
+/// # Errors
+///
+/// [`RecordDecodeError::Truncated`] when the bytes run out, and
+/// [`RecordDecodeError::Malformed`] for a count no record could hold or a gap walking past the
+/// largest identifier there is.
+pub(super) fn decode_read_list(
+    reader: &mut FieldReader<'_>,
+    field: &'static str,
+    into: &mut Vec<ChainId>,
+) -> Result<(), RecordDecodeError> {
+    into.clear();
+    let count = reader.read_count(field, LEAST_BYTES_PER_ENTRY)?;
+    let mut previous: Option<u64> = None;
+    for _ in 0..count {
+        let id = read_ascending(reader, field, "id", previous)?;
+        into.push(id);
+        previous = Some(id);
+    }
+    Ok(())
+}
+
+/// The reads the residual observation names: **the live set minus every other observation's**.
+///
+/// `named_elsewhere` is the ascending, deduplicated union of the lists the record stores
+/// explicitly. Both inputs are sorted, so this is one pass.
+///
+/// **This is where most of the column's saving is and where it fails silently** (spec
+/// `psp_chain_id_encoding.md` §5): derive one id too many and the reference allele gains a read
+/// that does not exist, which the cohort merge composes an allele for without complaint. The
+/// guard is the caller's — an observation's derived count against its own read count — and
+/// `record.rs` applies it.
+pub(super) fn residual_reads(live: &LiveSet, named_elsewhere: &[ChainId], into: &mut Vec<ChainId>) {
+    into.clear();
+    let mut elsewhere = 0usize;
+    for id in &live.ids {
+        while elsewhere < named_elsewhere.len() && named_elsewhere[elsewhere] < *id {
+            elsewhere += 1;
+        }
+        if elsewhere < named_elsewhere.len() && named_elsewhere[elsewhere] == *id {
+            continue;
+        }
+        into.push(*id);
+    }
+}
+
+/// Sort `ids` ascending and drop duplicates — the shape both halves of this column want.
+pub(super) fn as_a_read_set(ids: &mut Vec<ChainId>) {
+    sort_and_dedup(ids);
 }
 
 /// Write a record's live-set changes, and carry the set forward.
@@ -413,7 +503,12 @@ fn encode_changes(changes: &LiveSetChanges, live: &LiveSet, out: &mut Vec<u8>) {
 fn gap_from(previous: Option<u64>, value: u64) -> u64 {
     match previous {
         None => value,
-        Some(previous) => value - previous - 1,
+        // **Saturating, and it cannot fire on a caller keeping its promise.** Every run written
+        // through here is ascending and distinct — the arrivals and the departure positions by
+        // construction, an observation's reads by its producer's — and a caller that broke that
+        // would otherwise get a panic in a writer rather than a wrong byte. `debug_assert`s at
+        // both call sites are what catch it in a test.
+        Some(previous) => value.saturating_sub(previous).saturating_sub(1),
     }
 }
 

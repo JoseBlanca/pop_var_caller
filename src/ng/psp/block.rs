@@ -1536,7 +1536,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     // Reading it applied this record's chain-id changes, so parsing it a second
                     // time to reach the body would apply them twice.
                     let record = if want(&head) {
-                        match decode_the_body_of(&found, &self.layout) {
+                        match decode_the_body_of(&found, self.live_reads.live(), &self.layout) {
                             Ok(decoded) => Some(decoded.record),
                             Err(refused) => {
                                 return Some(Err(self.fail(BlockReadError::from_record(refused))));

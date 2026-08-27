@@ -192,7 +192,7 @@ two-stretch ids on the fixture and asserts they all come back.
 carry state, so a skipped body must not strand them.
 ***Depends:*** E2, C3. ***Source:*** [spec psp_record_encoding §6](../spec/psp_record_encoding.md).
 
-☐ **E4 — the derived residual, and the check that guards it.** The residual observation's ids are the
+✅ **E4 — the derived residual, and the check that guards it.** The residual observation's ids are the
 live set minus the others; reads the depth cap discarded and reads that produced no observation must
 not leak in. **Own commit.** The oracle is the inequality the walk already asserts: a derived list is
 at most the observation's read count and at least half of it, since at most two mates share an id.

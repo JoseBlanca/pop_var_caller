@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **E3 reviewed — the live set moved before the record
+> - **Last completed task (2026-08-27):** **one observation's reads are not stored — they are the
+> live set minus every other observation's** (step E4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **Milestone E is complete and this is Checkpoint E.** The changes in a record's
+> head already carry the union of the reads that record names, so storing every observation's own
+> list beside them writes that union twice; the largest list is left out and derived instead.
+> That is where this column's saving is, and where it fails silently — derive one read too many
+> and the reference allele gains a read that does not exist, which the cohort merge composes an
+> allele for without complaint. **The guard is an inequality against a number the record already
+> carries**: a list of identifiers is at most the observation's read count and at least half of
+> it, because an identifier names one read or two. **Two things the spec assumed away and the
+> code does not.** A chain id names a read *pair*, so if both mates cover one record and show
+> different sequences the same identifier is in two observations — and the subtraction would drop
+> it from the residual. The writer derives, compares, and **falls back to storing every list when
+> the two differ**, because Checkpoint E asks for chain ids that round-trip *exactly*. And the
+> writer checks the reader's own inequality before it derives, so it can never produce a record
+> its own reader refuses. Eight defects injected, eight caught. **The format changed** — two body
+> fields — and the golden-bytes fixture with it; the version did not rise, because no psp file
+> exists yet to be incompatible with.
+> [E4](doc/devel/reports/implementations/ng_psp_e4_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E3 reviewed — the live set moved before the record
 > could still be refused, which is E1's defect one level up** (the eight-checklist review of step
 > E3 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`,
 > status `fixes-applied`). Three agents, 35 mutations, **12,000,000 fuzzed inputs**, two Blockers.
