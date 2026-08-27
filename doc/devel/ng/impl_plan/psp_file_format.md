@@ -182,7 +182,7 @@ oracle green either side.
 each block's start.
 ***Depends:*** D5. ***Source:*** [spec psp_chain_id_encoding §4](../spec/psp_chain_id_encoding.md).
 
-☐ **E2 — re-entry.** An id may go live, stop, and go live again, because a pair's mates rarely
+✅ **E2 — re-entry.** An id may go live, stop, and go live again, because a pair's mates rarely
 overlap — **83 % of ids on the human sample and 91 % on tomato**. A stream that assumes one stretch
 per id silently loses the second mate of nine reads in ten. **Own commit**, and the oracle counts
 two-stretch ids on the fixture and asserts they all come back.

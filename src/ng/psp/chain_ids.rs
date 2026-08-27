@@ -635,6 +635,8 @@ fn value_after(previous: Option<u64>, gap: u64) -> Option<u64> {
 mod tests {
     use super::*;
 
+    use std::collections::{BTreeMap, BTreeSet};
+
     use proptest::prelude::*;
 
     /// Write a whole file's worth of records and read them back, restarting at every block.
@@ -707,6 +709,55 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Coverage that looks like **read pairs**: `pairs_starting` pairs begin at every position,
+    /// each mate `read_length` bases long with `mate_gap` unsequenced bases between them, and one
+    /// identifier names the whole pair.
+    ///
+    /// **So an identifier covers two stretches with a hole between them**, which is what makes a
+    /// read go live, stop, and go live again. Spec `psp_record_encoding.md` §6 measures that on
+    /// real alignments: 83 % of identifiers on the human sample and 91 % on tomato.
+    fn a_paired_end_coverage(
+        positions: u64,
+        pairs_starting: u64,
+        read_length: u64,
+        mate_gap: u64,
+    ) -> Vec<Vec<ChainId>> {
+        let pair_span = read_length * 2 + mate_gap;
+        (0..positions)
+            .map(|at| {
+                let earliest = at.saturating_sub(pair_span - 1);
+                (earliest..=at)
+                    .filter(|start| {
+                        let into_the_pair = at - start;
+                        into_the_pair < read_length
+                            || (read_length + mate_gap..pair_span).contains(&into_the_pair)
+                    })
+                    .flat_map(|start| {
+                        (0..pairs_starting).map(move |which| start * pairs_starting + which)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// How many separate stretches of records each identifier covers — one for a read that is
+    /// live over a run and then gone, two for a pair whose mates do not overlap.
+    ///
+    /// **The oracle's own measure**, so a fixture that quietly stopped containing re-entry shows
+    /// up as a number rather than as a test that still passes.
+    fn stretches_of(records: &[Vec<ChainId>]) -> BTreeMap<ChainId, usize> {
+        let mut stretches: BTreeMap<ChainId, usize> = BTreeMap::new();
+        let mut live_last_time: BTreeSet<ChainId> = BTreeSet::new();
+        for record in records {
+            let now: BTreeSet<ChainId> = record.iter().copied().collect();
+            for id in now.difference(&live_last_time) {
+                *stretches.entry(*id).or_default() += 1;
+            }
+            live_last_time = now;
+        }
+        stretches
     }
 
     #[test]
@@ -1040,6 +1091,142 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Re-entry: a read goes live, stops, and goes live again
+    // -----------------------------------------------------------------
+
+    /// **Most reads go live twice, and every one of them comes back.**
+    ///
+    /// A chain id names a read *pair*, with the mates collapsed onto one identifier, and a pair's
+    /// mates rarely overlap — so the id covers two stretches with an unsequenced hole between
+    /// them. Spec `psp_record_encoding.md` §6 measures that at **83 % of identifiers on the human
+    /// sample and 91 % on tomato**, and says what a stream that assumed one stretch per id would
+    /// do: *"loses the second mate of nine reads in ten — silently, because the merge would simply
+    /// see a read that was not there."*
+    ///
+    /// So the assertion is not that the walk came out right. It is that **the fixture contains the
+    /// thing**, counted, and that the thing survives:
+    ///
+    /// - how many identifiers cover two stretches rather than one, as a fraction, so a fixture
+    ///   that quietly stopped containing re-entry fails here rather than passing quietly;
+    /// - that the writer emitted **one arrival per stretch**, not one per identifier — which is
+    ///   exactly what a writer that assumed one stretch per id would get wrong, and what nothing
+    ///   downstream could then recover;
+    /// - and that every record's set reads back, so a second stretch that was written is also
+    ///   read.
+    #[test]
+    fn most_reads_go_live_twice_and_every_one_of_them_comes_back() {
+        // Two pairs starting at every position, 30-base mates, a 40-base hole between them.
+        // Measured: 800 identifiers over 400 records, 660 of them (82.5 %) covering two stretches
+        // and 1,460 stretches in all — so a stream naming each identifier once would carry 800
+        // arrivals and lose 660 second mates. The 140 that cover one stretch are the pairs whose
+        // second mate falls off the end of the fixture.
+        let records = a_paired_end_coverage(400, 2, 30, 40);
+        let stretches = stretches_of(&records);
+
+        let went_live_twice = stretches.values().filter(|count| **count == 2).count();
+        let all_of_them = stretches.len();
+        assert!(
+            went_live_twice * 10 > all_of_them * 8,
+            "the fixture has to contain re-entry to say anything about it: {went_live_twice} of \
+             {all_of_them} identifiers cover two stretches, and the corpora this is modelled on \
+             are 83 % and 91 %"
+        );
+        assert!(
+            stretches.values().all(|count| *count <= 2),
+            "a pair has two mates, so no identifier should reach three stretches here"
+        );
+
+        // **One arrival per stretch, not one per identifier.** This is the number a writer that
+        // assumed one stretch per id would get wrong, and it is measured on the bytes rather than
+        // inferred: the reader reports what it read.
+        let all_the_stretches: usize = stretches.values().sum();
+        let written = write_a_file(std::slice::from_ref(&records));
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        let mut arrivals = 0usize;
+        let mut back = Vec::new();
+        for bytes in &written {
+            reader.read_changes(bytes).expect("it reads");
+            arrivals += reader.changes().arrived().len();
+            back.push(reader.live().ids().to_vec());
+        }
+        assert_eq!(
+            arrivals, all_the_stretches,
+            "one arrival a stretch: {all_of_them} identifiers cover {all_the_stretches} stretches, \
+             and a stream that named each identifier once would carry {all_of_them}"
+        );
+
+        // And every record's set, so a second stretch that was written is also read.
+        let wanted: Vec<_> = records.iter().map(|ids| as_a_set(ids)).collect();
+        assert_eq!(back, wanted);
+    }
+
+    /// **A read that comes back after a block boundary is restated, not remembered.**
+    ///
+    /// The two rules meet here: the live set restarts at every block (spec §3.2), and a read may
+    /// go live twice. A read still covering across the boundary arrives again in the new block —
+    /// which is the restatement — and a read whose *second* mate begins after the boundary
+    /// arrives there for the first time in that block, with nothing to say it is the same read.
+    /// Both are ordinary arrivals, and that is the point: the reader carries nothing across.
+    #[test]
+    fn a_read_that_comes_back_across_a_block_boundary_arrives_again() {
+        // One read pair, id 4: mates over records 0-1 and 4-5. The block cuts at record 3.
+        let first_block = vec![vec![4u64], vec![4u64], vec![], vec![]];
+        let second_block = vec![vec![4u64], vec![4u64], vec![]];
+
+        let written = write_a_file(&[first_block.clone(), second_block.clone()]);
+        let mut reader = LiveSetReader::new();
+
+        reader.start_block();
+        let mut arrivals_in_the_first = 0usize;
+        for bytes in &written[..first_block.len()] {
+            reader.read_changes(bytes).expect("it reads");
+            arrivals_in_the_first += reader.changes().arrived().len();
+        }
+        assert_eq!(arrivals_in_the_first, 1, "one mate, one arrival");
+        assert!(
+            reader.live().is_empty(),
+            "and it has gone by the block's end"
+        );
+
+        // A reader that starts *here*, with no history at all — Milestone F's index will hand one
+        // exactly this.
+        let mut alone = LiveSetReader::new();
+        alone.start_block();
+        let mut back = Vec::new();
+        for bytes in &written[first_block.len()..] {
+            alone.read_changes(bytes).expect("it reads");
+            back.push(alone.live().ids().to_vec());
+        }
+        assert_eq!(
+            back,
+            vec![vec![4], vec![4], vec![]],
+            "the second mate arrives in its own block, and nothing had to be remembered"
+        );
+    }
+
+    /// **An identifier may go live more than twice**, and nothing here counts.
+    ///
+    /// Two mates is what a pair gives, but a read that straddles the boundary between two walked
+    /// regions is met twice and named twice, and a spliced alignment can leave more than one hole.
+    /// The encoding has no notion of *how many times*; this is the test that says so.
+    #[test]
+    fn an_identifier_that_goes_live_five_times_reads_back() {
+        let records: Vec<Vec<ChainId>> = (0..20u64)
+            .map(|at| if at % 4 < 2 { vec![9u64] } else { Vec::new() })
+            .collect();
+        let stretches = stretches_of(&records);
+        assert_eq!(
+            stretches.get(&9),
+            Some(&5),
+            "the fixture must give this identifier five stretches"
+        );
+
+        let (back, _) = round_trip(std::slice::from_ref(&records));
+        assert_eq!(back, records);
+    }
+
     /// **An id that goes live, stops, and goes live again while larger ids are live.**
     ///
     /// A pair's mates rarely overlap, so most identifiers cover two stretches — spec
@@ -1271,6 +1458,50 @@ mod tests {
             }
             prop_assert_eq!(back, wanted);
             prop_assert_eq!(at, stream.len());
+        }
+
+        /// **Any pattern of comings and goings round trips**, however many times a read leaves
+        /// and returns.
+        ///
+        /// Each generated read is a mask over the records — live where the mask says so — so the
+        /// generator produces every re-entry shape there is, including the ones a pair does not
+        /// make: three stretches, four, a read live only at the last record, a read that never
+        /// goes live at all. The assertion carries the count, so a shrink that removed the
+        /// re-entry would fail rather than pass quietly.
+        #[test]
+        fn any_pattern_of_comings_and_goings_round_trips(
+            masks in prop::collection::vec(prop::collection::vec(any::<bool>(), 1..30), 1..12),
+        ) {
+            let records: Vec<Vec<ChainId>> = (0..masks[0].len())
+                .map(|at| {
+                    masks
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mask)| *mask.get(at).unwrap_or(&false))
+                        .map(|(read, _)| read as ChainId)
+                        .collect()
+                })
+                .collect();
+
+            let (back, _) = round_trip(std::slice::from_ref(&records));
+            prop_assert_eq!(&back, &records);
+
+            // The reader met every stretch of every read, and no more.
+            let stretches = stretches_of(&records);
+            let mut writer = LiveSetWriter::new();
+            writer.start_block();
+            let mut reader = LiveSetReader::new();
+            reader.start_block();
+            let mut arrivals = 0usize;
+            for record in &records {
+                let mut bytes = Vec::new();
+                writer.write_changes(record.iter().copied(), &mut bytes);
+                reader
+                    .read_changes(&bytes)
+                    .map_err(|refused| TestCaseError::fail(refused.to_string()))?;
+                arrivals += reader.changes().arrived().len();
+            }
+            prop_assert_eq!(arrivals, stretches.values().sum::<usize>());
         }
 
         /// **Arbitrary bytes are refused, or leave the live set a set** — ascending and without

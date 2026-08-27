@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **E1 reviewed — a short read left the live set
+> - **Last completed task (2026-08-27):** **a read goes live, stops, and goes live again — and
+> most of them do** (step E2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `implemented`). A chain id names a read *pair* with its mates
+> collapsed onto one identifier, and a pair's mates rarely overlap, so the identifier covers two
+> stretches of reference with an unsequenced hole between them. On real alignments that is **83 %
+> of identifiers on the human sample and 91 % on tomato**, and a stream that assumed one stretch
+> per identifier would lose the second mate of nine reads in ten — silently, because the merge
+> would simply see a read that was not there. **E1's encoding already handles it**: an identifier
+> that departed at one record and arrives at a later one is an ordinary arrival, since nothing in
+> the codec remembers what has been named. So this step adds no bytes; what it owes is the
+> oracle, and the oracle is not "the walk came out right" — a walk agrees with itself under a
+> writer that loses every second mate. It asserts three things: that the fixture **contains**
+> re-entry, counted (660 of 800 identifiers cover two stretches, 82.5 %); that the writer emitted
+> **one arrival per stretch and not one per identifier** (1,460 stretches against 800 identifiers,
+> so a one-stretch stream would lose 660 second mates); and that every record's set reads back.
+> Four defects injected, four caught — including one in the oracle's own measuring instrument,
+> which is the way an oracle passes for the same reason the code would.
+> [E2](doc/devel/reports/implementations/ng_psp_e2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E1 reviewed — a short read left the live set
 > half-advanced, and the retry it instructs silently dropped a read** (the eight-checklist review
 > of step E1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`, status `fixes-applied`). Three agents, 19 mutations, **1,500,000 fuzzed
