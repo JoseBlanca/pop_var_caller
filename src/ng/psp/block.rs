@@ -384,6 +384,25 @@ impl OpenBlock {
 ///   is a large thing to hold while writing (spec §4.1; spec §12 question 2 is still open on
 ///   what the value should be, which is why the default is no ceiling at all).
 ///
+/// **A grid cell holding no records produces no block.** The rule above decides where a block
+/// *ends*; it never asks for one per 100 kb of reference. A sample covering two cells ninety
+/// apart writes two blocks, so a thin sample pays no index entry and no compressed frame for
+/// reference it did not cover.
+///
+/// **And blocks that are merely *small* are not merged, which is a ruling rather than an
+/// omission.** Spec §4.1 offers a second secondary rule — accumulate across empty stretches so a
+/// patchy sample gets one large block instead of several thin ones, each compressing from cold —
+/// and spec §12 question 3 says it ships, leaving only its threshold open. **The owner ruled
+/// against it on 2026-08-27: merging would complicate the alignment between samples.** That is
+/// the property the grid exists for: every sample's boundaries fall on the same coordinates, so
+/// a cohort reader stepping across a region knows which block of each sample holds a position.
+/// Merge, and one sample's block may begin ninety cells earlier than its neighbour's, so the
+/// block holding a given position differs from sample to sample and a reader wanting one
+/// position decodes from far behind it. **The measured price of not merging is about 7 % of a
+/// patchy sample's file** at the shipped block size (spec §4.1: 17.557 bytes a record against
+/// 16.444 at 1,000 kb). Spec §4.1 and §12 question 3 should be corrected when that document is
+/// next touched.
+///
 /// # What it refuses
 ///
 /// **Records must arrive in coordinate order, and the cut is where that would otherwise be
@@ -1070,6 +1089,34 @@ pub const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// next block.
 pub const ROLLING_BYTES: usize = 16 * 1024;
 
+/// How far the rolling buffer may grow for one record before a reader refuses the block.
+///
+/// **A reader's budget, not a maximum record size the format fixes.** Spec §8 refuses the
+/// second outright — "many alleles, many chain ids", and a fixed ceiling baked into the format
+/// would make a legitimate file unreadable. But spec §1.1 puts an open sample at 500 kB, and on
+/// a *corrupt* block the two do not both hold: no record parses, so nothing ever fits, and the
+/// buffer doubles until the block's whole decompressed size is in it. A block's decompressed
+/// size is not bounded by its size on disk — measured, **4,132 bytes on disk drove a reader to
+/// hold 67,125,248**.
+///
+/// **So the ceiling is the reader's, and it is raisable, exactly as the look-back window's is.**
+/// Spec §4.2 gives the window budget its own error class because *the fix is a knob rather than
+/// a rebuild*; [`BlockReadError::RecordLargerThanTheReaderAllows`] says the same about this one,
+/// and names the number to change.
+///
+/// **Why 1 MiB.** A record's size is bounded by the depth cap: at three hundred reads a
+/// position, three hundred observations of fifty bases with their moments and their chain ids
+/// come to roughly 30 kB. This is about thirty times that, and sixty-four times the rolling
+/// buffer — far enough above anything the caller's own depth cap can produce that it is not
+/// expected to bind, and small enough that a thousand open samples meeting damaged blocks
+/// together is a gigabyte rather than an unbounded number. (The owner's ruling, 2026-08-27.)
+pub const MOST_A_RECORD_MAY_HOLD_BYTES: usize = 1024 * 1024;
+
+const _: () = assert!(
+    MOST_A_RECORD_MAY_HOLD_BYTES > ROLLING_BYTES,
+    "a ceiling at or under the buffer would refuse records the buffer already holds"
+);
+
 /// One record as a walk met it.
 #[derive(Debug, Clone, PartialEq)]
 #[must_use]
@@ -1471,21 +1518,27 @@ impl<R: std::io::Read> BlockStream<R> {
             self.rolling.drain(..self.cursor.rolling_at);
             self.cursor.rolling_at = 0;
         }
+        if self.rolling.len() >= MOST_A_RECORD_MAY_HOLD_BYTES {
+            // The buffer has grown as far as this reader allows and the record in front of it
+            // still does not fit. **Refused rather than grown into**, so that a block nothing
+            // can be parsed out of costs a bounded amount of memory rather than its own whole
+            // decompressed size.
+            return Err(BlockReadError::RecordLargerThanTheReaderAllows {
+                held_bytes: self.rolling.len(),
+                allowed_bytes: MOST_A_RECORD_MAY_HOLD_BYTES,
+            });
+        }
         if self.rolling.len() >= self.rolling.capacity() {
             // One record needs more than the buffer holds. **Grow rather than fail**: spec §8
             // refuses a fixed maximum record size outright — "many alleles, many chain ids" —
             // and `begin_next_block` shrinks back at the next block.
             //
-            // **⚠ On a corrupt block that growth reaches the block's whole inflated size**, and
-            // a psp block's inflated size is not bounded by its size on disk. Measured by a
-            // review agent: a **4,132-byte block drove this reader to hold 67,125,248 bytes**,
-            // 2,048 times the 32 kB budget, because no record could be parsed out of it and the
-            // buffer doubled until the frame ran out. Nothing is sized from a *declared* length
-            // — the fuzzing found no input that allocates from one — so this is bounded by the
-            // data rather than by an attacker's arithmetic, and `fail` releases it the moment
-            // the block is refused. But **spec §8 (grow without a ceiling) and spec §1.1 (500 kB
-            // an open sample) do not both hold on a corrupt file**, and which of them gives is
-            // the owner's call, not this module's. Raised at Checkpoint D.
+            // **The growth is bounded by [`MOST_A_RECORD_MAY_HOLD_BYTES`], checked above.**
+            // Without that ceiling a corrupt block grew this buffer to the block's whole
+            // decompressed size, which is not bounded by its size on disk — measured, 4,132
+            // bytes on disk against 67,125,248 held. Nothing is sized from a *declared* length
+            // either way; the ceiling is what keeps a damaged file's cost bounded rather than
+            // merely finite.
             self.rolling
                 .reserve(self.rolling.capacity().max(ROLLING_BYTES));
         }
@@ -1657,6 +1710,22 @@ pub enum BlockReadError {
     DamagedBlockHead {
         #[source]
         source: BlockHeadDecodeError,
+    },
+
+    /// One record needs more of the rolling buffer than this reader allows.
+    ///
+    /// **A knob, not a rebuild**, which is why it is its own class: a genuine record this large
+    /// is read by raising [`MOST_A_RECORD_MAY_HOLD_BYTES`], the same instruction spec §4.2
+    /// attaches to a look-back window wider than a reader budgeted for. On a damaged block —
+    /// which is where it is actually expected — it is what stops the buffer growing to the
+    /// block's whole decompressed size.
+    #[error(
+        "a record needs more than the {allowed_bytes} bytes this reader allows one to hold; it \
+         had {held_bytes} and had not finished"
+    )]
+    RecordLargerThanTheReaderAllows {
+        held_bytes: usize,
+        allowed_bytes: usize,
     },
 
     /// The block held bytes past the last record its head declared.
@@ -2143,6 +2212,37 @@ mod tests {
             "both records start under 100,000, so both belong to the same block"
         );
         assert_eq!(walk(&blocks[0]).head.first_position, Position(99_998));
+    }
+
+    /// **A grid cell with no records produces no block.** The cut is a rule for deciding where a
+    /// block *ends*, not an instruction to emit one per 100 kb of reference: a block exists
+    /// because a record went into it, so a sample covering two cells of a chromosome writes two
+    /// blocks and not one per cell between them.
+    ///
+    /// The type carries the same statement — a block head's record count is a `NonZeroU64`, so a
+    /// block holding none has no representation — and this is the behaviour that matters at the
+    /// other end: a thin sample does not pay an index entry and a compressed frame for every
+    /// stretch of reference it did not cover.
+    #[test]
+    fn a_grid_cell_with_no_records_produces_no_block() {
+        // Two records ninety cells apart on one contig, and one on the next contig.
+        let records = vec![
+            a_record(0, 1, 1),
+            a_record(0, 90 * A_GRID.get() + 7, 1),
+            a_record(1, 40 * A_GRID.get() + 3, 1),
+        ];
+        let blocks =
+            cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records).expect("in order");
+
+        assert_eq!(
+            blocks.len(),
+            3,
+            "one block for each record's cell, and none for the ninety cells between them"
+        );
+        for block in &blocks {
+            assert_eq!(walk(block).records.len(), 1);
+        }
+        assert_eq!(walk_all(&blocks), records);
     }
 
     /// **Every sample cuts at the same coordinates**, which is what the grid buys and what a
@@ -2648,6 +2748,9 @@ mod tests {
     fn the_values_a_writer_ships_with_are_these() {
         assert_eq!(DEFAULT_GENOMIC_BLOCK_SIZE_BP, Bp(100_000));
         assert_eq!(DEFAULT_BLOCK_BYTE_CEILING, None);
+        // The reader's ceiling on one record, which is a budget rather than a format rule — so
+        // moving it is a decision taken here rather than a memory test that stops binding.
+        assert_eq!(MOST_A_RECORD_MAY_HOLD_BYTES, 1024 * 1024);
         let manifest = a_manifest();
         assert_eq!(
             manifest.genomic_block_size_bp,
@@ -4176,6 +4279,100 @@ mod tests {
         assert_eq!(
             back, records,
             "a retried record is the record that was written"
+        );
+    }
+
+    /// **A block nothing can be parsed out of costs a bounded amount of memory, not its own
+    /// decompressed size.**
+    ///
+    /// A psp block's decompressed size is not bounded by its size on disk. Before this ceiling
+    /// existed a review agent built one that is **4,132 bytes on disk and drove a reader to hold
+    /// 67,125,248 bytes** — 2,048 times what an open sample budgets for — because no record
+    /// parsed, so nothing ever "fitted", and the buffer doubled until the frame ran out. At a
+    /// thousand open samples that is a run that dies on memory rather than one that reports a
+    /// bad file.
+    ///
+    /// The fixture is the same shape: a block whose records are one enormous run of a single
+    /// byte, which compresses to almost nothing and inflates to far more than the ceiling, with
+    /// its first record's length corrupted so the parser can never make progress.
+    #[test]
+    fn a_block_that_never_parses_costs_a_bounded_amount_of_memory() {
+        let inflated_bytes = MOST_A_RECORD_MAY_HOLD_BYTES * 8;
+        // A block head that promises a record, then a run of a byte that is not a record. The
+        // parser reads a head out of it, believes a body far longer than the block, and asks for
+        // more bytes for ever after.
+        let mut payload = Vec::with_capacity(inflated_bytes);
+        BlockHead {
+            contig: ContigId(0),
+            first_position: Position(1),
+            record_count: NonZeroU64::MIN,
+        }
+        .encode(&mut payload);
+        // position-offset 0, reference-span 1, non-reference-reads 0, and a body length larger
+        // than anything that follows.
+        payload.extend_from_slice(&[0x00, 0x01, 0x00]);
+        encode_u64_leb128(u64::from(u32::MAX), &mut payload);
+        payload.resize(inflated_bytes, b'A');
+
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+        assert!(
+            on_disk.len() * 64 < payload.len(),
+            "the fixture must inflate far beyond its size on disk, or it tests nothing: {} \
+             bytes on disk against {} inflated",
+            on_disk.len(),
+            payload.len()
+        );
+
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        let refused = match stream.next_record() {
+            Some(Ok(_)) => panic!("nothing in this block is a record"),
+            Some(Err(refused)) => refused,
+            None => panic!("a block that never parses must be refused, not ended"),
+        };
+        // **What the refusal reports, not what the reader holds afterwards** — by then `fail`
+        // has released the buffer, so a reading taken after the fact is the budget whatever
+        // happened before it, and an assertion on it could not fail.
+        let BlockReadError::RecordLargerThanTheReaderAllows {
+            held_bytes,
+            allowed_bytes,
+        } = refused
+        else {
+            panic!("got {refused}");
+        };
+        assert_eq!(allowed_bytes, MOST_A_RECORD_MAY_HOLD_BYTES);
+        assert!(
+            (MOST_A_RECORD_MAY_HOLD_BYTES..MOST_A_RECORD_MAY_HOLD_BYTES * 2).contains(&held_bytes),
+            "a reader met {} bytes of block and grew to {held_bytes} before stopping, against a \
+             ceiling of {MOST_A_RECORD_MAY_HOLD_BYTES}",
+            payload.len()
+        );
+        assert_eq!(
+            stream.buffered_bytes(),
+            READ_CHUNK_BYTES,
+            "and it releases what it grew once the block is refused"
+        );
+    }
+
+    /// The refusal names the number to raise, because raising it is the fix when the record is
+    /// genuine — the same instruction spec §4.2 attaches to a look-back window wider than a
+    /// reader budgeted for.
+    #[test]
+    fn a_record_past_the_readers_ceiling_names_the_number_to_raise() {
+        let refused = BlockReadError::RecordLargerThanTheReaderAllows {
+            held_bytes: 1_048_576,
+            allowed_bytes: MOST_A_RECORD_MAY_HOLD_BYTES,
+        };
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "a record needs more than the {MOST_A_RECORD_MAY_HOLD_BYTES} bytes this reader \
+                 allows one to hold; it had 1048576 and had not finished"
+            )
         );
     }
 

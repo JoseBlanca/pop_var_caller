@@ -67,8 +67,9 @@ pub(crate) mod record;
 pub use block::{
     BlockBuilder, BlockCompressError, BlockCompressor, BlockCutRuleError, BlockHead,
     BlockHeadDecodeError, BlockReadError, BlockRecords, BlockStream, BlockWriteError,
-    COMPRESSED_BLOCK_LENGTH_BYTES, CompressedBlockAt, DecodedBlockHead, READ_CHUNK_BYTES,
-    ROLLING_BYTES, StreamedRecord, ZSTD_COMPRESSION_LEVEL, compressed_block_at,
+    COMPRESSED_BLOCK_LENGTH_BYTES, CompressedBlockAt, DecodedBlockHead,
+    MOST_A_RECORD_MAY_HOLD_BYTES, READ_CHUNK_BYTES, ROLLING_BYTES, StreamedRecord,
+    ZSTD_COMPRESSION_LEVEL, compressed_block_at,
 };
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{

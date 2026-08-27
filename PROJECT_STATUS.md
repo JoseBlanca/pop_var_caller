@@ -48,14 +48,26 @@ Skills and agents are instructed to leave it untouched.
 > **The reader itself came out sound under 1,473,500 fuzzed inputs** — no hang, no panic, and
 > nothing ever sized from a length a file declares, which is the property the whole error design
 > exists for.
-> **⛦ And a question for Checkpoint D that is genuinely the owner's**: spec §8 says a record
-> larger than the reader's buffer must make it grow and that a maximum record size is not safe to
-> assume, while spec §1.1 puts an open sample at 500 kB. On a *corrupt* file those cannot both
-> hold — measured, a 4,132-byte block drove the reader to hold 67 MB, because a block's inflated
-> size is not bounded by its size on disk and the buffer doubles until the frame runs out. Nothing
-> is sized from a declared length and the memory is released the moment the block is refused, so
-> this is bounded by the data rather than by an attacker; but which of the two sections gives is
-> not this module's call.
+> **⛦ Two owner rulings, both taken 2026-08-27, both now in the code.**
+> **A reader's buffer has a ceiling of 1 MiB for one record, and it is raisable.** Spec §8 says a
+> record larger than the buffer must make it grow and that a maximum record size is not safe to
+> assume; spec §1.1 puts an open sample at 500 kB. On a *corrupt* file those cannot both hold —
+> measured, a 4,132-byte block drove the reader to hold 67 MB, because a block's decompressed
+> size is not bounded by its size on disk and the buffer doubles until the frame runs out. The
+> ceiling is the **reader's** budget rather than a maximum record size the format fixes, with its
+> own refusal naming the number to raise — the pattern spec §4.2 already uses for a look-back
+> window wider than a reader budgeted for. A real record at three hundred reads a position is
+> about 30 kB, so it sits about thirty times above anything the depth cap can produce.
+> **And near-empty blocks are not merged.** Spec §4.1 offers a second cut rule — accumulate
+> across empty stretches so a patchy sample gets one large block instead of several thin ones —
+> and spec §12 question 3 says it ships. The ruling is against it: **merging would complicate the
+> alignment between samples**, which is the one thing the coordinate grid exists to give. Merge,
+> and one sample's block may begin ninety cells before its neighbour's, so which block holds a
+> position differs from sample to sample. The price of not merging is about 7 % of a patchy
+> sample's file at the shipped block size. *Separately, and already true: a grid cell holding no
+> records has never produced a block — the cut decides where a block ends, not that one is owed
+> per 100 kb — and that now has a test rather than being implied.* **Spec §4.1 and §12 question 3
+> need correcting when that document is next touched.**
 > [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
 > [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
 > [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).
