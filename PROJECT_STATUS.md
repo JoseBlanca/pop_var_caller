@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-26):** **the SNP/indel prior's two numbers stop being one
+> - **Last completed task (2026-08-27):** **what the parameter pre-pass measured is now what
+> calling reads** (branch `ng-prepass-handover`, plan
+> [prepass_calling_handover.md](doc/devel/ng/impl_plan/prepass_calling_handover.md)). The pre-pass
+> reports a run three ways — per sample from the SNP/indel path, per sample from the repeat tracts,
+> and once over the whole cohort — and calling reads one object. **Nothing built that object**: its
+> constructor had ten callers and all ten were its own tests, each handing it values written by
+> hand. One function now does it and computes nothing of its own. **A sample whose inbreeding
+> coefficient was never fitted stops the run and is named** — not defaulted, and not taken from the
+> cohort fit's homozygote excess, which is measured by the very fit whose diversity the coefficient
+> exists to correct.
+> **Two quantities had to be given a route out of the pre-pass first, and the first of them fails
+> silently.** A library with a fitted error rate and no minted-error total is not refused: it takes
+> the defaulted calibration, scale one, every read charged the error floor, and the run finishes
+> normally with quietly overconfident reads.
+> **⛦ The second step's premise turned out to be false and the step is smaller than planned**: the
+> repeat-tract substitution-rate gather already existed, already omitted a stratum that compared no
+> bases rather than calling it zero, and its records already carried the rate — what was missing
+> was only the shape calling asks for, so what shipped is a projection rather than a second copy of
+> numbers that could drift from the first.
+> **⛦ And a thousand samples cost 1.14 GB, of which 99.7% is nothing the seam reads.** Per sample:
+> 1,114,632 bytes of per-sample pre-pass results against 26,596 bytes of the run-wide maps built
+> from them. The difference is the allele-length genotype table each repeat-tract stratum's fit
+> carries, about 3.35 kB a stratum, which calling never asks for — **a finding for the run driver's
+> plan**, which can project each sample's rates as that sample finishes and release the rest.
+> Library target 4,920 → **4,928** passing.
+> [What was built](doc/devel/reports/implementations/ng_prepass_calling_handover_2026-08-27.md).
+>
+> - **Previously (2026-08-26):** **the SNP/indel prior's two numbers stop being one
 > fitted pair** (branch `ng-seed-shrinkage`, spec
 > [ordinary_site_seed.md](doc/devel/ng/spec/ordinary_site_seed.md) §3 and §4). They are an expected
 > allele frequency and a total conviction in other clothes, and the total is now solved from the
