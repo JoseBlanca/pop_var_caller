@@ -17,16 +17,21 @@
 //! compressed rather than in front of it: spec §3.2 asks that a block be self-contained, and a
 //! block whose opening facts lived outside its own bytes would not be.
 //!
-//! **Two halves, and the file is read in this order.** [`BlockBuilder`] turns a stream of
-//! records into block payloads, cutting them on the grid; [`BlockCompressor`] turns one payload
+//! **Three halves, and the file is read in this order.** [`BlockBuilder`] turns a stream of
+//! records into block payloads, cutting them on the grid. [`BlockCompressor`] turns one payload
 //! into a whole on-disk block — a four-byte length and then one zstd frame — with the
 //! compressor's look-back window capped at what the file declares, which is what unties the
-//! block's size from the reader's memory. **Nothing here writes a file** (Milestone F) and
-//! nothing reads one back through a rolling buffer (Milestone D3).
+//! block's size from the reader's memory. [`BlockStream`] reads a run of them back a record at a
+//! time, holding two 16 kB buffers and nothing that grows with the block.
+//!
+//! **Nothing here writes or opens a file.** Milestone F owns the header, the index and the
+//! footer; this module is handed bytes and hands bytes back, which is what lets a caller start a
+//! reader at any block it has an offset for.
 //!
 //! Design authority: `doc/devel/ng/spec/psp_file_format.md` §3.2 (a block is self-contained),
 //! §4.1 (the cut rule and what it buys), §4.2 (the window is declared and the reader honours
-//! it), §8 (the traps), and `doc/devel/ng/arch/psp_file_format.md` §1.
+//! it), §4.4 (the reader's two buffers), §5.1 (the reader's contract), §8 (the traps), and
+//! `doc/devel/ng/arch/psp_file_format.md` §1.
 //!
 //! [`RecordHead`]: crate::ng::psp::RecordHead
 
@@ -1045,8 +1050,10 @@ impl BlockCompressError {
 
 /// How many compressed bytes a reader pulls from the file at a time.
 ///
-/// **16 kB, and it is an optimum rather than a floor** (spec §4.4). Re-measured on a quiet
-/// machine over a walk of 7.69 M records: 4 kB takes 0.149 s and holds 233 kB an open sample,
+/// **16 kB, and it is an optimum rather than a floor** (spec §4.4). **⚠ The numbers below are
+/// the measuring prototype's reader, not this one** — nothing has yet timed `BlockStream`, and
+/// Milestone H is where that happens. Re-measured there on a quiet machine over a walk of
+/// 7.69 M records: 4 kB takes 0.149 s and holds 233 kB an open sample,
 /// 16 kB takes 0.143 s and holds 257 kB, 64 kB takes 0.161 s and holds 353 kB, and 256 kB takes
 /// 0.200 s. Going up costs both time and memory; going down costs a little time and saves a
 /// little memory. Why the curve turns is not established.
@@ -1102,12 +1109,21 @@ pub struct BlockStream<R> {
     compressed: Vec<u8>,
     compressed_at: usize,
     compressed_filled: usize,
-    /// Decompressed bytes the parser works out of, and how much of them it has consumed.
+    /// Decompressed bytes the parser works out of. **Storage, not state** — how much of it has
+    /// been consumed is in the cursor, because that is per-block.
     rolling: Vec<u8>,
-    rolling_at: usize,
 
     // ---- what lives for one block, and is replaced whole at every boundary ----
     cursor: BlockCursor,
+    /// Set once this reader has refused, and never cleared. **A stream that has refused is
+    /// finished**: without a state that says so, what stopped a refused reader was only that its
+    /// compressed buffer had been emptied — which lasts exactly as long as the whole file fits in
+    /// one read. Measured on a 219,758-byte file of 150 blocks: after the first refusal the
+    /// reader resynchronised at the next read-chunk boundary, took four arbitrary bytes for a
+    /// block length, and carried on; on a smaller file it refused once and then handed back
+    /// 5,681 further records and ended cleanly. Milestone F hands this reader a seeked `File`,
+    /// where that is the ordinary case rather than the exotic one.
+    refused: bool,
 }
 
 /// Everything a reader **restarts when a block does** (spec §3.2).
@@ -1124,6 +1140,10 @@ pub struct BlockStream<R> {
 /// reuses across blocks, not state a record is parsed against.
 #[derive(Debug, Clone, Copy)]
 struct BlockCursor {
+    /// How much of the rolling buffer the parser has consumed. **Per-block, and it belongs
+    /// here**: dropping its reset fails eight tests, so it is parse state rather than the
+    /// buffer's own bookkeeping.
+    rolling_at: usize,
     /// `None` until the block's head has been read out of the rolling buffer.
     block: Option<BlockHead>,
     /// How many records of this block are still to come.
@@ -1140,6 +1160,7 @@ impl BlockCursor {
     /// A block whose compressed bytes have been counted and whose head has not been read.
     fn opening(compressed_left: usize) -> Self {
         Self {
+            rolling_at: 0,
             block: None,
             records_left: 0,
             measured_from: OffsetBase::at_block_start(Position(0)),
@@ -1150,10 +1171,19 @@ impl BlockCursor {
 
     /// Before any block has been opened, and after one has been abandoned: nothing due, nothing
     /// left to inflate.
+    ///
+    /// **Written out rather than `..Self::opening(0)`**, so a field added to this type is a
+    /// compile error at *both* constructors. With the update syntax it was an error at
+    /// `opening` alone and this one silently inherited whatever `opening` chose — which for a
+    /// field that must differ between "not started" and "started" is exactly the wrong default.
     fn between_blocks() -> Self {
         Self {
+            rolling_at: 0,
+            block: None,
+            records_left: 0,
+            measured_from: OffsetBase::at_block_start(Position(0)),
+            compressed_left: 0,
             inflated: true,
-            ..Self::opening(0)
         }
     }
 }
@@ -1172,16 +1202,17 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             compressed_at,
             compressed_filled,
             rolling,
-            rolling_at,
             cursor,
+            refused,
         } = self;
         f.debug_struct("BlockStream")
             .field("look_back_window_log", look_back_window_log)
             .field("unknown_declared_fields", &layout.unknown_field_count())
             .field("compressed_buffered", &(compressed_filled - compressed_at))
-            .field("rolling_buffered", &(rolling.len() - rolling_at))
+            .field("rolling_buffered", &(rolling.len() - cursor.rolling_at))
             .field("rolling_capacity", &rolling.capacity())
             .field("cursor", cursor)
+            .field("refused", refused)
             .finish_non_exhaustive()
     }
 }
@@ -1230,8 +1261,8 @@ impl<R: std::io::Read> BlockStream<R> {
             compressed_at: 0,
             compressed_filled: 0,
             rolling: Vec::with_capacity(ROLLING_BYTES),
-            rolling_at: 0,
             cursor: BlockCursor::between_blocks(),
+            refused: false,
         })
     }
 
@@ -1264,9 +1295,10 @@ impl<R: std::io::Read> BlockStream<R> {
     ///
     /// **This is the whole of the skip, and it is the reader's decision rather than a separate
     /// call** (spec §6.2). A record the predicate declines costs its head and a pointer advance;
-    /// its body is never decoded. Measured on a tomato accession at three reads a position,
-    /// 7.69 M records: a walk keeping one record in a hundred takes 0.141 s against 0.29 s for
-    /// one that builds every record.
+    /// its body is never decoded. **⚠ What that is worth was measured on the prototype's reader
+    /// and not on this one**: over 7.69 M records of a tomato accession, a walk keeping one
+    /// record in a hundred took 0.141 s against 0.29 s for one building every record. Milestone
+    /// H times this reader.
     ///
     /// **The bytes still have to arrive either way.** Skipping saves building the record, not
     /// decompressing it: a block comes out of zstd sequentially and there is nothing to seek
@@ -1278,6 +1310,9 @@ impl<R: std::io::Read> BlockStream<R> {
     where
         F: FnMut(&RecordHead) -> bool,
     {
+        if self.refused {
+            return None;
+        }
         loop {
             if self.cursor.records_left == 0 {
                 match self.begin_next_block() {
@@ -1292,7 +1327,7 @@ impl<R: std::io::Read> BlockStream<R> {
                 .expect("a block is open once its head has been read");
 
             match read_record_head(
-                &self.rolling[self.rolling_at..],
+                &self.rolling[self.cursor.rolling_at..],
                 block.contig,
                 self.cursor.measured_from,
             ) {
@@ -1301,7 +1336,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     let record_bytes = found.record_bytes;
                     let record = if want(&head) {
                         match decode_record(
-                            &self.rolling[self.rolling_at..],
+                            &self.rolling[self.cursor.rolling_at..],
                             block.contig,
                             self.cursor.measured_from,
                             &self.layout,
@@ -1314,7 +1349,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     } else {
                         None
                     };
-                    self.rolling_at += record_bytes;
+                    self.cursor.rolling_at += record_bytes;
                     self.cursor.measured_from = OffsetBase::after(&head);
                     self.cursor.records_left -= 1;
                     if self.cursor.records_left == 0
@@ -1336,7 +1371,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     Ok(false) => {
                         return Some(Err(self.fail(BlockReadError::RecordRunsPastItsBlock {
                             records_left: self.cursor.records_left,
-                            bytes_left: self.rolling.len() - self.rolling_at,
+                            bytes_left: self.rolling.len() - self.cursor.rolling_at,
                         })));
                     }
                     Err(refused) => return Some(Err(self.fail(refused))),
@@ -1377,12 +1412,11 @@ impl<R: std::io::Read> BlockStream<R> {
         // Back to what a reader budgets for, so one enormous record does not leave every later
         // block holding its buffer: nothing a reader holds may be a function of the data.
         self.rolling.shrink_to(ROLLING_BYTES);
-        self.rolling_at = 0;
 
         loop {
-            match BlockHead::decode(&self.rolling[self.rolling_at..]) {
+            match BlockHead::decode(&self.rolling[self.cursor.rolling_at..]) {
                 Ok(decoded) => {
-                    self.rolling_at += decoded.head_bytes;
+                    self.cursor.rolling_at += decoded.head_bytes;
                     self.cursor.measured_from =
                         OffsetBase::at_block_start(decoded.head.first_position);
                     self.cursor.records_left = decoded.head.record_count.get();
@@ -1399,13 +1433,28 @@ impl<R: std::io::Read> BlockStream<R> {
         }
     }
 
-    /// The block declared its last record, so nothing of it may be left.
+    /// The block declared its last record, so nothing of it may be left — and the three ways
+    /// something can be are three different faults.
+    ///
+    /// **They were one variant reporting `bytes_left: 0` for two of them**, which told whoever
+    /// read the message that a block held nothing past its records and was refused anyway.
     fn check_the_block_ended_here(&mut self) -> Result<(), BlockReadError> {
         // The frame may not have been decompressed to its end; pump until it has.
-        while self.rolling_at >= self.rolling.len() && self.pump()? {}
-        let bytes_left = self.rolling.len() - self.rolling_at;
-        if bytes_left > 0 || !self.cursor.inflated || self.cursor.compressed_left > 0 {
+        while self.cursor.rolling_at >= self.rolling.len() && self.pump()? {}
+        let bytes_left = self.rolling.len() - self.cursor.rolling_at;
+        if bytes_left > 0 {
             return Err(BlockReadError::BlockHoldsMoreThanItDeclared { bytes_left });
+        }
+        if self.cursor.compressed_left > 0 {
+            // The length in front of the block covers more than the frame behind it — on a run
+            // of blocks that reaches into the *next* one, and a reader that believed it would
+            // hand back records from a block nobody asked for.
+            return Err(BlockReadError::BlockDeclaresMoreBytesThanItsFrame {
+                compressed_bytes_left: self.cursor.compressed_left,
+            });
+        }
+        if !self.cursor.inflated {
+            return Err(BlockReadError::BlockFrameDidNotEndWithItsRecords);
         }
         Ok(())
     }
@@ -1418,13 +1467,25 @@ impl<R: std::io::Read> BlockStream<R> {
         }
         // Drop what the parser has already consumed before asking for more. **This is what keeps
         // the rolling buffer rolling**: without it it grows to the whole block.
-        if self.rolling_at > 0 {
-            self.rolling.drain(..self.rolling_at);
-            self.rolling_at = 0;
+        if self.cursor.rolling_at > 0 {
+            self.rolling.drain(..self.cursor.rolling_at);
+            self.cursor.rolling_at = 0;
         }
         if self.rolling.len() >= self.rolling.capacity() {
-            // One record needs more than the buffer holds. **Grow rather than fail** — spec §8
-            // refuses a fixed maximum record size — and `begin_next_block` shrinks back.
+            // One record needs more than the buffer holds. **Grow rather than fail**: spec §8
+            // refuses a fixed maximum record size outright — "many alleles, many chain ids" —
+            // and `begin_next_block` shrinks back at the next block.
+            //
+            // **⚠ On a corrupt block that growth reaches the block's whole inflated size**, and
+            // a psp block's inflated size is not bounded by its size on disk. Measured by a
+            // review agent: a **4,132-byte block drove this reader to hold 67,125,248 bytes**,
+            // 2,048 times the 32 kB budget, because no record could be parsed out of it and the
+            // buffer doubled until the frame ran out. Nothing is sized from a *declared* length
+            // — the fuzzing found no input that allocates from one — so this is bounded by the
+            // data rather than by an attacker's arithmetic, and `fail` releases it the moment
+            // the block is refused. But **spec §8 (grow without a ceiling) and spec §1.1 (500 kB
+            // an open sample) do not both hold on a corrupt file**, and which of them gives is
+            // the owner's call, not this module's. Raised at Checkpoint D.
             self.rolling
                 .reserve(self.rolling.capacity().max(ROLLING_BYTES));
         }
@@ -1513,9 +1574,17 @@ impl<R: std::io::Read> BlockStream<R> {
     /// rather than the same refusal for ever, or a record built from state a refusal left
     /// half-advanced.
     fn fail(&mut self, refused: BlockReadError) -> BlockReadError {
+        self.refused = true;
         self.cursor = BlockCursor::between_blocks();
-        self.rolling.clear();
-        self.rolling_at = 0;
+        // **The rolling buffer goes and the read chunk stays.** The rolling one may have grown
+        // past what this reader budgeted for, and holding that until the caller drops the
+        // reader is memory nobody asked for. The read chunk is the budget, so freeing it saves
+        // nothing — and freeing it would make a refused reader stop for the wrong reason:
+        // `read` into an empty buffer returns zero, which looks exactly like the end of the
+        // source. What stops a refused reader is `refused`, and it has to be the only thing, or
+        // the next coder to change either of these lines resurrects a reader that carries on
+        // past damage.
+        self.rolling = Vec::new();
         self.compressed_at = 0;
         self.compressed_filled = 0;
         refused
@@ -1594,6 +1663,20 @@ pub enum BlockReadError {
     #[error("a block holds {bytes_left} bytes past the last record its head declared")]
     BlockHoldsMoreThanItDeclared { bytes_left: usize },
 
+    /// The length in front of the block claims more compressed bytes than its frame used. On a
+    /// run of blocks that length reaches into the next block, and a reader that believed it
+    /// would hand back records from a block nobody asked for.
+    #[error(
+        "a block's length claims {compressed_bytes_left} compressed bytes more than its frame \
+         used"
+    )]
+    BlockDeclaresMoreBytesThanItsFrame { compressed_bytes_left: usize },
+
+    /// The block's records ran out while its frame had not finished: the two disagree about
+    /// where the block ends.
+    #[error("a block's records end before its compressed frame does")]
+    BlockFrameDidNotEndWithItsRecords,
+
     /// The file ended inside a block's compressed bytes. **Refuse rather than read short**: a
     /// run that was killed part-way must not look like a sample covering less of the genome.
     #[error("the file ends with {compressed_bytes_left} compressed bytes of a block still due")]
@@ -1603,10 +1686,18 @@ pub enum BlockReadError {
     #[error("the file ends {bytes_read} bytes into a block's length")]
     FileEndsInsideABlockLength { bytes_read: usize },
 
-    /// zstd refused. **It names what was being done**, because zstd's own message is a code.
-    #[error("zstd failed while {while_doing} (zstd code {code})")]
+    /// zstd refused: the frame is damaged, or it needs a larger window than this reader was
+    /// configured for.
+    ///
+    /// **It names what was being done and what zstd said**, because zstd's own answer is a
+    /// numeric code — and the two cases a caller most needs to tell apart, a corrupt frame and a
+    /// window too small, differ *only* in that code. Resolved, they read "Restored data doesn't
+    /// match checksum" and "Frame requires too much memory for decoding".
+    #[error("zstd failed while {while_doing}: {said}")]
     Zstd {
         while_doing: &'static str,
+        /// zstd's own account, resolved from its code.
+        said: &'static str,
         code: usize,
     },
 
@@ -1621,7 +1712,11 @@ pub enum BlockReadError {
 
 impl BlockReadError {
     fn zstd(while_doing: &'static str, code: usize) -> Self {
-        Self::Zstd { while_doing, code }
+        Self::Zstd {
+            while_doing,
+            said: zstd::zstd_safe::get_error_name(code),
+            code,
+        }
     }
 
     /// Put a record's own fault in the class its instruction belongs to.
@@ -3433,9 +3528,10 @@ mod tests {
 
         let second = stream.next_record().expect("a record").expect("it reads");
         assert_eq!(second.record.as_ref(), Some(&records[1]));
-        assert!(
-            format!("{stream:?}").contains(&format!("rolling_capacity: {ROLLING_BYTES}")),
-            "the buffer must shrink back at the next block; it reads {stream:?}"
+        assert_eq!(
+            stream.buffered_bytes(),
+            READ_CHUNK_BYTES + ROLLING_BYTES,
+            "the buffer must shrink back at the next block"
         );
         assert!(stream.next_record().is_none());
     }
@@ -3470,13 +3566,20 @@ mod tests {
         let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
         let budget = READ_CHUNK_BYTES + ROLLING_BYTES;
         let mut most_held = stream.buffered_bytes();
-        let mut met = 0usize;
+        let mut back = Vec::new();
         while let Some(next) = stream.next_record() {
-            let _ = next.expect("it reads");
-            met += 1;
+            // **Compared, not counted.** This walk crosses the retry arm thousands of times —
+            // it is the module's densest exercise of it — and a retry that advanced the
+            // coordinate before failing would give the right *number* of records at the wrong
+            // positions, which a count cannot see.
+            back.push(
+                next.expect("it reads")
+                    .record
+                    .expect("every record is built"),
+            );
             most_held = most_held.max(stream.buffered_bytes());
         }
-        assert_eq!(met, records.len());
+        assert_eq!(back, records);
         assert!(
             most_held <= budget,
             "a reader over {biggest}-byte blocks held {most_held} bytes against a budget of \
@@ -3803,6 +3906,276 @@ mod tests {
                     | BlockReadError::DamagedBlockHead { .. }
             ),
             "got {refused}"
+        );
+    }
+
+    /// A source that hands back at most `most` bytes a read, and optionally fails with
+    /// `Interrupted` every so often — which is what a pipe, a socket or a signalled file does,
+    /// and what no fixture built from a `&[u8]` ever does.
+    struct ADribblingSource {
+        bytes: Vec<u8>,
+        at: usize,
+        most: usize,
+        interrupt_every: usize,
+        reads: usize,
+    }
+
+    impl ADribblingSource {
+        fn new(bytes: Vec<u8>, most: usize) -> Self {
+            Self::interrupted(bytes, most, 0)
+        }
+
+        fn interrupted(bytes: Vec<u8>, most: usize, interrupt_every: usize) -> Self {
+            Self {
+                bytes,
+                at: 0,
+                most,
+                interrupt_every,
+                reads: 0,
+            }
+        }
+    }
+
+    impl std::io::Read for ADribblingSource {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.interrupt_every > 0 && self.reads.is_multiple_of(self.interrupt_every) {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            let take = (self.bytes.len() - self.at).min(self.most).min(out.len());
+            out[..take].copy_from_slice(&self.bytes[self.at..self.at + take]);
+            self.at += take;
+            Ok(take)
+        }
+    }
+
+    /// One record whose bases zstd cannot shrink, so a file of them is large on disk.
+    ///
+    /// **`a_record`'s bodies are a four-letter cycle and compress to almost nothing** — twelve
+    /// thousand of them are 1,823 bytes on disk, a ninth of one read chunk. A reader's behaviour
+    /// past its first read cannot be tested with a fixture that never fills one.
+    fn a_bulky_record(start: u64) -> SampleLocusObservations {
+        // A multiplicative hash over the position, taken a byte at a time: no run of it repeats
+        // within a file, so zstd's match finder has nothing to work with.
+        let mut noise = start.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let bases: Vec<u8> = (0..48)
+            .map(|_| {
+                noise = noise
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                b"ACGT"[((noise >> 33) & 3) as usize]
+            })
+            .collect();
+        let mut bulky = a_record(0, start, 1);
+        bulky.observations = (0..4u32)
+            .map(|read| SequenceObservation {
+                bases: bases[read as usize * 12..(read as usize + 1) * 12]
+                    .to_vec()
+                    .into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read),
+                num_obs: 1 + read,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(noise as i64 & 0xffff)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: read % 2,
+                chain_ids: Vec::new(),
+            })
+            .collect();
+        bulky
+    }
+
+    /// A file of many blocks, larger than four read chunks — which every earlier fixture was
+    /// not, and which is why several properties below could not fail before.
+    fn a_file_of_many_blocks() -> (Vec<SampleLocusObservations>, BlocksOnDisk) {
+        let records: Vec<_> = (1..3_000u64).map(a_bulky_record).collect();
+        let on_disk = blocks_on_disk(&records, Bp(200), None);
+        assert!(
+            on_disk.bytes.len() > READ_CHUNK_BYTES * 4,
+            "the file must be several read chunks, or a refused reader stops for the wrong \
+             reason; it is {} bytes",
+            on_disk.bytes.len()
+        );
+        assert!(on_disk.block_offsets.len() > 10);
+        (records, on_disk)
+    }
+
+    /// **A refused stream is finished, and on a file bigger than one read chunk that is a
+    /// property rather than an accident.**
+    ///
+    /// Before this, nothing marked a reader as having refused: what stopped one was that its
+    /// compressed buffer had been emptied, which lasts exactly as long as the whole file fits in
+    /// a single 16 kB read. Past that the reader read on from wherever the source stood, took
+    /// four arbitrary bytes for a block length, and carried on — measured by three review
+    /// agents, one of which saw a file refuse after 5,980 records and then hand back **5,681
+    /// more** before ending cleanly. Every earlier fixture here was a few hundred bytes, so the
+    /// test named for this property could not fail.
+    #[test]
+    fn a_stream_that_refuses_stays_refused_on_a_file_larger_than_one_read() {
+        let (_, on_disk) = a_file_of_many_blocks();
+
+        // Damage inside the first block's frame, so the refusal comes early and most of the
+        // file is still ahead of the reader.
+        let first_frame_at = COMPRESSED_BLOCK_LENGTH_BYTES + 8;
+        let mut damaged = on_disk.bytes.clone();
+        damaged[first_frame_at] ^= 0xff;
+
+        let manifest = a_manifest();
+        // Both a source that hands over everything at once and one that dribbles: the second is
+        // what a pipe or a socket does, and it is where a resynchronising reader lands exactly
+        // on a block boundary and carries on as though nothing had happened.
+        /// A source to try, made fresh so each arm starts from the file's first byte.
+        type ASourceToTry = (&'static str, Box<dyn FnOnce() -> Box<dyn std::io::Read>>);
+        let sources: [ASourceToTry; 2] = [
+            ("a whole-file source", {
+                let bytes = damaged.clone();
+                Box::new(move || Box::new(std::io::Cursor::new(bytes)))
+            }),
+            ("a source that dribbles", {
+                let bytes = damaged.clone();
+                Box::new(move || Box::new(ADribblingSource::new(bytes, 64)))
+            }),
+        ];
+        for (what, source) in sources {
+            let mut stream = BlockStream::new(source(), &manifest).expect("a manifest");
+            let mut refused = None;
+            for _ in 0..20_000 {
+                match stream.next_record() {
+                    Some(Ok(_)) => {}
+                    Some(Err(fault)) => {
+                        refused = Some(fault);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            let refused = refused.unwrap_or_else(|| panic!("{what}: damage must be refused"));
+            for again in 0..5 {
+                assert!(
+                    stream.next_record().is_none(),
+                    "{what}: after {refused}, ask {again} handed something back"
+                );
+            }
+            assert_eq!(
+                stream.buffered_bytes(),
+                READ_CHUNK_BYTES,
+                "{what}: a refused reader releases what it grew and keeps only its budget"
+            );
+        }
+    }
+
+    /// **A block whose length prefix claims more than its frame used is refused.** On a run of
+    /// blocks that length reaches into the *next* block, so a reader that believed it would hand
+    /// back records from a block nobody asked for — and the guard for it was held by nothing:
+    /// dropping it left all 66 tests green while a two-block file read back as one.
+    #[test]
+    fn a_block_declaring_more_bytes_than_its_frame_is_refused() {
+        let records: Vec<_> = (0..12).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(60));
+        assert!(on_disk.block_offsets.len() >= 2, "two blocks at least");
+
+        let whole = stream_every_record(&on_disk.bytes).expect("the honest file reads");
+        assert_eq!(built(&whole), records);
+
+        // Make the first block's length cover the second block too.
+        let CompressedBlockAt::Whole { block_bytes, .. } = compressed_block_at(&on_disk.bytes)
+        else {
+            panic!("the first block is whole");
+        };
+        assert!(
+            block_bytes < on_disk.bytes.len(),
+            "the first block must not be the whole file"
+        );
+        let mut lying = on_disk.bytes.clone();
+        lying[..COMPRESSED_BLOCK_LENGTH_BYTES].copy_from_slice(
+            &u32::try_from(on_disk.bytes.len() - COMPRESSED_BLOCK_LENGTH_BYTES)
+                .expect("a small file")
+                .to_le_bytes(),
+        );
+
+        let refused = stream_every_record(&lying)
+            .expect_err("a block whose length reaches into the next one is damaged");
+        assert!(
+            matches!(
+                refused,
+                BlockReadError::BlockDeclaresMoreBytesThanItsFrame { .. }
+            ),
+            "got {refused}"
+        );
+    }
+
+    /// **`buffered_bytes` is the two buffers and nothing else.** The memory property rests on
+    /// it, and a stub returning zero satisfied every check the module made.
+    #[test]
+    fn buffered_bytes_is_the_two_buffers() {
+        let manifest = a_manifest();
+        let fresh = BlockStream::new([].as_slice(), &manifest).expect("a manifest");
+        assert_eq!(fresh.buffered_bytes(), READ_CHUNK_BYTES + ROLLING_BYTES);
+
+        let (_, on_disk) = a_file_of_many_blocks();
+        let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let _ = stream.next_record().expect("a record").expect("it reads");
+        assert_eq!(
+            stream.buffered_bytes(),
+            READ_CHUNK_BYTES + ROLLING_BYTES,
+            "a reader mid-file holds exactly what it budgeted for"
+        );
+    }
+
+    /// **A source that hands back one byte at a time reads the same records**, and one
+    /// interrupted mid-read is retried rather than reported as a damaged store. Every other
+    /// fixture is a `&[u8]`, which returns everything asked for and never fails — so neither
+    /// path had a witness.
+    #[test]
+    fn a_dribbling_or_interrupted_source_reads_the_same_records() {
+        let records: Vec<_> = (0..60).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(120));
+        assert!(on_disk.block_offsets.len() >= 3);
+        let manifest = a_manifest();
+
+        for (what, most, interrupt_every) in [
+            ("one byte at a time", 1usize, 0usize),
+            ("seven bytes at a time", 7, 0),
+            ("interrupted every third read", 64, 3),
+            ("one byte at a time, interrupted every other read", 1, 2),
+        ] {
+            let source =
+                ADribblingSource::interrupted(on_disk.bytes.clone(), most, interrupt_every);
+            let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+            let mut back = Vec::new();
+            while let Some(next) = stream.next_record() {
+                let met = next.unwrap_or_else(|refused| panic!("{what}: {refused}"));
+                back.push(met.record.expect("every record is built"));
+            }
+            assert_eq!(back, records, "{what}");
+        }
+    }
+
+    /// **A record retried after a refill is parsed from its first byte, against state the retry
+    /// did not touch.** This is spec §8's named trap — *"a parse that half-advances that state
+    /// before failing corrupts every record after it, plausibly"* — and it is the property
+    /// Milestone D4 exists to prove. Putting the defect in advances every later coordinate by
+    /// one, which only a walk that compares the records it built can see.
+    ///
+    /// The source hands back one byte at a time, so **every record in the file is retried**,
+    /// most of them many times.
+    #[test]
+    fn a_record_retried_after_a_refill_is_the_record_that_was_written() {
+        let records: Vec<_> = (1..900u64).map(|at| a_record(0, at, 1)).collect();
+        let on_disk = blocks_on_disk(&records, Bp(300), None);
+        assert!(on_disk.block_offsets.len() >= 3, "several blocks");
+
+        let manifest = a_manifest();
+        let source = ADribblingSource::new(on_disk.bytes.clone(), 1);
+        let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+        let mut back = Vec::new();
+        while let Some(next) = stream.next_record() {
+            back.push(next.expect("it reads").record.expect("built"));
+        }
+        assert_eq!(
+            back, records,
+            "a retried record is the record that was written"
         );
     }
 

@@ -36,7 +36,29 @@ Skills and agents are instructed to leave it untouched.
 > changed no behaviour and are reported as that rather than as survivors, and **three were real
 > survivors that now have tests** — a refused stream that kept going, a decoder fed past its
 > block's declared end, and the buffer that never rolled.
-> [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md).
+> **⛦ Eight review checklists then found 1 Blocker, 7 Majors and three more of my numbers wrong —
+> and the Blocker is the defect this step's own commit message said it had fixed.** A refused
+> stream did not end: nothing marked the reader as having refused, so what stopped one was its
+> next read hitting the end of the file, which holds only while the whole file fits in a single
+> 16 kB read. Past that it read on from wherever it stood, took four arbitrary bytes for a block
+> length, and carried on — measured on a 69,769-byte file with one bit flipped, it **reported the
+> file damaged and then handed back 3,585 more records**; on a smaller one it handed back 5,681
+> and ended cleanly. Four of the five agents found it independently. Every test that claimed to
+> hold the property used a fixture two orders of magnitude too small to reach it.
+> **The reader itself came out sound under 1,473,500 fuzzed inputs** — no hang, no panic, and
+> nothing ever sized from a length a file declares, which is the property the whole error design
+> exists for.
+> **⛦ And a question for Checkpoint D that is genuinely the owner's**: spec §8 says a record
+> larger than the reader's buffer must make it grow and that a maximum record size is not safe to
+> assume, while spec §1.1 puts an open sample at 500 kB. On a *corrupt* file those cannot both
+> hold — measured, a 4,132-byte block drove the reader to hold 67 MB, because a block's inflated
+> size is not bounded by its size on disk and the buffer doubles until the frame runs out. Nothing
+> is sized from a declared length and the memory is released the moment the block is refused, so
+> this is bounded by the data rather than by an attacker; but which of the two sections gives is
+> not this module's call.
+> [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).
 >
 > - **Previously (2026-08-27):** **a block is compressed with its look-back window
 > capped at what the file declares** (step D2 of
