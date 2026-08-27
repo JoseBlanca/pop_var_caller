@@ -2192,6 +2192,16 @@ fn one_position(
         // routes to those moments have to see the same census: the stored array records this
         // position as all-zero posteriors, so the running sums must record a position of no
         // alternative copies rather than skip it, or the two would divide by different counts.
+        //
+        // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
+        // way here is taken through `p.max(f64::MIN_POSITIVE).ln()`, which floors a read's term at
+        // about −708, and `ln_sum_exp` returns `−∞` only when every input already is one — so
+        // reaching `!position_ln.is_finite()` from well-formed evidence would take on the order of
+        // 1e305 reads at a position. What the two lines below maintain is tested where it can be:
+        // an all-zero position counts and contributes nothing, in `census_moments`'s
+        // all-reference fixtures, which build the identical buffer. Replacing this block with a
+        // `panic!` leaves the suite green, and that is a statement about the branch's
+        // reachability, not about the bookkeeping.
         scratch.position_genotype.fill(0.0);
         statistics
             .census_moments
@@ -3650,6 +3660,34 @@ mod whole_fit_tests {
         assert_eq!(report.inbreeding_source, InbreedingSource::User);
         assert!(report.warnings().is_empty(), "{:?}", report.warnings());
 
+        // **The coefficient the caller supplied is the one the report carried and the one the
+        // arithmetic used.** Measured before these three lines existed: `of` could pass a literal
+        // zero to `finish` *and* store a literal zero as the panel coefficient, and the whole suite
+        // stayed green — the ratio band below is wide enough to swallow a 1% shift.
+        // (Averaged over the ten supplied values, so it arrives as 0.19999999999999998.)
+        assert!(
+            (report.panel_inbreeding - 0.2).abs() < 1e-12,
+            "got {}",
+            report.panel_inbreeding
+        );
+        let outbred = fit
+            .census_moments
+            .finish(InbreedingF::try_new(0.0).expect("zero is a legal coefficient"));
+        let correction = report.measured.heterozygosity / outbred.heterozygosity;
+        // An inbred panel shows fewer differences than its population has, so the census average is
+        // **divided** by `1 − F/(2N − 1)` to recover the population's number — a lift, not a cut.
+        // 2N = 20 chromosomes here, so it is exactly `1 / (1 − 0.2/19)`.
+        let expected = 1.0 / (1.0 - 0.2 / 19.0);
+        assert!(
+            (correction - expected).abs() < 1e-12,
+            "the supplied coefficient moved the heterozygosity by {correction}, not by {expected}"
+        );
+
+        // **The curve's number is the curve's, not a second copy of the census average** — the
+        // point of putting them side by side. `of` could set this field from the census and the
+        // ratio would then be exactly 1, inside the band.
+        assert_eq!(report.curve_heterozygosity, fit.expected_heterozygosity);
+
         let ratio = report
             .curve_over_census()
             .expect("a cohort drawn at this density segregates");
@@ -3702,6 +3740,16 @@ mod whole_fit_tests {
     ///
     /// It also pins the **position count**: both routes must divide by the same number, which is
     /// the thing an early return on an underflowed position could quietly break.
+    ///
+    /// **What it does not pin is the formula.** Both routes call the same
+    /// [`alternative_copies_in`] and the same `nei_heterozygosity`, so a defect inside either — the
+    /// variance term dropped, `2N − 1` written as `2N` — moves both sides by the same factor and
+    /// this test stays green. Measured: gutting the variance term leaves it passing. It pins the
+    /// **plumbing** — that the sums saw the census the array saw — and the formula is pinned by the
+    /// hand-arithmetic fixtures in [`census_moments`](super::census_moments), which is where a
+    /// change to it should break something.
+    ///
+    /// [`alternative_copies_in`]: super::census_moments
     #[test]
     fn the_summed_moments_and_the_stored_array_agree() {
         let density = FrequencyDensity {

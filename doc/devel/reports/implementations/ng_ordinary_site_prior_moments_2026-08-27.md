@@ -1283,3 +1283,138 @@ reach the output; §9's three tests are all present.
   documentation, to one warning's branching and to the harness.
 - `examples/ng_prior_moments_from_reads.rs` run to completion with the new check in place.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+## The Milestone B and C review — tests, and what a mutation could get away with
+
+The third reviewer read the same two milestones asking one question: *which line of this code
+could be wrong without a test noticing?* It answered by changing lines and running the suite. Ten
+of its edits left **4,910 tests passing**, and one of the ten would have shipped wrong numbers to
+a user.
+
+### The one that was a live defect, not a coverage gap
+
+`CensusMomentSums::merge` adds six fields. Delete three of them — the two sums of squares and the
+segregating count — and nothing fails.
+
+That matters because `merge` is not a convenience. The expectation step splits the census across
+cores and `Statistics::absorb` folds every chunk into a fresh empty accumulator, so a field the
+merge forgets arrives at `finish` holding **only what the first chunk put there** — which for a
+freshly created accumulator is zero. A run on more than one chunk would then print both spread
+floors and the segregating count as **0**, and all three are printed in the same shape as the
+numbers beside them, with units and a magnitude. There is no visible symptom.
+
+The cause was that **no test called `merge` at all**. The two whole-fit tests run through the
+threaded path, but the fits there are small enough to land in a single chunk.
+
+What now pins it: `merging_two_chunks_is_the_same_as_one_walk` builds four positions, walks them
+through one accumulator and through two that are then merged, and compares **the whole struct**
+with a single `assert_eq!` — so a field added later cannot escape it, which the field-by-field
+version this replaced would have allowed. It then compares the two `finish` results and checks
+that the segregating count and the frequency floor are above zero, so the comparison cannot pass
+by matching two zeros.
+
+### What the other nine were: numbers no test read
+
+Each is a line that could be replaced by a constant, or dropped, with the suite green.
+
+| The edit | What a run would have shown | What kills it now |
+| --- | --- | --- |
+| `of` passes `0.0` to `finish` instead of the panel's coefficient | the heterozygosity uncorrected for inbreeding — 1% low at F = 0.2 in a panel of ten | `the_report_puts_the_census_average_beside_the_curves_own_number` |
+| `of` stores `panel_inbreeding: 0.0` | the report naming a coefficient of zero for a panel that supplied 0.2 | the same test |
+| `of` sets `curve_heterozygosity` from the census average | the two-route ratio §7 asks for, printed as exactly 1.0000 every time | the same test |
+| the `Display` impl swaps its two headline values | the frequency line carrying the heterozygosity and the reverse | `the_printed_report_carries_each_moment_on_its_own_line` |
+| the all-reference clamp dropped | two impossible posteriors multiplying to a **positive** probability, subtracted from the segregating count | `posteriors_leaving_no_room_for_a_reference_genotype_are_clamped` |
+| the variance clamp in the spread dropped | `NaN` where a nearly invariant census cancels to a small negative residue | `a_nearly_invariant_census_has_a_spread_of_zero_rather_than_a_nan` |
+| both `None` guards made unconditional | `NaN` and `inf` in place of the report's *none walked* | `a_report_with_nothing_to_divide_by_returns_none_rather_than_a_nan` |
+
+The three whole-fit assertions all landed in one test because they share its fit, and the exact
+ratio is what makes the first two visible: the census average with F = 0.2 over the same sums at
+F = 0 must be `1/(1 − 0.2/19)` **to twelve decimals**, where the `0.85..1.15` band the test already
+carried would have swallowed a shift of 1%.
+
+That ratio is a **lift, not a cut** — the assertion was written the wrong way round first. An
+inbred panel shows fewer differences than its population has, so the census average is *divided*
+by `1 − F/(2N − 1)` to recover the population's number.
+
+### Where the reviewer's claim was narrower than it read
+
+The report also said the two whole-fit tests survive a gutted heterozygosity formula — the
+variance term dropped, or `2N − 1` written as `2N`. Both are true of those two tests, and both
+were **already caught elsewhere**: running the same two edits against the whole joint module kills
+them at `at_one_individual_the_heterozygosity_is_the_heterozygous_posterior` and
+`point_mass_posteriors_return_the_census_s_own_moments`. So the formula was never unpinned; what
+was wrong was a **doc comment**, which claimed for
+`the_summed_moments_and_the_stored_array_agree` a guarantee it cannot give. Both of its routes
+call the same two functions, so a defect inside either moves both sides by the same factor. It
+pins the **plumbing** — that the running sums saw the census the stored array saw — and the
+comment now says so, and says where the formula is pinned instead.
+
+A third fixture was added anyway, `the_heterozygosity_formula_matches_arithmetic_done_by_hand`:
+four chromosomes, `E[k] = 1.5`, `Var(k) = 0.75`, and the answer is `0.5` where dropping the
+variance gives `0.625` and writing `2N` in the denominator gives `0.375`. It is not closing a
+hole; it is the one place the formula is checked against arithmetic rather than against itself.
+
+### Two release-held assertions nothing reached, and one message shared by two sites
+
+`add_position`'s buffer-length check and `merge`'s panel-size check were unreached — neither is
+reachable through the fit, which always passes the right shapes, and both exist for a caller that
+does not. Each now has its own `#[should_panic]` test, and each message occurs at exactly one
+site, checked.
+
+That last point is the lesson from the one thing the review found in the code rather than in the
+tests: `CensusMoments::from_posteriors` carried its own `samples > 0` guard with the **same
+message** as the one in `CensusMomentSums::over`, so the `#[should_panic]` test naming that
+message was satisfied by whichever fired. Measured, the `from_posteriors` guard could be deleted
+outright and the suite stayed green. It is gone, and a comment says why one check with one message
+at one site is what a test can pin.
+
+### Two coverage gaps that were about the range, not about a line
+
+**Uncertainty was never crossed with disagreement.** Every fixture with non-point-mass posteriors
+gave *every* sample the same three numbers, and every fixture whose samples differ was at point
+masses, where the variance is identically zero. So the per-sample loop only ever ran over
+identical uncertain samples or over differing certain ones — never over differing uncertain ones,
+which is what a real census at three reads a position is.
+`samples_that_disagree_each_contribute_their_own_uncertainty` runs one sample certain of being
+heterozygous, one at `(0.5, 0.25)` and one certain of carrying nothing: `E[k] = 2`, `Var(k) = 0.5`,
+and the position certainly segregates *because of the first sample*, which no product over one
+shared posterior can show.
+
+**The segregating count never depended on the panel.** `a_report`'s four positions give a share of
+exactly one in four whether the panel holds two samples or two thousand, because point masses
+segregate or do not regardless of how many there are. So nothing showed the count doing the one
+thing it exists for. `a_bigger_panel_finds_more_of_the_same_positions_segregating` gives each
+sample a heterozygous posterior of 0.2 and asks the same four positions at two panel sizes: the
+share is **0.36 at two samples and 0.5904 at four**, because the panel shows no alternative copy
+with probability `0.8^N`. It is also the plan's soft-count trap written as a test — a tally of
+positions whose expected copy count is above zero would call all four segregating at either size.
+
+### One branch that stays unreached, said rather than papered over
+
+The expectation step's underflow early-return — the path that records a position of no alternative
+copies so that both routes to the moments divide by the same count — is entered by no test, and
+none of the fixtures can enter it. Every logarithm on the way there is taken through
+`p.max(f64::MIN_POSITIVE).ln()`, which floors a read's term at about −708, and `ln_sum_exp` returns
+`−∞` only when every input already is one; reaching a non-finite position likelihood from
+well-formed evidence would take on the order of 10³⁰⁵ reads at a position. Replacing the block
+with a `panic!` leaves the suite green, and that is a fact about the branch's reachability, not
+about its bookkeeping — which *is* tested, in the all-reference fixtures that build the identical
+all-zero buffer. The comment at the branch now says all of this, so the next reader does not
+rediscover it as a gap.
+
+### Mutations run
+
+Eleven edits, each applied alone to a checked-out tree, tested against
+`cargo test --lib ng::parameter_estimation::joint`, and reverted; the restore was verified
+**byte-exact against a backup taken before the first edit**, not merely by `git diff`.
+
+Ten now die. The eleventh — demoting `add_position`'s length `assert_eq!` to a `debug_assert_eq!`
+— did not apply, because the pattern did not match the source; it is covered instead by the
+`#[should_panic]` test above, whose passing is itself the proof the assertion is reached.
+
+### Validation
+
+- `cargo test --lib` — **4,920 passed, 0 failed, 11 ignored**: ten new tests, no change to any
+  existing one except the three assertions added inside
+  `the_report_puts_the_census_average_beside_the_curves_own_number`.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.

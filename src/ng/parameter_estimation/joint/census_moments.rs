@@ -178,10 +178,11 @@ impl CensusMoments {
         positions: usize,
         panel_inbreeding: InbreedingF,
     ) -> Self {
-        assert!(
-            samples > 0,
-            "a census average over no samples has no chromosomes to be a share of"
-        );
+        // **A panel of no samples is refused by `CensusMomentSums::over` below, not here.** This
+        // function used to carry its own guard with the *same message*, so a `#[should_panic]`
+        // test naming that message was satisfied by whichever of the two fired — measured, the
+        // guard could be deleted outright and the suite stayed green. One check, one message, one
+        // site that a test can pin.
         assert_eq!(
             genotype_posterior.len(),
             positions * samples * 3,
@@ -957,6 +958,35 @@ mod tests {
         InbreedingF::try_new(0.0).expect("zero is a legal coefficient")
     }
 
+    /// **The heterozygosity formula itself, against arithmetic done by hand** — both of its two
+    /// parts, at numbers chosen so that each part's absence is visible.
+    ///
+    /// Every other fixture reaches [`nei_heterozygosity`] through a posterior array, and the two
+    /// whole-fit tests reach it through *both* routes at once, so a defect inside it moves every
+    /// number in sight by the same factor and nothing fails. Measured: dropping the variance term
+    /// and writing the denominator's `2N − 1` as `2N` left the whole suite green.
+    ///
+    /// Two samples, so four chromosomes. With `E[k] = 1.5` and `Var(k) = 0.75`:
+    ///
+    /// ```text
+    ///   2 (4·1.5 − 1.5² − 0.75) / (4·3)  =  2 (6 − 2.25 − 0.75) / 12  =  6/12  =  0.5
+    /// ```
+    ///
+    /// Drop the variance and it reads `0.625`; write `4·4` in the denominator and it reads
+    /// `0.375`. All three are different numbers, which is the point of the fixture.
+    #[test]
+    fn the_heterozygosity_formula_matches_arithmetic_done_by_hand() {
+        assert_eq!(nei_heterozygosity(1.5, 0.75, 4.0), 0.5);
+        // The two ways it has been seen to break, named so the numbers above cannot be tuned to
+        // whatever the code happens to return.
+        assert_ne!(nei_heterozygosity(1.5, 0.0, 4.0), 0.5, "the variance term");
+        assert_ne!(
+            2.0 * (4.0 * 1.5 - 1.5 * 1.5 - 0.75) / (4.0 * 4.0),
+            0.5,
+            "the chromosome the pair is not drawn against twice"
+        );
+    }
+
     /// **The inbreeding correction at one individual, where it is `1 − F` and its absence is an
     /// 80% error** — `doc/devel/ng/spec/ordinary_site_prior_moments.md` §9's first test, its
     /// inbreeding half.
@@ -1632,6 +1662,40 @@ mod tests {
         }
     }
 
+    /// **A bigger panel finds more positions segregating, from the same per-sample uncertainty** —
+    /// which is the whole reason the count is a sum of probabilities rather than a tally.
+    ///
+    /// Every other fixture that exercises the count is at **point masses**, where each position
+    /// either segregates or does not and the answer is the same at any panel size: `a_report`'s
+    /// four positions give a share of exactly one in four whether the panel holds two samples or
+    /// two thousand. So nothing showed the count doing the one thing it exists to do.
+    ///
+    /// Here each sample is heterozygous with probability 0.2 and never carries two copies, so it
+    /// shows no alternative copy with probability 0.8 and the panel shows none with `0.8^N`:
+    ///
+    /// ```text
+    ///   two samples:  1 − 0.8²  = 0.36        four samples: 1 − 0.8⁴ = 0.5904
+    /// ```
+    ///
+    /// **This is also the soft count the plan warns about not being** — a tally of positions whose
+    /// expected alternative-copy count is above zero would call all four of these segregating, at
+    /// either panel size.
+    #[test]
+    fn a_bigger_panel_finds_more_of_the_same_positions_segregating() {
+        let share_at = |samples: usize| {
+            let mut sums = CensusMomentSums::over(samples);
+            for _ in 0..4 {
+                sums.add_position(&as_f64(&midway(0.8, 0.2, 0.0, samples, 1)));
+            }
+            let moments = sums.finish(outbred());
+            moments.segregating_positions / moments.positions as f64
+        };
+        assert!((share_at(2) - 0.36).abs() < 1e-7, "got {}", share_at(2));
+        assert!((share_at(4) - 0.5904).abs() < 1e-7, "got {}", share_at(4));
+        // And none of these positions is certain either way, which is what a tally would miss.
+        assert!(share_at(2) > 0.0 && share_at(4) < 1.0);
+    }
+
     /// **The report prints both routes to the heterozygosity and the ratio between them, and
     /// judges neither** — `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7.
     ///
@@ -1804,6 +1868,241 @@ mod tests {
         assert!(printed[2].contains("runs-of-homozygosity estimator over 8004 genome windows"));
         assert_ne!(printed[0], printed[1]);
         assert_ne!(printed[1], printed[2]);
+    }
+
+    /// **Two chunks merged are one walk** — field for field, not only on the two fields a whole-fit
+    /// test happens to read.
+    ///
+    /// **`merge` is live production arithmetic**: the expectation step splits the census across
+    /// cores and `Statistics::absorb` folds every chunk into a fresh empty one, so a field the
+    /// merge forgets comes back as **zero** on any run with more than one chunk. Measured before
+    /// this test existed: dropping the two sums of squares and the segregating count from `merge`
+    /// left the whole 4,910-test suite green, and a real run would then have reported both spreads
+    /// and the segregating count as zero — three numbers that look like measurements.
+    ///
+    /// Only `positions`, `frequency` and `heterozygosity` were pinned at all, and only indirectly,
+    /// through the two whole-fit tests.
+    #[test]
+    fn merging_two_chunks_is_the_same_as_one_walk() {
+        let positions = [
+            as_f64(&point_masses(&[&[1, 0, 2]])),
+            as_f64(&point_masses(&[&[0, 0, 0]])),
+            as_f64(&midway(0.3, 0.4, 0.3, 3, 1)),
+            as_f64(&point_masses(&[&[2, 2, 1]])),
+        ];
+
+        let mut whole = CensusMomentSums::over(3);
+        for position in &positions {
+            whole.add_position(position);
+        }
+
+        let mut first = CensusMomentSums::over(3);
+        let mut second = CensusMomentSums::over(3);
+        first.add_position(&positions[0]);
+        first.add_position(&positions[1]);
+        second.add_position(&positions[2]);
+        second.add_position(&positions[3]);
+        first.merge(&second);
+
+        // **The whole struct, so a field added later cannot escape the check** — this is the
+        // assertion the field-by-field version would have let through.
+        assert_eq!(first, whole);
+
+        // And the finished numbers agree too, which is what a run reads.
+        let selfing = InbreedingF::try_new(0.5).expect("a legal coefficient");
+        assert_eq!(first.finish(selfing), whole.finish(selfing));
+        assert!(whole.finish(selfing).segregating_positions > 0.0);
+        assert!(whole.finish(selfing).frequency_standard_error_floor > 0.0);
+    }
+
+    /// **Sums taken over two different panels cannot be added**, because each position's terms are
+    /// already divided by the panel's chromosome count.
+    ///
+    /// Nothing merged two accumulators at all until the test above, so this release-held check was
+    /// unreached — a review demoted it and no test noticed.
+    #[test]
+    #[should_panic(expected = "their sums are over the same sample count")]
+    fn merging_sums_over_different_panels_is_refused() {
+        let mut two = CensusMomentSums::over(2);
+        let three = CensusMomentSums::over(3);
+        two.merge(&three);
+    }
+
+    /// **A position buffer of the wrong length is refused**, which is the check
+    /// [`CensusMomentSums::add_position`]'s own `# Panics` note argues for and which nothing
+    /// reached until now: it is read by computed offset, so a short buffer would read one sample's
+    /// numbers as another's rather than fail.
+    #[test]
+    #[should_panic(expected = "three numbers a sample, so")]
+    fn a_position_buffer_of_the_wrong_length_is_refused() {
+        let mut sums = CensusMomentSums::over(3);
+        sums.add_position(&[0.5, 0.0, 0.0, 0.5, 0.0, 0.0]);
+    }
+
+    /// **Posteriors that do not leave room for a homozygous-reference genotype are clamped, not
+    /// carried through negative** — the guard inside the all-reference product.
+    ///
+    /// Every other fixture here has `P(het) + P(both) ≤ 1` by construction, so the clamp was
+    /// unreachable and could be deleted with the suite green. A sample at `(0.6, 0.6)` has no room
+    /// left: `1 − 0.6 − 0.6` is `−0.2`, and **two negatives multiply to a positive** — the
+    /// unclamped all-reference term for two such samples is `+0.04`, a positive probability of a
+    /// state neither sample can be in, subtracted from the segregating count.
+    ///
+    /// Both samples also carry `P(both non-reference) = 0.6`, so the all-alternative term is
+    /// `0.36` whatever the clamp does. The clamp is therefore worth exactly the `0.04`:
+    /// **0.64 with it, 0.60 without**.
+    ///
+    /// The posteriors are not reachable from a converged fit; what this guards is a buffer built by
+    /// hand, and the point is that the failure is silent rather than loud.
+    ///
+    /// **⚠ The outer `clamp(0.0, 1.0)` on the returned probability is still unreachable** — with
+    /// the inner guard in place the two products are each in `[0, 1]` and cannot sum above one, so
+    /// only floating-point rounding can move it. Said rather than left for the next reviewer to
+    /// find again.
+    #[test]
+    fn posteriors_leaving_no_room_for_a_reference_genotype_are_clamped() {
+        let impossible = [0.6_f64, 0.6, 0.0, 0.6, 0.6, 0.0];
+        let segregating = probability_that_the_panel_segregates(&impossible, 2);
+        assert!(
+            (0.0..=1.0).contains(&segregating),
+            "the probability that a position segregates is a probability; got {segregating}"
+        );
+        // 1 − 0 − 0.36 with the clamp; 1 − 0.04 − 0.36 without it.
+        assert!((segregating - 0.64).abs() < 1e-15, "got {segregating}");
+    }
+
+    /// **A census that says almost the same thing at every position has a spread of zero rather
+    /// than the square root of a negative number.**
+    ///
+    /// The one-pass variance `Σx²/n − (Σx/n)²` cancels to a small *negative* residue when every
+    /// position carries nearly the same value, which is exactly what a nearly invariant cohort is —
+    /// and `sqrt` of it is `NaN`. Every other fixture here sits at values where the cancellation is
+    /// exact, so the clamp was unreachable and could be deleted with the suite green.
+    #[test]
+    fn a_nearly_invariant_census_has_a_spread_of_zero_rather_than_a_nan() {
+        let mut sums = CensusMomentSums::over(4);
+        let barely = [1e-7_f64, 0.0, 0.0].repeat(4);
+        for _ in 0..10_000 {
+            sums.add_position(&barely);
+        }
+        let moments = sums.finish(outbred());
+        assert!(
+            moments.frequency_standard_error_floor.is_finite()
+                && moments.frequency_standard_error_floor >= 0.0,
+            "got {}",
+            moments.frequency_standard_error_floor
+        );
+        assert!(
+            moments.heterozygosity_standard_error_floor.is_finite()
+                && moments.heterozygosity_standard_error_floor >= 0.0,
+            "got {}",
+            moments.heterozygosity_standard_error_floor
+        );
+    }
+
+    /// **A cohort with no variation at all has no two-route ratio and a run over nothing has no
+    /// segregating share** — both come back `None` rather than dividing by zero.
+    ///
+    /// Nothing constructed either state, so both guards could be replaced by unconditional `Some`
+    /// with the suite green — and the `Display` arm that prints *none walked* was dead code.
+    #[test]
+    fn a_report_with_nothing_to_divide_by_returns_none_rather_than_a_nan() {
+        let invariant = CensusMomentsReport {
+            measured: CensusMomentSums::over(2).finish(outbred()),
+            curve_heterozygosity: 7.0e-4,
+            panel_inbreeding: 0.0,
+            inbreeding_source: InbreedingSource::User,
+            samples: 2,
+        };
+        assert_eq!(invariant.measured.positions, 0);
+        assert_eq!(invariant.measured.heterozygosity, 0.0);
+        assert_eq!(invariant.curve_over_census(), None);
+        assert_eq!(invariant.segregating_share(), None);
+        let printed = invariant.to_string();
+        assert!(printed.contains("none walked"), "{printed}");
+        assert!(
+            !printed.contains("NaN") && !printed.contains("inf"),
+            "{printed}"
+        );
+    }
+
+    /// **Both moments' own values reach the printed output, on their own lines.**
+    ///
+    /// Nothing asserted that either number was printed at all: the `Display` tests checked fixed
+    /// substrings and the source labels, so **exchanging the two value expressions left the suite
+    /// green** — a report calling the heterozygosity a mean frequency and the frequency a
+    /// heterozygosity.
+    #[test]
+    fn the_printed_report_carries_each_moment_on_its_own_line() {
+        // A fixture whose two moments differ, so the swap is visible: one heterozygote in a panel
+        // of two is a frequency of 1 in 4 and a heterozygosity of 1 in 2.
+        let mut sums = CensusMomentSums::over(2);
+        sums.add_position(&as_f64(&point_masses(&[&[1, 0]])));
+        sums.add_position(&as_f64(&point_masses(&[&[0, 0]])));
+        let report = CensusMomentsReport {
+            measured: sums.finish(outbred()),
+            curve_heterozygosity: 7.0e-4,
+            panel_inbreeding: 0.0,
+            inbreeding_source: InbreedingSource::User,
+            samples: 2,
+        };
+        let printed = report.to_string();
+        let frequency_line = printed
+            .lines()
+            .find(|line| line.contains("mean alternative-allele frequency"))
+            .expect("the frequency has a line");
+        let heterozygosity_line = printed
+            .lines()
+            .find(|line| line.trim_start().starts_with("heterozygosity"))
+            .expect("the heterozygosity has a line");
+        assert!(
+            frequency_line.contains(&format!(
+                "{:.4e}",
+                report.measured.mean_alternative_frequency
+            )),
+            "the frequency line does not carry the frequency: {frequency_line}"
+        );
+        assert!(
+            heterozygosity_line.contains(&format!("{:.4e}", report.measured.heterozygosity)),
+            "the heterozygosity line does not carry the heterozygosity: {heterozygosity_line}"
+        );
+        // And the two really are different numbers here, so the check above can fail.
+        assert!(
+            report.measured.mean_alternative_frequency < report.measured.heterozygosity,
+            "a fixture where the two agree cannot see them swapped"
+        );
+    }
+
+    /// **Samples that disagree with each other each contribute their own uncertainty**, and their
+    /// own share of the all-reference product.
+    ///
+    /// Every other fixture with non-point-mass posteriors gives **every sample the same three
+    /// numbers**, and every fixture whose samples differ is at point masses, where the variance is
+    /// identically zero. So the per-sample loop was only ever exercised over identical uncertain
+    /// samples or over differing certain ones — never over differing uncertain ones, which is what
+    /// a real census at low depth is.
+    ///
+    /// Here: one sample certain of being heterozygous, one at `(0.5, 0.25)`, one certain of
+    /// carrying nothing. `E[k] = 1 + 1.0 + 0 = 2`; the variances are `0`, `0.5 + 4(0.25) − 1 = 0.5`
+    /// and `0`, so `Var(k) = 0.5`.
+    #[test]
+    fn samples_that_disagree_each_contribute_their_own_uncertainty() {
+        let mixed = [1.0_f64, 0.0, 0.0, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0];
+        let copies = alternative_copies_in(&mixed, 3);
+        assert!(
+            (copies.expected_copies - 2.0).abs() < 1e-15,
+            "got {}",
+            copies.expected_copies
+        );
+        assert!(
+            (copies.copy_count_variance - 0.5).abs() < 1e-15,
+            "got {}",
+            copies.copy_count_variance
+        );
+        // The all-reference product is `0 · 0.25 · 1 = 0` and the all-alternative one
+        // `0 · 0.25 · 0 = 0`, so this position certainly segregates — and it does so because of
+        // the *first* sample, which no product over one shared posterior could show.
+        assert_eq!(copies.segregating, 1.0);
     }
     /// **A posterior array of the wrong length is refused rather than read by offset.**
     ///
