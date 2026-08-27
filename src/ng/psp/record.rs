@@ -1194,7 +1194,14 @@ pub struct RecordEncoder {
 /// compiles and still is never reset — also measured, 148 tests green. So this does not force
 /// the choice; it makes the reset automatic once the choice is made, and names the two
 /// lifetimes so that making it wrong is visible rather than invisible.
-#[derive(Debug, Clone, Copy)]
+///
+/// **⚠ Not `Copy`, deliberately** — the same reason `BlockCursor` on the reading side is not.
+/// Milestone E's chain-id live set is a collection, and a `Copy` struct cannot hold one: adding
+/// it here under a `Copy` derive gives `error[E0204]: the trait `Copy` cannot be implemented for
+/// this type` *before* the `E0063` that is the point, and the cheapest way past `E0204` is to put
+/// the field on [`RecordEncoder`] instead, where it compiles and is never reset. Dropping `Copy`
+/// leaves only the error that sends the coder to the right place.
+#[derive(Debug, Clone)]
 struct PerBlockState {
     measured_from: OffsetBase,
 }

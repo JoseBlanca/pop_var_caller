@@ -19,10 +19,33 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **every running difference resets at a block boundary,
+> - **Last completed task (2026-08-27):** **Milestone D reviewed and hardened — the reader's
+> record ceiling was measured against the wrong thing, and the type that makes a per-block reset
+> unforgettable could not hold the field it was built for** (the eight-checklist review of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md)'s steps D4 and D5, branch
+> `ng-psp-encoding`). Three agents, 21 mutations, **1,523,400 fuzzed inputs**, no Blocker, nine
+> Majors, and **one mutation that survived the whole suite**: the ceiling written against the
+> rolling buffer's *capacity* instead of what it *holds* passes all 81 tests and refuses a
+> well-formed 2 MB block. Nothing caught it because **no reader test decoded a block past the
+> ceiling at all**, though at the shipped 100 kb block size a fully covered block is about 1.76 MB
+> decompressed — the ordinary case, untested. Two tests now come at it from both sides, and the
+> killer is three records that each grow the buffer to the ceiling without reaching it. **The
+> ceiling also moved from 1 MiB to 512 KiB**: at three thousand samples — the top of the range
+> this caller is committed to — 1 MiB each is 3.07 GB against spec §1.1's 1.5 GB, and 512 KiB is
+> 1,572,864,000 bytes, the budget to within 5 %. It is a settable field now rather than a
+> constant, because two documents called it a knob and there was no knob. **And `Copy` is gone
+> from both per-block state types**: Milestone E's chain-id difference is a live *set*, and a
+> `Copy` derive turns adding it into `error[E0204]` whose cheapest answer is to put the field
+> where nothing resets it — measured, it compiles there and 197 tests pass. **Seven numbers of
+> mine were wrong**, including a fixture described as "blocks" that was one block; all corrected
+> forward.
+> [the review](doc/devel/reports/reviews/ng_psp_d4d5_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d4d5_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **every running difference resets at a block boundary,
 > and the property turned out to be held already** (step D5 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`) —
-> **Milestone D is complete and this is Checkpoint D.** The defect the step exists to catch is a
+> **Milestone D is complete.** The defect the step exists to catch is a
 > difference that survives a block boundary *on both sides at once*, so a sequential read stays
 > self-consistent and only a reader starting mid-file sees anything wrong: the silent, plausible
 > failure the spec names. Injected exactly that — the writer keeping the previous block's
@@ -89,18 +112,25 @@ Skills and agents are instructed to leave it untouched.
 > size is not bounded by its size on disk and the buffer doubles until the frame runs out. The
 > ceiling is the **reader's** budget rather than a maximum record size the format fixes, with its
 > own refusal naming the number to raise — the pattern spec §4.2 already uses for a look-back
-> window wider than a reader budgeted for. A real record at three hundred reads a position is
-> about 30 kB, so it sits about thirty times above anything the depth cap can produce.
+> window wider than a reader budgeted for. *⚠ Corrected by the D4/D5 review: a real record at
+> three hundred reads a position measures **18,292 bytes** over a 50-base span and 48,693 over
+> 150, not "about 30 kB"; and the ceiling itself has since moved from 1 MiB to **512 KiB**,
+> because 1 MiB × three thousand samples is 3.07 GB against spec §1.1's 1.5 GB budget.*
 > **And near-empty blocks are not merged.** Spec §4.1 offers a second cut rule — accumulate
 > across empty stretches so a patchy sample gets one large block instead of several thin ones —
 > and spec §12 question 3 says it ships. The ruling is against it: **merging would complicate the
 > alignment between samples**, which is the one thing the coordinate grid exists to give. Merge,
 > and one sample's block may begin ninety cells before its neighbour's, so which block holds a
-> position differs from sample to sample. The price of not merging is about 7 % of a patchy
-> sample's file at the shipped block size. *Separately, and already true: a grid cell holding no
+> position differs from sample to sample. *⚠ Corrected by the D4/D5 review: what merging would
+> have saved was never measured. The "about 7 %" quoted here compares two **block sizes** on the
+> same non-merging writer, which prices a different change; no merging writer has been built.*
+> *Separately, and already true: a grid cell holding no
 > records has never produced a block — the cut decides where a block ends, not that one is owed
-> per 100 kb — and that now has a test rather than being implied.* **Spec §4.1 and §12 question 3
-> need correcting when that document is next touched.**
+> per 100 kb — and that now has a test rather than being implied.* **⛦ Spec §4.1 and §12
+> question 3 still say the merge rule ships, and need correcting — a Checkpoint D item, not a
+> "when that document is next touched" one, because nothing schedules that. So does spec §6.7/§7,
+> which enumerate the reader's error classes and have no row for the record ceiling that Milestone
+> F4's `PspReadError` mapping will have to carry.**
 > [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
 > [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
 > [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).

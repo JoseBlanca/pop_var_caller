@@ -398,10 +398,20 @@ impl OpenBlock {
 /// a cohort reader stepping across a region knows which block of each sample holds a position.
 /// Merge, and one sample's block may begin ninety cells earlier than its neighbour's, so the
 /// block holding a given position differs from sample to sample and a reader wanting one
-/// position decodes from far behind it. **The measured price of not merging is about 7 % of a
-/// patchy sample's file** at the shipped block size (spec §4.1: 17.557 bytes a record against
-/// 16.444 at 1,000 kb). Spec §4.1 and §12 question 3 should be corrected when that document is
-/// next touched.
+/// position decodes from far behind it.
+///
+/// **⚠ What merging would have saved was never measured, here or in the spec.** An earlier
+/// version of this comment priced it at "about 7 %" and cited spec §4.1's 17.557 bytes a record
+/// against 16.444 — but those two are the 100 kb and 1,000 kb rows of the *same*, non-merging
+/// cut rule, so they price a change of block size and say nothing about merging. No writer that
+/// accumulates across empty stretches has been built or measured. The ruling stands on the
+/// alignment argument above, which does not need a number; if someone later wants the price,
+/// they have to build the merging writer to get it.
+///
+/// **Spec §4.1 and §12 question 3 still say this rule ships**, so the design authority currently
+/// instructs the opposite of this code. Correcting them is owed at Checkpoint D and is listed in
+/// `PROJECT_STATUS.md` — not deferred to "when that document is next touched", which nothing
+/// schedules.
 ///
 /// # What it refuses
 ///
@@ -1089,32 +1099,49 @@ pub const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// next block.
 pub const ROLLING_BYTES: usize = 16 * 1024;
 
-/// How far the rolling buffer may grow for one record before a reader refuses the block.
+/// How far a reader's rolling buffer may grow for one record before it refuses the block.
 ///
-/// **A reader's budget, not a maximum record size the format fixes.** Spec §8 refuses the
-/// second outright — "many alleles, many chain ids", and a fixed ceiling baked into the format
-/// would make a legitimate file unreadable. But spec §1.1 puts an open sample at 500 kB, and on
-/// a *corrupt* block the two do not both hold: no record parses, so nothing ever fits, and the
-/// buffer doubles until the block's whole decompressed size is in it. A block's decompressed
-/// size is not bounded by its size on disk — measured, **4,132 bytes on disk drove a reader to
-/// hold 67,125,248**.
+/// **A reader's budget, not a maximum record size the format fixes** — and the name says buffer
+/// rather than record for that reason. Spec §8 refuses the second outright ("many alleles, many
+/// chain ids"), because a ceiling baked into the *format* makes a legitimate file unreadable
+/// everywhere at once. But spec §1.1 puts an open sample at 500 kB, and on a **corrupt** block the
+/// two do not both hold: no record parses, so nothing ever fits, and the buffer doubles until the
+/// block's whole decompressed size is in it. That size is not bounded by the block's size on disk
+/// — measured, **4,132 bytes on disk drove a reader to hold 67,125,248**.
 ///
-/// **So the ceiling is the reader's, and it is raisable, exactly as the look-back window's is.**
-/// Spec §4.2 gives the window budget its own error class because *the fix is a knob rather than
-/// a rebuild*; [`BlockReadError::RecordLargerThanTheReaderAllows`] says the same about this one,
-/// and names the number to change.
+/// **Why half a mebibyte.** Two numbers, both measured rather than estimated:
 ///
-/// **Why 1 MiB.** A record's size is bounded by the depth cap: at three hundred reads a
-/// position, three hundred observations of fifty bases with their moments and their chain ids
-/// come to roughly 30 kB. This is about thirty times that, and sixty-four times the rolling
-/// buffer — far enough above anything the caller's own depth cap can produce that it is not
-/// expected to bind, and small enough that a thousand open samples meeting damaged blocks
-/// together is a gigabyte rather than an unbounded number. (The owner's ruling, 2026-08-27.)
-pub const MOST_A_RECORD_MAY_HOLD_BYTES: usize = 1024 * 1024;
+/// - **It is 10× the largest record this caller's own depth cap can produce.** Built to the top of
+///   the committed range — three hundred reads a position, one observation each, with their
+///   moments — a record encodes to **18,292 bytes** at a 50-base span and **48,693** at 150 bases.
+///   (An earlier version of this comment said "roughly 30 kB" from estimation; the measured figure
+///   is the first of those. Milestone E's chain ids add about 8 bytes a read on top, since
+///   `encode_record_body` drops them today.)
+/// - **It is what keeps the worst case inside the budget spec §1.1 states.** A caller holds one
+///   reader per sample at up to several thousand; three thousand samples every one of which met a
+///   damaged block at the same moment is **1,572,864,000 bytes**, against the 1.5 GB §1.1 gives
+///   three thousand open samples — the same number to within 5 %. At 1 MiB — the value first
+///   proposed — it would have been 3.07 GB, twice the whole budget, which is a weak bound for
+///   something whose purpose is bounding hostile input. The arithmetic is a test, so it moves
+///   when the constant does: `the_buffer_ceiling_is_priced_at_the_top_of_the_committed_cohort_range`.
+///
+/// **And it is raisable at run time**, which is the other half of why a ceiling is tolerable here:
+/// [`BlockStream::with_a_buffer_ceiling`] takes one, and
+/// [`BlockReadError::RecordLargerThanTheReaderAllows`] names it. That is the pattern spec §4.2
+/// uses for a look-back window wider than a reader budgeted for — *the fix is a knob rather than a
+/// rebuild*. **⚠ It was a `const` read straight out of the reader when this was first written, so
+/// "raisable" meant recompiling**; the knob is what makes the sentence true.
+pub const ROLLING_BUFFER_CEILING_BYTES: usize = 512 * 1024;
 
 const _: () = assert!(
-    MOST_A_RECORD_MAY_HOLD_BYTES > ROLLING_BYTES,
+    ROLLING_BUFFER_CEILING_BYTES > ROLLING_BYTES,
     "a ceiling at or under the buffer would refuse records the buffer already holds"
+);
+
+const _: () = assert!(
+    ROLLING_BUFFER_CEILING_BYTES >= 64 * 1024,
+    "a ceiling under 64 kB refuses records this caller's own depth cap produces: 48,693 bytes \
+     at a 150-base span, and Milestone E's chain ids are still to come"
 );
 
 /// One record as a walk met it.
@@ -1150,7 +1177,7 @@ pub struct BlockStream<R> {
     look_back_window_log: u8,
     layout: RecordLayout,
 
-    // ---- what lives for the whole stream ----
+    // ---- what lives for the whole stream: storage, budgets, and totals ----
     /// Compressed bytes pulled from the source, and how much of them has been fed to the
     /// decoder.
     compressed: Vec<u8>,
@@ -1160,14 +1187,32 @@ pub struct BlockStream<R> {
     /// been consumed is in the cursor, because that is per-block.
     rolling: Vec<u8>,
 
-    // ---- what lives for one block, and is replaced whole at every boundary ----
-    cursor: BlockCursor,
-    /// How many times a record's parse has been retried after a refill. **Test-only, because it
-    /// is the one thing about a restartable parse that cannot be seen from outside**: a walk
-    /// that comes out right proves nothing if the retry never ran, and a fixture small enough
-    /// to fit one buffer never runs it.
-    #[cfg(test)]
-    retries_after_a_refill: usize,
+    /// How many times a record's parse ran out of bytes and was started again — **counted over
+    /// the whole file and never reset at a block**, because a total is what the oracle compares.
+    ///
+    /// ⚠ The increment is at the top of the truncated arm, *before* the refill is asked for, so a
+    /// stream that then refuses with `RecordRunsPastItsBlock` has counted one restart that never
+    /// happened. That is why the name is not `retries_after_a_refill`, which it was: at most one
+    /// per refused stream, and nothing pins the distinction.
+    ///
+    /// **Kept unconditionally, at eight bytes against a 500 kB budget.** It is the one thing
+    /// about a restartable parse that cannot be seen from outside — a walk that comes out right
+    /// is silent about whether the retry ever ran — and it was `#[cfg(test)]` until a review
+    /// pointed out that this hides it from `tests/`, from benches, and from Milestone H, which
+    /// is the one place this reader is to be timed.
+    parses_restarted: u64,
+
+    /// How many times a *block head*'s parse has been restarted after asking for more bytes.
+    ///
+    /// Counted separately because it answers a different question, and the answer is
+    /// surprising: a block head arrives whole or not at all. zstd emits an internal block in
+    /// one piece, so a refill lands *before* a head and never inside one — measured, over
+    /// 108,746 head restarts the largest partial head ever seen was **zero bytes**.
+    block_heads_restarted: u64,
+
+    /// How far `rolling` may grow for one record. Defaults to
+    /// [`ROLLING_BUFFER_CEILING_BYTES`]; [`BlockStream::with_a_buffer_ceiling`] sets it.
+    buffer_ceiling: usize,
 
     /// Set once this reader has refused, and never cleared. **A stream that has refused is
     /// finished**: without a state that says so, what stopped a refused reader was only that its
@@ -1178,6 +1223,15 @@ pub struct BlockStream<R> {
     /// 5,681 further records and ended cleanly. Milestone F hands this reader a seeked `File`,
     /// where that is the ordinary case rather than the exotic one.
     refused: bool,
+
+    // ---- what lives for one block, and is replaced whole at every boundary ----
+    //
+    // **Nothing per-block goes beside `cursor`.** A field here is initialised once in
+    // `new` and never reset; the same field inside [`BlockCursor`] cannot be, because
+    // `opening` and `between_blocks` are its only constructors and both literals are
+    // exhaustive. The hand-written `Debug` below does make a field here a compile error —
+    // but the fix it asks for is `field: _`, which is not the fix.
+    cursor: BlockCursor,
 }
 
 /// Everything a reader **restarts when a block does** (spec §3.2).
@@ -1192,7 +1246,13 @@ pub struct BlockStream<R> {
 ///
 /// **The two buffers are not in here**, and that is the distinction: they are storage a reader
 /// reuses across blocks, not state a record is parsed against.
-#[derive(Debug, Clone, Copy)]
+///
+/// **⚠ Not `Copy`, deliberately.** Milestone E's chain-id live set is a collection, and a `Copy`
+/// struct cannot hold one — `error[E0204]` — so a coder meeting that would put the field on
+/// [`BlockStream`] instead, where it compiles, passes every test, and is never reset. Measured: a
+/// live set added there builds clean and all 197 `ng::psp` tests pass. Dropping `Copy` is what
+/// keeps the field's natural home the one that forces the reset.
+#[derive(Debug, Clone)]
 struct BlockCursor {
     /// How much of the rolling buffer the parser has consumed. **Per-block, and it belongs
     /// here**: dropping its reset fails eight tests, so it is parse state rather than the
@@ -1246,6 +1306,12 @@ impl<R> std::fmt::Debug for BlockStream<R> {
     /// `zstd::zstd_safe::DCtx` is not `Debug`, so this is written by hand — and it destructures
     /// `Self` with no `..`, so a field added to the reader is a compile error here rather than
     /// one that silently stops being reportable. **Buffer lengths, never buffer contents.**
+    ///
+    /// **⚠ Being named here is not the same as being reset.** This is the *reporting* guard, and
+    /// the compile error it raises is answered by one line — `new_field: _`. A per-block field
+    /// added beside `cursor` therefore compiles clean after that one line and is never reset at a
+    /// block boundary; the guard that catches *that* is `BlockCursor`'s two exhaustive
+    /// constructors, and the field has to be inside it to meet them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
             source: _,
@@ -1257,8 +1323,9 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             compressed_filled,
             rolling,
             cursor,
-            #[cfg(test)]
-                retries_after_a_refill: _,
+            parses_restarted,
+            block_heads_restarted,
+            buffer_ceiling,
             refused,
         } = self;
         f.debug_struct("BlockStream")
@@ -1268,6 +1335,9 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             .field("rolling_buffered", &(rolling.len() - cursor.rolling_at))
             .field("rolling_capacity", &rolling.capacity())
             .field("cursor", cursor)
+            .field("parses_restarted", parses_restarted)
+            .field("block_heads_restarted", block_heads_restarted)
+            .field("buffer_ceiling", buffer_ceiling)
             .field("refused", refused)
             .finish_non_exhaustive()
     }
@@ -1318,16 +1388,48 @@ impl<R: std::io::Read> BlockStream<R> {
             compressed_filled: 0,
             rolling: Vec::with_capacity(ROLLING_BYTES),
             cursor: BlockCursor::between_blocks(),
-            #[cfg(test)]
-            retries_after_a_refill: 0,
+            parses_restarted: 0,
+            block_heads_restarted: 0,
+            buffer_ceiling: ROLLING_BUFFER_CEILING_BYTES,
             refused: false,
         })
     }
 
-    /// How many times a record's parse has been retried after a refill — see the field.
-    #[cfg(test)]
-    fn retries_after_a_refill(&self) -> usize {
-        self.retries_after_a_refill
+    /// How many times a record's parse has been restarted after asking for more bytes — see
+    /// the field for why a walk that comes out right does not answer this.
+    pub fn parses_restarted(&self) -> u64 {
+        self.parses_restarted
+    }
+
+    /// How many times a block head's parse has been restarted after asking for more bytes.
+    pub fn block_heads_restarted(&self) -> u64 {
+        self.block_heads_restarted
+    }
+
+    /// The same reader, with a different ceiling on how far its rolling buffer may grow for one
+    /// record.
+    ///
+    /// **This is the knob [`ROLLING_BUFFER_CEILING_BYTES`] is the default of.** A genuine record
+    /// larger than the default makes a file unreadable until someone raises it, which is why the
+    /// refusal names the number — the same shape spec §4.2 gives a look-back window wider than a
+    /// reader budgeted for, where the fix is a setting rather than a rebuilt file.
+    ///
+    /// A ceiling at or under [`ROLLING_BYTES`] is refused: it would turn away records the buffer
+    /// already holds without growing at all.
+    pub fn with_a_buffer_ceiling(mut self, ceiling: usize) -> Result<Self, BlockReadError> {
+        if ceiling <= ROLLING_BYTES {
+            return Err(BlockReadError::BufferCeilingUnderTheBuffer {
+                ceiling,
+                buffer_bytes: ROLLING_BYTES,
+            });
+        }
+        self.buffer_ceiling = ceiling;
+        Ok(self)
+    }
+
+    /// How far this reader's rolling buffer may grow for one record.
+    pub fn buffer_ceiling(&self) -> usize {
+        self.buffer_ceiling
     }
 
     /// The look-back window this reader's decoder is configured for, as the file declared it.
@@ -1428,10 +1530,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     }));
                 }
                 Err(RecordDecodeError::Truncated { .. }) => {
-                    #[cfg(test)]
-                    {
-                        self.retries_after_a_refill += 1;
-                    }
+                    self.parses_restarted += 1;
                     // **Nothing but `pump` may go here.** The parse starts again from the
                     // record's first byte, against state this arm has not touched — which is
                     // what makes it restartable rather than half-advanced. Spec §8: "a parse
@@ -1497,6 +1596,7 @@ impl<R: std::io::Read> BlockStream<R> {
                     return Ok(true);
                 }
                 Err(BlockHeadDecodeError::Truncated { field, bytes_in }) => {
+                    self.block_heads_restarted += 1;
                     if !self.pump()? {
                         return Err(BlockReadError::BlockHeadRunsPastItsBlock { field, bytes_in });
                     }
@@ -1544,14 +1644,48 @@ impl<R: std::io::Read> BlockStream<R> {
             self.rolling.drain(..self.cursor.rolling_at);
             self.cursor.rolling_at = 0;
         }
-        if self.rolling.len() >= MOST_A_RECORD_MAY_HOLD_BYTES {
+        // **The ceiling counts one record, and this is where that is true.** The drain above
+        // leaves `rolling` holding exactly what the record in front of the parser has claimed so
+        // far, so `len()` and "one record" are the same number — which is what lets the refusal
+        // below name a record. `pump`'s other callers keep it true the same way:
+        // `begin_next_block` clears the buffer before its own retry loop, and
+        // `check_the_block_ended_here` pumps only once the parser has consumed everything.
+        debug_assert_eq!(
+            self.cursor.rolling_at, 0,
+            "the ceiling counts one record, so nothing already consumed may still be held"
+        );
+        // ⚠ **`>=` rather than `>` is a one-byte convention, and no test distinguishes them.**
+        // Measured: swapping it fails none of the 201 `ng::psp` tests. What it decides is whether
+        // the buffer may ever *hold* exactly `buffer_ceiling` bytes or must stop one below, and
+        // building an oracle for that would mean searching for the exact rolling length at the
+        // deciding pump — a fixture pinned to zstd's emission sizes, to prove one byte on a
+        // 512 kB budget. Recorded as an unpinned convention rather than given a test that would
+        // break whenever the compressor's internals moved.
+        if self.rolling.len() >= self.buffer_ceiling {
             // The buffer has grown as far as this reader allows and the record in front of it
             // still does not fit. **Refused rather than grown into**, so that a block nothing
             // can be parsed out of costs a bounded amount of memory rather than its own whole
             // decompressed size.
+            let block = self.cursor.block.map_or(
+                GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(0),
+                    end: Position(0),
+                },
+                |head| GenomeRegion {
+                    contig: head.contig,
+                    start: head.first_position,
+                    end: head.first_position,
+                },
+            );
+            let records_read = self
+                .cursor
+                .block
+                .map_or(0, |head| head.record_count.get() - self.cursor.records_left);
             return Err(BlockReadError::RecordLargerThanTheReaderAllows {
-                held_bytes: self.rolling.len(),
-                allowed_bytes: MOST_A_RECORD_MAY_HOLD_BYTES,
+                block,
+                records_read,
+                allowed_bytes: self.buffer_ceiling,
             });
         }
         if self.rolling.len() >= self.rolling.capacity() {
@@ -1559,7 +1693,7 @@ impl<R: std::io::Read> BlockStream<R> {
             // refuses a fixed maximum record size outright — "many alleles, many chain ids" —
             // and `begin_next_block` shrinks back at the next block.
             //
-            // **The growth is bounded by [`MOST_A_RECORD_MAY_HOLD_BYTES`], checked above.**
+            // **The growth is bounded by [`ROLLING_BUFFER_CEILING_BYTES`], checked above.**
             // Without that ceiling a corrupt block grew this buffer to the block's whole
             // decompressed size, which is not bounded by its size on disk — measured, 4,132
             // bytes on disk against 67,125,248 held. Nothing is sized from a *declared* length
@@ -1741,18 +1875,30 @@ pub enum BlockReadError {
     /// One record needs more of the rolling buffer than this reader allows.
     ///
     /// **A knob, not a rebuild**, which is why it is its own class: a genuine record this large
-    /// is read by raising [`MOST_A_RECORD_MAY_HOLD_BYTES`], the same instruction spec §4.2
+    /// is read by raising [`ROLLING_BUFFER_CEILING_BYTES`], the same instruction spec §4.2
     /// attaches to a look-back window wider than a reader budgeted for. On a damaged block —
     /// which is where it is actually expected — it is what stops the buffer growing to the
     /// block's whole decompressed size.
     #[error(
-        "a record needs more than the {allowed_bytes} bytes this reader allows one to hold; it \
-         had {held_bytes} and had not finished"
+        "a record in the block starting at {block} needs more than the {allowed_bytes} bytes \
+         this reader allows one record to hold; raise the ceiling to read it"
     )]
     RecordLargerThanTheReaderAllows {
-        held_bytes: usize,
+        /// Which block it was in — the only thing that locates the record, since its own head
+        /// never finished parsing.
+        block: GenomeRegion,
+        /// How many records of that block were handed over before this one.
+        records_read: u64,
         allowed_bytes: usize,
     },
+
+    /// A ceiling at or under the rolling buffer, which would refuse records the buffer holds
+    /// without growing at all.
+    #[error(
+        "a buffer ceiling of {ceiling} bytes, which is not above the {buffer_bytes}-byte buffer \
+         it is a ceiling on"
+    )]
+    BufferCeilingUnderTheBuffer { ceiling: usize, buffer_bytes: usize },
 
     /// The block held bytes past the last record its head declared.
     #[error("a block holds {bytes_left} bytes past the last record its head declared")]
@@ -2249,6 +2395,13 @@ mod tests {
     /// block holding none has no representation — and this is the behaviour that matters at the
     /// other end: a thin sample does not pay an index entry and a compressed frame for every
     /// stretch of reference it did not cover.
+    ///
+    /// **And its hardest-working line is `blocks.len() == 3`, which pins the owner's ruling
+    /// against merging** (2026-08-27, recorded on [`OpenBlock`]): a writer that accumulated
+    /// across the ninety empty cells here would emit **two** blocks, not three. That is the newer
+    /// and more surprising of the two decisions, so it is worth saying which assertion carries
+    /// it. ⚠ What the fixture pins is a merge rule with a *byte* threshold, as spec §4.1
+    /// describes; one keyed on a cell count below 90 would survive this file.
     #[test]
     fn a_grid_cell_with_no_records_produces_no_block() {
         // Two records ninety cells apart on one contig, and one on the next contig.
@@ -2776,7 +2929,7 @@ mod tests {
         assert_eq!(DEFAULT_BLOCK_BYTE_CEILING, None);
         // The reader's ceiling on one record, which is a budget rather than a format rule — so
         // moving it is a decision taken here rather than a memory test that stops binding.
-        assert_eq!(MOST_A_RECORD_MAY_HOLD_BYTES, 1024 * 1024);
+        assert_eq!(ROLLING_BUFFER_CEILING_BYTES, 512 * 1024);
         let manifest = a_manifest();
         assert_eq!(
             manifest.genomic_block_size_bp,
@@ -2785,6 +2938,34 @@ mod tests {
         assert_eq!(manifest.block_byte_ceiling, DEFAULT_BLOCK_BYTE_CEILING);
         assert_eq!(manifest.look_back_window_log, DEFAULT_LOOK_BACK_WINDOW_LOG);
         assert_eq!(manifest.fields, record_fields());
+    }
+
+    /// **The argument for the ceiling's value, as something that can fail.**
+    ///
+    /// The test above pins the number; this pins the reason, which is what the number is *for*.
+    /// [`ROLLING_BUFFER_CEILING_BYTES`] is a per-open-sample figure, so what it costs is set by
+    /// the cohort, and the cohort this caller is committed to runs to several thousand samples
+    /// (`design_principles.md` §0). Spec §1.1 budgets an open sample at 500 kB and says that is
+    /// what makes a run of that size fit.
+    ///
+    /// So the worst case — every sample meeting a damaged block at the same moment — has to come
+    /// out at the budget rather than at a multiple of it. At the 1 MiB first proposed it came out
+    /// at 3.07 GB, twice the whole budget, which is a weak bound for something whose only job is
+    /// bounding hostile input.
+    #[test]
+    fn the_buffer_ceiling_is_priced_at_the_top_of_the_committed_cohort_range() {
+        const SAMPLES_AT_THE_TOP_OF_THE_RANGE: usize = 3_000;
+        const WHAT_SPEC_1_1_BUDGETS_AN_OPEN_SAMPLE: usize = 500_000;
+
+        let worst_case = ROLLING_BUFFER_CEILING_BYTES * SAMPLES_AT_THE_TOP_OF_THE_RANGE;
+        assert_eq!(worst_case, 1_572_864_000, "3,000 readers at the ceiling");
+        assert!(
+            worst_case
+                <= WHAT_SPEC_1_1_BUDGETS_AN_OPEN_SAMPLE * SAMPLES_AT_THE_TOP_OF_THE_RANGE * 21 / 20,
+            "the ceiling has to stay within a twentieth of spec §1.1's whole-cohort budget of \
+             {} bytes, and {worst_case} does not",
+            WHAT_SPEC_1_1_BUDGETS_AN_OPEN_SAMPLE * SAMPLES_AT_THE_TOP_OF_THE_RANGE
+        );
     }
 
     // -----------------------------------------------------------------
@@ -4038,40 +4219,42 @@ mod tests {
         );
     }
 
-    /// A source that hands back at most `most` bytes a read, and optionally fails with
+    /// A source that hands back at most `most_bytes_a_read` bytes a read, and optionally fails with
     /// `Interrupted` every so often — which is what a pipe, a socket or a signalled file does,
     /// and what no fixture built from a `&[u8]` ever does.
-    struct ADribblingSource {
+    struct DribblingSource {
         bytes: Vec<u8>,
         at: usize,
-        most: usize,
+        most_bytes_a_read: usize,
         interrupt_every: usize,
         reads: usize,
     }
 
-    impl ADribblingSource {
-        fn new(bytes: Vec<u8>, most: usize) -> Self {
-            Self::interrupted(bytes, most, 0)
+    impl DribblingSource {
+        fn new(bytes: Vec<u8>, most_bytes_a_read: usize) -> Self {
+            Self::interrupted(bytes, most_bytes_a_read, 0)
         }
 
-        fn interrupted(bytes: Vec<u8>, most: usize, interrupt_every: usize) -> Self {
+        fn interrupted(bytes: Vec<u8>, most_bytes_a_read: usize, interrupt_every: usize) -> Self {
             Self {
                 bytes,
                 at: 0,
-                most,
+                most_bytes_a_read,
                 interrupt_every,
                 reads: 0,
             }
         }
     }
 
-    impl std::io::Read for ADribblingSource {
+    impl std::io::Read for DribblingSource {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             self.reads += 1;
             if self.interrupt_every > 0 && self.reads.is_multiple_of(self.interrupt_every) {
                 return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
             }
-            let take = (self.bytes.len() - self.at).min(self.most).min(out.len());
+            let take = (self.bytes.len() - self.at)
+                .min(self.most_bytes_a_read)
+                .min(out.len());
             out[..take].copy_from_slice(&self.bytes[self.at..self.at + take]);
             self.at += take;
             Ok(take)
@@ -4081,9 +4264,11 @@ mod tests {
     /// One record whose bases zstd cannot shrink, so a file of them is large on disk.
     ///
     /// **`a_record`'s bodies are a four-letter cycle and compress to almost nothing** — twelve
-    /// thousand of them are 1,823 bytes on disk, a ninth of one read chunk. A reader's behaviour
-    /// past its first read cannot be tested with a fixture that never fills one.
-    fn a_bulky_record(start: u64) -> SampleLocusObservations {
+    /// thousand of them are 4,543 bytes on disk at the `Bp(200)` grid `a_file_of_several_read_chunks`
+    /// uses, and 165 bytes at the 100 kb default: a quarter of one read chunk at best. A
+    /// reader's behaviour past its first read cannot be tested with a fixture that never fills
+    /// one. (An earlier version of this comment said 1,823 bytes, which is neither.)
+    fn an_incompressible_record(start: u64) -> SampleLocusObservations {
         // A multiplicative hash over the position, taken a byte at a time: no run of it repeats
         // within a file, so zstd's match finder has nothing to work with.
         let mut noise = start.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -4117,8 +4302,8 @@ mod tests {
 
     /// A file of many blocks, larger than four read chunks — which every earlier fixture was
     /// not, and which is why several properties below could not fail before.
-    fn a_file_of_many_blocks() -> (Vec<SampleLocusObservations>, BlocksOnDisk) {
-        let records: Vec<_> = (1..3_000u64).map(a_bulky_record).collect();
+    fn a_file_of_several_read_chunks() -> (Vec<SampleLocusObservations>, BlocksOnDisk) {
+        let records: Vec<_> = (1..3_000u64).map(an_incompressible_record).collect();
         let on_disk = blocks_on_disk(&records, Bp(200), None);
         assert!(
             on_disk.bytes.len() > READ_CHUNK_BYTES * 4,
@@ -4142,7 +4327,7 @@ mod tests {
     /// test named for this property could not fail.
     #[test]
     fn a_stream_that_refuses_stays_refused_on_a_file_larger_than_one_read() {
-        let (_, on_disk) = a_file_of_many_blocks();
+        let (_, on_disk) = a_file_of_several_read_chunks();
 
         // Damage inside the first block's frame, so the refusal comes early and most of the
         // file is still ahead of the reader.
@@ -4163,7 +4348,7 @@ mod tests {
             }),
             ("a source that dribbles", {
                 let bytes = damaged.clone();
-                Box::new(move || Box::new(ADribblingSource::new(bytes, 64)))
+                Box::new(move || Box::new(DribblingSource::new(bytes, 64)))
             }),
         ];
         for (what, source) in sources {
@@ -4242,7 +4427,7 @@ mod tests {
         let fresh = BlockStream::new([].as_slice(), &manifest).expect("a manifest");
         assert_eq!(fresh.buffered_bytes(), READ_CHUNK_BYTES + ROLLING_BYTES);
 
-        let (_, on_disk) = a_file_of_many_blocks();
+        let (_, on_disk) = a_file_of_several_read_chunks();
         let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
         let _ = stream.next_record().expect("a record").expect("it reads");
         assert_eq!(
@@ -4263,14 +4448,17 @@ mod tests {
         assert!(on_disk.block_offsets.len() >= 3);
         let manifest = a_manifest();
 
-        for (what, most, interrupt_every) in [
+        for (what, most_bytes_a_read, interrupt_every) in [
             ("one byte at a time", 1usize, 0usize),
             ("seven bytes at a time", 7, 0),
             ("interrupted every third read", 64, 3),
             ("one byte at a time, interrupted every other read", 1, 2),
         ] {
-            let source =
-                ADribblingSource::interrupted(on_disk.bytes.clone(), most, interrupt_every);
+            let source = DribblingSource::interrupted(
+                on_disk.bytes.clone(),
+                most_bytes_a_read,
+                interrupt_every,
+            );
             let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
             let mut back = Vec::new();
             while let Some(next) = stream.next_record() {
@@ -4296,7 +4484,7 @@ mod tests {
         assert!(on_disk.block_offsets.len() >= 3, "several blocks");
 
         let manifest = a_manifest();
-        let source = ADribblingSource::new(on_disk.bytes.clone(), 1);
+        let source = DribblingSource::new(on_disk.bytes.clone(), 1);
         let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
         let mut back = Vec::new();
         while let Some(next) = stream.next_record() {
@@ -4313,24 +4501,33 @@ mod tests {
     ///
     /// A psp block's decompressed size is not bounded by its size on disk. Before this ceiling
     /// existed a review agent built one that is **4,132 bytes on disk and drove a reader to hold
-    /// 67,125,248 bytes** — 2,048 times what an open sample budgets for — because no record
-    /// parsed, so nothing ever "fitted", and the buffer doubled until the frame ran out. At a
-    /// thousand open samples that is a run that dies on memory rather than one that reports a
-    /// bad file.
+    /// 67,125,248 bytes** — 2,048 times the 32 kB the two buffers hold between them, and 131
+    /// times what spec §1.1 gives a whole open sample — because no record parsed, so nothing
+    /// ever "fitted", and the buffer doubled until the frame ran out. At a thousand open samples
+    /// that is a run that dies on memory rather than one that reports a bad file.
     ///
-    /// The fixture is the same shape: a block whose records are one enormous run of a single
-    /// byte, which compresses to almost nothing and inflates to far more than the ceiling, with
-    /// its first record's length corrupted so the parser can never make progress.
+    /// The fixture is the same shape: a block whose records are one long run of a single byte,
+    /// which compresses to almost nothing and inflates far past the ceiling, with a record head
+    /// in front of it declaring a body longer than anything that follows.
+    ///
+    /// **Its size is fixed rather than a multiple of the ceiling.** Written as `ceiling × 8` it
+    /// would grow with the very knob whose purpose is to bound memory — at a raised ceiling of
+    /// 1 GiB the fixture alone would be 8 GB.
     #[test]
     fn a_block_that_never_parses_costs_a_bounded_amount_of_memory() {
-        let inflated_bytes = MOST_A_RECORD_MAY_HOLD_BYTES * 8;
-        // A block head that promises a record, then a run of a byte that is not a record. The
-        // parser reads a head out of it, believes a body far longer than the block, and asks for
-        // more bytes for ever after.
-        let mut payload = Vec::with_capacity(inflated_bytes);
+        const INFLATED_BYTES: usize = 8 * 1024 * 1024;
+        const {
+            assert!(
+                INFLATED_BYTES > ROLLING_BUFFER_CEILING_BYTES * 4,
+                "the fixture must inflate well past the ceiling to say anything — and it is a \
+                 fixed 8 MiB, so raising the ceiling past 2 MiB means rethinking this test \
+                 rather than rescaling it"
+            )
+        };
+        let mut payload = Vec::with_capacity(INFLATED_BYTES);
         BlockHead {
-            contig: ContigId(0),
-            first_position: Position(1),
+            contig: ContigId(4),
+            first_position: Position(90_000),
             record_count: NonZeroU64::MIN,
         }
         .encode(&mut payload);
@@ -4338,7 +4535,7 @@ mod tests {
         // than anything that follows.
         payload.extend_from_slice(&[0x00, 0x01, 0x00]);
         encode_u64_leb128(u64::from(u32::MAX), &mut payload);
-        payload.resize(inflated_bytes, b'A');
+        payload.resize(INFLATED_BYTES, b'A');
 
         let manifest = a_manifest();
         let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
@@ -4348,8 +4545,8 @@ mod tests {
             .to_vec();
         assert!(
             on_disk.len() * 64 < payload.len(),
-            "the fixture must inflate far beyond its size on disk, or it tests nothing: {} \
-             bytes on disk against {} inflated",
+            "the fixture must inflate far beyond its size on disk: {} bytes on disk against {} \
+             inflated",
             on_disk.len(),
             payload.len()
         );
@@ -4360,27 +4557,206 @@ mod tests {
             Some(Err(refused)) => refused,
             None => panic!("a block that never parses must be refused, not ended"),
         };
+
         // **What the refusal reports, not what the reader holds afterwards** — by then `fail`
         // has released the buffer, so a reading taken after the fact is the budget whatever
         // happened before it, and an assertion on it could not fail.
         let BlockReadError::RecordLargerThanTheReaderAllows {
-            held_bytes,
+            block,
+            records_read,
             allowed_bytes,
         } = refused
         else {
             panic!("got {refused}");
         };
-        assert_eq!(allowed_bytes, MOST_A_RECORD_MAY_HOLD_BYTES);
-        assert!(
-            (MOST_A_RECORD_MAY_HOLD_BYTES..MOST_A_RECORD_MAY_HOLD_BYTES * 2).contains(&held_bytes),
-            "a reader met {} bytes of block and grew to {held_bytes} before stopping, against a \
-             ceiling of {MOST_A_RECORD_MAY_HOLD_BYTES}",
-            payload.len()
+        assert_eq!(allowed_bytes, ROLLING_BUFFER_CEILING_BYTES);
+        assert_eq!(
+            block.contig,
+            ContigId(4),
+            "the refusal locates the block the record was in"
         );
+        assert_eq!(block.start, Position(90_000));
+        assert_eq!(records_read, 0, "it was the block's first record");
         assert_eq!(
             stream.buffered_bytes(),
             READ_CHUNK_BYTES,
             "and it releases what it grew once the block is refused"
+        );
+    }
+
+    /// **⚠ The risk a ceiling creates: it must not refuse a file a writer legitimately produced.**
+    ///
+    /// At the shipped 100 kb grid and three hundred reads a position a block is about 1.76 MB
+    /// decompressed (spec §4.1's 17.557 bytes a record), which is **larger than the ceiling** —
+    /// and that has to be fine, because the buffer grows for one *record*, not for a block. No
+    /// reader test decoded a block past the ceiling before this one, and the gap was live:
+    /// checking the buffer's *capacity* rather than its length passes all the other tests while
+    /// refusing a well-formed 2 MB block.
+    #[test]
+    fn a_well_formed_block_larger_than_the_ceiling_reads_back_every_record() {
+        let records: Vec<_> = (1..14_000u64).map(an_incompressible_record).collect();
+        let payload = one_payload(&records);
+        assert!(
+            payload.len() > ROLLING_BUFFER_CEILING_BYTES * 2,
+            "the block must be well past the ceiling: {} bytes against {}",
+            payload.len(),
+            ROLLING_BUFFER_CEILING_BYTES
+        );
+
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        let mut back = Vec::new();
+        let mut most_held = stream.buffered_bytes();
+        while let Some(next) = stream.next_record() {
+            back.push(
+                next.expect("a well-formed block reads")
+                    .record
+                    .expect("built"),
+            );
+            most_held = most_held.max(stream.buffered_bytes());
+        }
+        assert_eq!(back, records);
+        assert!(
+            most_held <= READ_CHUNK_BYTES + ROLLING_BYTES,
+            "a block {} bytes decompressed was read holding {most_held}",
+            payload.len()
+        );
+    }
+
+    /// One record whose encoded body is a given size, near enough: `observations` reads of
+    /// sixteen bases each, which the encoder writes out one after another.
+    fn a_wide_record(start: u64, observations: u32) -> SampleLocusObservations {
+        let mut wide = a_record(0, start, 1);
+        wide.observations = (0..observations)
+            .map(|read| SequenceObservation {
+                bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read % 7),
+                num_obs: 1,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            })
+            .collect();
+        wide
+    }
+
+    /// **The ceiling counts what the buffer *holds*, not how large it has grown.** Once one
+    /// record has pushed the rolling buffer's capacity up to the ceiling, every later record of
+    /// the same block still has to be read — the buffer is then a large empty vector, and what it
+    /// holds is one record's worth.
+    ///
+    /// This is the one mutation that survived the whole D4/D5 suite: `self.rolling.capacity() >=
+    /// self.buffer_ceiling` in place of `self.rolling.len() >= …`. Under it a well-formed file
+    /// whose records each need more than half the ceiling is refused with *"a record needs more
+    /// than the … bytes this reader allows one to hold"* — a valid file reported as a record too
+    /// large for the reader, which is the refusal that sends an operator to raise a limit that was
+    /// never binding.
+    #[test]
+    fn a_block_whose_records_each_grow_the_buffer_to_the_ceiling_still_reads() {
+        // Sized so one record needs more than half the ceiling: the buffer doubles from
+        // ROLLING_BYTES, so holding one takes a capacity of exactly the ceiling.
+        let records: Vec<_> = (1..=3u64)
+            .map(|at| a_wide_record(at * 10, 12_000))
+            .collect();
+        let payload = one_payload(&records);
+        let a_record_holds = payload.len() / records.len();
+        assert!(
+            (ROLLING_BUFFER_CEILING_BYTES / 2..ROLLING_BUFFER_CEILING_BYTES)
+                .contains(&a_record_holds),
+            "each record must be over half the ceiling and under it, or the buffer's capacity \
+             never reaches the ceiling and the mutation this test exists for cannot fire: \
+             {a_record_holds} bytes against a ceiling of {ROLLING_BUFFER_CEILING_BYTES}"
+        );
+
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        let mut back = Vec::new();
+        while let Some(next) = stream.next_record() {
+            back.push(
+                next.unwrap_or_else(|refused| {
+                    panic!("a well-formed record was refused: {refused}")
+                })
+                .record
+                .expect("built"),
+            );
+        }
+        assert_eq!(back, records);
+    }
+
+    /// A record genuinely larger than the ceiling is read by raising it, which is what makes a
+    /// ceiling tolerable at all — and a ceiling under the buffer it caps is refused rather than
+    /// accepted as a way of turning every record away.
+    #[test]
+    fn a_record_past_the_ceiling_is_read_by_raising_it() {
+        let mut enormous = a_record(0, 500, 1);
+        enormous.observations = (0..40_000u32)
+            .map(|read| SequenceObservation {
+                bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read % 7),
+                num_obs: 1,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            })
+            .collect();
+        let records = vec![enormous];
+        let payload = one_payload(&records);
+        assert!(
+            payload.len() > ROLLING_BUFFER_CEILING_BYTES,
+            "one record must exceed the ceiling: {} bytes against {}",
+            payload.len(),
+            ROLLING_BUFFER_CEILING_BYTES
+        );
+
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let mut refused = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        assert!(matches!(
+            refused.next_record(),
+            Some(Err(BlockReadError::RecordLargerThanTheReaderAllows { .. }))
+        ));
+
+        let mut raised = BlockStream::new(on_disk.as_slice(), &manifest)
+            .expect("a manifest")
+            .with_a_buffer_ceiling(payload.len() * 2)
+            .expect("a ceiling above the buffer");
+        assert_eq!(raised.buffer_ceiling(), payload.len() * 2);
+        let met = raised.next_record().expect("a record").expect("it reads");
+        assert_eq!(met.record.as_ref(), Some(&records[0]));
+        assert!(raised.next_record().is_none());
+
+        let refused = BlockStream::new([].as_slice(), &manifest)
+            .expect("a manifest")
+            .with_a_buffer_ceiling(ROLLING_BYTES)
+            .expect_err("a ceiling at the buffer refuses records the buffer already holds");
+        assert!(
+            matches!(refused, BlockReadError::BufferCeilingUnderTheBuffer { .. }),
+            "got {refused}"
         );
     }
 
@@ -4390,15 +4766,18 @@ mod tests {
     #[test]
     fn a_record_past_the_readers_ceiling_names_the_number_to_raise() {
         let refused = BlockReadError::RecordLargerThanTheReaderAllows {
-            held_bytes: 1_048_576,
-            allowed_bytes: MOST_A_RECORD_MAY_HOLD_BYTES,
+            block: GenomeRegion {
+                contig: ContigId(7),
+                start: Position(90_600_000),
+                end: Position(90_600_000),
+            },
+            records_read: 41,
+            allowed_bytes: 524_288,
         };
         assert_eq!(
             refused.to_string(),
-            format!(
-                "a record needs more than the {MOST_A_RECORD_MAY_HOLD_BYTES} bytes this reader \
-                 allows one to hold; it had 1048576 and had not finished"
-            )
+            "a record in the block starting at contig 7:90600000-90600000 needs more than the \
+             524288 bytes this reader allows one record to hold; raise the ceiling to read it"
         );
     }
 
@@ -4455,24 +4834,26 @@ mod tests {
     // The restartable parse
     // -----------------------------------------------------------------
 
-    /// Read a whole file through a source that hands over exactly `most` bytes a read, and say
+    /// Read a whole file through a source that hands over exactly `most_bytes_a_read` bytes a read, and say
     /// how many times a record's parse had to be retried on the way.
-    fn stream_through_a_source_yielding(
+    fn stream_through_a_source_yielding_at_most(
         bytes: &[u8],
-        most: usize,
-    ) -> (Vec<SampleLocusObservations>, usize) {
+        most_bytes_a_read: usize,
+    ) -> (Vec<SampleLocusObservations>, u64) {
         let manifest = a_manifest();
-        let source = ADribblingSource::new(bytes.to_vec(), most);
+        let source = DribblingSource::new(bytes.to_vec(), most_bytes_a_read);
         let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
         let mut back = Vec::new();
         while let Some(next) = stream.next_record() {
             back.push(
-                next.unwrap_or_else(|refused| panic!("at {most} bytes a read: {refused}"))
-                    .record
-                    .expect("every record is built"),
+                next.unwrap_or_else(|refused| {
+                    panic!("at {most_bytes_a_read} bytes a read: {refused}")
+                })
+                .record
+                .expect("every record is built"),
             );
         }
-        (back, stream.retries_after_a_refill())
+        (back, stream.parses_restarted())
     }
 
     /// **The oracle: a decode forced to refill at every possible boundary.**
@@ -4483,13 +4864,16 @@ mod tests {
     /// **every byte offset the reader can meet one at**, and every run must give the same
     /// records as a single-shot read.
     ///
-    /// **Why this is the property and not the walk's success**: a record that straddles a refill
-    /// is retried from its first byte, and a retry that advanced the running coordinate before
-    /// asking for more bytes would give the right *number* of records at the wrong positions.
-    /// Spec §8 calls that out by name — *"a parse that half-advances that state before failing
-    /// corrupts every record after it, plausibly"*.
+    /// **⚠ And on blocks this small it retries nothing**, which is a fact about zstd rather than
+    /// about the reader: it decodes in internal blocks and emits one whole, so a payload that
+    /// fits a single emission is delivered in one piece however slowly its input arrived. The
+    /// count is asserted below rather than left implicit, because the sibling test exists
+    /// entirely because of it — and because a docstring here once claimed the opposite.
+    ///
+    /// What this sweep does hold is every *compressed-side* alignment: it was among the killers
+    /// of three mutations, which is why it stays.
     #[test]
-    fn a_decode_forced_to_refill_at_every_boundary_gives_the_same_records() {
+    fn a_decode_refilled_at_every_source_byte_boundary_gives_the_same_records() {
         // Small enough to run a schedule per byte, varied enough that records differ in width.
         let records: Vec<_> = (0..40)
             .map(|index| a_record(0, 100 + index * 3, 1 + index % 4))
@@ -4500,12 +4884,20 @@ mod tests {
             "several blocks, so refills land inside block heads as well as inside records"
         );
 
-        let (whole, _) = stream_through_a_source_yielding(&on_disk.bytes, usize::MAX);
+        let (whole, _) = stream_through_a_source_yielding_at_most(&on_disk.bytes, usize::MAX);
         assert_eq!(whole, records, "a single-shot read is the thing to match");
-        for most in 1..=on_disk.bytes.len() {
-            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
-            assert_eq!(back, records, "reading {most} bytes a read");
+        let mut ever_retried = 0u64;
+        for most_bytes_a_read in 1..=on_disk.bytes.len() {
+            let (back, retries) =
+                stream_through_a_source_yielding_at_most(&on_disk.bytes, most_bytes_a_read);
+            assert_eq!(back, records, "reading {most_bytes_a_read} bytes a read");
+            ever_retried += retries;
         }
+        assert_eq!(
+            ever_retried, 0,
+            "blocks that fit one zstd emission are never straddled, whatever the input \
+             schedule — the fact the next test exists for"
+        );
     }
 
     /// **And the same sweep over blocks the rolling buffer cannot hold, which is where a record
@@ -4519,10 +4911,31 @@ mod tests {
     /// the walk works and nothing about restarting it.
     ///
     /// What straddles a record is the buffer running out, so the blocks here are larger than it.
+    ///
+    /// **⚠ The first version of this fixture was a single block.** Its 1,999 records all fell in
+    /// cell 0 of the grid it named, so the sweep retried tens of thousands of times and never
+    /// crossed a block boundary while doing it — and the test's name, and D4's report, were both
+    /// plural about one block. The grid below cuts, and `payloads.len() >= 3` is what says so.
+    ///
+    /// Measured on the fixture as it now stands — three blocks, the largest 73,849 bytes against
+    /// a 16 kB buffer:
+    ///
+    /// | bytes a read | records retried |
+    /// |---:|---:|
+    /// | 1 | 37,209 |
+    /// | 17 | 2,200 |
+    /// | 1,024 | 48 |
+    /// | the whole file at once | 14 |
+    ///
+    /// **Even the single-shot read retries fourteen times**, because a payload larger than the
+    /// buffer straddles it however fast the input arrives. That is the whole difference between
+    /// this sweep and the one above.
     #[test]
     fn a_decode_of_blocks_larger_than_the_buffer_is_retried_and_still_exact() {
-        let records: Vec<_> = (1..2_000u64).map(a_bulky_record).collect();
-        let on_disk = blocks_on_disk(&records, Bp(4_000), None);
+        let records: Vec<_> = (1..2_000u64).map(an_incompressible_record).collect();
+        // A grid that cuts, so the sweep crosses block boundaries as well as buffer ones — the
+        // first version put all 1,999 records in one cell and never crossed a block at all.
+        let on_disk = blocks_on_disk(&records, Bp(700), None);
         let biggest = on_disk
             .payloads
             .iter()
@@ -4530,20 +4943,25 @@ mod tests {
             .max()
             .expect("some blocks");
         assert!(
+            on_disk.payloads.len() >= 3,
+            "several blocks, so a refill and a cut are different boundaries here"
+        );
+        assert!(
             biggest > ROLLING_BYTES * 2,
             "the blocks must be larger than the buffer, or no record straddles one: {biggest} \
              bytes against {ROLLING_BYTES}"
         );
 
-        let mut most_retries = 0usize;
-        for most in [1usize, 2, 3, 17, 251, 1024, READ_CHUNK_BYTES, usize::MAX] {
-            let (back, retries) = stream_through_a_source_yielding(&on_disk.bytes, most);
-            assert_eq!(back, records, "reading {most} bytes a read");
+        let mut most_retries = 0u64;
+        for most_bytes_a_read in [1usize, 2, 3, 17, 251, 1024, READ_CHUNK_BYTES, usize::MAX] {
+            let (back, retries) =
+                stream_through_a_source_yielding_at_most(&on_disk.bytes, most_bytes_a_read);
+            assert_eq!(back, records, "reading {most_bytes_a_read} bytes a read");
             most_retries = most_retries.max(retries);
         }
         // **The schedules have to actually retry, or the loop above proves nothing.**
         assert!(
-            most_retries > records.len() / 10,
+            most_retries > records.len() as u64 / 10,
             "the sweep retried at most {most_retries} times over {} records, too few to have \
              crossed many of them",
             records.len()
@@ -4557,7 +4975,7 @@ mod tests {
     /// met at the boundaries where it is hardest: a record that does not fit is retried until it
     /// does, so every retry is one the buffer has to survive.
     #[test]
-    fn a_record_larger_than_the_buffer_survives_every_refill_schedule() {
+    fn a_record_larger_than_the_buffer_survives_five_refill_schedules() {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..2_600u32)
             .map(|read| SequenceObservation {
@@ -4584,14 +5002,15 @@ mod tests {
         );
 
         let on_disk = blocks_on_disk(&records, A_GRID, None);
-        for most in [1usize, 3, 64, 1024, usize::MAX] {
-            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
-            assert_eq!(back, records, "reading {most} bytes a read");
+        for most_bytes_a_read in [1usize, 3, 64, 1024, usize::MAX] {
+            let (back, _) =
+                stream_through_a_source_yielding_at_most(&on_disk.bytes, most_bytes_a_read);
+            assert_eq!(back, records, "reading {most_bytes_a_read} bytes a read");
         }
 
         // And the buffer comes back down: the last block's records are ordinary.
         let manifest = a_manifest();
-        let source = ADribblingSource::new(on_disk.bytes.clone(), 7);
+        let source = DribblingSource::new(on_disk.bytes.clone(), 7);
         let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
         while let Some(next) = stream.next_record() {
             let _ = next.expect("it reads");
@@ -4603,11 +5022,17 @@ mod tests {
         );
     }
 
-    /// **A refill inside a block's own opening fields is retried too.** A block head is three
-    /// variable-length integers and the first thing a reader meets after a block's length, so a
-    /// schedule that hands over one byte at a time refills inside every one of them.
+    /// **A block head is read after however many refills it takes, and comes out whole.**
+    ///
+    /// ⚠ *This test was called `a_refill_inside_a_block_head_is_retried` and claimed a one-byte
+    /// schedule "refills inside every one of" the head's three integers. It does not, and it
+    /// cannot: a reader clears its buffer at a block start and zstd's first emission delivers
+    /// the whole internal block, so a refill always lands **before** a head and never inside
+    /// one. Measured over 108,746 head restarts, the largest partial head ever seen was zero
+    /// bytes.* What is real, and what this holds, is that the head's parse is **restarted** —
+    /// many times — and that the fields it finally reads are the ones the writer put there.
     #[test]
-    fn a_refill_inside_a_block_head_is_retried() {
+    fn a_block_head_is_read_after_however_many_restarts_it_takes() {
         // A contig, first position and record count that each need several bytes, so a
         // one-byte-a-read schedule stops inside each of them.
         let records: Vec<_> = (0..300)
@@ -4619,9 +5044,22 @@ mod tests {
         assert!(head.first_position.get() > 1 << 21, "a four-byte position");
         assert!(head.record_count.get() > 0x7f, "a multi-byte count");
 
-        for most in [1usize, 2, 3] {
-            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
-            assert_eq!(back, records, "reading {most} bytes a read");
+        let manifest = a_manifest();
+        for most_bytes_a_read in [1usize, 2, 3] {
+            let source = DribblingSource::new(on_disk.bytes.clone(), most_bytes_a_read);
+            let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+            let mut back = Vec::new();
+            while let Some(next) = stream.next_record() {
+                back.push(next.expect("it reads").record.expect("built"));
+            }
+            assert_eq!(back, records, "reading {most_bytes_a_read} bytes a read");
+            // **The witness.** Without it this is a walk that came out right, which is what the
+            // test claimed to be about and was not.
+            assert!(
+                stream.block_heads_restarted() > 0,
+                "reading {most_bytes_a_read} bytes a read never restarted a block head, so the schedule \
+                 proves nothing about restarting one"
+            );
         }
     }
 
@@ -4630,8 +5068,9 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Records over three contigs and several grid cells, with the cells **far apart** — so a
-    /// difference that was not reset lands a record thousands of bases from where it belongs
-    /// rather than one base out, and a comparison sees it.
+    /// difference that was not reset lands a record about **86 million bases** from where it
+    /// belongs (cells 0, 7, 41 and 900 of a 100 kb grid) rather than one base out, and a
+    /// comparison sees it.
     fn records_whose_blocks_are_far_apart() -> Vec<SampleLocusObservations> {
         let mut records = Vec::new();
         for contig in 0..3u32 {
@@ -4650,12 +5089,18 @@ mod tests {
 
     /// **A block read on its own gives exactly what it gives in the middle of a file.**
     ///
-    /// This is self-containment in its strongest form and the whole of what spec §3.2 asks for:
-    /// *"every running difference inside it restarts — the position difference, the coverage
-    /// difference, the chain-id difference"*. A reader handed one block's bytes and nothing else
-    /// has no history at all, so any difference that was still being measured from a previous
-    /// block would show up as records at the wrong coordinates — and **plausibly** wrong, because
+    /// Spec §3.2: *"every running difference inside it restarts — the position difference, the
+    /// coverage difference, the chain-id difference"*. A reader handed one block's bytes and
+    /// nothing else has no history at all, so any difference still being measured from a previous
+    /// block shows up as records at the wrong coordinates — and **plausibly** wrong, because
     /// coverage is smooth and a position difference that is slightly off still parses.
+    ///
+    /// **What it adds over D3's `a_reader_starting_at_a_block_gets_the_tail_of_a_full_read`**,
+    /// which reads every *tail* of the same file: a byte range that both begins **and ends** at a
+    /// block boundary — the shape Milestone F's index will hand a reader — and a fixture whose
+    /// blocks are about 86 million bases apart, so a carried difference is not a small coordinate
+    /// error. ⚠ It is not a strictly stronger test: a review could build no mutation that kills
+    /// this one and spares D3's.
     ///
     /// Today there is one running difference, the position offset. **Milestone E adds the
     /// chain-id live set, which is the second**, and this test is what it will meet.
@@ -4704,20 +5149,22 @@ mod tests {
     /// boundaries are crossed together here — a stale difference that survived a block boundary
     /// and one that survived a buffer boundary are different defects.
     #[test]
-    fn restart_equals_sequential_from_every_block_at_every_refill_schedule() {
+    fn restart_equals_sequential_from_every_block_at_five_refill_schedules() {
         let records = records_whose_blocks_are_far_apart();
         let on_disk = blocks_on_disk(&records, A_GRID, Some(150));
         let whole = stream_every_record(&on_disk.bytes).expect("the file reads");
 
-        for most in [1usize, 5, 97, READ_CHUNK_BYTES, usize::MAX] {
+        for most_bytes_a_read in [1usize, 5, 97, READ_CHUNK_BYTES, usize::MAX] {
             let mut taken = 0usize;
             for (index, offset) in on_disk.block_offsets.iter().enumerate() {
-                let (from_here, _) =
-                    stream_through_a_source_yielding(&on_disk.bytes[*offset..], most);
+                let (from_here, _) = stream_through_a_source_yielding_at_most(
+                    &on_disk.bytes[*offset..],
+                    most_bytes_a_read,
+                );
                 assert_eq!(
                     from_here,
                     built(&whole[taken..]),
-                    "from block {index} at {most} bytes a read"
+                    "from block {index} at {most_bytes_a_read} bytes a read"
                 );
                 taken += usize::try_from(walk(&on_disk.payloads[index]).head.record_count.get())
                     .expect("a small count");
