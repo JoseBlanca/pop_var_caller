@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **a read goes live, stops, and goes live again — and
+> - **Last completed task (2026-08-27):** **E2 reviewed — the test named for the block boundary
+> could not see a block boundary** (the eight-checklist review of step E2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Three agents, 33 mutations, **3,000,000 fuzzed inputs** across two independent
+> harnesses, no Blocker, four Majors — and three of them are one test, which **all three agents
+> reached independently**. Its fixture was a read pair whose two mates fell either side of the
+> cut, so nothing was live *at* the cut — the test asserted so itself — and it read the second
+> block with a fresh reader, which has no state to carry. Neither half of what its docstring
+> claimed could show up: not a read still covering being restated, not a reader that failed to
+> reset. Measured: of 22 mutations it caught exactly one, and fourteen other tests caught that one
+> too. It now has a read spanning the cut and carries the *same* reader across, and kills three
+> cross-block defects where it killed none. **The fixture generator could not tell two of its four
+> arguments apart** — transposing the mate length with the gap between mates gives the same 800
+> reads, the same 660 covering two stretches and the same 1,460 stretches, because a mate starts
+> at the sum either way, so "30-base mates, a 40-base hole" was a claim nothing checked. And the
+> **adversarial sortedness test asserted an invariant in a regime where it cannot break**: the set
+> can only stop being sorted when an arrival sorts below a live read, and uniform random bytes
+> never build a set for one to sort under — zero such cases in 600. It feeds damaged real streams
+> now, of which 113 in 600 get past the first count. **⚠ And one of my own edits silently deleted
+> three tests** by cutting a slice of the file between two markers; the suite stayed green, and
+> what caught it was the test *count* falling from 29 to 26.
+> [the review](doc/devel/reports/reviews/ng_psp_e2_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a read goes live, stops, and goes live again — and
 > most of them do** (step E2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`, status `implemented`). A chain id names a read *pair* with its mates
 > collapsed onto one identifier, and a pair's mates rarely overlap, so the identifier covers two

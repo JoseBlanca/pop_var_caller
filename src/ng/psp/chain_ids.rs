@@ -644,11 +644,29 @@ mod tests {
     /// `blocks` is one entry per block, each a list of records, each record the ids it names —
     /// in whatever order and with whatever repeats the caller gives, because that is the shape a
     /// record's observations hand over.
-    fn round_trip(blocks: &[Vec<Vec<ChainId>>]) -> (Vec<Vec<ChainId>>, usize) {
+    /// **What one write-and-read gives back**, so a test that needs the arrival count does not
+    /// write the file a second time to get it. Four tests did, which is four places the block
+    /// restart could be forgotten independently — the one mistake this module's tests exist to
+    /// catch.
+    struct WhatCameBack {
+        /// The live set after each record, in file order.
+        sets: Vec<Vec<ChainId>>,
+        /// How many arrivals the reader met over the whole file. **One a stretch, not one an
+        /// identifier** — which is what a stream assuming one stretch per read gets wrong.
+        arrivals: usize,
+        /// What the whole file's changes cost on the wire.
+        bytes: usize,
+    }
+
+    fn round_trip(blocks: &[Vec<Vec<ChainId>>]) -> WhatCameBack {
         let written = write_a_file(blocks);
 
         let mut reader = LiveSetReader::new();
-        let mut back = Vec::new();
+        let mut came_back = WhatCameBack {
+            sets: Vec::new(),
+            arrivals: 0,
+            bytes: written.iter().map(Vec::len).sum(),
+        };
         let mut at = 0usize;
         for block in blocks {
             reader.start_block();
@@ -661,11 +679,12 @@ mod tests {
                     written[at].len(),
                     "record {at} left bytes of its own stream unread"
                 );
-                back.push(reader.live().ids().to_vec());
+                came_back.arrivals += reader.changes().arrived().len();
+                came_back.sets.push(reader.live().ids().to_vec());
                 at += 1;
             }
         }
-        (back, written.iter().map(Vec::len).sum())
+        came_back
     }
 
     /// One block at a time, one record at a time: the bytes a writer lays down for each record.
@@ -711,31 +730,47 @@ mod tests {
             .collect()
     }
 
-    /// Coverage that looks like **read pairs**: `pairs_starting` pairs begin at every position,
-    /// each mate `read_length` bases long with `mate_gap` unsequenced bases between them, and one
-    /// identifier names the whole pair.
+    /// Coverage that looks like **read pairs**: pairs begin at every position, each mate a given
+    /// number of bases long with an unsequenced gap between them, and one identifier names the
+    /// whole pair.
+    ///
+    /// **The shape is a struct rather than four `u64`s**, because the mate length and the gap
+    /// between the mates are different biology and the fixture cannot tell them apart: measured,
+    /// transposing them gives the same 800 identifiers, the same 660 covering two stretches and
+    /// the same 1,460 stretches, because a mate starts at the sum of the two either way. Named at
+    /// the call site, a later edit that swaps them is visible.
     ///
     /// **So an identifier covers two stretches with a hole between them**, which is what makes a
     /// read go live, stop, and go live again. Spec `psp_record_encoding.md` §6 measures that on
     /// real alignments: 83 % of identifiers on the human sample and 91 % on tomato.
-    fn a_paired_end_coverage(
+    struct PairedEndFixture {
         positions: u64,
-        pairs_starting: u64,
-        read_length: u64,
-        mate_gap: u64,
-    ) -> Vec<Vec<ChainId>> {
-        let pair_span = read_length * 2 + mate_gap;
+        pairs_starting_at_each_position: u64,
+        mate_length: u64,
+        unsequenced_gap_between_mates: u64,
+    }
+
+    fn a_paired_end_coverage(shape: &PairedEndFixture) -> Vec<Vec<ChainId>> {
+        let PairedEndFixture {
+            positions,
+            pairs_starting_at_each_position,
+            mate_length,
+            unsequenced_gap_between_mates,
+        } = *shape;
+        let pair_span = mate_length * 2 + unsequenced_gap_between_mates;
         (0..positions)
             .map(|at| {
-                let earliest = at.saturating_sub(pair_span - 1);
+                let earliest = at.saturating_sub(pair_span.saturating_sub(1));
                 (earliest..=at)
                     .filter(|start| {
                         let into_the_pair = at - start;
-                        into_the_pair < read_length
-                            || (read_length + mate_gap..pair_span).contains(&into_the_pair)
+                        into_the_pair < mate_length
+                            || (mate_length + unsequenced_gap_between_mates..pair_span)
+                                .contains(&into_the_pair)
                     })
                     .flat_map(|start| {
-                        (0..pairs_starting).map(move |which| start * pairs_starting + which)
+                        (0..pairs_starting_at_each_position)
+                            .map(move |which| start * pairs_starting_at_each_position + which)
                     })
                     .collect()
             })
@@ -749,13 +784,13 @@ mod tests {
     /// up as a number rather than as a test that still passes.
     fn stretches_of(records: &[Vec<ChainId>]) -> BTreeMap<ChainId, usize> {
         let mut stretches: BTreeMap<ChainId, usize> = BTreeMap::new();
-        let mut live_last_time: BTreeSet<ChainId> = BTreeSet::new();
+        let mut previously_live: BTreeSet<ChainId> = BTreeSet::new();
         for record in records {
-            let now: BTreeSet<ChainId> = record.iter().copied().collect();
-            for id in now.difference(&live_last_time) {
+            let now_live: BTreeSet<ChainId> = record.iter().copied().collect();
+            for id in now_live.difference(&previously_live) {
                 *stretches.entry(*id).or_default() += 1;
             }
-            live_last_time = now;
+            previously_live = now_live;
         }
         stretches
     }
@@ -764,7 +799,7 @@ mod tests {
     fn a_run_of_records_reads_back_the_set_each_one_named() {
         let records = a_sliding_coverage(200, 3, 40);
         let wanted: Vec<_> = records.iter().map(|ids| as_a_set(ids)).collect();
-        let (back, _) = round_trip(&[records]);
+        let back = round_trip(&[records]).sets;
         assert_eq!(back, wanted);
     }
 
@@ -774,7 +809,7 @@ mod tests {
     #[test]
     fn unsorted_and_repeated_ids_name_the_same_set() {
         let records = vec![vec![900, 4, 4, 71, 4, 900], vec![71, 900, 71]];
-        let (back, _) = round_trip(&[records]);
+        let back = round_trip(&[records]).sets;
         assert_eq!(back, vec![vec![4, 71, 900], vec![71, 900]]);
     }
 
@@ -799,7 +834,7 @@ mod tests {
         // mid-file sees it.
         let written = write_a_file(&blocks);
 
-        let (whole, _) = round_trip(&blocks);
+        let whole = round_trip(&blocks).sets;
 
         let mut reader = LiveSetReader::new();
         reader.start_block();
@@ -907,7 +942,7 @@ mod tests {
     #[test]
     fn the_changes_cost_a_fraction_of_writing_every_record_s_list() {
         let records = a_sliding_coverage(400, 3, 100);
-        let (_, changes_bytes) = round_trip(std::slice::from_ref(&records));
+        let changes_bytes = round_trip(std::slice::from_ref(&records)).bytes;
 
         let mut list_bytes = 0usize;
         for record in &records {
@@ -1095,6 +1130,13 @@ mod tests {
     // Re-entry: a read goes live, stops, and goes live again
     // -----------------------------------------------------------------
 
+    /// The share of identifiers that must cover two stretches for this fixture to be saying
+    /// anything about re-entry at all. **The fixture measures 82.5 %**; the corpora spec
+    /// `psp_record_encoding.md` §6 gives are 83 % on the human sample and 91 % on tomato. Written
+    /// out because the number is what a later shortening of the fixture would erode, and an
+    /// expression like `× 10 > × 8` does not say how much headroom was meant.
+    const LEAST_TWO_STRETCH_SHARE: f64 = 0.80;
+
     /// **Most reads go live twice, and every one of them comes back.**
     ///
     /// A chain id names a read *pair*, with the mates collapsed onto one identifier, and a pair's
@@ -1116,21 +1158,45 @@ mod tests {
     ///   read.
     #[test]
     fn most_reads_go_live_twice_and_every_one_of_them_comes_back() {
-        // Two pairs starting at every position, 30-base mates, a 40-base hole between them.
-        // Measured: 800 identifiers over 400 records, 660 of them (82.5 %) covering two stretches
-        // and 1,460 stretches in all — so a stream naming each identifier once would carry 800
-        // arrivals and lose 660 second mates. The 140 that cover one stretch are the pairs whose
-        // second mate falls off the end of the fixture.
-        let records = a_paired_end_coverage(400, 2, 30, 40);
+        // Measured on this fixture: 800 identifiers over 400 records, 660 of them (82.5 %)
+        // covering two stretches and 1,460 stretches in all — so a stream naming each identifier
+        // once would carry 800 arrivals and lose 660 second mates. The 140 that cover one stretch
+        // are the pairs whose second mate starts past the fixture's last record.
+        let records = a_paired_end_coverage(&PairedEndFixture {
+            positions: 400,
+            pairs_starting_at_each_position: 2,
+            mate_length: 30,
+            unsequenced_gap_between_mates: 40,
+        });
         let stretches = stretches_of(&records);
 
-        let went_live_twice = stretches.values().filter(|count| **count == 2).count();
-        let all_of_them = stretches.len();
+        // **The mate length is measured, not only stated.** Transposing it with the gap gives the
+        // same identifier and stretch counts, so nothing else in this test would notice.
         assert!(
-            went_live_twice * 10 > all_of_them * 8,
+            records[29].contains(&0) && !records[30].contains(&0),
+            "a mate is 30 bases, so the pair that started at record 0 covers records 0 to 29"
+        );
+
+        let went_live_twice = stretches.values().filter(|count| **count == 2).count();
+        let identifiers = stretches.len();
+        // **The three numbers the comment above states, asserted.** The fraction below is the
+        // statement of intent and catches a gross change; these catch drift, and they close a
+        // circularity — `stretches_of` and `derive_changes` are two implementations of the same
+        // set difference, so the arrival equality further down is a differential between them
+        // rather than a check against a number derived without the code.
+        assert_eq!(
+            identifiers, 800,
+            "two pairs starting at each of 400 positions"
+        );
+        assert_eq!(
+            went_live_twice, 660,
+            "the pairs whose second mate fits inside the fixture"
+        );
+        assert!(
+            went_live_twice as f64 > identifiers as f64 * LEAST_TWO_STRETCH_SHARE,
             "the fixture has to contain re-entry to say anything about it: {went_live_twice} of \
-             {all_of_them} identifiers cover two stretches, and the corpora this is modelled on \
-             are 83 % and 91 %"
+             {identifiers} identifiers cover two stretches, and this asks for more than {}%",
+            LEAST_TWO_STRETCH_SHARE * 100.0
         );
         assert!(
             stretches.values().all(|count| *count <= 2),
@@ -1140,77 +1206,105 @@ mod tests {
         // **One arrival per stretch, not one per identifier.** This is the number a writer that
         // assumed one stretch per id would get wrong, and it is measured on the bytes rather than
         // inferred: the reader reports what it read.
-        let all_the_stretches: usize = stretches.values().sum();
-        let written = write_a_file(std::slice::from_ref(&records));
-        let mut reader = LiveSetReader::new();
-        reader.start_block();
-        let mut arrivals = 0usize;
-        let mut back = Vec::new();
-        for bytes in &written {
-            reader.read_changes(bytes).expect("it reads");
-            arrivals += reader.changes().arrived().len();
-            back.push(reader.live().ids().to_vec());
-        }
+        let stretches_in_all: usize = stretches.values().sum();
         assert_eq!(
-            arrivals, all_the_stretches,
-            "one arrival a stretch: {all_of_them} identifiers cover {all_the_stretches} stretches, \
-             and a stream that named each identifier once would carry {all_of_them}"
+            stretches_in_all, 1_460,
+            "800 first mates and 660 second ones"
+        );
+        let came_back = round_trip(std::slice::from_ref(&records));
+        assert_eq!(
+            came_back.arrivals, stretches_in_all,
+            "one arrival a stretch: {identifiers} identifiers cover {stretches_in_all} stretches, \
+             and a stream that named each identifier once would carry {identifiers}"
         );
 
         // And every record's set, so a second stretch that was written is also read.
         let wanted: Vec<_> = records.iter().map(|ids| as_a_set(ids)).collect();
-        assert_eq!(back, wanted);
+        assert_eq!(came_back.sets, wanted);
     }
 
     /// **A read that comes back after a block boundary is restated, not remembered.**
     ///
     /// The two rules meet here: the live set restarts at every block (spec §3.2), and a read may
-    /// go live twice. A read still covering across the boundary arrives again in the new block —
-    /// which is the restatement — and a read whose *second* mate begins after the boundary
-    /// arrives there for the first time in that block, with nothing to say it is the same read.
-    /// Both are ordinary arrivals, and that is the point: the reader carries nothing across.
+    /// go live twice. **Two shapes cross the boundary and both come out as ordinary arrivals** —
+    /// a read that never stopped covering, which is *restated*, and a read whose second mate
+    /// begins after the boundary, which arrives there with nothing saying it is the same read.
+    /// The reader carries nothing across, so it cannot tell them apart, and it does not need to.
+    ///
+    /// ⚠ **The fixture had no read live across the boundary when this test was written**, so the
+    /// restatement half of that claim was not exercised — and making `start_block` a no-op on the
+    /// writing side left this test green while two older ones caught it. Id 7 below is the read
+    /// the docstring was talking about.
     #[test]
     fn a_read_that_comes_back_across_a_block_boundary_arrives_again() {
-        // One read pair, id 4: mates over records 0-1 and 4-5. The block cuts at record 3.
-        let first_block = vec![vec![4u64], vec![4u64], vec![], vec![]];
-        let second_block = vec![vec![4u64], vec![4u64], vec![]];
+        // Id 4 is a pair whose mates cover records 0-1 and 4-5, so its second mate begins after
+        // the cut. Id 7 is a read still covering *across* the cut: live from record 0 to 6.
+        let first_block = vec![vec![4u64, 7], vec![4u64, 7], vec![7u64], vec![7u64]];
+        let second_block = vec![vec![4u64, 7], vec![4u64, 7], vec![7u64]];
 
         let written = write_a_file(&[first_block.clone(), second_block.clone()]);
         let mut reader = LiveSetReader::new();
 
         reader.start_block();
-        let mut arrivals_in_the_first = 0usize;
+        let mut arrivals_in_the_first_block = 0usize;
         for bytes in &written[..first_block.len()] {
             reader.read_changes(bytes).expect("it reads");
-            arrivals_in_the_first += reader.changes().arrived().len();
-        }
-        assert_eq!(arrivals_in_the_first, 1, "one mate, one arrival");
-        assert!(
-            reader.live().is_empty(),
-            "and it has gone by the block's end"
-        );
-
-        // A reader that starts *here*, with no history at all — Milestone F's index will hand one
-        // exactly this.
-        let mut alone = LiveSetReader::new();
-        alone.start_block();
-        let mut back = Vec::new();
-        for bytes in &written[first_block.len()..] {
-            alone.read_changes(bytes).expect("it reads");
-            back.push(alone.live().ids().to_vec());
+            arrivals_in_the_first_block += reader.changes().arrived().len();
         }
         assert_eq!(
-            back,
-            vec![vec![4], vec![4], vec![]],
-            "the second mate arrives in its own block, and nothing had to be remembered"
+            arrivals_in_the_first_block, 2,
+            "two reads, one arrival each"
         );
+        assert_eq!(
+            reader.live().ids(),
+            [7],
+            "the pair's first mate has gone by the block's end, and the other read has not"
+        );
+
+        // **The same reader, carried across the boundary.** ⚠ This half is what makes the test
+        // able to see a *reader* that forgot to reset: a fresh reader has no state to carry, so
+        // the alternative below cannot fail on that at all.
+        reader.start_block();
+        let mut carried_on = Vec::new();
+        let mut arrivals_at_the_new_block = Vec::new();
+        for bytes in &written[first_block.len()..] {
+            reader.read_changes(bytes).expect("it reads");
+            arrivals_at_the_new_block.push(reader.changes().arrived().to_vec());
+            carried_on.push(reader.live().ids().to_vec());
+        }
+        assert_eq!(
+            arrivals_at_the_new_block[0],
+            vec![4, 7],
+            "id 7 is restated even though it never stopped covering, and id 4's second mate \
+             arrives beside it with nothing saying it is the same read"
+        );
+
+        // And a reader that starts *here*, with no history at all — Milestone F's index will hand
+        // one exactly this. It must agree with the reader that came through the first block.
+        let mut reader_starting_fresh = LiveSetReader::new();
+        reader_starting_fresh.start_block();
+        let mut read_alone = Vec::new();
+        for bytes in &written[first_block.len()..] {
+            reader_starting_fresh.read_changes(bytes).expect("it reads");
+            read_alone.push(reader_starting_fresh.live().ids().to_vec());
+        }
+        assert_eq!(
+            carried_on, read_alone,
+            "the block reads the same either way"
+        );
+        assert_eq!(carried_on, vec![vec![4, 7], vec![4, 7], vec![7]]);
     }
 
     /// **An identifier may go live more than twice**, and nothing here counts.
     ///
-    /// Two mates is what a pair gives, but a read that straddles the boundary between two walked
-    /// regions is met twice and named twice, and a spliced alignment can leave more than one hole.
-    /// The encoding has no notion of *how many times*; this is the test that says so.
+    /// Two mates is what a pair gives, but **a spliced alignment can leave more than one hole**,
+    /// and nothing in the codec caps the count: an identifier that departed and arrives again is
+    /// an ordinary arrival however many times it has done so. This is the test that says so.
+    ///
+    /// *⚠ An earlier version of this sentence also offered "a read straddling two walked regions
+    /// is named twice". That argues the other way: under an allocator that never reuses an id,
+    /// being named twice gives **two identifiers of one stretch each**, not one identifier of
+    /// two.*
     #[test]
     fn an_identifier_that_goes_live_five_times_reads_back() {
         let records: Vec<Vec<ChainId>> = (0..20u64)
@@ -1223,8 +1317,11 @@ mod tests {
             "the fixture must give this identifier five stretches"
         );
 
-        let (back, _) = round_trip(std::slice::from_ref(&records));
+        let back = round_trip(std::slice::from_ref(&records)).sets;
         assert_eq!(back, records);
+        // ⚠ **What carries this test is the fixture assertion above, not the round trip.** Only
+        // one read is ever live, so its departure is always position 0 and its arrival always id
+        // 9 — a codec that confused the two would pass here. The five-stretch shape is the point.
     }
 
     /// **An id that goes live, stops, and goes live again while larger ids are live.**
@@ -1251,7 +1348,7 @@ mod tests {
             // and 15 arrives between two live ids while three others leave.
             vec![10u64, 15, 50],
         ];
-        let (back, _) = round_trip(std::slice::from_ref(&records));
+        let back = round_trip(std::slice::from_ref(&records)).sets;
         assert_eq!(
             back,
             vec![
@@ -1323,6 +1420,68 @@ mod tests {
         writer.write_changes([], &mut gone);
         reader.read_changes(&gone).expect("it reads");
         assert!(reader.live().is_empty(), "coverage stopped");
+    }
+
+    /// **`departed()` names the reads that stopped covering**, and until this test the accessor
+    /// could have returned anything.
+    ///
+    /// ⚠ Measured: replacing its body with `&[]` left all 228 `ng::psp` tests green, because the
+    /// only test that read it asserted the list was *empty*. Milestone E4's residual arithmetic is
+    /// specified against these two counts.
+    #[test]
+    fn changes_departed_names_the_reads_that_stopped_covering() {
+        let mut writer = LiveSetWriter::new();
+        writer.start_block();
+        writer.write_changes([7u64, 8, 9], &mut Vec::new());
+        let mut bytes = Vec::new();
+        writer.write_changes([9u64, 40], &mut bytes);
+
+        let written = write_a_file(&[vec![vec![7u64, 8, 9], vec![9u64, 40]]]);
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        reader.read_changes(&written[0]).expect("it reads");
+        assert_eq!(written[1], bytes, "the same record, written the same way");
+        reader.read_changes(&written[1]).expect("it reads");
+        assert_eq!(
+            reader.changes().departed(),
+            [7, 8],
+            "7 and 8 stopped covering"
+        );
+        assert_eq!(reader.changes().arrived(), [40], "and 40 started");
+        assert!(!reader.changes().is_empty());
+    }
+
+    /// **The departure count's own boundary.** One departure per live read is the most a record
+    /// can have, and one more than that is damage — named at the count, where the offset points at
+    /// the right byte, rather than at whichever position first runs off the end.
+    ///
+    /// ⚠ The guard test beside this one uses nine departures against a set of two, which is far
+    /// from the boundary: relaxing the bound by one left all 228 tests green.
+    #[test]
+    fn the_departure_count_may_equal_the_live_set_and_no_more() {
+        // Two reads live, then a record that departs both — the most a record can depart.
+        let mut all_of_them = LiveSetReader::new();
+        all_of_them.start_block();
+        all_of_them.read_changes(&[0, 2, 4, 0]).expect("two arrive");
+        assert_eq!(all_of_them.live().ids(), [4, 5]);
+        all_of_them
+            .read_changes(&[2, 0, 0, 0])
+            .expect("a whole set may depart at once");
+        assert!(all_of_them.live().is_empty());
+
+        // Three, one past the set: damage, and named at the count.
+        let mut one_too_many = LiveSetReader::new();
+        one_too_many.start_block();
+        one_too_many
+            .read_changes(&[0, 2, 4, 0])
+            .expect("two arrive");
+        let refused = one_too_many
+            .read_changes(&[3, 0, 0, 0, 0])
+            .expect_err("three departures from a set of two");
+        assert!(
+            refused.to_string().contains("3 departures"),
+            "the message must name the count rather than a position: {refused}"
+        );
     }
 
     /// **A departure count larger than the live set is damage at the count**, not at whichever
@@ -1463,68 +1622,139 @@ mod tests {
         /// **Any pattern of comings and goings round trips**, however many times a read leaves
         /// and returns.
         ///
-        /// Each generated read is a mask over the records — live where the mask says so — so the
-        /// generator produces every re-entry shape there is, including the ones a pair does not
-        /// make: three stretches, four, a read live only at the last record, a read that never
-        /// goes live at all. The assertion carries the count, so a shrink that removed the
-        /// re-entry would fail rather than pass quietly.
+        /// Each generated read is a mask over the same records — live where the mask says so — so
+        /// the generator reaches re-entry shapes a pair does not make: three stretches, four, a
+        /// read live only at the last record, a read that never goes live at all.
+        ///
+        /// **`prop_assume!` throws away the draws with no re-entry in them.** Without it the
+        /// count assertion below is self-consistent — both sides are computed from the same
+        /// records, so it says the reader met one arrival per stretch and nothing about how many
+        /// stretches there are, and a draw with no re-entry at all satisfies it exactly. ⚠ The
+        /// first version of this test claimed the opposite in its own docstring.
         #[test]
         fn any_pattern_of_comings_and_goings_round_trips(
-            masks in prop::collection::vec(prop::collection::vec(any::<bool>(), 1..30), 1..12),
+            (records_in_the_run, masks) in (2usize..30).prop_flat_map(|records_in_the_run| {
+                (
+                    Just(records_in_the_run),
+                    prop::collection::vec(
+                        prop::collection::vec(any::<bool>(), records_in_the_run),
+                        1..12,
+                    ),
+                )
+            }),
+            records_in_the_first_block in 1usize..29,
         ) {
-            let records: Vec<Vec<ChainId>> = (0..masks[0].len())
+            let records: Vec<Vec<ChainId>> = (0..records_in_the_run)
                 .map(|at| {
                     masks
                         .iter()
                         .enumerate()
-                        .filter(|(_, mask)| *mask.get(at).unwrap_or(&false))
+                        .filter(|(_, mask)| mask[at])
                         .map(|(read, _)| read as ChainId)
                         .collect()
                 })
                 .collect();
 
-            let (back, _) = round_trip(std::slice::from_ref(&records));
-            prop_assert_eq!(&back, &records);
-
-            // The reader met every stretch of every read, and no more.
             let stretches = stretches_of(&records);
-            let mut writer = LiveSetWriter::new();
-            writer.start_block();
-            let mut reader = LiveSetReader::new();
-            reader.start_block();
-            let mut arrivals = 0usize;
-            for record in &records {
-                let mut bytes = Vec::new();
-                writer.write_changes(record.iter().copied(), &mut bytes);
-                reader
-                    .read_changes(&bytes)
-                    .map_err(|refused| TestCaseError::fail(refused.to_string()))?;
-                arrivals += reader.changes().arrived().len();
-            }
-            prop_assert_eq!(arrivals, stretches.values().sum::<usize>());
+            prop_assume!(stretches.values().any(|count| *count > 1));
+
+            // **Cut into two blocks**, at a point the generator chose, so a read that is still
+            // covering at the cut is restated and one whose next stretch begins after it arrives
+            // fresh. Milestone E3 stresses exactly this seam, and two of the three hand-written
+            // re-entry tests use one block.
+            let cut = records_in_the_first_block.min(records.len() - 1);
+            let blocks = vec![records[..cut].to_vec(), records[cut..].to_vec()];
+
+            let came_back = round_trip(&blocks);
+            prop_assert_eq!(&came_back.sets, &records);
+
+            // The reader met every stretch of every read, and no more — **plus one restatement
+            // for every read still covering at the cut**, which is what a block costs.
+            let still_covering_at_the_cut = records[cut - 1]
+                .iter()
+                .filter(|id| records[cut].contains(id))
+                .count();
+            prop_assert_eq!(
+                came_back.arrivals,
+                stretches.values().sum::<usize>() + still_covering_at_the_cut
+            );
         }
 
-        /// **Arbitrary bytes are refused, or leave the live set a set** — ascending and without
+        /// **Damaged streams are refused, or leave the live set a set** — ascending and without
         /// duplicates. A decode that returns `Ok` having put an id in twice or out of order is
-        /// what silently breaks Milestone E4's residual subtraction, and it is what a bias defect
-        /// on the arrival gap produces.
+        /// what silently breaks Milestone E4's residual subtraction.
+        ///
+        /// **The bytes are a real record's, damaged, rather than uniform noise**, and the reader
+        /// is seeded with a live set first. Both matter, and the difference is measured: over 600
+        /// cases **113 of the damaged streams are accepted** and have their set checked, where
+        /// uniform bytes are refused at the first count almost every time.
+        ///
+        /// ⚠ **What it still does not reach is the interleaving arm** of `apply_arrivals` — the
+        /// shape that can actually break the ordering, where an arrival sorts below an id already
+        /// live. Measured on both versions of this test: zero entries over 600 cases, against
+        /// 1,320 by `most_reads_go_live_twice_and_every_one_of_them_comes_back`. **That arm's
+        /// guards are that oracle and `any_pattern_of_comings_and_goings_round_trips`**, not this
+        /// test; what this one holds is that damage is refused or harmless.
         #[test]
-        fn arbitrary_bytes_are_refused_or_keep_the_live_set_a_sorted_set(
-            chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..24), 1..8),
+        fn damaged_streams_are_refused_or_keep_the_live_set_a_sorted_set(
+            already_live in prop::collection::vec(0u64..300, 0..40),
+            then_live in prop::collection::vec(0u64..300, 0..40),
+            damage_at in any::<usize>(),
+            damage_to in any::<u8>(),
         ) {
+            let mut writer = LiveSetWriter::new();
+            writer.start_block();
+            let mut opening = Vec::new();
+            writer.write_changes(already_live.iter().copied(), &mut opening);
+            let mut next = Vec::new();
+            writer.write_changes(then_live.iter().copied(), &mut next);
+            prop_assume!(!next.is_empty());
+
             let mut reader = LiveSetReader::new();
             reader.start_block();
-            for chunk in &chunks {
-                if reader.read_changes(chunk).is_err() {
-                    break;
-                }
+            reader
+                .read_changes(&opening)
+                .map_err(|refused| TestCaseError::fail(refused.to_string()))?;
+            prop_assert!(
+                reader.live().ids().windows(2).all(|pair| pair[0] < pair[1]),
+                "the seeded set is a set"
+            );
+
+            let at = damage_at % next.len();
+            next[at] = damage_to;
+            if reader.read_changes(&next).is_ok() {
                 let ids = reader.live().ids();
                 prop_assert!(
                     ids.windows(2).all(|pair| pair[0] < pair[1]),
-                    "the live set stopped being a sorted set: {ids:?}"
+                    "a damaged stream was accepted and left the live set unsorted: {ids:?}"
                 );
             }
         }
+    }
+
+    /// A gap of nothing and a set that empties: coverage stops, and the next record starts again.
+    #[test]
+    fn a_set_that_empties_and_fills_again_reads_back() {
+        let records = vec![
+            vec![1u64, 2, 3],
+            vec![],
+            vec![],
+            vec![50u64, 51],
+            vec![51u64],
+            vec![],
+        ];
+        let back = round_trip(&[records]).sets;
+        assert_eq!(
+            back,
+            vec![
+                vec![1, 2, 3],
+                vec![],
+                vec![],
+                vec![50, 51],
+                vec![51],
+                vec![],
+            ]
+        );
     }
 
     /// **A record that departs an id and arrives the same id is damage.**
@@ -1575,32 +1805,7 @@ mod tests {
                 with_the_largest
             },
         ];
-        let (back, _) = round_trip(std::slice::from_ref(&records));
+        let back = round_trip(std::slice::from_ref(&records)).sets;
         assert_eq!(back, records);
-    }
-
-    /// A gap of nothing and a set that empties: coverage stops, and the next record starts again.
-    #[test]
-    fn a_set_that_empties_and_fills_again_reads_back() {
-        let records = vec![
-            vec![1u64, 2, 3],
-            vec![],
-            vec![],
-            vec![50u64, 51],
-            vec![51u64],
-            vec![],
-        ];
-        let (back, _) = round_trip(&[records]);
-        assert_eq!(
-            back,
-            vec![
-                vec![1, 2, 3],
-                vec![],
-                vec![],
-                vec![50, 51],
-                vec![51],
-                vec![],
-            ]
-        );
     }
 }
