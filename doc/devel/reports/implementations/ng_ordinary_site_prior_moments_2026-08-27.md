@@ -209,3 +209,50 @@ anything else ran.
 - `cargo doc --no-deps --lib` — **27 unresolved links, the same count as at `9f15f5e5`**. One new
   break was introduced and fixed: `HALF_WEIGHT_PANEL_SIZE`'s documentation linked to
   `SeedRegime::FittedSpectrum`, which no longer exists.
+
+---
+
+## A3 — the blend goes
+
+**Contract (plan A3).** Delete `HALF_WEIGHT_PANEL_SIZE`, `panel_shape_weight`, the log-space blend
+and `shape_from_panel`, and the three tests that pin the ramp; keep
+`examples/ng_seed_shape_weight_sweep.rs` as the record of why, with its head rewritten to say it
+measured a mechanism that is now deleted.
+
+### What shipped
+
+`shape_from_panel` went at A2, for the reason that section gives. This step deletes the rest:
+
+- **`HALF_WEIGHT_PANEL_SIZE`**, **`panel_shape_weight`**, **`blend_expected_frequency`** and
+  **`neutral_expected_frequency`** — the last because it was the blend's lower end and had no other
+  caller. The `#[allow(dead_code)]` markers A2 left on the two private ones are gone with them.
+- **The three tests**: `the_blend_is_geometric_and_reaches_both_ends_exactly`,
+  `the_ramps_neutral_end_is_the_pair_the_neutral_rung_returns` and
+  `the_weight_rises_with_the_panel_and_stays_inside_zero_and_one`. What the second protected — that
+  the no-frequency branch returns exactly `(1, θ)` — is still asserted, by
+  `no_fitted_frequency_is_the_neutral_pair_at_the_fitted_diversity`.
+- **The re-export** of the constant and the weight function from `genotype_prior`.
+
+**A comment stands where the ramp was**, carrying what it did, the one constant it had, and the
+two measurements that retired it: every arm of the sweep put the best half-weight panel size at
+zero, and the blended seed came back at **0.62× to 0.92× of the truth at one individual** across
+four populations.
+
+### The example is kept, and it needed its own copy of the constant
+
+`examples/ng_seed_shape_weight_sweep.rs` reads `HALF_WEIGHT_PANEL_SIZE` in four places, so keeping
+it meant giving it a local `const HALF_WEIGHT_PANEL_SIZE: f64 = 0.25;`. **That is a copy of a
+deleted constant and it is labelled as one** — the doc comment on it says the library no longer
+holds it and why. Its head now opens with what the sweep found and what became of the mechanism:
+the panel's own fitted shape is at its best at *one* individual and degrades as the panel grows, so
+the sweep answered its own question the wrong way round.
+
+Three sentences in the program's own printed output claimed the library *ships* the constant. All
+three were corrected — this is the "grep for the retired sentence" check, and it found three.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,871 passed, 0 failed, 14 ignored**, from 4,874. Three tests removed,
+  none added: the expected fall.
+- `cargo doc --no-deps --lib` — **27 unresolved links**, unchanged.

@@ -95,7 +95,7 @@ coefficient. The body is A1's frequency and the existing `total_for_diversity`. 
 `SeedRegime` distinguishes stay what they are: a fitted curve, a fitted diversity with no curve,
 neither. *Depends:* A1. *Source:* spec §6; [`../spec/ordinary_site_seed.md`](../spec/ordinary_site_seed.md) §3.
 
-**A3. The blend goes.**  ☐
+**A3. The blend goes.**  ✅
 `HALF_WEIGHT_PANEL_SIZE`, `panel_shape_weight`, the log-space blend and `shape_from_panel` on
 `SeedRegime::FittedSpectrum`. **The three tests that pin the ramp go with it**, and
 `examples/ng_seed_shape_weight_sweep.rs` stays as the record of why — with its head rewritten to

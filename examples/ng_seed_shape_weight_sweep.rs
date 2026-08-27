@@ -1,6 +1,17 @@
 //! **How big does a panel have to be before its own allele frequencies are a better guess than
 //! the textbook shape?**
 //!
+//! **⛔ The mechanism this program measures was deleted on 2026-08-27, and this is the record of
+//! why.** The seed no longer blends between a neutral shape and the panel's own: its expected
+//! frequency is an integral of the fitted population curve, with no panel in it at all
+//! (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1). **The sweep below is what said the
+//! blend should go**, and it said so by answering its own question the wrong way round: the
+//! panel's own fitted shape is at its best at *one* individual and degrades as the panel grows,
+//! so every arm put the best half-weight panel size `N₀` at **zero** — a weight of one at every
+//! panel, the blend inert. What shipped after that measurement was `N₀ = 0.25`, a hedge; what
+//! ships now is no blend. Kept as the record, and **the constant it fitted is a local one here
+//! now, because the library no longer holds it.**
+//!
 //! ## The question, and why it has a number in it
 //!
 //! The SNP/indel genotype prior starts from two numbers — how many chromosomes' worth of belief
@@ -79,9 +90,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, HALF_WEIGHT_PANEL_SIZE, fit_spectrum_shape,
-};
+use pop_var_caller::ng::calling::genotype_prior::{FittedSpectrum, fit_spectrum_shape};
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
@@ -97,6 +106,14 @@ use pop_var_caller::ng::parameter_estimation::joint::loci::{
 use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
 use pop_var_caller::ng::tandem_repeat::ScanParams;
 use pop_var_caller::ng::types::{InbreedingF, ReadGroupId};
+
+/// The half-weight panel size the library shipped between 2026-08-26 and 2026-08-27, in diploid
+/// individuals — **a local copy, because the library's constant went with the blend it fitted.**
+///
+/// A quarter of an individual: below every panel a run can have, so the weight was already 0.80 at
+/// a single genome. It was never this sweep's own answer, which is zero on every arm; it was the
+/// smallest value that kept the mechanism alive as a hedge against a pathological small-panel fit.
+const HALF_WEIGHT_PANEL_SIZE: f64 = 0.25;
 
 /// The panel sizes the curve is reported at, in diploid individuals. **1 is the single genome
 /// this caller commits to and 63 is the tomato cohort's size.**
@@ -320,7 +337,7 @@ fn main() {
     }
     println!(
         "\n**Fitted: N0 = {}**, on the drawn cohorts, scoring {:.4} there and {:.4} on the \
-         held-out ones. The library ships {HALF_WEIGHT_PANEL_SIZE}, which scores {:.4} and \
+         held-out ones. The library shipped {HALF_WEIGHT_PANEL_SIZE} for a day, which scores {:.4} and \
          {:.4}.",
         best.1,
         best.0,
@@ -359,7 +376,7 @@ fn main() {
     println!("\n### Is the blend ever worse than both ends?");
     println!();
     println!(
-        "On the held-out cohorts, at the shipped N0 of {HALF_WEIGHT_PANEL_SIZE}, **one drawn \
+        "On the held-out cohorts, at the once-shipped N0 of {HALF_WEIGHT_PANEL_SIZE}, **one drawn \
          cohort a row** rather than one cell. A geometric blend of two guesses whose errors have \
          opposite signs beats both; one whose errors point the same way lands between them. \
          **Worse than both is arithmetically impossible per cohort** — in log space the blend is a \
@@ -415,7 +432,7 @@ fn main() {
         "\n**On realistic parameters the score rises from zero with no floor at all**, so this arm \
          wants the panel's own shape and nothing else — and so, since the scoring was corrected \
          to each drawn cohort's own realised frequency, does the drawn arm. **Both arms now put \
-         the minimum at zero.** The shipped {HALF_WEIGHT_PANEL_SIZE} is a hedge rather than a fit, \
+         the minimum at zero.** The {HALF_WEIGHT_PANEL_SIZE} that shipped was a hedge rather than a fit, \
          and it costs this arm {:.0}% over zero.",
         100.0 * (projection_only_score(HALF_WEIGHT_PANEL_SIZE) / projection_only_score(0.0) - 1.0)
     );

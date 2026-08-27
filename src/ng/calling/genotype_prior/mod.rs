@@ -87,8 +87,8 @@ pub mod seed_ssr;
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{
-    FittedShape, FittedSpectrum, HALF_WEIGHT_PANEL_SIZE, VariantClass, fill_locus_concentration,
-    fit_spectrum_shape, panel_shape_weight, seed_from_population_moments,
+    FittedShape, FittedSpectrum, VariantClass, fill_locus_concentration, fit_spectrum_shape,
+    seed_from_population_moments,
 };
 pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 

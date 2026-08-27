@@ -677,129 +677,22 @@ pub fn fit_spectrum_shape(
     }
 }
 
-/// **The panel size at which a panel's own fitted shape and the neutral shape are equally good
-/// guesses**, in diploid individuals — the one constant of the blend in
-/// `doc/devel/ng/spec/ordinary_site_seed.md` §4.1, and the point where its weight is a half.
-///
-/// **A quarter of an individual, which is to say: below every panel a run can have.** At one
-/// diploid individual — the smallest panel there is — the weight is already 0.80, and at 63 it is
-/// 0.996. So the ramp exists and is monotone, but a run sits near its panel's own end of it
-/// throughout the committed cohort range.
-///
-/// ## Why it is not in the tens, which is what §4.1 expected
-///
-/// **The panel's own shape does not improve as the panel grows. It is at its best at one
-/// individual and degrades from there**, and that is the opposite of the assumption the ramp was
-/// designed around. Measured with no cohort drawn and nothing estimated — the density handed
-/// straight to `allele_count_classes` and the shipped search run over the result — the expected
-/// frequency the search reads back, against the density's own, on four of the five shapes
-/// `ordinary_site_seed.md` §1.2 measured:
-///
-/// ```text
-///   individuals                      1       10       63      200
-///   tomato-like, Beta(0.20, 1.00)  0.999×   1.097×   1.177×   1.217×
-///   human-like,  Beta(0.35, 1.20)  1.000×   1.079×   1.141×   1.164×
-///   flat,        Beta(1.00, 1.00)  1.000×   0.912×   0.862×   0.843×
-///   middling,    Beta(4.00, 4.00)  1.000×   0.872×   0.831×   0.818×
-/// ```
-///
-/// **The mechanism is one individual's arithmetic.** A panel of one has three allele-count
-/// classes, which after normalisation are two free numbers, and the two-parameter family has two
-/// parameters — so the fit reproduces the panel's first two moments exactly, point masses
-/// included, and those are the population's own. At 63 individuals the same two parameters are
-/// fitted over 127 classes and can no longer absorb the mass piled at *invariant*, so they
-/// compromise. **This is `ordinary_site_seed.md` §1.2's mechanism, measured on the ratio of the
-/// pair rather than on its total.**
-///
-/// ## How the value was arrived at
-///
-/// [`examples/ng_seed_shape_weight_sweep.rs`](../../../../examples/ng_seed_shape_weight_sweep.rs),
-/// on drawn cohorts across both axes the caller commits to — 1 to 63 diploid individuals at 3, 8
-/// and 20 reads a sample, two population shapes, six drawn cohorts a cell for the fit and four
-/// held out. **§4.1's own criterion cannot be used**: it reads the constant off where the two
-/// guesses' errors cross with panel size, and they do not cross in that direction on either
-/// shape. So the constant is fitted the other way it can be — the value that puts the blended
-/// shape nearest the truth, averaged over every panel size, depth and population.
-///
-/// **The score is flat below about a quarter of an individual, and this is the largest value on
-/// that floor.** On the held-out cohorts, `|ln(blended / drawn)|` averaged over 42 cells runs
-/// 0.1544 at zero, 0.1537 at 0.1, 0.1538 here, 0.1584 at one individual and 0.1686 at twelve. The
-/// literal minimiser is 0.1 and it is not taken: it beats this value by 1 part in 1,500, which the
-/// sweep cannot resolve, and this one keeps a fifth of the shape on the neutral side at a single
-/// genome — the hardest case in the committed range, and the one where the panel has least to
-/// say. **Zero is not taken either**, for a different reason: it would delete the ramp, and with
-/// it the run's ability to report how much of its shape it borrowed.
-///
-/// **⛔ Zero is what the measurement of 2026-08-27 settled on, by deleting the question.** The
-/// seed takes no shape from the panel at all now, so this constant has no consumer; plan step A3
-/// deletes it (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1).
-///
-/// **It does not depend on depth**, which answers `ordinary_site_seed.md` §7's first open
-/// question: the best value is the same at 3, 8 and 20 reads a sample on both shapes. **It does
-/// depend on the population's shape** — the moderate pile-up wants 50 to 200 and the strong one
-/// wants 0 to 0.25 — and that dependence is what §4.1 did not anticipate.
-///
-/// **⚠ Drawn cohorts, not a real one.** This checkout cannot rebuild the tomato census, so
-/// nothing here is a confirmation on real data; `ordinary_site_seed.md` §7's second open question
-/// keeps that open. The report is
-/// `doc/devel/reports/implementations/ng_seed_shrinkage_2026-08-26.md`.
-pub const HALF_WEIGHT_PANEL_SIZE: f64 = 0.25;
-
-/// **How much of the seed's shape comes from the panel's own fitted spectrum** rather than from
-/// the neutral shape a population with no selection has: `N / (N + N₀)`, for a panel of `N`
-/// diploid individuals and the half-weight panel size `N₀`
-/// ([`HALF_WEIGHT_PANEL_SIZE`]).
-///
-/// **Zero would be exactly the neutral rung and one exactly the panel's own fit**, so the two
-/// rungs `doc/devel/ng/spec/population_diversity.md` §3.4 used to switch between are the two ends
-/// of this ramp. Neither end is reached: a panel has at least one individual, so the weight is
-/// above zero everywhere, and it approaches one from below as the panel grows.
-///
-/// **It rises with the panel and never leaves `[0, 1]`**, which is what
-/// `ordinary_site_seed.md` §6.4 asks of it.
-#[must_use]
-pub fn panel_shape_weight(individuals: u32) -> f64 {
-    let panel = f64::from(individuals);
-    panel / (panel + HALF_WEIGHT_PANEL_SIZE)
-}
-
-/// **The seed's expected frequency: the neutral shape's and the panel's own, mixed in log
-/// space** at the weight [`panel_shape_weight`] gives.
-///
-/// `ln f = (1 − w) · ln f_neutral + w · ln f_fitted`.
-///
-/// **In log space because the two can be orders of magnitude apart.** On a tomato-like density
-/// at 63 individuals they are 6.1 in 10,000 and 2.0 in 1,000; a straight average of numbers that
-/// small is the larger one at every weight but zero, so the ramp would not be a ramp
-/// (`doc/devel/ng/spec/ordinary_site_seed.md` §4).
-///
-/// Both inputs are strictly between 0 and 1, so the result is too: a weighted geometric mean of
-/// two numbers in `(0, 1)` lies between them.
-///
-/// **⛔ Nothing calls this any more.** The seed's expected frequency is the fitted population
-/// curve's own mean, and the panel supplies none of it
-/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1). It is left standing for exactly one
-/// commit so that the deletion of the ramp — this function, [`panel_shape_weight`],
-/// [`HALF_WEIGHT_PANEL_SIZE`] and the three tests that pin them — is its own commit and a bisect
-/// can find it.
-#[allow(dead_code)]
-fn blend_expected_frequency(neutral: f64, fitted: f64, weight: f64) -> f64 {
-    debug_assert!(
-        neutral > 0.0 && neutral < 1.0,
-        "the neutral shape's expected frequency is theta / (1 + theta) and a diversity of \
-         exactly zero is taken before this point, so it is strictly inside (0, 1); got {neutral}"
-    );
-    debug_assert!(
-        fitted > 0.0 && fitted < 1.0,
-        "the search's ratio range keeps its expected frequency strictly inside (0, 1); got \
-         {fitted}"
-    );
-    debug_assert!(
-        (0.0..=1.0).contains(&weight),
-        "the share of the shape taken from the panel is a weight in [0, 1]; got {weight}"
-    );
-    ((1.0 - weight) * neutral.ln() + weight * fitted.ln()).exp()
-}
+// **What stood here until 2026-08-27: the blend toward the neutral shape, and its one constant.**
+//
+// The seed's expected frequency used to be interpolated in log space between the neutral shape's
+// `θ / (1 + θ)` and the panel's own fitted one, at a weight `N / (N + N₀)` that rose with the
+// panel — three functions and a fitted `N₀` of a quarter of an individual.
+//
+// **It existed to damp the small-panel noise of a search that is itself being deleted**, and the
+// sweep that was to set `N₀` said the blend points the wrong way: the panel's own fitted shape is
+// exact at one individual and degrades as the panel grows, so every arm put the best half-weight
+// panel size at zero. Handed the population exactly, the blended seed came back at **0.62× to
+// 0.92× of the truth at one individual** across four populations
+// (`doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md` §9,
+// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1).
+//
+// **The frequency is now integrated off the fitted curve, and there is nothing to blend toward.**
+// `examples/ng_seed_shape_weight_sweep.rs` is kept as the record of the measurement.
 
 /// The largest diversity **any** concentration pair can imply.
 ///
@@ -858,25 +751,6 @@ fn total_for_diversity(expected_frequency: f64, diversity: f64) -> PinnedTotal {
         return PinnedTotal::BeyondTheShapesReach;
     }
     PinnedTotal::Reached(share_of_ceiling / (1.0 - share_of_ceiling))
-}
-
-/// **The neutral rung's own expected alternative-allele frequency** — the pair `(1, θ)` written as
-/// a ratio, `θ / (1 + θ)`.
-///
-/// It is the bottom end of §4's ramp, and it has to be *exactly* the frequency of the pair the
-/// no-frequency branch of [`seed_from_population_moments`] returns, or the two rungs
-/// `doc/devel/ng/spec/population_diversity.md` §3.4 used to switch between are not the two ends of
-/// one ramp after all. **Writing `θ` here instead is wrong by a factor of `1 + θ`**, which is 1
-/// part in 10,000 at a human diversity and 40% at a `θ` of 0.4 — invisible where anyone would
-/// look, and the reason
-/// [`projection_tests::the_ramps_neutral_end_is_the_pair_the_neutral_rung_returns`] tests it at a
-/// diversity no cohort has.
-///
-/// **⛔ Nothing calls this any more**, for the same reason and on the same one-commit footing as
-/// [`blend_expected_frequency`]: it was the bottom end of the ramp, and there is no ramp.
-#[allow(dead_code)]
-fn neutral_expected_frequency(diversity: f64) -> f64 {
-    diversity / (NEUTRAL_ALPHA_REF + diversity)
 }
 
 /// **Build the run's two starting numbers from the two things the pre-pass measured about the
@@ -3242,120 +3116,6 @@ mod projection_tests {
         assert!(
             worst < 1e-11,
             "the solved total must be the one the Beta-binomial needs; worst {worst:.2e}"
-        );
-    }
-
-    /// **The blend is a geometric mean, not an arithmetic one, and it is a mean of the right two
-    /// numbers.**
-    ///
-    /// The check that discriminates: halfway between an expected frequency of 1 in 10,000 and one
-    /// of 1 in 100 is **1 in 1,000**. An arithmetic blend would put it at 50.5 in 10,000 — five
-    /// times higher, and within a factor of two of the larger end at every weight above about a
-    /// tenth, which is why `ordinary_site_seed.md` §4 says a linear blend of numbers this small
-    /// is not a ramp.
-    ///
-    /// The two ends are exact: at a weight of zero the answer is the neutral shape itself and at
-    /// one it is the panel's own.
-    #[test]
-    fn the_blend_is_geometric_and_reaches_both_ends_exactly() {
-        assert!(
-            (blend_expected_frequency(1e-4, 1e-2, 0.5) - 1e-3).abs() < 1e-15,
-            "halfway between 1e-4 and 1e-2 in log space is 1e-3; got {}",
-            blend_expected_frequency(1e-4, 1e-2, 0.5)
-        );
-        // **Both ends are exact to within a couple of units in the last place, not to the bit.**
-        // The blend goes through a logarithm and back, and `exp(1.0 * ln(1e-4))` comes out one
-        // part in `10¹⁶` above `1e-4`. Nothing downstream can tell, and saying so is cheaper than
-        // a special case for two weights a panel never produces.
-        assert!(
-            (blend_expected_frequency(1e-4, 1e-2, 0.0) / 1e-4 - 1.0).abs() < 1e-14,
-            "at a weight of zero the answer is the neutral shape; got {}",
-            blend_expected_frequency(1e-4, 1e-2, 0.0)
-        );
-        assert!(
-            (blend_expected_frequency(1e-4, 1e-2, 1.0) - 1e-2).abs() < 1e-17,
-            "at a weight of one the answer is the panel's own shape; got {}",
-            blend_expected_frequency(1e-4, 1e-2, 1.0)
-        );
-        // **Neither end is symmetric in the two arguments**, which is what a swap of the weight
-        // would make it: a quarter of the way up from 1e-4 is not a quarter of the way down
-        // from 1e-2.
-        assert!(
-            blend_expected_frequency(1e-4, 1e-2, 0.25) < blend_expected_frequency(1e-4, 1e-2, 0.75),
-            "the weight is how much of the panel's own shape is taken, so more of it moves the \
-             answer toward the larger number here"
-        );
-    }
-
-    /// **The bottom end of the ramp is exactly the pair the neutral rung returns**, so the two
-    /// rungs `population_diversity.md` §3.4 switched between really are the two ends of one thing
-    /// (`ordinary_site_seed.md` §6.2).
-    ///
-    /// The check compares [`neutral_expected_frequency`] against the ratio of the seed the
-    /// *no-spectrum* branch actually builds — not against the formula that produced it. **A
-    /// diversity of 0.4 is in the grid on purpose**: writing `θ` where `θ / (1 + θ)` belongs is
-    /// wrong by a factor of `1 + θ`, which is 1 part in 10,000 at a human diversity and would sit
-    /// inside every tolerance in this module, and 40% here.
-    #[test]
-    fn the_ramps_neutral_end_is_the_pair_the_neutral_rung_returns() {
-        for diversity in [1e-4_f64, 1e-3, 1e-2, 0.1, 0.4] {
-            let rung = seed_from_population_moments(
-                None,
-                Some(ExpectedHeterozygosity::try_new(diversity).unwrap()),
-            );
-            assert_eq!(rung.regime(), SeedRegime::NeutralShape);
-            let rungs_own = rung.alpha_alt_total() / (rung.alpha_ref() + rung.alpha_alt_total());
-            assert!(
-                (neutral_expected_frequency(diversity) - rungs_own).abs() < 1e-15,
-                "at a diversity of {diversity} the ramp's neutral end is {} and the rung's own \
-                 expected frequency is {rungs_own}",
-                neutral_expected_frequency(diversity)
-            );
-        }
-    }
-
-    /// **The weight rises with the panel and never leaves `[0, 1]`** —
-    /// `ordinary_site_seed.md` §6.4.
-    ///
-    /// **And it is above a half at every panel a run can have**, which is what
-    /// [`HALF_WEIGHT_PANEL_SIZE`] being a quarter of an individual means: the panel size at which
-    /// the two shapes would be equally trusted sits below one, so a run is always nearer its own
-    /// panel's shape than the neutral one. At a single genome the weight is 0.80 and at 63
-    /// individuals 0.996 — a ramp that is monotone but short.
-    #[test]
-    fn the_weight_rises_with_the_panel_and_stays_inside_zero_and_one() {
-        let mut previous = 0.0;
-        for individuals in [1u32, 2, 3, 5, 10, 25, 63, 200, 1_000, 10_000] {
-            let weight = panel_shape_weight(individuals);
-            assert!(
-                (0.0..1.0).contains(&weight),
-                "at {individuals} individuals the weight is {weight}"
-            );
-            assert!(
-                weight > previous,
-                "at {individuals} individuals the weight fell to {weight} from {previous}"
-            );
-            previous = weight;
-        }
-        assert!(
-            (panel_shape_weight(1) - 0.80).abs() < 5e-3,
-            "a single genome takes {:.3} of its shape from its own panel",
-            panel_shape_weight(1)
-        );
-        assert!(
-            (panel_shape_weight(63) - 0.996).abs() < 5e-3,
-            "a panel of 63 takes {:.4} of its shape from its own panel",
-            panel_shape_weight(63)
-        );
-        // **Half-weight is below one individual**, so no panel a run can have is at it — which is
-        // the whole of what the fitted constant says. Written as a comparison against the
-        // smallest panel there is rather than against the literal `1.0`, so that it reads as the
-        // claim it is.
-        assert!(
-            HALF_WEIGHT_PANEL_SIZE < f64::from(1_u32),
-            "the constant is {HALF_WEIGHT_PANEL_SIZE} individuals; above one individual the \
-             weight at a single genome would fall below a half and every sentence about this \
-             ramp changes"
         );
     }
 
