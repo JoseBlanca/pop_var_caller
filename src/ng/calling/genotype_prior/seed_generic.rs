@@ -703,19 +703,6 @@ pub fn fit_spectrum_shape(
 const MAX_IMPLIED_DIVERSITY: f64 = 0.5;
 
 /// The total concentration that makes a pair of a given expected frequency imply exactly the
-/// measured diversity — **or the news that no total does**.
-#[derive(Copy, Clone, PartialEq, Debug)]
-enum PinnedTotal {
-    /// `A = t / (1 − t)`, with `t = θ / (2 f (1 − f))` the share of the shape's own ceiling the
-    /// measurement asks for. Always strictly positive, because `t` is.
-    Reached(f64),
-    /// **The shape's own maximum implied diversity is at or below the measurement**, so no total
-    /// reaches it: `A` would have to be infinite. Rescaling toward the ceiling or clamping the
-    /// total would both answer a different question, so the caller falls to the neutral rung and
-    /// says it did (`doc/devel/ng/spec/ordinary_site_seed.md` §3.1).
-    BeyondTheShapesReach,
-}
-
 /// **Solve for how much conviction a pair of this expected frequency needs in order to imply the
 /// diversity that was measured** — `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity.
 ///
@@ -727,9 +714,36 @@ enum PinnedTotal {
 ///   t = θ / (2 f (1 − f)),        A = t / (1 − t)
 /// ```
 ///
-/// `t` is the share of the shape's own ceiling the measurement asks for, so a measurement at or
-/// above the ceiling has no answer at all rather than a large one.
-fn total_for_diversity(expected_frequency: f64, diversity: f64) -> PinnedTotal {
+/// `t` is the share of the shape's own ceiling the measurement asks for.
+///
+/// ## Why there is no "no total reaches it" answer here, and there used to be
+///
+/// **`2 f (1 − f)` is the largest heterozygosity a pair of expected frequency `f` can imply**, so
+/// a measurement at or above it has no answer at all rather than a large one. Until 2026-08-27
+/// this function said so, and the seed carried a `DiversityUnreachable` regime that fell back to
+/// the neutral pair and reported which of two ways it had got there.
+///
+/// **On the route that ships, that state cannot arise, and the reason is Jensen's inequality.**
+/// Both numbers are integrals of one fitted population curve:
+///
+/// ```text
+///   θ  =  E[2 f (1 − f)]  =  2 E[f] − 2 E[f²]
+///   the ceiling            =  2 E[f] (1 − E[f])  =  2 E[f] − 2 E[f]²
+/// ```
+///
+/// and `E[f²] ≥ E[f]²` — that difference *is* the spread of the population's frequencies. So the
+/// measurement is below the ceiling by exactly twice that spread, and equals it only where the
+/// whole population sits at one frequency. **No density the fit can produce does**: its Beta's
+/// shape parameters are clamped to `[0.02, 50]`, and the narrowest of those, `Beta(50, 50)`, still
+/// has a spread of 2.5 in 1,000 (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
+///
+/// So this is now a **release assertion** rather than a fall-back: tripping it means the two
+/// numbers did not come from one curve, which is a run-assembly defect and not a thin cohort.
+///
+/// # Panics
+///
+/// On a measured heterozygosity at or above `2 f (1 − f)`, per the paragraph above.
+fn total_for_diversity(expected_frequency: f64, diversity: f64) -> f64 {
     debug_assert!(
         expected_frequency > 0.0 && expected_frequency < 1.0,
         "the expected alternative-allele frequency is strictly inside (0, 1); got \
@@ -744,13 +758,23 @@ fn total_for_diversity(expected_frequency: f64, diversity: f64) -> PinnedTotal {
     let share_of_ceiling = diversity / shapes_ceiling;
     // **At or above the ceiling rather than above it**, and the difference is not pedantry: at
     // exactly the ceiling the solved total is infinite, which `SpectrumSeed` refuses — so a
-    // measurement that lands there would panic at the run's assembly instead of being reported.
-    // The division can also *round* to one from a measurement just below the ceiling, and that
-    // lands in the same place.
-    if share_of_ceiling >= 1.0 {
-        return PinnedTotal::BeyondTheShapesReach;
-    }
-    PinnedTotal::Reached(share_of_ceiling / (1.0 - share_of_ceiling))
+    // measurement that lands there would panic three frames later with a message about a
+    // concentration. The division can also *round* to one from a measurement just below the
+    // ceiling, and that lands in the same place.
+    //
+    // Held in release, because what it catches is a silently wrong seed rather than a crash: a
+    // negative solved total makes `SpectrumSeed::new` refuse, but a total that overflowed to
+    // infinity or came back enormous would be a prior no depth of reads could move.
+    assert!(
+        share_of_ceiling < 1.0,
+        "a heterozygosity of {diversity} cannot come from a population whose mean \
+         alternative-allele frequency is {expected_frequency}: the most such a population can \
+         show is 2 f (1 - f) = {shapes_ceiling}, and it reaches that only if every position sits \
+         at exactly that frequency. Two moments of one fitted curve always satisfy this strictly \
+         — E[2f(1-f)] is below 2 E[f] (1 - E[f]) by twice the spread of the population's \
+         frequencies — so these two numbers did not come from one curve"
+    );
+    share_of_ceiling / (1.0 - share_of_ceiling)
 }
 
 /// **Build the run's two starting numbers from the two things the pre-pass measured about the
@@ -796,9 +820,11 @@ fn total_for_diversity(expected_frequency: f64, diversity: f64) -> PinnedTotal {
 ///   entry of the solved pair goes to zero with it, so the alternative concentration is floored at
 ///   [`MIN_ALT_CONCENTRATION`] and the run says the diversity was zero
 ///   ([`SeedRegime::ZeroDiversity`]).
-/// - **No total reaches the measured heterozygosity** at that frequency — the pair falls to the
-///   neutral rung and says *that*, distinguishably from a run that was on the neutral rung
-///   because no frequency arrived ([`SeedRegime::DiversityUnreachable`]).
+///
+/// **There is no fifth regime for a heterozygosity no pair can reach**, and until 2026-08-27 there
+/// was. Two moments of one fitted curve always leave the ceiling `2 f (1 − f)` above the
+/// measurement, by Jensen's inequality — [`total_for_diversity`] carries the argument and holds it
+/// as a release assertion.
 ///
 /// **Nothing here tests how many samples the cohort holds.**
 ///
@@ -862,27 +888,18 @@ pub fn seed_from_population_moments(
         );
     };
 
-    match total_for_diversity(expected_frequency, measured_diversity) {
-        PinnedTotal::Reached(total) => {
-            // **No floor is applied here, and an earlier draft applied one.** Flooring the
-            // alternative concentration at `MIN_ALT_CONCENTRATION` would break the one thing this
-            // function now guarantees: below a measured diversity of about `2e-12` the floor
-            // binds and the pair stops implying the measurement. A diversity of exactly zero is
-            // the case that needs the floor and it is taken above; every diversity above zero
-            // gives a strictly positive total, and the per-locus expansion floors what it shares
-            // out (`fill_locus_concentration`).
-            SpectrumSeed::new(
-                total * (1.0 - expected_frequency),
-                total * expected_frequency,
-                SeedRegime::FittedCurve,
-            )
-        }
-        PinnedTotal::BeyondTheShapesReach => SpectrumSeed::new(
-            NEUTRAL_ALPHA_REF,
-            measured_diversity,
-            SeedRegime::DiversityUnreachable { expected_frequency },
-        ),
-    }
+    let total = total_for_diversity(expected_frequency, measured_diversity);
+    // **No floor is applied here, and an earlier draft applied one.** Flooring the alternative
+    // concentration at `MIN_ALT_CONCENTRATION` would break the one thing this function
+    // guarantees: below a measured diversity of about `2e-12` the floor binds and the pair stops
+    // implying the measurement. A diversity of exactly zero is the case that needs the floor and
+    // it is taken above; every diversity above zero gives a strictly positive total, and the
+    // per-locus expansion floors what it shares out (`fill_locus_concentration`).
+    SpectrumSeed::new(
+        total * (1.0 - expected_frequency),
+        total * expected_frequency,
+        SeedRegime::FittedCurve,
+    )
 }
 
 /// What the fit returned: the pair, what it scored, and what it cost.
@@ -2770,59 +2787,54 @@ mod projection_tests {
         let (alpha_ref, alpha_alt) = shape.concentrations();
         assert!(alpha_ref.is_finite() && alpha_alt.is_finite());
     }
-
-    /// **A fully invariant cohort whose run measured a diversity is a contradiction, and the seed
-    /// says so rather than answering it.**
+    /// **Two numbers that did not come from one population curve are refused, not answered.**
     ///
-    /// Every site in the spectrum sits in class 0: no chromosome of the panel carries the
-    /// alternative allele anywhere. The search's answer to that is an alternative concentration
-    /// of zero, which it cannot express — the ratio between the two concentrations floors at
-    /// `1e-9` — so what comes back is that floor, and the fit says it stopped on the edge of its
-    /// range.
+    /// A pair of expected frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the
+    /// time, however much conviction it carries, so a heterozygosity at or above that ceiling has
+    /// no answer at all. **Before 2026-08-27 the seed fell back to the neutral pair and reported
+    /// which of two ways it had got there.** It no longer can: on the shipped route both numbers
+    /// are integrals of one curve and Jensen's inequality puts the measurement strictly below the
+    /// ceiling, so reaching this state means a caller assembled two numbers that do not go
+    /// together.
     ///
-    /// **That frequency cannot reach the measured diversity.** A pair of expected frequency `f`
-    /// makes a diploid heterozygous at most `2 f (1 − f)` of the time, and a frequency near
-    /// `1e-9` has a ceiling near `2e-9` against a measured `6e-4`. There is no total that reaches
-    /// it, so the pair falls to the neutral rung and the run reports which of the two ways it got
-    /// there (`doc/devel/ng/spec/ordinary_site_seed.md` §3.1).
-    ///
-    /// **This is the failure the repeat-tract seed used to have**, and the reason it is a regime
-    /// rather than a clamp: a shape scaled toward a measurement it cannot reach answers a
-    /// different question from the one asked.
-    ///
-    /// **⚑ The frequency reaches the seed from the search here, and on a run it will not.** A
-    /// mean frequency integrated off a fitted curve cannot be too small for its own
-    /// heterozygosity — that is Jensen's inequality, and plan step A4 is where the refusal and
-    /// this test go because of it.
+    /// **The fixture is the state a fully invariant panel used to produce**: an expected frequency
+    /// of 1 in a thousand million — the old search's own floor on the ratio between the two
+    /// concentrations — against a measured heterozygosity of 6 in 10,000. The ceiling there is
+    /// about 2 in a thousand million, five orders of magnitude short.
     #[test]
-    fn a_fully_invariant_cohort_at_a_measured_diversity_falls_to_the_neutral_rung_and_says_so() {
-        let mut weights = vec![0.0; 53];
-        weights[0] = 1.0;
-        let theta = 6e-4;
-        let seed = project(&weights, theta, 0.0);
-        let SeedRegime::DiversityUnreachable { expected_frequency } = seed.regime() else {
-            panic!(
-                "no total reaches a diversity of {theta} from a shape this far out in the tail; \
-                 got {:?}",
-                seed.regime()
-            );
-        };
-        // The pair is the neutral rung exactly — not the fitted one rescaled toward the ceiling.
-        assert_eq!((seed.alpha_ref(), seed.alpha_alt_total()), (1.0, theta));
+    #[should_panic(expected = "did not come from one curve")]
+    fn two_moments_that_cannot_belong_to_one_curve_are_refused() {
+        let _ = seed_at(1e-9, 6e-4);
+    }
+
+    /// **The refusal is at the ceiling and not above it**, which is the difference between a
+    /// reported refusal and a panic three frames later about a concentration: at exactly the
+    /// ceiling the solved total is infinite, and `SpectrumSeed` refuses a non-finite one.
+    ///
+    /// At an expected frequency of a half the ceiling is a half, and this asks for exactly that.
+    #[test]
+    #[should_panic(expected = "did not come from one curve")]
+    fn a_heterozygosity_exactly_at_the_ceiling_is_refused() {
+        let _ = seed_at(0.5, 0.5);
+    }
+
+    /// **And a hair below the ceiling is not refused** — the bound is at the ceiling rather than
+    /// near it, which neither of the two tests above can say on its own.
+    ///
+    /// 999 parts in a thousand of the ceiling gives a total near a thousand: a pair that carries a
+    /// thousand chromosomes' worth of conviction, which is what asking for almost all of a shape's
+    /// own maximum heterozygosity costs.
+    #[test]
+    fn just_below_the_ceiling_still_has_a_total() {
+        let frequency = 1e-3;
+        let ceiling = 2.0 * frequency * (1.0 - frequency);
+        let seed = seed_at(frequency, 0.999 * ceiling);
+        let total = seed.alpha_ref() + seed.alpha_alt_total();
         assert!(
-            2.0 * expected_frequency * (1.0 - expected_frequency) < theta,
-            "the shape's own ceiling is {}, which is what makes the diversity unreachable",
-            2.0 * expected_frequency * (1.0 - expected_frequency)
+            (900.0..1_100.0).contains(&total),
+            "999 parts in a thousand of the ceiling needs a total near a thousand; got {total}"
         );
-        // **The search's own report says where the frequency came from**: the pair it found
-        // reproduces the spectrum, and it says it stopped on a bound.
-        let spectrum_match = searched_match(&weights, 0.0);
-        assert!(spectrum_match.at_search_limit(), "got {spectrum_match:?}");
-        assert!(
-            spectrum_match.divergence_nats() < 2e-9,
-            "{} nats",
-            spectrum_match.divergence_nats()
-        );
+        assert!(matches!(seed.regime(), SeedRegime::FittedCurve));
     }
 
     /// **The objective is maximised by the truth and by nothing else** — Gibbs' inequality, which
@@ -3100,11 +3112,7 @@ mod projection_tests {
             for share_of_ceiling in [1e-3_f64, 0.1, 0.5, 0.9, 0.99] {
                 let ceiling = 2.0 * expected_frequency * (1.0 - expected_frequency);
                 let diversity = share_of_ceiling * ceiling;
-                let PinnedTotal::Reached(total) =
-                    total_for_diversity(expected_frequency, diversity)
-                else {
-                    panic!("{share_of_ceiling} of the ceiling is reachable by construction");
-                };
+                let total = total_for_diversity(expected_frequency, diversity);
                 let seed = SpectrumSeed::new(
                     total * (1.0 - expected_frequency),
                     total * expected_frequency,
@@ -3212,62 +3220,18 @@ mod projection_tests {
         );
     }
 
-    /// **Exactly a half is the largest a pair can imply, so it is accepted** — the refusal above
-    /// is strictly outside the range rather than at its edge.
+    /// **How close a measurement can come to the ceiling and still have an answer** — one bit,
+    /// where the solved total is 9.0 × 10¹⁵ and the pair is a prior no depth of reads could move.
     ///
-    /// It falls to the neutral rung, because a diversity of a half needs an expected frequency of
-    /// exactly a half and the frequency handed over here is a third — `2 f (1 − f)` is then
-    /// `4/9`, short of the measurement. No total gets there, which is the first of §3.1's three
-    /// failures rather than the second.
+    /// It is not reachable from a fit: it needs the measurement and the shape's own ceiling to
+    /// agree to one part in 10¹⁶, where Jensen's inequality puts them apart by twice the
+    /// population's spread of frequencies. It is recorded rather than guarded, because clamping it
+    /// would break the pin for a case that cannot arise.
     #[test]
-    fn a_heterozygosity_of_exactly_a_half_is_not_refused() {
-        let seed = seed_at(1.0 / 3.0, 0.5);
-        assert!(
-            matches!(seed.regime(), SeedRegime::DiversityUnreachable { .. }),
-            "got {:?}",
-            seed.regime()
-        );
-    }
-
-    /// **Exactly at the shape's ceiling there is no total**, which is why the comparison is `≥`
-    /// and not `>`.
-    ///
-    /// A pair of expected frequency `f` implies `2 f (1 − f) · A / (A + 1)`, which approaches
-    /// `2 f (1 − f)` from below and never reaches it: at the ceiling the solved `A` is infinite.
-    /// **`SpectrumSeed` refuses a non-finite concentration**, so writing the comparison as
-    /// strictly-greater turns a reported fall-back into a panic at the run's assembly.
-    ///
-    /// **How close a measurement can come and still have an answer, since the size is worth
-    /// knowing:** one bit below the ceiling the total is `9.0e15`, and the pair is then a prior no
-    /// depth of reads could move. It is not reachable from a fit — it needs the measurement and
-    /// the shape's ceiling to agree to one part in `10¹⁶` — and it is recorded rather than
-    /// guarded, because clamping it would break the pin for a case that cannot arise.
-    #[test]
-    fn a_measurement_exactly_at_the_shapes_ceiling_has_no_total() {
-        assert_eq!(
-            total_for_diversity(0.5, 0.5),
-            PinnedTotal::BeyondTheShapesReach,
-            "half is the largest diversity any pair implies and no pair reaches it"
-        );
-        assert_eq!(
-            total_for_diversity(1e-3, 2.0 * 1e-3 * (1.0 - 1e-3)),
-            PinnedTotal::BeyondTheShapesReach
-        );
-        // Nine hundred and ninety-nine parts in a thousand of the ceiling does have a total, and
-        // it is a thousand-fold what a run at half the ceiling gets — which is the shape of the
-        // approach rather than a defect.
-        let PinnedTotal::Reached(total) =
-            total_for_diversity(1e-3, 0.999 * 2.0 * 1e-3 * (1.0 - 1e-3))
-        else {
-            panic!("999 parts in a thousand of the ceiling is reachable");
-        };
-        assert!((900.0..1_100.0).contains(&total), "got {total}");
-        // One bit below the ceiling, which is as close as an `f64` gets.
+    fn one_bit_below_the_ceiling_still_has_a_total() {
         let ceiling = 2.0_f64 * 0.3 * (1.0 - 0.3);
         let a_bit_under = f64::from_bits(ceiling.to_bits() - 1);
-        let PinnedTotal::Reached(enormous) = total_for_diversity(0.3, a_bit_under) else {
-            panic!("one bit below the ceiling still has a total, and it is 9.0e15");
-        };
+        let enormous = total_for_diversity(0.3, a_bit_under);
         assert!(
             enormous > 8e15 && enormous.is_finite(),
             "one bit below the ceiling the total is {enormous:e}"

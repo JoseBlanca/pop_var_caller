@@ -256,3 +256,73 @@ three were corrected — this is the "grep for the retired sentence" check, and 
 - `cargo test --lib` — **4,871 passed, 0 failed, 14 ignored**, from 4,874. Three tests removed,
   none added: the expected fall.
 - `cargo doc --no-deps --lib` — **27 unresolved links**, unchanged.
+
+---
+
+## A4 — `DiversityUnreachable` goes, and the reason is a proof
+
+**Contract (plan A4).** A curve's own two moments always satisfy `E[2f(1−f)] ≤ 2 E[f](1 − E[f])` by
+Jensen, so no total is ever out of reach on this route. Delete the variant and its test, and record
+the inequality where the variant was. `ZeroDiversity` stays.
+
+### What shipped
+
+- **`SeedRegime::DiversityUnreachable` is gone**, and **a comment stands exactly where it was**,
+  carrying what it did, why it existed — this is the failure the repeat-tract seed used to have and
+  it must not return silently — and the argument that makes it unreachable now.
+- **`PinnedTotal` is gone with it.** `total_for_diversity` returns an `f64` and holds the
+  inequality as a **release assertion**. The enum existed only to carry the "no total reaches it"
+  answer to a regime that no longer exists.
+- **The argument, written out where the code is**: `θ = E[2f(1−f)] = 2E[f] − 2E[f²]` against a
+  ceiling of `2E[f](1 − E[f]) = 2E[f] − 2E[f]²`, and `E[f²] ≥ E[f]²` — Jensen, whose slack is
+  exactly the spread of the population's frequencies. So the measurement sits below the ceiling by
+  twice that spread, with equality only where the whole population sits at one frequency. **No
+  density the fit can produce does**: its Beta's shape parameters are clamped to `[0.02, 50]`, and
+  the narrowest of those, `Beta(50, 50)`, still has a spread of 2.5 in 1,000.
+
+### Why it is a release assertion and not a `debug_assert!`
+
+**Because without it the run dies three frames later naming the wrong thing.** Measured, by
+downgrading the check and running the module in release:
+
+| what a caller passed | what it panics with instead |
+|---|---|
+| frequency `1e-9`, heterozygosity `6e-4` | `the reference concentration must be finite and strictly positive, got -1.0000033323444377` |
+| frequency `0.5`, heterozygosity `0.5` | `the reference concentration must be finite and strictly positive, got inf` |
+
+Both come from `SpectrumSeed::new` in a different module. Neither says that the two numbers handed
+over cannot both describe one population, which is the only thing a reader needs to know.
+
+### Tests
+
+Three went with the mechanism —
+`a_fully_invariant_cohort_at_a_measured_diversity_falls_to_the_neutral_rung_and_says_so`,
+`a_heterozygosity_of_exactly_a_half_is_not_refused`, and
+`a_measurement_exactly_at_the_shapes_ceiling_has_no_total` — and four arrived:
+
+- **`two_moments_that_cannot_belong_to_one_curve_are_refused`**, at the state a fully invariant
+  panel used to produce: a mean frequency of 1 in a thousand million against a heterozygosity of 6
+  in 10,000, five orders of magnitude past the ceiling.
+- **`a_heterozygosity_exactly_at_the_ceiling_is_refused`**, at frequency and heterozygosity both a
+  half — the `≥` boundary rather than the `>` one, which is where the solved total goes infinite.
+- **`just_below_the_ceiling_still_has_a_total`**, at 999 parts in a thousand of the ceiling, where
+  the total is near a thousand. Without it the two above would pass with the comparison written as
+  `share_of_ceiling > 0.0`.
+- **`one_bit_below_the_ceiling_still_has_a_total`**, keeping the 9.0 × 10¹⁵ figure the deleted test
+  carried.
+
+**The release-held assertion battery was run**: the new `assert!` downgraded to `debug_assert!`,
+`cargo test --release --lib ng::calling::genotype_prior --all-features` — **2 tests failed and both
+are the two `#[should_panic]` tests above**, so the check is reached and nothing else depends on it.
+The source was restored and the restore checked with `git diff` before anything else ran.
+
+**The two `#[should_panic]` strings are the same, and deliberately**: they exercise one check from
+two sides. The module's other refusal — a heterozygosity above a half, which is caught before the
+frequency is looked at — keeps its own distinct string, *"is not a thin estimate"*.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,872 passed, 0 failed, 14 ignored**, from 4,871. Three tests removed,
+  four added.
+- `cargo doc --no-deps --lib` — **27 unresolved links**, unchanged.

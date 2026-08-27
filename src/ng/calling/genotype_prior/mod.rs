@@ -601,21 +601,28 @@ pub enum SeedRegime {
     /// heterozygosity itself, and **nothing computes the mean of `Hobs / (1 − F)` across
     /// samples**, so a run on that route alone reaches [`Self::FallbackDiversity`] instead.
     NeutralShape,
-    /// **The measured frequency's own largest implied heterozygosity is at or below the one that
-    /// was measured**, so no total reaches it and the pair falls back to the neutral `(1, θ)`.
-    ///
-    /// A pair of expected frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the
-    /// time, however much conviction it carries.
-    ///
-    /// **It is its own variant so that this fall to the neutral rung is distinguishable from
-    /// [`Self::NeutralShape`]'s**, where no frequency arrived at all. *This is the failure the
-    /// repeat-tract seed used to have — a shape scaled to a measurement it could not reach, which
-    /// fired at every tract at one outbred sample — and it was deleted with the construction that
-    /// caused it (`population_diversity.md` §4.2). It does not return silently here.*
-    ///
-    /// `expected_frequency` is the frequency that could not reach the measurement, so a reader can
-    /// see how far out the rare-allele tail the run had gone.
-    DiversityUnreachable { expected_frequency: f64 },
+    // **What stood here until 2026-08-27: `DiversityUnreachable`.**
+    //
+    // A pair of expected frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the
+    // time, however much conviction it carries, so a measured heterozygosity at or above that
+    // ceiling had no answer. The seed fell back to the neutral `(1, θ)` and reported which of two
+    // ways it had got there — deliberately distinguishable from `NeutralShape`'s, because this is
+    // the failure the repeat-tract seed used to have and it must not return silently
+    // (`population_diversity.md` §4.2).
+    //
+    // **It is absent rather than forgotten: on this route the state cannot arise.** Both of the
+    // seed's numbers are integrals of one fitted population curve, and
+    //
+    //     θ = E[2 f (1 − f)] = 2 E[f] − 2 E[f²]      against a ceiling of 2 E[f] (1 − E[f])
+    //
+    // with `E[f²] ≥ E[f]²` — Jensen's inequality, whose slack is exactly the spread of the
+    // population's frequencies. The measurement is therefore below the ceiling by twice that
+    // spread, and equals it only where the whole population sits at one frequency, which no
+    // density the fit can produce does. `seed_generic::total_for_diversity` holds the inequality
+    // as a release assertion and says what tripping it means
+    // (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
+    //
+    // `ZeroDiversity` below is **not** the same thing and stays: it is a real cohort state.
     /// **The run's measured heterozygosity was exactly zero** — a cohort with no variation at all.
     ///
     /// Solving for the total gives zero and every entry of the pair with it, so the alternative

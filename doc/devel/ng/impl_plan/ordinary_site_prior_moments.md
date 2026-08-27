@@ -101,7 +101,7 @@ neither. *Depends:* A1. *Source:* spec §6; [`../spec/ordinary_site_seed.md`](..
 `examples/ng_seed_shape_weight_sweep.rs` stays as the record of why — with its head rewritten to
 say it measured a mechanism that is now deleted. *Depends:* A2. *Source:* spec §6.1.
 
-**A4. `DiversityUnreachable` goes, and the reason is a proof.**  ☐
+**A4. `DiversityUnreachable` goes, and the reason is a proof.**  ✅
 A curve's own two moments always satisfy `E[2f(1−f)] ≤ 2 E[f](1 − E[f])` by Jensen, so no total is
 ever out of reach on this route. **Delete the variant and its test, and record the inequality where
 the variant was** — a later reader must find why the refusal is absent rather than wonder.
