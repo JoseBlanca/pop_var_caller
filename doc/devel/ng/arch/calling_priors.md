@@ -152,6 +152,17 @@ with `error[E0451]`.
 /// because a run on the fallback and a run on a fitted spectrum are otherwise
 /// indistinguishable (spec §4, §4.1).
 ///
+/// ⚠ SUPERSEDED AGAIN 2026-08-27 by `spec/ordinary_site_prior_moments.md` §7, which has
+/// not been built. Both numbers become integrals of the fitted curve, so the fields that
+/// describe the search and the blend go with them: `shape_from_panel` (there is no blend),
+/// `spectrum_match` (there is no search to be far from anything), and
+/// `DiversityUnreachable` — which becomes unreachable by Jensen's inequality, since a
+/// curve's own two moments always satisfy `E[2f(1-f)] <= 2 E[f] (1 - E[f])`. What the
+/// regime must still carry is which of the three information states produced the pair:
+/// a fitted curve, a fitted diversity with no curve, or neither. See that spec for what
+/// replaces the list below; the note beneath it is the 2026-08-26 state, kept because it
+/// is what the code currently does.
+///
 /// ⚠ SUPERSEDED 2026-08-26 by `spec/ordinary_site_seed.md` §4.2, and built. The shipped
 /// enum has FIVE variants, not three, and the fitted one carries the blend's weight:
 /// `shape_from_panel: f64` — what share of the seed's expected frequency came from the

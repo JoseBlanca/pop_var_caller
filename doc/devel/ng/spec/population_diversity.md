@@ -162,16 +162,24 @@ floor exists in the code**.
 
 ### 3.4 The ordinary-site ladder
 
-**⚠ Superseded in part by [`ordinary_site_seed.md`](ordinary_site_seed.md), 2026-08-26, and built.**
-The top two rungs below are no longer alternatives: they are the two ends of one ramp, and a run
-sits somewhere between them at a weight that rises with the panel (that document's §4). The bottom
-rung is unchanged and stays a rung, because there is nothing to interpolate when no diversity was
-fitted at all. The table is kept because the *inputs* each rung needs are still what this document
-supplies.
+**⚠ Superseded in part, twice.** By [`ordinary_site_seed.md`](ordinary_site_seed.md) on
+2026-08-26, which made the top two rungs the two ends of a ramp; and by
+[`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) on 2026-08-27, **which retires
+that ramp and the rung above it together**.
+
+**What the top rung becomes:** both numbers are integrals of the fitted curve, in closed form —
+the heterozygosity as `p_segregating · 2ab/((a+b)(a+b+1))`, which this document already names, and
+the expected frequency as `p_fixed_alt + p_segregating · a/(a+b)`. There is no spectrum to project,
+no pair to search for, no blend, and **no panel size in the answer at all**. The allele-count
+classes §3.2 asks for are not part of that path.
+
+**The lower two rungs are unchanged**, and the reason the middle one survives is unchanged too: a
+route that supplies a diversity and no curve has nothing to integrate. The table is kept because
+the *inputs* each rung needs are still what this document supplies.
 
 | rung | when | what the seed is |
 |---|---|---|
-| **fitted frequency spectrum** | a spectrum arrived | its **shape**, blended toward the neutral one; the **scale** is solved from the measured diversity, which is read on every rung |
+| **fitted curve** | the joint fit produced a density | both numbers integrated off it in closed form — no projection, no search, no blend |
 | **fitted diversity** | no spectrum arrived | a neutral shape at the measured diversity |
 | **stated constant** | no diversity fitted at all | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
 
