@@ -59,6 +59,7 @@ use crate::ng::types::GenomeRegion;
 // pin the path the re-export list exists to make canonical. Production does the same for two
 // of its own submodules.
 pub(crate) mod block;
+pub(crate) mod chain_ids;
 pub(crate) mod footer;
 pub(crate) mod header;
 pub(crate) mod index;
@@ -71,6 +72,7 @@ pub use block::{
     ROLLING_BUFFER_CEILING_BYTES, ROLLING_BYTES, StreamedRecord, ZSTD_COMPRESSION_LEVEL,
     compressed_block_at,
 };
+pub use chain_ids::{LiveSet, LiveSetChanges, LiveSetReader, LiveSetWriter};
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{
     ContigIdentity, DEFAULT_BLOCK_BYTE_CEILING, DEFAULT_GENOMIC_BLOCK_SIZE_BP,

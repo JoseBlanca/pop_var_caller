@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **Milestone D reviewed and hardened — the reader's
+> - **Last completed task (2026-08-27):** **which reads are live at a record, written as what
+> changed since the last one** (step E1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). A chain id names the read that produced a piece of evidence, and since the
+> owner's ruling of 2026-08-17 ng names every read it folds rather than only the ones that
+> disagreed — which is what lets the cohort merge tell a read that covered a position and agreed
+> from one that never reached it. **That makes this the field that decides the file's size at
+> depth**: measured on real alignments, the ids are 16 % of the file at eleven reads a position
+> and **89 % of it at three hundred**. A read of length L is named at every one of the L positions
+> it covers, so this step stores only what changed — which reads started covering a record and
+> which stopped — and lets a reader carry the set forward. **A block restates the whole set, and
+> that is the reset rather than a field**: `start_block` empties it, so a block's first record has
+> nothing to depart and its arrivals are the entire set, which is what lets a reader begin at any
+> block. **A departure is written as its position in the live set, not as its identifier** — one
+> byte against four — and identifiers and positions never meet outside the codec, which is the
+> transposition the architecture names as this field's hazard. On a fixture at the top of the
+> committed depth range the changes are **3,257 bytes against 106,166**, 32.6 times smaller than
+> writing each record's list as ascending gaps — and that is the *cheapest* alternative, not the
+> naive one. Ten defects injected, ten caught, and the count-bound test had to cover both counts
+> rather than one. **Re-entry is E2's and nothing here assumes one stretch per id**; the wiring
+> into the record head — and the silent failure of a writer that forgets to restart at a block —
+> is E3's.
+> [E1](doc/devel/reports/implementations/ng_psp_e1_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **Milestone D reviewed and hardened — the reader's
 > record ceiling was measured against the wrong thing, and the type that makes a per-block reset
 > unforgettable could not hold the field it was built for** (the eight-checklist review of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md)'s steps D4 and D5, branch

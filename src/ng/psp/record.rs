@@ -726,7 +726,7 @@ pub fn decode_record_body(
 // Writing primitives
 // ---------------------------------------------------------------------
 
-fn put_varint(out: &mut Vec<u8>, value: u64) {
+pub(super) fn put_varint(out: &mut Vec<u8>, value: u64) {
     encode_u64_leb128(value, out);
 }
 
@@ -796,20 +796,26 @@ fn put_kind(out: &mut Vec<u8>, kind: &LocusKind) {
 ///
 /// Every method here advances the cursor, which is why each is named `read_` or `skip_` — a
 /// column of them in [`decode_record_body`] has to say that it consumes as it goes.
-struct FieldReader<'a> {
+///
+/// **`pub(super)` so that [`chain_ids`](super::chain_ids) reads its bytes through this and not
+/// through a second spelling.** The line this type draws — a field that ran out of bytes is
+/// `Truncated` and a field that cannot mean what it says is `Malformed` — is what Milestone D's
+/// restartable reader branches on, and a chain-id stream that drew it slightly differently would
+/// make a streaming reader either reject a good record or retry for ever on a bad one.
+pub(super) struct FieldReader<'a> {
     bytes: &'a [u8],
     bytes_read: usize,
 }
 
 impl<'a> FieldReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(super) fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
             bytes_read: 0,
         }
     }
 
-    fn bytes_read(&self) -> usize {
+    pub(super) fn bytes_read(&self) -> usize {
         self.bytes_read
     }
 
@@ -826,7 +832,7 @@ impl<'a> FieldReader<'a> {
         }
     }
 
-    fn malformed(&self, field: &'static str, reason: String) -> RecordDecodeError {
+    pub(super) fn malformed(&self, field: &'static str, reason: String) -> RecordDecodeError {
         RecordDecodeError::Malformed {
             field,
             bytes_in: self.bytes_read,
@@ -835,7 +841,7 @@ impl<'a> FieldReader<'a> {
     }
 
     /// One variable-length integer, read through production's codec.
-    fn read_varint(&mut self, field: &'static str) -> Result<u64, RecordDecodeError> {
+    pub(super) fn read_varint(&mut self, field: &'static str) -> Result<u64, RecordDecodeError> {
         self.accept(decode_u64_leb128(&self.bytes[self.bytes_read..]), field)
     }
 
@@ -893,7 +899,7 @@ impl<'a> FieldReader<'a> {
     /// observations is not a buffer that stopped early — no record body is that long — so
     /// reporting it as a short read would ask Milestone D's reader to grow its buffer to a
     /// terabyte instead of reporting damage.
-    fn read_count(
+    pub(super) fn read_count(
         &mut self,
         field: &'static str,
         least_bytes_each: usize,
