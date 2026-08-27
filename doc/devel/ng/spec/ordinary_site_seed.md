@@ -1,10 +1,39 @@
 # ng — the ordinary-site prior's seed: pin its diversity, shrink its shape
 
-**Status:** design spec, 2026-08-26. **No code yet — this settles the design.** It supersedes
-part of [`calling_priors.md`](calling_priors.md) §4.1, which specifies the seed as *the pair whose
-predicted allele-count spectrum best matches the fitted one*, and part of
+**Status:** design spec, 2026-08-26; **§1's diagnosis and §4 are superseded, 2026-08-27**, by
+[`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) and the measurements behind it
+([`../../reports/ng_ordinary_site_prior_moments_2026-08-27.md`](../../reports/ng_ordinary_site_prior_moments_2026-08-27.md)).
+**§3 stands and is shipped.**
+
+> **⛔ Two of this document's four claims did not survive measurement, and the reader needs both
+> before §1.**
+>
+> **§1's diagnosis is wrong.** It says the trouble is that a four-number curve with a spike at
+> frequency zero cannot be compressed into two numbers without one. **It can, exactly, at every
+> panel size**: the prior's two numbers are two *integrals* of the curve, and a spike at zero
+> contributes nothing to either. What actually costs the accuracy is that the seed is chosen by a
+> **curve fit in class space** — the density is evaluated into the panel's `2N + 1` allele-count
+> classes and a pair is searched for that minimises a divergence against them. That objective has
+> `2N + 1` terms, so its answer moves with the cohort; a moment match cannot. This document even
+> notices the symptom — that the panel size appears in an answer about the population — and does
+> not follow it to the cause.
+>
+> **§4's ramp is retired.** It exists to damp the small-panel noise of a search that is itself
+> being deleted, and it was measured to cost 0.62× to 0.92× of the truth at one sample. With the
+> two numbers integrated off the curve there is nothing left to blend.
+>
+> **§3 is untouched and correct.** Solving the total from the measured heterozygosity is half of
+> the replacement, and the identity it defines is the one the new spec inverts. It is shipped.
+>
+> **What to build is [`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §2's step
+> one**, which is this document's §3 plus one closed-form line for the expected frequency, minus
+> the projection, the search, the ramp and the inbreeding coefficient at this seam.
+
+It supersedes part of [`calling_priors.md`](calling_priors.md) §4.1, which specifies the seed as
+*the pair whose predicted allele-count spectrum best matches the fitted one*, and part of
 [`population_diversity.md`](population_diversity.md) §3.4, whose ordinary-site ladder switches
-between two rungs. §3 below replaces the first; §4 replaces the switch with a ramp.
+between two rungs. §3 below replaces the first; §4 replaced the switch with a ramp and is itself
+now replaced.
 
 **Companions:** [`population_diversity.md`](population_diversity.md) §3 (where the two fitted
 numbers come from, and how they reach the caller — built as plan step E2f),
@@ -186,6 +215,14 @@ in this tree applies, and the run says the diversity was zero.
 ---
 
 ## 4. Shrink the shape
+
+> **⛔ Superseded 2026-08-27** by
+> [`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §6.1. The ramp damps the
+> small-panel noise of the class-space search, and that search is being deleted — measured, the
+> blend costs **0.62× to 0.92× of the truth at one sample**, and its own sweep put the best
+> half-weight panel size at zero on every arm. **Kept as the record of what was tried.** The one
+> paragraph below that survives is the last: the two rungs do not disagree only about shape, and
+> the size of the disagreement in the *total* is what a reader should carry away.
 
 **Decision: the expected frequency is interpolated between the neutral one and the panel's own,
 by a weight that rises with how much the panel supports a shape. The diversity stays pinned

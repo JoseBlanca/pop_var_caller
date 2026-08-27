@@ -356,7 +356,19 @@ because a run at the fallback and a run at a fitted `θ` are otherwise indisting
 
 ### 4.1 Where the two numbers come from: the fitted spectrum, projected
 
-**⚠ Superseded in part by [`ordinary_site_seed.md`](ordinary_site_seed.md), 2026-08-26, and built.**
+**⚠ Superseded in part, twice — and the second time removes the mechanism this section is about.**
+[`ordinary_site_seed.md`](ordinary_site_seed.md) (2026-08-26) solved the pair's *total* from the
+measured diversity rather than from the search.
+[`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) (2026-08-27) **deletes the
+search itself**: both numbers are integrals of the fitted curve, in closed form, exact at every
+panel size. Measured, the search is the worse of the two routes in **34 of 36 cells**, worst case
+0.749× the truth, because a curve fit in class space has an objective with `2N + 1` terms and its
+answer therefore moves with the cohort. **What goes with it:** the projection into allele-count
+classes, the panel-size ceiling, the divergence report, the blend toward the neutral shape, and the
+inbreeding coefficient at this seam — the last because a curve describes a population and not
+particular individuals.
+
+**⚠ The 2026-08-26 note this replaces read:**
 What follows describes the seed as *the pair whose predicted spectrum best matches the fitted one*.
 That is now the source of the seed's **shape** only. Its **scale** — how much conviction the pair
 carries — is solved from the run's measured heterozygosity instead, because compressing a spectrum
