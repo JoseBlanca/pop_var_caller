@@ -374,12 +374,53 @@ fn main() {
             }
         }
     }
+    // **The corpus describes itself, rather than being described from memory.** The depth
+    // label on a sample is exactly the kind of number this project keeps getting wrong: the
+    // specs call this tomato accession "three reads a position" and it measures ten.
+    let reads: u64 = records
+        .iter()
+        .map(|record| {
+            record
+                .observations
+                .iter()
+                .map(|observation| u64::from(observation.num_obs))
+                .sum::<u64>()
+        })
+        .sum();
+    // Which records could not be written with a two-byte position offset, and how far past it
+    // the worst one is — the fact behind a narrow fixed-width arm that cannot encode a sample.
+    let mut over_a_two_byte_offset = 0u64;
+    let mut widest_offset = 0u64;
+    let mut measured_from: Option<(ContigId, u64, Position)> = None;
+    for record in &records {
+        let cell = record.region.start.get() / grid.get();
+        let offset = match measured_from {
+            Some((contig, open_cell, previous))
+                if contig == record.region.contig && open_cell == cell =>
+            {
+                record.region.start.get() - previous.get()
+            }
+            _ => 0,
+        };
+        if offset > u64::from(u16::MAX) {
+            over_a_two_byte_offset += 1;
+        }
+        widest_offset = widest_offset.max(offset);
+        measured_from = Some((record.region.contig, cell, record.region.start));
+    }
+
     println!("sample\t{label}");
     println!("psp\t{path}");
     println!("records\t{}", records.len());
     println!("records-skipped-no-reference-allele\t{skipped}");
+    println!(
+        "mean-reads-a-position\t{:.2}",
+        reads as f64 / records.len() as f64
+    );
     println!("genomic-block-size-bp\t{}", grid.get());
     println!("look-back-window-bytes\t{}", 1u64 << window_log);
+    println!("widest-within-block-position-offset\t{widest_offset}");
+    println!("records-whose-offset-passes-65535\t{over_a_two_byte_offset}");
     println!("read-seconds\t{:.1}", read_at.elapsed().as_secs_f64());
 
     // Every field at the width the *format* allows: a position offset is bounded by the grid,
@@ -436,5 +477,110 @@ fn main() {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read the four head fields back out of a fixed-width head, so the arm that produces the
+    /// comparison's fixed rows has an oracle of its own.
+    ///
+    /// **The varint arm is checked against the shipped `BlockBuilder` and the fixed arm was
+    /// checked against nothing** — and the fixed arm is the one whose bytes the conclusion
+    /// turns on. A field order or a width silently wrong there would report a difference
+    /// between varint and *something nobody wrote*.
+    fn take_fixed_head(bytes: &[u8], widths: [u8; 4]) -> ([u64; 4], usize) {
+        let mut at = 0usize;
+        let mut values = [0u64; 4];
+        for (index, width) in widths.into_iter().enumerate() {
+            let mut whole = [0u8; 8];
+            whole[..width as usize].copy_from_slice(&bytes[at..at + width as usize]);
+            values[index] = u64::from_le_bytes(whole);
+            at += width as usize;
+        }
+        (values, at)
+    }
+
+    #[test]
+    fn a_fixed_width_head_reads_back_field_for_field() {
+        let widths = [4u8, 2, 2, 4];
+        let encoding = HeadEncoding::Fixed {
+            offset: widths[0],
+            span: widths[1],
+            reads: widths[2],
+            body: widths[3],
+        };
+        // Values that need every byte of their declared width, so a width read one short or
+        // one long is visible rather than absorbed by leading zeros.
+        let written = [3_000_000_007u64, 40_001, 60_002, 4_000_000_009];
+
+        let mut bytes = Vec::new();
+        put_head(
+            &mut bytes, encoding, written[0], written[1], written[2], written[3],
+        )
+        .expect("every value fits its declared width");
+
+        let (read, used) = take_fixed_head(&bytes, widths);
+        assert_eq!(read, written, "field for field");
+        assert_eq!(used, bytes.len(), "and nothing else was written");
+        assert_eq!(used, 12, "four plus two plus two plus four");
+    }
+
+    /// **The width bound is exact.** A value of exactly what a width holds is written; one more
+    /// is refused and names its own field. An off-by-one there would silently truncate a
+    /// position offset — the field that decides whether the narrow arm can encode a sample at
+    /// all.
+    #[test]
+    fn a_value_one_past_its_declared_width_is_refused_and_names_its_field() {
+        for (width, largest) in [(1u8, 255u64), (2, 65_535), (4, 4_294_967_295)] {
+            let encoding = HeadEncoding::Fixed {
+                offset: width,
+                span: 8,
+                reads: 8,
+                body: 8,
+            };
+            let mut bytes = Vec::new();
+            put_head(&mut bytes, encoding, largest, 0, 0, 0).unwrap_or_else(|field| {
+                panic!("{largest} must fit {width} bytes; {field} refused")
+            });
+            assert_eq!(bytes.len(), width as usize + 24);
+
+            let mut bytes = Vec::new();
+            assert_eq!(
+                put_head(&mut bytes, encoding, largest + 1, 0, 0, 0),
+                Err("position-offset"),
+                "{} must not fit {width} bytes",
+                largest + 1
+            );
+        }
+    }
+
+    /// An eight-byte width holds every value there is, so the bound must not overflow computing
+    /// its own ceiling.
+    #[test]
+    fn an_eight_byte_width_holds_every_value_there_is() {
+        let encoding = HeadEncoding::Fixed {
+            offset: 8,
+            span: 8,
+            reads: 8,
+            body: 8,
+        };
+        let mut bytes = Vec::new();
+        put_head(&mut bytes, encoding, u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .expect("eight bytes hold a u64");
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(take_fixed_head(&bytes, [8, 8, 8, 8]).0, [u64::MAX; 4]);
+    }
+
+    /// The varint arm writes LEB128, checked against an independent decode rather than against
+    /// itself. Its agreement with the shipped format is checked at run time, against
+    /// `BlockBuilder`'s own bytes.
+    #[test]
+    fn the_varint_arm_writes_leb128() {
+        let mut bytes = Vec::new();
+        put_head(&mut bytes, HeadEncoding::Varint, 0, 1, 127, 128).expect("varints never refuse");
+        assert_eq!(bytes, vec![0x00, 0x01, 0x7f, 0x80, 0x01]);
     }
 }

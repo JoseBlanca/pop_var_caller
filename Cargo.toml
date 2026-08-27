@@ -322,6 +322,14 @@ harness = false
 name = "ng_generic_walk_probe"
 test = true
 
+# The head-encoding harness carries its own tests for the same reason: it produced the
+# measurement that closed arch §7's open question about the record head's encoding, and the
+# fixed-width arm it compares against has no other oracle. `test = true` puts them in a plain
+# `cargo test`, which is the command a developer types.
+[[example]]
+name = "ng_psp_head_encoding"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.

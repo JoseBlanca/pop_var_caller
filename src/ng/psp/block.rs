@@ -17,12 +17,16 @@
 //! compressed rather than in front of it: spec §3.2 asks that a block be self-contained, and a
 //! block whose opening facts lived outside its own bytes would not be.
 //!
-//! **What this file does not do yet.** Nothing here compresses (Milestone D2) and nothing
-//! writes a file (Milestone F). [`BlockBuilder`] turns a stream of records into block
-//! payloads — the bytes a compressor is handed — and stops there.
+//! **Two halves, and the file is read in this order.** [`BlockBuilder`] turns a stream of
+//! records into block payloads, cutting them on the grid; [`BlockCompressor`] turns one payload
+//! into a whole on-disk block — a four-byte length and then one zstd frame — with the
+//! compressor's look-back window capped at what the file declares, which is what unties the
+//! block's size from the reader's memory. **Nothing here writes a file** (Milestone F) and
+//! nothing reads one back through a rolling buffer (Milestone D3).
 //!
 //! Design authority: `doc/devel/ng/spec/psp_file_format.md` §3.2 (a block is self-contained),
-//! §4.1 (the cut rule and what it buys), and `doc/devel/ng/arch/psp_file_format.md` §1.
+//! §4.1 (the cut rule and what it buys), §4.2 (the window is declared and the reader honours
+//! it), §8 (the traps), and `doc/devel/ng/arch/psp_file_format.md` §1.
 //!
 //! [`RecordHead`]: crate::ng::psp::RecordHead
 
@@ -707,10 +711,17 @@ pub enum BlockWriteError {
 ///
 /// **Production's number** (`psp::block::ZSTD_COMPRESSION_LEVEL`), kept because every byte
 /// figure the specs quote was measured at it and because nothing here has re-measured the
-/// curve. **It is not declared in the file, and does not need to be**: zstd frames carry
-/// everything a decoder needs, so a reader is never told the level. That is the difference
-/// between this and the genomic block size or the look-back window, which a reader *is* driven
-/// by and which therefore travel in the manifest (spec §4.5).
+/// curve.
+///
+/// **It is not declared in the manifest, and does not need to be**: a zstd frame carries
+/// everything a decoder needs, so no reader is ever driven by the level — which is the
+/// difference between it and the genomic block size or the look-back window (spec §4.5). But
+/// *nobody is driven by it* is not the same as *nobody needs to know it*: goal 5's
+/// byte-identity check, an append that must match the bytes already in a file, and every byte
+/// figure the specs quote all rest on the level a file was written at. So a compressor keeps
+/// its own ([`BlockCompressor::compression_level`]), and **recording it in the header's
+/// writer-provenance parameters is Milestone F3's** — that is where a writer's exposed knobs
+/// go, and nothing writes a header yet.
 pub const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 
 /// How many bytes stand in front of each compressed block, saying how long it is.
@@ -740,8 +751,9 @@ pub const COMPRESSED_BLOCK_LENGTH_BYTES: usize = 4;
 ///
 /// **What it hands back is a whole on-disk block**: a four-byte length and then one zstd frame.
 pub struct BlockCompressor {
-    inner: zstd::bulk::Compressor<'static>,
+    zstd: zstd::bulk::Compressor<'static>,
     look_back_window_log: u8,
+    compression_level: i32,
     /// The zstd frame alone, and it has to be its own buffer.
     ///
     /// **`compress_to_buffer` writes from the buffer's *start*, not from its end** — its
@@ -749,68 +761,125 @@ pub struct BlockCompressor {
     /// prefix cannot be reserved in front and filled in afterwards: zstd overwrites it, and
     /// what a reader meets is a four-byte length where the frame's magic should be. Measured,
     /// on the first run of this file's round-trip test.
-    frame: Vec<u8>,
+    zstd_frame_scratch: Vec<u8>,
     /// The length and the frame together — what a caller is handed.
-    block: Vec<u8>,
+    on_disk_block: Vec<u8>,
 }
 
 impl std::fmt::Debug for BlockCompressor {
-    /// `zstd::bulk::Compressor` is not `Debug`, and the useful facts are the two settings and
-    /// how much the scratch buffer is holding — never its contents, which are a whole block.
+    /// `zstd::bulk::Compressor` is not `Debug`, so this is written by hand — and it
+    /// destructures `Self` with no `..`, so a setting added to the compressor is a compile
+    /// error here rather than one that silently stops being reportable.
+    ///
+    /// **Buffer lengths, never buffer contents**: what they hold is a whole block, and a
+    /// `{:?}` of a compressor mid-file would otherwise run to megabytes.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            zstd: _,
+            look_back_window_log,
+            compression_level,
+            zstd_frame_scratch,
+            on_disk_block,
+        } = self;
         f.debug_struct("BlockCompressor")
-            .field("look_back_window_log", &self.look_back_window_log)
-            .field("block_bytes", &self.block.len())
+            .field("look_back_window_log", look_back_window_log)
+            .field("compression_level", compression_level)
+            .field("zstd_frame_scratch_bytes", &zstd_frame_scratch.len())
+            .field("on_disk_block_bytes", &on_disk_block.len())
             .finish_non_exhaustive()
     }
 }
 
 impl BlockCompressor {
-    /// A compressor for a file declaring `look_back_window_log`, at the level every psp is
-    /// written at.
-    pub fn new(look_back_window_log: u8) -> Result<Self, BlockCompressError> {
-        Self::at_level(look_back_window_log, ZSTD_COMPRESSION_LEVEL)
+    /// A compressor for the file `manifest` describes, at the level every psp is written at.
+    ///
+    /// **This is the constructor a writer uses, and the reason is that the window has to come
+    /// from the same place the reader will read it from.** A compressor handed a window by hand
+    /// can be given one the file does not declare, and a file whose frames need more window
+    /// than its own manifest promises is one every reader in the cohort refuses, block by
+    /// block, with a zstd error code — precisely the unactionable failure spec §4.2 says the
+    /// declaration exists to prevent.
+    pub fn from_manifest(manifest: &Manifest) -> Result<Self, BlockCompressError> {
+        // Destructured with no `..`, and every field named: a field added to the manifest that
+        // a compressor would have to honour is a compile error here. Before this existed,
+        // adding one flagged three sites in the crate and none of them was the compressor.
+        let Manifest {
+            look_back_window_log,
+            // `BlockBuilder`'s, both of them: they decide where a block ends, not how it is
+            // compressed.
+            genomic_block_size_bp: _,
+            block_byte_ceiling: _,
+            // The record codec's, honoured by `RecordEncoder`.
+            fields: _,
+        } = manifest;
+        Self::with_level(*look_back_window_log, ZSTD_COMPRESSION_LEVEL)
     }
 
-    /// The same, at a level of the caller's choosing. **For measuring the level's cost**, which
-    /// nothing in this project has done on ng's own records; a writer uses
-    /// [`new`](Self::new).
-    pub fn at_level(look_back_window_log: u8, level: i32) -> Result<Self, BlockCompressError> {
+    /// A compressor for a file declaring `look_back_window_log`, at the level every psp is
+    /// written at.
+    ///
+    /// **[`from_manifest`](Self::from_manifest) is what a writer should use.** This is for a
+    /// caller that has a window and no manifest — the tests below, and Milestone D3's own
+    /// fixtures.
+    pub fn new(look_back_window_log: u8) -> Result<Self, BlockCompressError> {
+        Self::with_level(look_back_window_log, ZSTD_COMPRESSION_LEVEL)
+    }
+
+    /// The same, at a level of the caller's choosing. **For measuring what the level costs**,
+    /// which nothing in this project has done on ng's own records; a writer uses
+    /// [`from_manifest`](Self::from_manifest).
+    pub fn with_level(look_back_window_log: u8, level: i32) -> Result<Self, BlockCompressError> {
         if !(MIN_LOOK_BACK_WINDOW_LOG..=MAX_LOOK_BACK_WINDOW_LOG).contains(&look_back_window_log) {
             return Err(BlockCompressError::WindowLogOutOfRange {
                 look_back_window_log,
             });
         }
-        let mut inner = zstd::bulk::Compressor::new(level)
+        // **Checked rather than left to zstd**, which clamps silently: measured before this
+        // existed, a level of 100 produced exactly the level-22 bytes and a level of −131,073
+        // produced a block 169 times the shipped level's. Either is a file written at a level
+        // nobody asked for and nothing records.
+        let allowed = zstd::compression_level_range();
+        if !allowed.contains(&level) {
+            return Err(BlockCompressError::LevelOutOfRange {
+                level,
+                lowest: *allowed.start(),
+                highest: *allowed.end(),
+            });
+        }
+        let mut zstd = zstd::bulk::Compressor::new(level)
             .map_err(|source| BlockCompressError::zstd("creating the compressor", source))?;
         // The cap that makes the block size and the reader's memory independent.
-        inner
-            .set_parameter(zstd::zstd_safe::CParameter::WindowLog(u32::from(
-                look_back_window_log,
-            )))
-            .map_err(|source| BlockCompressError::zstd("capping the look-back window", source))?;
+        zstd.set_parameter(zstd::zstd_safe::CParameter::WindowLog(u32::from(
+            look_back_window_log,
+        )))
+        .map_err(|source| BlockCompressError::zstd("capping the look-back window", source))?;
         // **Off deliberately.** With it on, zstd writes the payload's length into the frame
         // header, and a reader that meets it is one `reserve` away from allocating a whole
         // block — the temptation spec §8 names. It also costs bytes we do not need.
-        inner
-            .set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false))
+        zstd.set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false))
             .map_err(|source| BlockCompressError::zstd("clearing the content size", source))?;
         // A frame checksum, as production's writer sets: it is what turns a damaged block into
         // a refusal rather than into records that decode to plausible values.
-        inner
-            .include_checksum(true)
+        zstd.include_checksum(true)
             .map_err(|source| BlockCompressError::zstd("enabling the frame checksum", source))?;
         Ok(Self {
-            inner,
+            zstd,
             look_back_window_log,
-            frame: Vec::new(),
-            block: Vec::new(),
+            compression_level: level,
+            zstd_frame_scratch: Vec::new(),
+            on_disk_block: Vec::new(),
         })
     }
 
     /// The look-back window this compressor caps at, as the exponent the file declares.
     pub fn look_back_window_log(&self) -> u8 {
         self.look_back_window_log
+    }
+
+    /// The level this compressor writes at. **Nothing in a psp records it** — see
+    /// [`ZSTD_COMPRESSION_LEVEL`] for why, and for whose job recording it is.
+    pub fn compression_level(&self) -> i32 {
+        self.compression_level
     }
 
     /// Compress one block payload into a whole on-disk block: its length, then its frame.
@@ -821,50 +890,96 @@ impl BlockCompressor {
     /// **The same payload always gives the same bytes**, whether this compressor has seen a
     /// thousand blocks before it or none — which is what lets goal 5's byte-identity check across
     /// worker counts mean anything.
+    ///
+    /// **A frame can be longer than the payload it came from**, which is why the reservation is
+    /// zstd's own bound and not the payload's length: a block holding one small record is
+    /// incompressible, and zstd's framing and checksum then cost more than they save.
     pub fn compress(&mut self, payload: &[u8]) -> Result<&[u8], BlockCompressError> {
-        self.frame.clear();
+        self.zstd_frame_scratch.clear();
         // `compress_to_buffer` writes into the spare capacity from the buffer's start, so the
         // worst case has to be there before it is called; the reservation is kept between
         // blocks, so only a larger block than any before it allocates.
-        self.frame
+        self.zstd_frame_scratch
             .reserve(zstd::zstd_safe::compress_bound(payload.len()));
-        self.inner
-            .compress_to_buffer(payload, &mut self.frame)
+        self.zstd
+            .compress_to_buffer(payload, &mut self.zstd_frame_scratch)
             .map_err(|source| BlockCompressError::zstd("compressing a block", source))?;
 
-        let frame_bytes = self.frame.len();
+        let frame_bytes = self.zstd_frame_scratch.len();
         let declared =
             u32::try_from(frame_bytes).map_err(|_| BlockCompressError::FrameTooLong {
                 frame_bytes,
                 payload_bytes: payload.len(),
             })?;
-        self.block.clear();
-        self.block
+        self.on_disk_block.clear();
+        self.on_disk_block
             .reserve(COMPRESSED_BLOCK_LENGTH_BYTES + frame_bytes);
-        self.block.extend_from_slice(&declared.to_le_bytes());
-        self.block.extend_from_slice(&self.frame);
-        Ok(&self.block)
+        self.on_disk_block
+            .extend_from_slice(&declared.to_le_bytes());
+        self.on_disk_block
+            .extend_from_slice(&self.zstd_frame_scratch);
+        Ok(&self.on_disk_block)
     }
 }
 
-/// How many compressed bytes the block at the front of `bytes` occupies, head to tail.
+/// What is at the front of a run of bytes a reader has pulled from a file.
 ///
-/// **The length prefix is read and nothing else is touched** — no decompression, no allocation.
-/// It is what a reader advances to reach the next block, and what tells a decoder where this
-/// block's bytes stop.
-pub fn compressed_block_bytes(bytes: &[u8]) -> Option<usize> {
-    let declared: [u8; COMPRESSED_BLOCK_LENGTH_BYTES] = bytes
-        .get(..COMPRESSED_BLOCK_LENGTH_BYTES)?
+/// **Three states and not a length**, because the distinction is the one the whole module
+/// types: a reader that has some of a block does something different from a reader that has all
+/// of it, and a bare `Option<usize>` says neither. Before this existed the function handed back
+/// a length taken from four untrusted bytes with nothing bounding it — measured under fuzzing,
+/// it returned a length longer than the slice it was given 656,785 times, the largest
+/// 4,294,967,299 from eight bytes in — and the module's own walk sliced on it directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum CompressedBlockAt<'a> {
+    /// The whole block is here: its zstd frame, and how many bytes to advance to reach the
+    /// next block.
+    Whole {
+        zstd_frame: &'a [u8],
+        block_bytes: usize,
+    },
+    /// The length is here and the block is not all of it. **`block_bytes` is what the four
+    /// bytes *declared*, not a fact** — a reader pulls that many and finds out.
+    NotAllHere { block_bytes: usize },
+    /// Fewer than [`COMPRESSED_BLOCK_LENGTH_BYTES`] bytes: not even a length yet.
+    NoLengthYet,
+}
+
+/// What is at the front of `bytes`, at a block boundary.
+///
+/// **Nothing is allocated and no frame is touched** — the four-byte length is read and that is
+/// all. It is what a reader advances by to reach the next block, and what tells a decoder where
+/// this block's bytes stop.
+pub fn compressed_block_at(bytes: &[u8]) -> CompressedBlockAt<'_> {
+    let Some(declared) = bytes.get(..COMPRESSED_BLOCK_LENGTH_BYTES) else {
+        return CompressedBlockAt::NoLengthYet;
+    };
+    let declared: [u8; COMPRESSED_BLOCK_LENGTH_BYTES] = declared
         .try_into()
-        .ok()?;
+        .expect("a slice of exactly the length prefix's width is an array of it");
     let frame_bytes = u32::from_le_bytes(declared) as usize;
-    COMPRESSED_BLOCK_LENGTH_BYTES.checked_add(frame_bytes)
+    // `usize` is at least 32 bits wide everywhere this builds, and the declaration is a `u32`,
+    // so the sum is exact on a 64-bit target and checked rather than assumed on a 32-bit one.
+    let Some(block_bytes) = COMPRESSED_BLOCK_LENGTH_BYTES.checked_add(frame_bytes) else {
+        return CompressedBlockAt::NotAllHere {
+            block_bytes: usize::MAX,
+        };
+    };
+    match bytes.get(COMPRESSED_BLOCK_LENGTH_BYTES..block_bytes) {
+        Some(zstd_frame) => CompressedBlockAt::Whole {
+            zstd_frame,
+            block_bytes,
+        },
+        None => CompressedBlockAt::NotAllHere { block_bytes },
+    }
 }
 
 /// Why a block could not be compressed.
 ///
-/// **Both variants are the writer's problem, not the data's** — unlike every other error in this
-/// module, which is about a record or a file a caller was handed.
+/// **Every variant is the writer's own configuration or its own output**, not a fault in data
+/// it was handed — unlike every other error in this module, which is about a record or a file a
+/// caller supplied.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BlockCompressError {
@@ -876,6 +991,16 @@ pub enum BlockCompressError {
          2^{MIN_LOOK_BACK_WINDOW_LOG} and 2^{MAX_LOOK_BACK_WINDOW_LOG}"
     )]
     WindowLogOutOfRange { look_back_window_log: u8 },
+
+    /// A compression level outside what zstd takes. **Refused rather than clamped**, which is
+    /// what zstd does silently: a level of 100 gives exactly the level-22 bytes, and a level of
+    /// −131,073 gives a block 169 times the size, with nothing anywhere saying so.
+    #[error("a compression level of {level}; zstd takes between {lowest} and {highest}")]
+    LevelOutOfRange {
+        level: i32,
+        lowest: i32,
+        highest: i32,
+    },
 
     /// A compressed frame longer than the four-byte length in front of it can describe.
     ///
@@ -1837,6 +1962,19 @@ mod tests {
     // Compressing a block
     // -----------------------------------------------------------------
 
+    /// Why a decoder would not inflate a frame. **Two states and not one**, because a test that
+    /// cannot tell them apart proves nothing: asking for a window below zstd's own minimum is
+    /// refused at the parameter, before the frame is looked at, so an assertion of "this
+    /// decoder refuses it" is satisfied by any bytes at all. Measured — that is exactly what
+    /// half of the first window test did before this type existed.
+    #[derive(Debug, PartialEq, Eq)]
+    enum NotInflated {
+        /// zstd would not accept the window cap itself.
+        TheCapWasRefused,
+        /// The cap was accepted and the frame was refused under it.
+        TheFrameWasRefused,
+    }
+
     /// Decompress a whole zstd frame with the decoder's window capped at `window_log_max`,
     /// which is what a reader configured from the file's declaration would do.
     ///
@@ -1845,11 +1983,11 @@ mod tests {
     /// even if this wanted to. It is not the reader — that streams into a rolling buffer at
     /// Milestone D3 — it is just enough to ask zstd whether the window it was promised is the
     /// window the frame needs.
-    fn decompress_capped_at(frame: &[u8], window_log_max: u32) -> Result<Vec<u8>, String> {
+    fn decompress_capped_at(frame: &[u8], window_log_max: u32) -> Result<Vec<u8>, NotInflated> {
         let mut decoder = zstd::zstd_safe::DCtx::create();
         decoder
             .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(window_log_max))
-            .map_err(|code| format!("setting the window cap: zstd code {code}"))?;
+            .map_err(|_| NotInflated::TheCapWasRefused)?;
 
         let mut out: Vec<u8> = Vec::new();
         let mut input = zstd::zstd_safe::InBuffer::around(frame);
@@ -1859,32 +1997,55 @@ mod tests {
             let mut output = zstd::zstd_safe::OutBuffer::around_pos(&mut out, at);
             let hint = decoder
                 .decompress_stream(&mut output, &mut input)
-                .map_err(|code| format!("decompressing: zstd code {code}"))?;
+                .map_err(|_| NotInflated::TheFrameWasRefused)?;
             if hint == 0 {
                 break;
             }
             if input.pos == frame.len() && output.pos() == at {
-                return Err("the frame ended before it was complete".to_string());
+                return Err(NotInflated::TheFrameWasRefused);
             }
         }
         Ok(out)
     }
 
-    /// The frame of a whole on-disk block, without its length prefix.
+    /// The zstd frame of a whole on-disk block, and a check that the block is exactly what its
+    /// own length prefix declares.
     fn frame_of(block: &[u8]) -> &[u8] {
-        let whole = compressed_block_bytes(block).expect("a length prefix");
-        assert_eq!(whole, block.len(), "the block is exactly what it declares");
-        &block[COMPRESSED_BLOCK_LENGTH_BYTES..]
+        match compressed_block_at(block) {
+            CompressedBlockAt::Whole {
+                zstd_frame,
+                block_bytes,
+            } => {
+                assert_eq!(block_bytes, block.len(), "the block is what it declares");
+                zstd_frame
+            }
+            other => panic!("a whole block was expected; got {other:?}"),
+        }
     }
 
     /// Enough records to fill more than one look-back window, so a frame's declared window is
     /// the one it was capped at rather than one zstd narrowed to fit a small payload.
+    ///
+    /// **The slack is one record, not sixty-four.** An oversized fixture is what hid the
+    /// `compress_bound` finding: every compression test built forty records or more, so nothing
+    /// ever reached a block zstd cannot shrink.
     fn records_past_a_window(window_log: u8) -> Vec<SampleLocusObservations> {
         let want = 1usize << window_log;
         let one = one_records_bytes() as usize;
-        (1..=(want / one + 64) as u64)
+        (1..=(want / one + 1) as u64)
             .map(|at| a_record(0, at, 1))
             .collect()
+    }
+
+    /// One block payload holding `records.len()` records, on a grid that never cuts.
+    fn one_payload(records: &[SampleLocusObservations]) -> Vec<u8> {
+        let payloads = cut(
+            BlockBuilder::new(Bp(u64::MAX), None).expect("a grid"),
+            records,
+        )
+        .expect("in order");
+        assert_eq!(payloads.len(), 1, "the grid must not cut this fixture");
+        payloads.into_iter().next().expect("one block")
     }
 
     #[test]
@@ -1917,40 +2078,73 @@ mod tests {
         );
     }
 
-    /// **The declared window is the window the frame needs**, which is what makes a reader's
-    /// budget a number it can act on: a decoder allowed exactly what the file declares inflates
-    /// the block, and one allowed a single exponent less refuses it.
+    /// **The declared window is the window the frame needs, at the settings a writer ships
+    /// with.** A decoder allowed exactly what the file declares inflates the block; one allowed
+    /// a single exponent less refuses *the frame*, not the cap.
     ///
-    /// The payload has to be larger than the window or zstd narrows the frame's own declaration
-    /// to fit, and the test would pass for a reason that says nothing.
+    /// Two things make this test able to fail, and it could not before either was here. The
+    /// payload has to exceed the window, or zstd narrows the frame's own declaration to fit and
+    /// the assertion says nothing. And the window has to be above zstd's minimum, or "one
+    /// exponent less" is refused at the parameter and the frame is never looked at — which is
+    /// what the first version of this test did, at a window of 2^10.
     #[test]
-    fn a_frame_declares_the_window_it_was_capped_at() {
-        let small_window = MIN_LOOK_BACK_WINDOW_LOG;
-        let records = records_past_a_window(small_window);
-        let payloads = cut(
-            BlockBuilder::new(Bp(u64::MAX), None).expect("a grid"),
-            &records,
-        )
-        .expect("in order");
-        assert_eq!(payloads.len(), 1, "one block, so one frame");
+    fn the_shipped_settings_cap_a_payload_larger_than_the_window() {
+        let payload = one_payload(&records_past_a_window(DEFAULT_LOOK_BACK_WINDOW_LOG));
         assert!(
-            payloads[0].len() > (1usize << small_window),
+            payload.len() > (1usize << DEFAULT_LOOK_BACK_WINDOW_LOG),
             "the payload must exceed the window; it is {} bytes against {}",
-            payloads[0].len(),
-            1usize << small_window
+            payload.len(),
+            1usize << DEFAULT_LOOK_BACK_WINDOW_LOG
         );
 
-        let mut compressor = BlockCompressor::at_level(small_window, 1).expect("a valid window");
-        let block = compressor.compress(&payloads[0]).expect("it compresses");
-        let frame = frame_of(block).to_vec();
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let frame = frame_of(compressor.compress(&payload).expect("it compresses")).to_vec();
 
         assert!(
-            decompress_capped_at(&frame, u32::from(small_window)).is_ok(),
+            decompress_capped_at(&frame, u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG)).is_ok(),
             "a decoder allowed exactly what the file declares must inflate it"
         );
+        assert_eq!(
+            decompress_capped_at(&frame, u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG) - 1),
+            Err(NotInflated::TheFrameWasRefused),
+            "and one exponent less must be refused by the frame, not by the cap"
+        );
+    }
+
+    /// **⚠ A frame's own declared window is never *wider* than the file's, and is often
+    /// narrower.** zstd narrows it to fit a payload smaller than the cap, so an ordinary block
+    /// under a 32 kB declaration can write a frame needing 1 kB. Spec §4.2 calls a mismatch
+    /// between our declaration and the frame's "a corruption worth detecting rather than
+    /// tolerating" — **and the check that implements that has to be `≤`, not `=`**, or Milestone
+    /// D3 rejects almost every block of every file this writer produces.
+    #[test]
+    fn a_frames_own_window_is_never_wider_than_the_file_declares() {
+        let a_few = vec![a_record(0, 1, 1), a_record(0, 2, 1), a_record(0, 3, 1)];
+        let small = one_payload(&a_few);
+        let large = one_payload(&records_past_a_window(DEFAULT_LOOK_BACK_WINDOW_LOG));
+
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let narrowed = frame_of(compressor.compress(&small).expect("it compresses")).to_vec();
+        let at_the_cap = frame_of(compressor.compress(&large).expect("it compresses")).to_vec();
+
+        // The declared window is whatever the smallest cap that still inflates it is.
+        let window_needed_by = |frame: &[u8]| -> u32 {
+            (MIN_LOOK_BACK_WINDOW_LOG..=DEFAULT_LOOK_BACK_WINDOW_LOG)
+                .map(u32::from)
+                .find(|cap| decompress_capped_at(frame, *cap).is_ok())
+                .expect("some cap at or under the file's inflates it")
+        };
+
         assert!(
-            decompress_capped_at(&frame, u32::from(small_window) - 1).is_err(),
-            "and one allowed a smaller window must refuse it rather than allocate more"
+            window_needed_by(&narrowed) < u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG),
+            "a small payload's frame declares less than the file does"
+        );
+        assert_eq!(
+            window_needed_by(&at_the_cap),
+            u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG),
+            "and a payload past the cap declares exactly the file's"
         );
     }
 
@@ -1998,17 +2192,12 @@ mod tests {
     /// windows over the same records are not the same file.
     #[test]
     fn the_declared_window_reaches_the_bytes() {
-        let records = records_past_a_window(MIN_LOOK_BACK_WINDOW_LOG);
-        let payloads = cut(
-            BlockBuilder::new(Bp(u64::MAX), None).expect("a grid"),
-            &records,
-        )
-        .expect("in order");
+        let payload = one_payload(&records_past_a_window(MIN_LOOK_BACK_WINDOW_LOG));
 
         let at = |window_log: u8| {
-            BlockCompressor::at_level(window_log, 1)
+            BlockCompressor::new(window_log)
                 .expect("a valid window")
-                .compress(&payloads[0])
+                .compress(&payload)
                 .expect("it compresses")
                 .to_vec()
         };
@@ -2019,38 +2208,84 @@ mod tests {
         );
     }
 
-    /// **A damaged frame is refused, not decoded into records.** The frame checksum is what
-    /// makes that true, and without it a flipped byte reads back as a block of plausible
-    /// nonsense.
+    /// **The level reaches the bytes too, and nothing else in the suite could see it.** Every
+    /// other test that mentions the level compares two compressors at the *same* level, so a
+    /// constructor that ignored its argument — or one that forced every caller to 9 — passed
+    /// all of them.
     #[test]
-    fn a_flipped_byte_anywhere_in_a_frame_is_refused() {
-        let records: Vec<_> = (0..40).map(|index| a_record(0, 100 + index, 1)).collect();
-        let payloads =
-            cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records).expect("in order");
+    fn the_chosen_level_reaches_the_bytes() {
+        let payload = one_payload(&records_past_a_window(DEFAULT_LOOK_BACK_WINDOW_LOG));
+        let at = |level: i32| {
+            let mut compressor = BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, level)
+                .expect("a valid level");
+            assert_eq!(compressor.compression_level(), level);
+            compressor.compress(&payload).expect("it compresses").len()
+        };
+
+        let cheap = at(1);
+        let shipped = at(ZSTD_COMPRESSION_LEVEL);
+        let dear = at(19);
+        assert!(
+            dear < shipped && shipped < cheap,
+            "a higher level must give a smaller block: level 1 {cheap}, level \
+             {ZSTD_COMPRESSION_LEVEL} {shipped}, level 19 {dear}"
+        );
+        assert_eq!(
+            at(ZSTD_COMPRESSION_LEVEL),
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG)
+                .expect("a window")
+                .compress(&payload)
+                .expect("it compresses")
+                .len(),
+            "and the constructor a writer uses writes at the shipped level"
+        );
+    }
+
+    /// **A damaged frame is refused or harmless, never decoded into different records.** The
+    /// frame checksum is what makes that true.
+    ///
+    /// **The claim is exactly that, and not "every damaged byte is refused".** Flipping a whole
+    /// byte is refused every time; flipping a single *bit* is not — measured over one frame,
+    /// nine flips of 552 were accepted and inflated to the payload unchanged, because they land
+    /// in bits the format does not use. None inflated to anything different, which is the
+    /// property that matters and the one asserted here.
+    #[test]
+    fn damage_to_a_frame_is_refused_or_harmless_and_never_silently_different() {
+        let payload = one_payload(&(0..40).map(|i| a_record(0, 100 + i, 1)).collect::<Vec<_>>());
         let mut compressor =
             BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
-        let whole = compressor
-            .compress(&payloads[0])
-            .expect("it compresses")
-            .to_vec();
-        let frame = frame_of(&whole).to_vec();
+        let frame = frame_of(compressor.compress(&payload).expect("it compresses")).to_vec();
 
         let mut refused = 0usize;
+        let mut harmless = 0usize;
         for at in 0..frame.len() {
-            let mut damaged = frame.clone();
-            damaged[at] ^= 0xff;
-            match decompress_capped_at(&damaged, u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG)) {
-                Err(_) => refused += 1,
-                Ok(inflated) => assert_ne!(
-                    inflated, payloads[0],
-                    "byte {at} flipped and the payload came back unchanged"
-                ),
+            for bit in 0..8u32 {
+                let mut damaged = frame.clone();
+                damaged[at] ^= 1 << bit;
+                match decompress_capped_at(&damaged, u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG)) {
+                    Err(NotInflated::TheFrameWasRefused) => refused += 1,
+                    Err(NotInflated::TheCapWasRefused) => {
+                        panic!("the cap is this test's, not the frame's")
+                    }
+                    Ok(inflated) => {
+                        assert_eq!(
+                            inflated, payload,
+                            "bit {bit} of byte {at} was accepted and gave different records"
+                        );
+                        harmless += 1;
+                    }
+                }
             }
         }
         assert_eq!(
-            refused,
-            frame.len(),
-            "every one of the {} bytes must be refused, not merely inflate to something else",
+            refused + harmless,
+            frame.len() * 8,
+            "every bit of the frame was tried"
+        );
+        assert!(
+            refused > harmless * 10,
+            "damage should overwhelmingly be refused; {refused} refused against {harmless} \
+             harmless over {} bytes",
             frame.len()
         );
     }
@@ -2058,24 +2293,87 @@ mod tests {
     /// **A frame carries no uncompressed length, and that is deliberate.** Spec §8 lists a
     /// block header that says how large it inflates to among the traps — "a temptation to
     /// allocate it" — and the whole design is that a reader never sizes a buffer from a block.
-    /// With the content size on, `ZSTD_getFrameContentSize` hands a reader the number and the
-    /// temptation with it; with it off, there is nothing to be tempted by.
     #[test]
     fn a_frame_says_nothing_about_how_large_it_inflates_to() {
-        let records: Vec<_> = (0..40).map(|index| a_record(0, 100 + index, 1)).collect();
-        let payloads = cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records)
-            .expect("in order");
+        let payload = one_payload(&(0..40).map(|i| a_record(0, 100 + i, 1)).collect::<Vec<_>>());
         let mut compressor =
             BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
-        let block = compressor.compress(&payloads[0]).expect("it compresses");
+        let block = compressor.compress(&payload).expect("it compresses");
 
         match zstd::zstd_safe::get_frame_content_size(frame_of(block)) {
             Ok(None) => {}
             other => panic!(
                 "the frame must not declare the {} bytes it inflates to; it said {other:?}",
-                payloads[0].len()
+                payload.len()
             ),
         }
+    }
+
+    /// **A block zstd cannot shrink still compresses.** A block holding one small record is
+    /// incompressible — zstd's framing and checksum cost more than they save — so the buffer a
+    /// frame is written into has to be zstd's own worst-case bound and not the payload's
+    /// length. Nothing reached this before: every compression fixture built forty records or
+    /// more.
+    #[test]
+    fn a_payload_zstd_cannot_shrink_still_compresses() {
+        let one_record = one_payload(&[a_record(0, 1, 1)]);
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let block = compressor.compress(&one_record).expect("it compresses");
+        assert!(
+            frame_of(block).len() > one_record.len(),
+            "the fixture must be incompressible for this to say anything: {} payload bytes \
+             against a {}-byte frame",
+            one_record.len(),
+            frame_of(block).len()
+        );
+        assert_eq!(
+            decompress_capped_at(frame_of(block), u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG))
+                .expect("it inflates"),
+            one_record
+        );
+
+        // And an empty payload, which a block never holds but a caller can hand over.
+        let block = compressor.compress(&[]).expect("nothing compresses too");
+        assert!(
+            decompress_capped_at(frame_of(block), u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG))
+                .expect("it inflates")
+                .is_empty()
+        );
+    }
+
+    /// **The framing a file carries, pinned without pinning zstd's own bytes.** The length is
+    /// four little-endian bytes and the frame's magic follows immediately; a round-trip test
+    /// alone cannot see either, because a writer and a reader that both changed to big-endian
+    /// would agree with each other and with nothing else.
+    #[test]
+    fn an_on_disk_block_is_a_little_endian_length_then_a_zstd_frame() {
+        let payload = one_payload(&(0..40).map(|i| a_record(0, 100 + i, 1)).collect::<Vec<_>>());
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let block = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let frame_bytes = block.len() - COMPRESSED_BLOCK_LENGTH_BYTES;
+        assert_eq!(
+            &block[..COMPRESSED_BLOCK_LENGTH_BYTES],
+            &u32::try_from(frame_bytes)
+                .expect("a small frame")
+                .to_le_bytes(),
+            "the first four bytes are the frame's length, little-endian"
+        );
+        assert!(
+            frame_bytes < 256,
+            "the fixture's frame must be under 256 bytes, or a big-endian length would agree \
+             with a little-endian one; it is {frame_bytes}"
+        );
+        assert_eq!(
+            &block[COMPRESSED_BLOCK_LENGTH_BYTES..COMPRESSED_BLOCK_LENGTH_BYTES + 4],
+            &[0x28, 0xb5, 0x2f, 0xfd],
+            "and a zstd frame begins immediately after it"
+        );
     }
 
     /// The length in front of a block says where the next one starts, and reading it touches
@@ -2103,39 +2401,69 @@ mod tests {
         let mut at = 0usize;
         let mut walked = Vec::new();
         while at < file.len() {
-            let whole = compressed_block_bytes(&file[at..]).expect("a length prefix");
-            walked.push(whole);
-            let inflated = decompress_capped_at(
-                &file[at + COMPRESSED_BLOCK_LENGTH_BYTES..at + whole],
-                u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG),
-            )
-            .expect("it inflates");
-            assert_eq!(inflated, payloads[walked.len() - 1]);
-            at += whole;
+            let CompressedBlockAt::Whole {
+                zstd_frame,
+                block_bytes,
+            } = compressed_block_at(&file[at..])
+            else {
+                panic!("every block of a whole file is whole");
+            };
+            walked.push(block_bytes);
+            assert_eq!(
+                decompress_capped_at(zstd_frame, u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG))
+                    .expect("it inflates"),
+                payloads[walked.len() - 1]
+            );
+            at += block_bytes;
         }
         assert_eq!(walked, lengths, "every block was found by its own length");
         assert_eq!(at, file.len(), "and the walk consumed the file exactly");
     }
 
-    /// A length prefix that is not wholly there is `None` rather than a panic or a guess: the
-    /// bytes in front of a block are the first thing a reader meets, and it may hold fewer than
-    /// four of them.
+    /// **A declared length is not a fact, and the three states say which.** A reader pulling
+    /// bytes from a file meets all three: too few for a length at all, a length whose block has
+    /// not arrived, and a whole block. Before these were separate the function handed back the
+    /// declaration alone, so a block truncated to half its length still reported its full one
+    /// and the caller sliced on it.
     #[test]
-    fn a_length_prefix_that_is_not_all_there_is_no_length_at_all() {
-        let mut whole = Vec::new();
-        whole.extend_from_slice(&7u32.to_le_bytes());
-        whole.extend_from_slice(&[0u8; 7]);
+    fn a_length_is_a_declaration_until_the_block_behind_it_is_there() {
+        let payload = one_payload(&(0..40).map(|i| a_record(0, 100 + i, 1)).collect::<Vec<_>>());
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let whole = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
 
         for cut_at in 0..COMPRESSED_BLOCK_LENGTH_BYTES {
             assert_eq!(
-                compressed_block_bytes(&whole[..cut_at]),
-                None,
-                "at {cut_at}"
+                compressed_block_at(&whole[..cut_at]),
+                CompressedBlockAt::NoLengthYet,
+                "at {cut_at} bytes there is not even a length"
             );
         }
+        for cut_at in COMPRESSED_BLOCK_LENGTH_BYTES..whole.len() {
+            assert_eq!(
+                compressed_block_at(&whole[..cut_at]),
+                CompressedBlockAt::NotAllHere {
+                    block_bytes: whole.len()
+                },
+                "at {cut_at} bytes the length has arrived and the block has not"
+            );
+        }
+        assert!(matches!(
+            compressed_block_at(&whole),
+            CompressedBlockAt::Whole { .. }
+        ));
+
+        // And a length no buffer could satisfy is `NotAllHere`, never a slice.
+        let mut hostile = u32::MAX.to_le_bytes().to_vec();
+        hostile.extend_from_slice(&[0u8; 4]);
         assert_eq!(
-            compressed_block_bytes(&whole),
-            Some(COMPRESSED_BLOCK_LENGTH_BYTES + 7)
+            compressed_block_at(&hostile),
+            CompressedBlockAt::NotAllHere {
+                block_bytes: COMPRESSED_BLOCK_LENGTH_BYTES + u32::MAX as usize
+            }
         );
     }
 
@@ -2143,12 +2471,7 @@ mod tests {
     /// zstd to report as a code. `header.rs` refuses the same values in a manifest.
     #[test]
     fn a_look_back_window_outside_what_zstd_takes_is_refused() {
-        for window_log in [
-            MIN_LOOK_BACK_WINDOW_LOG - 1,
-            MAX_LOOK_BACK_WINDOW_LOG + 1,
-            0,
-            u8::MAX,
-        ] {
+        for window_log in [MIN_LOOK_BACK_WINDOW_LOG - 1, MAX_LOOK_BACK_WINDOW_LOG + 1] {
             match BlockCompressor::new(window_log) {
                 Err(BlockCompressError::WindowLogOutOfRange {
                     look_back_window_log,
@@ -2160,31 +2483,117 @@ mod tests {
         assert!(BlockCompressor::new(MAX_LOOK_BACK_WINDOW_LOG).is_ok());
     }
 
-    /// The compressor a writer gets is the one every measurement was taken with, and it caps
-    /// the window the file declares.
+    /// **A level zstd does not take is refused rather than clamped**, which is what zstd does
+    /// silently — and silently is the problem: a level of 100 gives exactly the level-22 bytes,
+    /// so a caller measuring the level's cost would read the same number twice and conclude the
+    /// level had stopped mattering.
     #[test]
-    fn a_writers_compressor_uses_the_shipped_level_and_the_declared_window() {
+    fn a_compression_level_outside_what_zstd_takes_is_refused() {
+        let allowed = zstd::compression_level_range();
+        for level in [*allowed.start() - 1, *allowed.end() + 1, i32::MIN, i32::MAX] {
+            match BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, level) {
+                Err(BlockCompressError::LevelOutOfRange {
+                    level: refused,
+                    lowest,
+                    highest,
+                }) => {
+                    assert_eq!(refused, level);
+                    assert_eq!((lowest, highest), (*allowed.start(), *allowed.end()));
+                }
+                other => panic!("level {level} gave {other:?}"),
+            }
+        }
+        assert!(
+            BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, *allowed.start()).is_ok()
+        );
+        assert!(BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, *allowed.end()).is_ok());
+    }
+
+    /// **A compressor made from a manifest caps at the window that manifest declares.** That is
+    /// the only way a writer can be sure the frames it writes fit the promise its own header
+    /// makes: a window taken from anywhere else gives a file every reader in the cohort refuses,
+    /// block by block, with a zstd error code.
+    #[test]
+    fn a_compressor_from_a_manifest_caps_at_the_window_the_manifest_declares() {
+        let mut manifest = a_manifest();
+        manifest.look_back_window_log = MIN_LOOK_BACK_WINDOW_LOG + 2;
+        let compressor = BlockCompressor::from_manifest(&manifest).expect("a valid window");
+        assert_eq!(
+            compressor.look_back_window_log(),
+            manifest.look_back_window_log
+        );
+        assert_eq!(compressor.compression_level(), ZSTD_COMPRESSION_LEVEL);
+
+        let payload = one_payload(&records_past_a_window(manifest.look_back_window_log));
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a valid window");
+        let frame = frame_of(compressor.compress(&payload).expect("it compresses")).to_vec();
+        assert!(
+            decompress_capped_at(&frame, u32::from(manifest.look_back_window_log)).is_ok(),
+            "a reader configured from the same manifest inflates it"
+        );
+
+        // And a manifest whose window is outside what zstd takes is refused here, not left to
+        // produce a file with a window nobody can honour.
+        manifest.look_back_window_log = MAX_LOOK_BACK_WINDOW_LOG + 1;
+        assert!(matches!(
+            BlockCompressor::from_manifest(&manifest),
+            Err(BlockCompressError::WindowLogOutOfRange { .. })
+        ));
+    }
+
+    /// The compressor a writer gets is the one every measurement was taken with.
+    #[test]
+    fn a_writers_compressor_uses_the_shipped_level() {
         assert_eq!(ZSTD_COMPRESSION_LEVEL, 9);
-        let compressor = BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a window");
+        let compressor = BlockCompressor::from_manifest(&a_manifest()).expect("a window");
         assert_eq!(
             compressor.look_back_window_log(),
             DEFAULT_LOOK_BACK_WINDOW_LOG
         );
+        assert_eq!(compressor.compression_level(), ZSTD_COMPRESSION_LEVEL);
+    }
 
-        let records: Vec<_> = (0..40).map(|index| a_record(0, 100 + index, 1)).collect();
-        let payloads =
-            cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records).expect("in order");
-        let at_the_default = BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG)
-            .expect("a window")
-            .compress(&payloads[0])
-            .expect("it compresses")
-            .to_vec();
-        let spelled_out = BlockCompressor::at_level(DEFAULT_LOOK_BACK_WINDOW_LOG, 9)
-            .expect("a window")
-            .compress(&payloads[0])
-            .expect("it compresses")
-            .to_vec();
-        assert_eq!(at_the_default, spelled_out);
+    /// Every refusal names what it was doing and the number whoever sees it must act on.
+    #[test]
+    fn a_compressors_refusals_say_what_broke_and_what_the_bounds_are() {
+        let window = BlockCompressor::new(MAX_LOOK_BACK_WINDOW_LOG + 1)
+            .expect_err("a window zstd does not take");
+        assert_eq!(
+            window.to_string(),
+            format!(
+                "a look-back window of 2^{} bytes; zstd takes between 2^{MIN_LOOK_BACK_WINDOW_LOG} \
+                 and 2^{MAX_LOOK_BACK_WINDOW_LOG}",
+                MAX_LOOK_BACK_WINDOW_LOG + 1
+            )
+        );
+
+        let allowed = zstd::compression_level_range();
+        let level = BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, *allowed.end() + 1)
+            .expect_err("a level zstd does not take");
+        assert_eq!(
+            level.to_string(),
+            format!(
+                "a compression level of {}; zstd takes between {} and {}",
+                *allowed.end() + 1,
+                allowed.start(),
+                allowed.end()
+            )
+        );
+
+        let zstd_said = BlockCompressError::zstd(
+            "compressing a block",
+            std::io::Error::other("Destination buffer is too small"),
+        );
+        assert_eq!(
+            zstd_said.to_string(),
+            "zstd failed while compressing a block"
+        );
+        assert_eq!(
+            std::error::Error::source(&zstd_said)
+                .expect("zstd's own account is the cause")
+                .to_string(),
+            "Destination buffer is too small"
+        );
     }
 
     // -----------------------------------------------------------------

@@ -33,15 +33,30 @@ Skills and agents are instructed to leave it untouched.
 > 15.669 against 16.257. The spec's intuition was right and the conclusion still goes the other
 > way: compression removes 98 % of what a fixed-width head adds, and the 2 % that survives is 5 %
 > of a file that is only 4.7 bytes a record to begin with. **And the narrow widths that would have
-> made fixed width competitive cannot encode the human sample at all** — its coverage is scattered
-> over 644 regions, so a position offset inside one block passes 65,535. So the head stays as it
-> was written, and switching it is no longer an open question.
+> made fixed width competitive cannot encode the human sample at all** — 15 of its records have a
+> within-block position offset over 65,535, the largest 90,467. So the head stays as it was
+> written, and switching it is no longer an open question. **⚠ What the two corpora cover is 10
+> to 280 reads a position, not 3 to 279** — the tomato accession measures 10.25, and the "three
+> reads a position" label the specs give it is not a fact about the file. The 3× end of this
+> caller's committed range is covered by neither, so the conclusion holds at 10× and at 280× and
+> thinner data has not been tried.
 > Two defects this step made were caught by its own tests rather than by review: zstd writes into
 > a buffer from its *start*, so the four bytes reserved for a block's length were being overwritten
 > with the frame's own magic; and nothing tested that a frame declines to say how large it inflates
 > to — the mutation turning that back on passed every other test in the module, and it is the trap
 > the spec names by name.
-> [D2](doc/devel/reports/implementations/ng_psp_d2_2026-08-27.md).
+> **⛦ Eight review checklists then found 1 Blocker, 8 Majors and five numbers of mine measured
+> wrong, and the Blocker is the same shape D1's was**: the compressor's four settings each had one
+> test, and none of those tests used the configuration a writer ships with. The window cap — the
+> format's central decision — was proved only at a 1 kB window and level 1, and every shipped-path
+> test compressed a payload *under* the 32 kB window, where zstd narrows the frame's own
+> declaration to fit and the cap is inert. Guarding it with `if level < 9` passed all 42 tests
+> while making every file need a wider window than its own manifest declares. Four agents
+> independently found that the compression level reached zstd untested, and four that a block's
+> declared length was believed without being checked against the bytes actually present.
+> [D2](doc/devel/reports/implementations/ng_psp_d2_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d2_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d2_2026-08-27.md).
 >
 > - **Previously (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A block
