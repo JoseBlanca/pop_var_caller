@@ -167,7 +167,7 @@ coefficient came from. **The last one carries a circularity the output must not 
 fit's homozygote excess is measured against a diversity the same fit produced. *Depends:* C2.
 *Source:* spec §7.
 
-**C4. Where the inbreeding coefficient comes from — stop and ask.**  ☐
+**C4. Where the inbreeding coefficient comes from — stop and ask.**  ✅
 Spec §4.1 prefers the runs estimator and §8's fifth open question records that **the joint route
 does not produce one**: the runs estimator walks genome windows in the per-sample histogram route,
 and this route walks census positions. Three shapes are possible and the spec does not choose.

@@ -1079,3 +1079,96 @@ documentation forbids using it as a threshold — measured, three fits above it 
 runs at all** would have been called detections. So the count is printed and the reader judges,
 which is the same treatment the segregating count and the two-route gap get. **Where "near" goes is
 a banked question for the owner**, beside the other two.
+
+---
+
+## C4 — where the inbreeding coefficient comes from
+
+**Contract (plan C4).** A stop-and-ask, not an implementation: bring the three shapes and a
+recommendation. **The owner ruled on 2026-08-27** — *use whatever fit is already done; fitting runs
+from the census positions is a later piece of work* — so this section is what that ruling turned
+into.
+
+### The question, and why its premise was half wrong
+
+Spec §8's fifth question asks how a run on the joint route obtains a runs-of-homozygosity
+coefficient, since that estimator walks genome *windows* in the per-sample route while this one
+walks census *positions*. **The premise held for where the estimator lives and not for whether a
+run can reach it.** `parameter_prepass.md`'s step table gives `F` its own row — computed after each
+sample's walk, needing that sample's windowed histogram and nothing else — and marks it as **not**
+one of the quantities the two routes produce competing estimates of. That document also states
+plainly that *"both routes are built, and both run"*.
+
+So there is one coefficient, fitted once per sample by the route that already builds the histograms
+for it, and the only thing missing was the join.
+
+### What shipped
+
+- **`PanelInbreeding`**, three variants for the three shapes a run can arrive in — `Supplied`,
+  `FittedFromRuns`, `HomozygoteExcess` — and `for_the_panel()`, which returns the panel's one
+  coefficient and the matching `InbreedingSource`.
+- **`CensusMomentsReport::of(fit, panel_inbreeding)`**, which takes a converged `JointFit` and
+  produces the finished moments and the report.
+- **`RunsModelFit::windows_holding_sites`**, one field added in the other route's module. The fit
+  folded that count into `resolution_at(...)` and dropped it, so the number spec §7 asks a run to
+  print was recoverable from nothing the per-sample fit returned.
+
+### Three decisions inside the join, each with a test
+
+**The panel's coefficient is the plain mean over samples, unweighted.** With a per-individual `Fᵢ`
+the estimator's expectation is `π · (1 − F̄/(2N − 1))` with `F̄` the unweighted mean, so a sample
+with more census positions covered must not count for more. **⚠ Nothing has tested this on a panel
+of mixed coefficients but the fixture that pins it** — every drawn panel behind the design shares
+one, so a weighted rule would have passed every arm of every sweep (§8's sixth question).
+
+**A sample with no coefficient is absent from the mean rather than entered as a zero.**
+`fit_inbreeding_if_diploid` declines above and below two genome copies, so a haploid sample
+contributes nothing; averaging a zero in for it would invent a coefficient, and on a panel of two
+it would halve the correction. The test measures exactly that halving.
+
+**The window count reported for a panel is the thinnest sample's, not the mean.** What the count is
+printed for is telling a reader whether *any* of the panel's coefficients rests on too little, and
+a mean hides one thin sample among sixty-two whole genomes — the fixture is 62 samples at a tomato
+genome's 8,004 windows and one at 3,100, where the mean is 7,926 and says nothing.
+
+**And an empty list is refused in every arm rather than meant to zero**, because zero is the answer
+that makes the correction vanish. The two arms carry different messages: a user supplying nothing
+and a run that lost its per-sample coefficients between the two routes are different defects.
+
+### The end-to-end test
+
+`the_report_puts_the_census_average_beside_the_curves_own_number` runs a real fit on a ten-sample
+cohort drawn from a single Beta with two point masses — **inside the fit's own family, which is
+where the two routes should agree** — and checks that the census average and the integrated curve
+land together after the whole chain: convergence, the running sums over every position, the panel's
+coefficient, the report.
+
+**Measured: the curve reads 2.260e-2 and the census average 2.226e-2, a ratio of 1.0155** — inside
+the 1.1% below to 10.7% above the design measured across three populations and four depths. The
+band asserted is 0.85 to 1.15, loose on purpose: it bounds *the machinery being connected*, and a
+tighter band would pin the fit's convergence on one seed. The test also checks both numbers sit
+near the diversity the cohort was drawn with, so the agreement is not two matching wrong numbers,
+and that the fallback arm reports the homozygote excess with its circularity warning.
+
+### Mutations run
+
+Four. Two on the join, against the whole 4,910-test suite: reporting the **widest** window count
+instead of the thinnest fails 1, and summing the coefficients instead of meaning them fails 4. Two
+on the refusals, under `--release --all-features` with the assertion neutered: each is reached by
+exactly its own `#[should_panic]` test and no other.
+
+### What is still open, and none of it is this plan's
+
+- **Fitting runs from the census positions** — the owner's later work, deferred rather than
+  contingent.
+- **Three numbers nobody may pick**: a floor on the segregating count, a threshold on the two-route
+  heterozygosity gap, and where *near* the 3,000-window floor goes. All three need a real census.
+- **`RunParameters::assemble` has no caller** anywhere outside its own tests: the pre-pass →
+  calling handover is unbuilt as a whole. This plan ends at producing the moments and the report.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,910 passed, 0 failed, 11 ignored**, from 4,904. Six tests added.
+- `cargo test --tests` — green on every integration target.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.

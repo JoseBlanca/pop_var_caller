@@ -18,6 +18,7 @@
 //! **Nothing calls this yet.** Wiring it to a run is that spec's §5 and the implementation plan's
 //! Milestone C; what is here is the reduction and the type it returns.
 
+use super::fit::JointFit;
 use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
 use crate::ng::types::InbreedingF;
 
@@ -317,6 +318,13 @@ impl CensusMomentSums {
         self.segregating += other.segregating;
     }
 
+    /// How many diploid individuals the panel holds — the `N` both moments' finite-panel
+    /// corrections are written in.
+    #[must_use]
+    pub fn samples(&self) -> usize {
+        self.samples
+    }
+
     /// How many census positions have been added.
     #[must_use]
     pub fn positions(&self) -> u64 {
@@ -574,6 +582,98 @@ pub enum InbreedingSource {
     User,
 }
 
+/// **What a run had to correct its heterozygosity with, before the panel's one number is taken
+/// from it** — the three shapes a run can arrive in, and the decision of which source it is
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §4.1, §4.2).
+///
+/// **The panel's value is the plain mean over samples, unweighted, whichever source supplied
+/// it.** With a per-individual `Fᵢ` the estimator's expectation is `π · (1 − F̄/(2N − 1))` with
+/// `F̄` the unweighted mean, so a sample with more census positions covered must not count for
+/// more. **⚠ Nothing has tested this on a panel of mixed coefficients** — every drawn panel behind
+/// the design shares one, so a weighted rule would have passed every arm of every measurement
+/// (spec §4.1, §8's sixth open question).
+#[derive(Clone, PartialEq, Debug)]
+pub enum PanelInbreeding<'a> {
+    /// **The user gave one value for the whole panel, or one per sample.** Not a single-sample
+    /// feature: a user who knows how their material was bred knows it whatever the cohort size,
+    /// and a fitted coefficient at three samples is worth overriding for the same reason it is at
+    /// one (§4.2, owner's decision of 2026-08-27).
+    Supplied(&'a [InbreedingF]),
+    /// **The per-sample route's runs-of-homozygosity coefficients**, one entry per sample that has
+    /// one, each with the count of windows holding sites it was fitted over.
+    ///
+    /// **A sample can legitimately be missing from this list**: `fit_inbreeding_if_diploid`
+    /// declines above and below two genome copies — above two, `F` needs several
+    /// identity-by-descent coefficients; below two there are no heterozygotes to be short of — so
+    /// a haploid sample contributes nothing rather than a zero. **Averaging a zero in for it would
+    /// invent a coefficient**, which is why the mean is over the entries present.
+    FittedFromRuns(&'a [(InbreedingF, u32)]),
+    /// **Nothing produced a runs coefficient, so the joint fit's own homozygote excess stands
+    /// in** — per sample, and circular (see [`InbreedingSource::JointFitHomozygoteExcess`]).
+    HomozygoteExcess(&'a [InbreedingF]),
+}
+
+impl PanelInbreeding<'_> {
+    /// The panel's one coefficient and where it came from.
+    ///
+    /// # Panics
+    ///
+    /// **On an empty list, in every arm.** A run claiming a source and supplying nothing from it
+    /// is a run-assembly defect, and the alternative — quietly meaning an empty list to zero —
+    /// would report a panel of unrelated individuals, which is the answer that makes the
+    /// correction vanish.
+    #[must_use]
+    pub fn for_the_panel(&self) -> (InbreedingF, InbreedingSource) {
+        match self {
+            Self::Supplied(coefficients) => {
+                (mean_of(coefficients, "the user"), InbreedingSource::User)
+            }
+            Self::FittedFromRuns(fitted) => {
+                assert!(
+                    !fitted.is_empty(),
+                    "a run whose coefficient came from the runs estimator has at least one \
+                     sample it was fitted on; an empty list is a run whose per-sample \
+                     coefficients went missing between the two routes"
+                );
+                let coefficients: Vec<InbreedingF> =
+                    fitted.iter().map(|(coefficient, _)| *coefficient).collect();
+                // **The thinnest sample's window count, not the mean of them.** What the count is
+                // printed for is telling a reader whether any of the panel's coefficients rests on
+                // too little, and a mean hides one thin sample among sixty-two whole genomes.
+                let windows = fitted
+                    .iter()
+                    .map(|(_, windows)| *windows)
+                    .min()
+                    .expect("the list is not empty");
+                (
+                    mean_of(&coefficients, "the runs estimator"),
+                    InbreedingSource::RunsOfHomozygosity { windows },
+                )
+            }
+            Self::HomozygoteExcess(coefficients) => (
+                mean_of(coefficients, "the joint fit's homozygote excess"),
+                InbreedingSource::JointFitHomozygoteExcess,
+            ),
+        }
+    }
+}
+
+/// The unweighted mean of a panel's coefficients, refusing an empty panel.
+fn mean_of(coefficients: &[InbreedingF], source: &str) -> InbreedingF {
+    assert!(
+        !coefficients.is_empty(),
+        "a run whose inbreeding coefficient came from {source} has at least one value; an empty \
+         list would mean to zero, which is the answer that makes the correction vanish"
+    );
+    let mean = coefficients
+        .iter()
+        .map(|coefficient| coefficient.get())
+        .sum::<f64>()
+        / coefficients.len() as f64;
+    // Every entry is in `[0, 1)`, so their mean is too — this cannot fail, and saying so is
+    // cheaper than a `Result` no caller could act on.
+    InbreedingF::try_new(mean).expect("the mean of coefficients each below one is below one")
+}
 /// **Everything a run owes its reader about the two numbers its SNP/indel prior was built from** —
 /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7's list, assembled so that a run that used
 /// different information cannot look like one that did not.
@@ -607,6 +707,46 @@ pub struct CensusMomentsReport {
 }
 
 impl CensusMomentsReport {
+    /// **Assemble the report from a converged joint fit and whatever the run had to correct its
+    /// heterozygosity with** — the join `doc/devel/ng/spec/ordinary_site_prior_moments.md` §8's
+    /// fifth open question is about, taken the way the owner ruled on 2026-08-27.
+    ///
+    /// ## Where the coefficient comes from, and why nothing new was built for it
+    ///
+    /// **The coefficient already exists, per sample, and this takes it.** §4.1 prefers the
+    /// runs-of-homozygosity estimator over the fit's own homozygote excess, and §8's fifth
+    /// question asked how a run on this route obtains one — the runs estimator walks genome
+    /// windows in the per-sample histogram route, and this route walks census positions. **The
+    /// answer is that both routes run**: `parameter_prepass.md`'s step table gives `F` its own
+    /// row — computed after each sample's walk, needing that sample's windowed histogram and
+    /// nothing else — and marks it as *not* one of the quantities the two routes produce competing
+    /// estimates of. So there is one coefficient, fitted once per sample, and the only thing that
+    /// was missing is this: taking those values, meaning them unweighted over the panel, and
+    /// handing the mean to [`CensusMomentSums::finish`].
+    ///
+    /// **Fitting runs from the census positions themselves is a later piece of work and not a
+    /// fallback** (owner, 2026-08-27). The arithmetic that says the signal is there is in §8's
+    /// fifth question; nothing here anticipates it.
+    ///
+    /// ## What a run does when there is no runs coefficient
+    ///
+    /// It passes [`PanelInbreeding::HomozygoteExcess`] and the report says so, with the
+    /// circularity warning that source carries and — at one sample — the second warning that the
+    /// excess there is 0.000 whatever the truth. **That path stays reachable**: `fit_inbreeding`
+    /// *refuses* below its 3,000-window floor rather than returning a thin coefficient, so a run
+    /// whose samples are region-restricted has no runs coefficient at all rather than a bad one.
+    #[must_use]
+    pub fn of(fit: &JointFit, panel_inbreeding: PanelInbreeding<'_>) -> Self {
+        let (coefficient, inbreeding_source) = panel_inbreeding.for_the_panel();
+        Self {
+            measured: fit.census_moments.finish(coefficient),
+            curve_heterozygosity: fit.expected_heterozygosity,
+            panel_inbreeding: coefficient.get(),
+            inbreeding_source,
+            samples: fit.census_moments.samples(),
+        }
+    }
+
     /// **The curve's heterozygosity over the census average's** — the two-route ratio §7 asks a
     /// run to print.
     ///
@@ -1360,6 +1500,84 @@ mod tests {
         assert_eq!(selfing.segregating_positions, plain.segregating_positions);
     }
 
+    /// **The panel's coefficient is the plain mean over samples, and a sample with more census
+    /// positions covered does not count for more** — spec §4.1, whose derivation gives the
+    /// estimator's expectation as `π · (1 − F̄/(2N − 1))` with `F̄` the *unweighted* mean.
+    ///
+    /// **⚠ Nothing has tested this on a panel of mixed coefficients but this**, and it is a
+    /// fixture rather than a measurement: every drawn panel behind the design shares one
+    /// coefficient across its individuals, so a weighted rule would have passed every arm of every
+    /// sweep (§8's sixth open question). What this pins is that the code means them, not that
+    /// meaning them is right on real data.
+    #[test]
+    fn the_panels_coefficient_is_the_unweighted_mean_over_its_samples() {
+        let coefficients: Vec<InbreedingF> = [0.0, 0.4, 0.8]
+            .into_iter()
+            .map(|f| InbreedingF::try_new(f).expect("a legal coefficient"))
+            .collect();
+        let (mean, source) = PanelInbreeding::Supplied(&coefficients).for_the_panel();
+        assert!((mean.get() - 0.4).abs() < 1e-15, "got {}", mean.get());
+        assert_eq!(source, InbreedingSource::User);
+    }
+
+    /// **A haploid sample contributes no coefficient rather than a zero**, and the mean is over
+    /// the samples that have one.
+    ///
+    /// `fit_inbreeding_if_diploid` declines above and below two genome copies — above two, `F`
+    /// needs several identity-by-descent coefficients; below two there are no heterozygotes to be
+    /// short of. **Averaging a zero in for such a sample would invent a coefficient**, and on a
+    /// panel of two where one is haploid it would halve the correction.
+    #[test]
+    fn a_sample_with_no_coefficient_is_absent_rather_than_zero() {
+        let one_fitted = [(InbreedingF::try_new(0.8).expect("legal"), 8_004)];
+        let (mean, _) = PanelInbreeding::FittedFromRuns(&one_fitted).for_the_panel();
+        assert!((mean.get() - 0.8).abs() < 1e-15, "got {}", mean.get());
+
+        // The same panel with a zero averaged in for the sample that has none would give 0.4.
+        let with_an_invented_zero = [
+            (InbreedingF::try_new(0.8).expect("legal"), 8_004),
+            (InbreedingF::try_new(0.0).expect("legal"), 8_004),
+        ];
+        let (halved, _) = PanelInbreeding::FittedFromRuns(&with_an_invented_zero).for_the_panel();
+        assert!((halved.get() - 0.4).abs() < 1e-15);
+    }
+
+    /// **The window count reported for a panel is the thinnest sample's, not the mean of them** —
+    /// because what the count is printed for is telling a reader whether *any* of the panel's
+    /// coefficients rests on too little evidence, and a mean hides one thin sample among
+    /// sixty-two whole genomes.
+    ///
+    /// Here: sixty-two samples at a tomato genome's 8,004 windows and one at 3,100. The mean is
+    /// 7,926 and says nothing; the minimum is 3,100 and is one tenth above the estimator's floor.
+    #[test]
+    fn the_reported_window_count_is_the_thinnest_samples() {
+        let mut fitted: Vec<(InbreedingF, u32)> =
+            vec![(InbreedingF::try_new(0.8).expect("legal"), 8_004); 62];
+        fitted.push((InbreedingF::try_new(0.8).expect("legal"), 3_100));
+        let (_, source) = PanelInbreeding::FittedFromRuns(&fitted).for_the_panel();
+        assert_eq!(
+            source,
+            InbreedingSource::RunsOfHomozygosity { windows: 3_100 }
+        );
+    }
+
+    /// **A run claiming a source and supplying nothing from it is refused, not meant to zero** —
+    /// and zero is the answer that makes the correction vanish, which is why this is a panic and
+    /// not a default.
+    #[test]
+    #[should_panic(expected = "makes the correction vanish")]
+    fn a_panel_with_no_coefficients_at_all_is_refused() {
+        let _ = PanelInbreeding::Supplied(&[]).for_the_panel();
+    }
+
+    /// **The same, on the runs arm, with its own message** — because a run that fitted
+    /// coefficients per sample and arrived here with none lost them between the two routes, which
+    /// is a different defect from a user supplying an empty list.
+    #[test]
+    #[should_panic(expected = "went missing between the two routes")]
+    fn a_runs_source_with_no_samples_is_refused() {
+        let _ = PanelInbreeding::FittedFromRuns(&[]).for_the_panel();
+    }
     /// A report over a small census, so the tests below can name every number in it.
     fn a_report(inbreeding_source: InbreedingSource, samples: usize) -> CensusMomentsReport {
         let mut sums = CensusMomentSums::over(samples);

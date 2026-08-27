@@ -151,6 +151,20 @@ pub struct RunsModelFit {
     /// against other runs, not a test a fit has passed.
     pub resolution: f64,
 
+    /// **How many windows held sites** — the evidence the coefficient rests on, and the number
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`] is a floor on.
+    ///
+    /// **The windows that hold sites, not the chain's length**, for the reason
+    /// [`Self::resolution`] is computed from the same count: the chain pads every contig from
+    /// window zero, so a region-restricted run's chain is far longer than its evidence.
+    ///
+    /// **It is here because a consumer needs the count and not only what was derived from it.**
+    /// `resolution` folds this into a number its own documentation forbids using as a threshold,
+    /// so a run that has to say *what its coefficient was fitted over* — which
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7 requires of the SNP/indel prior's
+    /// report — cannot recover it from anything else this type carries.
+    pub windows_holding_sites: u32,
+
     /// Windows whose posterior landed between 0.01 and 0.99 — the ones the chain rather
     /// than their own reads decided. Non-zero is not a fault; it is the chain earning its
     /// keep.
@@ -663,6 +677,9 @@ pub fn fit_inbreeding(
         // reports 0.006768 where the truth is 0.029067 — understated 4.3-fold, on the
         // one number a consumer uses to decide whether a small `F` means anything.
         resolution: resolution_at(chain.windows_holding_sites),
+        // The same count the resolution above is read off, kept rather than only derived from —
+        // see the field's own note.
+        windows_holding_sites: chain.windows_holding_sites as u32,
         undecided_windows: best.undecided_windows,
         coefficient_was_capped: inbreeding.was_capped,
     };
@@ -1505,6 +1522,7 @@ mod tests {
                 outcome(0.0000, -1.41e9),
             ]),
             resolution: 0.01,
+            windows_holding_sites: 8_004,
             undecided_windows: 0,
             coefficient_was_capped: false,
         };

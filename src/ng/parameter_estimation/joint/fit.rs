@@ -3552,7 +3552,9 @@ mod whole_fit_tests {
     };
     use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCap;
-    use crate::ng::parameter_estimation::joint::census_moments::CensusMoments;
+    use crate::ng::parameter_estimation::joint::census_moments::{
+        CensusMoments, CensusMomentsReport, InbreedingSource, PanelInbreeding,
+    };
     use crate::ng::types::InbreedingF;
 
     /// The mean of one of the two rates over every library the fit produced.
@@ -3566,6 +3568,99 @@ mod whole_fit_tests {
             .map(|noise| of(&noise.value))
             .sum::<f64>()
             / fit.noise.len() as f64
+    }
+
+    /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the
+    /// integrated curve are two independent routes to one heterozygosity, and they land together.**
+    ///
+    /// This is the join `ordinary_site_prior_moments.md` §8's fifth question is about, exercised
+    /// end to end — the fit converges, the expectation step's running sums accumulate over every
+    /// position, the panel's coefficient is applied, and the report puts the census average beside
+    /// the number read off the fitted curve.
+    ///
+    /// **Why the two agreeing here is a check and not a tautology.** They share the converged fit
+    /// and nothing else: one averages `2k(2N − k)/(2N(2N − 1))` over the per-position posteriors
+    /// with a curvature term and an inbreeding correction, the other evaluates
+    /// `p_segregating · 2ab/((a + b)(a + b + 1))` on four fitted numbers. A defect in either
+    /// separates them.
+    ///
+    /// **The cohort is drawn from a single Beta with two point masses — inside the fit's own
+    /// family — which is the case where they *should* agree.** On populations outside it the
+    /// curve settles 5 to 7% off and stays there at every depth, which is the whole reason the
+    /// census average exists (report §9.1). So this test says the machinery works, not that the
+    /// curve is adequate; the report prints both numbers precisely because the gap is a
+    /// diagnostic.
+    ///
+    /// **Measured on this cohort: the curve reads 2.260e-2 and the census average 2.226e-2, a
+    /// ratio of 1.0155** — well inside the 1.1% below to 10.7% above the design measured across
+    /// three populations and four depths. The band asserted is 0.85 to 1.15, loose against that on
+    /// purpose: it is bounding *the machinery being connected*, and a band tight enough to pin the
+    /// ratio would be pinning the fit's own convergence on one seed.
+    #[test]
+    fn the_report_puts_the_census_average_beside_the_curves_own_number() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let samples = 10;
+        let cohort = draw_cohort(
+            samples,
+            3_000,
+            20.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0xB7E1_5162_8AED_2A6B,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            max_passes: 20,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+
+        // The panel was drawn at F = 0.2 and this is what a user supplying it would give.
+        let supplied = [InbreedingF::try_new(0.2).expect("a legal coefficient"); 10];
+        let report = CensusMomentsReport::of(&fit, PanelInbreeding::Supplied(&supplied));
+
+        assert_eq!(report.samples, samples);
+        assert_eq!(report.measured.positions, 3_000);
+        assert_eq!(report.inbreeding_source, InbreedingSource::User);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+
+        let ratio = report
+            .curve_over_census()
+            .expect("a cohort drawn at this density segregates");
+        assert!(
+            (0.85..1.15).contains(&ratio),
+            "the two routes to one heterozygosity should agree inside the fit's own family; the \
+             curve reads {:.4e} and the census average {:.4e}, a ratio of {ratio:.4}",
+            report.curve_heterozygosity,
+            report.measured.heterozygosity
+        );
+
+        // **Both are near the diversity the cohort was actually drawn with**, which is what stops
+        // the agreement above being two matching wrong numbers.
+        let drawn: f64 =
+            cohort.heterozygous.iter().sum::<f64>() / cohort.heterozygous.len() as f64 / 0.8;
+        assert!(
+            (0.7..1.4).contains(&(report.measured.heterozygosity / drawn)),
+            "the census average is {:.4e} against a drawn diversity of {drawn:.4e}",
+            report.measured.heterozygosity
+        );
+
+        // And a run that had no runs coefficient says so, with the circularity warning.
+        let excess = [InbreedingF::try_new(0.2).expect("legal"); 10];
+        let fallback = CensusMomentsReport::of(&fit, PanelInbreeding::HomozygoteExcess(&excess));
+        assert_eq!(
+            fallback.inbreeding_source,
+            InbreedingSource::JointFitHomozygoteExcess
+        );
+        assert_eq!(fallback.warnings().len(), 1);
+        assert_eq!(fallback.measured, report.measured, "the same coefficient");
     }
 
     /// **The two routes to the two population moments agree on a real fit** — the running sums the
