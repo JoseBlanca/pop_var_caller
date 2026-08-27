@@ -149,14 +149,28 @@ impl RunParameters {
     ///
     /// - **Sample order.** `generic_by_sample` and `repeat_tract_by_sample` are the run's samples
     ///   in the run's own order, which is `read_groups.read_groups_per_sample()`'s order.
-    ///   Position `i` of both lists is the sample named at position `i` of that table. The
-    ///   cohort fit keys its own per-sample results by **name**, so the names are what join the
-    ///   two — and a list handed in permuted gives every sample a coefficient and a contamination
-    ///   fraction, just not its own.
+    ///   Position `i` of both lists is the sample named at position `i` of that table.
+    ///
+    ///   **The inbreeding coefficient is the one value here with no identifier on it.** Every
+    ///   other quantity a sample carries is keyed by read group, and the cohort fit's per-sample
+    ///   results are keyed by sample name — so those either land under a key that says whose they
+    ///   are, or are looked up by the name this table gives position `i`. A coefficient is a bare
+    ///   number, and a permuted list sends it to the wrong sample with nothing about the value
+    ///   saying so.
+    ///
+    ///   **What catches a permuted list is the read-group check below**, not anything about the
+    ///   coefficient: the sample at position `i` then carries its neighbour's identifiers, which
+    ///   are not this sample's, and the run stops. That leaves one gap, and it is the one a
+    ///   caller should know about — a sample carrying *no* read-group-keyed value at all would
+    ///   pass, and only its coefficient would be wrong. The SNP/indel fit does not produce one
+    ///   (`GenericAccumulators::estimate` refuses a sample with no read group with reads), so
+    ///   this is a statement about what the check rests on rather than a live hole.
     /// - **The read-group union.** Each sample's error rates, minted-error totals and tract
     ///   substitution rates are keyed by identifiers that are unique across the whole run,
-    ///   because a read group belongs to exactly one sample. So the run's maps are the samples'
-    ///   maps put together, and a key arriving twice means two samples claimed one library.
+    ///   because a read group belongs to exactly one sample: the run's read-group table files
+    ///   each declared `@RG` under the single sample its header names. So the run's maps are the
+    ///   samples' maps put together, and every key a sample carries is checked against that
+    ///   sample's own.
     ///
     /// # Errors
     ///

@@ -104,16 +104,30 @@ returns a `RunParameters` or the refusal above.
 
 **Two joins that no type enforces, and both are silent when wrong.**
 
-- **Sample order.** The two per-sample lists are joined to the run's sample table **by position**,
-  while the cohort fit keys its own per-sample results **by name**. A permuted list gives every
-  sample a coefficient and a contamination fraction, just not its own. Sample order is therefore an
-  argument rather than a map's iteration order, which is the one design decision in this step.
+- **Sample order.** The two per-sample lists are joined to the run's sample table **by position**.
+  Sample order is therefore an argument rather than a map's iteration order, which is the one
+  design decision in this step.
+
+  **The inbreeding coefficient is the one value with no identifier on it.** Every other quantity a
+  sample carries is keyed by read group, and the cohort fit's per-sample results are keyed by
+  sample name — so those either land under a key that says whose they are, or are looked up by the
+  name the read-group table gives that position. A coefficient is a bare number, and a permuted
+  list sends it to the wrong sample with nothing about the value saying so.
 - **The read-group union.** The run's per-library maps are the samples' maps put together, which is
   a union only because a read group belongs to exactly one sample: the run's read-group table files
   each declared `@RG` under the single sample its header names. So every key a sample carries is
   checked against that sample's own read groups. A value that fails it would land under a real
   identifier belonging to somebody else, and every read of that library would then be scored under
   another sample's chemistry, with nothing downstream able to tell.
+
+  **That check is also what catches a permuted list**, which the first draft of this report and of
+  the seam's own doc comment got wrong: they said a permuted list "gives every sample a coefficient
+  and a contamination fraction, just not its own", and neither half holds. Contamination is looked
+  up by the name at that position and cannot be permuted at all. And a sample handed its
+  neighbour's results carries its neighbour's read-group identifiers, so the check fires and the
+  run stops rather than proceeding with a wrong coefficient. The residual gap is one sample
+  carrying *no* read-group-keyed value at all, which the SNP/indel fit does not produce —
+  `GenericAccumulators::estimate` refuses a sample with no read group with reads.
 
 The fixture is three samples over four libraries with **no two numbers alike** — four error rates,
 four minted-error means, four contamination fractions, four tract substitution rates, three
