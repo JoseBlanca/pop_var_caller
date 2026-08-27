@@ -257,6 +257,34 @@ pub enum ParameterEstimationError {
         threshold: f64,
     },
 
+    /// **A sample reached the assembly of a run's calling parameters with no inbreeding
+    /// coefficient**, so the run is refused and the sample is named.
+    ///
+    /// The three variants above are the fit failing. This one is the fit never having been
+    /// asked: a coefficient is measured on the **diploid** part of a genome, and a sample with
+    /// no diploid region reports `None` without that being a failure — above two copies the
+    /// quantity needs several identity-by-descent coefficients and is deferred, below two there
+    /// are no heterozygotes to be short of. So the parameters are complete and calling still
+    /// cannot proceed, which is why this is raised where the two meet rather than where the fit
+    /// ran.
+    ///
+    /// **Refused rather than defaulted, on the same grounds as its three neighbours.** How much
+    /// less heterozygous a sample is than random mating predicts is what most separates an
+    /// outcrosser from a selfing landrace, and the cohort's diversity divides by `1 − F` — so a
+    /// number invented here is amplified rather than absorbed.
+    ///
+    /// **And not taken from the cohort fit's homozygote excess either**, which is available and
+    /// looks like the obvious fallback. That excess is measured by the very fit whose diversity
+    /// the coefficient exists to correct, so borrowing it makes the correction circular; the
+    /// census-moments report carries the same warning.
+    #[error(
+        "sample {sample}: no inbreeding coefficient was fitted for it, and calling has no \
+         default for one — a cohort's diversity divides by 1 − F, so an invented coefficient is \
+         amplified rather than absorbed. A sample reports none when no part of its genome is \
+         diploid, which is where the coefficient is measured; supply one instead"
+    )]
+    InbreedingNotFittedForSample { sample: String },
+
     /// The walk that was to produce this sample's loci failed part-way through.
     ///
     /// **Fatal, and never absorbed.** The loci a walk failed to produce are *missing*
@@ -442,6 +470,52 @@ mod tests {
             }
             .to_string(),
             "the two refusals have to be tellable apart in a log"
+        );
+    }
+
+    /// **The refusal a run meets rather than a fit** — and it has to be tellable apart from
+    /// the three fitting failures, because what a reader does about it is different.
+    ///
+    /// The other three say a search was run and did not settle, and the answer is to widen it
+    /// or to supply the number. This one says no search was ever run, because the sample has no
+    /// diploid region to run one on — so re-running the fit changes nothing and only supplying
+    /// the coefficient will. A message that named the sample and stopped there would leave a
+    /// reader re-running a fit that cannot answer.
+    ///
+    /// It also has to say plainly that there is no default. The cohort fit's homozygote excess
+    /// is sitting right there and is the obvious thing to reach for, and reaching for it makes
+    /// the correction circular.
+    #[test]
+    fn the_missing_coefficient_refusal_names_the_sample_and_is_not_a_failed_fit() {
+        let missing = ParameterEstimationError::InbreedingNotFittedForSample {
+            sample: "SL_landrace_07".to_string(),
+        };
+        let message = missing.to_string();
+
+        assert!(message.contains("SL_landrace_07"), "the sample: {message}");
+        assert!(
+            message.contains("no default"),
+            "that there is nothing to fall back on: {message}"
+        );
+        assert!(
+            message.contains("diploid"),
+            "why the sample has none, so a reader does not re-run a fit that cannot \
+             answer: {message}"
+        );
+        assert!(
+            message.contains("supply one"),
+            "what to do about it: {message}"
+        );
+        assert_ne!(
+            message,
+            ParameterEstimationError::InbreedingNotFittable {
+                sample: "SL_landrace_07".to_string(),
+                windows: 1_200,
+                floor: MIN_WINDOWS_TO_FIT_INBREEDING,
+            }
+            .to_string(),
+            "a coefficient never asked for and one the fit could not reach are different \
+             failures with different answers"
         );
     }
 
