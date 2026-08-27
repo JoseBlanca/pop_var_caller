@@ -645,11 +645,25 @@ every fixture.
 beside `genotype_table_parity.rs`, so ng's `use crate::var_calling::` stays in one greppable place.
 The entry points it needs are already `pub(crate)`.
 
-**F2. The STR differential.**  ☐
+**F2. The STR differential.**  ✅
 On the same likelihood table, run ng's loop under **production's convergence rule and
 tolerance** (π at `1e-6`) and require matching genotypes against production's STR loop; then
 restore ng's rule (copies over chromosomes at `1e-3`) and **report what moved**. A differential
 with a failing state, not parity with an escape clause. *Depends:* E3b. *Source:* spec §10.
+
+**⚖ What this entry calls one rule is two, and the step delivers the tolerance rather than the
+rule.** Both loops take the largest per-allele change in the cohort's expected allele copies and
+turn it into a frequency, but the SSR caller adds its prior's pseudocounts to the copies before
+normalising ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `run_pi_em` opens each pass with `let mut
+expected = g0.to_vec()`) where ng divides by the chromosomes alone. **So at one nominal number ng's
+test is the stricter of the two**, and reproducing the SSR caller's rule exactly would mean
+declaring ng's prior strength the counterpart of those pseudocounts — a claim about the two models
+that no calling document makes.
+
+**What is built is ng's rule at both tolerances**, with the residual measured rather than hidden:
+absorbing a plausible pseudocount mass into the divisor stops the tight arm at four passes rather
+than five. The genotypes do not move either way, which is why this is a note rather than a ruling.
+**Two tracts**: a fitted stratum (5 passes against 2) and the ladder's bottom rung (3 against 1).
 
 > **Checkpoint F:** ng's loop is anchored to production on both paths. **Arm A is complete; ng
 > calls genotypes.** Pause for review.

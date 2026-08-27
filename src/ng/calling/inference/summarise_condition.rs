@@ -7484,6 +7484,83 @@ mod tests {
         )
     }
 
+    /// **The tolerance the existing SSR caller states**, `1e-6`
+    /// ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `EmCfg::tol`).
+    ///
+    /// **It is that caller's number and not its rule**, and the difference is measured in
+    /// `a_tract_called_under_both_tolerances_gives_one_answer_and_says_what_moved`'s doc: the two
+    /// loops divide the same movement by different totals, so running ng at this number is
+    /// running ng's rule at the other caller's tolerance rather than reproducing its rule.
+    const SSR_CALLER_TOLERANCE: f64 = 1e-6;
+
+    /// **Three samples at four reads apiece** — one homozygous for each of the tract's two
+    /// lengths and one heterozygous — shared by both tolerance fixtures so that the pass counts
+    /// they report are comparable.
+    ///
+    /// **Four reads apiece, and both neighbours were measured before settling on it.** At twelve
+    /// the loop settles in one pass under the shipped tolerance and two under the tighter one, so
+    /// there is almost nothing to compare. At two the *reads* stop deciding: the first sample is
+    /// called `0/1` rather than `1/1`, so the fixture would be measuring the prior rather than the
+    /// tolerance. Four is where the tolerances have room and the reads still settle the answer.
+    ///
+    /// **Both candidates are one repeat apart and there are only two of them**, which is what a
+    /// tract fixture in this file is; so the two per-allele movements are equal and opposite and
+    /// the absolute value in the convergence test is inert here. `a_fall_larger_than_every_rise_has_not_settled`
+    /// is what pins that half of the rule.
+    fn three_samples_at_four_reads() -> (
+        [SequenceObservation; 1],
+        [SequenceObservation; 2],
+        [SequenceObservation; 1],
+    ) {
+        (
+            [tract_reads(TRACT_CANDIDATE_REPEATS[1], 4)],
+            [
+                tract_reads(TRACT_CANDIDATE_REPEATS[0], 2),
+                tract_reads(TRACT_CANDIDATE_REPEATS[1], 2),
+            ],
+            [tract_reads(TRACT_CANDIDATE_REPEATS[0], 4)],
+        )
+    }
+
+    /// **The same tract under a convergence threshold the caller chooses** — what the differential
+    /// against the existing caller's stopping rule needs, and nothing else uses.
+    ///
+    /// Everything but the threshold is the shipped configuration, so what the two runs it is used
+    /// for differ in is one number.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the same list `call_tract_over` takes, plus the one number the differential                   varies; bundling them would be a type nothing else names"
+    )]
+    fn call_tract_at_threshold(
+        observations_of_each_sample: &[&[SequenceObservation]],
+        strata: &StratumFits,
+        substitution: &std::collections::BTreeMap<
+            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+        >,
+        calibration: &[ReadGroupCalibration],
+        convergence_threshold: f64,
+        scratch: &mut CallingScratch<StutterSubstitutionScratch>,
+    ) -> LocusInference {
+        let detail = tract_detail();
+        let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
+            .iter()
+            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .collect();
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
+        let inbreeding = vec![outbred(); per_sample.len()];
+        let parameters =
+            uncontaminated_run(calibration, &inbreeding, strata, substitution, diploid());
+        let config = CallingLoopConfig {
+            convergence_threshold,
+            ..CallingLoopConfig::DEFAULT
+        }
+        .validate()
+        .expect("a threshold inside the configured range");
+        shipped_arm().call_locus(&evidence, &parameters, tract_alleles(), &config, scratch)
+    }
+
     /// The genotype a sample was called, as allele ids.
     fn called_alleles(inference: &LocusInference, sample: usize) -> Vec<u16> {
         inference.per_sample[sample]
@@ -7991,6 +8068,248 @@ mod tests {
         let mut contaminated_scratch = worker_scratch();
         let contaminated = call_contaminated_tract(&[&reads], 0.08, &mut contaminated_scratch);
         assert!(tract_record(&contaminated).contaminant_term_was_built());
+    }
+
+    /// **The repeat-tract differential: one tract called at the tolerance the existing SSR caller
+    /// states and at ng's own, with the genotypes required to match and what moved reported.**
+    ///
+    /// # Why a differential and not a parity oracle
+    ///
+    /// The SNP/indel path has an oracle — the existing caller's own loop, handed the same
+    /// likelihood table (`calling::loop_parity`). **The repeat-tract path does not**, and the
+    /// reason `doc/devel/ng/spec/calling_em_loop.md` §10 gives is that the two loops converge on a
+    /// different quantity at a different scale, so two loops stopping at different points on one
+    /// trajectory would disagree at any genotype near a boundary for no reason any document
+    /// records.
+    ///
+    /// # The two stopping tests measure one movement and divide it by different totals
+    ///
+    /// **This is the part §10's wording makes sound simpler than it is, and getting it wrong is
+    /// what an earlier version of this comment did.** Both loops take the largest per-allele
+    /// change in the cohort's expected allele copies between passes, and both turn it into a
+    /// frequency before comparing it against a tolerance. They divide by different things:
+    ///
+    /// - the SSR caller adds its prior's pseudocounts to the copies before normalising
+    ///   ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `run_pi_em`, whose `expected` **starts at**
+    ///   `g0`), so its divisor is `chromosomes + pseudocount mass`;
+    /// - ng divides by the cohort's chromosomes alone.
+    ///
+    /// **So at one nominal number ng's test is the stricter of the two**, by a factor of one plus
+    /// that mass over the chromosomes — the SSR caller sees the same movement as smaller and stops
+    /// sooner. Its own engine's documentation names this as a real effect rather than a rounding
+    /// one: a pseudocount-scaled readout *"does not feed back"*, and testing it *"let a larger
+    /// pseudocount damp the delta and stop the loop early"* (spec §6).
+    ///
+    /// **What this fixture therefore is: ng's rule at two tolerances**, `1e-6` — the SSR caller's
+    /// number — and ng's own `1e-3`. **What it is not** is a reproduction of that caller's rule,
+    /// which would need ng's prior strength declared the counterpart of those pseudocounts; that
+    /// is a claim about the two models and nobody has made it. Measured, the residual is worth one
+    /// pass out of five here: absorbing a plausible pseudocount mass into the divisor stops the
+    /// tight arm at four rather than five.
+    ///
+    /// # What it requires and what it reports
+    ///
+    /// **Requires:** the genotypes match. That is the failing state a differential needs.
+    ///
+    /// **Reports, by asserting the numbers so they cannot go stale:** the tighter tolerance takes
+    /// **five passes against two** on this tract — two and a half times the work for the same
+    /// three genotypes — and the two stopping points land **4.8 × 10⁻⁵ of a chromosome** apart,
+    /// which is twenty times inside the looser tolerance. *(That is how far apart the two answers
+    /// finished, not a promise either rule makes: a convergence rule bounds the **last step**
+    /// between two passes and says nothing about the distance to another rule's answer.)*
+    ///
+    /// **Every number here is measured on this fixture rather than predicted from it**, which is
+    /// worth saying because the first draft guessed three and two at twelve reads a sample and the
+    /// loop settled in one.
+    #[test]
+    fn a_tract_called_under_both_tolerances_gives_one_answer_and_says_what_moved() {
+        /// Measured on this fixture, not predicted from it.
+        const PASSES_AT_THE_TIGHT_TOLERANCE: u32 = 5;
+        /// The shipped tolerance's count on the same tract.
+        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 2;
+        /// How far apart the two stopping points landed, per chromosome — see the doc above.
+        const CHROMOSOMES_APART: f64 = 4.8e-5;
+
+        let reads_of_each_sample = three_samples_at_four_reads();
+        let reads: [&[SequenceObservation]; 3] = [
+            &reads_of_each_sample.0,
+            &reads_of_each_sample.1,
+            &reads_of_each_sample.2,
+        ];
+
+        // **ng's rule at the tolerance the SSR caller states.**
+        let mut tight_scratch = worker_scratch();
+        let tight = call_tract_at_threshold(
+            &reads,
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            SSR_CALLER_TOLERANCE,
+            &mut tight_scratch,
+        );
+
+        // **The same rule at ng's own tolerance.**
+        let mut shipped_scratch = worker_scratch();
+        let shipped = call_tract_at_threshold(
+            &reads,
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            DEFAULT_CONVERGENCE_THRESHOLD,
+            &mut shipped_scratch,
+        );
+
+        // Required: the genotypes match.
+        let under_each: Vec<(Vec<u16>, Vec<u16>)> = (0..3)
+            .map(|sample| {
+                (
+                    called_alleles(&tight, sample),
+                    called_alleles(&shipped, sample),
+                )
+            })
+            .collect();
+        for (sample, (at_tight, at_shipped)) in under_each.iter().enumerate() {
+            assert_eq!(
+                at_tight, at_shipped,
+                "sample {sample} is called {at_tight:?} under the SSR caller's tolerance and \
+                 {at_shipped:?} under ng's, so this tract's call turns on the last thousandth of \
+                 frequency movement"
+            );
+        }
+        assert_eq!(
+            under_each
+                .iter()
+                .map(|(at_tight, _)| at_tight.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![1, 1], vec![0, 1], vec![0, 0]],
+            "and the answer is the one the reads give, so the fixture is comparing two settled \
+             loops rather than two that both gave up"
+        );
+        assert!(
+            tight.converged && shipped.converged,
+            "a loop that hit the cap has not settled, and comparing two unsettled answers says \
+             nothing about the tolerance that stopped them"
+        );
+
+        // Reported: what a thousandfold tighter tolerance costs, and how far apart it lands.
+        assert_eq!(
+            (tight.passes, shipped.passes),
+            (
+                PASSES_AT_THE_TIGHT_TOLERANCE,
+                PASSES_AT_THE_SHIPPED_TOLERANCE
+            ),
+            "what a thousandfold tighter tolerance costs on this tract"
+        );
+        let moved = tight
+            .cohort_expected_copies()
+            .copies()
+            .iter()
+            .zip(shipped.cohort_expected_copies().copies())
+            .map(|(at_tight, at_shipped)| (at_tight - at_shipped).abs())
+            .fold(0.0_f64, f64::max);
+        let chromosomes = f64::from(diploid().get()) * reads.len() as f64;
+        let apart = moved / chromosomes;
+
+        // **How far apart the two stopping points landed, asserted as a size rather than as a
+        // sign.** `apart > 0` would admit a last-place float wobble as *the two runs diverged*,
+        // and the whole content of this fixture is that the genotypes survive a real movement:
+        // three more passes moved the frequencies somewhere, and they still called the same three
+        // samples the same way.
+        assert!(
+            apart > CHROMOSOMES_APART / 2.0 && apart < CHROMOSOMES_APART * 2.0,
+            "the two tolerances stopped {apart} of a chromosome apart, where this fixture \
+             measures {CHROMOSOMES_APART}: either they now stop in the same place, and the \
+             comparison is empty, or the trajectory has moved"
+        );
+        assert!(
+            apart < DEFAULT_CONVERGENCE_THRESHOLD,
+            "the two stopping points are {apart} of a chromosome apart, which is outside the \
+             looser tolerance itself"
+        );
+    }
+
+    /// **The same comparison at the tract ladder's bottom rung, where the prior's shape is flat
+    /// rather than fitted.**
+    ///
+    /// A run whose repeat fit produced no length spectrum anywhere seeds every tract from the
+    /// ladder's bottom rung: a **flat** shape at one chromosome of belief. Everything else is held
+    /// at the fixture above's — the same three samples, the same four reads apiece, the same
+    /// fitted substitution rates — so the one thing that changes is the prior's shape.
+    ///
+    /// **Measured: three passes against one, where the fitted spectrum takes five against two.**
+    /// The tighter tolerance still costs passes, and the genotypes are still the same three.
+    ///
+    /// **What separates the two fixtures is the prior's shape, not its strength**, and that is
+    /// worth stating because the obvious guess is the other one. Swept on this tract: holding the
+    /// fitted shape and raising its concentration from 1 chromosome to 100 moves the pass count
+    /// from 5 to 4 — barely, and in the direction opposite to *more belief, more iterating*.
+    /// Flattening the shape at a fixed concentration drops it to 3 or 4. **An asymmetric spectrum
+    /// pulls the frequencies off the point the reads alone would put them, and the loop then has a
+    /// trajectory to walk; a flat one does not.**
+    ///
+    /// *(An earlier version of this fixture changed the substitution rates as well as the shape
+    /// and reported one pass under both rules — the comparison empty. It was the missing rates
+    /// doing that, not the rung.)*
+    #[test]
+    fn the_two_tolerances_differ_at_the_ladders_bottom_rung_too() {
+        /// Measured on this fixture, at ng's rule and the tolerance the SSR caller states.
+        const PASSES_AT_THE_TIGHT_TOLERANCE: u32 = 3;
+        /// The shipped tolerance's count on the same tract.
+        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 1;
+
+        let reads_of_each_sample = three_samples_at_four_reads();
+        let reads: [&[SequenceObservation]; 3] = [
+            &reads_of_each_sample.0,
+            &reads_of_each_sample.1,
+            &reads_of_each_sample.2,
+        ];
+        let nothing_fitted = StratumFits::over(&[], std::collections::BTreeMap::new());
+
+        let mut tight_scratch = worker_scratch();
+        let tight = call_tract_at_threshold(
+            &reads,
+            &nothing_fitted,
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            SSR_CALLER_TOLERANCE,
+            &mut tight_scratch,
+        );
+        let mut shipped_scratch = worker_scratch();
+        let shipped = call_tract_at_threshold(
+            &reads,
+            &nothing_fitted,
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            DEFAULT_CONVERGENCE_THRESHOLD,
+            &mut shipped_scratch,
+        );
+
+        assert_eq!(
+            rung_of(&tight),
+            LengthSpectrumRung::StatedFlat,
+            "this fixture is about the bottom rung only while it is on the bottom rung"
+        );
+        for sample in 0..3 {
+            assert_eq!(
+                called_alleles(&tight, sample),
+                called_alleles(&shipped, sample),
+                "sample {sample} is called differently under the two tolerances at the flattest \
+                 prior the ladder offers"
+            );
+        }
+        assert!(
+            tight.converged && shipped.converged,
+            "a loop that hit the cap has not settled, and two unsettled answers say nothing \
+             about the tolerances that stopped them"
+        );
+        assert_eq!(
+            (tight.passes, shipped.passes),
+            (
+                PASSES_AT_THE_TIGHT_TOLERANCE,
+                PASSES_AT_THE_SHIPPED_TOLERANCE
+            ),
+            "what the tighter tolerance costs where the prior's shape is flat"
+        );
     }
 
     /// **A repeat tract's prior comes from its stratum's length spectrum, and the record says
