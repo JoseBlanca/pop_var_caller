@@ -430,3 +430,78 @@ it, as did every other refusal that constructor held.
 - **One stale sentence in a harness's printed output was found by running it**: the estimators
   program told its reader that the mean frequency column decides *whether the seed still needs its
   blend*. It does not still need one.
+
+---
+
+## B1 — the two estimators, over the fit's own posteriors
+
+**Contract (plan B1).** A function in `parameter_estimation::joint` taking the converged
+posteriors, the sample count and the panel's `F`, returning the two numbers. Types and the
+reduction only; Milestone C wires it to a run.
+
+### What shipped
+
+A new module,
+[`parameter_estimation/joint/census_moments.rs`](../../../../src/ng/parameter_estimation/joint/census_moments.rs),
+holding `CensusMoments` — the two moments averaged over the census positions — and
+`CensusMoments::from_posteriors(genotype_posterior, samples, positions)`.
+
+Per position it forms the panel's expected alternative-copy count `E[k]` and the sum of the
+samples' own posterior variances, then averages `k/2N` and `2k(2N − k)/(2N(2N − 1))` over
+positions. **The fit's third number a sample — the posterior that the sample carries an extra copy
+of the position — takes no part**: that is a mapping fact rather than an allele count, and the fit
+scores it as its own class precisely so it need not be read as a heterozygote.
+
+Nothing calls it. C1 is where it meets a run.
+
+### One deviation: the inbreeding coefficient arrives at B3, not here
+
+**The plan's contract lists `F` among B1's arguments and B3 is what applies it.** An argument that
+nothing reads is a `clippy -D warnings` failure and, worse, a signature that promises a correction
+the body does not make. So the function takes the posteriors and the two counts, and B3 adds `F`
+along with the division that uses it. The end state is the plan's.
+
+### What the heterozygosity owes as of this step, said in its own documentation
+
+It substitutes `E[k]` into a formula quadratic in `k`, so it comes back **high by the variance** —
+2.538 ± 0.165 times the truth at one sample and three reads a position, against 1.219 ± 0.152 with
+the term (report §4.1) — and it applies no inbreeding correction, a further 80% at one individual
+at `F = 0.8`. Both are named on the field itself, with the plan steps that close them.
+
+### The fixtures, and what each is for
+
+Nine tests. Two are the ones that could have been vacuous and are not:
+
+- **`point_mass_posteriors_return_the_census_s_own_moments`** runs at **one individual and at a
+  thousand**, which is spec §9's first test minus its inbreeding half. The two sizes are not a
+  formality: at a thousand individuals writing `2N` where `2N − 1` belongs is a 0.05% error and
+  sits inside any tolerance a test would set, and at one individual it is 50%.
+- **`the_frequency_and_the_heterozygosity_are_not_the_same_number`** runs at **two** individuals
+  with one alternative copy in four chromosomes, where the frequency is 1 in 4 and the
+  heterozygosity 1 in 2. At one individual the two agree, so no single-individual fixture can tell
+  a reduction that returned one for the other apart.
+
+The remaining seven pin the ends (a panel fixed for either allele has no heterozygosity), the
+carrier posterior's non-participation, the variance being summed per sample rather than squared as
+a whole, a certain genotype having no variance, and the two refusals.
+
+### Mutations run
+
+Five, each against the module's nine tests:
+
+| mutation | tests failing |
+|---|---|
+| the finite-panel correction dropped — `2N` for `2N − 1` | 2 of 9 |
+| the `(2N − k)` factor dropped, so the heterozygosity becomes the frequency | 3 of 9 |
+| a homozygous-alternative sample counted as one copy rather than two | 4 of 9 |
+| `E[k²]` written `P(het) + 2·P(both)` instead of `+ 4·P(both)` | 2 of 9 |
+| the carrier posterior read where the both-non-reference one belongs | 4 of 9 |
+
+The source was restored from a backup after each and the restore checked with `git diff`.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and a
+  plain `cargo build --lib` — all clean.
+- `cargo test --lib` — **4,831 passed, 0 failed, 11 ignored**, from 4,822. Nine tests added.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.

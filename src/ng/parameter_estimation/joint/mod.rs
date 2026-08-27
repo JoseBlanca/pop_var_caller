@@ -33,6 +33,7 @@
 
 pub mod census;
 pub mod census_file;
+pub mod census_moments;
 pub mod contamination;
 pub mod fit;
 pub mod loci;

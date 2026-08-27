@@ -123,7 +123,7 @@ saying what it measured, or kept against a local copy. **Own commit, do not bund
 
 ### Milestone B — step two's estimators, on known genotypes
 
-**B1. The two estimators, over posteriors.**  ☐
+**B1. The two estimators, over posteriors.**  ✅
 A function in `parameter_estimation::joint` taking the converged posteriors, the sample count and
 the panel's `F`, returning the two numbers. **Types and the reduction only** — Milestone C wires it
 to a run. *Depends:* A5. *Source:* spec §3, §5.
