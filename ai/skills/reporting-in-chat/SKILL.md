@@ -189,6 +189,79 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-27 — three numbers written before the measurement that produced them existed
+
+**Not an owner correction — caught in review before sending, and logged because the mechanism is
+the same one the entries below describe.** Writing up a six-part measurement, the prose for each
+part was drafted while the next sweep was still running, so three figures were carried from a run
+that was later superseded:
+
+> ❌ "a lump at one intermediate frequency … 1.52 per kb … gap **0.287**" — from a version of the
+> program that used a point mass; the shipped version uses a narrow Beta and gives 1.51 and 0.192.
+>
+> ❌ "on a population the curve can hold, they agree to within 4% at 63 samples; on one it cannot
+> hold, the curve's is up to 5% high" — **backwards**. The widest cell is 8.9% and it is on a
+> population the curve *can* hold.
+>
+> ❌ "every cell within its own uncertainty of the predicted value" — 21 of 36 are within one
+> standard error, 33 within two, 3 beyond two.
+
+> ✅ Each replaced by the figure re-extracted from the run that shipped, and the third replaced by
+> the count: *"21 of the 36 cells sit within one standard error of the prediction, 33 within two,
+> and all 36 within three — for 36 draws from a correct formula the expected counts are about 25,
+> 34 and 36."*
+
+Three failures, and the first is the new rule:
+
+1. **Prose written before its measurement exists is prose written from memory of an earlier
+   measurement.** Every one of the three came from drafting a section while its run was still
+   going. **New rule: a section is written after the run it reports, never during — and if a
+   number must be quoted before the final run, it is quoted with the run's filename beside it so
+   the staleness is visible.**
+2. **The second one asserted a direction, not just a size, and the direction was the interesting
+   half.** "The curve is worse on populations it cannot hold" is a mechanism claim; it was written
+   because it was the expected answer, and the data said the opposite. This is the *wrong mechanism
+   claim* failure the project's own review history puts at about 60 in 300 — and it was reached by
+   assuming rather than by reading the column.
+3. **"Within its own uncertainty" is a hedge dressed as a measurement.** Replacing it with three
+   counts and the counts a correct formula would give is both shorter and checkable. **A phrase of
+   the form "within X" over many cells has to say how many cells and how many were not.**
+
+**A review of the same report then found four more, and the two that matter are both the second
+failure above in a stronger form.** Every counted figure in the draft was right; what was wrong was
+why and where.
+
+> ❌ "Ten individuals is the worst panel size … the likeliest reason is the residual: the variance
+> term is the sum of the samples' own, which is exact only if their posteriors are independent."
+>
+> The residual has the **opposite sign** — the ignored covariance is positive, so ignoring it biases
+> the estimate *up* and these cells were *down* — and it is **ten times too small**, because the
+> whole variance term in those cells is 2 points against a 10-to-25-point shortfall.
+
+> ❌ "a quantity that moves in 7-nat steps lands in a 0.34-nat window about one time in twenty"
+>
+> That predicts 5 calls in 100 moving, in a section whose measurement three paragraphs above it is
+> 0.44 in 100 at worst and 0.00 in 28 of 36 cells. **The argument offered to explain a null
+> contradicted the null.**
+
+Three rules, and the first is why the hedging did not save either one:
+
+1. **Labelling a claim "an explanation and not a measurement" limits its confidence and not its
+   direction.** Both sentences above were hedged. A hedge on a mechanism that points the wrong way
+   is still a wrong mechanism, and a reader who trusts the hedge still comes away believing the
+   sign. **Before hedging a mechanism, check it against the sign and the size of the thing it
+   explains** — those are two arithmetic checks, and both of these failed one.
+2. **A mechanism proposed for a number must be arithmetically capable of producing that number.**
+   "Could this cause be this large?" is a one-line check and it was not run in either case.
+3. **An explanation of a null must not predict a non-null.** If the argument for "nothing moved"
+   yields a rate an order of magnitude above the largest cell measured, the argument is refuting the
+   result rather than accounting for it.
+
+**And one that is not about mechanism:** a table divided two quantities that do not cancel — a
+panel-level estimator over a population-level truth — leaving an unrelated 15% factor standing in
+every one-sample cell and being read as the effect under study. **When a ratio is meant to make
+something cancel, name what cancels and check it does**, at the point the ratio is written.
+
 ### 2026-08-24 — an abstract argument-about-an-argument, built on an undefined project verb
 
 Comparing what three callers allow as candidate alleles at one repeat tract, a reply ended a

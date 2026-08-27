@@ -4,6 +4,15 @@
 measure and what would settle it.** Written from a design conversation with the owner; the
 proposal is the owner's.
 
+**⚠ Answered, 2026-08-27, and §1's explanation of the defect is wrong.** The bias is real and the
+figures in §1 are reproduced, but it does not come from compressing four numbers into two — that
+map exists, is exact at every panel size, and is two lines. It comes from choosing the two numbers
+by a divergence fit over the panel's allele-count classes. **Read
+[`ordinary_site_prior_moments_answer.md`](ordinary_site_prior_moments_answer.md) before acting on
+this document**; the measurements are in
+[`../../reports/ng_ordinary_site_prior_moments_2026-08-27.md`](../../reports/ng_ordinary_site_prior_moments_2026-08-27.md)
+and the implementation in [`../spec/ordinary_site_prior_moments.md`](../spec/ordinary_site_prior_moments.md).
+
 **The objective, in one sentence.** Estimate the two numbers the ordinary-site genotype prior
 needs **directly from the census positions**, without bias, at every cohort size from one sample
 to thousands and every depth from about three reads a position to hundreds.
