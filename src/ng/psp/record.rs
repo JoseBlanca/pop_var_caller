@@ -1170,8 +1170,41 @@ impl OffsetBase {
 /// gives the block its own reader-side state; this is the writer's half of it.
 #[derive(Debug)]
 pub struct RecordEncoder {
+    /// Kept across blocks: reused so a writer does not allocate one per record.
     body_scratch: Vec<u8>,
+    /// Replaced whole at every block start.
+    block: PerBlockState,
+}
+
+/// Everything of the encoder's that **restarts when a block does** (spec §3.2).
+///
+/// **A struct rather than loose fields, and the reason is the next two milestones.** Spec §3.2
+/// requires every running difference inside a block to restart — the position difference, the
+/// coverage difference, the chain-id difference — and Milestone E adds the chain-id live set,
+/// which is exactly such a difference. While this was one field on [`RecordEncoder`], adding a
+/// second was a compile error in `for_block` and **not** in `start_block`: measured, a field
+/// added and initialised in the constructor alone builds clean and passes every test, and the
+/// file it then writes is wrong from each block's first record — plausibly wrong, because
+/// coverage is smooth.
+///
+/// **What the split buys, exactly, because it is less than it looks.** A field added *here* is
+/// a compile error at `at_block_start`, which is the only constructor, so it cannot be left out
+/// of the reset — measured, `error[E0063]: missing field … in initializer of PerBlockState`.
+/// A field added to [`RecordEncoder`] *beside* this one and initialised in `for_block` still
+/// compiles and still is never reset — also measured, 148 tests green. So this does not force
+/// the choice; it makes the reset automatic once the choice is made, and names the two
+/// lifetimes so that making it wrong is visible rather than invisible.
+#[derive(Debug, Clone, Copy)]
+struct PerBlockState {
     measured_from: OffsetBase,
+}
+
+impl PerBlockState {
+    fn at_block_start(first_position: Position) -> Self {
+        Self {
+            measured_from: OffsetBase::at_block_start(first_position),
+        }
+    }
 }
 
 impl RecordEncoder {
@@ -1179,22 +1212,24 @@ impl RecordEncoder {
     pub fn for_block(first_position: Position) -> Self {
         Self {
             body_scratch: Vec::new(),
-            measured_from: OffsetBase::at_block_start(first_position),
+            block: PerBlockState::at_block_start(first_position),
         }
     }
 
-    /// Begin the next block: the base every offset is measured from resets to `first_position`.
+    /// Begin the next block: everything measured from within a block resets to `first_position`.
     ///
     /// **The reset is the property a reader starting mid-file depends on** (spec §3.2), and it
     /// belongs here rather than in a caller's variable for the reason the type's own doc gives.
+    /// It assigns the whole of [`PerBlockState`] rather than one of its fields, so a running
+    /// difference added later cannot be left out of the reset.
     pub fn start_block(&mut self, first_position: Position) {
-        self.measured_from = OffsetBase::at_block_start(first_position);
+        self.block = PerBlockState::at_block_start(first_position);
     }
 
     /// What the next record's offset will be measured from — the block's first position until a
     /// record has been written, and the last written record's start after that.
     pub fn measured_from(&self) -> OffsetBase {
-        self.measured_from
+        self.block.measured_from
     }
 
     /// Append `record` to `out` as a head and then a body, and hand back the head that was
@@ -1217,9 +1252,9 @@ impl RecordEncoder {
             .region
             .start
             .get()
-            .checked_sub(self.measured_from.position().get())
+            .checked_sub(self.block.measured_from.position().get())
             .ok_or(RecordEncodeError::StartsBeforeThePreviousRecord {
-                previous_position: self.measured_from.position(),
+                previous_position: self.block.measured_from.position(),
                 offered_start: record.region.start,
             })?;
 
@@ -1240,7 +1275,7 @@ impl RecordEncoder {
             non_reference_reads,
             body_bytes,
         };
-        self.measured_from = OffsetBase::after(&head);
+        self.block.measured_from = OffsetBase::after(&head);
         Ok(head)
     }
 }

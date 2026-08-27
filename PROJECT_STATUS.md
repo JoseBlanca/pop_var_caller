@@ -19,7 +19,37 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-26):** **a psp record's body now goes to bytes and back
+> - **Last completed task (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A block
+> ends when a record's *start* crosses into the next multiple of the genomic block size, never
+> crosses a contig, and closes early once it has reached the declared byte ceiling. `src/ng/psp/block.rs`
+> holds the cut, the three fields a block opens with, and the payload a compressor will be handed;
+> nothing compresses and nothing writes a file yet.
+> **⛦ Eight review checklists found 2 Blockers and 9 Majors, and neither Blocker was a defect in
+> the cut** — both were properties the code has that no test held. *Nothing held the cut to a
+> record's start*: changing one identifier to `region.end` passed all 21 tests, because no fixture
+> had a record whose span crossed a grid multiple. That matters because a span is
+> sample-dependent — a deletion widens a locus in one sample and not another — so a cut taken from
+> the end makes a block boundary depend on which sample is being written, which is the one thing
+> the grid exists to prevent, and every file still reads back self-consistently. The second: a
+> caller holding a whole block was told *fetch more bytes* about a head that stopped early, which
+> is a retry that never ends. **The parsers themselves came out sound under 1.4 million fuzzed
+> inputs and half a million builder pushes** — no panic, no overflow, and nothing ever sized from a
+> declared length. Two of my own claims failed on their first run and are corrected: a fixture
+> asserted to reach three grid cells reached two, and a 200-byte ceiling asserted to fire never
+> did. **And a fixture property the review asked me to make true turned out to be unachievable** —
+> over a four-letter alphabet two one-base records must sometimes carry the same base — so the
+> claim is withdrawn rather than repaired.
+> **⛦ One departure is waiting at Checkpoint D:** spec §12 question 3 says the rule that
+> accumulates blocks across empty spans **ships**, leaving only its threshold open. It is not
+> built — `Manifest` has no field for it and the plan's D1 does not list it — and what omitting it
+> costs is measured in the spec: about 10 % of the file on a patchy sample at a 5 kb grid, and
+> most of that recovered at the 100 kb default.
+> [D1](doc/devel/reports/implementations/ng_psp_d1_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d1_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d1_2026-08-27.md).
+>
+> - **Previously (2026-08-26):** **a psp record's body now goes to bytes and back
 > exactly** (step C1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`), on top of a psp module, a header that round-trips, and a summed log-error
 > that is an integer where it is computed (A1–A3, B3). **The open question C1 had to close is

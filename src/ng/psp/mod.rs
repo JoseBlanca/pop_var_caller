@@ -64,14 +64,17 @@ pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod record;
 
-pub use block::{BlockBuilder, BlockHead, BlockHeadError, BlockRecords, BlockWriteError};
+pub use block::{
+    BlockBuilder, BlockCutRuleError, BlockHead, BlockHeadDecodeError, BlockRecords,
+    BlockWriteError, DecodedBlockHead,
+};
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{
-    ContigIdentity, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
-    FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding, FieldName, FieldSpec, HEAD_MAGIC,
-    HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header, IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES,
-    MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue,
-    ReferenceIdentity, WriterProvenance,
+    ContigIdentity, DEFAULT_BLOCK_BYTE_CEILING, DEFAULT_GENOMIC_BLOCK_SIZE_BP,
+    DEFAULT_LOOK_BACK_WINDOW_LOG, FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding,
+    FieldName, FieldSpec, HEAD_MAGIC, HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header,
+    IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES, MAX_LOOK_BACK_WINDOW_LOG,
+    MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue, ReferenceIdentity, WriterProvenance,
 };
 pub use index::BlockIndexEntry;
 pub use record::{
@@ -266,14 +269,16 @@ pub enum PspReadError {
     /// A block failed to decompress, or a record ran past the end of its block. The file
     /// is damaged.
     ///
-    /// **⚠ Do not fold a [`RecordDecodeError`] through this variant.** Its
-    /// [`Truncated`](RecordDecodeError::Truncated) means *the body stopped early*, which the
-    /// streaming reader of Milestone D reads more bytes for, and its
-    /// [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the reader* — and this
-    /// variant says *the file is damaged*, which is the wrong instruction for both. It also
-    /// takes a `std::io::Error` as its cause, so a record's own error could only reach it as a
-    /// string. **Milestone D adds the variants that carry the class**; this note is here
-    /// because that is the point at which it would be lost (the C1 review, M13).
+    /// **⚠ Do not fold a [`RecordDecodeError`] or a [`BlockHeadDecodeError`] through this
+    /// variant.** A record's [`Truncated`](RecordDecodeError::Truncated) means *the body
+    /// stopped early*, which the streaming reader of Milestone D reads more bytes for, and its
+    /// [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the reader*;
+    /// [`BlockHeadDecodeError::Truncated`] carries the first of those instructions about a
+    /// block's opening fields. This variant says *the file is damaged*, which is the wrong
+    /// instruction for all three. It also takes a `std::io::Error` as its cause, so either
+    /// error could only reach it as a string. **Milestone D3 adds the variants that carry the
+    /// class**; this note is here because that is the point at which it would be lost (the C1
+    /// review, M13; the D1 review).
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,

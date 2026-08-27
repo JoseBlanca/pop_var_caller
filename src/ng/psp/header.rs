@@ -166,6 +166,27 @@ pub struct Manifest {
     pub fields: Vec<FieldSpec>,
 }
 
+impl Manifest {
+    /// What a writer that was told nothing records in the file it writes.
+    ///
+    /// **The one place every default is assembled**, so that a caller does not have to know
+    /// which four values a manifest holds and F3's writer is not the fifth hand-built literal
+    /// to get one of them wrong: [`DEFAULT_GENOMIC_BLOCK_SIZE_BP`],
+    /// [`DEFAULT_BLOCK_BYTE_CEILING`], [`DEFAULT_LOOK_BACK_WINDOW_LOG`], and the fields this
+    /// build of the record codec encodes.
+    ///
+    /// **Every one of them still goes into the file.** A reader is driven by what it finds
+    /// there and never by these (spec §4.5); they are only what a writer starts from.
+    pub fn as_this_build_writes_it() -> Self {
+        Self {
+            genomic_block_size_bp: DEFAULT_GENOMIC_BLOCK_SIZE_BP,
+            block_byte_ceiling: DEFAULT_BLOCK_BYTE_CEILING,
+            look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
+            fields: crate::ng::psp::record::record_fields(),
+        }
+    }
+}
+
 /// A field of a record, and how to read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSpec {
@@ -299,6 +320,20 @@ pub const DEFAULT_LOOK_BACK_WINDOW_LOG: u8 = 15;
 /// larger block gives the match finder nothing extra. 100 kb is a round number in the flat
 /// part of that curve, and spec §4.1 records that 1,000 kb is live and may be better.
 pub const DEFAULT_GENOMIC_BLOCK_SIZE_BP: Bp = Bp(100_000);
+
+/// The byte ceiling a writer takes when nothing else says otherwise: **none at all**.
+///
+/// **Off because the value is not known yet**, not because none is wanted. Spec §12 question 2
+/// is open, and what settles it is the block-size distribution on a whole-genome
+/// deep-coverage sample, which nothing has produced. Leaving it off costs nothing measurable
+/// on the data there is: a 100 kb grid with a 1 MiB ceiling gives 4.628 bytes a record against
+/// 4.627 without, on a tomato accession at three reads a position (spec §4.1). What a ceiling
+/// would be *for* is the other end of the range — at 279 reads a position a fully covered
+/// 100 kb block is about 1.6 MB, which is a large thing to hold while writing.
+///
+/// **Named rather than spelled `None` at each site**, so that when the question closes the
+/// value has somewhere to land with the reasoning beside it.
+pub const DEFAULT_BLOCK_BYTE_CEILING: Option<u32> = None;
 
 // ---------------------------------------------------------------------
 // Build, encode, parse, validate
@@ -633,7 +668,7 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
     if manifest.block_byte_ceiling == Some(0) {
         return Err(BrokenRule::new(
             "manifest.block-byte-ceiling",
-            "is zero; a ceiling no block can stay under closes every block empty",
+            "is zero; a ceiling no block can stay under gives every record a block of its own",
         ));
     }
     if !(MIN_LOOK_BACK_WINDOW_LOG..=MAX_LOOK_BACK_WINDOW_LOG)
@@ -1704,7 +1739,7 @@ mod tests {
             (
                 "a byte ceiling no block can stay under",
                 Box::new(|header| header.manifest.block_byte_ceiling = Some(0)),
-                "closes every block empty",
+                "a block of its own",
             ),
             (
                 "a look-back window one step below zstd's floor",

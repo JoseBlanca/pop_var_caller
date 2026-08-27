@@ -139,7 +139,7 @@ keeps.
 
 ## Milestone D — the psp block
 
-☐ **D1 — cut blocks on the genomic grid.** A block ends when a position crosses into the next
+✅ **D1 — cut blocks on the genomic grid.** A block ends when a position crosses into the next
 multiple of `genomic_block_size_bp`, and never crosses a contig. The optional byte ceiling closes one
 early.
 ***Depends:*** C3. ***Source:*** [spec §4.1](../spec/psp_file_format.md).
