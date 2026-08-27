@@ -2948,6 +2948,52 @@ mod tests {
         };
         let truth = 0.09 * 2.0 * 0.5 * 2.0 / (2.5 * 3.5);
         assert!((density.expected_heterozygosity() - truth).abs() < 1e-12);
+
+        // **A second density, because the first has `a · b = 1` and hides the shape entirely.**
+        // At `a = 0.5, b = 2.0` the product in the numerator is exactly one, so deleting `a * b`
+        // from the formula altogether leaves this fixture's answer unchanged — measured, that
+        // mutation passed the whole library suite bar two distant tests. `Beta(0.35, 1.20)` has
+        // `a · b = 0.42`, so it does not.
+        let shape_shows = FrequencyDensity {
+            p_invariant: 0.9949,
+            p_fixed_alt: 0.0004,
+            a: 0.35,
+            b: 1.20,
+        };
+        let truth = 0.0047 * 2.0 * 0.35 * 1.20 / (1.55 * 2.55);
+        assert!(
+            (shape_shows.expected_heterozygosity() - truth).abs() < 1e-15,
+            "got {} against {truth}",
+            shape_shows.expected_heterozygosity()
+        );
+    }
+
+    /// **Two point masses that would leave nothing segregating are clamped at zero, not sent
+    /// negative** — and nothing tested that until a review mutated the clamp away and the whole
+    /// library suite stayed green.
+    ///
+    /// `p_segregating` is the shared input to both of this density's integrals, so without the
+    /// clamp a density whose masses total above one sends **both moments negative at once** — an
+    /// expected frequency below zero and a heterozygosity below zero, neither of which any
+    /// downstream type refuses on this path. The two moments would then reach the genotype prior's
+    /// own newtypes, which do refuse them, and the run would die naming a probability rather than
+    /// the density that produced it.
+    ///
+    /// **It is not reachable from a fit that converged** — the M-step clamps both masses off a
+    /// normalised branch total — which is exactly why the fields are public and this test exists:
+    /// what it guards is a density built by hand.
+    #[test]
+    fn two_point_masses_totalling_above_one_leave_nothing_segregating() {
+        let impossible = FrequencyDensity {
+            p_invariant: 0.7,
+            p_fixed_alt: 0.5,
+            a: 0.5,
+            b: 2.0,
+        };
+        assert_eq!(impossible.p_segregating(), 0.0);
+        // And both integrals follow it to zero rather than through it.
+        assert_eq!(impossible.expected_heterozygosity(), 0.0);
+        assert_eq!(impossible.expected_alternative_frequency(), 0.5);
     }
 
     /// **The mean alternative-allele frequency is the two contributing parts of the density**,

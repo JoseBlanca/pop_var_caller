@@ -443,6 +443,16 @@ mod tests {
     /// **The panel it was fitted on no longer enters.** Both numbers are integrals of the curve,
     /// so a run of one sample and a run of a thousand get the same seed off the same density
     /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
+    ///
+    /// **⚠ What this can and cannot see, because a review measured it.** Both assertions below
+    /// take their truth from the same two accessors that supplied the seed's inputs, so with
+    /// respect to *those functions* they are identities: whatever
+    /// `expected_alternative_frequency` returns, the seed reports it back. What they do catch is
+    /// everything between — the two moments reaching the builder in the right order, the identity
+    /// that solves the total, and the pair coming back unswapped, which the first assertion alone
+    /// could not see. **The test that can see a defect in either moment function is
+    /// [`the_seed_is_what_the_identity_gives_from_the_four_fitted_numbers`] below**, which starts
+    /// from the four literal fitted numbers.
     #[test]
     fn a_fitted_density_seeds_the_run_from_its_own_moments() {
         let density = a_fitted_density();
@@ -498,32 +508,49 @@ mod tests {
     /// The two assertions in the test above compare the seed against the density through the
     /// library's own accessors; this one writes the whole chain out from the four fitted numbers
     /// and compares against that.
+    ///
+    /// **It runs on two densities, and the second is there because the first has `b = 1`** — where
+    /// `a/(a+b)` and `a/(a+1)` are the same number, so a formula that lost the `b` would pass. The
+    /// second is the human-like shape, `Beta(0.35, 1.20)`, whose `a · b` is also not one, so
+    /// deleting the Beta's shape from the heterozygosity fails there too.
     #[test]
     fn the_seed_is_what_the_identity_gives_from_the_four_fitted_numbers() {
-        let density = a_fitted_density();
-        let (p_invariant, p_fixed_alt, a, b) = (0.9950, 0.0010, 0.20, 1.00);
-        let segregating = 1.0 - p_invariant - p_fixed_alt;
-        let frequency = p_fixed_alt + segregating * a / (a + b);
-        let theta = segregating * 2.0 * a * b / ((a + b) * (a + b + 1.0));
-        let share_of_ceiling = theta / (2.0 * frequency * (1.0 - frequency));
-        let total = share_of_ceiling / (1.0 - share_of_ceiling);
+        for (p_invariant, p_fixed_alt, a, b) in
+            [(0.9950, 0.0010, 0.20, 1.00), (0.9949, 0.0004, 0.35, 1.20)]
+        {
+            let density = Estimate {
+                value: FrequencyDensity {
+                    p_invariant,
+                    p_fixed_alt,
+                    a,
+                    b,
+                },
+                provenance: Provenance::FittedHere,
+                observations: 250_000,
+            };
+            let segregating = 1.0 - p_invariant - p_fixed_alt;
+            let frequency = p_fixed_alt + segregating * a / (a + b);
+            let theta = segregating * 2.0 * a * b / ((a + b) * (a + b + 1.0));
+            let share_of_ceiling = theta / (2.0 * frequency * (1.0 - frequency));
+            let total = share_of_ceiling / (1.0 - share_of_ceiling);
 
-        let seed = RunParameters::seed_from_moments(
-            its_own_frequency(&density),
-            its_own_diversity(&density),
-        );
-        assert!(
-            (seed.alpha_ref() / (total * (1.0 - frequency)) - 1.0).abs() < 1e-12,
-            "the reference concentration is {} where the identity gives {}",
-            seed.alpha_ref(),
-            total * (1.0 - frequency)
-        );
-        assert!(
-            (seed.alpha_alt_total() / (total * frequency) - 1.0).abs() < 1e-12,
-            "the alternative concentration is {} where the identity gives {}",
-            seed.alpha_alt_total(),
-            total * frequency
-        );
+            let seed = RunParameters::seed_from_moments(
+                its_own_frequency(&density),
+                its_own_diversity(&density),
+            );
+            assert!(
+                (seed.alpha_ref() / (total * (1.0 - frequency)) - 1.0).abs() < 1e-12,
+                "on Beta({a}, {b}) the reference concentration is {} where the identity gives {}",
+                seed.alpha_ref(),
+                total * (1.0 - frequency)
+            );
+            assert!(
+                (seed.alpha_alt_total() / (total * frequency) - 1.0).abs() < 1e-12,
+                "on Beta({a}, {b}) the alternative concentration is {} where the identity gives {}",
+                seed.alpha_alt_total(),
+                total * frequency
+            );
+        }
     }
 
     fn outbred() -> InbreedingF {

@@ -469,6 +469,22 @@ mod seed_tests {
         )
     }
 
+    /// One row of the shape list: a density, and **both of its moments worked out by hand**.
+    ///
+    /// The two truths are literals rather than expressions, so no formula is shared with what they
+    /// check. That is the whole point of the type: without them the list is decoration, and a
+    /// review measured exactly that — with the truths absent, deleting the Beta's shape from the
+    /// heterozygosity and swapping `a` for `b` in the mean frequency both left every test that
+    /// used this list green.
+    struct ShapeWithItsMoments {
+        name: &'static str,
+        density: FrequencyDensity,
+        /// `p_fixed_alt + p_segregating · a/(a+b)`, evaluated by hand.
+        mean_frequency: f64,
+        /// `p_segregating · 2ab/((a+b)(a+b+1))`, evaluated by hand.
+        heterozygosity: f64,
+    }
+
     /// The densities the closed-form checks run over: the four shapes
     /// `doc/devel/ng/spec/ordinary_site_seed.md` §1.2 measures, the unit tests' own lopsided
     /// fixture, **and one where the reference base is the rare one at the positions that vary**.
@@ -482,67 +498,120 @@ mod seed_tests {
     ///
     /// **Six rows, five distinct mean frequencies.** `Beta(1, 1)` and `Beta(4, 4)` are both
     /// symmetric, so their means are both a half and the two rows give the same answer — 3.000 in
-    /// 1,000 — on any test of *this* quantity. They differ in spread, which is what
-    /// `ordinary_site_seed.md` §1.2 measures them for, and not in mean. The list is kept whole
-    /// because it is the same set those measurements used, and the duplication is named here
-    /// rather than left for a reader to discover.
-    fn shapes_spanning_the_beta_and_both_point_masses() -> [(&'static str, FrequencyDensity); 6] {
+    /// 1,000. They differ in spread, which is what `ordinary_site_seed.md` §1.2 measures them for,
+    /// and not in mean. The list is kept whole because it is the same set those measurements used,
+    /// and the duplication is named here rather than left for a reader to discover.
+    ///
+    /// **⚠ The heterozygosity column cannot see an `a`-for-`b` swap on any row, and that is a fact
+    /// about the quantity rather than about the fixtures.** `2ab/((a+b)(a+b+1))` is symmetric in
+    /// its two arguments. The swap is visible only in the mean frequency, which is why both
+    /// columns are here.
+    fn shapes_spanning_the_beta_and_both_point_masses() -> [ShapeWithItsMoments; 6] {
         [
-            (
-                "tomato-like, strong rare-allele pile-up",
-                FrequencyDensity {
+            ShapeWithItsMoments {
+                name: "tomato-like, strong rare-allele pile-up",
+                density: FrequencyDensity {
                     p_invariant: 0.9950,
                     p_fixed_alt: 0.0010,
                     a: 0.20,
                     b: 1.00,
                 },
-            ),
-            (
-                "human-like, moderate pile-up",
-                FrequencyDensity {
+                // 0.0010 + 0.0040 · (1/6); 0.0040 · 0.4/2.64.
+                mean_frequency: 0.001_666_666_666_667,
+                heterozygosity: 0.000_606_060_606_061,
+            },
+            ShapeWithItsMoments {
+                name: "human-like, moderate pile-up",
+                density: FrequencyDensity {
                     p_invariant: 0.9949,
                     p_fixed_alt: 0.0004,
                     a: 0.35,
                     b: 1.20,
                 },
-            ),
-            (
-                "flat over what segregates",
-                FrequencyDensity {
+                // 0.0004 + 0.0047 · (0.35/1.55); 0.0047 · 0.84/3.9525.
+                mean_frequency: 0.001_461_290_322_581,
+                heterozygosity: 0.000_998_861_480_076,
+            },
+            ShapeWithItsMoments {
+                name: "flat over what segregates",
+                density: FrequencyDensity {
                     p_invariant: 0.9950,
                     p_fixed_alt: 0.0010,
                     a: 1.00,
                     b: 1.00,
                 },
-            ),
-            (
-                "the unit tests' own lopsided fixture",
-                FrequencyDensity {
+                // 0.0010 + 0.0040 · 0.5; 0.0040 · 2/6.
+                mean_frequency: 0.003,
+                heterozygosity: 0.001_333_333_333_333,
+            },
+            ShapeWithItsMoments {
+                name: "the unit tests' own lopsided fixture",
+                density: FrequencyDensity {
                     p_invariant: 0.90,
                     p_fixed_alt: 0.01,
                     a: 0.50,
                     b: 2.00,
                 },
-            ),
-            (
-                "middling frequencies — the shape the family cannot hold",
-                FrequencyDensity {
+                // 0.01 + 0.09 · 0.2; 0.09 · 2.0/8.75.
+                mean_frequency: 0.028,
+                heterozygosity: 0.020_571_428_571_429,
+            },
+            ShapeWithItsMoments {
+                name: "middling frequencies — the shape the family cannot hold",
+                density: FrequencyDensity {
                     p_invariant: 0.9950,
                     p_fixed_alt: 0.0010,
                     a: 4.00,
                     b: 4.00,
                 },
-            ),
-            (
-                "where it varies, the reference base is the rare one",
-                FrequencyDensity {
+                // 0.0010 + 0.0040 · 0.5; 0.0040 · 32/72.
+                mean_frequency: 0.003,
+                heterozygosity: 0.001_777_777_777_778,
+            },
+            ShapeWithItsMoments {
+                name: "where it varies, the reference base is the rare one",
+                density: FrequencyDensity {
                     p_invariant: 0.9950,
                     p_fixed_alt: 0.0010,
                     a: 3.00,
                     b: 0.60,
                 },
-            ),
+                // 0.0010 + 0.0040 · (5/6); 0.0040 · 3.6/16.56.
+                mean_frequency: 0.004_333_333_333_333,
+                heterozygosity: 0.000_869_565_217_391,
+            },
         ]
+    }
+
+    /// **Both closed forms are what a hand calculation gives, on all six shapes.**
+    ///
+    /// This is the test that makes the shape list load-bearing: it compares each density's two
+    /// integrals against literals worked out from the four fitted numbers, so it shares no
+    /// expression with either function. Without it the list's own justification was untrue — a
+    /// review measured that deleting `a · b` from the heterozygosity and swapping `a` for `b` in
+    /// the mean frequency both left every test that used the list green.
+    ///
+    /// The tolerance is relative and `1e-12`, which is about the accumulated rounding in
+    /// `1 − p_invariant − p_fixed_alt` and far tighter than any of the defects above.
+    #[test]
+    fn both_closed_forms_are_what_a_hand_calculation_gives() {
+        for shape in shapes_spanning_the_beta_and_both_point_masses() {
+            let frequency = shape.density.expected_alternative_frequency();
+            assert!(
+                (frequency / shape.mean_frequency - 1.0).abs() < 1e-12,
+                "on {} the mean frequency is {frequency:e} where the hand calculation gives {:e}",
+                shape.name,
+                shape.mean_frequency
+            );
+            let heterozygosity = shape.density.expected_heterozygosity();
+            assert!(
+                (heterozygosity / shape.heterozygosity - 1.0).abs() < 1e-12,
+                "on {} the heterozygosity is {heterozygosity:e} where the hand calculation gives \
+                 {:e}",
+                shape.name,
+                shape.heterozygosity
+            );
+        }
     }
 
     /// **No fitted mean frequency: the pair is the neutral `(1, θ)` at the diversity the pre-pass
@@ -661,28 +730,30 @@ mod seed_tests {
     fn the_seeds_implied_diversity_is_the_measured_one_at_every_shape() {
         let mut worst: f64 = 0.0;
         let mut worst_at = "";
-        for (name, density) in shapes_spanning_the_beta_and_both_point_masses() {
-            let theta = density.expected_heterozygosity();
-            let seed = seed_at(density.expected_alternative_frequency(), theta);
+        for shape in shapes_spanning_the_beta_and_both_point_masses() {
+            let name = shape.name;
+            // **The hand-computed moments, not the density's own methods.** Handing the seed
+            // builder `density.expected_alternative_frequency()` and then asserting the seed
+            // reports that same number back is an identity: it can see the builder swap the pair,
+            // and it cannot see the moment function be wrong. These two literals can.
+            let seed = seed_at(shape.mean_frequency, shape.heterozygosity);
             assert!(
                 matches!(seed.regime(), SeedRegime::FittedCurve),
                 "on {name} the regime came back {:?}",
                 seed.regime()
             );
-            // **And the pair's own expected frequency is the one it was handed.**
+            // **The pair's own expected frequency is the one it was handed.**
             // [`implied_heterozygosity`] cannot see this: `2 α_ref α_alt / (A (A + 1))` is
             // symmetric in the two concentrations, so it returns the same number for a pair and
-            // for its mirror. Without this line the only assertion in the tree that would notice
-            // the two being swapped lives in another module.
+            // for its mirror.
             let total = seed.alpha_ref() + seed.alpha_alt_total();
             let frequency = seed.alpha_alt_total() / total;
-            let handed_over = density.expected_alternative_frequency();
             assert!(
-                (frequency / handed_over - 1.0).abs() < 1e-12,
-                "on {name} the seed's expected frequency is {frequency:e} where it was handed \
-                 {handed_over:e}"
+                (frequency / shape.mean_frequency - 1.0).abs() < 1e-12,
+                "on {name} the seed's expected frequency is {frequency:e} where it was handed {:e}",
+                shape.mean_frequency
             );
-            let off = (implied_heterozygosity(seed) / theta - 1.0).abs();
+            let off = (implied_heterozygosity(seed) / shape.heterozygosity - 1.0).abs();
             if off > worst {
                 worst_at = name;
             }

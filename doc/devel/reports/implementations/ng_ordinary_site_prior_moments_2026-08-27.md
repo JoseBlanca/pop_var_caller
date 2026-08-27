@@ -709,3 +709,58 @@ here for it. The source was restored from a backup and the restore checked with 
 
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib` — **4,835 passed, 0 failed, 11 ignored**, from 4,832. Three tests added.
+
+### The tests-and-mutation review, and the three fixtures it closed
+
+Run at `02735054`, forty-three tool uses, nine container runs, and it found **one surviving
+mutation on shipped arithmetic and two fixture sets that could not fail.**
+
+**1. `FrequencyDensity::p_segregating`'s clamp had no test.** Removing `.max(0.0)` from
+`1 − p_invariant − p_fixed_alt` left the whole 4,822-test suite green. It is the shared input to
+**both** integrals, so a density whose two masses total above one sends both moments negative at
+once — and every fixture in the tree has the two masses totalling at most 0.991, so nothing sat
+near the saturation point. A doc comment elsewhere already leaned on the clamp by name. Closed by
+`two_point_masses_totalling_above_one_leave_nothing_segregating`; the mutation now fails 1 test.
+
+**2. Every heterozygosity fixture had `a · b = 1`.** `Beta(0.5, 2.0)` is the density in
+`the_expected_heterozygosity_is_the_densitys_own`, in `a_lopsided_density`, and in row 4 of the
+shape list — and in all three the product in the numerator is exactly one. So **deleting `a * b`
+from the formula altogether**, which removes the Beta's whole shape dependence, passed the test
+written to pin that formula. Closed by adding `Beta(0.35, 1.20)` beside it, where `a · b = 0.42`;
+the mutation now fails 5 tests where it failed 2.
+
+**3. The six-shape list was decoration.** Its twenty-five lines of justification claim it spans
+`a ≤ b` and `a > b` so that an `a`-for-`b` swap shows. Its only consumer asserted the seed's implied
+heterozygosity against `density.expected_heterozygosity()` — **an identity with respect to the
+moment functions**, since the same call supplied the seed's input. The frequency assertion added
+earlier in this review round was an identity in the same way. Measured: the exact `a`↔`b` swap left
+that test green.
+
+Closed by making the list carry **both of each density's moments as hand-computed literals**, in a
+type of its own, and adding `both_closed_forms_are_what_a_hand_calculation_gives` to compare them.
+The shape test now seeds from the literals rather than from the accessors, so it is no longer an
+identity either. The swap mutation fails 3 tests where it failed 2, and — the point — one of the
+three is now the test whose doc comment claims to catch it.
+
+**And one thing the list still cannot do, now said on the list itself**: the heterozygosity column
+cannot see an `a`-for-`b` swap on any row, because `2ab/((a+b)(a+b+1))` is symmetric in its two
+arguments. That is a fact about the quantity, not about the fixtures, and the swap is visible only
+in the mean frequency.
+
+### What the review found sound, and what it recorded as owed
+
+The `should_panic` battery came back clean: all four release-held checks in `seed_generic`
+demoted at once, and **all seven `should_panic` tests failed**, none satisfied by a different panic.
+`fill_locus_concentration`, `total_for_diversity`'s solved total, and
+`ExpectedAlternativeFrequency`'s constructor are each pinned by exact-value assertions.
+
+Recorded as gaps rather than defects, because Milestone A is not the step that closes them:
+
+- **Nothing in `src/` reads `SeedRegime`**, and the test that pinned two runs emitting different
+  records went with the variant's payload fields. What a run reports is spec §7 and Milestone C's
+  step C3.
+- **`RunParameters::seed_from_moments` has no production caller.** Expected at Milestone A — C1 is
+  where the seam meets a run — but it means two tests are the entire integration story.
+- **No test pins an absolute seed value.** The change moves `α_ref` off 1.0 for the first time: on
+  the fixture density the pair is `(0.2223, 3.711e-4)` where production's was `(1.0, 6.06e-4)`. A
+  reader cannot see the size of that from the suite.
