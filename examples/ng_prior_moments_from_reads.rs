@@ -40,9 +40,15 @@
 //!    come back **high**. The variance used here is the sum of the samples' own, which is exact
 //!    only if the samples' posteriors are independent given the reads; they are not, so a residual
 //!    remains and its size is what column 3 minus column 1 shows.
-//! 4. **What the caller does today.** The fit's own population curve, projected into the panel's
-//!    allele-count classes and searched for a two-parameter pair
-//!    (`doc/devel/ng/spec/population_diversity.md` §3.2) — the detour the plan proposes removing.
+//! 4. **The fit's own population curve, integrated in closed form.** Its mean frequency is
+//!    `p_fixed_alt + p_segregating · a/(a + b)` and its heterozygosity
+//!    `p_segregating · 2ab/((a + b)(a + b + 1))` — two integrals, no census pass and no panel.
+//!    **This is what the caller does since 2026-08-27**, and the column that matters is how many
+//!    calls it moves against the census average.
+//!
+//! **A fifth arm used to be here and its machinery is deleted**: the curve evaluated into the
+//! panel's `2N + 1` allele-count classes and searched for a two-parameter pair, which is the
+//! detour this work removed. Its figures are in report §9.
 //!
 //! **The gap between 1 and 3 is what the read model costs.** The gap between 3 and 1 *on the
 //! populations outside the fit's family, at low depth, where it does not appear on the populations
@@ -77,12 +83,11 @@ use std::collections::BTreeMap;
 use std::env;
 use std::time::Instant;
 
-use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, VariantClass, fill_locus_concentration, fit_spectrum_shape,
-    seed_from_population_moments,
-};
 use pop_var_caller::ng::calling::genotype_prior::{GenotypePriorModel, MarginalizedDirichletPrior};
 use pop_var_caller::ng::calling::genotype_prior::{PriorRow, SpectrumSeed};
+use pop_var_caller::ng::calling::genotype_prior::{
+    VariantClass, fill_locus_concentration, seed_from_population_moments,
+};
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
@@ -420,13 +425,12 @@ fn run_depth(
     );
     println!();
     println!(
-        "| individuals | freq: genotypes /drawn | freq: posteriors /gt | freq: today /gt | het: \
-         genotypes /drawn | het: posteriors plain /gt | het: posteriors + variance /gt | het: \
-         today /gt | freq: the curve's own /gt | calls moved, search vs census | **calls moved, \
-         curve vs census** | calls moved, trebled | alpha_alt curve | alpha_alt today | alpha_alt \
-         direct | seconds |"
+        "| individuals | freq: genotypes /drawn | freq: posteriors /gt | het: genotypes /drawn | \
+         het: posteriors plain /gt | het: posteriors + variance /gt | het: the curve's own /gt | \
+         freq: the curve's own /gt | **calls moved, curve vs census** | calls moved, trebled | \
+         alpha_alt curve | alpha_alt direct | seconds |"
     );
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let largest = *PANELS.last().expect("a panel");
     let mut cells: Vec<Cell> = PANELS.iter().map(|_| Cell::default()).collect();
@@ -502,28 +506,15 @@ fn run_depth(
 
             let posterior =
                 MomentsFromPosteriors::of(&fit.genotype_posterior, individuals, positions);
-            let today =
-                TodaysPath::of(&fit.density.value, fit.expected_heterozygosity, individuals);
+            // **Both numbers integrated off the fitted curve in closed form**, with no projection,
+            // no search and no census average. This is the two-line repair, and the column it
+            // feeds asks the question the recommendation turns on — whether choosing between it
+            // and the census average moves a genotype at all.
+            let curve = FromTheCurve::of(&fit.density.value, fit.expected_heterozygosity);
             let direct_seed =
                 seed_from_moments(posterior.frequency, posterior.heterozygosity_with_variance);
-            // **The third seed: both numbers integrated off the fitted curve in closed form**, with
-            // no projection, no search and no census average. This is the two-line repair, and the
-            // column it feeds asks the question the recommendation turns on — whether choosing
-            // between it and the census average moves a genotype at all.
-            let curve_seed = seed_from_moments(today.density_frequency, today.heterozygosity);
-            let calls = genotype_calls(
-                today.seed,
-                direct_seed,
-                panel_inbreeding,
-                population,
-                depth,
-                inbreeding,
-                GENOTYPE_COMPARISON_LOCI,
-                replicate,
-                individuals,
-            );
             let curve_against_census = genotype_calls(
-                curve_seed,
+                curve.seed,
                 direct_seed,
                 panel_inbreeding,
                 population,
@@ -539,25 +530,21 @@ fn run_depth(
                 .add(oracle_frequency / cohort.drawn_mean_frequency);
             cell.posterior_frequency_over_oracle
                 .add(posterior.frequency / oracle_frequency);
-            cell.today_frequency_over_oracle
-                .add(today.frequency / oracle_frequency);
             cell.oracle_heterozygosity_over_drawn
                 .add(oracle_heterozygosity / cohort.drawn_heterozygosity);
             cell.posterior_plain_over_oracle
                 .add(posterior.heterozygosity_plain / oracle_heterozygosity);
             cell.posterior_with_variance_over_oracle
                 .add(posterior.heterozygosity_with_variance / oracle_heterozygosity);
-            cell.today_heterozygosity_over_oracle
-                .add(today.heterozygosity / oracle_heterozygosity);
+            cell.curve_heterozygosity_over_oracle
+                .add(curve.heterozygosity / oracle_heterozygosity);
             cell.curve_frequency_over_oracle
-                .add(today.density_frequency / oracle_frequency);
-            cell.calls_moved.add(calls.moved_in_a_hundred());
+                .add(curve.frequency / oracle_frequency);
             cell.calls_moved_curve_against_census
                 .add(curve_against_census.moved_in_a_hundred());
-            cell.alpha_alt_curve.add(curve_seed.alpha_alt_total());
+            cell.alpha_alt_curve.add(curve.seed.alpha_alt_total());
             cell.calls_moved_when_trebled
-                .add(calls.moved_when_trebled_in_a_hundred());
-            cell.alpha_alt_today.add(today.seed.alpha_alt_total());
+                .add(curve_against_census.moved_when_trebled_in_a_hundred());
             cell.alpha_alt_direct.add(direct_seed.alpha_alt_total());
 
             if mismapped_share > 0.0 {
@@ -596,21 +583,18 @@ fn run_depth(
     for (index, &individuals) in PANELS.iter().enumerate() {
         let cell = &cells[index];
         println!(
-            "| {individuals} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.2e} | \
-             {:.2e} | {:.2e} | {seconds:.0} |",
+            "| {individuals} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.2e} | \
+             {:.2e} | {seconds:.0} |",
             cell.oracle_frequency_over_drawn.as_ratio(),
             cell.posterior_frequency_over_oracle.as_ratio(),
-            cell.today_frequency_over_oracle.as_ratio(),
             cell.oracle_heterozygosity_over_drawn.as_ratio(),
             cell.posterior_plain_over_oracle.as_ratio(),
             cell.posterior_with_variance_over_oracle.as_ratio(),
-            cell.today_heterozygosity_over_oracle.as_ratio(),
+            cell.curve_heterozygosity_over_oracle.as_ratio(),
             cell.curve_frequency_over_oracle.as_ratio(),
-            cell.calls_moved.as_percentage(),
             cell.calls_moved_curve_against_census.as_percentage(),
             cell.calls_moved_when_trebled.as_percentage(),
             cell.alpha_alt_curve.mean,
-            cell.alpha_alt_today.mean,
             cell.alpha_alt_direct.mean,
         );
     }
@@ -647,29 +631,27 @@ fn run_depth(
 ///
 /// **The planted-positions half of this program keeps its three numbers in [`MismappedCell`]
 /// rather than borrowing three of these fields.** An earlier version borrowed
-/// `posterior_with_variance_over_oracle` and `today_heterozygosity_over_oracle` to hold quantities
-/// that were neither over the oracle nor anything to do with the caller's current path, which told
+/// `posterior_with_variance_over_oracle` and `curve_heterozygosity_over_oracle` to hold quantities
+/// that were neither over the oracle nor anything to do with the caller's own path, which told
 /// a reader auditing the scoring — the one audit this program most needs — the wrong thing.
 #[derive(Default)]
 struct Cell {
     oracle_frequency_over_drawn: Welford,
     posterior_frequency_over_oracle: Welford,
-    today_frequency_over_oracle: Welford,
     oracle_heterozygosity_over_drawn: Welford,
     posterior_plain_over_oracle: Welford,
     posterior_with_variance_over_oracle: Welford,
-    today_heterozygosity_over_oracle: Welford,
+    /// The heterozygosity integrated off the fitted curve, over the same panel's genotypes.
+    curve_heterozygosity_over_oracle: Welford,
     /// The mean frequency integrated off the fitted curve in closed form, over the same panel's
     /// genotypes — the route that keeps the curve and drops only the projection and the search.
     curve_frequency_over_oracle: Welford,
-    calls_moved: Welford,
     /// **The recommendation's own question**: how many calls come out differently under the two
     /// routes that both remove the search — the curve integrated in closed form, and the census
     /// average.
     calls_moved_curve_against_census: Welford,
     alpha_alt_curve: Welford,
     calls_moved_when_trebled: Welford,
-    alpha_alt_today: Welford,
     alpha_alt_direct: Welford,
 }
 
@@ -831,52 +813,38 @@ impl MomentsFromPosteriors {
     }
 }
 
-/// What the caller reads off the fit today: the density's own heterozygosity, and the mean
-/// frequency of the pair its projection-and-search returns.
-struct TodaysPath {
-    frequency: f64,
-    heterozygosity: f64,
+/// **What the caller reads off the fit: the two integrals of its own population curve**, and the
+/// seed they imply.
+///
+/// **Until 2026-08-27 this held a third number** — the mean frequency of the pair the caller got by
+/// evaluating the curve into the panel's `2N + 1` allele-count classes and searching for a
+/// two-parameter match. That search is deleted
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5) and its figures are in report §9.
+struct FromTheCurve {
     /// **The mean allele frequency integrated straight off the fitted curve**, with no projection
     /// and no search: `p_fixed_alt + p_segregating · a/(a + b)`.
     ///
-    /// **A third route to the prior's first number, and it was missing from the first version of
-    /// this program.** The prior takes two numbers and the fitted curve carries four, and the
-    /// argument that started this work was that compressing four into two must bias the prior. It
-    /// need not: the two numbers the prior wants *are* two integrals of the curve, and both have a
-    /// closed form — this one, and `FrequencyDensity::expected_heterozygosity` for the other. What
-    /// the caller does instead is evaluate the curve into the panel's allele-count classes and
-    /// search for the pair whose own classes match, and it is **that detour** the
-    /// [`Self::frequency`] column measures. Printing both separates the cost of the compression
-    /// from the cost of the detour.
-    density_frequency: f64,
+    /// **The prior takes two numbers and the fitted curve carries four, and the argument that
+    /// started this work was that compressing four into two must bias the prior.** It need not:
+    /// the two numbers the prior wants *are* two integrals of the curve, and both have a closed
+    /// form — this one, and `FrequencyDensity::expected_heterozygosity` for the other.
+    frequency: f64,
+    heterozygosity: f64,
     seed: SpectrumSeed,
 }
 
-impl TodaysPath {
-    fn of(density: &FrequencyDensity, expected_heterozygosity: f64, individuals: usize) -> Self {
-        let classes = density.allele_count_classes(individuals as u32);
+impl FromTheCurve {
+    fn of(density: &FrequencyDensity, expected_heterozygosity: f64) -> Self {
         let diversity = ExpectedHeterozygosity::try_new(expected_heterozygosity.clamp(0.0, 0.5))
             .expect("a clamped heterozygosity is a probability");
-        // The panel's inbreeding as the seam passes it. **Outbred here on purpose**: the
-        // projection into classes takes no coefficient, so handing the search a different one
-        // would compare the seam against a spectrum no such panel produces.
-        let outbred = InbreedingF::try_new(0.0).expect("a legal coefficient");
-        // **The search's own frequency, fed to the shipped seed builder by hand.** Since
-        // 2026-08-27 the builder takes two measured moments and no spectrum
-        // (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2), so this arm reconstructs what
-        // the old seam did rather than calling it: the search is still here, and it is what the
-        // [`Self::frequency`] column is about.
-        let searched = fit_spectrum_shape(&FittedSpectrum::new(&classes, 0.0, 1_000.0), outbred);
+        let frequency = density.expected_alternative_frequency();
         let seed = seed_from_population_moments(
-            ExpectedAlternativeFrequency::try_new(searched.expected_frequency()).ok(),
+            ExpectedAlternativeFrequency::try_new(frequency).ok(),
             Some(diversity),
         );
-        let total = seed.alpha_ref() + seed.alpha_alt_total();
         Self {
-            frequency: seed.alpha_alt_total() / total,
+            frequency,
             heterozygosity: expected_heterozygosity,
-            // The curve's own mean allele frequency, in closed form — the library's since A1.
-            density_frequency: density.expected_alternative_frequency(),
             seed,
         }
     }

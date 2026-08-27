@@ -86,10 +86,7 @@ pub mod seed_ssr;
 
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use hardy_weinberg::PlugInWrightPrior;
-pub use seed_generic::{
-    FittedShape, FittedSpectrum, VariantClass, fill_locus_concentration, fit_spectrum_shape,
-    seed_from_population_moments,
-};
+pub use seed_generic::{VariantClass, fill_locus_concentration, seed_from_population_moments};
 pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
@@ -648,76 +645,6 @@ pub enum SeedRegime {
     FallbackDiversity,
 }
 
-/// **How far the two numbers the fit returned are from the spectrum it was given**, and whether
-/// the search ran out of range before it got there.
-///
-/// **The fit always returns a pair, and sometimes no pair is close.** The two-parameter family
-/// cannot hold every shape — `doc/devel/ng/spec/calling_priors.md` §4.1 names a panel whose
-/// alleles sit mostly at middling frequency as one it cannot — so a run that used a compromised
-/// starting point and one that matched must not look the same in the output. That is what this
-/// carries, and it is the complaint [`SeedRegime`] exists to answer.
-///
-/// **It reports a distance rather than a verdict, and that is deliberate.** Nobody has measured
-/// how far off the starting pair has to be before a genotype moves, so this names no threshold
-/// and calls nothing a failure; whoever reads a run's output decides what is too far. An earlier
-/// version did classify, and it classified without looking: it reported *reproduced* whenever the
-/// search finished inside its range and no allele-count class came back at exactly zero, so a
-/// fitted pair sharing 4 parts in 100 of its mass with the measurement was reported as a match
-/// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct SpectrumMatch {
-    divergence_nats: f64,
-    at_search_limit: bool,
-}
-
-impl SpectrumMatch {
-    /// Build the report. Only the fit does this.
-    pub(super) fn new(divergence_nats: f64, at_search_limit: bool) -> Self {
-        debug_assert!(
-            divergence_nats.is_finite() && divergence_nats >= 0.0,
-            "the divergence is a distance and cannot be negative, got {divergence_nats}"
-        );
-        Self {
-            divergence_nats,
-            at_search_limit,
-        }
-    }
-
-    /// **How much information is lost by describing the measured spectrum with the fitted pair
-    /// instead of itself** — the Kullback–Leibler divergence of the measurement from the fitted
-    /// pair's prediction, in nats. **Zero means the family reproduced the measurement exactly.**
-    ///
-    /// It is free to compute. The fit's objective is already the measurement's own entropy minus
-    /// this quantity, so subtracting the winning score from that entropy gives it with no extra
-    /// prediction — which is why the fit costs the same 399 predictions it did before this was
-    /// reported.
-    ///
-    /// **A rough scale, so the number means something before anyone has calibrated it.** One nat
-    /// is a factor of `e` in likelihood, so a divergence of 0.01 nats is a pair that would
-    /// misprice the average site's allele-count class by about one per cent — invisible against a
-    /// single read. A divergence above about 1 nat means the prediction and the measurement
-    /// disagree about where most of the panel's variable sites sit. The spectra measured in this
-    /// module's own tests land at 1.1e-9 nats when the family can hold the shape, and at 0.481
-    /// and 3.153 nats on two it cannot
-    /// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
-    #[inline]
-    pub fn divergence_nats(self) -> f64 {
-        self.divergence_nats
-    }
-
-    /// **The best pair sits on the edge of the range the fit searches**, so a better one may lie
-    /// outside it and what came back is a boundary rather than a summit.
-    ///
-    /// Not derivable from the divergence, which is why it is carried separately: a pair pinned
-    /// against a bound can still predict the measurement well. **A fully invariant cohort reaches
-    /// this legitimately** — its answer is an alternative concentration of zero, and the search
-    /// floors the ratio at `1e-9`.
-    #[inline]
-    pub fn at_search_limit(self) -> bool {
-        self.at_search_limit
-    }
-}
-
 /// How far below the cohort's total a sample's own copies may sit before it stops being rounding
 /// and starts being a defect.
 ///
@@ -921,9 +848,8 @@ pub trait GenotypePriorModel {
     /// string this returns directly.
     ///
     /// **Not the seed's provenance, which is a different question.**
-    /// [`SeedRegime`] says where the *concentration* came from and [`SpectrumMatch`] how far the
-    /// fit landed from the measurement; both describe the input the two implementations **share**,
-    /// so neither can tell two runs over the same seed apart.
+    /// [`SeedRegime`] says where the *concentration* came from, which describes the input the two
+    /// implementations **share** — so it cannot tell two runs over the same seed apart.
     fn name(&self) -> &'static str;
 }
 

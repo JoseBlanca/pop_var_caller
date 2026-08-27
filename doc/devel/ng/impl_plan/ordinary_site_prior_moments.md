@@ -108,7 +108,7 @@ the variant was** — a later reader must find why the refusal is absent rather 
 `ZeroDiversity` stays: it is a real cohort state. *Depends:* A2. *Source:* spec §6, and
 [`../spec/ordinary_site_seed.md`](../spec/ordinary_site_seed.md) §3.1.
 
-**A5. The projection and the search are deleted.**  ☐
+**A5. The projection and the search are deleted.**  ✅
 `FittedSpectrum`, `fit_spectrum_shape`, `fit_pair`, `fill_expected_spectrum`, `SpectrumMatch`,
 `MAX_PROJECTION_INDIVIDUALS`, `FrequencyDensity::allele_count_classes`,
 `FittedFrequencySpectrum` — **and not the variable-census-site count**, which spec §5 marks as the

@@ -326,3 +326,107 @@ frequency is looked at — keeps its own distinct string, *"is not a thin estima
 - `cargo test --lib` — **4,872 passed, 0 failed, 14 ignored**, from 4,871. Three tests removed,
   four added.
 - `cargo doc --no-deps --lib` — **27 unresolved links**, unchanged.
+
+---
+
+## A5 — the projection and the search are deleted
+
+**Contract (plan A5).** Delete `FittedSpectrum`, `fit_spectrum_shape`, `fit_pair`,
+`fill_expected_spectrum`, `SpectrumMatch`, `MAX_PROJECTION_INDIVIDUALS`,
+`FrequencyDensity::allele_count_classes` and `FittedFrequencySpectrum` — **and not the
+variable-census-site count**, which Milestone B re-sources. `examples/ng_inbreeding_sensitivity.rs`
+and `ng_spectrum_panel_floor.rs` consume the deleted machinery; each is either retired with a note
+saying what it measured, or kept against a local copy.
+
+### What was deleted
+
+`seed_generic.rs` falls from **3,440 lines to 958**. Gone: the two-branch spectrum prediction
+(`fill_expected_spectrum`, `fill_expected_spectrum_at`, `log_branch_split`,
+`MAX_PROJECTION_CONCENTRATION`, `BRANCH_TAIL_TOLERANCE`, `NEGLIGIBLE_BRANCH_WEIGHT`), the search
+(`fit_pair`, `SpectrumScorer`, `ScoredPoint`, `sweep_from`, `sweep_once`, `line_search`,
+`bounds_along`, `concentrations_at`, `at_search_limit`, `spectrum_log_likelihood`,
+`spectrum_entropy`, `ProjectionFit`, `SEARCH_STARTS`, `SEARCH_DIRECTIONS`, both search ranges,
+`MAX_PROJECTION_INDIVIDUALS`, `SPECTRUM_NORMALISATION_TOLERANCE`), the two wrapper types
+(`FittedSpectrum`, `FittedShape`) and `fit_spectrum_shape`.
+
+Elsewhere: `SpectrumMatch` from `genotype_prior/mod.rs`;
+`FrequencyDensity::allele_count_classes` and `MAX_PROJECTED_PANEL` from
+`parameter_estimation/joint/fit.rs`; `FittedFrequencySpectrum` from `calling/run_parameters.rs`.
+
+**Three comments stand where the machinery was** — in `seed_generic`'s module header, at
+`allele_count_classes`, and at `FittedFrequencySpectrum` — each saying what the thing did, what
+consumed it, and where the numbers it produced now live.
+
+### The debt A5 must not lose, recorded where the code was
+
+Spec §5 marks **the count of census positions that came out variable across the panel** as the one
+thing that must survive. Its only producer was `FittedFrequencySpectrum::of`, which computed it as
+one minus the two end classes — so the code could not survive the deletion, and what survives is
+the requirement. The note left in `run_parameters.rs` states it: the quantity is not the share that
+segregates in the population (the two differed 6.6-fold at one individual on a tomato-like
+density), spec §6.2 re-sources it from the fit's own per-position posteriors as a **soft count**,
+and **nothing computes it today** — it is step C2.
+
+### The oracle the tests needed, rebuilt
+
+`implied_heterozygosity` — the oracle for the pin, and the reason
+`the_seeds_implied_diversity_is_the_measured_one_at_every_shape` is a check rather than a
+restatement — read the module's own spectrum machinery at one individual. That machinery is gone.
+It is rewritten as `2 · B(1 + α_alt, 1 + α_ref) / B(α_alt, α_ref)` through `lgamma`: the same
+Beta-binomial by the same route, four lines, and it still **shares no line of arithmetic** with the
+pin's `t / (1 − t)`.
+
+### The examples: four retired, two cut down
+
+The plan named two programs. **Four more consume the machinery**, and the same rule was applied to
+all six.
+
+| program | what happened | why |
+|---|---|---|
+| `ng_spectrum_projection_cost.rs` | **deleted** | it measured what one spectrum prediction costs; there are no predictions |
+| `ng_spectrum_panel_floor.rs` | **deleted** | it measured what the search's pair loses against the density it was fitted to |
+| `ng_seed_shape_weight_sweep.rs` | **deleted** | it swept the blend's constant *through the search*; A3 kept it, and A5 makes that impossible |
+| `ng_inbreeding_sensitivity.rs` | **cut to its live half** | one of its two routes was the search; the other — the diversity divided by `1 − F` — needs none of it and still runs |
+| `ng_prior_moment_estimators.rs` | **one arm retired** | its "what the caller gets today" table ran the search |
+| `ng_prior_moments_from_reads.rs` | **one arm retired** | same, and its `TodaysPath` became `FromTheCurve`: the two integrals and the seed they imply |
+
+**Why deleted rather than kept against a local copy**, which the plan offers as the alternative:
+the machinery is about 1,300 lines and its correctness rested on roughly fifty tests that go with
+it. A copy in `examples/` cannot carry those tests — `cargo test` does not run an example's test
+module — so what would be kept is an untested copy of deleted code, whose figures would then be
+facts about the copy. Every retired program's numbers are already in the reports it was written
+for, and each retirement note says which report.
+
+**⚑ Three citations now point at files that do not exist**, all in documents this step does not
+edit: `research/ordinary_site_prior_moments.md` line 49, `spec/ordinary_site_seed.md` line 93 and
+`spec/population_diversity.md` line 459 cite `examples/ng_spectrum_panel_floor.rs`, and
+`ng/reports/spectrum_projection_cost_2026-08-22.md` cites `ng_spectrum_projection_cost.rs`. The
+first three are live specs, and the second and third of them already carry supersession banners
+naming the moments spec. **Repointing them at the reports that hold the same figures is owed and
+not done here**, because these are the design documents the implementation skill does not edit.
+
+### Two `#[should_panic]` messages that moved
+
+`a_regularizer_weight_that_is_not_a_count_of_sites_is_refused` and
+`a_variable_site_count_that_is_not_a_count_is_refused` tested `FittedSpectrum::new` and went with
+it, as did every other refusal that constructor held.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,822 passed, 0 failed, 11 ignored**, from 4,872 and 14. **Fifty tests and
+  three ignored ones deleted with the code they pinned**; the plan expects this fall and it is not
+  a regression. The three ignored were the search's own wall-clock measurements.
+- `cargo doc --no-deps --lib` — **25 unresolved links, down from 27**. The two that went were
+  pre-existing breaks inside the deleted machinery
+  (`projection_tests::a_fit_costs_at_most_450_predictions` and
+  `::the_cost_of_one_fit_by_panel_size`). One new break was introduced and fixed: a paragraph on
+  `fill_locus_concentration`'s floor argued from the search box's bottom corner, and now argues
+  from the identity instead.
+- **Both surviving harnesses were run**, not merely compiled:
+  `cargo run --release --example ng_prior_moment_estimators -- 500 2` and
+  `cargo run --release --example ng_prior_moments_from_reads -- 400 0.15 0.0 1 0`, both to
+  completion with the expected number of columns.
+- **One stale sentence in a harness's printed output was found by running it**: the estimators
+  program told its reader that the mean frequency column decides *whether the seed still needs its
+  blend*. It does not still need one.

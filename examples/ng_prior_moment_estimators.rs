@@ -68,13 +68,6 @@
 use std::env;
 
 use pop_var_caller::genetics::lgamma;
-use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, fit_spectrum_shape, seed_from_population_moments,
-};
-use pop_var_caller::ng::parameter_estimation::joint::fit::FrequencyDensity;
-use pop_var_caller::ng::types::{
-    ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF,
-};
 
 /// Panel sizes, in diploid individuals — the committed range, one sample to a thousand
 /// (`doc/devel/specs/design_principles.md` §0).
@@ -109,138 +102,27 @@ fn main() {
     }
 
     print_single_sample_spread(&shapes, replicates.max(40));
-    print_todays_path(&shapes);
 }
 
 // ---------------------------------------------------------------------------------------------
-// What the caller gets today, on the same populations
+// What the caller used to get, and why the arm that measured it is gone
 // ---------------------------------------------------------------------------------------------
-
-/// **The detour the plan proposes removing, measured on the same four populations.**
-///
-/// Today the caller does not read the mean frequency off the census. It takes the fitted
-/// population density, evaluates it into the `2N + 1` allele-count classes a panel of `N` diploid
-/// individuals has, and searches for the two-parameter pair whose own predicted classes best match
-/// (`doc/devel/ng/spec/population_diversity.md` §3.2). The mean frequency the caller used was the
-/// pair's, blended toward a neutral shape by how much the panel had earned.
-///
-/// **⚑ Both the blend and the search left the caller on 2026-08-27**
-/// (`ordinary_site_prior_moments.md` §2, §6.1). The last column of each table below is what the
-/// caller uses now — the population's own mean frequency, straight into the seed — and on this arm
-/// it is 1.000× at every panel size **by construction**, because this arm hands the population over
-/// exactly. That is not a check of anything; it is the point. What the column is for is putting
-/// the search's own departure beside a route that has none. The blend's own cost, which this
-/// program used to print as a column, is in report §9's third reading: 0.816×, 0.622×, 0.893× and
-/// 0.916× of the population's frequency at one individual on the four shapes.
-///
-/// **This arm is handed the population exactly**, with no census sampling and no fitting error in
-/// it at all — so whatever it is off by is the detour's own, and it is the best case for the
-/// current path rather than a fair fight. The direct estimator's column beside it does carry
-/// census sampling, and its size is in the tables above.
-///
-/// **Run at `F = 0` only, and that is not an omission.** The projection into classes is a
-/// Beta-binomial that takes no inbreeding coefficient (`FrequencyDensity::allele_count_classes`),
-/// while the search's own prediction of a panel's classes does take one
-/// (`fit_spectrum_shape(..., panel_inbreeding)`). Feeding an inbreeding-free projection to a
-/// search that predicts with `F = 0.8` would compare the seam against a spectrum no such panel
-/// produces, and what came back would be a fact about that mismatch rather than about the detour.
-/// The mismatch itself is outside this program's question.
-///
-/// **The panel stops at 200 because of what the search costs**: 399 predictions of a panel's
-/// spectrum per fit, which is 11.8 minutes at 3,200 individuals
-/// (`seed_generic::projection_tests::the_cost_of_one_fit_by_panel_size`). A 1,000-individual row
-/// would add minutes to this program for a number that the 200 row already shows the direction of.
-fn print_todays_path(shapes: &[PopulationShape]) {
-    println!();
-    println!("## What the caller's current path returns on the same four populations");
-    println!();
-    println!(
-        "The population is handed to it exactly — no census sampling, no fitting error — so every \
-         departure below belongs to the projection and the search. Random mating throughout; the \
-         note in this section's source says why."
-    );
-
-    let outbred = InbreedingF::try_new(0.0).expect("a legal coefficient");
-    for shape in shapes {
-        let population_frequency = shape.mean_frequency();
-        let population_heterozygosity = shape.heterozygosity();
-        let diversity = ExpectedHeterozygosity::try_new(population_heterozygosity)
-            .expect("a drawn population's heterozygosity is a probability");
-        println!();
-        println!("### {}", shape.name);
-        println!();
-        println!(
-            "| individuals | the search's mean frequency, over the population's | the seed the \
-             search would give, over the population's | what the caller now uses |"
-        );
-        println!("|---:|---:|---:|---:|");
-        for &individuals in DETOUR_PANELS.iter() {
-            let classes = allele_count_classes(shape, individuals as u32);
-            let spectrum = FittedSpectrum::new(&classes, 0.0, 1_000.0);
-            let search = fit_spectrum_shape(&spectrum, outbred);
-            let searched_seed = seed_from_population_moments(
-                ExpectedAlternativeFrequency::try_new(search.expected_frequency()).ok(),
-                Some(diversity),
-            );
-            let searched_frequency = searched_seed.alpha_alt_total()
-                / (searched_seed.alpha_ref() + searched_seed.alpha_alt_total());
-            // What the caller does today: the population's own mean frequency, straight into the
-            // seed. Handed the population exactly, as this arm is, the ratio is one by
-            // construction — which is the finding rather than a check.
-            let direct_seed = seed_from_population_moments(
-                ExpectedAlternativeFrequency::try_new(population_frequency).ok(),
-                Some(diversity),
-            );
-            let direct_frequency = direct_seed.alpha_alt_total()
-                / (direct_seed.alpha_ref() + direct_seed.alpha_alt_total());
-            println!(
-                "| {individuals} | {:.3}× | {:.3}× | {:.3}× |",
-                search.expected_frequency() / population_frequency,
-                searched_frequency / population_frequency,
-                direct_frequency / population_frequency,
-            );
-        }
-    }
-}
-
-/// The panel sizes the current-path comparison runs at.
-const DETOUR_PANELS: [usize; 8] = [1, 2, 3, 5, 10, 25, 63, 200];
-
-/// A shape's exact allele-count classes at a panel of `N` diploid individuals — what share of
-/// positions carry the alternative allele on no chromosome of the panel, on exactly one, and so on.
-///
-/// **Built out of the caller's own projection, one call per mixture component.** Each component is
-/// a Beta with no end masses, so `FrequencyDensity::allele_count_classes` returns exactly that
-/// component's Beta-binomial; the components are then combined at their weights and the two end
-/// masses added where they belong. Nothing here recomputes a Beta-binomial, which is what keeps
-/// the comparison a fact about the shipped projection rather than about a copy of it.
-fn allele_count_classes(shape: &PopulationShape, individuals: u32) -> Vec<f64> {
-    let chromosomes = 2 * individuals as usize;
-    let mut classes = vec![0.0_f64; chromosomes + 1];
-    for component in &shape.segregating {
-        let component_only = FrequencyDensity {
-            p_invariant: 0.0,
-            p_fixed_alt: 0.0,
-            a: component.a,
-            b: component.b,
-        };
-        for (slot, value) in classes
-            .iter_mut()
-            .zip(component_only.allele_count_classes(individuals))
-        {
-            *slot += shape.share_segregating() * component.weight * value;
-        }
-    }
-    classes[0] += shape.invariant;
-    classes[chromosomes] += shape.fixed_alt;
-    // The consumer checks that the weights are a distribution, and the sum above is a sum of
-    // renormalised parts rather than one normalised whole.
-    let total: f64 = classes.iter().sum();
-    for slot in classes.iter_mut() {
-        *slot /= total;
-    }
-    classes
-}
+//
+// **This program used to print a third block: what the caller's own path returned on these four
+// populations.** It evaluated each population into the `2N + 1` allele-count classes a panel of
+// `N` diploid individuals has, ran the shipped two-parameter search over the result, and reported
+// the pair's mean frequency over the population's — the detour this work removed.
+//
+// **The search was deleted on 2026-08-27** (`doc/devel/ng/spec/ordinary_site_prior_moments.md`
+// §5), so the arm cannot run against the shipped code any more, and running it against a copy
+// would make its figures facts about the copy. **Its numbers are in the report** it was written
+// for, `doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md` §9: handed the population
+// exactly, the search's mean frequency was 0.999× the truth at one individual and 1.217×, 0.861×,
+// 0.787× and 1.043× at 200 individuals on the four shapes, and the blend cost a further 0.816×,
+// 0.622×, 0.893× and 0.916× at one individual.
+//
+// **What the caller does now needs no arm here**: the mean frequency is an integral of the fitted
+// curve, so handed the population exactly it returns the population exactly.
 
 // ---------------------------------------------------------------------------------------------
 // The populations
@@ -676,10 +558,11 @@ fn print_single_sample_spread(shapes: &[PopulationShape], replicates: usize) {
     );
     println!();
     println!(
-        "**Both moments, because the design decision that rests on this arm needs both.** The \
+        "**Both moments, because the design decision that rested on this arm needed both.** The \
          heterozygosity decides whether a single-genome run should fall back to the species-range \
-         constant; the mean frequency decides whether the seed still needs its blend toward a \
-         neutral shape, which exists to damp a small panel's noisy one."
+         constant. The mean frequency decided whether the seed still needed its blend toward a \
+         neutral shape — the columns below say it did not, and that blend was deleted on \
+         2026-08-27."
     );
     println!();
     println!(
