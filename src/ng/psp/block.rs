@@ -4626,6 +4626,144 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Every running difference resets at a block boundary
+    // -----------------------------------------------------------------
+
+    /// Records over three contigs and several grid cells, with the cells **far apart** — so a
+    /// difference that was not reset lands a record thousands of bases from where it belongs
+    /// rather than one base out, and a comparison sees it.
+    fn records_whose_blocks_are_far_apart() -> Vec<SampleLocusObservations> {
+        let mut records = Vec::new();
+        for contig in 0..3u32 {
+            for cell in [0u64, 7, 41, 900] {
+                for step in 0..9u64 {
+                    records.push(a_record(
+                        contig,
+                        cell * A_GRID.get() + 1 + step * 4_000,
+                        1 + step % 5,
+                    ));
+                }
+            }
+        }
+        records
+    }
+
+    /// **A block read on its own gives exactly what it gives in the middle of a file.**
+    ///
+    /// This is self-containment in its strongest form and the whole of what spec §3.2 asks for:
+    /// *"every running difference inside it restarts — the position difference, the coverage
+    /// difference, the chain-id difference"*. A reader handed one block's bytes and nothing else
+    /// has no history at all, so any difference that was still being measured from a previous
+    /// block would show up as records at the wrong coordinates — and **plausibly** wrong, because
+    /// coverage is smooth and a position difference that is slightly off still parses.
+    ///
+    /// Today there is one running difference, the position offset. **Milestone E adds the
+    /// chain-id live set, which is the second**, and this test is what it will meet.
+    #[test]
+    fn a_block_read_alone_gives_what_it_gives_in_the_middle_of_a_file() {
+        let records = records_whose_blocks_are_far_apart();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(150));
+        assert!(
+            on_disk.block_offsets.len() >= 12,
+            "several blocks per contig, or a lone block is barely different from the file"
+        );
+
+        let whole = stream_every_record(&on_disk.bytes).expect("the file reads");
+        assert_eq!(built(&whole), records);
+
+        let mut taken = 0usize;
+        for (index, offset) in on_disk.block_offsets.iter().enumerate() {
+            let ends_at = on_disk
+                .block_offsets
+                .get(index + 1)
+                .copied()
+                .unwrap_or(on_disk.bytes.len());
+            let alone = stream_every_record(&on_disk.bytes[*offset..ends_at])
+                .unwrap_or_else(|refused| panic!("block {index} alone: {refused}"));
+
+            let holds = usize::try_from(walk(&on_disk.payloads[index]).head.record_count.get())
+                .expect("a small count");
+            assert_eq!(
+                alone,
+                whole[taken..taken + holds],
+                "block {index} read alone against the same block read in the file"
+            );
+            taken += holds;
+        }
+        assert_eq!(
+            taken,
+            records.len(),
+            "every record was in exactly one block"
+        );
+    }
+
+    /// **Restart equals sequential, from every block, at every refill schedule.**
+    ///
+    /// The plan's own oracle: reading from an arbitrary block gives what a full read gives from
+    /// that point. D4 showed that where a reader refills is not where a writer cut, so the two
+    /// boundaries are crossed together here — a stale difference that survived a block boundary
+    /// and one that survived a buffer boundary are different defects.
+    #[test]
+    fn restart_equals_sequential_from_every_block_at_every_refill_schedule() {
+        let records = records_whose_blocks_are_far_apart();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(150));
+        let whole = stream_every_record(&on_disk.bytes).expect("the file reads");
+
+        for most in [1usize, 5, 97, READ_CHUNK_BYTES, usize::MAX] {
+            let mut taken = 0usize;
+            for (index, offset) in on_disk.block_offsets.iter().enumerate() {
+                let (from_here, _) =
+                    stream_through_a_source_yielding(&on_disk.bytes[*offset..], most);
+                assert_eq!(
+                    from_here,
+                    built(&whole[taken..]),
+                    "from block {index} at {most} bytes a read"
+                );
+                taken += usize::try_from(walk(&on_disk.payloads[index]).head.record_count.get())
+                    .expect("a small count");
+            }
+        }
+    }
+
+    /// **The writer's half: a block's bytes do not depend on the blocks written before it.**
+    ///
+    /// Self-containment has to hold on the way out as well as on the way in — a reader that
+    /// restarts correctly is no use if the block it restarts at was written against a coordinate
+    /// only the previous block knew. So every block is rebuilt from its own records alone and
+    /// compared byte for byte with the one the whole run produced.
+    #[test]
+    fn a_block_is_written_the_same_alone_as_it_is_after_other_blocks() {
+        let records = records_whose_blocks_are_far_apart();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(150));
+
+        let mut taken = 0usize;
+        for (index, payload) in on_disk.payloads.iter().enumerate() {
+            let walked = walk(payload);
+            let holds = usize::try_from(walked.head.record_count.get()).expect("a small count");
+            let its_own = &records[taken..taken + holds];
+
+            // A builder that has seen nothing else, handed just this block's records. The grid
+            // must not cut them further, so they are given a cell of their own.
+            let alone = cut(
+                BlockBuilder::new(Bp(u64::MAX), None).expect("a grid"),
+                its_own,
+            )
+            .expect("in order");
+            assert_eq!(
+                alone.len(),
+                1,
+                "block {index}'s records are one block alone"
+            );
+            assert_eq!(
+                alone[0], *payload,
+                "block {index} written alone against written after {index} others"
+            );
+            taken += holds;
+        }
+        assert_eq!(taken, records.len());
+    }
+
+    // -----------------------------------------------------------------
     // The two round-trip laws, over the whole value range
     // -----------------------------------------------------------------
 

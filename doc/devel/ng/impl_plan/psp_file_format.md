@@ -157,7 +157,7 @@ start with the running state restored, and the buffer grows for a record larger 
 record after it, plausibly. The oracle is a decode forced to refill at every possible boundary.
 ***Depends:*** D3. ***Source:*** [spec §8](../spec/psp_file_format.md).
 
-☐ **D5 — every running difference resets at a block boundary.** The oracle is
+✅ **D5 — every running difference resets at a block boundary.** The oracle is
 restart-equals-sequential: reading from an arbitrary block gives what a full read gives from there.
 **Own commit** — the failure is silent and plausible, because coverage is smooth.
 ***Depends:*** D4. ***Source:*** [spec §3.2](../spec/psp_file_format.md).

@@ -19,7 +19,23 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **a record cut in half by the reader's buffer is
+> - **Last completed task (2026-08-27):** **every running difference resets at a block boundary,
+> and the property turned out to be held already** (step D5 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`) —
+> **Milestone D is complete and this is Checkpoint D.** The defect the step exists to catch is a
+> difference that survives a block boundary *on both sides at once*, so a sequential read stays
+> self-consistent and only a reader starting mid-file sees anything wrong: the silent, plausible
+> failure the spec names. Injected exactly that — the writer keeping the previous block's
+> coordinate and the reader carrying its own forward to match — and **eleven tests failed, eight
+> of them already there**, because the module anchors every check to a block's own declared first
+> position. So the step closes no hole; it states the property in its strongest form for the
+> difference that arrives next. **There is exactly one running difference today** — the position
+> offset. The coverage difference is computed nowhere in ng, and the chain-id difference is
+> Milestone E, which is what the new tests are there to meet: a block read *alone*, with no
+> history at all, must give what it gives in the middle of a file.
+> [D5](doc/devel/reports/implementations/ng_psp_d5_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a record cut in half by the reader's buffer is
 > retried from its first byte, and the oracle for that caught itself being useless** (step D4 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). The
 > retry loop was already there — a reader cannot work without one — so what this step owes is the
