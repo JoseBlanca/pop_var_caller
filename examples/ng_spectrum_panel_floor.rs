@@ -53,7 +53,7 @@
 //! smallest where a floor would fire.
 //!
 //! **Every panel here is outbred (`F = 0`).** Inbreeding reshapes the predicted spectrum —
-//! `project_spectrum_seed`'s own documentation records the reference concentration moving 8.6% to
+//! the seed builder's own documentation used to record the reference concentration moving 8.6% to
 //! 14.0% across `F = 0.6` to `0.9` — so these are outbred-panel numbers.
 //!
 //! ## What it is not

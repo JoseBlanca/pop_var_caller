@@ -69,10 +69,12 @@ use std::env;
 
 use pop_var_caller::genetics::lgamma;
 use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, SeedRegime, fit_spectrum_shape, project_spectrum_seed,
+    FittedSpectrum, fit_spectrum_shape, seed_from_population_moments,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::FrequencyDensity;
-use pop_var_caller::ng::types::{ExpectedHeterozygosity, InbreedingF};
+use pop_var_caller::ng::types::{
+    ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF,
+};
 
 /// Panel sizes, in diploid individuals — the committed range, one sample to a thousand
 /// (`doc/devel/specs/design_principles.md` §0).
@@ -119,9 +121,17 @@ fn main() {
 /// Today the caller does not read the mean frequency off the census. It takes the fitted
 /// population density, evaluates it into the `2N + 1` allele-count classes a panel of `N` diploid
 /// individuals has, and searches for the two-parameter pair whose own predicted classes best match
-/// (`doc/devel/ng/spec/population_diversity.md` §3.2). The mean frequency the caller uses is the
-/// pair's, blended toward a neutral shape by how much the panel has earned
-/// (`ordinary_site_seed.md` §4).
+/// (`doc/devel/ng/spec/population_diversity.md` §3.2). The mean frequency the caller used was the
+/// pair's, blended toward a neutral shape by how much the panel had earned.
+///
+/// **⚑ Both the blend and the search left the caller on 2026-08-27**
+/// (`ordinary_site_prior_moments.md` §2, §6.1). The last column of each table below is what the
+/// caller uses now — the population's own mean frequency, straight into the seed — and on this arm
+/// it is 1.000× at every panel size **by construction**, because this arm hands the population over
+/// exactly. That is not a check of anything; it is the point. What the column is for is putting
+/// the search's own departure beside a route that has none. The blend's own cost, which this
+/// program used to print as a column, is in report §9's third reading: 0.816×, 0.622×, 0.893× and
+/// 0.916× of the population's frequency at one individual on the four shapes.
 ///
 /// **This arm is handed the population exactly**, with no census sampling and no fitting error in
 /// it at all — so whatever it is off by is the detour's own, and it is the best case for the
@@ -160,31 +170,34 @@ fn print_todays_path(shapes: &[PopulationShape]) {
         println!("### {}", shape.name);
         println!();
         println!(
-            "| individuals | the search's mean frequency, over the population's | the seed's, \
-             after the blend | how much shape the blend took from the panel |"
+            "| individuals | the search's mean frequency, over the population's | the seed the \
+             search would give, over the population's | what the caller now uses |"
         );
         println!("|---:|---:|---:|---:|");
         for &individuals in DETOUR_PANELS.iter() {
             let classes = allele_count_classes(shape, individuals as u32);
             let spectrum = FittedSpectrum::new(&classes, 0.0, 1_000.0);
             let search = fit_spectrum_shape(&spectrum, outbred);
-            let seed = project_spectrum_seed(
-                Some(FittedSpectrum::new(&classes, 0.0, 1_000.0)),
+            let searched_seed = seed_from_population_moments(
+                ExpectedAlternativeFrequency::try_new(search.expected_frequency()).ok(),
                 Some(diversity),
-                outbred,
             );
-            let seed_frequency =
-                seed.alpha_alt_total() / (seed.alpha_ref() + seed.alpha_alt_total());
-            let blend = match seed.regime() {
-                SeedRegime::FittedSpectrum {
-                    shape_from_panel, ..
-                } => format!("{shape_from_panel:.3}"),
-                other => format!("{other:?}"),
-            };
+            let searched_frequency = searched_seed.alpha_alt_total()
+                / (searched_seed.alpha_ref() + searched_seed.alpha_alt_total());
+            // What the caller does today: the population's own mean frequency, straight into the
+            // seed. Handed the population exactly, as this arm is, the ratio is one by
+            // construction — which is the finding rather than a check.
+            let direct_seed = seed_from_population_moments(
+                ExpectedAlternativeFrequency::try_new(population_frequency).ok(),
+                Some(diversity),
+            );
+            let direct_frequency = direct_seed.alpha_alt_total()
+                / (direct_seed.alpha_ref() + direct_seed.alpha_alt_total());
             println!(
-                "| {individuals} | {:.3}× | {:.3}× | {blend} |",
+                "| {individuals} | {:.3}× | {:.3}× | {:.3}× |",
                 search.expected_frequency() / population_frequency,
-                seed_frequency / population_frequency,
+                searched_frequency / population_frequency,
+                direct_frequency / population_frequency,
             );
         }
     }

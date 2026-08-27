@@ -115,8 +115,10 @@ impl FrequencyDensity {
     /// grows.** [`Self::allele_count_classes`] carries this number exactly at every panel size —
     /// the classes' own unbiased heterozygosity is this, at one individual and at two hundred.
     /// What does not carry it is the two-parameter Dirichlet-multinomial fitted to those classes
-    /// (`genotype_prior::project_spectrum_seed`): it cannot represent a point mass, and the more
-    /// classes it is fitted over the more it trades the ends against the middle.
+    /// (`genotype_prior::fit_spectrum_shape`, deleted at plan step A5): it cannot represent a
+    /// point mass, and the more classes it is fitted over the more it trades the ends against the
+    /// middle. **The caller stopped reading it on 2026-08-27** and now takes this integral and
+    /// [`Self::expected_alternative_frequency`] instead.
     ///
     /// **Measured on four densities in `examples/ng_spectrum_panel_floor.rs`, and the size
     /// depends on the shape.** The pair reproduces this number to within 0.1% at one individual,
@@ -193,10 +195,10 @@ impl FrequencyDensity {
     ///
     /// **What the two-parameter fit does with them afterwards is not exact, and that is
     /// downstream of here.** The Dirichlet-multinomial family
-    /// ([`project_spectrum_seed`](crate::ng::calling::genotype_prior::project_spectrum_seed))
-    /// cannot represent a point mass, so the pair it returns depends on how many classes it was
-    /// fitted over — measured in `examples/ng_spectrum_panel_floor.rs`, and recorded on
-    /// [`Self::expected_heterozygosity`].
+    /// ([`fit_spectrum_shape`](crate::ng::calling::genotype_prior::fit_spectrum_shape)) cannot
+    /// represent a point mass, so the pair it returns depends on how many classes it was fitted
+    /// over — measured in `examples/ng_spectrum_panel_floor.rs`, and recorded on
+    /// [`Self::expected_heterozygosity`]. **No seed reads that pair any more.**
     ///
     /// # Panics
     ///
@@ -450,7 +452,7 @@ impl JointFit {
     /// cannot hand the caller something that is not a probability.
     ///
     /// **`None` means the fit produced something that is not a heterozygosity**, and the ladder
-    /// below it takes over: `project_spectrum_seed` seeds from
+    /// below it takes over: `seed_from_population_moments` seeds from
     /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`] and marks the run `FallbackDiversity`, which
     /// is `population_diversity.md` §6's rule that neither number may fail a run. **It is not a
     /// refusal**, and an earlier draft of this sentence said it was.

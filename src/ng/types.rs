@@ -738,6 +738,46 @@ impl ExpectedHeterozygosity {
     }
 }
 
+/// **How often a chromosome drawn at random from the population carries something other
+/// than the reference base**, at an ordinary site — the mean alternative-allele
+/// frequency. A probability in `[0, 1]`.
+///
+/// **The partner of [`ExpectedHeterozygosity`], and a type of its own so the two cannot
+/// be swapped.** The SNP/indel genotype prior's two concentration numbers are exactly
+/// this frequency and a total conviction in other clothes, and
+/// `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity turns the pair back into
+/// them. Both are probabilities in `[0, 1]`, both are population quantities with no
+/// panel in them, and both reach the seed builder in the same call — so as bare floats
+/// a swapped pair compiles and returns a seed that is wrong in a way no downstream check
+/// refuses.
+///
+/// **They are different questions about the same population.** This one asks how often
+/// *one* chromosome is non-reference; the heterozygosity asks how often *two* differ.
+/// On a population where the alternative allele is rare the second is about twice the
+/// first, and on one where the reference base is the rare one it is far smaller than
+/// the first — so their sizes do not separate them either.
+///
+/// Source: the joint fit's own fitted density, in closed form
+/// (`FrequencyDensity::expected_alternative_frequency`,
+/// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §2). A run whose pre-pass fitted no
+/// density has none of this, and its seed falls to the neutral shape at whatever
+/// diversity it did fit.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct ExpectedAlternativeFrequency(f64);
+
+impl ExpectedAlternativeFrequency {
+    /// The only constructor. A frequency that is not a probability in `[0, 1]` is
+    /// rejected rather than coerced.
+    pub fn try_new(frequency: f64) -> Result<Self, DomainError> {
+        checked_probability(frequency, DomainError::ExpectedAlternativeFrequency).map(Self)
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// The chance that two repeat-tract copies drawn at random from the cohort carry
 /// different numbers of repeats — Nei's gene diversity, measured on repeat tracts.
 ///
@@ -910,6 +950,15 @@ pub enum DomainError {
     /// wrong fit.
     #[error("expected heterozygosity {0} is not a finite probability in [0, 1]")]
     ExpectedHeterozygosity(f64),
+    /// An [`ExpectedAlternativeFrequency`] was built from a value that is not a finite
+    /// probability in `[0, 1]`.
+    ///
+    /// **Its own variant beside [`Self::ExpectedHeterozygosity`], because the two arrive
+    /// together.** They are the two numbers the SNP/indel genotype prior is built from
+    /// and they reach the seed builder in one call, so a message naming the wrong one
+    /// sends the reader to the wrong half of a two-number fit.
+    #[error("expected alternative-allele frequency {0} is not a finite probability in [0, 1]")]
+    ExpectedAlternativeFrequency(f64),
     /// A [`RepeatGeneDiversity`] was built from a value that is not a finite
     /// probability in `[0, 1]`.
     ///
@@ -1436,6 +1485,15 @@ mod tests {
         assert_eq!(ExpectedHeterozygosity::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(ExpectedHeterozygosity::try_new(1.0).unwrap().get(), 1.0);
 
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(0.0).unwrap().get(),
+            0.0
+        );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(1.0).unwrap().get(),
+            1.0
+        );
+
         assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
         let just_below_one = f64::from_bits(1.0f64.to_bits() - 1);
         // Pinned, not assumed: any value below one would satisfy the assertion that
@@ -1532,6 +1590,14 @@ mod tests {
             ExpectedHeterozygosity::try_new(1.5),
             Err(DomainError::ExpectedHeterozygosity(1.5))
         );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(-0.5),
+            Err(DomainError::ExpectedAlternativeFrequency(-0.5))
+        );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(1.5),
+            Err(DomainError::ExpectedAlternativeFrequency(1.5))
+        );
     }
 
     /// `NaN` and both infinities are not probabilities and none of them
@@ -1570,6 +1636,13 @@ mod tests {
                     Err(DomainError::ExpectedHeterozygosity(_))
                 ),
                 "expected heterozygosity {bad}"
+            );
+            assert!(
+                matches!(
+                    ExpectedAlternativeFrequency::try_new(bad),
+                    Err(DomainError::ExpectedAlternativeFrequency(_))
+                ),
+                "expected alternative-allele frequency {bad}"
             );
         }
     }

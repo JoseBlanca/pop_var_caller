@@ -28,7 +28,7 @@
 //! the other belongs where the run is assembled, not here. What this checks is that there is at
 //! least one.
 //!
-//! **The prior's seed is projected once**, by [`RunParameters::project_seed`], and not per
+//! **The prior's seed is built once**, by [`RunParameters::seed_from_moments`], and not per
 //! locus: what varies per locus is how the seed is spread across that locus's alleles
 //! (`doc/devel/ng/spec/calling_priors.md` §2.3).
 //!
@@ -51,7 +51,7 @@
 use std::collections::BTreeMap;
 
 use super::genotype_prior::SpectrumSeed;
-use super::genotype_prior::seed_generic::{FittedSpectrum, project_spectrum_seed};
+use super::genotype_prior::seed_generic::{FittedSpectrum, seed_from_population_moments};
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
 use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
@@ -62,15 +62,24 @@ use crate::ng::parameter_estimation::joint::fit::FrequencyDensity;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::ssr::StratumKey;
-use crate::ng::types::{ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId};
+use crate::ng::types::{
+    ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, Ploidy,
+    ReadGroupId,
+};
 
 /// **The run's frequency spectrum, owned** — the joint fit's allele-frequency density written
-/// out as the `2N + 1` allele-count class weights the genotype prior's projection takes.
+/// out as the `2N + 1` allele-count class weights a panel of `N` diploid individuals has.
+///
+/// **⛔ The seed does not take this any more**, and this type has no other consumer in the
+/// library. Both of the seed's numbers are integrals of the density itself, so nothing is
+/// evaluated into classes on the way (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2, §5).
+/// Plan step A5 deletes it; **the one thing that must outlive it is the count of census positions
+/// that came out variable**, which spec §6.2 re-sources from the fit's own per-position
+/// posteriors as a soft count of positions that segregate.
 ///
 /// **It exists because [`FittedSpectrum`] borrows.** The pre-pass emits a four-parameter density,
-/// the prior takes a vector of class weights, and something has to own that vector for as long as
-/// the seed is being projected. This is that owner and nothing more; the arithmetic is
-/// `FrequencyDensity::allele_count_classes`'.
+/// the search took a vector of class weights, and something had to own that vector. This is that
+/// owner and nothing more; the arithmetic is `FrequencyDensity::allele_count_classes`'.
 ///
 /// **A change of representation, not a second estimate** (`population_diversity.md` §3.2):
 /// nothing here is fitted that the density does not already carry.
@@ -128,14 +137,15 @@ impl FittedFrequencySpectrum {
     /// population's alleles sit at middling frequencies. The projection itself is exact — the
     /// classes carry the density's heterozygosity at every panel size, which
     /// `fit::tests::the_classes_carry_the_densitys_heterozygosity_at_every_panel` pins. What lost
-    /// it was `project_spectrum_seed`.
+    /// it was `seed_from_population_moments`.
     ///
     /// **That function no longer takes its total from the search**
     /// (`ordinary_site_seed.md` §3): it solves one from the run's measured heterozygosity, so the
     /// seed reproduces the measurement at every panel size and every shape, which
-    /// `seed_generic::projection_tests::the_seeds_implied_diversity_is_the_measured_one_at_every_panel_and_shape`
-    /// asserts. The four numbers above are what the *search* still loses, and
-    /// `examples/ng_spectrum_panel_floor.rs` is where they are measured.
+    /// `seed_generic::projection_tests::the_seeds_implied_diversity_is_the_measured_one_at_every_shape`
+    /// asserts. The four numbers above are what the *search* loses, and
+    /// `examples/ng_spectrum_panel_floor.rs` is where they are measured — **no seed reads that
+    /// search now** (`ordinary_site_prior_moments.md` §2).
     ///
     /// **The two rungs are still not interchangeable, and it is worth saying which way.** They
     /// agree on the heterozygosity — now by construction on both — and they disagree on how much
@@ -183,11 +193,12 @@ impl FittedFrequencySpectrum {
     /// **The regulariser weight is zero, and it is a measurement rather than a placeholder.**
     /// That field says how many sites' worth of pseudo-counts held the spectrum at the neutral
     /// shape; the joint route holds it at nothing, because it fits the density by maximum
-    /// likelihood over the census positions with no pseudo-counts anywhere. So
-    /// `SeedRegime::FittedSpectrum`'s `census_sites_outweigh_regularizer` is true for this route
-    /// whenever any position segregates — which is the honest answer and not a flattering one:
-    /// the flag exists to catch a *regularised* spectrum whose real sites lost, and this route
-    /// has no regulariser to lose to.
+    /// likelihood over the census positions with no pseudo-counts anywhere.
+    ///
+    /// **Nothing reads it any more.** It used to travel to the run's output on the seed's regime,
+    /// beside whether the real census sites outweighed it. The seed no longer takes a spectrum
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6), so this view's only remaining
+    /// readers are the two programs that measure what the old search cost.
     #[must_use]
     pub fn view(&self) -> FittedSpectrum<'_> {
         FittedSpectrum::new(&self.class_weights, 0.0, self.variable_census_sites)
@@ -231,24 +242,24 @@ pub struct RunParameters {
 }
 
 impl RunParameters {
-    /// **The prior's seed for this run**, projected from the pre-pass's fitted spectrum.
+    /// **The prior's seed for this run**, built from the two moments of the population the
+    /// pre-pass fitted.
     ///
-    /// A named step of its own rather than an argument, because it is the one number here that
-    /// is *derived* rather than gathered, and because its three inputs come from three
-    /// different places — the spectrum from the joint fit, the diversity from the same fit's
-    /// density, the panel's inbreeding from the cohort. See
-    /// [`project_spectrum_seed`] for what it does with each and what it falls back to.
+    /// A named step of its own rather than an argument, because it is the one number here that is
+    /// *derived* rather than gathered. See [`seed_from_population_moments`] for what it does with
+    /// each moment and what it falls back to when one is missing.
     ///
-    /// **Both of the first two now have a producer**, which they did not until plan step E2f:
-    /// [`FittedFrequencySpectrum::of`] and
+    /// **Both moments come off the same fitted density**, in closed form and with no panel in
+    /// either: `FrequencyDensity::expected_alternative_frequency` and
     /// [`JointFit::fitted_diversity`](crate::ng::parameter_estimation::joint::fit::JointFit::fitted_diversity).
+    /// **The panel's inbreeding coefficient is no longer an input**, because nothing in the seed
+    /// reads a panel any more (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
     #[must_use]
-    pub fn project_seed(
-        spectrum: Option<FittedSpectrum<'_>>,
+    pub fn seed_from_moments(
+        expected_frequency: Option<ExpectedAlternativeFrequency>,
         diversity: Option<ExpectedHeterozygosity>,
-        panel_inbreeding: InbreedingF,
     ) -> SpectrumSeed {
-        project_spectrum_seed(spectrum, diversity, panel_inbreeding)
+        seed_from_population_moments(expected_frequency, diversity)
     }
 
     /// **Gather one run's frozen parameters.**
@@ -532,6 +543,21 @@ mod tests {
         )
     }
 
+    /// The mean alternative-allele frequency that density itself implies — **the seed's other
+    /// input**, and the one that replaced the panel-fitted search on 2026-08-27
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
+    ///
+    /// On this fixture it is 1.67 in 1,000: 4.0 in 1,000 positions segregate at a Beta(0.20,
+    /// 1.00) mean of 0.167, plus the 1.0 in 1,000 fixed for a non-reference base.
+    fn its_own_frequency(
+        density: &Estimate<FrequencyDensity>,
+    ) -> Option<ExpectedAlternativeFrequency> {
+        Some(
+            ExpectedAlternativeFrequency::try_new(density.value.expected_alternative_frequency())
+                .expect("a fitted density's mean frequency is a probability"),
+        )
+    }
+
     /// A density whose four parameters are all different, at a diversity near this project's
     /// tomato cohort's — 6 differences per 10,000 bases.
     fn a_fitted_density() -> Estimate<FrequencyDensity> {
@@ -547,27 +573,23 @@ mod tests {
         }
     }
 
-    /// **The seam that was missing**: a fitted density and the panel it was fitted on produce the
-    /// class weights the prior's projection takes, and the run seeds from them rather than from a
-    /// species-range constant.
+    /// **The seam that was missing**: a fitted density produces both of the seed's numbers, and
+    /// the run seeds from them rather than from a species-range constant.
+    ///
+    /// **The panel it was fitted on no longer enters.** Both numbers are integrals of the curve,
+    /// so a run of one sample and a run of a thousand get the same seed off the same density
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
     #[test]
-    fn a_fitted_density_seeds_the_run_from_its_own_spectrum() {
+    fn a_fitted_density_seeds_the_run_from_its_own_moments() {
         let density = a_fitted_density();
-        let spectrum = FittedFrequencySpectrum::of(&density, 63);
-        assert_eq!(
-            spectrum.class_weights().len(),
-            2 * 63 + 1,
-            "a panel of 63 diploids has 127 allele-count classes"
-        );
 
-        let seed = RunParameters::project_seed(
-            Some(spectrum.view()),
+        let seed = RunParameters::seed_from_moments(
+            its_own_frequency(&density),
             its_own_diversity(&density),
-            outbred(),
         );
         assert!(
-            matches!(seed.regime(), SeedRegime::FittedSpectrum { .. }),
-            "a spectrum arrived, so the run is on its own measurement rather than a fallback: \
+            matches!(seed.regime(), SeedRegime::FittedCurve),
+            "both moments arrived, so the run is on its own measurement rather than a fallback: \
              {:?}",
             seed.regime()
         );
@@ -576,6 +598,24 @@ mod tests {
             "the pair is ({}, {})",
             seed.alpha_ref(),
             seed.alpha_alt_total()
+        );
+        // **The seed reproduces the density's own heterozygosity**, which is the whole claim: a
+        // Dirichlet(`α_ref`, `α_alt`) makes a diploid heterozygous
+        // `2 α_ref α_alt / (A (A + 1))` of the time, with `A` the pair's total.
+        let total = seed.alpha_ref() + seed.alpha_alt_total();
+        let implied = 2.0 * seed.alpha_ref() * seed.alpha_alt_total() / (total * (total + 1.0));
+        let theta = density.value.expected_heterozygosity();
+        assert!(
+            (implied / theta - 1.0).abs() < 1e-12,
+            "the seed implies {implied:e} where the density's own heterozygosity is {theta:e}"
+        );
+        // **And its expected frequency is the density's own**, which is the number that used to
+        // come out of a search over the panel's allele-count classes.
+        let frequency = seed.alpha_alt_total() / total;
+        let densitys_own = density.value.expected_alternative_frequency();
+        assert!(
+            (frequency / densitys_own - 1.0).abs() < 1e-12,
+            "the seed's expected frequency is {frequency:e} where the density's is {densitys_own:e}"
         );
     }
 
@@ -631,16 +671,7 @@ mod tests {
     }
 
     /// **The panel is the run's fact and not the density's**, so the same density at two panel
-    /// sizes gives two different vectors — and the seed the caller would use moves with it.
-    ///
-    /// **What moves it is the *shape*, not the scale.** Both seeds imply the density's own
-    /// heterozygosity exactly, because the total is solved from it
-    /// (`doc/devel/ng/spec/ordinary_site_seed.md` §3); what differs is the expected
-    /// alternative-allele frequency, which the larger panel reads more of off its own data.
-    /// A higher expected frequency needs less conviction to reach the same heterozygosity, so
-    /// the reference concentration falls as the panel grows. This pins the direction, and that
-    /// the two are not the same call — which is what a projection ignoring its `individuals`
-    /// argument would make them.
+    /// sizes gives two different class-weight vectors.
     #[test]
     fn the_same_density_at_two_panels_is_two_different_spectra() {
         let density = a_fitted_density();
@@ -649,40 +680,55 @@ mod tests {
 
         assert_eq!(small.class_weights().len(), 3);
         assert_eq!(large.class_weights().len(), 127);
-
-        let small_seed =
-            RunParameters::project_seed(Some(small.view()), its_own_diversity(&density), outbred());
-        let large_seed =
-            RunParameters::project_seed(Some(large.view()), its_own_diversity(&density), outbred());
-        assert!(
-            small_seed.alpha_ref() > large_seed.alpha_ref(),
-            "the pair drifts down with the panel: {} at one individual against {} at 63",
-            small_seed.alpha_ref(),
-            large_seed.alpha_ref()
+        assert_ne!(
+            small.variable_census_sites(),
+            large.variable_census_sites(),
+            "a larger panel carries more of the population's rare alleles, so more of its \
+             census positions come out variable"
         );
-        // **And both imply this density's own heterozygosity**, which is what makes the sentence
-        // above about *shape* rather than about scale.
-        //
-        // **This is the assertion that makes `its_own_diversity` load-bearing**, and until a
-        // review put the old hard-coded `1e-3` back and watched all 26 tests pass, nothing here
-        // read the argument at all. The density's own heterozygosity is 6.06 in 10,000, so the
-        // constant was 65% high and the seed's total 65% wrong — invisible to an ordering.
-        //
-        // A Dirichlet(`α_ref`, `α_alt`) makes a diploid drawn from it heterozygous
-        // `2 α_ref α_alt / (A (A + 1))` of the time, with `A` the pair's total.
-        let implied = |seed: SpectrumSeed| {
-            let total = seed.alpha_ref() + seed.alpha_alt_total();
-            2.0 * seed.alpha_ref() * seed.alpha_alt_total() / (total * (total + 1.0))
-        };
-        let theta = density.value.expected_heterozygosity();
-        for (panel, seed) in [(1, small_seed), (63, large_seed)] {
-            assert!(
-                (implied(seed) / theta - 1.0).abs() < 1e-9,
-                "at {panel} individuals the seed implies a heterozygosity of {} against the \
-                 density's own {theta}",
-                implied(seed)
-            );
-        }
+    }
+
+    /// **The seed is the pair a hand calculation gives, to the last few bits** — on the fixture
+    /// density, whose four numbers make both moments short enough to write down.
+    ///
+    /// **The density's own two moments**: 4.0 in 1,000 positions segregate, at a `Beta(0.20,
+    /// 1.00)` whose mean is `0.2/1.2` and whose `E[2f(1−f)]` is `2·0.2·1.0/(1.2·2.2)`, plus 1.0
+    /// in 1,000 positions fixed for a non-reference base. So the mean frequency is
+    /// `0.001 + 0.004 · 0.2/1.2` and the heterozygosity is `0.004 · 2 · 0.2/(1.2 · 2.2)`.
+    ///
+    /// **Then `ordinary_site_seed.md` §3's identity**: `t = θ / (2 f (1 − f))`, `A = t/(1 − t)`,
+    /// and the pair is `(A(1 − f), A f)`.
+    ///
+    /// **This is what makes the seam's arithmetic checkable rather than merely self-consistent.**
+    /// The two assertions in the test above compare the seed against the density through the
+    /// library's own accessors; this one writes the whole chain out from the four fitted numbers
+    /// and compares against that.
+    #[test]
+    fn the_seed_is_what_the_identity_gives_from_the_four_fitted_numbers() {
+        let density = a_fitted_density();
+        let (p_invariant, p_fixed_alt, a, b) = (0.9950, 0.0010, 0.20, 1.00);
+        let segregating = 1.0 - p_invariant - p_fixed_alt;
+        let frequency = p_fixed_alt + segregating * a / (a + b);
+        let theta = segregating * 2.0 * a * b / ((a + b) * (a + b + 1.0));
+        let share_of_ceiling = theta / (2.0 * frequency * (1.0 - frequency));
+        let total = share_of_ceiling / (1.0 - share_of_ceiling);
+
+        let seed = RunParameters::seed_from_moments(
+            its_own_frequency(&density),
+            its_own_diversity(&density),
+        );
+        assert!(
+            (seed.alpha_ref() / (total * (1.0 - frequency)) - 1.0).abs() < 1e-12,
+            "the reference concentration is {} where the identity gives {}",
+            seed.alpha_ref(),
+            total * (1.0 - frequency)
+        );
+        assert!(
+            (seed.alpha_alt_total() / (total * frequency) - 1.0).abs() < 1e-12,
+            "the alternative concentration is {} where the identity gives {}",
+            seed.alpha_alt_total(),
+            total * frequency
+        );
     }
 
     /// **The count of variable census sites is a count of sites in *this panel***, not the
@@ -730,31 +776,14 @@ mod tests {
         );
     }
 
-    /// **The regulariser weight is zero and the flag beside it says the real sites won**, which
-    /// is a fact about this route rather than a flattering default: the joint fit holds the
-    /// density at nothing, so there is no regulariser for the census sites to lose to.
+    /// **The regulariser weight is zero on this route**, which is a fact about it rather than a
+    /// flattering default: the joint fit holds the density at nothing, so there is no regulariser
+    /// for the census sites to lose to.
     #[test]
     fn the_joint_route_carries_no_regulariser() {
         let density = a_fitted_density();
         let spectrum = FittedFrequencySpectrum::of(&density, 10);
         assert_eq!(spectrum.view().regularizer_site_weight(), 0.0);
-
-        let seed = RunParameters::project_seed(
-            Some(spectrum.view()),
-            its_own_diversity(&density),
-            outbred(),
-        );
-        match seed.regime() {
-            SeedRegime::FittedSpectrum {
-                regularizer_site_weight,
-                census_sites_outweigh_regularizer,
-                ..
-            } => {
-                assert_eq!(regularizer_site_weight, 0.0);
-                assert!(census_sites_outweigh_regularizer);
-            }
-            other => panic!("a spectrum was supplied and the regime came back {other:?}"),
-        }
     }
 
     fn outbred() -> InbreedingF {

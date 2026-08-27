@@ -89,7 +89,7 @@ oracle is the closed form checked against the search's own answer at **one indiv
 §9 records the search is exact; the two agree to the search's 1% resolution on all five densities.
 *Depends:* none. *Source:* spec §2, step one.
 
-**A2. `project_spectrum_seed` takes the two numbers.**  ☐
+**A2. `project_spectrum_seed` takes the two numbers.**  ✅
 Its signature becomes the two moments and nothing else — no spectrum, no panel size, no inbreeding
 coefficient. The body is A1's frequency and the existing `total_for_diversity`. The three regimes
 `SeedRegime` distinguishes stay what they are: a fitted curve, a fitted diversity with no curve,

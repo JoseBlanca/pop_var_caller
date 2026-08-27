@@ -7,15 +7,21 @@
 //! just, and *how much* larger is fitted rather than fixed
 //! (`doc/devel/ng/spec/calling_priors.md` §4.1).
 //!
-//! **Three functions and the view between them.** [`fill_expected_spectrum`] says what a panel's
-//! allele counts would look like if a candidate pair were the truth; [`project_spectrum_seed`]
-//! takes the pre-pass's measured spectrum as a [`FittedSpectrum`], searches for the pair whose
-//! prediction matches it, and hands back the run's seed; [`fill_locus_concentration`] spreads
-//! that one pair over each locus's own alleles.
+//! **Two functions, and one piece of machinery on its way out.**
+//! [`seed_from_population_moments`] takes the two things the pre-pass measured about the
+//! population — its mean alternative-allele frequency and its heterozygosity — and returns the
+//! run's seed; [`fill_locus_concentration`] spreads that one pair over each locus's own alleles.
+//!
+//! **⛔ The rest of this file is the search the seed used to go through**, which evaluated the
+//! fitted population curve into a panel's `2N + 1` allele-count classes
+//! ([`fill_expected_spectrum`], [`FittedSpectrum`]) and fitted a two-parameter pair to them. **No
+//! seed reads it any more** (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2), and plan step
+//! A5 deletes it. It stands meanwhile so that the programs measuring what it cost keep measuring
+//! the shipped search rather than a copy.
 
 use crate::genetics::{MIN_ALT_CONCENTRATION, PROBABILITY_FLOOR, lgamma};
 use crate::ng::parameter_estimation::fitting::multistart::SearchPrecision;
-use crate::ng::types::{ExpectedHeterozygosity, InbreedingF};
+use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF};
 
 use super::{Concentration, SeedRegime, SpectrumMatch, SpectrumSeed};
 
@@ -575,11 +581,13 @@ pub use checked::FittedSpectrum;
 /// Two numbers and one report:
 ///
 /// - the **expected alternative-allele frequency** the fitted pair carries,
-///   `α_alt / (α_ref + α_alt)` — the ratio of the pair, which is what
-///   [`project_spectrum_seed`] keeps;
-/// - the **pair itself**, through [`Self::concentrations`] — whose total is what
-///   [`project_spectrum_seed`] throws away;
+///   `α_alt / (α_ref + α_alt)` — the ratio of the pair, which is what the seed used to keep;
+/// - the **pair itself**, through [`Self::concentrations`] — whose total the seed used to throw
+///   away;
 /// - how far the fitted pair sat from the spectrum it was fitted to, as a [`SpectrumMatch`].
+///
+/// **⛔ No seed reads any of it now**, and its remaining readers are the programs that measure
+/// what the search cost (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
 ///
 /// ## Why the ratio is kept and the total is not
 ///
@@ -636,19 +644,25 @@ impl FittedShape {
 
 /// **Fit the two-parameter family to a panel's allele-count spectrum, and keep its shape.**
 ///
-/// This is the search unchanged — `doc/devel/ng/spec/ordinary_site_seed.md` §2 lists it as a
-/// non-goal — wrapped so that what comes out of it is separable into the part the seed keeps
-/// and the part the seed replaces. [`project_spectrum_seed`] is its one caller inside the
-/// library.
+/// This is the search unchanged, wrapped so that what comes out of it is separable into the part
+/// the seed used to keep — the ratio — and the part it replaced with a pin — the total.
 ///
-/// **It is public because the sweep that set [`HALF_WEIGHT_PANEL_SIZE`] has to measure the
-/// shipped search rather than a copy of it** (`examples/ng_seed_shape_weight_sweep.rs`). A copy
-/// would make the constant a fact about the copy.
+/// **⛔ Nothing in the library calls it.** The seed's frequency is an integral of the fitted
+/// population curve since 2026-08-27 (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2), and
+/// plan step A5 deletes this. It is public, and stays until then, because the programs that
+/// measure what it cost have to measure the shipped search rather than a copy of it —
+/// `examples/ng_spectrum_panel_floor.rs`, `ng_seed_shape_weight_sweep.rs`,
+/// `ng_prior_moment_estimators.rs` and `ng_prior_moments_from_reads.rs`. A copy would make those
+/// figures facts about the copy.
 ///
 /// ## Cost
 ///
-/// One fit, which is 399 predictions of the panel's spectrum — see [`project_spectrum_seed`]'s
-/// cost section, whose figures are this function's.
+/// One fit is **399 predictions of the panel's spectrum** — the same count at every panel size
+/// and every inbreeding coefficient measured, because what the search costs is set by how finely
+/// it resolves each direction and not by the panel. The count is asserted in
+/// [`projection_tests::a_fit_costs_at_most_450_predictions`]; the wall clock is 3.8 s at 400
+/// individuals, 22 s at 800, 2.2 minutes at 1,600 and **11.8 minutes at 3,200**, measured in
+/// [`projection_tests::the_cost_of_one_fit_by_panel_size`].
 #[must_use]
 pub fn fit_spectrum_shape(
     spectrum: &FittedSpectrum<'_>,
@@ -714,8 +728,11 @@ pub fn fit_spectrum_shape(
 /// sweep cannot resolve, and this one keeps a fifth of the shape on the neutral side at a single
 /// genome — the hardest case in the committed range, and the one where the panel has least to
 /// say. **Zero is not taken either**, for a different reason: it would delete the ramp, and with
-/// it the run's ability to report how much of its shape it borrowed
-/// ([`SeedRegime::FittedSpectrum`](super::SeedRegime::FittedSpectrum)).
+/// it the run's ability to report how much of its shape it borrowed.
+///
+/// **⛔ Zero is what the measurement of 2026-08-27 settled on, by deleting the question.** The
+/// seed takes no shape from the panel at all now, so this constant has no consumer; plan step A3
+/// deletes it (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1).
 ///
 /// **It does not depend on depth**, which answers `ordinary_site_seed.md` §7's first open
 /// question: the best value is the same at 3, 8 and 20 reads a sample on both shapes. **It does
@@ -758,6 +775,14 @@ pub fn panel_shape_weight(individuals: u32) -> f64 {
 ///
 /// Both inputs are strictly between 0 and 1, so the result is too: a weighted geometric mean of
 /// two numbers in `(0, 1)` lies between them.
+///
+/// **⛔ Nothing calls this any more.** The seed's expected frequency is the fitted population
+/// curve's own mean, and the panel supplies none of it
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1). It is left standing for exactly one
+/// commit so that the deletion of the ramp — this function, [`panel_shape_weight`],
+/// [`HALF_WEIGHT_PANEL_SIZE`] and the three tests that pin them — is its own commit and a bisect
+/// can find it.
+#[allow(dead_code)]
 fn blend_expected_frequency(neutral: f64, fitted: f64, weight: f64) -> f64 {
     debug_assert!(
         neutral > 0.0 && neutral < 1.0,
@@ -839,98 +864,97 @@ fn total_for_diversity(expected_frequency: f64, diversity: f64) -> PinnedTotal {
 /// a ratio, `θ / (1 + θ)`.
 ///
 /// It is the bottom end of §4's ramp, and it has to be *exactly* the frequency of the pair the
-/// no-spectrum branch of [`project_spectrum_seed`] returns, or the two rungs
+/// no-frequency branch of [`seed_from_population_moments`] returns, or the two rungs
 /// `doc/devel/ng/spec/population_diversity.md` §3.4 used to switch between are not the two ends of
 /// one ramp after all. **Writing `θ` here instead is wrong by a factor of `1 + θ`**, which is 1
 /// part in 10,000 at a human diversity and 40% at a `θ` of 0.4 — invisible where anyone would
 /// look, and the reason
 /// [`projection_tests::the_ramps_neutral_end_is_the_pair_the_neutral_rung_returns`] tests it at a
 /// diversity no cohort has.
+///
+/// **⛔ Nothing calls this any more**, for the same reason and on the same one-commit footing as
+/// [`blend_expected_frequency`]: it was the bottom end of the ramp, and there is no ramp.
+#[allow(dead_code)]
 fn neutral_expected_frequency(diversity: f64) -> f64 {
     diversity / (NEUTRAL_ALPHA_REF + diversity)
 }
 
-/// **Read the run's two starting numbers off what the pre-pass fitted**: the reference allele's
-/// concentration and the total shared out across whatever alternative alleles a locus turns out
-/// to carry.
+/// **Build the run's two starting numbers from the two things the pre-pass measured about the
+/// population**: how often a chromosome drawn at random carries something other than the
+/// reference base, and how often two chromosomes drawn at random differ.
+///
+/// What comes out is the reference allele's concentration and the total shared out across
+/// whatever alternative alleles a locus turns out to carry.
 ///
 /// ## What it does, in one sentence each
 ///
-/// **The pair is exactly an expected frequency and a total conviction in other clothes**, and
-/// the two come from different places. The frequency is a *shape*, blended between the neutral
-/// shape and the panel's own fitted one by how much the panel has earned
-/// ([`panel_shape_weight`]). The total is then whatever makes that shape imply the
-/// heterozygosity the pre-pass measured ([`total_for_diversity`]). Neither number is chosen
-/// (`doc/devel/ng/spec/ordinary_site_seed.md` §3, §4).
+/// **A concentration pair is exactly an expected frequency and a total conviction in other
+/// clothes**, so the two measurements determine it. The frequency is used as it stands. The total
+/// is whatever makes a pair of that frequency imply the heterozygosity that was measured
+/// ([`total_for_diversity`]). Neither number is chosen, and neither is fitted here
+/// (`doc/devel/ng/spec/ordinary_site_seed.md` §3,
+/// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
 ///
-/// **The diversity is read on every path through this function.** The sentence that used to
-/// stand here — *"a spectrum makes the diversity moot: it carries its own scale"* — is retired
-/// by §3: a spectrum's own scale is the number the two-parameter family loses, by 9.9% at 63
-/// individuals on a tomato-like shape and 18.6% on a human-like one (§1.2), and the measurement
-/// is what replaces it.
+/// **The panel's size appears nowhere in this function, and that is the point of the change that
+/// put it here.** Until 2026-08-27 the frequency was not measured but *searched for*: the fitted
+/// population curve was evaluated into the `2N + 1` allele-count classes a panel of `N` diploid
+/// individuals has, and a two-parameter pair was fitted to those classes. That objective has
+/// `2N + 1` terms, so its answer moved with the cohort — measured against the panel's own
+/// genotypes it was the worst of three routes in **34 of 36 cells**, and **0.749×** the truth at
+/// its worst, on a population with two frequency peaks at 63 individuals
+/// (`doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md` §9.1). The frequency is a
+/// property of the population, and now nothing about the panel reaches it.
 ///
 /// ## The regimes, and none of them is a branch on cohort size
 ///
-/// - **A spectrum and a diversity arrived** — the shape is blended, the total is pinned, and the
-///   run reports the weight it blended at ([`SeedRegime::FittedSpectrum`]).
-/// - **A diversity but no spectrum** — there is no second shape to blend toward, so the pair is
-///   the neutral `(1, θ)` ([`SeedRegime::NeutralShape`]). This is the bottom rung
-///   `ordinary_site_seed.md` §4 leaves a rung: there is nothing to interpolate when there is no
-///   measurement of shape.
-/// - **No diversity at all** — the neutral pair at the species-range guess, and the run must say
-///   so ([`SeedRegime::FallbackDiversity`]). **A spectrum without a diversity lands here too**,
-///   and its shape is discarded: after §3 the total comes from the measurement, so a run with no
-///   measurement has nothing to pin a shape to. In practice the two arrive together — the joint
-///   route fits the density and the heterozygosity in one pass, and reads the second off the
-///   first.
-/// - **The measured diversity is exactly zero** — a cohort with no variation at all. Every entry
-///   of the solved pair goes to zero with it, so the alternative concentration is floored at
+/// - **Both moments arrived** — the frequency is used and the total is pinned to the
+///   heterozygosity ([`SeedRegime::FittedCurve`]).
+/// - **A heterozygosity but no frequency** — there is no measured shape, so the pair is the
+///   neutral `(1, θ)` ([`SeedRegime::NeutralShape`]). This is the middle rung of
+///   `population_diversity.md` §3.4's ladder, and the per-sample histogram route is what is
+///   meant to reach it.
+/// - **No heterozygosity at all** — the neutral pair at the species-range guess, and the run must
+///   say so ([`SeedRegime::FallbackDiversity`]). **A frequency without a heterozygosity lands
+///   here too**, and it is discarded: the total comes from the heterozygosity, so a run without
+///   one has nothing to pin a shape to. In practice the two arrive together — the joint route
+///   fits the population's density and reads both moments off it.
+/// - **The measured heterozygosity is exactly zero** — a cohort with no variation at all. Every
+///   entry of the solved pair goes to zero with it, so the alternative concentration is floored at
 ///   [`MIN_ALT_CONCENTRATION`] and the run says the diversity was zero
 ///   ([`SeedRegime::ZeroDiversity`]).
-/// - **No total reaches the measured diversity** at the blended shape — the pair falls to the
+/// - **No total reaches the measured heterozygosity** at that frequency — the pair falls to the
 ///   neutral rung and says *that*, distinguishably from a run that was on the neutral rung
-///   because no spectrum arrived ([`SeedRegime::DiversityUnreachable`]).
+///   because no frequency arrived ([`SeedRegime::DiversityUnreachable`]).
 ///
-/// **Nothing here tests how many samples the cohort holds.** The panel size enters in one place
-/// only, as the weight of the blend, and it enters as a continuous ramp rather than as a switch.
+/// **Nothing here tests how many samples the cohort holds.**
 ///
 /// ## It takes no variant class, and that is a decision rather than an omission
 ///
 /// The design keeps the door open to giving substitutions and short insertions or deletions
 /// different diversities (`calling_priors.md` §4.2, Q1). **The end that will apply that split is
-/// [`fill_locus_concentration`], not this one** — settled by the owner, 2026-08-22. This
-/// function reads the *shape* of variation off the panel's own allele counts, which the pre-pass
-/// fits without separating the two classes; a class-specific *scale* belongs where the run's
-/// total is shared out over a locus's alleles, and that is the only end able to describe a site
-/// carrying one alternative of each kind. Carrying the argument at both ends would apply the
-/// ratio twice.
+/// [`fill_locus_concentration`], not this one** — settled by the owner, 2026-08-22. This function
+/// reads how variable the population is, which the pre-pass fits without separating the two
+/// classes; a class-specific *scale* belongs where the run's total is shared out over a locus's
+/// alleles, and that is the only end able to describe a site carrying one alternative of each
+/// kind. Carrying the argument at both ends would apply the ratio twice.
 ///
 /// # Panics
 ///
-/// **On a measured diversity above a half**, which no concentration pair can imply
+/// **On a measured heterozygosity above a half**, which no concentration pair can imply
 /// ([`MAX_IMPLIED_DIVERSITY`]). `ExpectedHeterozygosity` admits the whole of `[0, 1]`, so this is
 /// expressible; it is refused at the run's assembly rather than carried, because a heterozygosity
 /// above a half is a fit that did not converge (`ordinary_site_seed.md` §3.1).
 ///
 /// ## Cost
 ///
-/// One prediction of the panel's spectrum is the expensive step and a fit runs **399 of them,
-/// once per run** — the same count at every panel size and every inbreeding coefficient
-/// measured, because what the search costs is set by how finely it resolves each direction and
-/// not by the panel. The count is asserted in
-/// [`projection_tests::a_fit_costs_at_most_450_predictions`]; the wall clock is 3.8 s at 400
-/// individuals, 22 s at 800, 2.2 minutes at 1,600 and **11.8 minutes at 3,200**, measured in
-/// [`projection_tests::the_cost_of_one_fit_by_panel_size`]. **The pin and the blend add no
-/// prediction**: both are arithmetic on the pair the search already returned.
-///
-/// The search resolves each concentration to about 1% of itself, which is
-/// [`SearchPrecision::fast`]'s reasoning applied here: a concentration shifted by 1% moves a call
-/// far less than one more read would, so resolving it further would be spending time on digits no
-/// genotype registers.
-pub fn project_spectrum_seed(
-    spectrum: Option<FittedSpectrum<'_>>,
+/// **Three multiplications and a divide.** There is no fit here and no spectrum: the two moments
+/// arrive already measured, and the identity that turns them into a pair is closed-form. The
+/// search this replaced cost 399 predictions of the panel's own spectrum, which was 3.8 seconds at
+/// 400 individuals and **11.8 minutes at 3,200**.
+#[must_use]
+pub fn seed_from_population_moments(
+    expected_frequency: Option<ExpectedAlternativeFrequency>,
     diversity: Option<ExpectedHeterozygosity>,
-    panel_inbreeding: InbreedingF,
 ) -> SpectrumSeed {
     let Some(measured_diversity) = diversity.map(ExpectedHeterozygosity::get) else {
         return SpectrumSeed::new(
@@ -956,23 +980,13 @@ pub fn project_spectrum_seed(
             SeedRegime::ZeroDiversity,
         );
     }
-    let Some(spectrum) = spectrum else {
+    let Some(expected_frequency) = expected_frequency.map(ExpectedAlternativeFrequency::get) else {
         return SpectrumSeed::new(
             NEUTRAL_ALPHA_REF,
             measured_diversity,
             SeedRegime::NeutralShape,
         );
     };
-
-    let shape_from_panel = panel_shape_weight(spectrum.individuals());
-    let fitted = fit_spectrum_shape(&spectrum, panel_inbreeding);
-    // The neutral rung is the pair `(1, θ)`, so its own expected frequency is `θ / (1 + θ)`.
-    let neutral_frequency = neutral_expected_frequency(measured_diversity);
-    let expected_frequency = blend_expected_frequency(
-        neutral_frequency,
-        fitted.expected_frequency(),
-        shape_from_panel,
-    );
 
     match total_for_diversity(expected_frequency, measured_diversity) {
         PinnedTotal::Reached(total) => {
@@ -986,29 +1000,13 @@ pub fn project_spectrum_seed(
             SpectrumSeed::new(
                 total * (1.0 - expected_frequency),
                 total * expected_frequency,
-                SeedRegime::FittedSpectrum {
-                    shape_from_panel,
-                    regularizer_site_weight: spectrum.regularizer_site_weight(),
-                    // **This is the panel-wide comparison, and `calling_priors.md` §4.1 is
-                    // explicit that a panel-wide ratio is the wrong number to quote as
-                    // reassurance** — on the panel it measures, the aggregate was 3,100 to 1
-                    // while the thinnest class held two sites and was outweighed only 39 to 1.
-                    // The per-class ratio is the pre-pass's to emit beside its spectrum (arch
-                    // §4); this module carries the aggregate through and claims nothing more.
-                    census_sites_outweigh_regularizer: spectrum.variable_census_sites()
-                        > spectrum.regularizer_site_weight(),
-                    spectrum_match: fitted.spectrum_match(),
-                },
+                SeedRegime::FittedCurve,
             )
         }
         PinnedTotal::BeyondTheShapesReach => SpectrumSeed::new(
             NEUTRAL_ALPHA_REF,
             measured_diversity,
-            SeedRegime::DiversityUnreachable {
-                spectrum_match: fitted.spectrum_match(),
-                shape_from_panel,
-                expected_frequency,
-            },
+            SeedRegime::DiversityUnreachable { expected_frequency },
         ),
     }
 }
@@ -1503,7 +1501,7 @@ fn spectrum_log_likelihood(class_weights: &[f64], predicted: &[f64]) -> f64 {
 /// Both classes take the same seed today, for the reason [`VariantClass`] gives.
 ///
 /// **This is the end that will apply the split when it happens** — settled by the owner,
-/// 2026-08-22, and [`project_spectrum_seed`] no longer takes the argument because of it. That
+/// 2026-08-22, and [`seed_from_population_moments`] no longer takes the argument because of it. That
 /// function reads the *shape* of variation off the panel's allele counts, which the pre-pass fits
 /// without separating the two classes; a class-specific *scale* belongs here, where the run's
 /// total is shared out. When the pre-pass measures two diversities, [`SpectrumSeed`] carries both
@@ -2341,7 +2339,17 @@ mod projection_tests {
         ]
     }
 
-    /// Project a spectrum **at the diversity it was built to carry**.
+    /// Run the search over a panel's allele-count classes and build a seed from what it read,
+    /// **at the diversity the classes were built to carry**.
+    ///
+    /// **The search is no longer part of the seed**, and this helper is what keeps the tests
+    /// written against it measuring the same thing while the search still exists. Since
+    /// 2026-08-27 [`seed_from_population_moments`] takes a measured mean frequency and a measured
+    /// heterozygosity and nothing else; on a real run that frequency comes off the fitted
+    /// population curve in closed form
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2). Here it comes from the search, so
+    /// that a test asking *what does the seed do with the shape the search reads* still asks
+    /// exactly that. **This helper and the tests that use it go when the search does.**
     ///
     /// **The diversity is an argument rather than a constant, and that is not tidiness.** It was
     /// a hard-coded `1e-3` while the seed did not read it; after
@@ -2350,10 +2358,19 @@ mod projection_tests {
     /// the alternative concentration — and a test that ran that way would be measuring the
     /// mismatch rather than the projection.
     fn project(weights: &[f64], diversity: f64, inbreeding: f64) -> SpectrumSeed {
-        project_spectrum_seed(
-            Some(FittedSpectrum::new(weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(diversity).unwrap()),
+        let searched = fit_spectrum_shape(
+            &FittedSpectrum::new(weights, 10.0, 3_000.0),
             InbreedingF::try_new(inbreeding).unwrap(),
+        );
+        seed_at(searched.expected_frequency(), diversity)
+    }
+
+    /// The seed the shipped builder returns for a measured mean frequency and a measured
+    /// heterozygosity — the whole of what it takes.
+    fn seed_at(expected_frequency: f64, diversity: f64) -> SpectrumSeed {
+        seed_from_population_moments(
+            Some(ExpectedAlternativeFrequency::try_new(expected_frequency).unwrap()),
+            Some(ExpectedHeterozygosity::try_new(diversity).unwrap()),
         )
     }
 
@@ -2676,18 +2693,16 @@ mod projection_tests {
         }
     }
 
-    /// **No spectrum: the pair is the neutral `(1, θ)` at the diversity the pre-pass did fit** —
-    /// exactly, with no arithmetic in between, and the regime says where it came from.
+    /// **No fitted mean frequency: the pair is the neutral `(1, θ)` at the diversity the pre-pass
+    /// did fit** — exactly, with no arithmetic in between, and the regime says where it came from.
     ///
-    /// A run arrives with no spectrum for one of three reasons — the per-sample histogram route,
-    /// which supplies a diversity and no density; the cohort gather below its designed panel-size
-    /// floor; or an assembly that chose not to project one. **A branch on absence, never on
-    /// cohort size** (see [`project_spectrum_seed`]'s three regimes, whose illustration of the
-    /// floor named two cohort sizes without the routes that explain them until 2026-08-26).
+    /// A run arrives without a mean frequency when its pre-pass fitted no population curve: the
+    /// per-sample histogram route, which supplies a diversity and no density, is the case the
+    /// design has in mind. **A branch on absence, never on cohort size.**
     #[test]
-    fn an_absent_spectrum_is_the_neutral_pair_at_the_fitted_diversity() {
+    fn no_fitted_frequency_is_the_neutral_pair_at_the_fitted_diversity() {
         let theta = ExpectedHeterozygosity::try_new(6e-4).unwrap();
-        let seed = project_spectrum_seed(None, Some(theta), InbreedingF::try_new(0.85).unwrap());
+        let seed = seed_from_population_moments(None, Some(theta));
         assert_eq!(seed.alpha_ref(), 1.0);
         assert_eq!(seed.alpha_alt_total(), 6e-4);
         assert_eq!(seed.regime(), SeedRegime::NeutralShape);
@@ -2697,7 +2712,7 @@ mod projection_tests {
     /// runs that used different information are otherwise indistinguishable in what they emit.
     #[test]
     fn no_fitted_diversity_falls_back_to_the_species_value_and_says_so() {
-        let seed = project_spectrum_seed(None, None, InbreedingF::try_new(0.0).unwrap());
+        let seed = seed_from_population_moments(None, None);
         assert_eq!(seed.alpha_ref(), 1.0);
         assert_eq!(
             seed.alpha_alt_total(),
@@ -2706,32 +2721,24 @@ mod projection_tests {
         assert_eq!(seed.regime(), SeedRegime::FallbackDiversity);
     }
 
-    /// **How strongly the estimate was held toward the neutral shape travels with the seed**, and
-    /// so does whether the real sites outweighed that hold. A run whose spectrum was mostly its
-    /// own prior and one whose spectrum was measured are otherwise indistinguishable in what they
-    /// emit (spec §4.1).
+    /// **A fitted mean frequency with no diversity beside it is discarded**, and the run lands on
+    /// the species-range guess and says so.
+    ///
+    /// The total comes from the heterozygosity, so a frequency alone has nothing to pin. On the
+    /// joint route the two always arrive together — both are integrals of one fitted curve — so
+    /// this is a shape the type system allows rather than a state a run reaches.
     #[test]
-    fn the_regularizer_weight_and_whether_the_census_sites_outweighed_it_travel_with_the_seed() {
-        let weights = exact_spectrum(1.0, 6e-4, 5, 0.0);
-        for (regularizer, variable_sites, expected_data_won) in
-            [(10.0, 3_000.0, true), (10_000.0, 3_000.0, false)]
-        {
-            let seed = project_spectrum_seed(
-                Some(FittedSpectrum::new(&weights, regularizer, variable_sites)),
-                Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-                InbreedingF::try_new(0.0).unwrap(),
-            );
-            let SeedRegime::FittedSpectrum {
-                regularizer_site_weight,
-                census_sites_outweigh_regularizer,
-                ..
-            } = seed.regime()
-            else {
-                panic!("a spectrum was supplied, so the regime is a fitted one");
-            };
-            assert_eq!(regularizer_site_weight, regularizer);
-            assert_eq!(census_sites_outweigh_regularizer, expected_data_won);
-        }
+    fn a_frequency_with_no_diversity_falls_back_and_says_so() {
+        let seed = seed_from_population_moments(
+            Some(ExpectedAlternativeFrequency::try_new(0.2).unwrap()),
+            None,
+        );
+        assert_eq!(seed.alpha_ref(), 1.0);
+        assert_eq!(
+            seed.alpha_alt_total(),
+            ExpectedHeterozygosity::SPECIES_FALLBACK.get()
+        );
+        assert_eq!(seed.regime(), SeedRegime::FallbackDiversity);
     }
 
     /// **Every start reaches the same pair when each is swept to its own convergence.**
@@ -2788,10 +2795,7 @@ mod projection_tests {
         let theta = 6e-4;
         for (individuals, inbreeding) in [(1u32, 0.0), (26, 0.6), (63, 0.9)] {
             let weights = exact_spectrum(1.0, theta, individuals, inbreeding);
-            let seed = project(&weights, theta, inbreeding);
-            let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
-                panic!("a spectrum was supplied, so the regime is a fitted one");
-            };
+            let spectrum_match = searched_match(&weights, inbreeding);
             assert!(
                 !spectrum_match.at_search_limit(),
                 "at {individuals} individuals and F = {inbreeding} the fit ran out of range"
@@ -2841,17 +2845,22 @@ mod projection_tests {
             .expect("the f64 below one is inside [0, 1)")
     }
 
+    /// How far the search's own pair sits from the classes it was fitted to.
+    ///
+    /// **Read off the search rather than off the seed, since 2026-08-27**: the seed no longer
+    /// runs a search, so this report has no route to a run's output and lives only here. It goes
+    /// when the search does.
+    fn searched_match(class_weights: &[f64], inbreeding: f64) -> SpectrumMatch {
+        fit_spectrum_shape(
+            &FittedSpectrum::new(class_weights, 10.0, 3_000.0),
+            InbreedingF::try_new(inbreeding).unwrap(),
+        )
+        .spectrum_match()
+    }
+
     /// The divergence a spectrum projects to, in nats.
     fn divergence_of(class_weights: &[f64], inbreeding: f64) -> f64 {
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(class_weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-            InbreedingF::try_new(inbreeding).unwrap(),
-        );
-        let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
-            panic!("a spectrum was supplied, so the regime is a fitted one");
-        };
-        spectrum_match.divergence_nats()
+        searched_match(class_weights, inbreeding).divergence_nats()
     }
 
     /// **A spectrum no pair can produce says so instead of returning a pair that looks fitted.**
@@ -2865,14 +2874,11 @@ mod projection_tests {
     #[test]
     fn a_spectrum_no_pair_can_produce_is_marked_rather_than_answered() {
         let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+        let shape = fit_spectrum_shape(
+            &FittedSpectrum::new(&weights, 10.0, 3_000.0),
             greatest_accepted_inbreeding(),
         );
-        let SeedRegime::FittedSpectrum { spectrum_match, .. } = seed.regime() else {
-            panic!("a spectrum was supplied, so the regime is a fitted one");
-        };
+        let spectrum_match = shape.spectrum_match();
         // The model puts about `10⁻¹⁶` on an odd class, so the objective charges the pair
         // `ln 10⁻¹⁶` there and the divergence lands at **1.74 nats** — against the `1.1e-9` a
         // shape the family can hold reaches, and above the 1 nat that
@@ -2887,7 +2893,8 @@ mod projection_tests {
             "{} nats",
             spectrum_match.divergence_nats()
         );
-        assert!(seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite());
+        let (alpha_ref, alpha_alt) = shape.concentrations();
+        assert!(alpha_ref.is_finite() && alpha_alt.is_finite());
     }
 
     /// **A fully invariant cohort whose run measured a diversity is a contradiction, and the seed
@@ -2899,32 +2906,27 @@ mod projection_tests {
     /// `1e-9` — so what comes back is that floor, and the fit says it stopped on the edge of its
     /// range.
     ///
-    /// **The blended shape then cannot reach the measured diversity.** A pair of expected
-    /// frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the time; blended at
-    /// 26 individuals the frequency lands near `1.1e-9`, a ceiling of about `2.3e-9` against a
-    /// measured `6e-4`. There is no total that reaches it, so the pair falls to the neutral rung
-    /// and the run reports which of the two ways it got there
-    /// (`doc/devel/ng/spec/ordinary_site_seed.md` §3.1, §4.2).
+    /// **That frequency cannot reach the measured diversity.** A pair of expected frequency `f`
+    /// makes a diploid heterozygous at most `2 f (1 − f)` of the time, and a frequency near
+    /// `1e-9` has a ceiling near `2e-9` against a measured `6e-4`. There is no total that reaches
+    /// it, so the pair falls to the neutral rung and the run reports which of the two ways it got
+    /// there (`doc/devel/ng/spec/ordinary_site_seed.md` §3.1).
     ///
     /// **This is the failure the repeat-tract seed used to have**, and the reason it is a regime
     /// rather than a clamp: a shape scaled toward a measurement it cannot reach answers a
     /// different question from the one asked.
+    ///
+    /// **⚑ The frequency reaches the seed from the search here, and on a run it will not.** A
+    /// mean frequency integrated off a fitted curve cannot be too small for its own
+    /// heterozygosity — that is Jensen's inequality, and plan step A4 is where the refusal and
+    /// this test go because of it.
     #[test]
     fn a_fully_invariant_cohort_at_a_measured_diversity_falls_to_the_neutral_rung_and_says_so() {
         let mut weights = vec![0.0; 53];
         weights[0] = 1.0;
         let theta = 6e-4;
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(theta).unwrap()),
-            InbreedingF::try_new(0.0).unwrap(),
-        );
-        let SeedRegime::DiversityUnreachable {
-            spectrum_match,
-            shape_from_panel,
-            expected_frequency,
-        } = seed.regime()
-        else {
+        let seed = project(&weights, theta, 0.0);
+        let SeedRegime::DiversityUnreachable { expected_frequency } = seed.regime() else {
             panic!(
                 "no total reaches a diversity of {theta} from a shape this far out in the tail; \
                  got {:?}",
@@ -2938,10 +2940,9 @@ mod projection_tests {
             "the shape's own ceiling is {}, which is what makes the diversity unreachable",
             2.0 * expected_frequency * (1.0 - expected_frequency)
         );
-        assert_eq!(shape_from_panel, panel_shape_weight(26));
-        // **The search's own report survives the fall**, which is the difference between a
-        // contradictory measurement and a search that never got near one: here the pair the
-        // search found reproduces the spectrum, and it says it stopped on a bound.
+        // **The search's own report says where the frequency came from**: the pair it found
+        // reproduces the spectrum, and it says it stopped on a bound.
+        let spectrum_match = searched_match(&weights, 0.0);
         assert!(spectrum_match.at_search_limit(), "got {spectrum_match:?}");
         assert!(
             spectrum_match.divergence_nats() < 2e-9,
@@ -3054,10 +3055,9 @@ mod projection_tests {
         let _ = FittedSpectrum::new(&[1.5, -0.5, 0.0], 10.0, 3_000.0);
     }
 
-    /// **A regularizer weight that is not a count of sites is refused.** It travels onto the run's
-    /// output through [`SeedRegime::FittedSpectrum`], and a `NaN` there is worse than an error:
-    /// `NaN > x` is false, so the seed would also report that the prior dominated, which is the
-    /// reassuring answer.
+    /// **A regularizer weight that is not a count of sites is refused.** A `NaN` is worse than an
+    /// error here: `NaN > x` is false, so a consumer comparing it against the real site count
+    /// would come back with the reassuring answer.
     #[test]
     #[should_panic(expected = "sites' worth of pseudo-counts")]
     fn a_regularizer_weight_that_is_not_a_count_of_sites_is_refused() {
@@ -3065,7 +3065,7 @@ mod projection_tests {
     }
 
     /// **A variable-site count that is not a count is refused**, for the same reason: it is the
-    /// other half of the comparison the seed reports.
+    /// other half of that comparison.
     #[test]
     #[should_panic(expected = "count of variable census sites")]
     fn a_variable_site_count_that_is_not_a_count_is_refused() {
@@ -3088,16 +3088,14 @@ mod projection_tests {
     #[test]
     fn a_fully_inbred_panel_whose_spectrum_holds_heterozygotes_still_returns_a_pair() {
         let weights = [0.90, 0.04, 0.04, 0.01, 0.01];
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
+        let (alpha_ref, alpha_alt) = fit_spectrum_shape(
+            &FittedSpectrum::new(&weights, 10.0, 3_000.0),
             greatest_accepted_inbreeding(),
-        );
+        )
+        .concentrations();
         assert!(
-            seed.alpha_ref().is_finite() && seed.alpha_alt_total().is_finite(),
-            "got ({}, {})",
-            seed.alpha_ref(),
-            seed.alpha_alt_total()
+            alpha_ref.is_finite() && alpha_alt.is_finite(),
+            "got ({alpha_ref}, {alpha_alt})"
         );
     }
 
@@ -3176,59 +3174,42 @@ mod projection_tests {
         );
     }
 
-    /// **The seed's implied diversity is the one that was measured, at every panel size and every
-    /// shape** — `doc/devel/ng/spec/ordinary_site_seed.md` §6.1, and goal 1 of the whole change.
+    /// **The seed's implied diversity is the one that was measured, at every shape** —
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §9's third test, and goal 1 of the whole
+    /// change.
     ///
-    /// The grid is the one §1.2 measured the old behaviour on: five allele-frequency densities
-    /// from a strong rare-allele pile-up to a population whose alleles sit at middling
-    /// frequencies, each projected into the allele-count classes of panels from one individual to
-    /// two hundred. **Where the old pair lost 9.9% of the diversity at 63 individuals on a
-    /// tomato-like shape, 18.6% on a human-like one and 53.9% on a middling one, the pinned pair
-    /// loses none of it anywhere on this grid.**
+    /// **Both of the seed's inputs are now integrals of one fitted curve**, so this runs over the
+    /// six shapes those integrals are checked on rather than over a grid of panel sizes: there is
+    /// no panel size left in the seed to vary. Where the old two-parameter fit lost 9.9% of the
+    /// diversity at 63 individuals on a tomato-like shape, 18.6% on a human-like one and 53.9% on
+    /// a middling one (`ordinary_site_seed.md` §1.2), the pinned pair loses none of it on any of
+    /// these.
     ///
-    /// **Asserted rather than sampled**: the class weights come from
-    /// [`FrequencyDensity::allele_count_classes`], which is exact, and the seed's own implied
-    /// heterozygosity is read off [`implied_heterozygosity`], which shares no algebra with the
-    /// pin.
+    /// **Asserted rather than sampled, and it is not a restatement of the identity that produced
+    /// it**: the seed's own implied heterozygosity is read off [`implied_heterozygosity`], which
+    /// evaluates the Beta-binomial sum at one individual and shares no algebra with the pin.
     #[test]
-    fn the_seeds_implied_diversity_is_the_measured_one_at_every_panel_and_shape() {
+    fn the_seeds_implied_diversity_is_the_measured_one_at_every_shape() {
         let mut worst: f64 = 0.0;
-        let mut worst_at = ("", 0u32);
-        for (name, a, b) in [
-            ("tomato-like, strong rare-allele pile-up", 0.20, 1.00),
-            ("human-like, moderate pile-up", 0.35, 1.20),
-            ("flat over what segregates", 1.00, 1.00),
-            ("the lopsided unit-test fixture", 0.50, 2.00),
-            ("middling frequencies", 4.00, 4.00),
-        ] {
-            let density = FrequencyDensity {
-                p_invariant: 0.9950,
-                p_fixed_alt: 0.0010,
-                a,
-                b,
-            };
+        let mut worst_at = "";
+        for (name, density) in shapes_spanning_the_beta_and_both_point_masses() {
             let theta = density.expected_heterozygosity();
-            for individuals in [1u32, 2, 5, 20, 63] {
-                let classes = density.allele_count_classes(individuals);
-                let seed = project(&classes, theta, 0.0);
-                assert!(
-                    matches!(seed.regime(), SeedRegime::FittedSpectrum { .. }),
-                    "on {name} at {individuals} individuals the regime came back {:?}",
-                    seed.regime()
-                );
-                let off = (implied_heterozygosity(seed) / theta - 1.0).abs();
-                if off > worst {
-                    worst_at = (name, individuals);
-                }
-                worst = worst.max(off);
+            let seed = seed_at(density.expected_alternative_frequency(), theta);
+            assert!(
+                matches!(seed.regime(), SeedRegime::FittedCurve),
+                "on {name} the regime came back {:?}",
+                seed.regime()
+            );
+            let off = (implied_heterozygosity(seed) / theta - 1.0).abs();
+            if off > worst {
+                worst_at = name;
             }
+            worst = worst.max(off);
         }
         assert!(
             worst < 1e-11,
-            "the seed must imply the diversity it was handed, whatever shape the panel showed; \
-             worst departure {worst:.2e}, on {} at {} individuals",
-            worst_at.0,
-            worst_at.1
+            "the seed must imply the diversity it was handed, whatever the population's shape; \
+             worst departure {worst:.2e}, on {worst_at}"
         );
     }
 
@@ -3318,10 +3299,9 @@ mod projection_tests {
     #[test]
     fn the_ramps_neutral_end_is_the_pair_the_neutral_rung_returns() {
         for diversity in [1e-4_f64, 1e-3, 1e-2, 0.1, 0.4] {
-            let rung = project_spectrum_seed(
+            let rung = seed_from_population_moments(
                 None,
                 Some(ExpectedHeterozygosity::try_new(diversity).unwrap()),
-                InbreedingF::try_new(0.0).unwrap(),
             );
             assert_eq!(rung.regime(), SeedRegime::NeutralShape);
             let rungs_own = rung.alpha_alt_total() / (rung.alpha_ref() + rung.alpha_alt_total());
@@ -3332,64 +3312,6 @@ mod projection_tests {
                 neutral_expected_frequency(diversity)
             );
         }
-    }
-
-    /// **The bigger the panel, the more of its own shape the seed takes** — the ramp, measured on
-    /// a panel whose shape is deliberately nothing like the neutral one.
-    ///
-    /// The spectra are built from a pair whose expected frequency is **ten times** the neutral
-    /// shape's, so the two ends of the blend are far apart and which one the seed leans on is
-    /// visible. What is asserted: the seed's expected frequency rises with the panel, stays
-    /// strictly between the two ends at every panel size, and is nearer the panel's own shape at
-    /// 63 individuals than at one.
-    ///
-    /// **This is the test a neutral fixture cannot be**: on a spectrum built from `(1, θ)` the
-    /// two ends of the blend are the same number, so the weight could be anything — swapped,
-    /// constant, ignored — and nothing would move. Every other projection test in this module
-    /// uses exactly such a spectrum.
-    #[test]
-    fn the_bigger_the_panel_the_more_of_its_own_shape_the_seed_takes() {
-        let theta = 6e-4;
-        let neutral_frequency = theta / (1.0 + theta);
-        // Ten times the neutral shape's expected frequency, at a total near the neutral rung's.
-        let far_frequency = 10.0 * neutral_frequency;
-        let panels = [1u32, 3, 10, 25, 63];
-
-        let mut frequencies = Vec::new();
-        for individuals in panels {
-            let weights = exact_spectrum(1.0 - far_frequency, far_frequency, individuals, 0.0);
-            let seed = project(&weights, theta, 0.0);
-            let total = seed.alpha_ref() + seed.alpha_alt_total();
-            frequencies.push(seed.alpha_alt_total() / total);
-        }
-
-        for (index, individuals) in panels.iter().enumerate() {
-            let frequency = frequencies[index];
-            assert!(
-                frequency > neutral_frequency && frequency < far_frequency,
-                "at {individuals} individuals the seed's expected frequency is {frequency:e}, \
-                 outside the two ends {neutral_frequency:e} and {far_frequency:e} it is blended \
-                 between"
-            );
-            if index > 0 {
-                assert!(
-                    frequency > frequencies[index - 1],
-                    "the seed takes more of the panel's own shape as the panel grows: \
-                     {frequencies:?} at {panels:?} individuals"
-                );
-            }
-        }
-        // **And the ramp really does move**: at one individual the seed is 0.80 of the way to the
-        // panel's own shape and at 63 it is 0.996 of the way — short, but monotone and visible.
-        let share = |frequency: f64| {
-            (frequency / neutral_frequency).ln() / (far_frequency / neutral_frequency).ln()
-        };
-        assert!(
-            share(frequencies[0]) < 0.85 && share(frequencies[panels.len() - 1]) > 0.99,
-            "one individual took {:.3} of the way to the panel's own shape and 63 took {:.3}",
-            share(frequencies[0]),
-            share(frequencies[panels.len() - 1])
-        );
     }
 
     /// **The weight rises with the panel and never leaves `[0, 1]`** —
@@ -3445,16 +3367,14 @@ mod projection_tests {
     /// builder in this tree applies and the regime says the diversity was zero
     /// (`ordinary_site_seed.md` §3.1).
     ///
-    /// **A spectrum makes no difference here**, and that is the point of the variant carrying no
-    /// shape weight: with no diversity there is nothing for a shape to scale.
+    /// **A fitted mean frequency makes no difference here**, and that is the point of the variant
+    /// carrying none: with no diversity there is nothing for a shape to scale.
     #[test]
     fn a_cohort_with_no_variation_is_floored_and_says_the_diversity_was_zero() {
-        let weights = exact_spectrum(1.0, 6e-4, 26, 0.0);
-        for spectrum in [Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)), None] {
-            let seed = project_spectrum_seed(
-                spectrum,
+        for frequency in [ExpectedAlternativeFrequency::try_new(0.2).ok(), None] {
+            let seed = seed_from_population_moments(
+                frequency,
                 Some(ExpectedHeterozygosity::try_new(0.0).unwrap()),
-                InbreedingF::try_new(0.0).unwrap(),
             );
             assert_eq!(seed.regime(), SeedRegime::ZeroDiversity);
             assert_eq!(seed.alpha_ref(), 1.0);
@@ -3474,11 +3394,8 @@ mod projection_tests {
     #[test]
     #[should_panic(expected = "is not a thin estimate")]
     fn a_heterozygosity_above_a_half_refuses_the_run() {
-        let _ = project_spectrum_seed(
-            None,
-            Some(ExpectedHeterozygosity::try_new(0.9).unwrap()),
-            InbreedingF::try_new(0.0).unwrap(),
-        );
+        let _ =
+            seed_from_population_moments(None, Some(ExpectedHeterozygosity::try_new(0.9).unwrap()));
     }
 
     /// **The refusal sits at exactly a half and not somewhere above it**, which neither of its
@@ -3490,41 +3407,9 @@ mod projection_tests {
     #[test]
     #[should_panic(expected = "is not a thin estimate")]
     fn a_heterozygosity_a_millionth_above_a_half_refuses_the_run() {
-        let _ = project_spectrum_seed(
+        let _ = seed_from_population_moments(
             None,
             Some(ExpectedHeterozygosity::try_new(0.500_001).unwrap()),
-            InbreedingF::try_new(0.0).unwrap(),
-        );
-    }
-
-    /// **Equal is not outweighed**, and no other fixture in this module puts the two counts
-    /// equal — so the comparison written `>=` passes every one of them. Measured — it does.
-    ///
-    /// The flag exists to say whether the panel's real census sites beat the pseudo-counts that
-    /// held its spectrum at the neutral shape. At a tie they did not, and a run that reported
-    /// otherwise would be claiming its own regulariser lost when it drew.
-    #[test]
-    fn census_sites_equal_to_the_regulariser_do_not_outweigh_it() {
-        let weights = exact_spectrum(1.0, 6e-4, 26, 0.0);
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 3_000.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(6e-4).unwrap()),
-            InbreedingF::try_new(0.0).unwrap(),
-        );
-        let SeedRegime::FittedSpectrum {
-            census_sites_outweigh_regularizer,
-            ..
-        } = seed.regime()
-        else {
-            panic!(
-                "a spectrum and a diversity arrived; got {:?}",
-                seed.regime()
-            );
-        };
-        assert!(
-            !census_sites_outweigh_regularizer,
-            "3,000 census sites against 3,000 sites' worth of pseudo-counts is a tie, and a tie \
-             is not the real sites winning"
         );
     }
 
@@ -3570,17 +3455,13 @@ mod projection_tests {
     /// **Exactly a half is the largest a pair can imply, so it is accepted** — the refusal above
     /// is strictly outside the range rather than at its edge.
     ///
-    /// It reaches the neutral rung, because a diversity of a half needs an expected frequency of
-    /// exactly a half and the neutral shape's is a third; no total gets there, which is the first
-    /// of §3.1's three failures rather than the second.
+    /// It falls to the neutral rung, because a diversity of a half needs an expected frequency of
+    /// exactly a half and the frequency handed over here is a third — `2 f (1 − f)` is then
+    /// `4/9`, short of the measurement. No total gets there, which is the first of §3.1's three
+    /// failures rather than the second.
     #[test]
     fn a_heterozygosity_of_exactly_a_half_is_not_refused() {
-        let weights = exact_spectrum(1.0, 6e-4, 26, 0.0);
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-            Some(ExpectedHeterozygosity::try_new(0.5).unwrap()),
-            InbreedingF::try_new(0.0).unwrap(),
-        );
+        let seed = seed_at(1.0 / 3.0, 0.5);
         assert!(
             matches!(seed.regime(), SeedRegime::DiversityUnreachable { .. }),
             "got {:?}",
@@ -3588,61 +3469,6 @@ mod projection_tests {
         );
     }
 
-    /// **A spectrum with no diversity beside it is on the species-range guess, and says so.**
-    ///
-    /// After `ordinary_site_seed.md` §3 the pair's total comes from the measurement, so a run with
-    /// no measurement has nothing to pin a shape to and the shape is discarded. The two arrive
-    /// together on the joint route — it reads its heterozygosity off the same density it projects
-    /// — so this is the degenerate-fit path rather than a routine one, and it must not be silent.
-    #[test]
-    fn a_spectrum_with_no_diversity_falls_to_the_species_range_guess() {
-        let weights = exact_spectrum(1.0, 6e-4, 26, 0.0);
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
-            None,
-            InbreedingF::try_new(0.0).unwrap(),
-        );
-        assert_eq!(seed.regime(), SeedRegime::FallbackDiversity);
-        assert_eq!(seed.alpha_ref(), 1.0);
-        assert_eq!(
-            seed.alpha_alt_total(),
-            ExpectedHeterozygosity::SPECIES_FALLBACK.get()
-        );
-    }
-
-    /// **Two runs that leaned differently on their panels emit different records** — goal 3 of
-    /// `ordinary_site_seed.md`, and the complaint `calling_priors.md` §4 makes about production's
-    /// own fallback.
-    ///
-    /// The same population at three panel sizes gives three different weights on the panel's own
-    /// shape, and the weight travels on the regime rather than being recoverable from the pair.
-    /// **A reader of the run's output can tell how much of its shape it borrowed**; before this
-    /// they could not.
-    #[test]
-    fn two_panels_that_leaned_differently_emit_different_records() {
-        let theta = 6e-4;
-        let mut reported = Vec::new();
-        for individuals in [1u32, 10, 63] {
-            let weights = exact_spectrum(1.0, theta, individuals, 0.0);
-            let seed = project(&weights, theta, 0.0);
-            let SeedRegime::FittedSpectrum {
-                shape_from_panel, ..
-            } = seed.regime()
-            else {
-                panic!("a spectrum was supplied; got {:?}", seed.regime());
-            };
-            reported.push(shape_from_panel);
-        }
-        assert!(
-            reported[0] < reported[1] && reported[1] < reported[2],
-            "three panels, three records: {reported:?}"
-        );
-        assert!(
-            reported[0] < 0.85 && reported[2] > 0.99,
-            "a single genome takes 0.80 of its shape from its own panel and a panel of \
-             63 takes 0.996: {reported:?}"
-        );
-    }
     /// **Exactly at the shape's ceiling there is no total**, which is why the comparison is `≥`
     /// and not `>`.
     ///
@@ -3696,11 +3522,10 @@ mod projection_tests {
     /// is a diversity of exactly zero, which is taken before any of this.
     #[test]
     fn a_diversity_far_below_the_floor_is_still_pinned_rather_than_floored() {
-        let weights = exact_spectrum(1.0, 6e-4, 26, 0.0);
         let theta = 1e-15;
-        let seed = project(&weights, theta, 0.0);
+        let seed = seed_at(6e-4 / (1.0 + 6e-4), theta);
         assert!(
-            matches!(seed.regime(), SeedRegime::FittedSpectrum { .. }),
+            matches!(seed.regime(), SeedRegime::FittedCurve),
             "got {:?}",
             seed.regime()
         );

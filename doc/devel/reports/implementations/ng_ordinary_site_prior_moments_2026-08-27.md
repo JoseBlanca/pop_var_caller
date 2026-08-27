@@ -108,3 +108,104 @@ All in the container, from this worktree:
 - `cargo doc --no-deps --lib` — **27 unresolved links, the same 27 as at `9f15f5e5`**. The crate
   denies broken intra-doc links, so this command exits 101 on the pre-existing set; what matters is
   that the count did not move.
+
+---
+
+## A2 — the seed takes the two moments, and nothing else
+
+**Contract (plan A2).** The seed builder's signature becomes the two moments — no spectrum, no
+panel size, no inbreeding coefficient. Its body is A1's frequency and the existing
+`total_for_diversity`. The three regimes stay what they are: a fitted curve, a fitted diversity
+with no curve, neither.
+
+### What shipped
+
+- **`ExpectedAlternativeFrequency`**, a new type in
+  [`src/ng/types.rs`](../../../../src/ng/types.rs) beside `ExpectedHeterozygosity`, with its own
+  `DomainError` variant. **It is a type and not an `f64` for the reason every other newtype in that
+  section is one**: both moments are probabilities in `[0, 1]`, both are population quantities with
+  no panel in them, and both reach the seed builder in the same call — so as bare floats a swapped
+  pair compiles and returns a seed no downstream check refuses. Their sizes do not separate them
+  either: where the alternative allele is rare the heterozygosity is about twice the frequency, and
+  where the reference base is the rare one it is far smaller.
+- **`seed_from_population_moments`** replaces `project_spectrum_seed` in
+  [`seed_generic.rs`](../../../../src/ng/calling/genotype_prior/seed_generic.rs). It takes
+  `Option<ExpectedAlternativeFrequency>` and `Option<ExpectedHeterozygosity>` and returns the seed.
+  **The rename is the implementer's**, not the plan's: the function projects nothing any more, and
+  a name that says it would be the sort of retired sentence this area keeps finding six copies of.
+- **`RunParameters::seed_from_moments`** replaces `RunParameters::project_seed` at the seam in
+  [`run_parameters.rs`](../../../../src/ng/calling/run_parameters.rs).
+
+### Three deviations from the plan's step boundaries, and why each was forced
+
+**1. `SeedRegime::FittedSpectrum` became `SeedRegime::FittedCurve`, a variant with no fields —
+in A2 rather than in A3 and A5.** All four of its fields were computed from the two arguments A2
+removes: `shape_from_panel` from the panel size, `spectrum_match` from the search, and
+`regularizer_site_weight` and `census_sites_outweigh_regularizer` from the spectrum. **Keeping any
+of them for one commit would have meant committing a fabricated value into a field a run reports.**
+The end state is the plan's; only which commit removes which field moved. The two regulariser
+fields have no future producer at all — they described a spectrum emission the cohort gather no
+longer makes (owner's ruling of 2026-08-27, `parameter_prepass_cohort.md` §4) — so they are gone
+rather than owed.
+
+**2. `SeedRegime::DiversityUnreachable` kept only `expected_frequency`**, for the same reason. The
+variant itself goes at A4.
+
+**3. Two tests died here rather than at A3**, because the mechanism they pinned left the seed at
+A2: `the_bigger_the_panel_the_more_of_its_own_shape_the_seed_takes` and
+`two_panels_that_leaned_differently_emit_different_records`. Three more went with the regime's
+deleted fields: `the_regularizer_weight_and_whether_the_census_sites_outweighed_it_travel_with_the_seed`,
+`census_sites_equal_to_the_regulariser_do_not_outweigh_it`, and
+`a_spectrum_with_no_diversity_falls_to_the_species_range_guess` — the last replaced by
+`a_frequency_with_no_diversity_falls_back_and_says_so`, which asks the same question of the new
+signature.
+
+**The ramp's own three functions are still standing**, uncalled, under a one-commit
+`#[allow(dead_code)]` that names A3 — so that the ramp's deletion is its own commit and a bisect
+can find it, which is what the plan asked for.
+
+### What the existing tests could not have caught, and what was added
+
+**Every projection test in this module builds its spectrum from `(1, θ)`.** On such a spectrum the
+two ends of the blend are the same number, so the blend's removal moves nothing — which is why
+`a_neutral_panel_projects_to_one_and_theta` and
+`at_one_individual_the_projection_is_still_the_neutral_pair` passed unchanged through a commit that
+deleted the blend. **This is the same fixture weakness the previous branch's review recorded**, and
+it is recorded again here rather than repaired: those tests are about the search and go at A5.
+
+Two tests were added at the seam, in `run_parameters`:
+
+- **`a_fitted_density_seeds_the_run_from_its_own_moments`** asserts the seed's implied
+  heterozygosity is the density's own to within 1 part in 10¹² **and that its expected frequency is
+  the density's own** — the second is the one that matters, because the implied heterozygosity
+  `2 f (1 − f) · A/(A+1)` is symmetric under `f → 1 − f`, so it cannot see a swapped pair.
+- **`the_seed_is_what_the_identity_gives_from_the_four_fitted_numbers`** writes the whole chain out
+  from the fixture density's four fitted numbers — both moments, then
+  `t = θ/(2f(1−f))`, `A = t/(1−t)`, `(A(1−f), A f)` — and compares. It is the only check here that
+  does not go through the library's own accessors.
+
+### Mutations run
+
+Two, on the seed builder, each against the whole library suite:
+
+| mutation | tests failing |
+|---|---|
+| the two concentrations swapped — `α_ref` given the frequency's share | **4** |
+| the regime reported as `NeutralShape` instead of `FittedCurve` | **3** |
+
+The swap is killed by the two frequency assertions and by the two neutral-panel tests; it is **not**
+killed by `the_seeds_implied_diversity_is_the_measured_one_at_every_shape`, for the symmetry
+reason above.
+
+The source was restored from a backup after each and the restore checked with `git diff` before
+anything else ran.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,874 passed, 0 failed, 14 ignored**, from 4,877 after A1. **Five tests
+  removed and two added**, all named above; the fall is the deletion the plan expects and not a
+  regression.
+- `cargo doc --no-deps --lib` — **27 unresolved links, the same count as at `9f15f5e5`**. One new
+  break was introduced and fixed: `HALF_WEIGHT_PANEL_SIZE`'s documentation linked to
+  `SeedRegime::FittedSpectrum`, which no longer exists.

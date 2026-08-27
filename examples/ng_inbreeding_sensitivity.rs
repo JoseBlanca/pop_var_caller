@@ -1,9 +1,18 @@
 //! **How wrong is the caller's starting belief when the panel's inbreeding is wrong?**
 //!
+//! **⛔ Half of what this measures left the caller on 2026-08-27.** The seed no longer takes a
+//! panel spectrum or a panel inbreeding coefficient: its two numbers are integrals of the fitted
+//! population curve (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2), so an error in `F`
+//! cannot reach them by route 1 below at all. The `alpha_ref` / `alpha_alt` columns are kept
+//! **fed from the search**, so the table still says what the old path would have done — minus the
+//! blend, which is also gone. Route 2, the diversity divided by `(1 − F)`, is untouched and is
+//! still live. This program is retired or moved onto a local copy of the search when the search
+//! itself is deleted (plan step A5).
+//!
 //! The genotype prior starts every locus from two numbers — one attached to the reference base,
-//! one shared among the alternatives — and both are now read off what the panel actually showed
-//! (`doc/devel/ng/spec/calling_priors.md` §4.1). The panel's inbreeding coefficient enters that
-//! reading twice, and this measures both:
+//! one shared among the alternatives. **When this program was written both were read off what the
+//! panel actually showed** (`doc/devel/ng/spec/calling_priors.md` §4.1), and the panel's
+//! inbreeding coefficient entered that reading twice. This measures both:
 //!
 //! 1. **Directly, in the prediction.** Working out what allele counts a candidate pair of numbers
 //!    would produce needs a model of how the panel's chromosomes came about, and in a selfer an
@@ -23,14 +32,18 @@
 //!
 //! **⚠ Since `doc/devel/ng/spec/ordinary_site_seed.md` §3 this measures a much smaller thing than
 //! it used to, and that is the finding rather than a caveat.** The seed's *total* — how much
-//! conviction the pair carries — is now solved from the run's measured heterozygosity rather than
+//! conviction the pair carries — is solved from the run's measured heterozygosity rather than
 //! taken from the search, and a wrong inbreeding coefficient moves mostly the total. So the two
-//! `search` columns below still show the old sensitivity and the two beside them show what
-//! actually reaches the caller. **At one individual the shipped pair does not move at all**, to
-//! five digits, while the search's reference concentration moves by a factor of three across a
-//! `±0.10` error: at one individual a wrong `F` rescales the search's pair without moving its
-//! ratio, and the ratio is the only thing the seed keeps. At 63 individuals the same error moves
-//! the shipped number by at most 1.4%, against 4% for the search's own.
+//! `search` columns below show the old sensitivity and the two beside them show what survived the
+//! pin. **At one individual the pinned pair does not move at all**, to five digits, while the
+//! search's reference concentration moves by a factor of three across a `±0.10` error: at one
+//! individual a wrong `F` rescales the search's pair without moving its ratio, and the ratio is
+//! the only thing the pin keeps. At 63 individuals the same error moves the pinned number by at
+//! most 1.4%, against 4% for the search's own.
+//!
+//! **And since `ordinary_site_prior_moments.md` §2 even that is not what a run does**: the seed's
+//! frequency is an integral of the fitted population curve, so the `alpha_ref` / `alpha_alt`
+//! columns are what the old seam *would* have produced, reconstructed here by hand.
 //!
 //! **Read the one-sample rows as a bound, not as a prediction.** At one sample no site can vary
 //! *across* the panel, so the distribution the fit is handed is the pre-pass's own neutral prior,
@@ -53,12 +66,14 @@
 
 use pop_var_caller::ng::calling::GenotypeTable;
 use pop_var_caller::ng::calling::genotype_prior::seed_generic::{
-    FittedSpectrum, fill_expected_spectrum, fit_spectrum_shape, project_spectrum_seed,
+    FittedSpectrum, fill_expected_spectrum, fit_spectrum_shape, seed_from_population_moments,
 };
 use pop_var_caller::ng::calling::genotype_prior::{
     Concentration, GenotypePriorModel, MarginalizedDirichletPrior, PriorRow,
 };
-use pop_var_caller::ng::types::{ExpectedHeterozygosity, InbreedingF, LogProb, Ploidy};
+use pop_var_caller::ng::types::{
+    ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, LogProb, Ploidy,
+};
 
 /// Tomato's fitted diversity: 6 differences per 10,000 bases (spec §4.1).
 const THETA: f64 = 6e-4;
@@ -107,10 +122,10 @@ fn main() {
     );
     println!(
         "The two `search` columns are the pair the search returns on its own; the two beside them\n\
-         are the pair the caller actually seeds from, whose total is solved from the measured\n\
-         heterozygosity instead of taken from the search (ordinary_site_seed.md 3) and whose\n\
-         shape is blended toward the neutral one by how large the panel is (4). So an error in F\n\
-         reaches the shipped pair only through the shape.\n"
+         are what the seed builder returns when it is handed the search's own frequency, with its\n\
+         total solved from the measured heterozygosity (ordinary_site_seed.md 3). The blend\n\
+         toward a neutral shape is gone, and so is the seam that read the search at all: on a run\n\
+         the frequency now comes off the fitted population curve, where F cannot reach it.\n"
     );
     println!(
         "{:>6}  {:>6}  {:>6}  {:>11}  {:>11}  {:>10}  {:>10}  {:>9}  {:>8}",
@@ -134,10 +149,10 @@ fn main() {
                 let coefficient = InbreedingF::try_new(f_used).unwrap();
                 let (search_ref, search_alt) =
                     fit_spectrum_shape(&view, coefficient).concentrations();
-                let seed = project_spectrum_seed(
-                    Some(view),
+                let seed = seed_from_population_moments(
+                    ExpectedAlternativeFrequency::try_new(search_alt / (search_ref + search_alt))
+                        .ok(),
                     Some(ExpectedHeterozygosity::try_new(THETA).unwrap()),
-                    coefficient,
                 );
                 println!(
                     "{individuals:>6}  {f_true:>6.2}  {f_used:>6.2}  {search_ref:>11.4}  \

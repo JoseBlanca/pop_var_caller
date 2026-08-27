@@ -78,7 +78,8 @@ use std::env;
 use std::time::Instant;
 
 use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
+    FittedSpectrum, VariantClass, fill_locus_concentration, fit_spectrum_shape,
+    seed_from_population_moments,
 };
 use pop_var_caller::ng::calling::genotype_prior::{GenotypePriorModel, MarginalizedDirichletPrior};
 use pop_var_caller::ng::calling::genotype_prior::{PriorRow, SpectrumSeed};
@@ -97,7 +98,8 @@ use pop_var_caller::ng::parameter_estimation::joint::loci::{
 use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
 use pop_var_caller::ng::tandem_repeat::ScanParams;
 use pop_var_caller::ng::types::{
-    AlleleId, ExpectedHeterozygosity, InbreedingF, LogProb, ReadGroupId,
+    AlleleId, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, LogProb,
+    ReadGroupId,
 };
 
 /// How often a read misreads a base at an ordinary position.
@@ -859,21 +861,22 @@ impl TodaysPath {
         // projection into classes takes no coefficient, so handing the search a different one
         // would compare the seam against a spectrum no such panel produces.
         let outbred = InbreedingF::try_new(0.0).expect("a legal coefficient");
-        let seed = project_spectrum_seed(
-            Some(FittedSpectrum::new(&classes, 0.0, 1_000.0)),
+        // **The search's own frequency, fed to the shipped seed builder by hand.** Since
+        // 2026-08-27 the builder takes two measured moments and no spectrum
+        // (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2), so this arm reconstructs what
+        // the old seam did rather than calling it: the search is still here, and it is what the
+        // [`Self::frequency`] column is about.
+        let searched = fit_spectrum_shape(&FittedSpectrum::new(&classes, 0.0, 1_000.0), outbred);
+        let seed = seed_from_population_moments(
+            ExpectedAlternativeFrequency::try_new(searched.expected_frequency()).ok(),
             Some(diversity),
-            outbred,
         );
         let total = seed.alpha_ref() + seed.alpha_alt_total();
-        // The curve's own mean allele frequency. A position fixed for the non-reference allele
-        // contributes its whole weight, a segregating one contributes the Beta's mean, and a
-        // position carrying only the reference base contributes nothing.
-        let segregating = (1.0 - density.p_invariant - density.p_fixed_alt).max(0.0);
         Self {
             frequency: seed.alpha_alt_total() / total,
             heterozygosity: expected_heterozygosity,
-            density_frequency: density.p_fixed_alt
-                + segregating * density.a / (density.a + density.b),
+            // The curve's own mean allele frequency, in closed form — the library's since A1.
+            density_frequency: density.expected_alternative_frequency(),
             seed,
         }
     }
