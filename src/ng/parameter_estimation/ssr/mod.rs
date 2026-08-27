@@ -774,6 +774,48 @@ impl SsrSampleParameters {
             .map(|(&key, fit)| (key, fit.substitution.clone()))
             .collect()
     }
+
+    /// **A sample's repeat-tract parameters carrying the stated substitution rates and nothing
+    /// else a test would read** — for a test elsewhere in the crate about where those rates
+    /// travel to, rather than about how they are fitted.
+    ///
+    /// Built here rather than in the test that wants it because [`StratumFit`] has ten fields
+    /// and only one of them is the point; a caller assembling the other nine by hand is nine
+    /// chances to write a fixture that is subtly not what a fit produces.
+    ///
+    /// **Test-only, and the assembled route is the real one**: a run's records come from
+    /// [`assemble_sample_parameters`], over an accumulator and the four fits.
+    #[cfg(test)]
+    pub(crate) fn of_substitution_rates(rates: &[(StratumKey, Estimate<ErrorRate>)]) -> Self {
+        let a_model = Estimate {
+            value: SlippageModel::try_new(0.01, 0.20, 0.065).expect("a slippage model"),
+            provenance: Provenance::FittedHere,
+            observations: 0,
+        };
+        Self {
+            by_stratum: rates
+                .iter()
+                .map(|(key, rate)| {
+                    (
+                        *key,
+                        StratumFit {
+                            stratum: key.stratum,
+                            slippage: a_model.clone(),
+                            substitution: rate.clone(),
+                            genotypes: Vec::new(),
+                            not_whole_repeat_share: 0.0,
+                            unexplained_locus_share: 0.0,
+                            starts_tried: SmallVec::new(),
+                            fitted_over: SmallVec::from_slice(&[key.stratum]),
+                            shares_fitted_over: SmallVec::from_slice(&[key.stratum]),
+                            slipped_reads: 0,
+                        },
+                    )
+                })
+                .collect(),
+            summary: BTreeMap::new(),
+        }
+    }
 }
 
 /// Everything the accumulator did to a locus other than enter it as it arrived.
