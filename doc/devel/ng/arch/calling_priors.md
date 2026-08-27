@@ -341,6 +341,20 @@ is therefore not minted — nothing in the three calling docs consumes one.
 
 ## 4. The SNP/indel path
 
+> **⛔ Superseded, 2026-08-27**, by
+> [`../spec/ordinary_site_prior_moments.md`](../spec/ordinary_site_prior_moments.md) §2 and §5, and
+> **the code no longer matches this section.** The seed is not projected any more: it is built from
+> two integrals of the fitted population curve — its mean alternative-allele frequency and its
+> heterozygosity — by `seed_from_population_moments(frequency, diversity)`, which takes no
+> spectrum, no panel size and no inbreeding coefficient. The projection into allele-count classes,
+> the two-parameter search this section prices at 399 predictions, the blend toward a neutral
+> shape, `FittedSpectrum`, `FittedFrequencySpectrum` and `SpectrumMatch` are all deleted.
+>
+> **What still stands here**: the identity that turns two moments into a pair, the reason `α_ref`
+> near 1 holds the heterozygote-to-homozygous-alternative prior ratio near 2:1, and the ruling
+> that the SNP-versus-indel split belongs to the per-locus expansion. **Kept as the record of what
+> was replaced.**
+
 The seed comes from the pre-pass's fitted spectrum, projected onto `(α_ref, α_alt)`:
 
 ```rust
@@ -554,8 +568,8 @@ Every row read on 2026-08-21.
 | `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
 | `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, **retyped** and renamed for what it decays |
 | `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, [`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs) | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
-| `project_spectrum_seed` | — (production never fitted a spectrum) | **new**; optimiser reuses [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) |
-| `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |
+| `seed_from_population_moments` | — (production never fitted a population curve) | **new**; three multiplications and a divide, no optimiser. ⛔ *It was `project_spectrum_seed` over a two-parameter search until 2026-08-27* |
+| the seed's two inputs | joint route's `FrequencyDensity::expected_alternative_frequency` and `::expected_heterozygosity`, [`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; two closed-form integrals of the same fitted curve, with no panel in either. ⛔ *It was `FittedSpectrum`, the density evaluated into a panel's allele-count classes, until 2026-08-27* |
 | `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs) | import value + reasoning; carried as overridable, regime-reported |
 | `InbreedingF` | [`types.rs:412`](../../../../src/ng/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
 | `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit `Provenance`'s own variants onto it. **It shipped with five, not the three §2.3 draws** — see the ⚠ there |

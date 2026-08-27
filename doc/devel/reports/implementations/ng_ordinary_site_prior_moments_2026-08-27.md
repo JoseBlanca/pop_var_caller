@@ -64,12 +64,16 @@ check is the hand-computed one below.
 
 ### What the fixtures share, and what was added because of it
 
-**The five densities this repository already sweeps all have `a ≤ b`** — the alternative allele
-rare, or the two shapes balanced. On every one of them, reading `b/(a+b)` for `a/(a+b)` returns a
-number too *high*, so a reader checking the sign of an error would see a consistent story and
-conclude the formula was merely mis-scaled. `Beta(3, 0.6)` — the population where the reference
-base is the rare one at the positions that vary (report §2) — was added for that reason, and the
-swap moves the answer **down** there and up on the other five.
+**The five densities this repository already sweeps all have `a ≤ b`**, and reading `b/(a+b)` for
+`a/(a+b)` does one of two things on them. On the three where `a < b` it returns a number too
+*high*. On the two symmetric ones, `Beta(1, 1)` and `Beta(4, 4)`, it returns the **identical**
+number — the swap is not merely consistent there, it is invisible. `Beta(3, 0.6)` — the population
+where the reference base is the rare one at the positions that vary (report §2) — was added
+because it is the only fixture on which the swap points the other way.
+
+**⛦ An earlier version of this paragraph said the swap "returns a number too high on every one of
+them"**, which is wrong on two of the five for the same reason the paragraph below gives: those
+two are symmetric. Corrected after review.
 
 **Six rows, five distinct answers.** `Beta(1, 1)` and `Beta(4, 4)` are both symmetric, so both have
 mean a half and both give 3.000 in 1,000. They differ in spread and not in mean, so for this
@@ -206,6 +210,14 @@ anything else ran.
 - `cargo test --lib` — **4,874 passed, 0 failed, 14 ignored**, from 4,877 after A1. **Five tests
   removed and two added**, all named above; the fall is the deletion the plan expects and not a
   regression.
+
+  **⛦ That counts three renames among the "removed", and a review caught it.** Only
+  `the_seed_is_what_the_identity_gives_from_the_four_fitted_numbers` is net-new;
+  `a_fitted_density_seeds_the_run_from_its_own_moments`,
+  `no_fitted_frequency_is_the_neutral_pair_at_the_fitted_diversity` and
+  `the_seeds_implied_diversity_is_the_measured_one_at_every_shape` are the same tests under new
+  names, two of them carrying new assertions. The arithmetic nets out to the same −3 and the suite
+  really did move 4,877 → 4,874; what was wrong was the composition.
 - `cargo doc --no-deps --lib` — **27 unresolved links, the same count as at `9f15f5e5`**. One new
   break was introduced and fixed: `HALF_WEIGHT_PANEL_SIZE`'s documentation linked to
   `SeedRegime::FittedSpectrum`, which no longer exists.
@@ -233,12 +245,24 @@ measured a mechanism that is now deleted.
   `no_fitted_frequency_is_the_neutral_pair_at_the_fitted_diversity`.
 - **The re-export** of the constant and the weight function from `genotype_prior`.
 
-**A comment stands where the ramp was**, carrying what it did, the one constant it had, and the
-two measurements that retired it: every arm of the sweep put the best half-weight panel size at
-zero, and the blended seed came back at **0.62× to 0.92× of the truth at one individual** across
-four populations.
+**A comment stands where the ramp was**, carrying what it did, the one constant it had, and the two
+measurements that retired it: **all three arms of the sweep's headline table — the one averaged
+over panel size, depth and population — put the best half-weight panel size at zero**, and the
+blended seed came back at **0.62× to 0.92× of the truth at one individual** across four
+populations.
 
-### The example is kept, and it needed its own copy of the constant
+**⛦ An earlier version of that comment and of this paragraph said "every arm" put it at zero**,
+which the project's own record contradicts: the sweep's *depth-crossed* arms put it at 0 on a
+strong rare-allele pile-up and at **200** on a moderate one, and that two-hundred-fold
+disagreement is the reason no single constant is right
+(`ng_seed_shrinkage_2026-08-26.md` §5.2, `PROJECT_STATUS.md`). Corrected after review, in the code
+comment and here.
+
+### The example was kept here, and A5 deleted it
+
+> **⛦ Superseded by A5 below.** `examples/ng_seed_shape_weight_sweep.rs` also reads
+> `fit_spectrum_shape`, which A5 deletes, so keeping it was possible for exactly one commit. What
+> follows is what this step did; A5's table says what became of it.
 
 `examples/ng_seed_shape_weight_sweep.rs` reads `HALF_WEIGHT_PANEL_SIZE` in four places, so keeping
 it meant giving it a local `const HALF_WEIGHT_PANEL_SIZE: f64 = 0.25;`. **That is a copy of a
@@ -248,7 +272,9 @@ the panel's own fitted shape is at its best at *one* individual and degrades as 
 the sweep answered its own question the wrong way round.
 
 Three sentences in the program's own printed output claimed the library *ships* the constant. All
-three were corrected — this is the "grep for the retired sentence" check, and it found three.
+three were corrected — this is the "grep for the retired sentence" check applied to that one file.
+**Applied to the whole tree it finds more, and a review found them**: see the Milestone A review
+section at the end.
 
 ### Validation
 
@@ -275,10 +301,25 @@ the inequality where the variant was. `ZeroDiversity` stays.
   answer to a regime that no longer exists.
 - **The argument, written out where the code is**: `θ = E[2f(1−f)] = 2E[f] − 2E[f²]` against a
   ceiling of `2E[f](1 − E[f]) = 2E[f] − 2E[f]²`, and `E[f²] ≥ E[f]²` — Jensen, whose slack is
-  exactly the spread of the population's frequencies. So the measurement sits below the ceiling by
-  twice that spread, with equality only where the whole population sits at one frequency. **No
-  density the fit can produce does**: its Beta's shape parameters are clamped to `[0.02, 50]`, and
-  the narrowest of those, `Beta(50, 50)`, still has a spread of 2.5 in 1,000.
+  exactly the spread of the population's frequencies, over the whole density and not over the Beta
+  alone. So the measurement sits below the ceiling by twice that spread, with equality only where
+  the whole population sits at one frequency, which no density the fit can produce does.
+- **How much room that leaves has a closed form, and it is now pinned by a test.** Where every
+  position segregates and neither point mass carries anything, the density is a bare `Beta(a, b)`
+  and the share of the ceiling is exactly `(a + b)/(a + b + 1)`, so the solved total is exactly
+  `a + b`. The fit clamps `a` and `b` to `[0.02, 50]` independently, so the tightest case in the
+  box is `a = b = 50`: **one part in 101 of the ceiling left unused, and a total of 100
+  chromosomes.** Adding either point mass widens it — swept over the whole box, the largest share
+  any density asks for is that same 100 in 101, and it is asked for only where the masses carry
+  nothing (`seed_tests::no_density_the_fit_can_produce_comes_within_one_part_in_a_hundred_of_its_ceiling`).
+
+  **⛦ An earlier version of this argument said the tightest density was `Beta(50, 50)` "the
+  narrowest of those, still with a spread of 2.5 in 1,000".** Two things were wrong. `Beta(50, 50)`
+  is not the narrowest the clamp admits — `a` and `b` are clamped independently, so `Beta(0.02, 50)`
+  is reachable and its spread is 7.8 in a *million*, 316 times narrower. And absolute spread was
+  the wrong quantity: what bounds the assertion is spread **relative to the ceiling**, which is
+  where the closed form above comes from. The conclusion held; the reason given for it did not.
+  Corrected after review, and replaced by a swept test rather than a second argument.
 
 ### Why it is a release assertion and not a `debug_assert!`
 
@@ -505,3 +546,95 @@ The source was restored from a backup after each and the restore checked with `g
   plain `cargo build --lib` — all clean.
 - `cargo test --lib` — **4,831 passed, 0 failed, 11 ignored**, from 4,822. Nine tests added.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+---
+
+## The Milestone A review, and what it changed
+
+Three agents in worktrees at `02735054`, one brief each: arithmetic and numerics; tests and
+mutation; design conformance and claim-checking. **Every finding below is the author's own claim
+about the author's own work** — the figures quoted from the design documents and the reports came
+back clean, which is the split this project keeps measuring.
+
+### Wrong mechanism claims — two, and both were the reason given for a decision
+
+**1. `Beta(50, 50)` is not the narrowest density the fit can produce.** The doc comment justifying
+the release assertion that replaced `DiversityUnreachable` said the Beta's shapes are clamped to
+`[0.02, 50]` "and the narrowest of those, `Beta(50, 50)`, still has a spread of 2.5 in 1,000". The
+clamps are **independent**, so `Beta(0.02, 50)` is reachable and its spread is 7.8 in a million —
+316 times narrower. Worse, absolute spread was the wrong quantity: what bounds the assertion is
+spread *relative to the ceiling*. Replaced by a closed form — the bare Beta's share of its ceiling
+is exactly `(a + b)/(a + b + 1)`, so the solved total is exactly `a + b` and the tightest case in
+the box is 100 chromosomes — **and by a test that sweeps the box and finds 100 in 101**, so the
+claim is now measured rather than argued. The conclusion never moved; the reason did.
+
+**2. "every arm of the sweep put the best half-weight panel size at zero" is contradicted by this
+project's own record.** All three arms of that sweep's *headline* table did. Its depth-crossed arms
+put it at 0 on a strong rare-allele pile-up and at **200** on a moderate one — the two-hundred-fold
+disagreement that is the actual reason no single constant is right. Corrected in the code comment
+where the ramp was, here, and in `PROJECT_STATUS.md`.
+
+### Wrong numbers — one
+
+**"reading `b/(a+b)` for `a/(a+b)` returns a number too high on every one of them" is false on two
+of the five.** `Beta(1, 1)` and `Beta(4, 4)` are symmetric, so the swap returns the *identical*
+number there — invisible rather than consistent. The argument for adding `Beta(3, 0.6)` survives
+and is now stated correctly. The same report's next paragraph already said those two are symmetric,
+so the two paragraphs contradicted each other.
+
+### A defect the deletion introduced
+
+`total_for_diversity`'s rustdoc summary line was the **first line of the deleted `PinnedTotal`'s
+doc comment**, orphaned when the enum went and rendering as a sentence that stops mid-clause.
+Removed.
+
+### An over-claimed oracle, and the assertion that closes it
+
+`implied_heterozygosity` is `2 α_ref α_alt / (A(A + 1))`, **symmetric in the two concentrations**,
+so it returns the same number for a pair and for its mirror. Its doc claimed only that it shares no
+arithmetic with the pin, which is true and reads as more than it is. Two changes: the doc now says
+what the oracle is blind to, and
+`the_seeds_implied_diversity_is_the_measured_one_at_every_shape` now asserts the seed's own
+expected frequency beside the heterozygosity. **Before that, the only assertion in the tree that
+could see the pair swapped lived in another module.**
+
+### Retired sentences the step's own grep missed
+
+The A3 section above records finding three, all in one file. A tree-wide grep found more:
+
+| where | what it still said |
+|---|---|
+| `examples/ng_prior_moment_estimators.rs`, twice | that the mixtures let the comparison against the current path go through the caller's own projection — both the arm and the projection are deleted |
+| `src/ng/calling/mod.rs`, a doc comment and **a release panic message** | "a SNP/indel locus seeds from a frequency spectrum" |
+| `doc/devel/ng/arch/calling_priors.md` §4 and its reuse map | the whole SNP/indel architecture section, stating `project_spectrum_seed(spectrum, diversity, panel_inbreeding)` and "399 predictions and 11.8 minutes at 3,200 individuals" as current |
+| `doc/devel/ng/spec/ordinary_site_seed.md` §2, §6, §7 | the projection and the search as non-goals that "stay"; a seven-item checklist five of whose items rest on deleted machinery, including one asking that `DiversityUnreachable` **remain reachable**; two open questions about a constant that no longer exists |
+| `doc/devel/ng/spec/population_diversity.md` §3.2, §8, §9 | the `FittedSpectrum` adapter as the current seam, and the class-weight projection as a live acceptance criterion |
+
+The two source files were fixed outright. **The three design documents were given supersession
+banners rather than rewritten** — a banner saying the code no longer matches is a factual note and
+follows the owner's own precedent of 2026-08-27; rewriting the design is not this loop's to do.
+
+**⚑ Still owed, and deliberately not touched:** `doc/devel/ng/impl_plan/calling_loop.md` step E2
+still names `project_spectrum_seed` in its contract. That plan is being executed on a sibling
+branch right now, and editing it here would collide.
+
+### Two A5 changes the report did not mention, now named
+
+- **`ng_prior_moments_from_reads.rs`'s "calls moved, trebled" column changed what it measures.** It
+  was the control on the *search-versus-census* comparison and is now the control on the
+  *curve-versus-census* one, because the first comparison is gone. Report §9.2's published trebling
+  figures were computed the other way.
+- **A5's verification line in the plan asks for the implied-heterozygosity pin "at every panel size
+  and shape"; what shipped runs over six shapes and no panel sizes.** That is correct — there is no
+  panel size left in the seed to vary, which is the point of the milestone — but it is a change to
+  a stated acceptance criterion and belongs in the record.
+
+### What came back clean
+
+Every test count, line count and broken-link count in this report reconciles against the tree. The
+A1 closed form and its six hand-computed values, the identity in `total_for_diversity` and its
+boundary handling, the rebuilt oracle's algebra, A4's two measured panic messages, and every figure
+quoted from the design documents and the measurement report — 34 of 36, 0.749×, 0.62×–0.92×,
+1.22×, 399 predictions, 11.8 minutes, 6.6-fold — all verified correct. The arithmetic review also
+swept the box the fit clamps to and found no input on which the new release assertion can fire from
+one fitted curve, with about 1% of headroom.

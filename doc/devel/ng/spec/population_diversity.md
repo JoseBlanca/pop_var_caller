@@ -50,9 +50,10 @@ and how it reaches the caller**.
   document says which fitted quantity each prior takes, what happens where a fit is thin, and how
   the numbers reach the caller. The one piece of arithmetic it does add is a **representation
   change** — a fitted continuous density into allele-count classes (§3.2).
-- **Changing what the caller does with either number once it has it.** The projection from a
-  frequency spectrum to a seed pair is built and tested (`project_spectrum_seed`,
-  `src/ng/calling/genotype_prior/seed_generic.rs:636`); this document does not touch it.
+- **Changing what the caller does with either number once it has it.** ⛔ *Superseded 2026-08-27:*
+  the projection from a frequency spectrum to a seed pair is **deleted**; the seed builder is
+  `seed_from_population_moments`, which takes the density's two moments and no panel
+  ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §5).
 - **Repeat-tract candidate selection.** Which lengths a tract is called over is
   [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)'s.
 
@@ -131,6 +132,19 @@ search for the newtype's constructor misses it. **Search for what a step emits, 
 consumer takes.**
 
 ### 3.2 What that leaves, and it is an adapter
+
+> **⛔ Superseded, 2026-08-27**, by
+> [`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §5. **The second of the two
+> conversions below is deleted**, and so is the type that carried it: the caller takes two
+> integrals of the fitted density — its mean alternative-allele frequency and its heterozygosity —
+> and evaluates nothing into allele-count classes. `FittedSpectrum`,
+> `FittedFrequencySpectrum` and `FrequencyDensity::allele_count_classes` are all gone from the
+> tree. **The first conversion stands**: the heterozygosity is still wrapped in
+> `ExpectedHeterozygosity`, and the frequency now arrives beside it in a type of its own.
+>
+> **One thing this section computed is still owed**: the count of census positions that came out
+> variable across the panel, which the new spec §6.2 re-sources from the fit's own per-position
+> posteriors as a soft count of positions that segregate.
 
 **Two conversions at the seam, and nothing else:**
 
@@ -408,10 +422,10 @@ read-only thereafter.
    none.
 3. **The rung reaches the output.** A locus seeded from a stratum's own fit, one from its period's
    pool, and one from the stated constant are distinguishable in the run's record.
-4. **The class-weight projection reproduces the density it came from.** Summed back, the `2N + 1`
-   class weights return the density's own segregating share and its two point masses; and the
-   heterozygosity implied by the classes matches `FrequencyDensity::expected_heterozygosity` at a
-   panel large enough for the discretisation to be fine.
+4. ⛔ *Superseded 2026-08-27 — there is no class-weight projection.* What replaces this check is
+   `ordinary_site_prior_moments.md` §9's third: the seed's implied heterozygosity is the measured
+   one at every population shape, checked against a Beta-binomial oracle that shares no arithmetic
+   with the identity that produced it.
 5. **The two numbers cannot be crossed.** They are separate types; a test that hands one where the
    other belongs must not compile.
 6. **The end-to-end check** is a repeat tract called from real evidence, which is what this unblocks.
@@ -446,8 +460,14 @@ read-only thereafter.
    tracts genuinely spread over more lengths. **Leaning: leave it** until the loci it applies to are
    worth more than 7%. **What would settle it:** the spread of the pooled length spectrum against repeat
    count within one period, on tomato, where the thin rung carries the larger share.
-3. **Where does the class-weight projection stop being worth doing? — ANSWERED, 2026-08-26: nowhere,
-   because there is no switch left to place a floor at.** At `N` diploid individuals the frequency
+3. **Where does the class-weight projection stop being worth doing? — ANSWERED TWICE. 2026-08-26:
+   nowhere, because there is no switch left to place a floor at. 2026-08-27: the question has no
+   subject, because there is no projection** ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md)
+   §5). The 2026-08-26 answer is kept below as the record; its citation of
+   `examples/ng_spectrum_panel_floor.rs` names a program deleted with the machinery it measured,
+   whose figures are in
+   [`../../reports/implementations/ng_seed_shrinkage_2026-08-26.md`](../../reports/implementations/ng_seed_shrinkage_2026-08-26.md).
+   **The sampling question named at the end of it is untouched and still open.** At `N` diploid individuals the frequency
    spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape, and
    this question asked where to put a floor below which it is not projected. The ordinary-site
    ladder's top two rungs are no longer separated by nothing: they are the two ends of one ramp,

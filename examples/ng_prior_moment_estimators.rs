@@ -133,9 +133,10 @@ fn main() {
 ///
 /// **Every component is a Beta, and a shape is a weighted mixture of them.** A single Beta is
 /// what the joint fit can hold; a mixture of two is not, and that is the whole point of the
-/// awkward shapes below. Keeping every component in the same family is also what lets the
-/// comparison against the current path use **the caller's own projection**
-/// ([`allele_count_classes`]) rather than a copy of it written here.
+/// awkward shapes below. Keeping every component in the same family also kept the retired
+/// comparison-against-the-current-path arm honest: it went through the caller's own projection
+/// rather than a copy of it written here. That arm and that projection are both deleted, and the
+/// mixtures stay because being outside the fitted family is what they are for.
 #[derive(Clone, Copy, Debug)]
 struct Component {
     /// What share of the segregating positions this component holds.
@@ -293,8 +294,7 @@ fn shapes() -> Vec<PopulationShape> {
                     b: 1.50,
                 },
                 // **A narrow lump at frequency 0.42**, not a point mass: a mean of 0.42 with a
-                // spread of 0.049. Every component being a Beta is what lets the comparison
-                // against the current path go through the caller's own projection.
+                // spread of 0.049.
                 Component {
                     weight: 0.45,
                     a: 42.0,

@@ -5,7 +5,13 @@
 //! (`doc/devel/ng/spec/calling_priors.md` §4). **In a selfer that divides by a small number.** At
 //! an inbreeding coefficient of 0.85 only about 15 alternative copies in 100 sit in heterozygotes,
 //! so the diversity is measured through the thinnest available channel and multiplied by 6.7 to
-//! recover it; an error `dF` in the coefficient moves `θ` by `dF / (1 − F)`, exactly.
+//! recover it; an error `dF` in the coefficient moves `θ` by about `dF / (1 − F)`.
+//!
+//! **That is the first-order size and the table below prints it; the exact one is
+//! `dF / (1 − F − dF)`, and the two part company where they matter most.** At `F = 0.9` with a
+//! coefficient 0.05 too high, the column says 50% and the true inflation is **100%** — because
+//! `1 − F` has halved rather than shrunk by a twentieth. The first-order figure is what a reader
+//! can carry between rows; the exact one is what a run at the wrong `F` actually gets.
 //!
 //! That factor is arithmetic rather than a simulation, and printing it is all this program now
 //! does.
@@ -35,7 +41,8 @@ fn main() {
     println!(
         "Where the pre-pass supplies a diversity rather than a fitted population curve, the pair\n\
          is (1, th), and th is each sample's observed heterozygosity divided by (1 - F). An error\n\
-         in F then moves th by dF / (1 - F), exactly:\n"
+         in F then moves th by about dF / (1 - F). The exact size is dF / (1 - F - dF), which\n\
+         at F = 0.9 and dF = 0.05 is 100% against the 50% printed here:\n"
     );
     println!(
         "{:>6}  {:>22}  {:>28}",

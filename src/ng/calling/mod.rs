@@ -2619,8 +2619,8 @@ pub struct LocusInference {
     /// this is what carries it. Every rung answers, so this is never *no shape*; what it
     /// says is how well founded the shape was.
     ///
-    /// `None` on the SNP/indel path, which seeds from a frequency spectrum rather than
-    /// from a length spectrum — [`Self::new`] refuses a rung set there. **Also `None` at a
+    /// `None` on the SNP/indel path, whose seed is two integrals of the population curve rather
+    /// than a length spectrum — [`Self::new`] refuses a rung set there. **Also `None` at a
     /// repeat tract today**, because the driver still refuses every tract at its front
     /// door; step E3b of `doc/devel/ng/impl_plan/calling_loop.md` is what fills it.
     ///
@@ -2782,8 +2782,8 @@ impl LocusInference {
         );
         assert!(
             !(length_spectrum_rung.is_some() && matches!(alleles.kind(), LocusKind::Generic)),
-            "the tract ladder's rung belongs to the repeat-tract prior: a SNP/indel locus \
-             seeds from a frequency spectrum, whose own ladder has different rungs"
+            "the tract ladder's rung belongs to the repeat-tract prior: a SNP/indel locus is \
+             seeded from the population curve's two moments, whose own ladder has different rungs"
         );
         assert!(
             matches!(alleles.kind(), LocusKind::Generic)

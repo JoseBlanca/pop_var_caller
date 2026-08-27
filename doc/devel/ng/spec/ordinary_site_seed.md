@@ -147,6 +147,13 @@ shapes *inside* the Dirichlet family.
 
 ### Non-goals
 
+> **⛔ The second and third of these are superseded, 2026-08-27**, by
+> [`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §5. The projection and the
+> search were non-goals *for this document* and are now **deleted**: the seed takes two integrals
+> of the fitted curve, so `FrequencyDensity::allele_count_classes`, `fill_expected_spectrum` and
+> the two-parameter fit have no consumer and are gone from the tree, along with the programs that
+> measured them.
+
 - **A richer prior family** (§1.3). Not a mixture of Betas, not a point mass at *invariant*, not
   the Ewens spectrum.
 - **Changing the projection.** `FrequencyDensity::allele_count_classes` is exact and stays.
@@ -315,6 +322,18 @@ fell there because `w` was zero.
 
 ## 6. How we know it works
 
+> **⛔ Superseded, 2026-08-27**, by
+> [`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §9. Items 1, 2, 3, 5 and 6
+> below all rest on machinery that no longer exists — the projection, the search, the ramp between
+> two rungs, and the `DiversityUnreachable` regime item 5 asks to be kept reachable. **Item 5 is
+> the one to read carefully**: that regime is deliberately *unreachable* now, because two moments
+> of one curve always leave the ceiling above the measurement by twice the population's spread of
+> frequencies, and the refusal is a release assertion about the caller rather than a rung.
+>
+> What replaces this checklist is the new spec's §9: the closed forms against the search's own
+> answer at one individual, the seed's implied heterozygosity equal to the measured one at every
+> shape, and the census estimators against known genotypes at one individual and at a thousand.
+
 1. **The seed's implied diversity is the measured one**, at every panel size from 1 to the
    projection's ceiling and at every shape in §1.2's grid — asserted, not sampled.
 2. **The two ends are exactly the two rungs.** At `w = 0` the seed is `(1, θ)` to the same 0.15%
@@ -357,6 +376,13 @@ what was measured.** The design is unchanged; these are factual amendments to th
 ---
 
 ## 7. Open questions, and one thing deliberately left shut
+
+> **⛔ Questions 1 and 3 are closed by deletion, 2026-08-27.** Both are about `N₀`, the blend's one
+> constant, and about the projection's inbreeding coefficient. The blend, the constant and the
+> projection are all gone
+> ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §6.1), so neither question
+> has a subject any more. **Question 2 stands and is still open** — no measurement in this area has
+> seen a real cohort.
 
 **Open.**
 

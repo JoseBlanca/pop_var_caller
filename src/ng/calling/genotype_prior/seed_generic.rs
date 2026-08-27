@@ -60,9 +60,15 @@ pub enum VariantClass {
 //
 // **It existed to damp the small-panel noise of a search that is itself being deleted**, and the
 // sweep that was to set `N₀` said the blend points the wrong way: the panel's own fitted shape is
-// exact at one individual and degrades as the panel grows, so every arm put the best half-weight
-// panel size at zero. Handed the population exactly, the blended seed came back at **0.62× to
-// 0.92× of the truth at one individual** across four populations
+// exact at one individual and degrades as the panel grows. **All three arms of that sweep's
+// headline table — the one averaged over panel size, depth and population — put the best
+// half-weight panel size at zero**; its depth-crossed arms did not agree with each other, putting
+// it at 0 on a strong rare-allele pile-up and at **200** on a moderate one, which is the
+// two-hundred-fold disagreement that says no single constant is right
+// (`doc/devel/reports/implementations/ng_seed_shrinkage_2026-08-26.md` §5.2).
+//
+// Handed the population exactly, the blended seed came back at **0.62× to 0.92× of the truth at
+// one individual** across four populations
 // (`doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md` §9,
 // `doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.1).
 //
@@ -79,7 +85,6 @@ pub enum VariantClass {
 /// (`doc/devel/ng/spec/ordinary_site_seed.md` §3.1).
 const MAX_IMPLIED_DIVERSITY: f64 = 0.5;
 
-/// The total concentration that makes a pair of a given expected frequency imply exactly the
 /// **Solve for how much conviction a pair of this expected frequency needs in order to imply the
 /// diversity that was measured** — `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity.
 ///
@@ -108,11 +113,24 @@ const MAX_IMPLIED_DIVERSITY: f64 = 0.5;
 ///   the ceiling            =  2 E[f] (1 − E[f])  =  2 E[f] − 2 E[f]²
 /// ```
 ///
-/// and `E[f²] ≥ E[f]²` — that difference *is* the spread of the population's frequencies. So the
-/// measurement is below the ceiling by exactly twice that spread, and equals it only where the
-/// whole population sits at one frequency. **No density the fit can produce does**: its Beta's
-/// shape parameters are clamped to `[0.02, 50]`, and the narrowest of those, `Beta(50, 50)`, still
-/// has a spread of 2.5 in 1,000 (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
+/// and `E[f²] ≥ E[f]²` — that difference *is* the spread of the population's frequencies, taken
+/// over the whole density, both point masses included. So the measurement is below the ceiling by
+/// exactly twice that spread, and equals it only where the whole population sits at one frequency.
+/// **No density the fit can produce does**, and the margin has a closed form rather than an
+/// estimate. Where every position segregates and neither point mass carries anything, the density
+/// is a bare `Beta(a, b)` and the algebra collapses:
+///
+/// ```text
+///   1 − θ / (2 E[f] (1 − E[f]))  =  1 / (a + b + 1),      so      A  =  a + b
+/// ```
+///
+/// The fit clamps `a` and `b` to `[0.02, 50]` independently, so the tightest that gets is
+/// `a = b = 50` — one part in 101 of the ceiling left unused, and a solved total of 100
+/// chromosomes. **Adding either point mass widens the margin**, and that is measured rather than
+/// argued: swept over the whole box the fit clamps to, the largest share of the ceiling any
+/// density asks for is that same 100 in 101, and it is asked for only where the point masses carry
+/// nothing ([`seed_tests::no_density_the_fit_can_produce_comes_within_one_part_in_a_hundred_of_its_ceiling`],
+/// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
 ///
 /// So this is now a **release assertion** rather than a fall-back: tripping it means the two
 /// numbers did not come from one curve, which is a run-assembly defect and not a thin cohort.
@@ -425,6 +443,14 @@ mod seed_tests {
     /// this evaluates `2 · B(1 + α_alt, 1 + α_ref) / B(α_alt, α_ref)` through `lgamma`, so a test
     /// comparing the two is not comparing a value against its own definition.
     ///
+    /// **⚠ It checks the pair's total and is blind to how the total was split.**
+    /// `2 α_ref α_alt / (A (A + 1))` is symmetric in the two concentrations, so it returns the
+    /// same number for a pair and for its mirror, so a test that reads only this cannot see the
+    /// two swapped. Where that matters — in
+    /// [`the_seeds_implied_diversity_is_the_measured_one_at_every_shape`], which is the one test
+    /// here that goes through the seed builder on a shape whose two concentrations differ — the
+    /// expected frequency is asserted separately beside it.
+    ///
     /// **It used to read the module's own spectrum machinery at one individual**, which was
     /// deleted with the search on 2026-08-27; this is the same quantity by the same route, written
     /// out here because it is now only a test's oracle.
@@ -448,11 +474,11 @@ mod seed_tests {
     /// fixture, **and one where the reference base is the rare one at the positions that vary**.
     ///
     /// **That last row is why this is a list rather than one density.** The other five all have
-    /// `a ≤ b` — the alternative allele rare or the two shapes balanced — so on all of them a
-    /// formula that read `b / (a + b)` for `a / (a + b)` would come back too *high* in one
-    /// direction only, and a reader checking the sign would see a consistent story. `Beta(3, 0.6)`
-    /// points the other way (report §2, the population where the reference base is the rare one),
-    /// so the swap moves the answer down there and up elsewhere.
+    /// `a ≤ b`, and a formula that read `b / (a + b)` for `a / (a + b)` does one of two things on
+    /// them: on the three where `a < b` it comes back too *high*, and on the two symmetric ones,
+    /// `Beta(1, 1)` and `Beta(4, 4)`, it comes back **identical** — the swap is not merely
+    /// consistent there, it is invisible. `Beta(3, 0.6)` (report §2, the population where the
+    /// reference base is the rare one) is the only fixture on which the swap points the other way.
     ///
     /// **Six rows, five distinct mean frequencies.** `Beta(1, 1)` and `Beta(4, 4)` are both
     /// symmetric, so their means are both a half and the two rows give the same answer — 3.000 in
@@ -643,6 +669,19 @@ mod seed_tests {
                 "on {name} the regime came back {:?}",
                 seed.regime()
             );
+            // **And the pair's own expected frequency is the one it was handed.**
+            // [`implied_heterozygosity`] cannot see this: `2 α_ref α_alt / (A (A + 1))` is
+            // symmetric in the two concentrations, so it returns the same number for a pair and
+            // for its mirror. Without this line the only assertion in the tree that would notice
+            // the two being swapped lives in another module.
+            let total = seed.alpha_ref() + seed.alpha_alt_total();
+            let frequency = seed.alpha_alt_total() / total;
+            let handed_over = density.expected_alternative_frequency();
+            assert!(
+                (frequency / handed_over - 1.0).abs() < 1e-12,
+                "on {name} the seed's expected frequency is {frequency:e} where it was handed \
+                 {handed_over:e}"
+            );
             let off = (implied_heterozygosity(seed) / theta - 1.0).abs();
             if off > worst {
                 worst_at = name;
@@ -653,6 +692,71 @@ mod seed_tests {
             worst < 1e-11,
             "the seed must imply the diversity it was handed, whatever the population's shape; \
              worst departure {worst:.2e}, on {worst_at}"
+        );
+    }
+
+    /// **No density the fit can produce comes within one part in a hundred of its own ceiling**,
+    /// which is what makes [`total_for_diversity`]'s refusal a release assertion about the caller
+    /// rather than a state a run can reach.
+    ///
+    /// A pair of expected frequency `f` implies at most `2 f (1 − f)`. Jensen's inequality puts a
+    /// curve's own heterozygosity below that by twice the spread of its frequencies — this sweeps
+    /// the box the fit clamps its four parameters to and reports how much of the ceiling the worst
+    /// density in it asks for.
+    ///
+    /// **The answer is 100 in 101, and where it is reached says why.** With every position
+    /// segregating and neither point mass carrying anything, the density is a bare `Beta(a, b)`,
+    /// the share of the ceiling is exactly `(a + b) / (a + b + 1)`, and the solved total is exactly
+    /// `a + b` — so the tightest case in the box is `a = b = 50` and the total never exceeds 100
+    /// chromosomes. Every point mass added widens the margin.
+    #[test]
+    fn no_density_the_fit_can_produce_comes_within_one_part_in_a_hundred_of_its_ceiling() {
+        // The fit's own clamps: `a` and `b` to [0.02, 50] independently, and the two masses to
+        // shares that leave something segregating (`joint::fit`'s M-step).
+        let shapes = [0.02_f64, 0.1, 0.5, 1.0, 4.0, 20.0, 50.0];
+        let masses = [0.0_f64, 1e-9, 1e-3, 0.1, 0.5, 0.9, 0.999];
+        let mut worst_share = 0.0_f64;
+        let mut worst_at = (0.0, 0.0, 0.0, 0.0);
+        for &a in &shapes {
+            for &b in &shapes {
+                for &p_invariant in &masses {
+                    for &p_fixed_alt in &masses {
+                        if p_invariant + p_fixed_alt >= 1.0 {
+                            continue;
+                        }
+                        let density = FrequencyDensity {
+                            p_invariant,
+                            p_fixed_alt,
+                            a,
+                            b,
+                        };
+                        let frequency = density.expected_alternative_frequency();
+                        let theta = density.expected_heterozygosity();
+                        let share = theta / (2.0 * frequency * (1.0 - frequency));
+                        if share > worst_share {
+                            worst_share = share;
+                            worst_at = (a, b, p_invariant, p_fixed_alt);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst_share <= 100.0 / 101.0 + 1e-12,
+            "the worst density in the fit's own box asks for {worst_share} of its ceiling, at \
+             Beta({}, {}) with masses {} and {} — the closed form says the bare Beta at a = b = 50 \
+             is the tightest, at 100/101",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2,
+            worst_at.3
+        );
+        // **And it really does get that close**, so the bound above is tight rather than generous:
+        // a test asserting only `share < 1` would pass with the clamps ten times wider.
+        assert!(
+            worst_share > 100.0 / 101.0 - 1e-9,
+            "the bare Beta at a = b = 50 should reach 100/101 exactly; the sweep's worst is \
+             {worst_share}"
         );
     }
 
