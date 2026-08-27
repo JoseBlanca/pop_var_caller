@@ -2223,6 +2223,124 @@ mod projection_tests {
     use super::*;
     use crate::ng::parameter_estimation::joint::fit::FrequencyDensity;
 
+    /// **The closed-form mean frequency reproduces the search's own answer at one individual**,
+    /// which is the one panel size where the search is exact.
+    ///
+    /// **Why this is a proof and not a coincidence.** A panel of one diploid individual has three
+    /// allele-count classes, two of them free once they are normalised, and the two-parameter
+    /// family has two parameters — so the fitted pair reproduces those three classes exactly,
+    /// point masses included, and its mean frequency is therefore the density's own
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §9, report §9). At larger panels the
+    /// search is fitted over more classes than it has parameters and drifts away from the
+    /// density — up to 1.22× at 200 individuals — so this comparison is only available here.
+    ///
+    /// **It shares no algebra with what it checks.** The search evaluates Beta-binomial class
+    /// weights and maximises a log-likelihood over them; the closed form is one line of Beta
+    /// moments. The two arriving at the same number is evidence about both.
+    ///
+    /// **The tolerance is the search's own resolution**, 1% of each concentration
+    /// ([`SearchPrecision::fast`]), not a number chosen to make this pass. Measured, the six
+    /// densities land between **0.9987× and 1.0010×** of the closed form — an order of magnitude
+    /// inside it.
+    ///
+    /// **⚑ This test dies with the search.** `ordinary_site_prior_moments.md` §5 deletes
+    /// [`fit_spectrum_shape`] and everything under it; what survives as the permanent check on
+    /// the closed form is `fit::tests::the_expected_alternative_frequency_is_the_densitys_own`,
+    /// which hand-computes it. This one exists to prove the replacement against the thing it
+    /// replaces, before that thing is gone.
+    #[test]
+    fn the_closed_form_frequency_is_the_searchs_own_answer_at_one_individual() {
+        let outbred = InbreedingF::try_new(0.0).expect("a legal coefficient");
+        for (name, density) in shapes_spanning_the_beta_and_both_point_masses() {
+            let class_weights = density.allele_count_classes(1);
+            let spectrum = FittedSpectrum::new(&class_weights, 0.0, 3_000.0);
+            let searched = fit_spectrum_shape(&spectrum, outbred).expected_frequency();
+            let closed_form = density.expected_alternative_frequency();
+            let ratio = searched / closed_form;
+            assert!(
+                (ratio - 1.0).abs() < 0.01,
+                "on {name} the search reads {searched:e} where the closed form gives \
+                 {closed_form:e}, a ratio of {ratio:.4} — outside the search's own 1% resolution"
+            );
+        }
+    }
+
+    /// The densities the closed-form checks run over: the four shapes
+    /// `doc/devel/ng/spec/ordinary_site_seed.md` §1.2 measures, the unit tests' own lopsided
+    /// fixture, **and one where the reference base is the rare one at the positions that vary**.
+    ///
+    /// **That last row is why this is a list rather than one density.** The other five all have
+    /// `a ≤ b` — the alternative allele rare or the two shapes balanced — so on all of them a
+    /// formula that read `b / (a + b)` for `a / (a + b)` would come back too *high* in one
+    /// direction only, and a reader checking the sign would see a consistent story. `Beta(3, 0.6)`
+    /// points the other way (report §2, the population where the reference base is the rare one),
+    /// so the swap moves the answer down there and up elsewhere.
+    ///
+    /// **Six rows, five distinct mean frequencies.** `Beta(1, 1)` and `Beta(4, 4)` are both
+    /// symmetric, so their means are both a half and the two rows give the same answer — 3.000 in
+    /// 1,000 — on any test of *this* quantity. They differ in spread, which is what
+    /// `ordinary_site_seed.md` §1.2 measures them for, and not in mean. The list is kept whole
+    /// because it is the same set those measurements used, and the duplication is named here
+    /// rather than left for a reader to discover.
+    fn shapes_spanning_the_beta_and_both_point_masses() -> [(&'static str, FrequencyDensity); 6] {
+        [
+            (
+                "tomato-like, strong rare-allele pile-up",
+                FrequencyDensity {
+                    p_invariant: 0.9950,
+                    p_fixed_alt: 0.0010,
+                    a: 0.20,
+                    b: 1.00,
+                },
+            ),
+            (
+                "human-like, moderate pile-up",
+                FrequencyDensity {
+                    p_invariant: 0.9949,
+                    p_fixed_alt: 0.0004,
+                    a: 0.35,
+                    b: 1.20,
+                },
+            ),
+            (
+                "flat over what segregates",
+                FrequencyDensity {
+                    p_invariant: 0.9950,
+                    p_fixed_alt: 0.0010,
+                    a: 1.00,
+                    b: 1.00,
+                },
+            ),
+            (
+                "the unit tests' own lopsided fixture",
+                FrequencyDensity {
+                    p_invariant: 0.90,
+                    p_fixed_alt: 0.01,
+                    a: 0.50,
+                    b: 2.00,
+                },
+            ),
+            (
+                "middling frequencies — the shape the family cannot hold",
+                FrequencyDensity {
+                    p_invariant: 0.9950,
+                    p_fixed_alt: 0.0010,
+                    a: 4.00,
+                    b: 4.00,
+                },
+            ),
+            (
+                "where it varies, the reference base is the rare one",
+                FrequencyDensity {
+                    p_invariant: 0.9950,
+                    p_fixed_alt: 0.0010,
+                    a: 3.00,
+                    b: 0.60,
+                },
+            ),
+        ]
+    }
+
     /// Project a spectrum **at the diversity it was built to carry**.
     ///
     /// **The diversity is an argument rather than a constant, and that is not tidiness.** It was

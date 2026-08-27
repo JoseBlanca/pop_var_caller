@@ -81,7 +81,7 @@ reports about all of it.
 
 ### Milestone A — step one: the moments off the curve, and the deletion
 
-**A1. `FrequencyDensity::expected_alternative_frequency`.**  ☐
+**A1. `FrequencyDensity::expected_alternative_frequency`.**  ✅
 `p_fixed_alt + p_segregating · a/(a+b)`, beside `expected_heterozygosity`, with the same
 population-not-panel framing in its documentation. **Own commit, do not bundle** — a wrong
 expected frequency is a plausible number at every panel size and nothing downstream refuses it. The

@@ -133,6 +133,38 @@ impl FrequencyDensity {
         self.p_segregating() * 2.0 * a * b / ((a + b) * (a + b + 1.0))
     }
 
+    /// `∫ π(f) · f df` — **the population's mean alternative-allele frequency**: pick a position
+    /// at random and then a chromosome at random from the whole population, and this is how often
+    /// that chromosome carries something other than the reference base.
+    ///
+    /// **There is no panel in it**, exactly as there is none in
+    /// [`Self::expected_heterozygosity`]: it describes the population the density was fitted to,
+    /// not the individuals the run happened to sequence.
+    ///
+    /// Two of the density's three parts contribute, and the third cannot:
+    ///
+    /// ```text
+    /// E[f]  =  p_fixed_alt  +  p_segregating · a / (a + b)
+    /// ```
+    ///
+    /// A position where the population carries only a non-reference base has every chromosome
+    /// alternative, so it contributes its whole share. A position that segregates contributes the
+    /// mean of its Beta, which is `a / (a + b)`. A position where the population carries only the
+    /// reference base contributes nothing.
+    ///
+    /// **This and [`Self::expected_heterozygosity`] are the two numbers the SNP/indel genotype
+    /// prior is built from** (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2): a
+    /// concentration pair is a mean frequency and a total conviction in other clothes, and
+    /// `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity turns the two moments back into a
+    /// pair. So the prior reads two integrals of this curve rather than a projection of it into a
+    /// panel's allele-count classes.
+    pub fn expected_alternative_frequency(&self) -> f64 {
+        let (a, b) = (self.a, self.b);
+        // E[f] under Beta(a, b) is a / (a + b); positions fixed for a non-reference base are at
+        // frequency one and carry their whole share.
+        self.p_fixed_alt + self.p_segregating() * a / (a + b)
+    }
+
     /// **The density evaluated into the `2N + 1` allele-count classes a panel of `N` diploid
     /// individuals has** — what share of positions carry the alternative allele on no chromosome
     /// of the panel, on exactly one, and so on to every chromosome.
@@ -3026,6 +3058,71 @@ mod tests {
         };
         let truth = 0.09 * 2.0 * 0.5 * 2.0 / (2.5 * 3.5);
         assert!((density.expected_heterozygosity() - truth).abs() < 1e-12);
+    }
+
+    /// **The mean alternative-allele frequency is the two contributing parts of the density**,
+    /// hand-computed on shapes that would tell an `a`-for-`b` swap apart from the truth.
+    ///
+    /// **Two densities, one either side of `a = b`**, because a swap is invisible on a symmetric
+    /// shape and a fixture set that only ever pointed one way would not see it: the first has the
+    /// rare-allele pile-up a neutral population has (`a < b`) and the second has the reference
+    /// base as the rare one at the positions that vary (`a > b`). Swapped, the first returns
+    /// 0.0085 for its 0.0025 and the second 0.05 for its 0.09.
+    ///
+    /// Both point masses are non-zero and different from each other, so dropping the
+    /// fixed-non-reference share or reading the invariant share in its place is a different
+    /// number too — 0.05 and 0.95 on the second density.
+    #[test]
+    fn the_expected_alternative_frequency_is_the_densitys_own() {
+        let rare_alternative = FrequencyDensity {
+            p_invariant: 0.99,
+            p_fixed_alt: 0.001,
+            a: 0.2,
+            b: 1.0,
+        };
+        // 0.001 + 0.009 · 0.2/1.2
+        assert!(
+            (rare_alternative.expected_alternative_frequency() - 0.0025).abs() < 1e-15,
+            "got {}",
+            rare_alternative.expected_alternative_frequency()
+        );
+
+        let rare_reference = FrequencyDensity {
+            p_invariant: 0.9,
+            p_fixed_alt: 0.04,
+            a: 3.0,
+            b: 0.6,
+        };
+        // 0.04 + 0.06 · 3.0/3.6
+        assert!(
+            (rare_reference.expected_alternative_frequency() - 0.09).abs() < 1e-15,
+            "got {}",
+            rare_reference.expected_alternative_frequency()
+        );
+    }
+
+    /// **A population carrying only non-reference bases has every chromosome alternative**, and a
+    /// population with no variation at all has none — the two ends the Beta cannot reach.
+    ///
+    /// It pins the point masses' own contributions rather than the Beta's: at `p_fixed_alt = 1`
+    /// the answer is 1 whatever `a` and `b` say, and at `p_invariant = 1` it is 0.
+    #[test]
+    fn the_two_point_masses_carry_their_own_ends() {
+        let all_alternative = FrequencyDensity {
+            p_invariant: 0.0,
+            p_fixed_alt: 1.0,
+            a: 0.2,
+            b: 1.0,
+        };
+        assert!((all_alternative.expected_alternative_frequency() - 1.0).abs() < 1e-15);
+
+        let no_variation = FrequencyDensity {
+            p_invariant: 1.0,
+            p_fixed_alt: 0.0,
+            a: 0.2,
+            b: 1.0,
+        };
+        assert_eq!(no_variation.expected_alternative_frequency(), 0.0);
     }
 
     /// A `JointFit` carrying one density and one heterozygosity, with everything else empty —
