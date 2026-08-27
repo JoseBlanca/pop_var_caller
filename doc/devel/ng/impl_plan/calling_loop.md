@@ -290,7 +290,10 @@ A1. *Source:* arch §2, §7; [`../arch/read_likelihoods.md`](../arch/read_likeli
 **E2. `FrozenParameters` assembly.**  ✅
 One constructor per run from the pre-pass's outputs: calibration scales from the accumulator
 (scale 1 + `Defaulted` where no rate), contamination views (absent at one sample — absent, not a
-fitted zero), per-sample `F` in run order, the seed from `project_spectrum_seed`, the
+fitted zero), per-sample `F` in run order, the seed from `seed_from_population_moments`
+(⛔ *it was `project_spectrum_seed` when this step was written; the projection and the search were
+deleted on 2026-08-27 —* [`ordinary_site_prior_moments.md`](../spec/ordinary_site_prior_moments.md)
+*§5*), the
 `StratumFits` borrow, ploidy. **Not class frequencies** — the mixture's second half is per locus
 and is built inside the loop, at E2a. *Depends:* A1. *Source:* arch §2; the three parameter
 sources' plans.
