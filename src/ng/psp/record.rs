@@ -59,6 +59,7 @@ use crate::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
     WitnessedLocusPositions,
 };
+use crate::ng::psp::chain_ids::{LiveSet, LiveSetReader, LiveSetWriter};
 use crate::ng::psp::header::{FieldEncoding, FieldName, FieldSpec, Manifest};
 use crate::ng::types::{ContigId, GenomeRegion, Motif, Position, ReadGroupId, SummedLogError};
 use crate::psp::errors::VarintError;
@@ -115,16 +116,27 @@ pub struct RecordHead {
 /// arrives at Milestone D2, so the choice here is the one that composes with every other field and
 /// **that comparison belongs to Milestone D2**.
 ///
+/// **The fifth field is not a scalar and is here for the one reason that outranks tidiness.**
+/// The chain ids' live-set changes carry state: a reader knows which reads are live only because
+/// it applied every arrival and departure since the block began. **A reader that skipped a
+/// record's body would never see changes kept there, so its set would go stale and every later
+/// record it did want would be wrong** — silently, because a stale set is still a plausible set.
+/// So the changes go in front of the body-byte count's reach, where every reader decodes them
+/// whether or not it wants the record, and the *exception lists* — the ids of every observation
+/// except the residual one — stay in the skippable body, because they carry no state
+/// (spec `psp_record_encoding.md` §6, arch §5).
+///
 /// ⚠ **Switching them then is a format change, not just a manifest one.** This reader is driven
 /// by [`RECORD_HEAD_FIELDS`], and [`RecordLayout::from_manifest`] refuses a file declaring
 /// anything else — so a build that switched would reject every psp written before it, and a
 /// build before it would reject every psp written after. It costs nothing today because no psp
 /// exists; from Milestone F it costs a version.
-const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 4] = [
+const RECORD_HEAD_FIELDS: [(&str, FieldEncoding); 5] = [
     ("position-offset", FieldEncoding::Varint),
     ("reference-span", FieldEncoding::Varint),
     ("non-reference-reads", FieldEncoding::Varint),
     ("record-body-byte-count", FieldEncoding::Varint),
+    ("chain-id-changes", FieldEncoding::ChainIdChanges),
 ];
 
 const fn record_head_field(position: usize) -> &'static str {
@@ -505,6 +517,38 @@ pub enum RecordDecodeError {
 }
 
 impl RecordDecodeError {
+    /// Move a fault's offset forward by the bytes in front of the parser that reported it.
+    ///
+    /// **The class is untouched**, unlike [`inside_a_bounded_body`](Self::inside_a_bounded_body):
+    /// a sub-parser handed the *rest* of the record rather than a bounded slice still means
+    /// "fetch more bytes" when it runs out, because more bytes is exactly what would help.
+    pub(super) fn further_in(self, bytes_before: usize) -> Self {
+        match self {
+            Self::Truncated { field, bytes_in } => Self::Truncated {
+                field,
+                bytes_in: bytes_before + bytes_in,
+            },
+            Self::Malformed {
+                field,
+                bytes_in,
+                reason,
+            } => Self::Malformed {
+                field,
+                bytes_in: bytes_before + bytes_in,
+                reason,
+            },
+            Self::Unsupported {
+                field,
+                bytes_in,
+                tag,
+            } => Self::Unsupported {
+                field,
+                bytes_in: bytes_before + bytes_in,
+                tag,
+            },
+        }
+    }
+
     /// Re-express a fault the body reported as a fault in the record that contains it.
     ///
     /// **Two things change, and both are wrong without it.** The offset becomes record-relative,
@@ -841,6 +885,11 @@ impl<'a> FieldReader<'a> {
     }
 
     /// One variable-length integer, read through production's codec.
+    /// Advance past bytes another parser has already accounted for.
+    fn skip(&mut self, bytes: usize) {
+        self.bytes_read += bytes;
+    }
+
     pub(super) fn read_varint(&mut self, field: &'static str) -> Result<u64, RecordDecodeError> {
         self.accept(decode_u64_leb128(&self.bytes[self.bytes_read..]), field)
     }
@@ -1050,6 +1099,24 @@ impl<'a> FieldReader<'a> {
             FieldEncoding::LengthPrefixedBytes => {
                 self.read_length_prefixed(field)?;
             }
+            // **Measurable, which is not the same as usable.** Two counted runs of varints, so
+            // its length is a function of its own bytes and a reader can step over it. But this
+            // encoding carries state every later record is decoded against, so a reader that
+            // stepped over one it *needed* would build every record after it against a stale
+            // live set. That is why the head's copy is a field this reader knows by name
+            // (`RecordLayout::from_manifest` refuses a file that renames or moves it) rather
+            // than something reached through this arm. What this arm handles is a *later*
+            // writer putting another one at the end of a body, which nothing here uses.
+            FieldEncoding::ChainIdChanges => {
+                let departures = self.read_count(field, 1)?;
+                for _ in 0..departures {
+                    self.read_varint(field)?;
+                }
+                let arrivals = self.read_count(field, 1)?;
+                for _ in 0..arrivals {
+                    self.read_varint(field)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1178,6 +1245,14 @@ impl OffsetBase {
 pub struct RecordEncoder {
     /// Kept across blocks: reused so a writer does not allocate one per record.
     body_scratch: Vec<u8>,
+    /// Which reads are live, and the changes it writes to move between records.
+    ///
+    /// **Its own per-block state is inside it**, reset by
+    /// [`encode_record_starting_a_block`](Self::encode_record_starting_a_block) — which is why
+    /// that is the only way to start a block. It sits here rather than in [`PerBlockState`]
+    /// because it owns scratch buffers that must survive a boundary; what must not survive one
+    /// is the set, and that is [`LiveSetWriter::start_block`]'s business.
+    live_reads: LiveSetWriter,
     /// Replaced whole at every block start.
     block: PerBlockState,
 }
@@ -1225,24 +1300,48 @@ impl RecordEncoder {
     pub fn for_block(first_position: Position) -> Self {
         Self {
             body_scratch: Vec::new(),
+            live_reads: LiveSetWriter::new(),
             block: PerBlockState::at_block_start(first_position),
         }
     }
 
-    /// Begin the next block: everything measured from within a block resets to `first_position`.
+    /// **Write the record that opens a block**, resetting everything a block restarts first.
     ///
-    /// **The reset is the property a reader starting mid-file depends on** (spec §3.2), and it
-    /// belongs here rather than in a caller's variable for the reason the type's own doc gives.
-    /// It assigns the whole of [`PerBlockState`] rather than one of its fields, so a running
-    /// difference added later cannot be left out of the reset.
-    pub fn start_block(&mut self, first_position: Position) {
-        self.block = PerBlockState::at_block_start(first_position);
+    /// This is the only way to start a block, and that is the point. Spec §3.2 requires every
+    /// running difference to restart at a block boundary, and there are two of them now — the
+    /// coordinate the next offset is measured from, and the set of reads live. A separate
+    /// `start_block` call that a caller had to remember beside `encode_record` would be one more
+    /// thing to forget, and forgetting it writes a file that parses perfectly and is wrong from
+    /// this record onward.
+    ///
+    /// **Nothing is reset until the record is known to be writable.** The refusals below depend
+    /// on the record alone, not on either running difference, so they are made first — which is
+    /// what lets a caller meet one at a block cut and carry on with the block it already had
+    /// open, rather than needing to put back a live set that a reset had already thrown away.
+    pub fn encode_record_starting_a_block(
+        &mut self,
+        record: &SampleLocusObservations,
+        out: &mut Vec<u8>,
+    ) -> Result<RecordHead, RecordEncodeError> {
+        let span = record_span(record.region)?;
+        self.body_scratch.clear();
+        encode_record_body(record, &mut self.body_scratch);
+        let body_bytes = declared_body_bytes(self.body_scratch.len())?;
+
+        self.block = PerBlockState::at_block_start(record.region.start);
+        self.live_reads.start_block();
+        self.write_a_record(record, 0, span, body_bytes, out)
     }
 
     /// What the next record's offset will be measured from — the block's first position until a
     /// record has been written, and the last written record's start after that.
     pub fn measured_from(&self) -> OffsetBase {
         self.block.measured_from
+    }
+
+    /// The reads live at the record last written.
+    pub fn live_reads(&self) -> &LiveSet {
+        self.live_reads.live()
     }
 
     /// Append `record` to `out` as a head and then a body, and hand back the head that was
@@ -1275,12 +1374,37 @@ impl RecordEncoder {
         encode_record_body(record, &mut self.body_scratch);
         let body_bytes = declared_body_bytes(self.body_scratch.len())?;
 
+        self.write_a_record(record, offset, span, body_bytes, out)
+    }
+
+    /// The bytes, once every refusal has been made and the body is in `body_scratch`.
+    ///
+    /// **The chain-id changes go between the body's byte count and the body itself**, which is
+    /// what puts them in the head: `body_bytes` does not reach them, so a reader that skips the
+    /// body has already decoded them. That is the whole of spec §6's resolution — the half of
+    /// the column that carries state is in front of the skip, and the half that does not stays
+    /// behind it.
+    fn write_a_record(
+        &mut self,
+        record: &SampleLocusObservations,
+        offset: u64,
+        span: u64,
+        body_bytes: BodyByteCount,
+        out: &mut Vec<u8>,
+    ) -> Result<RecordHead, RecordEncodeError> {
         let (non_reference_reads, _) = record.non_reference_and_compared_reads();
 
         put_varint(out, offset);
         put_varint(out, span);
         put_varint(out, u64::from(non_reference_reads));
         put_varint(out, u64::from(body_bytes));
+        self.live_reads.write_changes(
+            record
+                .observations
+                .iter()
+                .flat_map(|observation| observation.chain_ids.iter().copied()),
+            out,
+        );
         out.extend_from_slice(&self.body_scratch);
 
         let head = RecordHead {
@@ -1360,11 +1484,12 @@ pub struct LocatedRecord<'a> {
 /// runs, and on the corner it was measured on — the tomato panel at about three reads a
 /// position — it is all that runs at roughly ninety-nine positions in a hundred
 /// (`cohort_merge.md`, "roughly one position in a hundred is variable at the measured corner").
-pub fn read_record_head(
-    bytes: &[u8],
+pub fn read_record_head<'a>(
+    bytes: &'a [u8],
     contig: ContigId,
     measured_from: OffsetBase,
-) -> Result<LocatedRecord<'_>, RecordDecodeError> {
+    live_reads: &mut LiveSetReader,
+) -> Result<LocatedRecord<'a>, RecordDecodeError> {
     let mut reader = FieldReader::new(bytes);
 
     let offset = reader.read_varint(POSITION_OFFSET)?;
@@ -1406,6 +1531,19 @@ pub fn read_record_head(
 
     let non_reference_reads = reader.read_u32(NON_REFERENCE_READS)?;
     let body_bytes = reader.read_u32(RECORD_BODY_BYTE_COUNT)?;
+
+    // **The chain ids' changes, and every reader decodes them.** They are read here rather than
+    // in the body because they carry the state later records are decoded against: a reader that
+    // skipped them would build every record after this one against a stale live set — silently,
+    // because a stale set is still a plausible set (spec `psp_record_encoding.md` §6).
+    //
+    // ⚠ **Applied here, so this function must be called exactly once a record.**
+    // [`decode_record`] reaches the body through the head this returns rather than parsing the
+    // head a second time, which is what keeps that true.
+    let changes_bytes = live_reads
+        .read_changes(&bytes[reader.bytes_read()..])
+        .map_err(|fault| fault.further_in(reader.bytes_read()))?;
+    reader.skip(changes_bytes);
 
     let body = reader.take(body_bytes as usize, RECORD_BODY_BYTE_COUNT)?;
 
@@ -1460,9 +1598,23 @@ pub fn decode_record(
     bytes: &[u8],
     contig: ContigId,
     measured_from: OffsetBase,
+    live_reads: &mut LiveSetReader,
     layout: &RecordLayout,
 ) -> Result<DecodedRecord, RecordDecodeError> {
-    let found = read_record_head(bytes, contig, measured_from)?;
+    let found = read_record_head(bytes, contig, measured_from, live_reads)?;
+    decode_the_body_of(&found, layout)
+}
+
+/// Build the record a head has already located.
+///
+/// **A caller that has read the head passes it here rather than the bytes**, because reading a
+/// head applies that record's chain-id changes to the live set and doing it twice would apply
+/// them twice — a read arriving into a set it is already in, refused as damage, on a file that is
+/// perfectly good.
+pub fn decode_the_body_of(
+    found: &LocatedRecord<'_>,
+    layout: &RecordLayout,
+) -> Result<DecodedRecord, RecordDecodeError> {
     let head_bytes = found.record_bytes - found.body.len();
     let decoded_body = decode_record_body(found.body, found.head.region, layout)
         .map_err(|fault| fault.inside_a_bounded_body(head_bytes, found.body.len()))?;
@@ -1498,6 +1650,38 @@ pub fn decode_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader for one block's worth of records.
+    ///
+    /// **One of these per walk, not one per record.** A record's head carries which reads started
+    /// covering it and which stopped, and a departure is a position in the set as the previous
+    /// record left it — so a fresh reader meets the second record's departures against nothing.
+    fn a_live_set_reader() -> LiveSetReader {
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        reader
+    }
+
+    /// [`decode_record`], with the walk's reader carried in.
+    fn decode_a_record(
+        live_reads: &mut LiveSetReader,
+        bytes: &[u8],
+        contig: ContigId,
+        measured_from: OffsetBase,
+        layout: &RecordLayout,
+    ) -> Result<DecodedRecord, RecordDecodeError> {
+        decode_record(bytes, contig, measured_from, live_reads, layout)
+    }
+
+    /// [`read_record_head`], with the walk's reader carried in.
+    fn read_a_record_head<'a>(
+        live_reads: &mut LiveSetReader,
+        bytes: &'a [u8],
+        contig: ContigId,
+        measured_from: OffsetBase,
+    ) -> Result<LocatedRecord<'a>, RecordDecodeError> {
+        read_record_head(bytes, contig, measured_from, live_reads)
+    }
 
     /// A head is read once per record on a path that runs at about twenty million records
     /// a second, and a reader that had to clone one — or that paid a pointer chase to
@@ -1959,6 +2143,7 @@ mod tests {
                 "reference-span",
                 "non-reference-reads",
                 "record-body-byte-count",
+                "chain-id-changes",
                 "reference-bases",
                 "observation-count",
                 "observation-bases",
@@ -2797,10 +2982,12 @@ mod tests {
     /// with the head's own fields intact and the byte count covering both halves.
     #[test]
     fn a_record_round_trips_through_its_head_and_its_body() {
+        let mut live_reads = a_live_set_reader();
         let written = a_rich_record();
         let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&written));
 
-        let decoded = decode_record(
+        let decoded = decode_a_record(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -2819,12 +3006,14 @@ mod tests {
     /// fail. The fixture discriminates because its three records differ in all three fields.
     #[test]
     fn the_head_the_encoder_hands_back_is_the_head_it_wrote() {
+        let mut live_reads = a_live_set_reader();
         for record in three_records_in_order() {
             let mut bytes = Vec::new();
             let handed = RecordEncoder::for_block(record.region.start)
                 .encode_record(&record, &mut bytes)
                 .expect("the fixture is at its own base");
-            let read = read_record_head(
+            let read = read_a_record_head(
+                &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 OffsetBase::at_block_start(record.region.start),
@@ -2843,6 +3032,7 @@ mod tests {
     /// here with two complete observations, one of them a variant.
     #[test]
     fn the_head_carries_the_reads_that_showed_something_other_than_the_reference() {
+        let mut live_reads = a_live_set_reader();
         let no_reads_varied = a_rich_record();
         assert_eq!(
             no_reads_varied.non_reference_and_compared_reads(),
@@ -2872,7 +3062,8 @@ mod tests {
 
         for (record, expected) in [(no_reads_varied, 0u32), (nineteen_reads_varied, 19)] {
             let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
-            let found = read_record_head(
+            let found = read_a_record_head(
+                &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 OffsetBase::at_block_start(block_starts_at),
@@ -2888,6 +3079,7 @@ mod tests {
     /// pass skips, and nothing downstream ever looks at it again.
     #[test]
     fn a_head_whose_non_reference_count_disagrees_with_its_body_is_refused() {
+        let mut live_reads = a_live_set_reader();
         let mut varying = a_rich_record();
         varying.observations.push(SequenceObservation {
             bases: b"ACGTACT".to_vec().into_boxed_slice(),
@@ -2907,7 +3099,8 @@ mod tests {
         assert_eq!(bytes[2], 19);
         bytes[2] = 0;
 
-        match decode_record(
+        match decode_a_record(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -2945,15 +3138,17 @@ mod tests {
 
         let body_bytes = record_body_length(&record);
         assert_eq!(
-            bytes[..4],
+            bytes[..6],
             [
                 40, // position-offset: 1,040 − 1,000
                 7,  // reference-span: seven bases, inclusive
                 0,  // non-reference-reads: no observation showed anything
                 body_bytes as u8,
+                0, // chain-id departures: this record names no reads, so none stopped
+                0, // chain-id arrivals: and none started
             ]
         );
-        assert_eq!(bytes.len(), 4 + body_bytes);
+        assert_eq!(bytes.len(), 6 + body_bytes);
     }
 
     // -----------------------------------------------------------------
@@ -2968,6 +3163,7 @@ mod tests {
     /// `read_record_head`'s head and byte count verbatim, so those two agreeing is arithmetic.
     #[test]
     fn a_walk_over_heads_alone_reaches_the_same_records_as_a_full_decode() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
         let layout = RecordLayout::as_this_build_writes_it();
@@ -2975,12 +3171,18 @@ mod tests {
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         for (index, expected) in records.iter().enumerate() {
-            let found =
-                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("the head reads");
+            let found = read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
+                .expect("the head reads");
             assert_eq!(found.head.region, expected.region, "record {index}");
 
-            let decoded = decode_record(&bytes[at..], A_CONTIG, measured_from, &layout)
-                .expect("and the record builds");
+            let decoded = decode_a_record(
+                &mut live_reads,
+                &bytes[at..],
+                A_CONTIG,
+                measured_from,
+                &layout,
+            )
+            .expect("and the record builds");
             assert_eq!(&decoded.record, expected, "record {index}");
             assert_eq!(decoded.record_bytes, found.record_bytes, "record {index}");
 
@@ -2995,6 +3197,7 @@ mod tests {
     /// over one block's worth of records rather than a file's.
     #[test]
     fn a_walk_that_skips_every_other_record_matches_a_full_decode_on_the_ones_it_keeps() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
         let layout = RecordLayout::as_this_build_writes_it();
@@ -3004,15 +3207,22 @@ mod tests {
         let mut kept = 0usize;
         for (index, expected) in records.iter().enumerate() {
             if index % 2 == 0 {
-                let decoded = decode_record(&bytes[at..], A_CONTIG, measured_from, &layout)
-                    .expect("a kept record builds");
+                let decoded = decode_a_record(
+                    &mut live_reads,
+                    &bytes[at..],
+                    A_CONTIG,
+                    measured_from,
+                    &layout,
+                )
+                .expect("a kept record builds");
                 assert_eq!(&decoded.record, expected, "record {index}");
                 at += decoded.record_bytes;
                 measured_from = OffsetBase::after(&decoded.head);
                 kept += 1;
             } else {
-                let found = read_record_head(&bytes[at..], A_CONTIG, measured_from)
-                    .expect("a skipped record's head reads");
+                let found =
+                    read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
+                        .expect("a skipped record's head reads");
                 assert_eq!(found.head.region, expected.region, "record {index}");
                 at += found.record_bytes;
                 measured_from = OffsetBase::after(&found.head);
@@ -3028,6 +3238,7 @@ mod tests {
     /// start for this record's width fails here.
     #[test]
     fn positions_are_rebuilt_from_the_blocks_first_position_and_the_offsets_since() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         assert_ne!(
             records[0].region.len(),
@@ -3039,8 +3250,8 @@ mod tests {
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         for expected in &records {
-            let found =
-                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("the head reads");
+            let found = read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
+                .expect("the head reads");
             assert_eq!(found.head.region, expected.region);
             at += found.record_bytes;
             measured_from = OffsetBase::after(&found.head);
@@ -3055,6 +3266,7 @@ mod tests {
     /// why the encoder holds its own.
     #[test]
     fn a_base_stale_by_one_record_moves_every_record_after_it() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
 
@@ -3062,7 +3274,8 @@ mod tests {
         let mut rebuilt = Vec::new();
         while at < bytes.len() {
             // Never advanced: the fault this test exists to price.
-            let found = read_record_head(
+            let found = read_a_record_head(
+                &mut live_reads,
                 &bytes[at..],
                 A_CONTIG,
                 OffsetBase::at_block_start(block_starts_at),
@@ -3101,10 +3314,12 @@ mod tests {
     /// read into the record after it.
     #[test]
     fn a_records_body_is_bounded_by_what_its_head_declared() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
 
-        let found = read_record_head(
+        let found = read_a_record_head(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3181,6 +3396,7 @@ mod tests {
     /// writer's file can either.
     #[test]
     fn a_record_at_the_coordinate_ceiling_is_refused_by_the_writer_and_by_the_reader() {
+        let mut live_reads = a_live_set_reader();
         let mut record = a_rich_record();
         record.region.start = Position(u64::MAX);
         record.region.end = Position(u64::MAX);
@@ -3194,7 +3410,8 @@ mod tests {
 
         // offset 1 from u64::MAX − 1 gives a start of u64::MAX; span 1 ends there too.
         let from_a_file = vec![1u8, 1, 0, 0];
-        match read_record_head(
+        match read_a_record_head(
+            &mut live_reads,
             &from_a_file,
             A_CONTIG,
             OffsetBase::at_block_start(Position(u64::MAX - 1)),
@@ -3210,8 +3427,10 @@ mod tests {
     /// nothing.
     #[test]
     fn a_head_declaring_no_reference_span_is_refused() {
+        let mut live_reads = a_live_set_reader();
         let bytes = vec![0u8, 0, 0, 0];
-        match read_record_head(
+        match read_a_record_head(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
@@ -3227,20 +3446,25 @@ mod tests {
     /// offset it reports is measured from the record's first byte, not the body's.
     #[test]
     fn a_head_that_declares_more_body_than_the_body_uses_is_refused() {
+        let mut live_reads = a_live_set_reader();
         let record = a_rich_record();
         let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
 
         let body_bytes = record_body_length(&record);
         let head_bytes = bytes.len() - body_bytes;
         assert_eq!(
-            usize::from(bytes[head_bytes - 1]),
+            usize::from(bytes[head_bytes - 3]),
             body_bytes,
-            "the head's last byte is the body's length"
+            "the body's length, three bytes before the body: the two chain-id counts follow it"
         );
-        bytes[head_bytes - 1] = (body_bytes + 1) as u8;
+        bytes[head_bytes - 3] = (body_bytes + 1) as u8;
         bytes.push(0);
 
-        match decode_record(
+        // ⚠ The extra byte goes at the *end*, so the body reads one byte past what it holds. The
+        // head's chain-id changes are untouched — a byte inserted before them would be read as a
+        // departure count instead, which is a different fault in a different field.
+        match decode_a_record(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3272,6 +3496,7 @@ mod tests {
     /// it — which is the property `a_records_body_is_bounded_by_what_its_head_declared` claims.
     #[test]
     fn a_head_that_declares_less_body_than_the_body_uses_is_refused() {
+        let mut live_reads = a_live_set_reader();
         let records = three_records_in_order();
         let (mut bytes, block_starts_at) = a_run_of_records(&records);
 
@@ -3281,7 +3506,8 @@ mod tests {
         bytes[head_bytes - 1] = (body_bytes - 1) as u8;
 
         assert!(
-            decode_record(
+            decode_a_record(
+                &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 OffsetBase::at_block_start(block_starts_at),
@@ -3298,6 +3524,7 @@ mod tests {
     /// Left in that class, one damaged record is a retry that never ends.
     #[test]
     fn a_fault_inside_a_bounded_body_is_damage_and_more_bytes_do_not_help() {
+        let mut live_reads = a_live_set_reader();
         let record = a_rich_record();
         let (whole, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
         let layout = RecordLayout::as_this_build_writes_it();
@@ -3308,7 +3535,8 @@ mod tests {
         let head_bytes = damaged.len() - record_body_length(&record);
         damaged[head_bytes] = 120;
 
-        let exactly = decode_record(
+        let exactly = decode_a_record(
+            &mut live_reads,
             &damaged,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3316,7 +3544,8 @@ mod tests {
         );
         let mut grown = damaged.clone();
         grown.extend_from_slice(&[0u8; 4_096]);
-        let with_more = decode_record(
+        let with_more = decode_a_record(
+            &mut live_reads,
             &grown,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3341,13 +3570,15 @@ mod tests {
     /// buffer looks like.
     #[test]
     fn a_record_cut_short_is_truncated_at_every_cut() {
+        let mut live_reads = a_live_set_reader();
         let record = a_rich_record();
         let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
         let layout = RecordLayout::as_this_build_writes_it();
         let head_bytes = bytes.len() - record_body_length(&record);
 
         for cut in 0..bytes.len() {
-            match read_record_head(
+            match read_a_record_head(
+                &mut live_reads,
                 &bytes[..cut],
                 A_CONTIG,
                 OffsetBase::at_block_start(block_starts_at),
@@ -3361,10 +3592,12 @@ mod tests {
                     );
                 }
                 Err(RecordDecodeError::Truncated { field, .. }) => {
-                    // Inside the head, the field named is whichever one the bytes ran out on,
-                    // and every one of them is the head's.
+                    // Inside the head, the field named is whichever one the bytes ran out on.
+                    // The chain-id changes are a head field whose *parts* have their own names,
+                    // because a fault in one of them has to say which run it was in.
                     assert!(
-                        RECORD_HEAD_FIELDS.iter().any(|(name, _)| *name == field),
+                        RECORD_HEAD_FIELDS.iter().any(|(name, _)| *name == field)
+                            || field.starts_with("chain-id "),
                         "{cut} bytes stops in the head, and {field} is not one of its fields"
                     );
                 }
@@ -3372,7 +3605,8 @@ mod tests {
             }
             assert!(
                 matches!(
-                    decode_record(
+                    decode_a_record(
+                        &mut live_reads,
                         &bytes[..cut],
                         A_CONTIG,
                         OffsetBase::at_block_start(block_starts_at),
@@ -3384,7 +3618,8 @@ mod tests {
             );
         }
         assert!(
-            read_record_head(
+            read_a_record_head(
+                &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 OffsetBase::at_block_start(block_starts_at)
@@ -3397,10 +3632,12 @@ mod tests {
     /// coordinate, and so is a span that runs off it from a legal start.
     #[test]
     fn a_head_that_runs_off_the_coordinate_axis_is_refused() {
+        let mut live_reads = a_live_set_reader();
         let mut runaway_offset = Vec::new();
         encode_u64_leb128(u64::MAX, &mut runaway_offset);
         runaway_offset.extend_from_slice(&[1, 0, 0]);
-        match read_record_head(
+        match read_a_record_head(
+            &mut live_reads,
             &runaway_offset,
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
@@ -3414,7 +3651,8 @@ mod tests {
         let mut runaway_span = vec![0u8];
         encode_u64_leb128(u64::MAX, &mut runaway_span);
         runaway_span.extend_from_slice(&[0, 0]);
-        match read_record_head(
+        match read_a_record_head(
+            &mut live_reads,
             &runaway_span,
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
@@ -3432,6 +3670,7 @@ mod tests {
     /// exists to make impossible.
     #[test]
     fn a_head_count_too_large_for_its_field_is_refused_rather_than_narrowed() {
+        let mut live_reads = a_live_set_reader();
         for (position, expected) in [
             (2usize, "non-reference-reads"),
             (3, "record-body-byte-count"),
@@ -3445,7 +3684,8 @@ mod tests {
                 }
             }
             bytes.extend_from_slice(&[0u8; 8]);
-            match read_record_head(
+            match read_a_record_head(
+                &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 OffsetBase::at_block_start(Position(1_000)),
@@ -3484,9 +3724,13 @@ mod tests {
     /// `u32`, which the test above pins, and Milestone D's block.
     #[test]
     fn a_head_declaring_a_body_no_buffer_holds_is_truncated_not_malformed() {
+        let mut live_reads = a_live_set_reader();
         let mut bytes = vec![0u8, 1, 0];
         encode_u64_leb128(u64::from(BodyByteCount::MAX), &mut bytes);
-        match read_record_head(
+        // No departures and no arrivals, so the head is whole and what runs out is the body.
+        bytes.extend_from_slice(&[0, 0]);
+        match read_a_record_head(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(Position(1_000)),
@@ -3505,10 +3749,12 @@ mod tests {
     /// away, and the caller is committed to it.
     #[test]
     fn a_record_at_the_depth_the_caller_must_survive_round_trips_through_its_head() {
+        let mut live_reads = a_live_set_reader();
         let deep = a_record_at_three_hundred_reads();
         let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&deep));
 
-        let found = read_record_head(
+        let found = read_a_record_head(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3525,7 +3771,8 @@ mod tests {
             found.head.non_reference_reads
         );
 
-        let decoded = decode_record(
+        let decoded = decode_a_record(
+            &mut live_reads,
             &bytes,
             A_CONTIG,
             OffsetBase::at_block_start(block_starts_at),
@@ -3546,6 +3793,7 @@ mod tests {
             forward in 0u64..1_000_000,
             span in 1u64..500,
         ) {
+            let mut live_reads = a_live_set_reader();
             let record = SampleLocusObservations {
                 region: GenomeRegion {
                     contig: A_CONTIG,
@@ -3562,7 +3810,7 @@ mod tests {
             RecordEncoder::for_block(Position(base))
                 .encode_record(&record, &mut bytes)
                 .expect("a record at or past its base");
-            let found = read_record_head(&bytes, A_CONTIG, OffsetBase::at_block_start(Position(base)))
+            let found = read_a_record_head(&mut live_reads, &bytes, A_CONTIG, OffsetBase::at_block_start(Position(base)))
                 .expect("what this encoder wrote, this decoder reads");
             prop_assert_eq!(found.head.region, record.region);
             prop_assert_eq!(found.record_bytes, bytes.len());
@@ -3578,8 +3826,9 @@ mod tests {
             bytes in prop::collection::vec(any::<u8>(), 0..256),
             base in prop::sample::select(vec![0u64, 1, 1_000, u64::MAX / 2, u64::MAX - 1, u64::MAX]),
         ) {
+            let mut live_reads = a_live_set_reader();
             let measured_from = OffsetBase::at_block_start(Position(base));
-            if let Ok(found) = read_record_head(&bytes, A_CONTIG, measured_from) {
+            if let Ok(found) = read_a_record_head(&mut live_reads, &bytes, A_CONTIG, measured_from) {
                 prop_assert_eq!(found.body.len(), found.head.body_bytes as usize);
                 prop_assert!(found.record_bytes <= bytes.len());
                 // `len()` on purpose, not `is_empty()`: it is the accessor that used
@@ -3587,7 +3836,8 @@ mod tests {
                 let width = found.head.region.len();
                 prop_assert!(width >= 1);
             }
-            if let Ok(decoded) = decode_record(
+            if let Ok(decoded) = decode_a_record(
+            &mut live_reads,
                 &bytes,
                 A_CONTIG,
                 measured_from,
@@ -3791,15 +4041,19 @@ mod tests {
         layout: &RecordLayout,
         is_kept: impl Fn(usize) -> bool,
     ) -> Vec<WalkedRecord> {
+        let mut live_reads = a_live_set_reader();
         let mut walked = Vec::new();
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         while at < bytes.len() {
             let index = walked.len();
-            let found = read_record_head(&bytes[at..], A_CONTIG, measured_from)
+            let found = read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
                 .unwrap_or_else(|refused| panic!("{what}: record {index}'s head reads: {refused}"));
             let built = if is_kept(index) {
-                let decoded = decode_record(&bytes[at..], A_CONTIG, measured_from, layout)
+                // **From the head just read, not from the bytes again.** Reading a head applies
+                // that record's chain-id changes, so parsing it twice applies them twice — and
+                // the second time an arriving read is already live, which is damage.
+                let decoded = decode_the_body_of(&found, layout)
                     .unwrap_or_else(|refused| panic!("{what}: record {index} builds: {refused}"));
                 assert_eq!(
                     decoded.head, found.head,
@@ -4004,14 +4258,15 @@ mod tests {
         is_kept: impl Fn(usize) -> bool,
         filling: impl Fn(usize) -> Vec<u8>,
     ) -> (Vec<u8>, usize) {
+        let mut live_reads = a_live_set_reader();
         let mut damaged = bytes.to_vec();
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         let mut index = 0usize;
         let mut replaced = 0usize;
         while at < bytes.len() {
-            let found =
-                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("every head reads");
+            let found = read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
+                .expect("every head reads");
             if !is_kept(index) && !found.body.is_empty() {
                 let body_at = at + found.record_bytes - found.body.len();
                 let written = filling(found.body.len());
@@ -4104,6 +4359,7 @@ mod tests {
     /// full forward walk produces.
     #[test]
     fn a_body_decodes_the_same_alone_as_it_does_after_every_record_before_it() {
+        let mut live_reads = a_live_set_reader();
         let records = twelve_records_in_order();
         let (bytes, block_starts_at) = a_run_of_records(&records);
         let layout = RecordLayout::as_this_build_writes_it();
@@ -4113,8 +4369,8 @@ mod tests {
         let mut at = 0usize;
         let mut measured_from = OffsetBase::at_block_start(block_starts_at);
         while at < bytes.len() {
-            let found =
-                read_record_head(&bytes[at..], A_CONTIG, measured_from).expect("the head reads");
+            let found = read_a_record_head(&mut live_reads, &bytes[at..], A_CONTIG, measured_from)
+                .expect("the head reads");
             let body_at = at + found.record_bytes - found.body.len();
             located.push((body_at..body_at + found.body.len(), found.head));
             at += found.record_bytes;
@@ -4211,18 +4467,24 @@ mod tests {
             body.extend_from_slice(&[7, 7, 7, index as u8]);
             body.extend_from_slice(&[2, b'h', b'i']);
             // The head's declared body length has to grow with the body it describes, so the
-            // head is rewritten rather than reused.
+            // head is rewritten rather than reused — **and the chain-id changes behind the count
+            // are copied through verbatim**, because they are the head's too and this test is
+            // pretending to be a later writer, not a different codec.
             let mut head = FieldReader::new(&widened);
             let offset = head.read_varint("position-offset").expect("the head reads");
             let span = head.read_varint("reference-span").expect("the head reads");
             let non_reference = head
                 .read_varint("non-reference-reads")
                 .expect("the head reads");
+            head.read_varint("record-body-byte-count")
+                .expect("the head reads");
+            let changes = widened[head.bytes_read()..].to_vec();
             widened.clear();
             put_varint(&mut widened, offset);
             put_varint(&mut widened, span);
             put_varint(&mut widened, non_reference);
             put_varint(&mut widened, body.len() as u64);
+            widened.extend_from_slice(&changes);
             widened.extend_from_slice(&body);
             bytes.extend_from_slice(&widened);
         }

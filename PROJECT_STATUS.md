@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **E2 reviewed — the test named for the block boundary
+> - **Last completed task (2026-08-27):** **the chain ids' changes move into the record head,
+> because a reader that skips a record's body must still see them** (step E3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Two things the format wants pull against each other: a reader may skip a
+> record's body without decoding it, which is what makes a walk 2.06× faster; and the chain ids
+> are stored as *changes* a reader carries forward, which is what takes them from 43.78 bytes a
+> position to 6.42 at three hundred reads. **A reader that skipped a body would never see that
+> record's changes**, so its set would go stale and every later record it did want would be
+> wrong — silently, because a stale set is still a plausible set. The column is split across the
+> skip: the changes go in the head, where every reader decodes them, and the exception lists stay
+> in the skippable body, which is E4's. **Two things fell out of the wiring.** Starting a block is
+> now a *different method* rather than a call to remember beside the ordinary one — so the
+> failure E2's report named, a writer forgetting to reset at a boundary, has no way to happen.
+> And the writer's cut path lost its rollback: it used to reset to the new block, try the record,
+> and put the coordinate base back if the codec refused it — **a coordinate base can be put back,
+> a live set cannot**, and the open block still needed it, so every refusal is now made before
+> anything is reset. Five defects injected, five caught, including the one the head placement
+> exists to prevent.
+> [E3](doc/devel/reports/implementations/ng_psp_e3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E2 reviewed — the test named for the block boundary
 > could not see a block boundary** (the eight-checklist review of step E2 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Three agents, 33 mutations, **3,000,000 fuzzed inputs** across two independent

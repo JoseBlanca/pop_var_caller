@@ -38,10 +38,11 @@
 use std::num::NonZeroU64;
 
 use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::psp::chain_ids::{LiveSet, LiveSetReader};
 use crate::ng::psp::header::{MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest};
 use crate::ng::psp::record::{
     OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
-    RecordLayoutError, decode_record, read_record_head,
+    RecordLayoutError, decode_the_body_of, read_record_head,
 };
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 use crate::psp::errors::VarintError;
@@ -521,10 +522,12 @@ impl BlockBuilder {
         let grid_cell = self.grid_cell_of(record.region);
 
         let Some(open) = self.open_block else {
-            // The file's first record. The encoder is positioned before anything is written,
-            // so a record the codec refuses leaves no block open behind it.
-            self.encoder.start_block(record.region.start);
-            if let Err(refused) = self.encoder.encode_record(record, &mut self.records) {
+            // The file's first record. The encoder resets nothing until the record is known to
+            // be writable, so a record the codec refuses leaves no block open behind it.
+            if let Err(refused) = self
+                .encoder
+                .encode_record_starting_a_block(record, &mut self.records)
+            {
                 self.records.clear();
                 return Err(refused.into());
             }
@@ -547,11 +550,18 @@ impl BlockBuilder {
 
         // A cut. The record goes down first, in the buffer that will become the new block's,
         // so that a record the codec refuses leaves the open block open and loses nothing.
+        //
+        // **And nothing here puts the encoder back.** `encode_record_starting_a_block` makes
+        // every refusal before it resets anything, so a refused record leaves the open block's
+        // running differences exactly as they were. ⚠ There used to be a `start_block(resume_at)`
+        // on this path, which restored the coordinate base and would have thrown away the live
+        // set that the open block still needed — a reset is not undoable once a second difference
+        // rides on it.
         self.next_records.clear();
-        let resume_at = self.encoder.measured_from().position();
-        self.encoder.start_block(record.region.start);
-        if let Err(refused) = self.encoder.encode_record(record, &mut self.next_records) {
-            self.encoder.start_block(resume_at);
+        if let Err(refused) = self
+            .encoder
+            .encode_record_starting_a_block(record, &mut self.next_records)
+        {
             self.next_records.clear();
             return Err(refused.into());
         }
@@ -1214,6 +1224,14 @@ pub struct BlockStream<R> {
     /// [`ROLLING_BUFFER_CEILING_BYTES`]; [`BlockStream::with_a_buffer_ceiling`] sets it.
     buffer_ceiling: usize,
 
+    /// Which reads are live, and the changes read out of each record's head to move between
+    /// records.
+    ///
+    /// **Its own per-block state is inside it**, emptied by [`LiveSetReader::start_block`], which
+    /// `begin_next_block` calls. It sits here rather than in [`BlockCursor`] because it owns
+    /// scratch buffers that must survive a boundary; what must not survive one is the set.
+    live_reads: LiveSetReader,
+
     /// Set once this reader has refused, and never cleared. **A stream that has refused is
     /// finished**: without a state that says so, what stopped a refused reader was only that its
     /// compressed buffer had been emptied — which lasts exactly as long as the whole file fits in
@@ -1323,6 +1341,7 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             compressed_filled,
             rolling,
             cursor,
+            live_reads,
             parses_restarted,
             block_heads_restarted,
             buffer_ceiling,
@@ -1335,6 +1354,7 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             .field("rolling_buffered", &(rolling.len() - cursor.rolling_at))
             .field("rolling_capacity", &rolling.capacity())
             .field("cursor", cursor)
+            .field("live_reads", &live_reads.live().len())
             .field("parses_restarted", parses_restarted)
             .field("block_heads_restarted", block_heads_restarted)
             .field("buffer_ceiling", buffer_ceiling)
@@ -1388,6 +1408,7 @@ impl<R: std::io::Read> BlockStream<R> {
             compressed_filled: 0,
             rolling: Vec::with_capacity(ROLLING_BYTES),
             cursor: BlockCursor::between_blocks(),
+            live_reads: LiveSetReader::new(),
             parses_restarted: 0,
             block_heads_restarted: 0,
             buffer_ceiling: ROLLING_BUFFER_CEILING_BYTES,
@@ -1397,6 +1418,16 @@ impl<R: std::io::Read> BlockStream<R> {
 
     /// How many times a record's parse has been restarted after asking for more bytes — see
     /// the field for why a walk that comes out right does not answer this.
+    /// The reads live at the record last handed back.
+    ///
+    /// **Exact after a skipped record too**, which is the whole point of putting the changes in
+    /// the head: a caller walking with a predicate that declines most records still knows which
+    /// reads are live at the ones it takes.
+    #[must_use]
+    pub fn live_reads(&self) -> &LiveSet {
+        self.live_reads.live()
+    }
+
     pub fn parses_restarted(&self) -> u64 {
         self.parses_restarted
     }
@@ -1496,17 +1527,16 @@ impl<R: std::io::Read> BlockStream<R> {
                 &self.rolling[self.cursor.rolling_at..],
                 block.contig,
                 self.cursor.measured_from,
+                &mut self.live_reads,
             ) {
                 Ok(found) => {
                     let head = found.head;
                     let record_bytes = found.record_bytes;
+                    // **The head is read once, and the body is built from what it located.**
+                    // Reading it applied this record's chain-id changes, so parsing it a second
+                    // time to reach the body would apply them twice.
                     let record = if want(&head) {
-                        match decode_record(
-                            &self.rolling[self.cursor.rolling_at..],
-                            block.contig,
-                            self.cursor.measured_from,
-                            &self.layout,
-                        ) {
+                        match decode_the_body_of(&found, &self.layout) {
                             Ok(decoded) => Some(decoded.record),
                             Err(refused) => {
                                 return Some(Err(self.fail(BlockReadError::from_record(refused))));
@@ -1568,6 +1598,10 @@ impl<R: std::io::Read> BlockStream<R> {
         // from here (spec §3.2); a block that carried state in from the one before it would read
         // back wrong from its first record, plausibly, because coverage is smooth.
         self.cursor = BlockCursor::opening(u32::from_le_bytes(declared) as usize);
+        // **The second running difference, and it lives inside its own type.** The set of reads
+        // live restarts here too, which is what lets this reader begin at an arbitrary block:
+        // with nothing live, the block's first record restates its whole set as arrivals.
+        self.live_reads.start_block();
         // **Defensive, and measured to be so.** zstd takes consecutive frames on one context
         // without being told, so removing this line passes every test in the module — the only
         // states it would rescue are ones where the previous frame ended mid-way, and those
@@ -1986,6 +2020,7 @@ mod tests {
     };
     use crate::ng::psp::record::{OffsetBase, RecordLayout, decode_record, record_fields};
     use crate::ng::types::{ReadGroupId, SummedLogError};
+    use crate::pileup_record::ChainId;
     use proptest::prelude::*;
 
     /// The grid these tests cut on. **A fixture of its own and not the shipped default**: every
@@ -2080,6 +2115,10 @@ mod tests {
         let found = BlockRecords::split(payload).expect("the block head reads");
         let layout = RecordLayout::as_this_build_writes_it();
         let mut measured_from = OffsetBase::at_block_start(found.head.first_position);
+        // **One reader across the block, because the chain-id changes carry state.** A fresh one
+        // per record would meet the second record's departures against an empty set.
+        let mut live_reads = LiveSetReader::new();
+        live_reads.start_block();
         let mut at = 0usize;
         let mut records = Vec::new();
         while at < found.records.len() {
@@ -2087,6 +2126,7 @@ mod tests {
                 &found.records[at..],
                 found.head.contig,
                 measured_from,
+                &mut live_reads,
                 &layout,
             )
             .unwrap_or_else(|refused| panic!("record {} reads: {refused}", records.len()));
@@ -3224,7 +3264,14 @@ mod tests {
     /// all of them.
     #[test]
     fn the_chosen_level_reaches_the_bytes() {
-        let payload = one_payload(&records_past_a_window(DEFAULT_LOOK_BACK_WINDOW_LOG));
+        // **Varied records, not a repeated one.** A payload of identical records compresses to
+        // the same size at every level, because there is nothing for a longer search to find:
+        // measured, the window-spanning fixture used here before gave 91 bytes at both level 1
+        // and level 9, so the middle of the ordering below could not be seen.
+        let records: Vec<_> = (1..4_000u64)
+            .map(|at| a_record(0, at, 1 + at % 23))
+            .collect();
+        let payload = one_payload(&records);
         let at = |level: i32| {
             let mut compressor = BlockCompressor::with_level(DEFAULT_LOOK_BACK_WINDOW_LOG, level)
                 .expect("a valid level");
@@ -4535,6 +4582,9 @@ mod tests {
         // than anything that follows.
         payload.extend_from_slice(&[0x00, 0x01, 0x00]);
         encode_u64_leb128(u64::from(u32::MAX), &mut payload);
+        // No chain-id departures and no arrivals, so the head is whole and what the reader
+        // cannot find the end of is the body.
+        payload.extend_from_slice(&[0x00, 0x00]);
         payload.resize(INFLATED_BYTES, b'A');
 
         let manifest = a_manifest();
@@ -4828,6 +4878,186 @@ mod tests {
             matches!(upgrade, BlockReadError::UnsupportedRecord { .. }),
             "a tag a later writer added is *upgrade the reader*, not damage"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The chain ids ride in the head, so a skipped body cannot strand them
+    // -----------------------------------------------------------------
+
+    /// Coverage that looks like read pairs, as records a block builder will take: one record a
+    /// position, each naming the reads live there, with the mates of a pair separated by an
+    /// unsequenced hole so identifiers go live twice.
+    fn records_naming_paired_reads(positions: u64) -> Vec<SampleLocusObservations> {
+        const MATE: u64 = 12;
+        const HOLE: u64 = 9;
+        const PAIRS_A_POSITION: u64 = 2;
+        let span = MATE * 2 + HOLE;
+        (0..positions)
+            .map(|at| {
+                let live: Vec<ChainId> = (at.saturating_sub(span - 1)..=at)
+                    .filter(|start| {
+                        let into_the_pair = at - start;
+                        into_the_pair < MATE || (MATE + HOLE..span).contains(&into_the_pair)
+                    })
+                    .flat_map(|start| {
+                        (0..PAIRS_A_POSITION).map(move |which| start * PAIRS_A_POSITION + which)
+                    })
+                    .collect();
+                let mut record = a_record(0, at + 1, 1);
+                record.observations[0].chain_ids = live;
+                record
+            })
+            .collect()
+    }
+
+    /// **A record the codec refuses at a block cut leaves the open block's live set alone.**
+    ///
+    /// ⚠ **This is a hazard the chain ids created and the shape of the writer removed.** The cut
+    /// path used to reset the encoder to the new block, try the record, and — on a refusal — put
+    /// the coordinate base back. A coordinate base can be put back; **a live set cannot**, and
+    /// the open block still needed it. So `encode_record_starting_a_block` makes every refusal
+    /// before it resets anything, and there is nothing to put back.
+    ///
+    /// The evidence is the bytes: a run written with refusals interleaved must equal the run
+    /// written without them, over records that actually name reads — with empty chain-id lists
+    /// every record's changes are two zero bytes and a lost set would not show.
+    #[test]
+    fn a_refusal_at_a_cut_leaves_the_open_blocks_live_reads_alone() {
+        let records = records_naming_paired_reads(120);
+        let clean =
+            cut(BlockBuilder::new(Bp(20), None).expect("a grid"), &records).expect("in order");
+        assert!(
+            clean.len() >= 3,
+            "the fixture has to cut for this to say anything"
+        );
+
+        let mut interrupted = BlockBuilder::new(Bp(20), None).expect("a grid");
+        let mut with = Vec::new();
+        for record in &records {
+            // A region covering no base: refused by the codec, and at a cell of its own so the
+            // refusal comes through the cut path.
+            assert!(matches!(
+                interrupted.push(&a_record_over_no_base(0, 900_000)),
+                Err(BlockWriteError::RecordRefused(
+                    RecordEncodeError::EmptyRegion { .. }
+                ))
+            ));
+            if let Some(closed) = interrupted.push(record).expect("in order") {
+                with.push(closed.to_vec());
+            }
+        }
+        if let Some(last) = interrupted.finish() {
+            with.push(last);
+        }
+
+        assert_eq!(
+            with, clean,
+            "a refused record at a cut must leave the open block's reads exactly as they were"
+        );
+    }
+
+    /// **A walk that skips almost every body still knows which reads are live.**
+    ///
+    /// This is the whole of why the chain ids' changes are in the record *head*. They carry
+    /// state: a reader knows which reads are live only because it applied every arrival and
+    /// departure since the block began. **Kept in the body, a reader that declined a record
+    /// would never see that record's changes, so its set would go stale and every later record
+    /// it did want would be wrong** — silently, because a stale set is still a plausible set
+    /// (spec `psp_record_encoding.md` §6).
+    ///
+    /// So the oracle is: take one record in seven, and at each one the live set must be what a
+    /// walk that built every record has there. The fixture is paired-end coverage, so most
+    /// identifiers go live twice and a stale set drifts rather than merely lagging.
+    #[test]
+    fn a_walk_that_skips_almost_every_body_knows_which_reads_are_live() {
+        let records = records_naming_paired_reads(300);
+        let on_disk = blocks_on_disk(&records, Bp(90), None);
+        assert!(
+            on_disk.payloads.len() >= 3,
+            "several blocks, so the set restarts inside the walk as well"
+        );
+        let manifest = a_manifest();
+
+        // What a reader that builds everything has live at each record.
+        let mut whole = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let mut live_at_each = Vec::new();
+        while let Some(next) = whole.next_record() {
+            let _ = next.expect("it reads");
+            live_at_each.push(whole.live_reads().ids().to_vec());
+        }
+        assert_eq!(live_at_each.len(), records.len());
+        assert!(
+            live_at_each.iter().any(|live| live.len() > 20),
+            "the fixture has to put reads live for this to say anything: the most at once was {}",
+            live_at_each.iter().map(Vec::len).max().unwrap_or(0)
+        );
+
+        // And a reader that declines six records in seven.
+        let mut skipping =
+            BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let mut met = 0usize;
+        let mut built = 0usize;
+        while let Some(next) = skipping.next_record_where(|_| met.is_multiple_of(7)) {
+            let streamed = next.expect("it reads");
+            assert_eq!(
+                skipping.live_reads().ids(),
+                live_at_each[met].as_slice(),
+                "record {met}: a skipping walk must have the reads a full walk has"
+            );
+            if streamed.record.is_some() {
+                built += 1;
+            }
+            met += 1;
+        }
+        assert_eq!(met, records.len());
+        assert!(
+            built * 6 < met,
+            "the walk has to skip most of the file to say anything: it built {built} of {met}"
+        );
+    }
+
+    /// **And a reader that starts at an arbitrary block, skipping, agrees from there.**
+    ///
+    /// Milestone F's index hands a reader a block offset and nothing else. The two rules meet
+    /// here: the set restarts at the block, and the skipping reader still applies every head.
+    #[test]
+    fn a_skipping_walk_from_any_block_has_the_reads_a_full_walk_has_there() {
+        let records = records_naming_paired_reads(200);
+        let on_disk = blocks_on_disk(&records, Bp(60), None);
+        let manifest = a_manifest();
+
+        let mut whole = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let mut live_at_each = Vec::new();
+        while let Some(next) = whole.next_record() {
+            let _ = next.expect("it reads");
+            live_at_each.push(whole.live_reads().ids().to_vec());
+        }
+
+        let mut skipped_records = 0usize;
+        for (block, offset) in on_disk.block_offsets.iter().enumerate() {
+            let mut from_here =
+                BlockStream::new(&on_disk.bytes[*offset..], &manifest).expect("a manifest");
+            let mut at = skipped_records;
+            while let Some(next) = from_here.next_record_where(|_| false) {
+                let _ = next.expect("it reads");
+                assert_eq!(
+                    from_here.live_reads().ids(),
+                    live_at_each[at].as_slice(),
+                    "block {block}, record {at}: starting here must give what reading through gives"
+                );
+                at += 1;
+            }
+            assert_eq!(
+                at,
+                records.len(),
+                "block {block} read to the end of the file"
+            );
+            skipped_records += BlockRecords::split(&on_disk.payloads[block])
+                .expect("the block head reads")
+                .head
+                .record_count
+                .get() as usize;
+        }
     }
 
     // -----------------------------------------------------------------

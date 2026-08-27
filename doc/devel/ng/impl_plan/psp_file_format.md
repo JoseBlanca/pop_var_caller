@@ -188,7 +188,7 @@ per id silently loses the second mate of nine reads in ten. **Own commit**, and 
 two-stretch ids on the fixture and asserts they all come back.
 ***Depends:*** E1. ***Source:*** [spec psp_record_encoding §6](../spec/psp_record_encoding.md).
 
-☐ **E3 — the changes ride in the record head; the exception lists stay in the body.** The changes
+✅ **E3 — the changes ride in the record head; the exception lists stay in the body.** The changes
 carry state, so a skipped body must not strand them.
 ***Depends:*** E2, C3. ***Source:*** [spec psp_record_encoding §6](../spec/psp_record_encoding.md).
 

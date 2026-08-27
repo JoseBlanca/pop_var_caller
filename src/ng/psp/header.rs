@@ -243,6 +243,19 @@ pub enum FieldEncoding {
     FixedPoint { steps_per_unit: u32 },
     /// Bytes with a varint length in front — an allele's sequence, a chain-id list.
     LengthPrefixedBytes,
+    /// **Which reads started covering this record and which stopped**: a count of departures,
+    /// each a position in the live set as the previous record left it; then a count of arrivals,
+    /// each an identifier. Both runs are strictly ascending and written as their gaps
+    /// (spec `psp_chain_id_encoding.md` §4).
+    ///
+    /// **The one composite in an otherwise scalar set, and it earns the exception.** The others
+    /// exist so a reader can measure a field it does not recognise and walk past it; this one
+    /// cannot be walked past by anybody, because it carries the state every later record is
+    /// decoded against. A reader either knows it or cannot read the file at all — which is why
+    /// it is a named scheme rather than an opaque byte run: the name is what makes a file that
+    /// carries it refuse an older reader, instead of that reader skipping the field and building
+    /// every subsequent record against a stale set.
+    ChainIdChanges,
 }
 
 // ---------------------------------------------------------------------
@@ -756,7 +769,8 @@ fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), Broke
         }
         FieldEncoding::Varint
         | FieldEncoding::SignedVarint
-        | FieldEncoding::LengthPrefixedBytes => {}
+        | FieldEncoding::LengthPrefixedBytes
+        | FieldEncoding::ChainIdChanges => {}
     }
     Ok(())
 }
@@ -992,13 +1006,14 @@ impl WireHeader {
 ///
 /// The parameters here are placeholders: the array names the schemes, and each field's own
 /// parameter is read from the header beside it.
-const ALL_ENCODINGS: [FieldEncoding; 6] = [
+const ALL_ENCODINGS: [FieldEncoding; 7] = [
     FieldEncoding::Varint,
     FieldEncoding::SignedVarint,
     FieldEncoding::FixedWidthInteger { width_bytes: 1 },
     FieldEncoding::IeeeFloat { width_bytes: 4 },
     FieldEncoding::FixedPoint { steps_per_unit: 1 },
     FieldEncoding::LengthPrefixedBytes,
+    FieldEncoding::ChainIdChanges,
 ];
 
 impl FieldEncoding {
@@ -1019,6 +1034,7 @@ impl FieldEncoding {
                 ("fixed-point", None, Some(steps_per_unit))
             }
             FieldEncoding::LengthPrefixedBytes => ("length-prefixed-bytes", None, None),
+            FieldEncoding::ChainIdChanges => ("chain-id-changes", None, None),
         }
     }
 }
@@ -1075,6 +1091,7 @@ fn encoding_of(field: &WireFieldSpec) -> Result<FieldEncoding, BrokenRule> {
         FieldEncoding::Varint => FieldEncoding::Varint,
         FieldEncoding::SignedVarint => FieldEncoding::SignedVarint,
         FieldEncoding::LengthPrefixedBytes => FieldEncoding::LengthPrefixedBytes,
+        FieldEncoding::ChainIdChanges => FieldEncoding::ChainIdChanges,
         FieldEncoding::FixedWidthInteger { .. } => FieldEncoding::FixedWidthInteger {
             width_bytes: field.width_bytes.ok_or_else(|| missing("width"))?,
         },
@@ -1967,8 +1984,8 @@ mod tests {
         }
     }
 
-    /// `ALL_ENCODINGS` has to be all of them. The exhaustive match is what makes adding a
-    /// seventh scheme a compile error here rather than a file one side cannot read.
+    /// `ALL_ENCODINGS` has to be all of them. The exhaustive match is what makes adding an
+    /// eighth scheme a compile error here rather than a file one side cannot read.
     #[test]
     fn the_encoding_list_holds_every_scheme_the_type_has() {
         let sample = FieldEncoding::Varint;
@@ -1978,7 +1995,8 @@ mod tests {
             | FieldEncoding::FixedWidthInteger { .. }
             | FieldEncoding::IeeeFloat { .. }
             | FieldEncoding::FixedPoint { .. }
-            | FieldEncoding::LengthPrefixedBytes => 6,
+            | FieldEncoding::LengthPrefixedBytes
+            | FieldEncoding::ChainIdChanges => 7,
         };
         assert_eq!(
             ALL_ENCODINGS.len(),
