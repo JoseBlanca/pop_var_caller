@@ -393,7 +393,7 @@ impl JointFit {
     /// **A wrap, not a computation**, exactly as [`Self::fitted_diversity`] beside it:
     /// [`FrequencyDensity::expected_alternative_frequency`] is the number, and this puts it
     /// behind the constructor that refuses a value outside `[0, 1]`. The two travel together
-    /// into [`RunParameters::seed_from_moments`](crate::ng::calling::RunParameters::seed_from_moments),
+    /// into [`RunParameters::seed_from_moments`](crate::ng::calling::run_parameters::RunParameters::seed_from_moments),
     /// and having one of them wrapped here and the other wrapped at each call site is how they
     /// come to be wrapped differently.
     ///
