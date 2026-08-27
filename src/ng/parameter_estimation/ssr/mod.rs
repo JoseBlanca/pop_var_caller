@@ -763,10 +763,16 @@ impl SsrSampleParameters {
     /// **A stratum whose reads compared no bases has no rate, and never a zero** — a zero here
     /// would say every mismatch a read shows is a slip, which biases the one parameter the whole
     /// per-stratum design exists to protect. That rule is enforced where the rate is measured
-    /// rather than here: [`substitution_rate_of`] answers `None`, [`substitution_rates`] leaves
-    /// the key out, and [`assemble_sample_parameters`] refuses to build a record for a stratum
-    /// with no rate. So a key that reaches this map has been measured, and there is no absence
-    /// left for it to represent.
+    /// rather than here: [`substitution_rate_of`] answers `None` and [`substitution_rates`]
+    /// leaves the key out. So a key that reaches this map has been measured, and there is no
+    /// absence left for it to represent.
+    ///
+    /// **What happens to the stratum that has none is a whole-sample abort, and it is reachable
+    /// from data.** [`assemble_sample_parameters`] panics for it, naming the stratum — the
+    /// sample's parameters are not built at all, rather than that one stratum being dropped and
+    /// the rest kept. One repeat tract every read shows as entirely deleted is enough: those
+    /// reads witness the tract completely, so they are entered and file a shape, and they show no
+    /// bases to compare. Two tests in this file build exactly that state.
     #[must_use]
     pub fn substitution_rate_by_stratum(&self) -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
         self.by_stratum

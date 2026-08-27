@@ -390,9 +390,16 @@ impl JointFit {
     /// type the caller's genotype prior takes — the other of the two numbers that prior is
     /// seeded from (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
     ///
-    /// **A wrap, not a computation**, exactly as [`Self::fitted_diversity`] beside it:
-    /// [`FrequencyDensity::expected_alternative_frequency`] is the number, and this puts it
-    /// behind the constructor that refuses a value outside `[0, 1]`. The two travel together
+    /// **A wrap, not a computation**: [`FrequencyDensity::expected_alternative_frequency`] is the
+    /// number, and this puts it behind the constructor that refuses a value outside `[0, 1]`.
+    ///
+    /// **It reads a different place from [`Self::fitted_diversity`] beside it, and the two agree
+    /// by convention rather than by construction.** That one wraps the stored
+    /// [`Self::expected_heterozygosity`] field; this one recomputes from [`Self::density`]. The
+    /// fitter sets both from one density in the same struct literal, so on every `JointFit` this
+    /// crate produces they are two moments of one curve — but every field here is public, and a
+    /// value built by hand can hold a density and a heterozygosity that have nothing to do with
+    /// each other. The two travel together
     /// into [`RunParameters::seed_from_moments`](crate::ng::calling::run_parameters::RunParameters::seed_from_moments),
     /// and having one of them wrapped here and the other wrapped at each call site is how they
     /// come to be wrapped differently.

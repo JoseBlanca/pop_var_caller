@@ -139,8 +139,12 @@ impl RunParameters {
     /// The pre-pass measures a run three ways and reports in three shapes: one value per sample
     /// for the SNP/indel path, one per sample for the repeat tracts, and one fit over the whole
     /// cohort at once. Calling reads a single object. This is the join between them, and it does
-    /// nothing else — no walk, no input or output, and **no number of its own**: every value it
-    /// hands on was computed by one of the three.
+    /// nothing else — no walk, and no input or output.
+    ///
+    /// **It gathers rather than fits.** Every per-library and per-sample number it hands on is
+    /// one of the three pre-pass outputs, unchanged. The one exception is the genotype prior's
+    /// seed, which [`Self::seed_from_moments`] solves in closed form from the cohort fit's two
+    /// moments, and which falls back to its own constants where a moment is missing.
     ///
     /// # The joins, and the two that no type enforces
     ///

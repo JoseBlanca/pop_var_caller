@@ -45,9 +45,11 @@
 //!   (`doc/devel/reports/implementations/ng_parameter_prepass_ssr_e5_2026-08-13.md`), which is the
 //!   larger of the two counts this project has measured; the tomato SL4.00 catalogue holds 141
 //!   (`census_tract_grain_b4_2026-08-14.md`).
-//! - **78 allele-length genotypes a stratum**, which is what a five-copy dinucleotide tract has at
-//!   two genome copies: twelve allele lengths make 78 unordered pairs. Longer tracts have more, so
-//!   this is a floor rather than a typical value.
+//! - **78 allele-length genotypes a stratum**, which is what a five-copy tract has at two genome
+//!   copies: the allele support is `min(repeats, 6) + 7` lengths, so five copies give twelve and
+//!   twelve make 78 unordered pairs. It is not a floor over the whole range — a three-copy tract
+//!   has 55 and a four-copy one 66 — but it is the value from five copies up, since the support
+//!   stops growing at six.
 //!
 //! All three are arguments, so a reader who disagrees can re-run rather than rescale by hand:
 //!
@@ -55,11 +57,26 @@
 //! cargo run … --example ng_prepass_handover_footprint --features dhat-heap -- 338 1 78
 //! ```
 //!
-//! # What it does not measure
+//! # What it does not measure, and why the union column is a lower bound
 //!
 //! Nothing here runs a pre-pass or reads a file. The values are synthesised at the shape above,
 //! so this is a **footprint** measurement and not an accuracy one: no fitted number in it means
 //! anything.
+//!
+//! **Two of the run-wide things `from_prepass` builds are left empty here**, so they appear in no
+//! column:
+//!
+//! - **contamination.** A run where every library has a fitted fraction carries one estimate per
+//!   library in the union and one dense view per library in the result. Left empty, `assemble`
+//!   stores an empty vector instead — which is why the last column is 24 bytes a library at every
+//!   cohort size: it is the calibration vector alone.
+//! - **the slippage gather.** At the default grain — every library pooled into one slippage group
+//!   — it does not grow with the cohort. At one group per library it does, with the same shape as
+//!   the substitution map.
+//!
+//! Both are small beside 1.1 MB a sample, and neither changes what the table is for. But the union
+//! column is a **lower bound** on what a run holds, and the run driver is the reader who would act
+//! on it.
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
@@ -274,8 +291,9 @@ fn main() {
 
         // The seam's own union, assembled the way `from_prepass` assembles it. `assemble` is
         // called rather than `from_prepass` because the latter needs the run's read-group table,
-        // which is read from the alignment files' headers and cannot be built in memory — and
-        // what is being measured is what is *held*, which is the same either way.
+        // and the only constructor that mints one without an alignment header is test-only
+        // (`ReadGroups::of_libraries`), which an example cannot reach. What is being measured is
+        // what is *held*, which is the same either way.
         let before_union = live_bytes();
         let mut error_rate = BTreeMap::new();
         let mut minted = BTreeMap::new();

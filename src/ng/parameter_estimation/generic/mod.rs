@@ -454,11 +454,15 @@ pub struct GenericSampleParameters {
     /// ([`GenericAccumulators::minted_errors`](accumulators::GenericAccumulators::minted_errors))
     /// unchanged rather than out of a fit.
     ///
-    /// **Carried here because the tally does not outlive the fit.** The accumulators are
-    /// dropped when this value is returned, and until 2026-08-27 these totals went with them —
-    /// so a run that assembled its calling parameters had a fitted rate for every library and
-    /// no denominator for any of them, which is not a failure but a **default**: scale one,
-    /// every read charged the error floor, and the run completing normally.
+    /// **Carried here because the tally does not outlive the fit.** The streaming entry point
+    /// drops its accumulator as soon as the fit returns, so this is the last moment the totals
+    /// can be reached — and until 2026-08-27 they went with it, leaving nothing that assembled a
+    /// run's calling parameters able to supply the denominator at all. That much does not fail
+    /// quietly: `RunParameters::assemble` refuses a fitted rate whose read group has no total
+    /// here, and the reverse, so a run built without them stops at assembly naming the first read
+    /// group. **What is quiet is a total under the wrong key** — a map with the right identifiers
+    /// and another read group's numbers in them, which no assertion can see and which moves every
+    /// scale it touches.
     ///
     /// **A read group with no entry is one that put no complete observation anywhere**, which
     /// is not the same as one whose reads all read perfectly: a sum of zero over reads that

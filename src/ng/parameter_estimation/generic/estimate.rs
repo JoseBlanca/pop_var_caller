@@ -638,12 +638,14 @@ mod tests {
     /// the denominator the calling step divides the fitted error rate by
     /// (`doc/devel/ng/spec/read_likelihoods.md` §3.2).
     ///
-    /// **The failure this is written against does not stop a run.** A total that never arrives
-    /// — an empty map, or one filled from another sample's tally — leaves the calling step with
-    /// a fitted rate and no denominator, and its answer to that is not a refusal but a
-    /// **default**: scale one, every read of the library charged the error floor, and the run
-    /// finishing normally with quietly overconfident reads. So *the map is non-empty* is not
-    /// what is asserted here.
+    /// **The failure this is written against is the one no assertion can see.** A map that
+    /// never arrives is refused: `RunParameters::assemble` requires a read group to have a
+    /// fitted rate and a minted total or neither, so an empty map stops the run at assembly
+    /// naming the first read group, and a map keyed by another sample's libraries is refused by
+    /// the seam that unions them. **What survives all of that is a map with the right keys and
+    /// the wrong numbers in them** — another read group's total under this one's identifier —
+    /// which moves every scale it touches and looks exactly like a correct map. So *the map is
+    /// non-empty* is not what is asserted here.
     ///
     /// Two things are checked, and the second is what makes the first mean something. The
     /// totals equal the tally's own, whole map against whole map — so a key dropped, added or
