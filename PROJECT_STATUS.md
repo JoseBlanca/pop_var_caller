@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **a block is compressed with its look-back window
+> - **Last completed task (2026-08-27):** **a run of blocks streams back a record at a time,
+> holding two 16 kB buffers and nothing that grows with them** (step D3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That is
+> the half of the design that gets lost: a reader can decompress a block perfectly and then gather
+> every record into an array before returning, at which point the memory is exactly where it was —
+> and in production's cohort run those assembled per-sample columns are the largest single mass of
+> the heap, larger than the decompression buffers they came from. **The line that makes the buffer
+> roll was asserted by nothing**: removing it left all sixteen other tests green while the buffer
+> grew to the whole block. It now has a test that reads a file whose blocks are several times the
+> buffer and asserts the reader never holds more than it budgeted for, and the number it asks is
+> public, because it is the one Milestone H measures against the 500 kB per-open-sample budget.
+> **A reader can already start at any block and gets exactly the tail of a full read** — the
+> property the next step but one owes, available early because the reader takes any byte source
+> and knows nothing about files. Thirteen deliberate defects were injected: seven died, three
+> changed no behaviour and are reported as that rather than as survivors, and **three were real
+> survivors that now have tests** — a refused stream that kept going, a decoder fed past its
+> block's declared end, and the buffer that never rolled.
+> [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a block is compressed with its look-back window
 > capped at what the file declares** (step D2 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That cap
 > is the format's whole design in one parameter: without it zstd sizes its window from the data,

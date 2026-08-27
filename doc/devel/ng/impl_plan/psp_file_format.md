@@ -147,7 +147,7 @@ early.
 ✅ **D2 — compress a block with a capped look-back window**, and record the window in the header.
 ***Depends:*** D1. ***Source:*** [spec §4.2](../spec/psp_file_format.md).
 
-☐ **D3 — the streaming reader.** Pull decompressed bytes into a rolling buffer, parse a record, hand
+✅ **D3 — the streaming reader.** Pull decompressed bytes into a rolling buffer, parse a record, hand
 it over, keep nothing. 16 kB buffers.
 ***Depends:*** D2. ***Source:*** [spec §5.1, §4.4](../spec/psp_file_format.md).
 

@@ -34,7 +34,10 @@ use std::num::NonZeroU64;
 
 use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::psp::header::{MAX_LOOK_BACK_WINDOW_LOG, MIN_LOOK_BACK_WINDOW_LOG, Manifest};
-use crate::ng::psp::record::{RecordEncodeError, RecordEncoder, RecordLayout, RecordLayoutError};
+use crate::ng::psp::record::{
+    OffsetBase, RecordDecodeError, RecordEncodeError, RecordEncoder, RecordHead, RecordLayout,
+    RecordLayoutError, decode_record, read_record_head,
+};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 use crate::psp::errors::VarintError;
 use crate::psp::varint::{decode_u64_leb128, encode_u64_leb128};
@@ -1032,6 +1035,608 @@ impl BlockCompressError {
         Self::Zstd {
             while_doing,
             source,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Reading a block back, a record at a time
+// ---------------------------------------------------------------------
+
+/// How many compressed bytes a reader pulls from the file at a time.
+///
+/// **16 kB, and it is an optimum rather than a floor** (spec §4.4). Re-measured on a quiet
+/// machine over a walk of 7.69 M records: 4 kB takes 0.149 s and holds 233 kB an open sample,
+/// 16 kB takes 0.143 s and holds 257 kB, 64 kB takes 0.161 s and holds 353 kB, and 256 kB takes
+/// 0.200 s. Going up costs both time and memory; going down costs a little time and saves a
+/// little memory. Why the curve turns is not established.
+///
+/// **It is the reader's choice and not the file's**, which is the point: nothing a reader holds
+/// is a function of the block size, and untying those two is what this format exists for.
+pub const READ_CHUNK_BYTES: usize = 16 * 1024;
+
+/// How many decompressed bytes a reader keeps in front of the parser. See [`READ_CHUNK_BYTES`]
+/// for the measurement; the two were swept together.
+///
+/// **A record larger than this is not an error**, and a fixed maximum record size is not a safe
+/// assumption to bake in (spec §8): the buffer grows for one, and shrinks back to this at the
+/// next block.
+pub const ROLLING_BYTES: usize = 16 * 1024;
+
+/// One record as a walk met it.
+#[derive(Debug, Clone, PartialEq)]
+#[must_use]
+pub struct StreamedRecord {
+    /// Which block it came from — its contig, its first position, and how many records it holds.
+    pub block: BlockHead,
+    /// What the record's own head said, whether or not the body was built.
+    pub head: RecordHead,
+    /// The record, when the caller wanted it. **`None` is the skip**, and it is what the head
+    /// exists for: the body was never decoded, only advanced past.
+    pub record: Option<SampleLocusObservations>,
+}
+
+/// Reads records back out of a run of compressed blocks, holding nothing that grows with them.
+///
+/// **Two conditions make that true and only the first is the compressor's doing** (spec §5.1).
+/// One: do not inflate a whole block — pull decompressed bytes out incrementally, bounded by
+/// the declared window. Two: **do not accumulate what you inflated** — parse a record out of the
+/// rolling buffer, hand it to the caller, keep nothing. Satisfying only the first moves the
+/// memory rather than removing it: in production's cohort run the assembled per-sample columns
+/// are the largest single mass of the heap, larger than the decompression buffers they came
+/// from. This type hands each record over and retains only its two buffers, the decoder's own
+/// state, and where it is.
+///
+/// **It reads forward from wherever `source` is.** Milestone F's index turns a coordinate into a
+/// byte offset and seeks before handing the source over; this type knows nothing about files,
+/// which is what lets a caller start one at an arbitrary block.
+pub struct BlockStream<R> {
+    source: R,
+    decoder: zstd::zstd_safe::DCtx<'static>,
+    look_back_window_log: u8,
+    layout: RecordLayout,
+
+    // ---- what lives for the whole stream ----
+    /// Compressed bytes pulled from the source, and how much of them has been fed to the
+    /// decoder.
+    compressed: Vec<u8>,
+    compressed_at: usize,
+    compressed_filled: usize,
+    /// Decompressed bytes the parser works out of, and how much of them it has consumed.
+    rolling: Vec<u8>,
+    rolling_at: usize,
+
+    // ---- what lives for one block, and is replaced whole at every boundary ----
+    cursor: BlockCursor,
+}
+
+/// Everything a reader **restarts when a block does** (spec §3.2).
+///
+/// **A struct rather than loose fields, for the reason D1 gave `RecordEncoder`'s own per-block
+/// state**: spec §3.2 requires every running difference inside a block to restart, Milestone E
+/// adds the chain-id live set, and a field added beside these and initialised once is one that
+/// silently never resets — a file that then reads back wrong from every block's first record,
+/// and plausibly wrong, because coverage is smooth. It is rebuilt by one assignment from
+/// [`opening`](Self::opening), whose literal is exhaustive, so a field added here is a compile
+/// error at the reset.
+///
+/// **The two buffers are not in here**, and that is the distinction: they are storage a reader
+/// reuses across blocks, not state a record is parsed against.
+#[derive(Debug, Clone, Copy)]
+struct BlockCursor {
+    /// `None` until the block's head has been read out of the rolling buffer.
+    block: Option<BlockHead>,
+    /// How many records of this block are still to come.
+    records_left: u64,
+    /// The coordinate the next record's position offset is measured from.
+    measured_from: OffsetBase,
+    /// Compressed bytes of this block that have not reached the decoder yet.
+    compressed_left: usize,
+    /// True once this block's frame has been decompressed to its end.
+    inflated: bool,
+}
+
+impl BlockCursor {
+    /// A block whose compressed bytes have been counted and whose head has not been read.
+    fn opening(compressed_left: usize) -> Self {
+        Self {
+            block: None,
+            records_left: 0,
+            measured_from: OffsetBase::at_block_start(Position(0)),
+            compressed_left,
+            inflated: false,
+        }
+    }
+
+    /// Before any block has been opened, and after one has been abandoned: nothing due, nothing
+    /// left to inflate.
+    fn between_blocks() -> Self {
+        Self {
+            inflated: true,
+            ..Self::opening(0)
+        }
+    }
+}
+
+impl<R> std::fmt::Debug for BlockStream<R> {
+    /// `zstd::zstd_safe::DCtx` is not `Debug`, so this is written by hand — and it destructures
+    /// `Self` with no `..`, so a field added to the reader is a compile error here rather than
+    /// one that silently stops being reportable. **Buffer lengths, never buffer contents.**
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            source: _,
+            decoder: _,
+            look_back_window_log,
+            layout,
+            compressed: _,
+            compressed_at,
+            compressed_filled,
+            rolling,
+            rolling_at,
+            cursor,
+        } = self;
+        f.debug_struct("BlockStream")
+            .field("look_back_window_log", look_back_window_log)
+            .field("unknown_declared_fields", &layout.unknown_field_count())
+            .field("compressed_buffered", &(compressed_filled - compressed_at))
+            .field("rolling_buffered", &(rolling.len() - rolling_at))
+            .field("rolling_capacity", &rolling.capacity())
+            .field("cursor", cursor)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: std::io::Read> BlockStream<R> {
+    /// A reader for a file whose manifest is `manifest`, reading forward from wherever `source`
+    /// is positioned — which must be the start of a block.
+    ///
+    /// **The decoder's window comes from the manifest and nothing else.** zstd refuses a frame
+    /// whose window exceeds what its decoder was configured for, so a reader that assumed a
+    /// value would reject a perfectly good file with an error naming a zstd code (spec §4.2).
+    pub fn new(source: R, manifest: &Manifest) -> Result<Self, BlockReadError> {
+        // Destructured with no `..`: a manifest field a reader must honour is a compile error
+        // here rather than a setting it silently ignores.
+        let Manifest {
+            look_back_window_log,
+            // `BlockBuilder`'s: they decide where a *writer* ends a block, and a reader is told
+            // where each one ends by the block's own framing.
+            genomic_block_size_bp: _,
+            block_byte_ceiling: _,
+            // Read below, into the layout every record is decoded against.
+            fields: _,
+        } = manifest;
+        let look_back_window_log = *look_back_window_log;
+        if !(MIN_LOOK_BACK_WINDOW_LOG..=MAX_LOOK_BACK_WINDOW_LOG).contains(&look_back_window_log) {
+            return Err(BlockReadError::WindowLogOutOfRange {
+                look_back_window_log,
+            });
+        }
+        let layout = RecordLayout::from_manifest(manifest)
+            .map_err(|source| BlockReadError::UnsupportedRecordLayout { source })?;
+
+        let mut decoder = zstd::zstd_safe::DCtx::create();
+        decoder
+            .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(u32::from(
+                look_back_window_log,
+            )))
+            .map_err(|code| BlockReadError::zstd("configuring the decoder's window", code))?;
+
+        Ok(Self {
+            source,
+            decoder,
+            look_back_window_log,
+            layout,
+            compressed: vec![0u8; READ_CHUNK_BYTES],
+            compressed_at: 0,
+            compressed_filled: 0,
+            rolling: Vec::with_capacity(ROLLING_BYTES),
+            rolling_at: 0,
+            cursor: BlockCursor::between_blocks(),
+        })
+    }
+
+    /// The look-back window this reader's decoder is configured for, as the file declared it.
+    pub fn look_back_window_log(&self) -> u8 {
+        self.look_back_window_log
+    }
+
+    /// How many bytes this reader's two buffers are holding right now.
+    ///
+    /// **This is the number the whole format is shaped around.** A caller holds one of these per
+    /// sample for the length of a run, so what one costs is multiplied by the cohort size, and
+    /// goal 1 puts the budget at 500 kB an open sample. What it does *not* include is zstd's own
+    /// context — about 190 kB, and no buffer choice reaches it (spec §5.3) — so this is the part
+    /// a reader controls.
+    ///
+    /// **It must not grow with the block, the depth, or the length of the genome.** It grows for
+    /// exactly one thing: a record larger than [`ROLLING_BYTES`], and it goes back at the next
+    /// block.
+    pub fn buffered_bytes(&self) -> usize {
+        self.compressed.capacity() + self.rolling.capacity()
+    }
+
+    /// The next record, built — the walk a caller takes when it wants everything.
+    pub fn next_record(&mut self) -> Option<Result<StreamedRecord, BlockReadError>> {
+        self.next_record_where(|_| true)
+    }
+
+    /// The next record, built only if `want` says so.
+    ///
+    /// **This is the whole of the skip, and it is the reader's decision rather than a separate
+    /// call** (spec §6.2). A record the predicate declines costs its head and a pointer advance;
+    /// its body is never decoded. Measured on a tomato accession at three reads a position,
+    /// 7.69 M records: a walk keeping one record in a hundred takes 0.141 s against 0.29 s for
+    /// one that builds every record.
+    ///
+    /// **The bytes still have to arrive either way.** Skipping saves building the record, not
+    /// decompressing it: a block comes out of zstd sequentially and there is nothing to seek
+    /// past.
+    pub fn next_record_where<F>(
+        &mut self,
+        mut want: F,
+    ) -> Option<Result<StreamedRecord, BlockReadError>>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        loop {
+            if self.cursor.records_left == 0 {
+                match self.begin_next_block() {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(refused) => return Some(Err(self.fail(refused))),
+                }
+            }
+            let block = self
+                .cursor
+                .block
+                .expect("a block is open once its head has been read");
+
+            match read_record_head(
+                &self.rolling[self.rolling_at..],
+                block.contig,
+                self.cursor.measured_from,
+            ) {
+                Ok(found) => {
+                    let head = found.head;
+                    let record_bytes = found.record_bytes;
+                    let record = if want(&head) {
+                        match decode_record(
+                            &self.rolling[self.rolling_at..],
+                            block.contig,
+                            self.cursor.measured_from,
+                            &self.layout,
+                        ) {
+                            Ok(decoded) => Some(decoded.record),
+                            Err(refused) => {
+                                return Some(Err(self.fail(BlockReadError::from_record(refused))));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    self.rolling_at += record_bytes;
+                    self.cursor.measured_from = OffsetBase::after(&head);
+                    self.cursor.records_left -= 1;
+                    if self.cursor.records_left == 0
+                        && let Err(refused) = self.check_the_block_ended_here()
+                    {
+                        return Some(Err(self.fail(refused)));
+                    }
+                    return Some(Ok(StreamedRecord {
+                        block,
+                        head,
+                        record,
+                    }));
+                }
+                Err(RecordDecodeError::Truncated { .. }) => match self.pump() {
+                    // More of the block arrived. **The parse starts again from the record's
+                    // first byte**, against state this arm has not touched — which is what makes
+                    // it restartable rather than half-advanced.
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Some(Err(self.fail(BlockReadError::RecordRunsPastItsBlock {
+                            records_left: self.cursor.records_left,
+                            bytes_left: self.rolling.len() - self.rolling_at,
+                        })));
+                    }
+                    Err(refused) => return Some(Err(self.fail(refused))),
+                },
+                Err(damage) => return Some(Err(self.fail(BlockReadError::from_record(damage)))),
+            }
+        }
+    }
+
+    /// Read the next block's framing and its head, or report that the source is finished.
+    ///
+    /// **Everything a record is parsed against resets here** — the coordinate the position
+    /// offsets are measured from, and how many records are still to come (spec §3.2). A block
+    /// that carried state in from the one before it would read back wrong from its first record,
+    /// and plausibly wrong, because coverage is smooth.
+    fn begin_next_block(&mut self) -> Result<bool, BlockReadError> {
+        let mut declared = [0u8; COMPRESSED_BLOCK_LENGTH_BYTES];
+        if !self.read_exactly(&mut declared)? {
+            return Ok(false);
+        }
+        // **One assignment, and it is the reset.** Everything a record is parsed against comes
+        // from here (spec §3.2); a block that carried state in from the one before it would read
+        // back wrong from its first record, plausibly, because coverage is smooth.
+        self.cursor = BlockCursor::opening(u32::from_le_bytes(declared) as usize);
+        // **Defensive, and measured to be so.** zstd takes consecutive frames on one context
+        // without being told, so removing this line passes every test in the module — the only
+        // states it would rescue are ones where the previous frame ended mid-way, and those
+        // already end the stream (`fail`). It is here because a block boundary is where a
+        // reader's state resets (spec §3.2), and leaving the decoder's out of that reset would
+        // make the exception the thing a later coder has to remember.
+        self.decoder
+            .reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+            .map_err(|code| {
+                BlockReadError::zstd("resetting the decoder for the next block", code)
+            })?;
+
+        self.rolling.clear();
+        // Back to what a reader budgets for, so one enormous record does not leave every later
+        // block holding its buffer: nothing a reader holds may be a function of the data.
+        self.rolling.shrink_to(ROLLING_BYTES);
+        self.rolling_at = 0;
+
+        loop {
+            match BlockHead::decode(&self.rolling[self.rolling_at..]) {
+                Ok(decoded) => {
+                    self.rolling_at += decoded.head_bytes;
+                    self.cursor.measured_from =
+                        OffsetBase::at_block_start(decoded.head.first_position);
+                    self.cursor.records_left = decoded.head.record_count.get();
+                    self.cursor.block = Some(decoded.head);
+                    return Ok(true);
+                }
+                Err(BlockHeadDecodeError::Truncated { field, bytes_in }) => {
+                    if !self.pump()? {
+                        return Err(BlockReadError::BlockHeadRunsPastItsBlock { field, bytes_in });
+                    }
+                }
+                Err(damage) => return Err(BlockReadError::DamagedBlockHead { source: damage }),
+            }
+        }
+    }
+
+    /// The block declared its last record, so nothing of it may be left.
+    fn check_the_block_ended_here(&mut self) -> Result<(), BlockReadError> {
+        // The frame may not have been decompressed to its end; pump until it has.
+        while self.rolling_at >= self.rolling.len() && self.pump()? {}
+        let bytes_left = self.rolling.len() - self.rolling_at;
+        if bytes_left > 0 || !self.cursor.inflated || self.cursor.compressed_left > 0 {
+            return Err(BlockReadError::BlockHoldsMoreThanItDeclared { bytes_left });
+        }
+        Ok(())
+    }
+
+    /// Decompress more of the block into the rolling buffer. `false` when the block's frame is
+    /// finished and nothing more will arrive.
+    fn pump(&mut self) -> Result<bool, BlockReadError> {
+        if self.cursor.inflated {
+            return Ok(false);
+        }
+        // Drop what the parser has already consumed before asking for more. **This is what keeps
+        // the rolling buffer rolling**: without it it grows to the whole block.
+        if self.rolling_at > 0 {
+            self.rolling.drain(..self.rolling_at);
+            self.rolling_at = 0;
+        }
+        if self.rolling.len() >= self.rolling.capacity() {
+            // One record needs more than the buffer holds. **Grow rather than fail** — spec §8
+            // refuses a fixed maximum record size — and `begin_next_block` shrinks back.
+            self.rolling
+                .reserve(self.rolling.capacity().max(ROLLING_BYTES));
+        }
+
+        if self.cursor.compressed_left == 0 {
+            // The block's declared bytes are spent. If zstd has not finished the frame, the
+            // length in front of the block is shorter than the frame behind it — and the answer
+            // is *this block has no more to give*, which the caller turns into damage. **Checked
+            // before the buffer, not inside it**: the next block's bytes are usually already
+            // buffered, and the version that looked at the buffer first fed the decoder an empty
+            // slice instead and left zstd to produce an error code nobody can act on.
+            self.cursor.inflated = true;
+            return Ok(false);
+        }
+        if self.compressed_at == self.compressed_filled && !self.fill_from_source()? {
+            return Err(BlockReadError::FileEndsInsideABlock {
+                compressed_bytes_left: self.cursor.compressed_left,
+            });
+        }
+
+        let feeding =
+            (self.compressed_filled - self.compressed_at).min(self.cursor.compressed_left);
+        let mut input = zstd::zstd_safe::InBuffer {
+            src: &self.compressed[self.compressed_at..self.compressed_at + feeding],
+            pos: 0,
+        };
+        let at = self.rolling.len();
+        let mut output = zstd::zstd_safe::OutBuffer::around_pos(&mut self.rolling, at);
+        let hint = self
+            .decoder
+            .decompress_stream(&mut output, &mut input)
+            .map_err(|code| BlockReadError::zstd("decompressing a block", code))?;
+        let taken = input.pos;
+        self.compressed_at += taken;
+        self.cursor.compressed_left -= taken;
+        if hint == 0 {
+            self.cursor.inflated = true;
+        }
+        Ok(true)
+    }
+
+    /// Pull the next chunk of compressed bytes. `false` at the end of the source.
+    fn fill_from_source(&mut self) -> Result<bool, BlockReadError> {
+        self.compressed_at = 0;
+        self.compressed_filled = 0;
+        loop {
+            match self.source.read(&mut self.compressed) {
+                Ok(0) => return Ok(false),
+                Ok(read) => {
+                    self.compressed_filled = read;
+                    return Ok(true);
+                }
+                Err(fault) if fault.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(source) => {
+                    return Err(BlockReadError::Io {
+                        while_doing: "reading a block's compressed bytes",
+                        source,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Read exactly `out.len()` bytes through the compressed buffer. `Ok(false)` when the source
+    /// is finished and **nothing at all** was read, which is the ordinary end of a run of blocks;
+    /// a source that ends part-way through is a truncated file.
+    fn read_exactly(&mut self, out: &mut [u8]) -> Result<bool, BlockReadError> {
+        let mut filled = 0usize;
+        while filled < out.len() {
+            if self.compressed_at == self.compressed_filled && !self.fill_from_source()? {
+                if filled == 0 {
+                    return Ok(false);
+                }
+                return Err(BlockReadError::FileEndsInsideABlockLength { bytes_read: filled });
+            }
+            let take = (self.compressed_filled - self.compressed_at).min(out.len() - filled);
+            out[filled..filled + take]
+                .copy_from_slice(&self.compressed[self.compressed_at..self.compressed_at + take]);
+            self.compressed_at += take;
+            filled += take;
+        }
+        Ok(true)
+    }
+
+    /// Mark the stream finished, so a caller that keeps asking after a refusal gets `None`
+    /// rather than the same refusal for ever, or a record built from state a refusal left
+    /// half-advanced.
+    fn fail(&mut self, refused: BlockReadError) -> BlockReadError {
+        self.cursor = BlockCursor::between_blocks();
+        self.rolling.clear();
+        self.rolling_at = 0;
+        self.compressed_at = 0;
+        self.compressed_filled = 0;
+        refused
+    }
+}
+
+/// Why a run of blocks could not be read back.
+///
+/// **Every variant is an input problem, not a bug**, and each carries a different instruction —
+/// which is why [`RecordDecodeError`] and [`BlockHeadDecodeError`] are not folded into one class
+/// here. A record that stopped early means *decompress more* to this reader and *the file is
+/// damaged* to its caller, because by the time it reaches a caller the bytes have run out for
+/// good.
+///
+/// [`RecordDecodeError`]: crate::ng::psp::RecordDecodeError
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum BlockReadError {
+    /// The file's declared look-back window is outside what zstd takes, so no decoder can be
+    /// configured for it.
+    #[error(
+        "the file declares a look-back window of 2^{look_back_window_log} bytes; zstd takes \
+         between 2^{MIN_LOOK_BACK_WINDOW_LOG} and 2^{MAX_LOOK_BACK_WINDOW_LOG}"
+    )]
+    WindowLogOutOfRange { look_back_window_log: u8 },
+
+    /// The file declares a record layout this reader does not read. **Upgrade the reader**; the
+    /// file is not damaged.
+    #[error("the file declares a record layout this reader cannot read: {source}")]
+    UnsupportedRecordLayout {
+        #[source]
+        source: RecordLayoutError,
+    },
+
+    /// A record's bytes cannot mean what they say. The file is damaged.
+    #[error("a record in this block is unreadable: {source}")]
+    DamagedRecord {
+        #[source]
+        source: RecordDecodeError,
+    },
+
+    /// A record names something a later writer added. **Upgrade the reader**; the file is fine.
+    #[error("a record in this block names something this reader does not know: {source}")]
+    UnsupportedRecord {
+        #[source]
+        source: RecordDecodeError,
+    },
+
+    /// A record's bytes ran out at the end of its block, so no further bytes can arrive. **This
+    /// is where the retry class becomes damage** — the same conversion `record.rs` makes for a
+    /// field inside a bounded body, one level up.
+    #[error(
+        "a record runs past the end of its block, with {records_left} records still declared \
+         and {bytes_left} bytes left"
+    )]
+    RecordRunsPastItsBlock {
+        records_left: u64,
+        bytes_left: usize,
+    },
+
+    /// The block's opening fields ran out before the block did.
+    #[error("a block's {field} runs past the end of the block, {bytes_in} bytes in")]
+    BlockHeadRunsPastItsBlock {
+        field: &'static str,
+        bytes_in: usize,
+    },
+
+    /// A block's opening fields cannot mean what they say.
+    #[error("a block's head is unreadable: {source}")]
+    DamagedBlockHead {
+        #[source]
+        source: BlockHeadDecodeError,
+    },
+
+    /// The block held bytes past the last record its head declared.
+    #[error("a block holds {bytes_left} bytes past the last record its head declared")]
+    BlockHoldsMoreThanItDeclared { bytes_left: usize },
+
+    /// The file ended inside a block's compressed bytes. **Refuse rather than read short**: a
+    /// run that was killed part-way must not look like a sample covering less of the genome.
+    #[error("the file ends with {compressed_bytes_left} compressed bytes of a block still due")]
+    FileEndsInsideABlock { compressed_bytes_left: usize },
+
+    /// The file ended inside the four bytes that say how long a block is.
+    #[error("the file ends {bytes_read} bytes into a block's length")]
+    FileEndsInsideABlockLength { bytes_read: usize },
+
+    /// zstd refused. **It names what was being done**, because zstd's own message is a code.
+    #[error("zstd failed while {while_doing} (zstd code {code})")]
+    Zstd {
+        while_doing: &'static str,
+        code: usize,
+    },
+
+    /// Reading the file's bytes failed.
+    #[error("the file could not be read while {while_doing}")]
+    Io {
+        while_doing: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl BlockReadError {
+    fn zstd(while_doing: &'static str, code: usize) -> Self {
+        Self::Zstd { while_doing, code }
+    }
+
+    /// Put a record's own fault in the class its instruction belongs to.
+    ///
+    /// **`Truncated` never arrives here**, and that is the point: the reader answers it by
+    /// decompressing more, and turns it into
+    /// [`RecordRunsPastItsBlock`](Self::RecordRunsPastItsBlock) only once the block has no more
+    /// to give. If one ever did reach here it would be damage — no further bytes are coming —
+    /// which is what the arm below says.
+    fn from_record(fault: RecordDecodeError) -> Self {
+        match fault {
+            RecordDecodeError::Unsupported { .. } => Self::UnsupportedRecord { source: fault },
+            RecordDecodeError::Malformed { .. } | RecordDecodeError::Truncated { .. } => {
+                Self::DamagedRecord { source: fault }
+            }
         }
     }
 }
@@ -2593,6 +3198,660 @@ mod tests {
                 .expect("zstd's own account is the cause")
                 .to_string(),
             "Destination buffer is too small"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Reading a block back, a record at a time
+    // -----------------------------------------------------------------
+
+    /// A whole file of compressed blocks, and where each one begins — which is what Milestone
+    /// F's index will hold and what lets a test start a reader at an arbitrary block.
+    struct BlocksOnDisk {
+        bytes: Vec<u8>,
+        block_offsets: Vec<usize>,
+        payloads: Vec<Vec<u8>>,
+    }
+
+    /// Cut `records` into blocks and compress each one, as a writer will.
+    fn blocks_on_disk(
+        records: &[SampleLocusObservations],
+        grid: Bp,
+        ceiling: Option<u32>,
+    ) -> BlocksOnDisk {
+        let manifest = a_manifest();
+        let payloads =
+            cut(BlockBuilder::new(grid, ceiling).expect("a grid"), records).expect("in order");
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let mut bytes = Vec::new();
+        let mut block_offsets = Vec::new();
+        for payload in &payloads {
+            block_offsets.push(bytes.len());
+            bytes.extend_from_slice(compressor.compress(payload).expect("it compresses"));
+        }
+        BlocksOnDisk {
+            bytes,
+            block_offsets,
+            payloads,
+        }
+    }
+
+    /// Read every record a reader over `bytes` yields, and refuse to loop for ever.
+    fn stream_every_record(bytes: &[u8]) -> Result<Vec<StreamedRecord>, BlockReadError> {
+        stream_records_where(bytes, |_| true)
+    }
+
+    fn stream_records_where<F>(
+        bytes: &[u8],
+        mut want: F,
+    ) -> Result<Vec<StreamedRecord>, BlockReadError>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        let manifest = a_manifest();
+        let mut stream = BlockStream::new(bytes, &manifest).expect("a valid manifest");
+        let mut met = Vec::new();
+        while let Some(next) = stream.next_record_where(&mut want) {
+            met.push(next?);
+            assert!(
+                met.len() < 1_000_000,
+                "a reader that never ends is a reader that is looping"
+            );
+        }
+        // **And it stays finished.** A caller that keeps asking after the end gets nothing more,
+        // rather than the last record again or a refusal that repeats.
+        assert!(stream.next_record().is_none());
+        Ok(met)
+    }
+
+    /// The records a walk built, in order — for comparing against what was written.
+    fn built(met: &[StreamedRecord]) -> Vec<SampleLocusObservations> {
+        met.iter().filter_map(|one| one.record.clone()).collect()
+    }
+
+    #[test]
+    fn a_stream_reads_back_every_record_that_was_written() {
+        let records: Vec<_> = (0..200).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(300));
+        assert!(
+            on_disk.payloads.len() >= 4,
+            "several blocks, or the reader never crosses one"
+        );
+
+        let met = stream_every_record(&on_disk.bytes).expect("it reads");
+        assert_eq!(built(&met), records);
+        assert_eq!(met.len(), records.len());
+    }
+
+    /// **The blocks a reader crosses are the blocks the writer cut**, and every record says
+    /// which one it came from.
+    #[test]
+    fn every_record_says_which_block_it_came_from() {
+        let records: Vec<_> = (0..200).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(300));
+        let met = stream_every_record(&on_disk.bytes).expect("it reads");
+
+        let mut blocks_met: Vec<BlockHead> = Vec::new();
+        for one in &met {
+            if blocks_met.last() != Some(&one.block) {
+                blocks_met.push(one.block);
+            }
+            assert_eq!(one.head.region.contig, one.block.contig);
+        }
+        assert_eq!(blocks_met.len(), on_disk.payloads.len());
+        for (index, block) in blocks_met.iter().enumerate() {
+            let walked = walk(&on_disk.payloads[index]);
+            assert_eq!(*block, walked.head, "block {index}");
+            assert_eq!(
+                met.iter().filter(|one| one.block == *block).count() as u64,
+                block.record_count.get()
+            );
+        }
+    }
+
+    /// A stream over records on several contigs and several grid cells reads them all back, in
+    /// the order they were written.
+    #[test]
+    fn a_stream_crosses_contigs_and_grid_cells() {
+        let mut records = Vec::new();
+        for contig in 0..3u32 {
+            for cell in 0..3u64 {
+                for step in 0..7u64 {
+                    records.push(a_record(
+                        contig,
+                        cell * A_GRID.get() + 1 + step * 3_000,
+                        1 + step % 4,
+                    ));
+                }
+            }
+        }
+        let on_disk = blocks_on_disk(&records, A_GRID, None);
+        assert_eq!(on_disk.payloads.len(), 9);
+        assert_eq!(
+            built(&stream_every_record(&on_disk.bytes).expect("it reads")),
+            records
+        );
+    }
+
+    /// **A record the caller declines costs its head and a pointer advance.** The heads a
+    /// skipping walk meets are the heads a full walk meets, and the records it builds are the
+    /// ones it asked for — byte for byte the same as a full decode of those.
+    #[test]
+    fn a_skipping_walk_meets_every_head_and_builds_only_what_it_wants() {
+        let records: Vec<_> = (0..200).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(300));
+        let whole = stream_every_record(&on_disk.bytes).expect("it reads");
+
+        for (name, keep) in [
+            ("every fourth", 4usize),
+            ("every twentieth", 20),
+            ("none at all", usize::MAX),
+        ] {
+            let mut index = 0usize;
+            let met = stream_records_where(&on_disk.bytes, |_| {
+                let wanted = keep != usize::MAX && index.is_multiple_of(keep);
+                index += 1;
+                wanted
+            })
+            .unwrap_or_else(|refused| panic!("{name}: {refused}"));
+
+            assert_eq!(
+                met.iter().map(|one| one.head).collect::<Vec<_>>(),
+                whole.iter().map(|one| one.head).collect::<Vec<_>>(),
+                "{name}: every head is met whatever is built"
+            );
+            let wanted: Vec<_> = records
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| keep != usize::MAX && at.is_multiple_of(keep))
+                .map(|(_, record)| record.clone())
+                .collect();
+            assert_eq!(built(&met), wanted, "{name}: exactly what was asked for");
+        }
+    }
+
+    /// **A reader can start at any block, and gets what a full read gives from there.** The
+    /// offsets are what Milestone F's index will hold; nothing else about the file is needed.
+    #[test]
+    fn a_reader_starting_at_a_block_gets_the_tail_of_a_full_read() {
+        let records: Vec<_> = (0..200).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(300));
+        let whole = stream_every_record(&on_disk.bytes).expect("it reads");
+        assert!(on_disk.block_offsets.len() >= 4);
+
+        let mut skipped = 0usize;
+        for (index, offset) in on_disk.block_offsets.iter().enumerate() {
+            let from_here = stream_every_record(&on_disk.bytes[*offset..])
+                .unwrap_or_else(|refused| panic!("from block {index}: {refused}"));
+            assert_eq!(
+                from_here,
+                whole[skipped..],
+                "block {index} at byte {offset}"
+            );
+            skipped += usize::try_from(walk(&on_disk.payloads[index]).head.record_count.get())
+                .expect("a small count");
+        }
+        assert_eq!(skipped, records.len());
+    }
+
+    /// A record larger than the rolling buffer is read, not refused — spec §8 says a fixed
+    /// maximum record size is not a safe assumption — and the buffer goes back to what a reader
+    /// budgets for at the next block.
+    #[test]
+    fn a_record_larger_than_the_rolling_buffer_is_read_and_the_buffer_shrinks_back() {
+        let mut enormous = a_record(0, 500, 1);
+        enormous.observations = (0..4_000u32)
+            .map(|read| SequenceObservation {
+                bases: vec![b"ACGT"[(read % 4) as usize]; 24].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read % 7),
+                num_obs: 1,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            })
+            .collect();
+        let records = vec![enormous, a_record(0, 200_000, 1)];
+
+        let payloads =
+            cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records).expect("in order");
+        assert!(
+            payloads[0].len() > ROLLING_BYTES,
+            "the record must exceed the rolling buffer, or this proves nothing: {} bytes \
+             against {ROLLING_BYTES}",
+            payloads[0].len()
+        );
+
+        let on_disk = blocks_on_disk(&records, A_GRID, None);
+        let manifest = a_manifest();
+        let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let first = stream.next_record().expect("a record").expect("it reads");
+        assert_eq!(first.record.as_ref(), Some(&records[0]));
+
+        let second = stream.next_record().expect("a record").expect("it reads");
+        assert_eq!(second.record.as_ref(), Some(&records[1]));
+        assert!(
+            format!("{stream:?}").contains(&format!("rolling_capacity: {ROLLING_BYTES}")),
+            "the buffer must shrink back at the next block; it reads {stream:?}"
+        );
+        assert!(stream.next_record().is_none());
+    }
+
+    /// **The rolling buffer rolls, and that is half of what the format is for.** Spec §5.1 says
+    /// two conditions make a reader cheap and only the first is the compressor's doing: do not
+    /// inflate the whole block, *and do not accumulate what you inflated*. Satisfying only the
+    /// first moves the memory rather than removing it.
+    ///
+    /// So this reads a file whose blocks are many times the rolling buffer and asserts the
+    /// reader never holds more than it budgeted for. **Nothing else in the module sees it**:
+    /// removing the line that drops consumed bytes before pumping leaves every other test green,
+    /// while the buffer grows to the whole block.
+    #[test]
+    fn a_reader_holds_its_two_buffers_and_never_the_block() {
+        // Blocks far larger than the rolling buffer, over several grid cells.
+        let records: Vec<_> = (1..12_000u64).map(|at| a_record(0, at, 1)).collect();
+        let on_disk = blocks_on_disk(&records, Bp(4_000), None);
+        let biggest = on_disk
+            .payloads
+            .iter()
+            .map(|payload| payload.len())
+            .max()
+            .expect("some blocks");
+        assert!(
+            biggest > ROLLING_BYTES * 4,
+            "a block must be several times the rolling buffer, or this proves nothing: \
+             {biggest} bytes against {ROLLING_BYTES}"
+        );
+
+        let manifest = a_manifest();
+        let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let budget = READ_CHUNK_BYTES + ROLLING_BYTES;
+        let mut most_held = stream.buffered_bytes();
+        let mut met = 0usize;
+        while let Some(next) = stream.next_record() {
+            let _ = next.expect("it reads");
+            met += 1;
+            most_held = most_held.max(stream.buffered_bytes());
+        }
+        assert_eq!(met, records.len());
+        assert!(
+            most_held <= budget,
+            "a reader over {biggest}-byte blocks held {most_held} bytes against a budget of \
+             {budget}"
+        );
+    }
+
+    /// **A reader is configured from the file's manifest and refuses what it cannot honour.**
+    /// A window zstd does not take, and a record layout this build does not write, are both
+    /// refused at the reader rather than block by block.
+    #[test]
+    fn a_reader_refuses_a_manifest_it_cannot_honour() {
+        let mut manifest = a_manifest();
+        manifest.look_back_window_log = MAX_LOOK_BACK_WINDOW_LOG + 1;
+        assert!(matches!(
+            BlockStream::new([].as_slice(), &manifest),
+            Err(BlockReadError::WindowLogOutOfRange { .. })
+        ));
+
+        let mut manifest = a_manifest();
+        manifest.fields.truncate(manifest.fields.len() - 1);
+        assert!(matches!(
+            BlockStream::new([].as_slice(), &manifest),
+            Err(BlockReadError::UnsupportedRecordLayout { .. })
+        ));
+
+        let good = a_manifest();
+        let stream = BlockStream::new([].as_slice(), &good).expect("a manifest this build wrote");
+        assert_eq!(stream.look_back_window_log(), good.look_back_window_log);
+    }
+
+    /// **A window narrower than the file's is refused, and the message says both numbers.**
+    /// A reader whose budget is smaller than what the file needs is the case spec §4.2 exists
+    /// for: zstd's own answer is a code, and this one names the exponent.
+    #[test]
+    fn a_reader_whose_window_is_narrower_than_the_file_refuses_the_block() {
+        let records = records_past_a_window(DEFAULT_LOOK_BACK_WINDOW_LOG);
+        let payload = one_payload(&records);
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let on_disk = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let mut narrower = a_manifest();
+        narrower.look_back_window_log = DEFAULT_LOOK_BACK_WINDOW_LOG - 1;
+        let mut stream = BlockStream::new(on_disk.as_slice(), &narrower).expect("a valid window");
+        match stream.next_record() {
+            Some(Err(BlockReadError::Zstd { while_doing, .. })) => {
+                assert_eq!(while_doing, "decompressing a block");
+            }
+            other => panic!("expected a zstd refusal, got {other:?}"),
+        }
+        assert!(
+            stream.next_record().is_none(),
+            "and a refused stream stays refused rather than repeating itself"
+        );
+    }
+
+    /// **An empty source is an empty read, not an error.** A run of blocks that holds none is
+    /// what a writer that was handed no records produces.
+    #[test]
+    fn a_source_with_no_blocks_reads_nothing() {
+        assert!(
+            stream_every_record(&[])
+                .expect("no blocks is not a fault")
+                .is_empty()
+        );
+    }
+
+    /// **A file cut short anywhere is refused, at every cut.** Spec §3.3's rule is that a run
+    /// killed part-way must not look like a sample covering less of the genome, and the reader
+    /// is where that starts: it refuses rather than stopping early and reporting success.
+    #[test]
+    fn a_file_cut_short_anywhere_inside_a_block_is_refused() {
+        let records: Vec<_> = (0..40).map(|index| a_record(0, 100 + index, 1)).collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(120));
+        assert!(on_disk.block_offsets.len() >= 3);
+        let whole = stream_every_record(&on_disk.bytes).expect("it reads");
+
+        for cut_at in 1..on_disk.bytes.len() {
+            let short = &on_disk.bytes[..cut_at];
+            let met = stream_every_record(short);
+            match met {
+                Err(_) => {}
+                Ok(records_read) => {
+                    // A cut exactly at a block boundary is a shorter *complete* file, which is
+                    // the one case that is not damage — and it must be a prefix of the whole.
+                    assert!(
+                        on_disk.block_offsets.contains(&cut_at),
+                        "a file cut at {cut_at} bytes, which is not a block boundary, must be \
+                         refused"
+                    );
+                    assert_eq!(records_read, whole[..records_read.len()]);
+                }
+            }
+        }
+    }
+
+    /// A block whose head declares more records than it holds is refused, and one that holds
+    /// more than it declares is refused too. **Both are the count doing its job**: it is what
+    /// lets a reader say *the block ended where it should have* rather than *the bytes ran out*.
+    #[test]
+    fn a_block_whose_record_count_disagrees_with_its_records_is_refused() {
+        let records: Vec<_> = (0..6).map(|index| a_record(0, 100 + index, 1)).collect();
+        let payload = one_payload(&records);
+        let found = BlockRecords::split(&payload).expect("it splits");
+        assert_eq!(found.head.record_count.get(), 6);
+
+        for miscount in [5u64, 7] {
+            let mut damaged = Vec::new();
+            BlockHead {
+                record_count: NonZeroU64::new(miscount).expect("not zero"),
+                ..found.head
+            }
+            .encode(&mut damaged);
+            damaged.extend_from_slice(found.records);
+
+            let mut compressor =
+                BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+            let on_disk = compressor
+                .compress(&damaged)
+                .expect("it compresses")
+                .to_vec();
+            let refused = stream_every_record(&on_disk)
+                .expect_err("a block that miscounts its records is damaged");
+            match (miscount, &refused) {
+                (5, BlockReadError::BlockHoldsMoreThanItDeclared { .. }) => {}
+                (7, BlockReadError::RecordRunsPastItsBlock { .. }) => {}
+                _ => panic!("a count of {miscount} gave {refused}"),
+            }
+        }
+    }
+
+    /// A block whose head cannot mean what it says is refused as damage, not as a short read.
+    #[test]
+    fn a_block_whose_head_is_damaged_is_refused() {
+        let records: Vec<_> = (0..6).map(|index| a_record(0, 100 + index, 1)).collect();
+        let payload = one_payload(&records);
+        let found = BlockRecords::split(&payload).expect("it splits");
+
+        // A contig id no contig id could be, in front of the records that were there.
+        let mut damaged = Vec::new();
+        encode_u64_leb128(u64::from(u32::MAX) + 1, &mut damaged);
+        encode_u64_leb128(found.head.first_position.get(), &mut damaged);
+        encode_u64_leb128(found.head.record_count.get(), &mut damaged);
+        damaged.extend_from_slice(found.records);
+
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let on_disk = compressor
+            .compress(&damaged)
+            .expect("it compresses")
+            .to_vec();
+        assert!(matches!(
+            stream_every_record(&on_disk),
+            Err(BlockReadError::DamagedBlockHead { .. })
+        ));
+    }
+
+    /// **A record's bytes reaching the end of its block is damage, not a retry.** Inside the
+    /// reader a record that stops early means *decompress more*; once the block has no more to
+    /// give, no quantity of further bytes changes the answer, and a reader that kept asking
+    /// would never finish.
+    #[test]
+    fn a_record_that_runs_past_its_block_is_damage_and_not_a_retry() {
+        let records: Vec<_> = (0..6).map(|index| a_record(0, 100 + index, 1)).collect();
+        let payload = one_payload(&records);
+        let found = BlockRecords::split(&payload).expect("it splits");
+
+        // The same records with the last one's tail cut off, and the head still declaring six.
+        let mut damaged = Vec::new();
+        found.head.encode(&mut damaged);
+        damaged.extend_from_slice(&found.records[..found.records.len() - 3]);
+
+        let mut compressor =
+            BlockCompressor::new(DEFAULT_LOOK_BACK_WINDOW_LOG).expect("a valid window");
+        let on_disk = compressor
+            .compress(&damaged)
+            .expect("it compresses")
+            .to_vec();
+
+        let manifest = a_manifest();
+        let mut stream = BlockStream::new(on_disk.as_slice(), &manifest).expect("a manifest");
+        let mut met = 0usize;
+        let refused = loop {
+            match stream.next_record() {
+                Some(Ok(_)) => {
+                    met += 1;
+                    assert!(met <= 6, "a reader that keeps going is one that is looping");
+                }
+                Some(Err(refused)) => break refused,
+                None => panic!("a truncated block must refuse, not end"),
+            }
+        };
+        assert!(
+            matches!(refused, BlockReadError::RecordRunsPastItsBlock { .. }),
+            "got {refused}"
+        );
+        assert_eq!(met, 5, "the five whole records were handed over first");
+    }
+
+    /// **A refused stream stays refused.** A caller that keeps asking after a refusal gets
+    /// nothing more — not the same refusal for ever, and not a record built from state the
+    /// refusal left half-advanced. Every way a stream can refuse is checked, because the state a
+    /// refusal leaves behind differs by which one it was.
+    #[test]
+    fn a_stream_that_refuses_yields_nothing_afterwards() {
+        let records: Vec<_> = (0..6).map(|index| a_record(0, 100 + index, 1)).collect();
+        let payload = one_payload(&records);
+        let found = BlockRecords::split(&payload).expect("it splits");
+        let manifest = a_manifest();
+        let compress = |bytes: &[u8]| {
+            BlockCompressor::from_manifest(&manifest)
+                .expect("a window")
+                .compress(bytes)
+                .expect("it compresses")
+                .to_vec()
+        };
+
+        // A record cut short at the end of its block; a block declaring one record too few; a
+        // block head no reader can believe; and a file that stops inside a block's bytes.
+        let mut short_record = Vec::new();
+        found.head.encode(&mut short_record);
+        short_record.extend_from_slice(&found.records[..found.records.len() - 3]);
+
+        let mut too_few = Vec::new();
+        BlockHead {
+            record_count: NonZeroU64::new(5).expect("not zero"),
+            ..found.head
+        }
+        .encode(&mut too_few);
+        too_few.extend_from_slice(found.records);
+
+        let mut bad_head = Vec::new();
+        encode_u64_leb128(u64::from(u32::MAX) + 1, &mut bad_head);
+        encode_u64_leb128(found.head.first_position.get(), &mut bad_head);
+        encode_u64_leb128(found.head.record_count.get(), &mut bad_head);
+        bad_head.extend_from_slice(found.records);
+
+        let whole = compress(&payload);
+        let files: [(&str, Vec<u8>); 4] = [
+            ("a record cut short", compress(&short_record)),
+            ("a block declaring too few records", compress(&too_few)),
+            ("a block head that cannot be believed", compress(&bad_head)),
+            (
+                "a file that stops inside a block",
+                whole[..whole.len() - 5].to_vec(),
+            ),
+        ];
+
+        for (what, bytes) in files {
+            let mut stream = BlockStream::new(bytes.as_slice(), &manifest).expect("a manifest");
+            let mut refused = None;
+            for _ in 0..records.len() + 4 {
+                match stream.next_record() {
+                    Some(Ok(_)) => {}
+                    Some(Err(fault)) => {
+                        refused = Some(fault);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            let refused = refused.unwrap_or_else(|| panic!("{what} must be refused"));
+            for again in 0..3 {
+                assert!(
+                    stream.next_record().is_none(),
+                    "{what}: after {refused}, ask {again} gave something back"
+                );
+            }
+        }
+    }
+
+    /// **A block whose declared length is shorter than its own frame is refused, not fed past
+    /// its end.** The decoder is handed at most the bytes the block declared: without that cap
+    /// zstd consumes into whatever follows, and the count of bytes still due goes below zero.
+    #[test]
+    fn a_block_declaring_fewer_bytes_than_its_frame_is_refused() {
+        let records: Vec<_> = (0..40).map(|index| a_record(0, 100 + index, 1)).collect();
+        let payload = one_payload(&records);
+        let manifest = a_manifest();
+        let mut compressor = BlockCompressor::from_manifest(&manifest).expect("a window");
+        let honest = compressor
+            .compress(&payload)
+            .expect("it compresses")
+            .to_vec();
+
+        let frame_bytes = honest.len() - COMPRESSED_BLOCK_LENGTH_BYTES;
+        let mut lying = honest.clone();
+        lying[..COMPRESSED_BLOCK_LENGTH_BYTES].copy_from_slice(
+            &u32::try_from(frame_bytes - 8)
+                .expect("a small frame")
+                .to_le_bytes(),
+        );
+        // Something after it, so a decoder fed past the block's end has bytes to run into.
+        lying.extend_from_slice(&honest);
+
+        let mut stream = BlockStream::new(lying.as_slice(), &manifest).expect("a manifest");
+        let mut refused = None;
+        for _ in 0..records.len() + 4 {
+            match stream.next_record() {
+                Some(Ok(_)) => {}
+                Some(Err(fault)) => {
+                    refused = Some(fault);
+                    break;
+                }
+                None => break,
+            }
+        }
+        let refused = refused.expect("a block that lies about its length must be refused");
+        // **The class is this module's, not zstd's.** A truncated frame may decompress to
+        // nothing at all, so which of the "this block has no more to give" refusals arrives
+        // depends on how far the frame got — but a zstd error code is the one answer nobody can
+        // act on, and it is what the version that fed the decoder an empty slice produced.
+        assert!(
+            matches!(
+                refused,
+                BlockReadError::BlockHeadRunsPastItsBlock { .. }
+                    | BlockReadError::RecordRunsPastItsBlock { .. }
+                    | BlockReadError::BlockHoldsMoreThanItDeclared { .. }
+                    | BlockReadError::DamagedRecord { .. }
+                    | BlockReadError::DamagedBlockHead { .. }
+            ),
+            "got {refused}"
+        );
+    }
+
+    /// Every refusal says what it was and carries the number whoever sees it must act on.
+    #[test]
+    fn a_readers_refusals_name_what_broke() {
+        assert_eq!(
+            BlockReadError::RecordRunsPastItsBlock {
+                records_left: 2,
+                bytes_left: 7,
+            }
+            .to_string(),
+            "a record runs past the end of its block, with 2 records still declared and 7 bytes \
+             left"
+        );
+        assert_eq!(
+            BlockReadError::FileEndsInsideABlock {
+                compressed_bytes_left: 91,
+            }
+            .to_string(),
+            "the file ends with 91 compressed bytes of a block still due"
+        );
+        assert_eq!(
+            BlockReadError::WindowLogOutOfRange {
+                look_back_window_log: 40,
+            }
+            .to_string(),
+            format!(
+                "the file declares a look-back window of 2^40 bytes; zstd takes between \
+                 2^{MIN_LOOK_BACK_WINDOW_LOG} and 2^{MAX_LOOK_BACK_WINDOW_LOG}"
+            )
+        );
+
+        let damaged = BlockReadError::from_record(RecordDecodeError::Malformed {
+            field: "observation-count",
+            bytes_in: 6,
+            reason: "a count larger than the body".to_string(),
+        });
+        assert!(matches!(damaged, BlockReadError::DamagedRecord { .. }));
+        assert!(std::error::Error::source(&damaged).is_some());
+
+        let upgrade = BlockReadError::from_record(RecordDecodeError::Unsupported {
+            field: "locus-kind",
+            bytes_in: 6,
+            tag: 9,
+        });
+        assert!(
+            matches!(upgrade, BlockReadError::UnsupportedRecord { .. }),
+            "a tag a later writer added is *upgrade the reader*, not damage"
         );
     }
 
