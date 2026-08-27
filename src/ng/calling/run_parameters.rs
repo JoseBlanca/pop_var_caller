@@ -191,7 +191,12 @@ impl RunParameters {
     ///   samples;
     /// - a sample of the run is missing from the cohort fit's contamination results, so the fit
     ///   and the run were made over different cohorts;
-    /// - one read group is claimed by two samples.
+    /// - a value is carried under a library that is not the sample's own;
+    /// - a library the run declared has no error rate from any sample — including the one case
+    ///   that is data rather than a mis-paired caller, a library whose reads were all refused at
+    ///   admission;
+    /// - a repeat-tract rate was fitted at a ploidy other than the run's, which would make every
+    ///   one of them unreachable at every locus without anything failing.
     pub fn from_prepass(
         generic_by_sample: &[GenericSampleParameters],
         repeat_tract_by_sample: &[SsrSampleParameters],
@@ -265,8 +270,53 @@ impl RunParameters {
 
             for (key, rate) in repeat_tract.substitution_rate_by_stratum() {
                 its_own_read_group(&its_own, key.read_group, sample, "a substitution rate");
+                // **The one axis of this key that is not checked anywhere else, and the only
+                // one whose mismatch is silent.** A tract substitution rate is looked up by
+                // `(read group, tract shape, ploidy)`, and the lookup rebuilds the ploidy from
+                // the run's rather than from the key — so a rate fitted at a different ploidy is
+                // never found at any locus, every tract falls back to the model's stated
+                // constant, and the run finishes with no rate it measured ever used.
+                assert_eq!(
+                    key.ploidy, ploidy,
+                    "sample {sample} fitted a repeat-tract substitution rate at ploidy {} and \
+                     this run is called at ploidy {ploidy}; the lookup rebuilds the key with the \
+                     run's ploidy, so every rate fitted at the other one is unreachable and every \
+                     tract would be called on the constant instead",
+                    key.ploidy
+                );
                 ssr_substitution_rate.insert(key, rate);
             }
+        }
+
+        // **Every library the run declared got a rate, checked here because this is the first
+        // place that holds both lists.** `assemble` derives the read-group axis from the union
+        // above and cannot see a library missing from it: an interior gap makes its contiguity
+        // check fire with a message about ids, and a missing *highest* library shortens the axis
+        // silently — after which `calibration_of` panics at whichever locus first carries one of
+        // its reads, which is the failure this module's header says assembly exists to turn into
+        // a message about the run.
+        //
+        // **It is reachable from data, not only from a mis-paired caller.** A sample's fitted
+        // rates cover the read groups that produced reads (`resolve_error_rates` walks the reads
+        // per group), so a declared library whose reads were all refused by admission has no
+        // entry anywhere.
+        //
+        // **⚑ What such a run should get is a question the design has not answered** — refusing
+        // it, as here, or giving that library the defaulted calibration it would get if it had
+        // been fitted and found unmeasurable. Refusing is the conservative half: it never calls a
+        // locus on a library it silently dropped.
+        for (group, declared) in read_groups.iter() {
+            assert!(
+                error_rate_by_read_group.contains_key(&group),
+                "read group {} ({}) of sample {} is one this run declared and no sample's \
+                 parameters carry an error rate for it — a library whose reads were all refused \
+                 looks exactly like this. It cannot be left out: the read-group axis is built \
+                 from the rates that are here, so this library would be dropped from the run and \
+                 the failure deferred to the first locus carrying one of its reads",
+                group.get(),
+                declared.id,
+                declared.sample
+            );
         }
 
         Ok(Self::assemble(
@@ -2487,6 +2537,97 @@ mod tests {
 
         let repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
             .map(repeat_tract_parameters_of)
+            .collect();
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            two_declared_batches(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// **A repeat-tract rate fitted at another ploidy stops the run**, and it is the one key
+    /// axis whose mismatch nothing downstream would show.
+    ///
+    /// The lookup rebuilds the key with the run's ploidy rather than reading the key's, so a rate
+    /// fitted at a different one is not found at any locus. Nothing fails: every tract is called
+    /// on the model's stated constant instead, and a run that measured a rate for every stratum
+    /// uses none of them. The read-group axis of the same key is checked loudly beside it; this
+    /// axis was not checked at all.
+    #[test]
+    #[should_panic(expected = "the lookup rebuilds the key with the run's ploidy")]
+    fn a_tract_rate_fitted_at_another_ploidy_is_refused() {
+        let groups = the_runs_read_groups();
+        let generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        let mut repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(repeat_tract_parameters_of)
+            .collect();
+        // The same library, the same tract shape, fitted as though the genome were haploid.
+        repeat_tract[1] = SsrSampleParameters::of_substitution_rates(&[(
+            StratumKey {
+                read_group: ReadGroupId(2),
+                stratum: the_shared_stratum(),
+                ploidy: Ploidy::try_new(1).expect("one genome copy"),
+            },
+            Estimate {
+                value: ErrorRate::try_new(0.0053).expect("a legal rate"),
+                provenance: Provenance::FittedHere,
+                observations: 100_000,
+            },
+        )]);
+
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            two_declared_batches(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// **A library the run declared that no sample carries a rate for stops the run, by name.**
+    ///
+    /// **Reachable from data rather than only from a mis-paired caller**: a sample's fitted rates
+    /// cover the read groups that produced reads, so a library whose reads were all refused at
+    /// admission has no entry anywhere. What happens without this check depends on which library
+    /// it is, and the worse case is the quieter one — a missing *highest* library shortens the
+    /// read-group axis with nothing said, and the run then panics at whichever locus first
+    /// carries one of its reads. The fixture drops read group 3, which is that case.
+    #[test]
+    #[should_panic(expected = "no sample's parameters carry an error rate for it")]
+    fn a_declared_library_with_no_rate_anywhere_is_refused() {
+        let groups = the_runs_read_groups();
+        let mut generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        generic[2].error_rate = BTreeMap::new();
+        generic[2].minted_errors = BTreeMap::new();
+
+        let repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                if sample == 2 {
+                    SsrSampleParameters::of_substitution_rates(&[])
+                } else {
+                    repeat_tract_parameters_of(sample)
+                }
+            })
             .collect();
         let _ = RunParameters::from_prepass(
             &generic,
