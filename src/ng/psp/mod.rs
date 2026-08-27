@@ -65,8 +65,9 @@ pub(crate) mod index;
 pub(crate) mod record;
 
 pub use block::{
-    BlockBuilder, BlockCutRuleError, BlockHead, BlockHeadDecodeError, BlockRecords,
-    BlockWriteError, DecodedBlockHead,
+    BlockBuilder, BlockCompressError, BlockCompressor, BlockCutRuleError, BlockHead,
+    BlockHeadDecodeError, BlockRecords, BlockWriteError, COMPRESSED_BLOCK_LENGTH_BYTES,
+    DecodedBlockHead, ZSTD_COMPRESSION_LEVEL, compressed_block_bytes,
 };
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{

@@ -144,7 +144,7 @@ multiple of `genomic_block_size_bp`, and never crosses a contig. The optional by
 early.
 ***Depends:*** C3. ***Source:*** [spec §4.1](../spec/psp_file_format.md).
 
-☐ **D2 — compress a block with a capped look-back window**, and record the window in the header.
+✅ **D2 — compress a block with a capped look-back window**, and record the window in the header.
 ***Depends:*** D1. ***Source:*** [spec §4.2](../spec/psp_file_format.md).
 
 ☐ **D3 — the streaming reader.** Pull decompressed bytes into a rolling buffer, parse a record, hand

@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
+> - **Last completed task (2026-08-27):** **a block is compressed with its look-back window
+> capped at what the file declares** (step D2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That cap
+> is the format's whole design in one parameter: without it zstd sizes its window from the data,
+> so a reader would have to hold a whole block to resolve a back-reference — which is what ties
+> production's block size to its memory. **The step also settles the measurement the architecture
+> document had been asking for since the design was written**: are the four fields at the front of
+> every record cheaper as variable-length integers or as fixed-width ones, compared *after*
+> compression rather than in the abstract. **Variable-length wins on both samples and at every
+> width tried** — on the tomato accession at three reads a position, 4.676 compressed bytes a
+> record against 4.913 with sixteen-byte fixed heads, and on the 279-reads-a-position human sample
+> 15.669 against 16.257. The spec's intuition was right and the conclusion still goes the other
+> way: compression removes 98 % of what a fixed-width head adds, and the 2 % that survives is 5 %
+> of a file that is only 4.7 bytes a record to begin with. **And the narrow widths that would have
+> made fixed width competitive cannot encode the human sample at all** — its coverage is scattered
+> over 644 regions, so a position offset inside one block passes 65,535. So the head stays as it
+> was written, and switching it is no longer an open question.
+> Two defects this step made were caught by its own tests rather than by review: zstd writes into
+> a buffer from its *start*, so the four bytes reserved for a block's length were being overwritten
+> with the frame's own magic; and nothing tested that a frame declines to say how large it inflates
+> to — the mutation turning that back on passed every other test in the module, and it is the trap
+> the spec names by name.
+> [D2](doc/devel/reports/implementations/ng_psp_d2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A block
 > ends when a record's *start* crosses into the next multiple of the genomic block size, never
 > crosses a contig, and closes early once it has reached the declared byte ceiling. `src/ng/psp/block.rs`
