@@ -410,7 +410,7 @@ iterates*, which is contamination **and** the SNP/indel path — not contaminati
 entry above describes the ordinary-site half and is unchanged; this is the tract half it did not
 have to consider.
 
-**E2b. The run says what contamination it used, per sample.**  ☐
+**E2b. The run says what contamination it used, per sample.**  ✅
 **Runs after E3a, not before it** — its own *Depends* line says so, and it is listed here because
 it belongs beside E2a rather than because it comes next.
 **Spec §3.6 requires it and nothing owned it until now** (added 2026-08-24, on the owner's
@@ -426,12 +426,36 @@ and only the counts tell them apart; and whether the batching the frequencies we
 was declared or defaulted, which `SequencingBatches::is_default` exists to answer and which the
 dense `BatchOfEachReadGroup` the mixture holds cannot (C2's review).
 
-`ContaminationView` already carries the first three. **What is missing is a route from there to
-the output**, and a decision this step must take rather than inherit: per sample or per read
-group. The fraction is fitted per read group and a sample may hold several, so a per-sample line
-either picks one or summarises; §3.6 asks for per sample and the finer grain is what the fit
-produces. *Depends:* E2a, E3a. *Source:*
-[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6.
+`ContaminationView` already carries the first three. **What was missing is a route from there to
+the output**, and a decision this step took rather than inherited: per sample or per read group.
+The fraction is fitted per read group and a sample may hold several, so a per-sample line either
+picks one or summarises; §3.6 asks for per sample and the finer grain is what the fit produces.
+
+**⚖ Decided: a row is a read group, and it names the sample it belongs to.** Every sample appears,
+with each of its read groups under it, which is what §3.6 asks for; nothing is picked and nothing
+is averaged, which is what the finer grain is for. A plant sequenced once, in one lane — every
+sample of both benchmark cohorts here — gets exactly one row. **A read group is not a library**:
+`@RG LB` is a grouping key several read groups can share, so the row names the read group's own
+`@RG ID` beside it, and two lanes of one preparation are two rows a reader can tell apart.
+
+**What it carries beyond the four the entry above names**, because two further items were recorded
+as owed here and a third arrived with E2d: **the outlier weight, stated once per run as inherited
+rather than fitted** (folding it into a tract's per-cell warrant would mark every tract of every
+run `Defaulted` and erase the distinction that warrant carries); **how many `(read group,
+candidate)` cells a tract defaulted because the fit does not describe this run's read groups**,
+counted apart from the ordinary absences because it is the one that means the parameters and the
+reads came from different runs; and **whether a tract's contaminant seed was used**, beside the
+rung of the tract ladder its length spectrum came from.
+
+**Those three are per locus and the first four are per run, so they travel separately**: a
+`RunParameterReport` for what is frozen before calling starts, and `RepeatTractProvenance` on the
+locus for what a tract's own parameters rested on. **The latter replaces
+`LocusInference::length_spectrum_rung`** — the rung and the counts are one statement about one
+tract, and two optional fields with one rule between them could disagree.
+[`../arch/calling_em_loop.md`](../arch/calling_em_loop.md) §2's sketch of that type was **three
+generations behind the shipped one** and has been brought up to it as a transcription, with a note
+naming which of C3b, E2e and E2b changed what. *Depends:* E2a, E3a. *Source:*
+[`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6, §4.5.
 
 **E3. The integration fixture — ng calls genotypes.**  **split into E3a ✅ and E3b ✅, 2026-08-26**
 

@@ -57,7 +57,7 @@ use pop_var_caller::ng::calling::likelihood::ssr_emission::{
 };
 use pop_var_caller::ng::calling::{
     CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
-    LocusInference, ReadGroupCalibration, SsrSampleEvidence,
+    LocusInference, ReadGroupCalibration, RepeatTractProvenance, SsrSampleEvidence,
 };
 use pop_var_caller::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
@@ -295,6 +295,19 @@ fn genotype_of(inference: &LocusInference, sample: usize) -> Vec<u16> {
         .iter()
         .map(|allele| allele.get())
         .collect()
+}
+
+/// **What a repeat tract's call rested on**, which every tract carries and no SNP or indel
+/// does — so calling this on an ordinary site's result is a test asking the wrong path.
+fn tract_record(inference: &LocusInference) -> RepeatTractProvenance {
+    inference
+        .repeat_tract
+        .expect("every called repeat tract carries what its parameters rested on")
+}
+
+/// Which rung of the tract ladder that record's prior shape came from.
+fn rung_of(inference: &LocusInference) -> LengthSpectrumRung {
+    tract_record(inference).length_spectrum_rung()
 }
 
 /// **ng calls genotypes at a SNP, and the three a reader can derive by hand come out.**
@@ -816,6 +829,18 @@ fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
 /// candidate-major rather than read-group-major hands library 0's reads another group's
 /// polymerase.
 fn tract_strata() -> StratumFits {
+    tract_strata_describing(BTreeMap::from([
+        (ReadGroupId(0), 0),
+        (ReadGroupId(1), 1),
+        (ReadGroupId(2), 1),
+    ]))
+}
+
+/// The same fit, over whichever of the run's libraries it claims to describe — what the fixture
+/// about a library the fit never saw needs.
+fn tract_strata_describing(
+    slippage_group_of_each_library: BTreeMap<ReadGroupId, u32>,
+) -> StratumFits {
     let level = LevelProvenance {
         source: LevelSource::Cell,
         curve: None,
@@ -878,11 +903,7 @@ fn tract_strata() -> StratumFits {
             fitted_stratum(6, 0.04, vec![0.10, 0.30, 0.44, 0.11, 0.05], 20.0),
             fitted_stratum(7, 0.06, vec![0.09, 0.21, 0.43, 0.19, 0.08], 25.0),
         ],
-        BTreeMap::from([
-            (ReadGroupId(0), 0),
-            (ReadGroupId(1), 1),
-            (ReadGroupId(2), 1),
-        ]),
+        slippage_group_of_each_library,
     )
 }
 
@@ -894,9 +915,14 @@ fn tract_strata() -> StratumFits {
 /// run's read-group axis and the locus's warrant is folded over all of it. The rate differs per
 /// stratum, so a lookup keyed by the wrong repeat count is a different number.
 fn tract_substitution_rates() -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+    tract_substitution_rates_over(TRACT_READ_GROUPS)
+}
+
+/// The same, fitted for the first `libraries` of the run and for none of the rest.
+fn tract_substitution_rates_over(libraries: usize) -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
     let period = SsrPeriod::try_new(2).expect("a dinucleotide");
     let mut rates = BTreeMap::new();
-    for library in 0..TRACT_READ_GROUPS {
+    for library in 0..libraries {
         for repeats in TRACT_CANDIDATE_REPEATS {
             rates.insert(
                 StratumKey {
@@ -1060,8 +1086,8 @@ fn three_samples_at_a_repeat_tract_are_called_from_their_reads() {
     assert!(inference.converged);
 
     assert_eq!(
-        inference.length_spectrum_rung,
-        Some(LengthSpectrumRung::StratumsOwnFit),
+        rung_of(&inference),
+        LengthSpectrumRung::StratumsOwnFit,
         "the tract's prior came from its own stratum's fitted length spectrum"
     );
     assert_eq!(
@@ -1107,8 +1133,8 @@ fn a_tract_in_a_run_that_fitted_nothing_is_still_called_and_says_what_it_rested_
     assert_eq!(genotype_of(&inference, 1), vec![0, 1]);
     assert_eq!(genotype_of(&inference, 2), vec![0, 0]);
     assert_eq!(
-        inference.length_spectrum_rung,
-        Some(LengthSpectrumRung::StatedFlat),
+        rung_of(&inference),
+        LengthSpectrumRung::StatedFlat,
         "the ladder always answers, and says from how far down"
     );
     assert_eq!(inference.weakest_provenance, Provenance::Defaulted);
@@ -1131,8 +1157,8 @@ fn one_sample_is_called_at_a_tract_on_its_own_reads() {
     assert_eq!(inference.per_sample.len(), 1);
     assert_eq!(genotype_of(&inference, 0), vec![1, 1]);
     assert_eq!(
-        inference.length_spectrum_rung,
-        Some(LengthSpectrumRung::StratumsOwnFit),
+        rung_of(&inference),
+        LengthSpectrumRung::StratumsOwnFit,
         "one sample reaches the same rung as a panel: the spectrum is fitted across tracts"
     );
 }
@@ -1227,4 +1253,109 @@ fn a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele() {
         Provenance::FittedHere,
         "every slippage number and every substitution rate this tract read was the fit's"
     );
+}
+
+/// **What a tract's call rested on comes out beside the genotypes, and a SNP's does not.**
+///
+/// This is the end-to-end half of what the run has to be able to say about itself. A genotype
+/// scored under a fitted length spectrum and one scored under a stated flat shape are different
+/// claims; so are one whose reads were shared out with a contaminant and one whose were not.
+/// Nothing in the called genotype says which, so the record carries it.
+///
+/// **The numbers are worth writing out, and the middle run is arranged so that no two of them
+/// are the same.** The run has three libraries and the tract two candidates, so the parameter
+/// table is six cells — over every library of the run rather than the one whose reads arrived,
+/// because that is the axis the read likelihood's context table is indexed on.
+///
+/// - **Fully fitted**: the fit names every library and every stratum these candidates reach, so
+///   none of the six falls back.
+/// - **Partly fitted**: the slippage fit names library 0 only and the substitution rates are
+///   fitted for libraries 0 and 1, so the four numbers come out **6, 4, 4 and 2** — and the two
+///   that coincide are the ones that must, since every one of library 1's and 2's cells is
+///   defaulted for the same reason.
+/// - **Fitted nowhere**: every cell falls back, by the reason that means the parameters and the
+///   reads came from different runs.
+#[test]
+fn a_tract_says_what_its_parameters_rested_on_and_a_snp_says_nothing() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+    ];
+
+    let clean = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+    let record = tract_record(&clean);
+    assert_eq!(
+        record.scoring_cells(),
+        TRACT_READ_GROUPS * 2,
+        "three libraries over two candidates"
+    );
+    assert_eq!(record.cells_with_no_fitted_slippage(), 0);
+    assert_eq!(record.cells_whose_read_group_the_fit_does_not_describe(), 0);
+    assert_eq!(record.cells_with_no_fitted_substitution_rate(), 0);
+    assert!(
+        !record.contaminant_term_was_built(),
+        "this run's fit found no contamination, so the mixture has two terms"
+    );
+
+    // **A fit that reaches part of the run, so that the four counts are four different-sized
+    // answers rather than all-or-nothing.** Without this arm every count here is either 0 or the
+    // cell total, and any two of the record's fields could be swapped unnoticed.
+    let partly = call_tract(
+        &per_sample,
+        &tract_strata_describing(BTreeMap::from([(ReadGroupId(0), 0)])),
+        &tract_substitution_rates_over(2),
+    );
+    let partial = tract_record(&partly);
+    assert_eq!(partial.scoring_cells(), 6);
+    assert_eq!(
+        partial.cells_with_no_fitted_slippage(),
+        4,
+        "libraries 1 and 2 over both candidates"
+    );
+    assert_eq!(
+        partial.cells_whose_read_group_the_fit_does_not_describe(),
+        4,
+        "all four, because both candidates' strata are fitted and only the libraries are not"
+    );
+    assert_eq!(
+        partial.cells_with_no_fitted_substitution_rate(),
+        2,
+        "library 2's two cells; libraries 0 and 1 have a rate at both strata"
+    );
+
+    // **A run that fitted nothing falls back in every cell, and says so** — the same tract, the
+    // same reads, over a fit that describes no library and no stratum.
+    let unfitted = call_tract(
+        &per_sample,
+        &StratumFits::over(&[], BTreeMap::new()),
+        &BTreeMap::new(),
+    );
+    let fell_back = tract_record(&unfitted);
+    assert_eq!(fell_back.scoring_cells(), TRACT_READ_GROUPS * 2);
+    assert_eq!(
+        fell_back.cells_with_no_fitted_slippage(),
+        TRACT_READ_GROUPS * 2
+    );
+    assert_eq!(
+        fell_back.cells_whose_read_group_the_fit_does_not_describe(),
+        TRACT_READ_GROUPS * 2,
+        "a fit naming no library at all is the absence that means the parameters and the reads \
+         came from different runs"
+    );
+    assert_eq!(
+        fell_back.cells_with_no_fitted_substitution_rate(),
+        TRACT_READ_GROUPS * 2
+    );
+
+    // **And the contaminant term is reported where it was built.**
+    let contaminated = call_contaminated_tract(&per_sample, 0.08);
+    assert!(tract_record(&contaminated).contaminant_term_was_built());
+
+    // A SNP/indel locus carries no such record: its prior comes from the population's frequency
+    // spectrum, whose ladder has different rungs, and it has no per-library stutter table at all.
+    let snp = call(&[
+        sample_locus(vec![showed(b"T", 20)]),
+        sample_locus(vec![showed(b"A", 20)]),
+    ]);
+    assert_eq!(snp.repeat_tract, None);
 }

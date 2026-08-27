@@ -52,6 +52,10 @@ use std::collections::BTreeMap;
 
 use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::{FittedSpectrum, project_spectrum_seed};
+use super::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use super::run_report::{
+    ContaminationUsed, ReadGroupContamination, RunParameterReport, SequencingBatchingUsed,
+};
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
 use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
@@ -62,6 +66,7 @@ use crate::ng::parameter_estimation::joint::fit::FrequencyDensity;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::ng::parameter_estimation::ssr::StratumKey;
+use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId};
 
 /// **The run's frequency spectrum, owned** — the joint fit's allele-frequency density written
@@ -431,6 +436,91 @@ impl RunParameters {
         self.calibration_by_read_group.len()
     }
 
+    /// **What this run scored its reads under, in a form an output can print** — the
+    /// contamination fraction each read group was corrected for, the batching those fractions
+    /// were drawn against, and the repeat-tract constant nothing measured.
+    ///
+    /// **A genotype computed at a fraction of 3 in 100 and one computed at zero are
+    /// indistinguishable in the call**, which is why spec §3.6 requires the run to state what it
+    /// used. This is the route from the parameters to that statement; it reads them and computes
+    /// nothing.
+    ///
+    /// **The grain is one row per read group, naming the sample it belongs to.** The spec asks
+    /// for the fraction per sample and the fit produces one per read group; a sample's read
+    /// groups can carry genuinely different fractions, so a per-sample line would have to pick
+    /// one or average them and would erase the claim that they differ. A sample sequenced once,
+    /// in one lane — every sample of both benchmark cohorts here — gets exactly one row.
+    ///
+    /// `read_groups` is the run's read-group table, which is where the sample names, the read
+    /// groups' own `@RG ID`s and the library names live; the parameters carry none of them.
+    ///
+    /// # Panics
+    ///
+    /// If `read_groups` does not describe this run — a different read-group count, or a
+    /// different sample count. Both are the same failure as the batching check at assembly: two
+    /// tables minted from different inputs, joined positionally. Here the symptom would be a
+    /// fraction reported under another read group's name, which is worse than a crash because it
+    /// looks like an answer.
+    #[must_use]
+    pub fn report(&self, read_groups: &ReadGroups) -> RunParameterReport {
+        assert_eq!(
+            read_groups.len(),
+            self.calibration_by_read_group.len(),
+            "the read-group table names {} libraries and the run's parameters cover {}; the two \
+             were minted from different inputs, and joining them positionally would report one \
+             library's contamination fraction under another's name",
+            read_groups.len(),
+            self.calibration_by_read_group.len()
+        );
+        assert_eq!(
+            read_groups.read_groups_per_sample().len(),
+            self.inbreeding_coefficient_by_sample.len(),
+            "the read-group table names {} samples and the run's parameters cover {}; the sample \
+             index each row carries is an index into the run's sample order, which is this \
+             table's own first-seen order",
+            read_groups.read_groups_per_sample().len(),
+            self.inbreeding_coefficient_by_sample.len()
+        );
+
+        // **Absent, not a fitted zero.** The gathered list is empty exactly where no read group
+        // identified a fraction, which is the same condition `view` reads to hand calling the
+        // uncontaminated parameters — so the two cannot drift apart.
+        let contamination = if self.contamination_by_read_group.is_empty() {
+            ContaminationUsed::NoneFitted
+        } else {
+            // **Walked by sample and then by that sample's read groups**, so the rows come out in
+            // the run's sample order however the read-group ids are spread across the samples. A
+            // walk over the read-group axis instead would come out in id order, which is the same
+            // list only where the two orders agree — and they agree in every fixture that gives
+            // each sample one library.
+            let mut rows = Vec::with_capacity(self.contamination_by_read_group.len());
+            for (sample, of_sample) in read_groups.read_groups_per_sample().iter().enumerate() {
+                for &read_group in &of_sample.read_groups {
+                    let declared = read_groups.get(read_group);
+                    rows.push(ReadGroupContamination {
+                        sample,
+                        sample_name: of_sample.sample.clone(),
+                        read_group,
+                        read_group_name: declared.id.clone(),
+                        library: declared.library.clone(),
+                        estimate: self.contamination_by_read_group[read_group.get() as usize],
+                    });
+                }
+            }
+            ContaminationUsed::PerReadGroup(rows)
+        };
+
+        let sequencing_batching = if self.sequencing_batches.is_default() {
+            SequencingBatchingUsed::DefaultedToOneBatch
+        } else {
+            SequencingBatchingUsed::Declared {
+                batches: self.sequencing_batches.batch_count(),
+            }
+        };
+
+        RunParameterReport::new(contamination, sequencing_batching, DEFAULT_OUTLIER_WEIGHT)
+    }
+
     /// Who was sequenced beside whom, as the run was told.
     ///
     /// **The one thing here that is declared rather than fitted**, and the one an output has to
@@ -514,7 +604,10 @@ mod tests {
     use crate::ng::parameter_estimation::joint::contamination::NotIdentifiedReason;
     use crate::ng::parameter_estimation::joint::fit::MAX_PROJECTED_PANEL;
     use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum};
+    use crate::ng::read::input::read_groups::NameOrigin;
+    use crate::ng::types::BatchId;
     use crate::ng::types::SsrPeriod;
+    use std::collections::BTreeSet;
 
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("a diploid")
@@ -1539,5 +1632,462 @@ mod tests {
             BTreeMap::new(),
             diploid(),
         );
+    }
+
+    // ── E2b: what the run says it used ────────────────────────────────────────────────────
+
+    /// **A run of three read groups over two samples, where the sample order and the read-group
+    /// order are deliberately different.**
+    ///
+    /// Read groups are minted in the order given, samples in first-seen order: `rgA` and `rgC`
+    /// both name `s2`, so sample 0 is `s2` holding read groups 0 and 2, and sample 1 is `s1`
+    /// holding read group 1. **A report walked over the read-group axis would come out
+    /// `rgA, rgB, rgC`; walked over the samples it comes out `rgA, rgC, rgB`** — which is the
+    /// accident every contamination fixture in *this* file shared, each giving one sample one
+    /// read group so that the two walks were the same list. (The loop's own fixtures include one
+    /// sample with two read groups — `summarise_condition`'s
+    /// `a_sample_with_two_libraries_reads_its_own_samples_batch` — but there the two are adjacent
+    /// identifiers, so the two walks still agree.)
+    fn two_samples_one_of_them_two_read_groups() -> ReadGroups {
+        ReadGroups::of_libraries(&[("rgA", "s2"), ("rgB", "s1"), ("rgC", "s2")])
+    }
+
+    /// The same run's calibration inputs — three read groups, all measured, which this step's
+    /// tests do not read but `assemble` requires.
+    fn three_calibrated_read_groups() -> (
+        BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        BTreeMap<ReadGroupId, MintedReadErrors>,
+    ) {
+        one_read_group(
+            &[
+                (0, fitted_rate(0.002, Provenance::FittedHere)),
+                (1, fitted_rate(0.002, Provenance::FittedHere)),
+                (2, fitted_rate(0.002, Provenance::FittedHere)),
+            ],
+            &[
+                (0, minted(0.004, 500)),
+                (1, minted(0.004, 500)),
+                (2, minted(0.004, 500)),
+            ],
+        )
+    }
+
+    /// **The run says what contamination it used, one row per read group, listed under its
+    /// sample** — spec §3.6's requirement, at the grain the fit produces.
+    ///
+    /// The three fractions are all different, so a row that read another read group's view is a
+    /// different number rather than the same one; and the sample a row names is checked against
+    /// the run's sample order, which is not the read-group order here.
+    #[test]
+    fn every_read_group_reports_its_own_fraction_under_its_own_sample() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let contamination = BTreeMap::from([
+            (ReadGroupId(0), estimated(0.03, 4_000)),
+            (ReadGroupId(1), estimated(0.07, 2_000)),
+            (ReadGroupId(2), estimated(0.05, 1_000)),
+        ]);
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &contamination,
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        let rows = match report.contamination() {
+            ContaminationUsed::PerReadGroup(rows) => rows,
+            ContaminationUsed::NoneFitted => panic!("three read groups were measured"),
+        };
+        assert_eq!(
+            rows.len(),
+            3,
+            "one row per read group, none summarised away"
+        );
+
+        // **Sample order, not read-group order**: s2's two read groups first, then s1's.
+        let named: Vec<(usize, &str, u32, f64)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.sample,
+                    row.sample_name.as_ref(),
+                    row.read_group.get(),
+                    row.estimate.fraction,
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![(0, "s2", 0, 0.03), (0, "s2", 2, 0.05), (1, "s1", 1, 0.07),]
+        );
+
+        // The two evidence counts and the source travel beside each fraction, unchanged.
+        assert_eq!(rows[0].estimate.markers_with_reads, 4_000);
+        assert_eq!(rows[0].estimate.reads_on_markers, 12_000);
+        assert_eq!(rows[1].estimate.markers_with_reads, 1_000);
+        assert_eq!(rows[1].estimate.reads_on_markers, 3_000);
+        assert_eq!(rows[2].estimate.markers_with_reads, 2_000);
+        assert_eq!(rows[2].estimate.reads_on_markers, 6_000);
+        for row in rows {
+            assert_eq!(
+                row.estimate.source,
+                ContaminationSource::ThisReadGroupsReads
+            );
+            assert!(row.was_measured());
+        }
+        // Every read group of this run is its own library, so the two names agree here — which
+        // is exactly why `a_librarys_two_lanes_are_two_rows_that_name_one_library` exists.
+        assert_eq!(rows[0].read_group_name.as_ref(), "rgA");
+        assert_eq!(rows[1].read_group_name.as_ref(), "rgC");
+        assert_eq!(rows[2].read_group_name.as_ref(), "rgB");
+    }
+
+    /// **One sample's two read groups carry two different fractions, and the report keeps
+    /// both.**
+    ///
+    /// This is the whole reason the row is a read group rather than a sample: a neighbouring
+    /// library hopping its index contaminates the run it is on and not the plant,
+    /// so a per-sample line would have to pick one of 0.06 and 0.0008 or average them, and each
+    /// of the three answers says something the fit did not.
+    #[test]
+    fn a_samples_two_read_groups_keep_their_two_fractions() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let contamination = BTreeMap::from([
+            (ReadGroupId(0), estimated(0.06, 4_000)),
+            (ReadGroupId(1), estimated(0.01, 4_000)),
+            (ReadGroupId(2), estimated(0.0008, 4_000)),
+        ]);
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &contamination,
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        let of_sample_zero: Vec<f64> = report
+            .contamination()
+            .rows()
+            .iter()
+            .filter(|row| row.sample == 0)
+            .map(|row| row.estimate.fraction)
+            .collect();
+        assert_eq!(of_sample_zero, vec![0.06, 0.0008]);
+    }
+
+    /// **A library sequenced over two lanes is two rows naming one library, and only the read
+    /// group's own name tells them apart.**
+    ///
+    /// `@RG LB` is a grouping key rather than an identity — the lanes of one preparation share
+    /// it — so a row that carried the library name alone would show the same name twice against
+    /// two different fractions, and a reader could not say which lane either belonged to.
+    ///
+    /// **Two lanes of one preparation really can differ in this number**, which is why the two
+    /// rows are not a redundancy: index hopping happens on a flowcell, so a library run beside a
+    /// contaminated neighbour on one lane and alone on another picks up stray reads on the first.
+    ///
+    /// Every other fixture here is built by a helper that names each read group's library after
+    /// the read group, so on those the two names agree and neither can be told from the other.
+    #[test]
+    fn a_librarys_two_lanes_are_two_rows_that_name_one_library() {
+        // One plant, one library preparation, two lanes; a second plant beside it.
+        let groups = ReadGroups::of_lanes(&[
+            ("lane1", "plant", "prep1"),
+            ("lane2", "plant", "prep1"),
+            ("lane3", "other", "prep2"),
+        ]);
+        let (rates, totals) = three_calibrated_read_groups();
+        let contamination = BTreeMap::from([
+            (ReadGroupId(0), estimated(0.04, 4_000)),
+            (ReadGroupId(1), estimated(0.0002, 4_000)),
+            (ReadGroupId(2), estimated(0.01, 4_000)),
+        ]);
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &contamination,
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        let named: Vec<(&str, &str, &str, f64)> = report
+            .contamination()
+            .rows()
+            .iter()
+            .map(|row| {
+                (
+                    row.sample_name.as_ref(),
+                    row.read_group_name.as_ref(),
+                    row.library.value.as_ref(),
+                    row.estimate.fraction,
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("plant", "lane1", "prep1", 0.04),
+                ("plant", "lane2", "prep1", 0.0002),
+                ("other", "lane3", "prep2", 0.01),
+            ]
+        );
+
+        // **And whether that library name is the file's or ours travels with it.** `of_lanes`
+        // builds runs whose headers declared `@RG LB`, so every row here says `Declared`; a
+        // report that dropped the origin would say the same thing about a name this pipeline
+        // invented, which is a claim about the run that nobody made.
+        for row in report.contamination().rows() {
+            assert_eq!(row.library.origin, NameOrigin::Declared);
+        }
+    }
+
+    /// **A library that could not be measured and one measured and found clean report the same
+    /// fraction and different rows**, which is the distinction spec §3.6 says must survive to
+    /// the output: only the evidence counts tell them apart.
+    #[test]
+    fn a_library_nothing_could_be_measured_on_is_not_a_library_measured_and_clean() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let contamination = BTreeMap::from([
+            (ReadGroupId(0), estimated(0.03, 4_000)),
+            // Measured, and found clean.
+            (ReadGroupId(1), estimated(0.0, 4_000)),
+            // Measured and refused — and read group 2 gets the same fraction from a different
+            // absence.
+            (
+                ReadGroupId(2),
+                ContaminationEstimate::NotIdentified {
+                    reason: NotIdentifiedReason::TooFewMarkers,
+                },
+            ),
+        ]);
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &contamination,
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        let rows = report.contamination().rows();
+        let clean = rows
+            .iter()
+            .find(|row| row.read_group == ReadGroupId(1))
+            .expect("the library that was measured and found clean");
+        let unmeasured = rows
+            .iter()
+            .find(|row| row.read_group == ReadGroupId(2))
+            .expect("the library nothing could be measured on");
+        assert_eq!(clean.estimate.fraction, unmeasured.estimate.fraction);
+        assert!(clean.was_measured());
+        assert!(!unmeasured.was_measured());
+        assert_eq!(unmeasured.estimate.markers_with_reads, 0);
+        assert_eq!(unmeasured.estimate.reads_on_markers, 0);
+        // **And the one field of an unmeasured row that is true of nothing.** No variant of
+        // `ContaminationSource` says *nothing was fitted here*, so the row carries a value an
+        // output would print as a claim; it is pinned so that changing it is a decision rather
+        // than a drift, and `was_measured` stays the gate a consumer reads first.
+        assert_eq!(
+            unmeasured.estimate.source,
+            ContaminationSource::TheWholeSamplesReads,
+            "meaningless where nothing was measured — read the counts before the source"
+        );
+    }
+
+    /// **A run whose fit identified nothing anywhere says so, rather than reporting three zero
+    /// fractions.** *Absent, not a fitted zero*: what this fixture exercises is a fit that
+    /// emitted no estimate for any read group — which is what a one-sample run always gets, since
+    /// contamination is a comparison between samples — and the report says *nothing was
+    /// estimable* rather than three zeroes, because those are different claims.
+    #[test]
+    fn a_run_that_fitted_no_contamination_reports_none_rather_than_zeroes() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        assert_eq!(report.contamination(), &ContaminationUsed::NoneFitted);
+        assert!(report.contamination().rows().is_empty());
+    }
+
+    /// **The batching those fractions were drawn against travels with them**, and a declared
+    /// batching of one batch is not the same claim as a defaulted one — the dense per-read-group
+    /// view the caller holds cannot tell them apart, because they are the same values.
+    #[test]
+    fn the_report_says_whether_the_batching_was_declared_or_assumed() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let assemble = |batches: SequencingBatches| {
+            RunParameters::assemble(
+                &rates,
+                &totals,
+                &BTreeMap::from([(ReadGroupId(0), estimated(0.03, 4_000))]),
+                batches,
+                vec![outbred(), outbred()],
+                human_like_seed(),
+                no_strata(),
+                BTreeMap::new(),
+                diploid(),
+            )
+        };
+
+        let defaulted = assemble(SequencingBatches::all_together(&groups));
+        assert_eq!(
+            defaulted.report(&groups).sequencing_batching(),
+            SequencingBatchingUsed::DefaultedToOneBatch
+        );
+
+        // s2's two read groups ran together and s1's ran apart, which is a partition no sample
+        // straddles — the one shape a declaration of two batches can take on this run.
+        let two = SequencingBatches::declared(
+            &groups,
+            &[
+                BTreeSet::from([ReadGroupId(0), ReadGroupId(2)]),
+                BTreeSet::from([ReadGroupId(1)]),
+            ],
+        )
+        .expect("a partition no sample straddles");
+        assert_eq!(
+            assemble(two).report(&groups).sequencing_batching(),
+            SequencingBatchingUsed::Declared { batches: 2 }
+        );
+
+        // **And the case this test's own headline is about, which the two above do not reach.**
+        // Two batches are told from a defaulted one by their count alone; a run that *declares*
+        // one batch holding every read group carries the same batch identifiers as a run that
+        // declared nothing, so `is_default` is the only thing that separates them — and a
+        // frequency somebody chose to draw over the whole cohort is a different claim from one
+        // drawn over it because nobody said otherwise.
+        let one = SequencingBatches::declared(
+            &groups,
+            &[BTreeSet::from([
+                ReadGroupId(0),
+                ReadGroupId(1),
+                ReadGroupId(2),
+            ])],
+        )
+        .expect("one batch holding every read group is a partition");
+        assert_eq!(one.of_each_read_group().0, [BatchId(0); 3]);
+        assert_eq!(
+            SequencingBatches::all_together(&groups)
+                .of_each_read_group()
+                .0,
+            [BatchId(0); 3],
+            "the two batchings carry identical identifiers, which is why the report cannot read \
+             them off the dense view"
+        );
+        assert_eq!(
+            assemble(one).report(&groups).sequencing_batching(),
+            SequencingBatchingUsed::Declared { batches: 1 },
+            "declared, not defaulted, though every read group is in one batch either way"
+        );
+    }
+
+    /// **The run states the repeat-tract outlier weight and states that nothing fitted it.**
+    ///
+    /// It is one run-wide constant, so it cannot enter a tract's per-`(read group, candidate)`
+    /// warrant without marking every tract of every run as defaulted; reported once per run it
+    /// says the same true thing and erases nothing. The value is the read likelihood's own
+    /// constant rather than a second spelling of 0.01.
+    #[test]
+    fn the_run_states_the_outlier_weight_it_inherited() {
+        let groups = two_samples_one_of_them_two_read_groups();
+        let (rates, totals) = three_calibrated_read_groups();
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let report = run.report(&groups);
+        assert_eq!(
+            report.inherited_repeat_tract_outlier_weight(),
+            DEFAULT_OUTLIER_WEIGHT
+        );
+        assert_eq!(report.inherited_repeat_tract_outlier_weight(), 0.01);
+    }
+
+    /// **A read-group table that does not describe this run is refused**, because the join is
+    /// positional: the sample names and the library names come from the table and the fractions
+    /// from the fit, so two tables minted from different inputs would report one library's
+    /// fraction under another's name — an answer rather than a crash.
+    #[test]
+    #[should_panic(expected = "names 3 libraries and the run's parameters cover 1")]
+    fn a_report_over_another_runs_read_groups_is_refused() {
+        let (rates, totals) = one_read_group(
+            &[(0, fitted_rate(0.002, Provenance::FittedHere))],
+            &[(0, minted(0.004, 500))],
+        );
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            one_batch_for(&rates, &totals, 1),
+            vec![outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+        let _ = run.report(&two_samples_one_of_them_two_read_groups());
+    }
+
+    /// **And the other axis**, which a run of one library per sample cannot tell from the
+    /// first: the sample index each row carries indexes the run's own sample order.
+    #[test]
+    #[should_panic(expected = "names 2 samples and the run's parameters cover 1")]
+    fn a_report_over_another_runs_samples_is_refused() {
+        let (rates, totals) = three_calibrated_read_groups();
+        let groups = two_samples_one_of_them_two_read_groups();
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            one_batch(3, 1),
+            vec![outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        );
+        let _ = run.report(&groups);
     }
 }

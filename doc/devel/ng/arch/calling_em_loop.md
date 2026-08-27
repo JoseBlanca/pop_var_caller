@@ -111,8 +111,8 @@ pub struct CallingScratch {
 
 /// One locus's outcome. Evidence of HOW it was reached travels with it: nothing
 /// downstream can otherwise tell a settled loop from a capped one (spec §6), a fitted
-/// parameter from a defaulted one, or a seed that met its target from one that could not
-/// (calling_priors.md §5).
+/// parameter from a defaulted one, or a call resting on a measured prior shape from one
+/// resting on a stated constant (population_diversity.md §4.4).
 pub struct LocusInference {
     pub region: GenomeRegion,
     pub alleles: CandidateAlleles,             // final — post-discovery, post-prune
@@ -121,10 +121,28 @@ pub struct LocusInference {
     pub converged: bool,                       // false = hit the pass cap; EMITTED, never dropped
     pub passes: u32,                           // instrument for Q4
     pub weakest_provenance: Provenance,
-    pub seed_diversity_unreachable: bool,      // calling_priors.md §5's marker
+    pub repeat_tract: Option<RepeatTractProvenance>,  // None at a SNP/indel
+    site_quality: Phred,                       // written by the worker, overwritten by the
+                                               // correction stage — calling_quality.md §3.5
+    artifact_test_counts: Option<ArtifactTestCounts>, // calling_quality.md §3.3
 }
-pub struct SampleGenotypeCall { pub genotype: Genotype, pub genotype_quality: Phred }
+pub enum SampleGenotypeCall {
+    Called { genotype: Genotype, genotype_quality: Phred },
+    Missing,                                   // the candidate step ruled this sample out
+}
 ```
+
+> **This block was three generations behind the shipped type and is a transcription of it, not a
+> new decision** (2026-08-27). Four steps changed it and each recorded its change in its own
+> implementation report rather than here: **C3b** turned `SampleGenotypeCall` from a struct into
+> an enum, so a sample the allele cap ruled uncallable can be emitted as missing, and added
+> `site_quality` and `artifact_test_counts` on
+> [`calling_quality.md`](../spec/calling_quality.md) §10's instruction; **E2e** deleted
+> `seed_diversity_unreachable`, whose whole subject was a refusal that no longer exists, and put
+> the tract ladder's rung in its place; **E2b** folded that rung together with the tract's
+> defaulted-cell counts into one `RepeatTractProvenance`, so that a locus cannot report a rung
+> without the counts or the counts without a rung. The two private fields are private for
+> reasons `calling_quality.md` §3.5 gives and `LocusInference`'s own doc comment repeats.
 
 **The two arguments the seam takes and this doc has not shaped yet, sketched here because a coder
 cannot build against `call_locus` (§3.1) without them.** Both are assemblies of what other documents

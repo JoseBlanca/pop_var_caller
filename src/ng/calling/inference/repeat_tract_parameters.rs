@@ -658,6 +658,23 @@ impl TractScoringFits {
         self.substitution_defaulted
     }
 
+    /// **Whether this tract's row carried the mixture's third term** — how common each reachable
+    /// tract length is in the contaminating population.
+    ///
+    /// True exactly where the run's parameter fit found a contamination fraction, which is what
+    /// decides whether a tract gets the three-term form or the two (spec §4.5.1). It is asked so
+    /// that the locus's own record can say it: a genotype scored with a share of its reads given
+    /// away to a contaminant and one scored without are different claims, and the call does not
+    /// say which.
+    ///
+    /// **A default-constructed value answers `false`, and that is the honest answer** rather
+    /// than a gap — nothing has been gathered, so no term was built.
+    #[inline]
+    #[must_use]
+    pub fn contaminant_term_was_built(&self) -> bool {
+        self.run_fitted_contamination
+    }
+
     /// **The weakest warrant behind any parameter that reached this tract** — what the locus's
     /// record is entitled to claim (spec §4.4).
     ///
