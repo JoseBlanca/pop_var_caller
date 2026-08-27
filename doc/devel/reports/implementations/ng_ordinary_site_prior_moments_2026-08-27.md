@@ -1044,3 +1044,38 @@ after every deletion.
 
 Library target 4,853 → **4,904**; `cargo test --tests` green across every integration target;
 clippy, fmt and the 25 broken intra-doc links all unchanged.
+
+---
+
+## Two corrections after C3, both from checking a claim against the code
+
+**⛦ The first was a cost claim in the C4 decision I put to the owner, and it was wrong.** Pricing
+the option *run the existing runs-of-homozygosity estimator alongside*, I wrote that it "eats
+per-sample windowed histograms the joint route never builds — so this is a second pass over the
+reads for every sample". **The histograms are built.** `generic/accumulators.rs` fills them per
+sample during the ordinary per-sample accumulation whenever the inbreeding mode is `Fitted`, and
+`generic/estimate.rs` already fits the coefficient from them and puts it on
+`GenericSampleParameters`. Nothing extra is read.
+
+What is actually missing is one join: **nothing takes those per-sample coefficients, means them
+unweighted over the panel, and hands the mean to the correction** — because the run assembly that
+would own that join is not built. The mechanism behind the error is recorded in
+`ai/skills/reporting-in-chat/SKILL.md`'s failure log: the design document says the runs estimator
+*lives in* the per-sample route, which is a statement about **where**, and I turned it into a
+statement about **what it would cost to get** — inside a paragraph asking the owner to choose
+between options priced in those units.
+
+**⛦ The second is a defect in C3 that the same check surfaced.** `InbreedingSource`'s
+below-the-floor warning **cannot fire on a coefficient that came from `fit_inbreeding`**: that
+function *refuses* below 3,000 windows, returning `InbreedingNotFittable` and naming the count and
+the floor, so a run never obtains a thin coefficient to warn about. The branch guards a report
+assembled by hand or by a future route that reaches the coefficient another way, and both the
+variant and its test now say so — **a test whose subject cannot arise on the shipped path reads as
+coverage it is not.**
+
+**And what spec §4.2 actually asks for is a warning when the window count is *near* the floor,
+which names no number.** This report does not invent one. `runs::resolution_at` exists and its own
+documentation forbids using it as a threshold — measured, three fits above it on genomes with **no
+runs at all** would have been called detections. So the count is printed and the reader judges,
+which is the same treatment the segregating count and the two-route gap get. **Where "near" goes is
+a banked question for the owner**, beside the other two.

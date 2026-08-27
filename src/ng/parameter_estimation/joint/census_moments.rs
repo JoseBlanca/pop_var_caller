@@ -528,9 +528,24 @@ pub enum InbreedingSource {
     /// is also what the derivation asks for — realized autozygosity is what a run of homozygosity
     /// *is* — and it works at one sample.
     ///
-    /// `windows` is how many the model was fitted over. **Below
+    /// `windows` is how many the model was fitted over, which spec §7 asks a run to print because
+    /// the estimator's own floor is
     /// [`MIN_WINDOWS_TO_FIT_INBREEDING`](crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING)
-    /// what it returns is its own noise**, and the report says so.
+    /// — 3,000 — below which what it returns is its own noise.
+    ///
+    /// **⚠ The below-the-floor warning this report carries cannot fire on a coefficient that came
+    /// from `fit_inbreeding`, and that is worth knowing rather than discovering.** That function
+    /// **refuses** below the floor — `ParameterEstimationError::InbreedingNotFittable`, naming the
+    /// window count and the floor — so a run never gets a thin coefficient to report in the first
+    /// place. What the warning guards is a report assembled by hand, or by some future route that
+    /// reaches the coefficient without going through that refusal.
+    ///
+    /// **⚑ What spec §4.2 actually asks for is a warning when the count is *near* the floor, and
+    /// it names no number.** This report does not invent one: `runs::resolution_at` exists and its
+    /// own documentation forbids being used as a threshold — measured, three fits above it on
+    /// genomes with no runs at all would have been called detections. So the count is printed and
+    /// the reader judges, which is the same treatment the segregating count and the two-route gap
+    /// get. **Where "near" goes is the owner's.**
     RunsOfHomozygosity { windows: u32 },
     /// **The joint fit's homozygote excess** — how much less heterozygous an individual is than
     /// the fitted frequencies predict.
@@ -1461,6 +1476,11 @@ mod tests {
 
     /// **The runs estimator warns below its own floor of 3,000 windows and not above it** — below
     /// that, `parameter_prepass_generic.md` §6.1 records that what it returns is its own noise.
+    ///
+    /// **⚠ This branch cannot be reached by a coefficient that came from `fit_inbreeding`**, which
+    /// refuses below the floor rather than returning a thin estimate. So what is tested here is a
+    /// guard on a hand-assembled report, and the fixture is hand-assembled to match. Said plainly
+    /// because a test whose subject cannot arise on the shipped path reads as coverage it is not.
     #[test]
     fn the_runs_estimator_warns_below_its_own_window_floor() {
         let thin = a_report(InbreedingSource::RunsOfHomozygosity { windows: 1_200 }, 4);

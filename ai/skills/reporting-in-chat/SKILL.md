@@ -740,3 +740,43 @@ about that corner, not a property of the caller."* **The failure is not forgetti
 measure the axis — it is measuring it and then writing as though it were not there.**
 Before writing a sentence from a sweep, list the sweep's axes and check each one
 appears in the sentence or is explicitly said not to matter.
+
+### 2026-08-27 — a cost claim, in a decision paragraph, about code I had not opened
+
+**The owner's correction, in full:**
+
+> "it eats per-sample windowed histograms the joint route never builds" if you mean the windowed
+> histogram build for every sample to calculate the F, they are built, per sample, not in the
+> cohort step
+
+Putting three options to the owner for where a run should get its inbreeding coefficient, one of
+them was *run the existing runs-of-homozygosity estimator alongside*, and I priced it:
+
+> ❌ "It is the shipped, tested one, but it eats per-sample windowed histograms the joint route
+> never builds — so this is a second pass over the reads for every sample, to fix a few per cent at
+> large panels."
+
+**The histograms are built.** `generic/accumulators.rs` fills them per sample during the ordinary
+per-sample accumulation whenever the inbreeding mode is `Fitted`, and `generic/estimate.rs` already
+fits the coefficient from them and puts it on `GenericSampleParameters` beside the window count.
+Nothing extra is read. What is actually missing is one join: no code takes those per-sample
+coefficients, means them over the panel, and hands the mean to the correction — because the run
+assembly that would own that join is not built.
+
+> ✅ "The coefficient already exists, per sample: the per-sample step builds the windowed histograms
+> and fits it. What is missing is the join — nothing means them over the panel and hands the mean
+> to the correction, because the assembly that would is unbuilt."
+
+**The mechanism, and it is not carelessness about a number.** The design document says the runs
+estimator *"lives in the per-sample histogram route and walks genome windows"*, which is true and is
+a statement about **where** something lives. I turned it into a statement about **what it would
+cost to get** — and then wrote that cost into a decision paragraph, where a wrong cost is not a
+blemish on the prose, it is a wrong answer to the question being asked. The owner was being asked to
+choose between three options priced in units I had inferred rather than read.
+
+**The rule.** *Every claim about what an option costs is a claim about code, and it is checked by
+opening the code — not by reasoning from the design document's description of where things live.* A
+`grep` for the type the estimator takes would have settled it in one call, and the reply asked for a
+ruling instead. This is the D-paragraph form of the failure the plan-driven skill already names for
+reports: **run the thing and read the number; do not recall it.** In a decision paragraph the cost
+*is* the number.
