@@ -1,13 +1,14 @@
-//! **ng calls genotypes** — the merge's output, through candidate selection and the input edge,
-//! into the calling loop, with the genotypes derived by hand.
+//! **ng calls genotypes** — per-sample reads in at one cohort locus, called genotypes out, with
+//! the answers derived by hand. Both paths: an ordinary SNP or indel, and a repeat tract.
 //!
 //! Every earlier test of this loop hands it a likelihood table, an evidence view or a candidate
-//! set built for the occasion. This one hands it a cohort locus and takes genotypes out, with
-//! nothing between the two supplied by the test:
+//! set built for the occasion. This one hands it a cohort locus and takes genotypes out:
 //!
 //! ```text
-//! per-sample observations → ClosedLocus → CohortObservation::over → select_generic
-//!                        → shape_generic_locus → call_locus → LocusInference
+//! SNP/indel: per-sample observations → ClosedLocus → CohortObservation::over → select_generic
+//!                                   → shape_generic_locus → call_locus → LocusInference
+//! repeat tract: per-sample observations + supplied candidates
+//!                                   → shape_ssr_locus      → call_locus → LocusInference
 //! ```
 //!
 //! # What this fixture supplies and what it runs, said exactly
@@ -15,32 +16,37 @@
 //! **Supplied**, and each for a reason:
 //!
 //! - **the per-sample observations** — what each sample's reads showed at the locus, as the
-//!   SNP/indel locus generator emits them. Turning aligned reads into observations is step 5's
+//!   locus generator emits them. Turning aligned reads into observations is step 5's
 //!   and outside this plan (`calling_loop.md`'s Scope); a fixture that ran it would be testing
 //!   that step here;
-//! - **the `ClosedLocus`** the merge is handed. The chaining walk that groups overlapping
-//!   observations into loci — `LocusCloser` — is not run. What [`merge`] does reproduce is the
-//!   **keep rule**, `MinAltReads::DEFAULT` asked of each sample separately, so a fixture the
-//!   real walk would have discarded as too quiet cannot pass here unnoticed;
+//! - **the `ClosedLocus`** the merge is handed, on the SNP/indel path. The chaining walk that
+//!   groups overlapping observations into loci — `LocusCloser` — is not run. What [`merge`] does
+//!   reproduce is the **keep rule**, `MinAltReads::DEFAULT` asked of each sample separately, so a
+//!   fixture the real walk would have discarded as too quiet cannot pass here unnoticed;
+//! - **at a repeat tract, the candidates themselves and each candidate's repeat count.** The
+//!   repeat-tract half of candidate selection is not written, so there is no step to run — and a
+//!   later reader must not take these candidate sets for a step's output. The tract section
+//!   below says it again where the fixtures are.
 //! - the run's frozen parameters and the loop's configuration, which are a run's inputs rather
 //!   than a locus's.
 //!
-//! **Run rather than supplied**: the merge's allele unification and read attribution
-//! (`CohortObservation::over`), candidate selection (`select_generic`), the input edge
-//! (`shape_generic_locus`), and the loop (`call_locus`).
+//! **Run rather than supplied**: on the SNP/indel path the merge's allele unification and read
+//! attribution (`CohortObservation::over`), candidate selection (`select_generic`) and the input
+//! edge (`shape_generic_locus`); at a tract the input edge (`shape_ssr_locus`); and on both, the
+//! loop (`call_locus`).
 //!
 //! # Why a test binary rather than a module inside the library
 //!
-//! It imports only what the crate exports, so it is also a check that this path's own seams are
-//! `pub` — the twenty-odd items it names, not every seam in the middle of it.
-//!
-//! **The repeat-tract path is not here.** A tract needs its genotype prior's seed, which is
-//! keyed by repeat count and takes two run-level numbers the parameter pre-pass does not emit
-//! yet; that half is the plan's E3b.
+//! It imports only what the crate exports, so it is also a check that both paths' seams are
+//! `pub` — the 56 items it names, not every seam in the middle of them. Half of those are the
+//! repeat fit's own output types, which a fixture has to build by hand because the pre-pass that
+//! produces them is a different subsystem.
 
 use pop_var_caller::ng::calling::allele_candidates::generic::select_generic;
 use pop_var_caller::ng::calling::allele_candidates::{CandidateSelectionConfig, SelectionScratch};
-use pop_var_caller::ng::calling::evidence_shaping::{GenericEvidenceScratch, shape_generic_locus};
+use pop_var_caller::ng::calling::evidence_shaping::{
+    GenericEvidenceScratch, shape_generic_locus, shape_ssr_locus,
+};
 use pop_var_caller::ng::calling::genotype_prior::{
     MarginalizedDirichletPrior, SeedRegime, SpectrumSeed,
 };
@@ -50,23 +56,38 @@ use pop_var_caller::ng::calling::likelihood::ssr_emission::{
     StutterSubstitutionEmission, StutterSubstitutionScratch,
 };
 use pop_var_caller::ng::calling::{
-    CallingScratch, FrozenParameters, GenericLocusSample, LocusInference, ReadGroupCalibration,
+    CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
+    LocusInference, ReadGroupCalibration, RepeatTractProvenance, SsrSampleEvidence,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
 };
 use pop_var_caller::ng::parameter_estimation::Provenance;
-use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::StratumFits;
-use pop_var_caller::ng::parameter_estimation::ssr::StratumKey;
+use pop_var_caller::ng::parameter_estimation::joint::census::Stratum as FitStratum;
+use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationSource;
+use pop_var_caller::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use pop_var_caller::ng::parameter_estimation::joint::share_curve::ShareSource;
+use pop_var_caller::ng::parameter_estimation::joint::slippage_curve::LevelSource;
+use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
+    LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
+};
+use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::{
+    LengthSpectrumRung, StratumFits,
+};
+use pop_var_caller::ng::parameter_estimation::ssr::{
+    RepeatCount, Stratum as SsrStratum, StratumKey,
+};
 use pop_var_caller::ng::run::cohort_merge::MinAltReads;
 use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
 use pop_var_caller::ng::types::{
-    AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Ploidy, Position, ReadGroupId,
+    AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Motif, Ploidy, Position, ReadGroupId,
+    SsrPeriod,
 };
 
 use pop_var_caller::ng::parameter_estimation::Estimate;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 /// The one position every locus here sits at.
 fn region() -> GenomeRegion {
@@ -276,6 +297,19 @@ fn genotype_of(inference: &LocusInference, sample: usize) -> Vec<u16> {
         .collect()
 }
 
+/// **What a repeat tract's call rested on**, which every tract carries and no SNP or indel
+/// does — so calling this on an ordinary site's result is a test asking the wrong path.
+fn tract_record(inference: &LocusInference) -> RepeatTractProvenance {
+    inference
+        .repeat_tract
+        .expect("every called repeat tract carries what its parameters rested on")
+}
+
+/// Which rung of the tract ladder that record's prior shape came from.
+fn rung_of(inference: &LocusInference) -> LengthSpectrumRung {
+    tract_record(inference).length_spectrum_rung()
+}
+
 /// **ng calls genotypes at a SNP, and the three a reader can derive by hand come out.**
 ///
 /// Three samples at one position whose reference base is `A`. The first showed 20 reads of `T`
@@ -349,8 +383,9 @@ fn the_cohorts_expected_copies_are_the_three_calls_chromosomes() {
     );
 }
 
-/// **One sample is called on its own reads and nothing else** — the cohort end of the range
-/// this caller commits to (`CLAUDE.md`), where there is no panel to draw a frequency from.
+/// **One sample is called on its own reads and nothing else** — the small end of the cohort-size
+/// range this caller commits to (`CLAUDE.md`), where there is no panel to draw a frequency
+/// from.
 ///
 /// The single sample shows 20 reads of `T` and none of `A`, and comes out `1/1`. It is the
 /// hardest case for the prior, not for the loop: with one sample the leave-one-out term is
@@ -697,4 +732,630 @@ fn a_locus_whose_read_groups_were_all_fitted_says_so() {
     ];
     let inference = call_with_calibration(&per_sample, &calibration);
     assert_eq!(inference.weakest_provenance, Provenance::FittedHere);
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────
+// The repeat-tract path
+// ────────────────────────────────────────────────────────────────────────────────────────
+//
+// **What is supplied here that is chosen above.** On the SNP/indel path the candidates come out
+// of `select_generic`, run by this file. **At a repeat tract they are supplied by the fixture,
+// and so are their repeat counts** — the repeat-tract half of candidate selection is not
+// written, so there is no step to run. A reader must not take these candidate sets for a
+// step's output: nothing here chose them.
+//
+// **Why the repeat counts travel at all.** How many whole repeats a candidate holds is not its
+// byte length divided by the motif's: an interrupted tract — one whose repeat is broken by a
+// substitution — holds fewer. The count is what picks the stratum whose slippage numbers score
+// the candidate, so it has to be measured rather than derived. The locus generator measures it;
+// until selection exists, a caller supplies it.
+//
+// Everything after the evidence is run: `shape_ssr_locus`, and the loop.
+
+/// A dinucleotide `AT` tract, with the flanks the read model anchors its alignment on.
+fn tract_detail() -> SsrDetail {
+    SsrDetail {
+        motif: Motif::new(b"AT").expect("a dinucleotide motif"),
+        left_flank: Box::from(b"CCCGGG".as_slice()),
+        right_flank: Box::from(b"TTTAAA".as_slice()),
+    }
+}
+
+/// The two lengths every tract here is called over, in candidate-table order: **6 whole repeats,
+/// which is the reference, and 7**.
+const TRACT_CANDIDATE_REPEATS: [u32; 2] = [6, 7];
+
+/// **How many libraries a tract fixture's run has, and it is deliberately not two.** The
+/// parameter table a tract is scored from is `read groups × candidates`, filled
+/// read-group-major; at an equal shape a table filled the other way round is the same length and
+/// the same set of cells, so a transposition passes every shape check. Only the first library
+/// sends a read.
+const TRACT_READ_GROUPS: usize = 3;
+
+fn tract_bases(repeats: u32) -> Vec<u8> {
+    b"AT".repeat(repeats as usize)
+}
+
+/// The supplied candidate table — the reference tract and one longer allele.
+fn tract_alleles() -> CandidateAlleles {
+    let mut alleles = CandidateAlleles::new(
+        tract_bases(TRACT_CANDIDATE_REPEATS[0]).into_boxed_slice(),
+        LocusKind::Ssr(tract_detail()),
+    );
+    alleles.admit(tract_bases(TRACT_CANDIDATE_REPEATS[1]).into_boxed_slice());
+    alleles
+}
+
+/// The supplied repeat counts, parallel to that table.
+fn tract_repeat_counts() -> Vec<NonZeroU32> {
+    TRACT_CANDIDATE_REPEATS
+        .iter()
+        .map(|count| NonZeroU32::new(*count).expect("a candidate always holds a repeat"))
+        .collect()
+}
+
+/// `reads` reads that spanned the whole tract and showed `repeats` whole copies of it, from the
+/// run's first library.
+///
+/// **The per-read error sum is filled in and nothing on this path reads it.** A tract's row is
+/// scored from a stutter model and a per-base substitution rate; `q_sum` is the SNP/indel
+/// emission's charge, and neither the repeat-tract row nor its emission model touches it.
+fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
+    SequenceObservation {
+        bases: tract_bases(repeats).into_boxed_slice(),
+        read_witness: ReadWitness::Complete,
+        read_group: ReadGroupId(0),
+        num_obs: reads,
+        num_fwd: reads / 2,
+        q_sum: -10.0 * f64::from(reads),
+        mapq_sum: 60 * reads,
+        mapq_sum_sq: u64::from(reads) * 3_600,
+        placed_left: reads / 2,
+        chain_ids: Vec::new(),
+    }
+}
+
+/// **A repeat fit that reached both of this tract's candidate strata**, each with its own
+/// slippage numbers and its own length spectrum.
+///
+/// The length spectrum is one share per whole-repeat offset from the reference tract length, two
+/// repeats either way. **No two of its classes share a weight and neither spectrum is a
+/// palindrome**, so reading one class for another, or reading a spectrum backwards, is a
+/// different prior rather than the same one — and each leans toward contraction, as every real
+/// repeat fit does.
+///
+/// **The run's three libraries do not share one slippage group.** Library 0 sits in group 0 and
+/// libraries 1 and 2 in group 1, whose numbers differ, so a parameter table filled
+/// candidate-major rather than read-group-major hands library 0's reads another group's
+/// polymerase.
+fn tract_strata() -> StratumFits {
+    tract_strata_describing(BTreeMap::from([
+        (ReadGroupId(0), 0),
+        (ReadGroupId(1), 1),
+        (ReadGroupId(2), 1),
+    ]))
+}
+
+/// The same fit, over whichever of the run's libraries it claims to describe — what the fixture
+/// about a library the fit never saw needs.
+fn tract_strata_describing(
+    slippage_group_of_each_library: BTreeMap<ReadGroupId, u32>,
+) -> StratumFits {
+    let level = LevelProvenance {
+        source: LevelSource::Cell,
+        curve: None,
+        reach: None,
+        slipped_reads: Some(400.0),
+    };
+    let share = ShareProvenance {
+        source: ShareSource::Stratum,
+        curve: None,
+        reach: None,
+    };
+    let fitted_stratum =
+        |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
+            StratumOutcome::Fitted(Box::new(StratumFit {
+                stratum: FitStratum {
+                    period: 2,
+                    reference_repeats: repeats,
+                },
+                slippage: vec![
+                    Some(Slippage {
+                        level: level_in_group_0,
+                        shorter_share: 0.83,
+                        fall_off: 0.25,
+                    }),
+                    Some(Slippage {
+                        level: level_in_group_0 * 1.75,
+                        shorter_share: 0.62,
+                        fall_off: 0.41,
+                    }),
+                ],
+                length_spectrum,
+                concentration,
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                converged: true,
+                tracts_of_its_own: 40,
+                reads_crossing: 400,
+                level_provenance: vec![Some(level), Some(level)],
+                shares_provenance: vec![
+                    Some(SharesProvenance {
+                        slipped_reads: Some(400.0),
+                        shorter_share: share,
+                        fall_off: share,
+                    }),
+                    Some(SharesProvenance {
+                        slipped_reads: Some(400.0),
+                        shorter_share: share,
+                        fall_off: share,
+                    }),
+                ],
+            }))
+        };
+    StratumFits::over(
+        &[
+            // **No two adjacent pairs of these weights are in the same ratio.** The first
+            // version's upper tail fell by a factor of three at each step, so a spectrum read
+            // one repeat off centre gave the two candidates the same pair of shares and the
+            // re-centring was invisible.
+            fitted_stratum(6, 0.04, vec![0.10, 0.30, 0.44, 0.11, 0.05], 20.0),
+            fitted_stratum(7, 0.06, vec![0.09, 0.21, 0.43, 0.19, 0.08], 25.0),
+        ],
+        slippage_group_of_each_library,
+    )
+}
+
+/// **A fitted per-base substitution rate for every `(library, stratum)` cell the tract's
+/// parameter table covers** — every library of the run against both candidate strata, so no cell
+/// falls to the stated constant.
+///
+/// **Every library, not only the one whose reads arrive**, because the table is built on the
+/// run's read-group axis and the locus's warrant is folded over all of it. The rate differs per
+/// stratum, so a lookup keyed by the wrong repeat count is a different number.
+fn tract_substitution_rates() -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+    tract_substitution_rates_over(TRACT_READ_GROUPS)
+}
+
+/// The same, fitted for the first `libraries` of the run and for none of the rest.
+fn tract_substitution_rates_over(libraries: usize) -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+    let period = SsrPeriod::try_new(2).expect("a dinucleotide");
+    let mut rates = BTreeMap::new();
+    for library in 0..libraries {
+        for repeats in TRACT_CANDIDATE_REPEATS {
+            rates.insert(
+                StratumKey {
+                    read_group: ReadGroupId(u32::try_from(library).expect("a small index")),
+                    stratum: SsrStratum::new(period, RepeatCount(repeats)),
+                    ploidy: diploid(),
+                },
+                Estimate {
+                    value: ErrorRate::try_new(0.001 * f64::from(repeats)).expect("a probability"),
+                    provenance: Provenance::FittedHere,
+                    observations: 4_000,
+                },
+            );
+        }
+    }
+    rates
+}
+
+/// Run the tract path over one cohort's observations and hand back what came out.
+fn call_tract(
+    observations_of_each_sample: &[Vec<SequenceObservation>],
+    strata: &StratumFits,
+    substitution: &BTreeMap<StratumKey, Estimate<ErrorRate>>,
+) -> LocusInference {
+    let detail = tract_detail();
+    let per_run_sample: Vec<&[SequenceObservation]> = observations_of_each_sample
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let repeat_counts = tract_repeat_counts();
+    let mut views: Vec<SsrSampleEvidence<'_>> = Vec::new();
+    let evidence = shape_ssr_locus(
+        region(),
+        &per_run_sample,
+        &detail,
+        &repeat_counts,
+        &mut views,
+    );
+
+    let calibration = vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+    let inbreeding =
+        vec![InbreedingF::try_new(0.0).expect("an outbred sample"); per_run_sample.len()];
+    let parameters = FrozenParameters::uncontaminated(
+        &calibration,
+        &inbreeding,
+        SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+        strata,
+        substitution,
+        diploid(),
+    );
+    let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
+    let config = CallingLoopConfig::DEFAULT
+        .validate()
+        .expect("the shipped configuration");
+    let mut scratch: CallingScratch<StutterSubstitutionScratch> = CallingScratch::default();
+    arm.call_locus(
+        &evidence,
+        &parameters,
+        tract_alleles(),
+        &config,
+        &mut scratch,
+    )
+}
+
+/// The same, in a run whose parameter fit found `fraction` of each library's reads to have come
+/// from another individual.
+fn call_contaminated_tract(
+    observations_of_each_sample: &[Vec<SequenceObservation>],
+    fraction: f64,
+) -> LocusInference {
+    let detail = tract_detail();
+    let per_run_sample: Vec<&[SequenceObservation]> = observations_of_each_sample
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let repeat_counts = tract_repeat_counts();
+    let mut views: Vec<SsrSampleEvidence<'_>> = Vec::new();
+    let evidence = shape_ssr_locus(
+        region(),
+        &per_run_sample,
+        &detail,
+        &repeat_counts,
+        &mut views,
+    );
+
+    let calibration = vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+    let contamination = vec![
+        ContaminationView {
+            fraction,
+            markers_with_reads: 400,
+            reads_on_markers: 1_000,
+            source: ContaminationSource::ThisReadGroupsReads,
+        };
+        TRACT_READ_GROUPS
+    ];
+    let inbreeding =
+        vec![InbreedingF::try_new(0.0).expect("an outbred sample"); per_run_sample.len()];
+    let batching = SequencingBatches::all_together_over(TRACT_READ_GROUPS, per_run_sample.len());
+    let strata = tract_strata();
+    let substitution = tract_substitution_rates();
+    let parameters = FrozenParameters::new(
+        &calibration,
+        &contamination,
+        &batching,
+        &inbreeding,
+        SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+        &strata,
+        &substitution,
+        diploid(),
+    );
+    let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
+    let config = CallingLoopConfig::DEFAULT
+        .validate()
+        .expect("the shipped configuration");
+    let mut scratch: CallingScratch<StutterSubstitutionScratch> = CallingScratch::default();
+    arm.call_locus(
+        &evidence,
+        &parameters,
+        tract_alleles(),
+        &config,
+        &mut scratch,
+    )
+}
+
+/// **ng calls genotypes at a repeat tract** — reads in, genotypes out, over the run's own fitted
+/// slippage numbers and its own fitted length spectrum.
+///
+/// Three samples at a dinucleotide `AT` tract called over 6 whole repeats — the reference — and
+/// 7. The first showed 20 reads of the 7-repeat tract, the second 10 of each length, the third
+/// 20 of the 6-repeat one. At a slippage level of 4 in 100, stutter cannot manufacture ten
+/// reads at a wrong length, so the three come out **`1/1`, `0/1`, `0/0`**.
+///
+/// **The candidates are supplied, not selected** — see this section's own note above.
+#[test]
+fn three_samples_at_a_repeat_tract_are_called_from_their_reads() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+        vec![
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 10),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 10),
+        ],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+    ];
+    let inference = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+
+    assert_eq!(inference.region, region());
+    assert_eq!(inference.alleles().len(), 2, "the two supplied lengths");
+    assert_eq!(inference.per_sample.len(), 3);
+
+    assert_eq!(
+        genotype_of(&inference, 0),
+        vec![1, 1],
+        "20 reads at 7 repeats"
+    );
+    assert_eq!(genotype_of(&inference, 1), vec![0, 1], "10 reads at each");
+    assert_eq!(
+        genotype_of(&inference, 2),
+        vec![0, 0],
+        "20 reads at 6 repeats"
+    );
+    assert!(inference.converged);
+
+    assert_eq!(
+        rung_of(&inference),
+        LengthSpectrumRung::StratumsOwnFit,
+        "the tract's prior came from its own stratum's fitted length spectrum"
+    );
+    assert_eq!(
+        inference.weakest_provenance,
+        Provenance::FittedHere,
+        "every slippage number and every substitution rate this tract read was the fit's"
+    );
+}
+
+/// **A run whose repeat fit reached nothing still calls its tracts**, from the bottom rung of
+/// the ladder — and the record says so rather than claiming a measurement.
+///
+/// The same three samples and the same reads, against an empty fit. The stutter model falls to
+/// the one HipSTR ships and the substitution rate to a stated constant, so the locus's warrant
+/// is `Defaulted`; the prior's shape falls to a flat spectrum at a stated concentration, so the
+/// rung is `StatedFlat`. **The genotypes are unchanged**, which is the point worth having: at
+/// twenty reads a sample the reads decide, and what the fit buys is not this locus's calls but
+/// the confidence attached to them.
+///
+/// **⚖ This fixture is the run the owner ruled on, 2026-08-27.**
+/// `population_diversity.md` §5 used to want a tract in a run carrying no repeat-tract
+/// parameters refused by name, where §4.4 wants the ladder to always answer; the two meet only
+/// at a run that fitted nothing, which is this one. **It is called, and the rung says so**,
+/// because refusing would turn a whole class of runs into a hard failure for a condition the
+/// record already states.
+#[test]
+fn a_tract_in_a_run_that_fitted_nothing_is_still_called_and_says_what_it_rested_on() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+        vec![
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 10),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 10),
+        ],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+    ];
+    let inference = call_tract(
+        &per_sample,
+        &StratumFits::over(&[], BTreeMap::new()),
+        &BTreeMap::new(),
+    );
+
+    assert_eq!(genotype_of(&inference, 0), vec![1, 1]);
+    assert_eq!(genotype_of(&inference, 1), vec![0, 1]);
+    assert_eq!(genotype_of(&inference, 2), vec![0, 0]);
+    assert_eq!(
+        rung_of(&inference),
+        LengthSpectrumRung::StatedFlat,
+        "the ladder always answers, and says from how far down"
+    );
+    assert_eq!(inference.weakest_provenance, Provenance::Defaulted);
+}
+
+/// **One sample's tract is called on its own reads** — the small end of the cohort-size range
+/// this caller commits to (`CLAUDE.md`), where there is no panel to draw a length frequency
+/// from.
+///
+/// **This is the case the prior's old construction refused outright.** A tract's prior belief
+/// used to be built as a decay away from the cohort's commonest length and scaled to reproduce a
+/// measured diversity, which one outbred sample cannot supply. It is now read from the fit's own
+/// per-stratum length spectrum, which is fitted across *tracts* — and a single genome carries the
+/// same tracts a panel does.
+#[test]
+fn one_sample_is_called_at_a_tract_on_its_own_reads() {
+    let per_sample = vec![vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)]];
+    let inference = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+
+    assert_eq!(inference.per_sample.len(), 1);
+    assert_eq!(genotype_of(&inference, 0), vec![1, 1]);
+    assert_eq!(
+        rung_of(&inference),
+        LengthSpectrumRung::StratumsOwnFit,
+        "one sample reaches the same rung as a panel: the spectrum is fitted across tracts"
+    );
+}
+
+/// **A tract carries no artifact summary**, where a SNP/indel locus carries one.
+///
+/// The artifact tests weigh strand and read-position imbalance between the reference and one
+/// alternative allele. **At a tract what goes wrong is slippage**, which is already inside the
+/// read likelihood, and a tract's own site quality is left to a document that is not written
+/// (`doc/devel/ng/spec/calling_quality.md` §8). So the summary is absent rather than computed
+/// over quantities that do not mean there what they mean at a SNP.
+#[test]
+fn a_repeat_tract_carries_no_artifact_summary_where_a_snp_carries_one() {
+    let at_a_tract = call_tract(
+        &[vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)]],
+        &tract_strata(),
+        &tract_substitution_rates(),
+    );
+    assert!(at_a_tract.artifact_test_counts().is_none());
+
+    let at_a_snp = call(&[sample_locus(vec![showed(b"T", 20)])]);
+    assert!(at_a_snp.artifact_test_counts().is_some());
+}
+
+/// **A contaminated library's reads are not called as a second allele at a repeat tract** — the
+/// failure the third term of the tract's read-likelihood mixture exists to prevent, end to end.
+///
+/// Three samples. The middle one carries two copies of the 6-repeat tract and shows twenty reads
+/// of its own plus four at the 7-repeat length that came from another individual's DNA. **With
+/// no fraction fitted it is called `0/1`**. The other two explanations cannot carry four reads:
+/// slippage to exactly one repeat longer runs about **one read in two hundred** at this
+/// stratum's fitted numbers, and the outlier term — reads no allele explains — is spread flat
+/// over every length the tract can reach and is smaller still. **With the fraction the pre-pass
+/// measured, 8 in 100, it is called `0/0`**, which is what it is.
+///
+/// **How this differs from the same correction at a SNP.** At an ordinary site the contaminating
+/// population's frequency for the allele an observation shows is the cohort's own estimate, so it
+/// moves as the loop iterates. At a tract there is no such number per length that is fixed before
+/// calling — so the mixture uses the genotype prior's own belief about which lengths this tract
+/// can be, which is the joint repeat fit's length spectrum for this tract's stratum. It is
+/// specific to the locus, because it is indexed from this tract's own reference length, and it is
+/// frozen, because the fit produced it before calling started.
+#[test]
+fn a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+        vec![
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 20),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 4),
+        ],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+    ];
+
+    let clean = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+    assert_eq!(
+        genotype_of(&clean, 1),
+        vec![0, 1],
+        "with no fraction fitted, four reads at another length are a second allele"
+    );
+
+    let contaminated = call_contaminated_tract(&per_sample, 0.08);
+    assert_eq!(
+        genotype_of(&contaminated, 1),
+        vec![0, 0],
+        "with the fitted fraction they are somebody else's DNA"
+    );
+
+    // **The fraction's own value has to do work, not merely its existence.** At the same four
+    // reads a fitted 5 in 100 is not enough mass to beat a heterozygote that must also account
+    // for twenty reference reads, so it still calls `0/1`. A model that read `c` as a flag would
+    // pass the two assertions above and fail this one.
+    let barely = call_contaminated_tract(&per_sample, 0.05);
+    assert_eq!(
+        genotype_of(&barely, 1),
+        vec![0, 1],
+        "a smaller fitted fraction cannot explain the same four reads"
+    );
+
+    for sample in [0, 2] {
+        assert_eq!(
+            genotype_of(&clean, sample),
+            genotype_of(&contaminated, sample),
+            "sample {sample} is unambiguous at twenty reads and is called the same either way"
+        );
+    }
+    // **The warrant does not cover the fraction, and this assertion does not claim it does.**
+    // A tract's warrant is folded over the stutter and substitution parameters its row reads
+    // per `(read group, candidate)`; the contamination fraction carries where it was fitted
+    // from, and nothing folds that in. Reporting it is a separate job.
+    assert_eq!(
+        contaminated.weakest_provenance,
+        Provenance::FittedHere,
+        "every slippage number and every substitution rate this tract read was the fit's"
+    );
+}
+
+/// **What a tract's call rested on comes out beside the genotypes, and a SNP's does not.**
+///
+/// This is the end-to-end half of what the run has to be able to say about itself. A genotype
+/// scored under a fitted length spectrum and one scored under a stated flat shape are different
+/// claims; so are one whose reads were shared out with a contaminant and one whose were not.
+/// Nothing in the called genotype says which, so the record carries it.
+///
+/// **The numbers are worth writing out, and the middle run is arranged so that no two of them
+/// are the same.** The run has three libraries and the tract two candidates, so the parameter
+/// table is six cells — over every library of the run rather than the one whose reads arrived,
+/// because that is the axis the read likelihood's context table is indexed on.
+///
+/// - **Fully fitted**: the fit names every library and every stratum these candidates reach, so
+///   none of the six falls back.
+/// - **Partly fitted**: the slippage fit names library 0 only and the substitution rates are
+///   fitted for libraries 0 and 1, so the four numbers come out **6, 4, 4 and 2** — and the two
+///   that coincide are the ones that must, since every one of library 1's and 2's cells is
+///   defaulted for the same reason.
+/// - **Fitted nowhere**: every cell falls back, by the reason that means the parameters and the
+///   reads came from different runs.
+#[test]
+fn a_tract_says_what_its_parameters_rested_on_and_a_snp_says_nothing() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+    ];
+
+    let clean = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+    let record = tract_record(&clean);
+    assert_eq!(
+        record.scoring_cells(),
+        TRACT_READ_GROUPS * 2,
+        "three libraries over two candidates"
+    );
+    assert_eq!(record.cells_with_no_fitted_slippage(), 0);
+    assert_eq!(record.cells_whose_read_group_the_fit_does_not_describe(), 0);
+    assert_eq!(record.cells_with_no_fitted_substitution_rate(), 0);
+    assert!(
+        !record.contaminant_term_was_built(),
+        "this run's fit found no contamination, so the mixture has two terms"
+    );
+
+    // **A fit that reaches part of the run, so that the four counts are four different-sized
+    // answers rather than all-or-nothing.** Without this arm every count here is either 0 or the
+    // cell total, and any two of the record's fields could be swapped unnoticed.
+    let partly = call_tract(
+        &per_sample,
+        &tract_strata_describing(BTreeMap::from([(ReadGroupId(0), 0)])),
+        &tract_substitution_rates_over(2),
+    );
+    let partial = tract_record(&partly);
+    assert_eq!(partial.scoring_cells(), 6);
+    assert_eq!(
+        partial.cells_with_no_fitted_slippage(),
+        4,
+        "libraries 1 and 2 over both candidates"
+    );
+    assert_eq!(
+        partial.cells_whose_read_group_the_fit_does_not_describe(),
+        4,
+        "all four, because both candidates' strata are fitted and only the libraries are not"
+    );
+    assert_eq!(
+        partial.cells_with_no_fitted_substitution_rate(),
+        2,
+        "library 2's two cells; libraries 0 and 1 have a rate at both strata"
+    );
+
+    // **A run that fitted nothing falls back in every cell, and says so** — the same tract, the
+    // same reads, over a fit that describes no library and no stratum.
+    let unfitted = call_tract(
+        &per_sample,
+        &StratumFits::over(&[], BTreeMap::new()),
+        &BTreeMap::new(),
+    );
+    let fell_back = tract_record(&unfitted);
+    assert_eq!(fell_back.scoring_cells(), TRACT_READ_GROUPS * 2);
+    assert_eq!(
+        fell_back.cells_with_no_fitted_slippage(),
+        TRACT_READ_GROUPS * 2
+    );
+    assert_eq!(
+        fell_back.cells_whose_read_group_the_fit_does_not_describe(),
+        TRACT_READ_GROUPS * 2,
+        "a fit naming no library at all is the absence that means the parameters and the reads \
+         came from different runs"
+    );
+    assert_eq!(
+        fell_back.cells_with_no_fitted_substitution_rate(),
+        TRACT_READ_GROUPS * 2
+    );
+
+    // **And the contaminant term is reported where it was built.**
+    let contaminated = call_contaminated_tract(&per_sample, 0.08);
+    assert!(tract_record(&contaminated).contaminant_term_was_built());
+
+    // A SNP/indel locus carries no such record: its prior comes from the population's frequency
+    // spectrum, whose ladder has different rungs, and it has no per-library stutter table at all.
+    let snp = call(&[
+        sample_locus(vec![showed(b"T", 20)]),
+        sample_locus(vec![showed(b"A", 20)]),
+    ]);
+    assert_eq!(snp.repeat_tract, None);
 }

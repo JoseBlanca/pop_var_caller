@@ -129,6 +129,13 @@ The outcome type as the arch writes it: region, final alleles, per-sample calls 
 `weakest_provenance`, `seed_diversity_unreachable`. Plain data, no logic; the loop plan fills it.
 *Depends:* B2, A2. *Source:* calling_em_loop arch §2; spec §6, §9.
 
+> **The last two of those field names are gone, and this line records what the step built rather
+> than what the type now is** (noted 2026-08-27). `seed_diversity_unreachable` was replaced by the
+> tract ladder's rung and then folded into a `RepeatTractProvenance`, and two quality fields were
+> added; `SampleGenotypeCall` became an enum. The shipped shape is in
+> [`../arch/calling_em_loop.md`](../arch/calling_em_loop.md) §2, and the four changes are recorded
+> at steps C3b, E2e and E2b of [`calling_loop.md`](calling_loop.md).
+
 > **Checkpoint B:** the shared vocabulary compiles and is importable downward by the future
 > sub-modules. Pause for review.
 

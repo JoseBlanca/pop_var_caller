@@ -364,6 +364,22 @@ repeat-tract parameters carries none, and **a tract in such a run is refused by 
 seeded from the ordinary-site numbers, which are indexed by allele rather than by length and would
 be meaningless there. *Absent* and *a fitted zero* are different claims about a run.
 
+**⚖ Owner's ruling, 2026-08-27: the refusal above is withdrawn at the one run it would fire on.**
+§4.4 says the tract ladder *always answers* — a stratum the fit never reached falls to its motif
+period's pool, and failing that to a flat shape at a stated concentration. The paragraph above says
+a run that fitted *nothing* is refused. The two meet at exactly one run: one whose fit produced no
+length spectrum anywhere. **Such a tract is called**, and the rung on its record says `StatedFlat`.
+
+**The reason is that refusing turns a whole class of runs into a hard failure for a condition the
+output already states.** The rung is what §1's third goal asks for — a call resting on a stated
+constant has to be distinguishable from one resting on a measurement without re-running anything —
+and it carries that distinction at every tract of such a run. A refusal would carry it too, by
+producing nothing, at the cost of the run.
+
+So the sentence above holds for what it was written against — a tract must never be seeded from the
+ordinary-site numbers, which are indexed by allele rather than by length — and not for the run-wide
+refusal. Built in step E3b.
+
 **The alternative was to attach the tract numbers to each locus's evidence.** It loses because they
 are run-level facts: every locus of the run would repeat them, and `FrozenParameters`' own
 documentation is explicit that mixing per-run with per-locus and per-sample values is the confusion
@@ -387,9 +403,10 @@ side adds one projection of a four-parameter density into `2N + 1` classes, once
 repeat side adds one length spectrum and one scalar per stratum carried across the seam — tens to a couple
 of hundred strata per run.
 
-**Errors.** Neither number can fail a run. Every absence has a rung below it and the rung is
-reported; the only refusal in this document is a repeat tract in a run with no repeat-tract
-parameters at all, which is a run that fitted no tracts.
+**Errors.** Neither number can fail a run, and **since the owner's ruling of 2026-08-27 this
+document asks for no refusal at all.** Every absence has a rung below it and the rung is reported,
+including at a run that fitted no tracts: §5 records why the one refusal it used to ask for was
+withdrawn.
 
 **Concurrency.** Nothing here is per locus or per worker; both are frozen before calling starts and
 read-only thereafter.

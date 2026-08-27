@@ -155,16 +155,18 @@ mod checked_spectrum {
     /// the rung into the run's output can tell a call resting on a measurement from one resting
     /// on a stated constant.
     ///
-    /// **The two spectra this caller fits cannot be crossed**, because they are separate types
-    /// with no conversion between them (`population_diversity.md` §8, check 5):
+    /// **⛔ There used to be a second spectrum to cross this with, and there is not any more.**
+    /// `population_diversity.md` §8's fifth check asked that a run's *allele-frequency* spectrum
+    /// and a tract's *length* spectrum be separate types with no conversion between them, and a
+    /// `compile_fail` doctest here handed the first where the second belonged. The first is
+    /// deleted: the SNP/indel seed is two integrals of the fitted population curve and evaluates
+    /// nothing into allele-count classes
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
     ///
-    /// ```compile_fail
-    /// use pop_var_caller::ng::calling::genotype_prior::FittedSpectrum;
-    /// use pop_var_caller::ng::parameter_estimation::joint::stratum_fits::LengthSpectrum;
-    /// fn takes_a_length_spectrum(_: LengthSpectrum<'_>) {}
-    /// let weights = [0.25, 0.5, 0.25];
-    /// takes_a_length_spectrum(FittedSpectrum::new(&weights, 0.0, 10.0));
-    /// ```
+    /// **The doctest went with it rather than being left standing**, because it would still have
+    /// failed to compile — for the wrong reason. A `compile_fail` test that passes because the
+    /// type it names no longer exists proves nothing about the type it was written to protect,
+    /// and this repository has shipped that shape of test before.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct LengthSpectrum<'a> {
         /// **`None` on the bottom rung and `Some` on the other two**, which is the invariant the
@@ -288,10 +290,10 @@ pub use checked_spectrum::{FittedFrom, LengthSpectrum};
 /// in the run's output beside the call (`doc/devel/ng/spec/population_diversity.md` §4.4 for the
 /// ladder, §1's third goal for why it has to travel).
 ///
-/// **Nothing carries it there yet**, and saying so is the point: the driver refuses every repeat
-/// tract at its front door until step E3b of `impl_plan/calling_loop.md` wires one in, and that
-/// step is where this reaches [`LocusInference`](crate::ng::calling::LocusInference). Until then
-/// the rung is available and unread.
+/// **The calling loop's driver carries it there**: it looks the spectrum up once per tract and
+/// puts the rung on the locus's
+/// [`LocusInference`](crate::ng::calling::LocusInference). A SNP/indel locus carries none,
+/// because its prior comes from a frequency spectrum instead.
 ///
 /// **Separate from [`LengthSpectrum`] because it outlives it.** The spectrum borrows the run's
 /// frozen parameters and dies with the locus; the rung is what an output carries.

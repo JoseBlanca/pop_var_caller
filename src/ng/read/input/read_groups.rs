@@ -422,18 +422,37 @@ impl ReadGroups {
     /// Test-only: a run reads its read groups from the files it was given.
     #[cfg(test)]
     pub(crate) fn of_libraries(libraries: &[(&str, &str)]) -> Self {
-        let read_groups: Vec<ReadGroup> = libraries
+        let triples: Vec<(&str, &str, &str)> = libraries
             .iter()
-            .map(|(id, sample)| ReadGroup {
+            .map(|(id, sample)| (*id, *sample, *id))
+            .collect();
+        Self::of_lanes(&triples)
+    }
+
+    /// **The same, for a test that needs a library sequenced over more than one lane** — one
+    /// entry per `(ID, SM, LB)` triple.
+    ///
+    /// `@RG LB` is a grouping key rather than an identity: several read groups sharing one
+    /// declared library are the lanes of one preparation, which is what [`ReadGroup::experiment`]
+    /// falls back to. [`Self::of_libraries`] gives each read group a library of its own by
+    /// naming it after the read group, so a fixture built through it **cannot** tell a library
+    /// name from a read-group name — this is what a test about that distinction needs.
+    ///
+    /// Test-only, as its sibling.
+    #[cfg(test)]
+    pub(crate) fn of_lanes(read_groups: &[(&str, &str, &str)]) -> Self {
+        let read_groups: Vec<ReadGroup> = read_groups
+            .iter()
+            .map(|(id, sample, library)| ReadGroup {
                 file: Arc::from(Path::new("a test's run")),
                 id: Box::from(*id),
                 sample: Box::from(*sample),
                 library: NameWithOrigin {
-                    value: Box::from(*id),
+                    value: Box::from(*library),
                     origin: NameOrigin::Declared,
                 },
                 experiment: NameWithOrigin {
-                    value: Box::from(*id),
+                    value: Box::from(*library),
                     origin: NameOrigin::Synthesized,
                 },
                 platform: None,
