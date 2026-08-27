@@ -28,11 +28,12 @@ use crate::ng::calling::GenotypeTableView;
 use crate::ng::calling::genotype_prior::seed_generic::{VariantClass, fill_locus_concentration};
 use crate::ng::calling::genotype_prior::{
     CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
-    fill_sample_concentration,
+    fill_sample_concentration, fill_ssr_seed,
 };
 use crate::ng::calling::likelihood::generic::{
     assemble_genotype_log_likelihood_row, fill_generic_emissions,
 };
+use crate::ng::calling::likelihood::ssr::genotype_log_likelihood_row;
 use crate::ng::calling::likelihood::ssr_emission::SsrEmissionModel;
 use crate::ng::calling::likelihood::{FrozenContamination, ReadGroupCalibrations};
 use crate::ng::calling::quality::{
@@ -42,14 +43,18 @@ use crate::ng::calling::{
     CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture, ErrorSpreadTable,
     ExpectedAlleleCopies, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeTable, LocusEvidence, LocusInference, ReadGroupParameters, SampleGenotypeCall,
-    SampleScoringBuffers, fill_batch_allele_copies, fill_contaminant_allele_frequencies,
-    fill_error_spreads,
+    SampleScoringBuffers, SsrSampleEvidence, fill_batch_allele_copies,
+    fill_contaminant_allele_frequencies, fill_error_spreads,
 };
+use crate::ng::locus_generation::SsrDetail;
 use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+use crate::ng::parameter_estimation::ssr::RepeatCount;
 use crate::ng::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
+use std::num::NonZeroU32;
 
+use super::repeat_tract_parameters::{TractScoringFits, tract_candidates};
 use super::{LocusGenotyper, RunnableCallingLoopConfig};
 
 /// Which prior one pass scores against — **a value, not a code path**.
@@ -1318,6 +1323,15 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     // **After the samples, and it could as well have been before them**: the fold reads the
     // genotype likelihood table, which the loop built and this pass only reads
     // (`doc/devel/ng/spec/calling_quality.md` §3.2).
+    //
+    // **⚠ At a repeat tract this is the one place an ordinary-site quantity is read**, and it
+    // is worth naming because everything else on the tract path was moved off one. The prior
+    // seed here is the run's *frequency* spectrum — how allele frequencies are spread across
+    // the population — and the tract's own *length* spectrum has no bearing on it. That is not
+    // a defect introduced by the tract branch: `calling_quality.md` §8 leaves a tract's site
+    // quality to a sibling document that is not written, so a tract shares the SNP/indel fold
+    // until that lands. It is stated here rather than left for a reader to discover, because
+    // `population_diversity.md` §1's fourth goal names exactly this shape of failure.
     let site_quality = score_uncorrected_site_quality(
         scratch.site_quality_buffers_mut(),
         genotypes,
@@ -1403,26 +1417,58 @@ fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
 /// otherwise launders the weaker of the two. [`Provenance::weaker_of`] is the ladder, and it
 /// is the ladder `parameter_estimation` already states rather than one invented here.
 ///
-/// **Only the read groups whose reads are actually here.** A run's other libraries contributed
-/// nothing to this locus, and charging it for a library that sent no read would make a locus's
-/// warrant a property of the run rather than of the evidence. Both a sample's whole-span
-/// observations and its partial ones name a read group, and both are scored, so both count.
+/// **On the SNP/indel path, only the read groups whose reads are actually here.** A run's other
+/// libraries contributed nothing to this locus, and charging it for a library that sent no read
+/// would make a locus's warrant a property of the run rather than of the evidence. Both a
+/// sample's whole-span observations and its partial ones name a read group, and both are
+/// scored, so both count. **A repeat tract does not hold to that**, and the ⚠ below says why
+/// and what it costs.
 ///
 /// **What is not in it yet, and it is not nothing.** The prior's fitted spectrum carries no
 /// provenance at all ([`SpectrumSeed`](crate::ng::calling::genotype_prior::SpectrumSeed) is
-/// three numbers), and at a repeat tract the slippage and substitution warrants travel on the
-/// scoring contexts rather than on the calibrations — they are gathered by
-/// [`TractScoringFits::weakest_warrant`](super::repeat_tract_parameters::TractScoringFits::weakest_warrant)
-/// and folded in by the step that wires a tract into this driver. So this is the weakest of
-/// *the calibrations*, which is the whole of what a SNP/indel locus reads today.
+/// three numbers), on either path — a repeat tract's prior shape carries the rung it came from,
+/// but that rung travels on the locus's own record rather than through this fold, because it is
+/// a statement about the *prior* where every rung here is a statement about the *reads*.
 ///
-/// **A locus no read reached comes back [`Provenance::FittedHere`]**, because nothing weaker
-/// entered it: every sample is decided by the prior alone, and the prior has no warrant to
-/// report. That is the fold's identity rather than a claim, and it is the one answer here that
-/// would change the day the seed carries one.
+/// # Each path folds the parameters its own row reads, and the two lists do not overlap
+///
+/// **A SNP/indel locus's row reads the calibrations** — one fitted error scale per read group —
+/// and nothing else this fold covers.
+///
+/// **A repeat tract's row never reads a calibration at all.** It is scored from a stutter model
+/// and a substitution rate per `(read group, candidate)`, which the tract's own parameter
+/// assembly gathers and whose warrants it already folded
+/// ([`TractScoringFits::weakest_warrant`](super::repeat_tract_parameters::TractScoringFits::weakest_warrant));
+/// the calibration scale does not enter a tract's likelihood at all, so folding it in would
+/// charge a tract for a parameter it never read.
+///
+/// **⚠ A tract's fold runs over every read group of the run, not the ones whose reads reached
+/// it, and that is a departure from `doc/devel/ng/spec/read_likelihoods.md` §4.4** — which asks
+/// for the weakest warrant of any parameter that *entered* the locus. The parameter table this
+/// folds is built on the run's read-group axis (that type's own documentation says so and why),
+/// so a tract in a run of many libraries can be reported `Defaulted` on account of a library
+/// that sent it no read.
+///
+/// **It is the conservative direction** — a call is never claimed better founded than it is —
+/// which is why it is stated rather than fixed here. Narrowing it means narrowing what the
+/// parameter table covers, since the fold has nothing finer to fold; the read groups a tract's
+/// observations name are what it would be narrowed to.
+///
+/// **A locus no read reached comes back [`Provenance::FittedHere`]** on the SNP/indel path,
+/// because nothing weaker entered it: every sample is decided by the prior alone, and the prior
+/// has no warrant to report. That is the fold's identity rather than a claim, and it is the one
+/// answer here that would change the day the seed carries one. **At a tract it is not reached
+/// at all**: the parameter table covers `read groups × candidates` whatever the reads did, so
+/// a tract with no read still folds over a full table.
+///
+/// # Panics
+///
+/// At a repeat tract, if `tract_fits` holds no gathered tract — which says the parameters were
+/// never read for this locus. On the SNP/indel path `tract_fits` is not read.
 fn weakest_warrant_at_the_locus(
     evidence: &LocusEvidence<'_>,
     parameters: &FrozenParameters<'_>,
+    tract_fits: &TractScoringFits,
 ) -> Provenance {
     let calibration = parameters.calibration_by_read_group();
     let mut weakest = Provenance::FittedHere;
@@ -1459,27 +1505,21 @@ fn weakest_warrant_at_the_locus(
                 }
             }
         }
-        // Unreachable: a repeat tract is refused at the seam's front door until it is wired
-        // into this driver, and its warrants travel on the scoring contexts
-        // `repeat_tract_parameters` gathers rather than on the calibrations read above.
-        LocusEvidence::Ssr { .. } => {}
+        // **The tract's warrants are already folded, one cell per `(read group, candidate)`,
+        // by the assembly that read them** — over the parameters a tract's row actually
+        // scores from, which are not the calibrations the arm above reads.
+        LocusEvidence::Ssr { .. } => {
+            weakest = weakest.weaker_of(tract_fits.weakest_warrant());
+        }
     }
     weakest
 }
 
-/// The generic path's per-sample evidence, or a message naming why a repeat tract never
-/// reaches here.
+/// The SNP/indel path's per-sample evidence.
 ///
-/// # The repeat-tract half is refused rather than approximated
-///
-/// The repeat-tract row is shipped (`likelihood::ssr`) and what it takes is now assembled —
-/// [`repeat_tract_parameters`](super::repeat_tract_parameters) builds the scoring context per
-/// `(read group, candidate)`, the reachable-length support and the outlier weight. **What is
-/// still unwritten is the wiring**: this function, the emission build and the row assembly all
-/// take the generic path's per-sample evidence, and a tract's evidence is a different shape. So
-/// a repeat tract is still refused loudly at the seam's front door, in
-/// [`SummariseConditionLoop::call_locus`] — the same rule the two unbuilt loop settings
-/// follow.
+/// **Its callers have already chosen the path**, so a repeat tract reaching here is a branch
+/// that was not taken rather than a case nobody wrote: the two paths' evidence is two different
+/// shapes, and each of this driver's steps picks between them before it reads either.
 fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocusSample<'a>] {
     match evidence {
         LocusEvidence::Generic {
@@ -1487,42 +1527,111 @@ fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocus
             per_sample,
         } => per_sample,
         LocusEvidence::Ssr { region, .. } => unreachable!(
-            "the repeat tract at {region} is refused by `call_locus` before reaching here: \
-             its row exists, but the per-(read group, candidate) scoring contexts that row \
-             takes need an outlier weight and a reachable-length buffer that no caller supplies \
-             yet"
+            "the repeat tract at {region} reached the SNP/indel path's evidence: its caller \
+             branches on the evidence before reading it, so one branch is missing rather than \
+             one path unbuilt"
         ),
     }
 }
 
-/// **Compute the locus's emissions — the half of the genotype likelihood that reads no allele
-/// frequency** — for every claimed scratch row.
+/// **Everything a repeat tract carries beside its samples' reads** — handed out together
+/// because the two per-locus facts below are read within a line or two of the observations.
 ///
-/// **Once per set of slippage numbers, and at the shipped configuration that is once per
-/// locus**, whatever the pass count and whether or not the run fitted a contamination fraction
+/// *(One caller today: the tract's table fill. The per-locus prior seed reads the same three
+/// things and destructures the evidence itself, because it runs before the seed's own branch
+/// has anything else to do with them.)*
+struct TractEvidence<'a> {
+    /// One entry per sample of the run, in run order. **A tract rules no sample out**
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), so every sample has one.
+    per_sample: &'a [SsrSampleEvidence<'a>],
+    /// The tract's repeat unit and its two flanks.
+    detail: &'a SsrDetail,
+    /// How many whole repeats each candidate carries, parallel to the locus's candidate table.
+    candidate_repeat_counts: &'a [NonZeroU32],
+}
+
+/// The repeat-tract path's evidence, as [`generic_evidence_of`] is the SNP/indel path's — and
+/// unreachable on that path for the same reason.
+fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
+    match evidence {
+        LocusEvidence::Ssr {
+            region: _,
+            per_sample,
+            detail,
+            candidate_repeat_counts,
+        } => TractEvidence {
+            per_sample,
+            detail,
+            candidate_repeat_counts,
+        },
+        LocusEvidence::Generic { region, .. } => unreachable!(
+            "the SNP/indel locus at {region} reached the repeat-tract path's evidence: its \
+             caller branches on the evidence before reading it, so one branch is missing rather \
+             than one path unbuilt"
+        ),
+    }
+}
+
+/// **Everything at this locus that reads no allele frequency, computed once** — for every
+/// claimed scratch row, and never again however many passes the loop takes.
+///
+/// **The name says what the two paths have in common**, because they fill different things:
+/// what is shared is that no pass recomputes any of it
 /// (`doc/devel/ng/spec/read_likelihoods.md` §6.1). What makes that checkable rather than merely
 /// true is [`EmissionCost`](crate::ng::calling::EmissionCost), which this charges as it goes: a
-/// version that recomputed the emissions on every pass would give identical genotypes, only
-/// slower, so nothing but a counter can tell the two apart.
+/// version that recomputed the work on every pass would give identical genotypes, only slower,
+/// so nothing but a counter can tell the two apart.
 ///
-/// Three things are filled, and none of them reads a frequency: the locus's error-spread table,
-/// which is a property of the candidate sequences and of the genotype being scored; each
-/// sample's charged error per observation; and its compatibility verdict per
-/// `(partial read, candidate)`.
-/// [`assemble_genotype_likelihood_table`] is what assembles them into a row.
+/// # What each path fills
+///
+/// **On the SNP/indel path, the emissions and nothing else.**
+/// [`assemble_genotype_likelihood_table`] then folds them into a per-genotype row, once per
+/// locus or once per pass depending on contamination. Three things are filled and none of them
+/// reads a frequency: the locus's error-spread table, which is a property of the candidate
+/// sequences and of the genotype being scored; each sample's charged error per observation; and
+/// its compatibility verdict per `(partial read, candidate)`.
+///
+/// **At a repeat tract, the whole genotype-likelihood table**, because the tract's row builder
+/// computes its emissions and assembles them in one call and there is no seam between the two
+/// ([`genotype_log_likelihood_row`]). That costs nothing extra and changes no invariant: an
+/// uncontaminated tract's row reads no allele frequency either, so the table it writes is the
+/// table every pass reads, and [`assemble_genotype_likelihood_table`] has nothing left to do.
+/// A **contaminated** tract is refused by name inside this call, because the third term of its
+/// read-likelihood mixture is unbuilt.
 ///
 /// # Panics
 ///
-/// Held in release (`doc/devel/ng/spec/calling_em_loop.md` §8), on a repeat tract — which
-/// `call_locus` refuses before reaching here, so this restates it for a reader of this function
-/// alone.
-fn build_locus_emissions<Model: SsrEmissionModel>(
-    _emission: &Model,
+/// Held in release (`doc/devel/ng/spec/calling_em_loop.md` §8). At a repeat tract, on a run
+/// whose parameter fit found contamination — the refusal
+/// [`TractScoringFits::locus_parameters`](super::repeat_tract_parameters::TractScoringFits::locus_parameters)
+/// owns.
+fn fill_what_no_pass_recomputes<Model: SsrEmissionModel>(
+    emission: &Model,
     evidence: &LocusEvidence<'_>,
     parameters: &FrozenParameters<'_>,
     candidates: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     scratch: &mut CallingScratch<Model::Scratch>,
+) {
+    match evidence {
+        LocusEvidence::Generic { .. } => {
+            fill_generic_locus_emissions(evidence, parameters, candidates, genotypes, scratch);
+        }
+        LocusEvidence::Ssr { .. } => {
+            fill_tract_likelihood_table(
+                emission, evidence, parameters, candidates, genotypes, scratch,
+            );
+        }
+    }
+}
+
+/// The SNP/indel half of [`fill_what_no_pass_recomputes`]: the emissions, once per locus.
+fn fill_generic_locus_emissions<SsrEmissionScratch>(
+    evidence: &LocusEvidence<'_>,
+    parameters: &FrozenParameters<'_>,
+    candidates: &CandidateAlleles,
+    genotypes: &GenotypeTableView<'_>,
+    scratch: &mut CallingScratch<SsrEmissionScratch>,
 ) {
     let per_sample = generic_evidence_of(evidence);
 
@@ -1544,6 +1653,97 @@ fn build_locus_emissions<Model: SsrEmissionModel>(
             candidates,
             calibration,
             scratch.generic_row_mut(row),
+        );
+    }
+}
+
+/// **The repeat-tract half of [`fill_what_no_pass_recomputes`]: read this tract's fitted scoring
+/// parameters, then score every sample's reads against every candidate genotype under them.**
+///
+/// One call per locus. It leaves the whole `rows × genotypes` genotype-likelihood table filled,
+/// where the SNP/indel half leaves only the emissions underneath one.
+///
+/// # Why the parameters are read here rather than once per run
+///
+/// They are this tract's: which stutter model and which substitution rate a `(read group,
+/// candidate)` cell takes depends on the candidate's own repeat count, so the table is gathered
+/// per locus (`doc/devel/ng/spec/read_likelihoods.md` §4.4). It is gathered **inside** the
+/// slippage round rather than before it, because that round exists to re-fit exactly these
+/// numbers from the locus's own reads — a round that changed them and did not re-read them
+/// would score the tract under the numbers it had just replaced.
+///
+/// # What it allocates, and it is the repeat path's own cost
+///
+/// **Two vectors per tract**: the candidate table as the row sees it — one
+/// [`SsrCandidate`](crate::ng::calling::likelihood::ssr_emission::SsrCandidate) per candidate,
+/// built straight from the evidence's repeat counts — and the scoring contexts,
+/// `read groups × candidates` of them. **The contexts cannot live on the worker's scratch**:
+/// they borrow the fits, which are a field of that same scratch, so a struct owning both would
+/// refer to itself, and `#![forbid(unsafe_code)]` closes the usual escape.
+///
+/// A tract pays for a third vector elsewhere, in [`SummariseConditionLoop::call_locus`]: the
+/// prior's seed builder takes the candidates' repeat counts as plain `u32`s where the evidence
+/// carries them as non-zero ones, so the seed branch copies them. The SNP/indel path allocates
+/// none of the three (`doc/devel/ng/spec/calling_em_loop.md` §8).
+///
+/// # Panics
+///
+/// On a run whose parameter fit found contamination, by name — the tract's third mixture term
+/// is unbuilt and scoring it on the two-term form would drop a measured fraction in silence.
+///
+/// On a candidate table that is not a repeat tract's, and on repeat counts that are not one per
+/// candidate — both by
+/// [`tract_candidates`](super::repeat_tract_parameters::tract_candidates).
+fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
+    emission: &Model,
+    evidence: &LocusEvidence<'_>,
+    parameters: &FrozenParameters<'_>,
+    candidates: &CandidateAlleles,
+    genotypes: &GenotypeTableView<'_>,
+    scratch: &mut CallingScratch<Model::Scratch>,
+) {
+    let tract = tract_evidence_of(evidence);
+    let scored_candidates = tract_candidates(candidates, tract.candidate_repeat_counts);
+    scratch
+        .tract_fits_mut()
+        .gather_for_locus(&tract.detail.motif, &scored_candidates, parameters);
+
+    // **Charged before the buffers are taken, not as each row is scored.** The walk below runs
+    // inside one borrow of this scratch, where no method of it can be called — so what a row
+    // costs is charged here, from the same shapes the row is about to be handed.
+    scratch.charge_emission_build();
+    scratch.charge_table_assembly();
+    let row_count = scratch.row_count();
+    for row in 0..row_count {
+        let run_sample = scratch.run_sample_of_each_row()[row];
+        scratch.charge_emission_row_fill(
+            tract.per_sample[run_sample].observations.len(),
+            candidates.len(),
+        );
+        // **A tract's row assembles as it fills**, so the two halves are charged together —
+        // one row assembled per row filled, where the SNP/indel path can charge them apart.
+        scratch.charge_row_assembly();
+    }
+
+    // **The two walks below index the samples through the row map, and at a tract the map is
+    // provably the identity** — `is_callable` is unconditionally true for a repeat tract, so
+    // every sample claims a row in run order. Nothing here is therefore *tested* by a tract
+    // whose rows and samples disagree, because no such tract exists; the map is read rather
+    // than assumed so that the day one does, this walk needs no change.
+    let buffers = scratch.tract_locus_buffers_mut();
+    let contexts = buffers.fits.scoring_contexts(&scored_candidates);
+    let locus = buffers.fits.locus_parameters(&scored_candidates, &contexts);
+    let genotype_count = buffers.genotype_count;
+    for row in 0..row_count {
+        let run_sample = buffers.run_sample_of_each_row[row];
+        let scored = row * genotype_count..(row + 1) * genotype_count;
+        genotype_log_likelihood_row(
+            emission,
+            &tract.per_sample[run_sample],
+            locus,
+            genotypes,
+            &mut buffers.genotype_likelihoods[scored],
+            &mut *buffers.row_scratch,
         );
     }
 }
@@ -1604,10 +1804,18 @@ enum ContaminantFrequencies {
 /// the plain formula but not equal to it, since an unexplained *reference* read would still pick
 /// up `c` of the contaminant's mass. The named constructor is what keeps the two apart.
 ///
+/// # At a repeat tract there is nothing here to do
+///
+/// **The tract's table is already filled**, by [`fill_what_no_pass_recomputes`], because the tract's
+/// row builder computes its emissions and assembles them in one call. Where nothing is
+/// contaminated that table is final: the row reads no allele frequency, so no pass can move it.
+/// Where something is, the tract was refused inside that same call — its third mixture term is
+/// unbuilt — so a contaminated tract never reaches here at all.
+///
 /// # Panics
 ///
-/// Held in release (`doc/devel/ng/spec/calling_em_loop.md` §8), on a repeat tract, and on a
-/// scratch whose contaminant tables were not prepared for a run that fitted a fraction.
+/// Held in release (`doc/devel/ng/spec/calling_em_loop.md` §8), on a scratch whose contaminant
+/// tables were not prepared for a run that fitted a fraction.
 fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
     evidence: &LocusEvidence<'_>,
     parameters: &FrozenParameters<'_>,
@@ -1615,7 +1823,6 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
     frequencies: ContaminantFrequencies,
     scratch: &mut CallingScratch<SsrEmissionScratch>,
 ) {
-    let per_sample = generic_evidence_of(evidence);
     let allele_count = genotypes.allele_count();
     // **Held in release**, and the direction that makes it worth the check is the second one: a
     // contaminated run handed `NoneFitted` is scored on the plain formula at every locus of the
@@ -1629,6 +1836,34 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
          did scores the reads alone on the initialisation assembly and its own estimate on every \
          later one. The caller picks the source from the parameters, so the two cannot disagree"
     );
+
+    // **A repeat tract's table was filled whole by the emission build**, so there is nothing
+    // to fold here.
+    //
+    // **The check is not redundant with the one three frames away, and the direction it guards
+    // is the future.** A contaminated tract cannot reach this line today, because the tract's
+    // parameter assembly refuses one before any row is scored. The day that refusal lifts — the
+    // day the tract's third mixture term is built — a contaminated tract reaching this early
+    // return would have its table written once against no frequency estimate and read unchanged
+    // by every pass: a silently uncontaminated call, which is the failure that refusal exists to
+    // prevent. Held here it becomes a failure in this function instead.
+    let per_sample = match evidence {
+        LocusEvidence::Generic {
+            region: _,
+            per_sample,
+        } => *per_sample,
+        LocusEvidence::Ssr { .. } => {
+            assert!(
+                parameters.contamination_is_absent(),
+                "the repeat tract at {} is in a contaminated run and reached the table \
+                 assembly: a tract's table is written whole by the emission build, so returning \
+                 here would leave every pass reading a table built against no contaminant \
+                 frequency at all",
+                evidence.region()
+            );
+            return;
+        }
+    };
 
     match frequencies {
         // Neither reads a contaminant frequency, so neither touches the tables — and the
@@ -1809,23 +2044,20 @@ where
         scratch: &mut CallingScratch<Model::Scratch>,
     ) -> LocusInference {
         evidence.assert_matches_locus_and_run(&candidates, parameters);
-        // **The one thing this arm cannot do yet is refused at its front door**, before any of
-        // the worker's scratch is touched. The release profile aborts on a panic, so once this
-        // is wired into a run one such locus ends the whole cohort run — it should do so from
-        // the seam the run selected rather than from three frames down, and it should not first
-        // leave a shared scratch prepared for a locus that was never scored. **This is the
-        // guard**; `generic_evidence_of` restates it as an `unreachable!` for a reader of the
-        // two halves alone. *(There were two until E2a: a contaminated run was refused here as
-        // well, and is now called.)*
-        assert!(
-            !matches!(evidence, LocusEvidence::Ssr { .. }),
-            "the repeat tract at {} cannot be scored yet: its row exists and its scoring \
-             parameters are assembled (inference::repeat_tract_parameters), but this driver's \
-             emission build and row assembly still take the SNP/indel path's per-sample \
-             evidence — step E3b of the calling loop's plan is where a tract is scored through \
-             them",
-            evidence.region()
-        );
+        // **This arm no longer turns any locus away at its front door.** It refused every
+        // repeat tract until the tract branches below were written, and refused a contaminated
+        // run before that. What is still refused is narrower — a contaminated *repeat tract* —
+        // and it is refused three frames down, by the assembly that would have to supply the
+        // third term of its read-likelihood mixture.
+        //
+        // **The front-door version gave two reasons, and both are weaker for a refusal this
+        // narrow.** It said a panic should come from the seam the run selected rather than
+        // from three frames down, and that it should not first leave a shared scratch prepared
+        // for a locus that was never scored. The first buys a better frame and not a different
+        // outcome — the release profile aborts on a panic either way — and the second costs
+        // nothing, because the scratch is one worker's and dies with it. Against them, a second
+        // spelling of one rule is a rule that can drift: the refusal belongs beside the term
+        // that is missing, where whoever builds that term will meet it.
         let table = GenotypeTable::build(parameters.ploidy(), candidates.len());
         let genotypes = table.view();
 
@@ -1863,17 +2095,79 @@ where
             scratch.prepare_contaminant_tables(parameters.batch_count(), parameters.sample_count());
         }
 
-        // The locus's seed concentration: what the prior behaves as though it had already seen
-        // here, before any sample's reads (`spec/calling_priors.md` §2.3). Once per locus — no
-        // pass moves it.
-        // The value it returns is a view over the buffer it just filled; what every pass
-        // reads is the buffer, through the scratch, so the view is dropped here.
-        let _seed_concentration = fill_locus_concentration(
-            parameters.prior_seed(),
-            variant_class_of(&candidates),
-            candidates.len(),
-            scratch.seed_concentration_mut(),
-        );
+        // **The locus's seed concentration: what the prior behaves as though it had already
+        // seen here, before any sample's reads** (`spec/calling_priors.md` §2.3). Once per
+        // locus — no pass moves it. Each fill returns a view over the buffer it just wrote;
+        // what every pass reads is the buffer, through the scratch, so the view is dropped
+        // here.
+        //
+        // **The two paths seed from two different measurements, and the specs keep the words
+        // apart** (`spec/population_diversity.md` §2). An ordinary site is seeded from the
+        // population's **frequency spectrum** — how allele frequencies are spread across the
+        // population — which the run projected once, before any locus, into the two numbers and
+        // the regime mark a `SpectrumSeed` carries. A repeat tract is seeded from its stratum's
+        // **length spectrum** — how that stratum's chromosomes are spread over tract lengths —
+        // which is looked up per locus.
+        //
+        // **Both have a fallback ladder and only one of them reports which rung it used.** The
+        // ordinary-site ladder is `population_diversity.md` §3.4's, as amended by
+        // `ordinary_site_seed.md` §4, and its rung is resolved when the run's seed is projected
+        // and is not carried onto a locus; the tract ladder's three rungs are §4.4's, and the
+        // rung comes back on the lookup and travels onto this locus's record.
+        let length_spectrum_rung = match evidence {
+            LocusEvidence::Generic { .. } => {
+                let _ = fill_locus_concentration(
+                    parameters.prior_seed(),
+                    variant_class_of(&candidates),
+                    candidates.len(),
+                    scratch.seed_concentration_mut(),
+                );
+                None
+            }
+            LocusEvidence::Ssr {
+                detail,
+                candidate_repeat_counts,
+                ..
+            } => {
+                // **The reference tract's own repeat count is entry 0**, and that is a
+                // property of the candidate table rather than a convention agreed here: the
+                // reference allele is id 0 of every `CandidateAlleles` and stays there, and
+                // these counts are parallel to it. It is what the length spectrum's offsets are
+                // measured from, and passing a *candidate's* count instead would re-centre
+                // the shape on that candidate and flatten the prior.
+                //
+                // **A run whose fit produced no length spectrum anywhere is called here, at
+                // the ladder's bottom rung, rather than refused** — the owner's ruling of
+                // 2026-08-27, taken where `population_diversity.md` §5's *refuse a tract in a
+                // run carrying no tract parameters* met §4.4's *the ladder always answers*.
+                // **Refusing would turn a whole class of runs into a hard failure for a
+                // condition the output already states**: the rung on the locus's record says
+                // `StatedFlat`, which is how a call resting on a stated constant stays
+                // distinguishable from one resting on a measurement without re-running
+                // anything. §5 and §6 of that spec carry the ruling.
+                let reference_repeats = candidate_repeat_counts[0].get();
+                let length_spectrum = parameters.ssr_length_spectrum_at(
+                    detail.motif.ssr_period(),
+                    RepeatCount(reference_repeats),
+                );
+                // **One vector of `candidates` counts per tract**, and the third the repeat
+                // path allocates — `fill_tract_likelihood_table` names the other two. It is a
+                // type conversion: the seed builder takes plain counts, and the evidence
+                // carries them as non-zero ones, which is the stronger type and the one worth
+                // keeping at the seam.
+                let repeats_of_each_candidate: Vec<u32> = candidate_repeat_counts
+                    .iter()
+                    .map(|count| count.get())
+                    .collect();
+                let _ = fill_ssr_seed(
+                    &repeats_of_each_candidate,
+                    reference_repeats,
+                    length_spectrum,
+                    scratch.seed_concentration_mut(),
+                );
+                Some(length_spectrum.rung())
+            }
+        };
 
         let outcome;
         // ── the discovery round (spec §4.1), `Off` by default ──
@@ -1882,7 +2176,7 @@ where
             loop {
                 // **The expensive half, once**: the emissions read no allele frequency, so
                 // nothing the loop does to the frequencies can move them.
-                build_locus_emissions(
+                fill_what_no_pass_recomputes(
                     &self.emission,
                     evidence,
                     parameters,
@@ -1942,6 +2236,11 @@ where
             break;
         }
 
+        // **Read before the final pass rather than inside its argument list**, because at a
+        // tract it reads the scratch's own parameter table and the pass takes that scratch
+        // mutably.
+        let weakest_warrant =
+            weakest_warrant_at_the_locus(evidence, parameters, scratch.tract_fits());
         summarise_final_pass(
             scratch,
             &genotypes,
@@ -1950,13 +2249,12 @@ where
             &self.prior,
             candidates,
             outcome,
-            weakest_warrant_at_the_locus(evidence, parameters),
-            // **Which rung of the tract ladder the prior's shape came from, and on this path
-            // it is not a placeholder**: an ordinary site seeds from a *frequency* spectrum,
-            // whose own ladder has different rungs, and `LocusInference::new` refuses a tract
-            // rung set at a SNP/indel locus. A repeat tract does not reach here at all until
-            // E3b wires one through this driver, which is where a `Some` comes from.
-            None,
+            weakest_warrant,
+            // Which rung of the **tract** ladder the prior's shape came from — `None` at an
+            // ordinary site, whose own seed comes from a frequency spectrum, whose ladder has
+            // different rungs and resolves them once per run rather than per locus.
+            // `LocusInference::new` refuses a tract rung set at a SNP/indel locus.
+            length_spectrum_rung,
         )
     }
 }
@@ -1964,6 +2262,292 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
+    /// a whole repeat and a single base are different steps and the part-repeat half of the
+    /// stutter distribution is not hidden.
+    const TRACT_MOTIF: &[u8] = b"AT";
+
+    /// The two candidate lengths every repeat tract here is called over, in candidate-table
+    /// order: **6 whole repeats and 7**. Entry 0 is the reference allele's, which is what the
+    /// prior's length spectrum measures its offsets from.
+    ///
+    /// **Different from each other**, so a lookup that read one candidate's repeat count for
+    /// another lands in a different stratum rather than the same one. **Neither is what a
+    /// reader could derive from the other's bases**, which
+    /// `an_interrupted_candidates_supplied_repeat_count_is_what_picks_its_stratum` is about.
+    const TRACT_CANDIDATE_REPEATS: [u32; 2] = [6, 7];
+
+    /// **How many libraries a tract fixture's run has, and it is not two.** The parameter table
+    /// a tract is scored from is `read groups × candidates`, filled read-group-major; at an
+    /// equal shape a table filled the other way round is the same length and the same set of
+    /// cells, so a transposition passes every shape check. At three libraries against two
+    /// candidates the two orders disagree cell by cell.
+    ///
+    /// Only the first library sends any read below. The other two are in the run, which is what
+    /// makes them visible to a tract's warrant fold — that fold runs over the run's read-group
+    /// axis rather than over the reads that arrived.
+    const TRACT_READ_GROUPS: usize = 3;
+
+    /// The two candidates' repeat counts. **Supplied, not selected** — repeat-tract candidate
+    /// selection is unwritten, so a tract fixture states its candidates' repeat counts and a
+    /// reader must not take them for a step's output.
+    fn tract_repeat_counts() -> Vec<NonZeroU32> {
+        TRACT_CANDIDATE_REPEATS
+            .iter()
+            .map(|count| NonZeroU32::new(*count).expect("a candidate always holds a repeat"))
+            .collect()
+    }
+
+    /// The bases of a tract holding `repeats` whole copies of the motif.
+    fn tract_bases(repeats: u32) -> Vec<u8> {
+        TRACT_MOTIF.repeat(repeats as usize)
+    }
+
+    fn tract_detail() -> SsrDetail {
+        SsrDetail {
+            motif: Motif::new(TRACT_MOTIF).expect("a dinucleotide motif"),
+            left_flank: Box::from(b"CCCGGG".as_slice()),
+            right_flank: Box::from(b"TTTAAA".as_slice()),
+        }
+    }
+
+    /// The candidate table the two lengths above spell, with the shorter as the reference.
+    fn tract_alleles() -> CandidateAlleles {
+        let mut alleles = CandidateAlleles::new(
+            tract_bases(TRACT_CANDIDATE_REPEATS[0]).into_boxed_slice(),
+            LocusKind::Ssr(tract_detail()),
+        );
+        alleles.admit(tract_bases(TRACT_CANDIDATE_REPEATS[1]).into_boxed_slice());
+        alleles
+    }
+
+    /// `reads` reads that spanned the whole tract and showed `repeats` whole copies of it, from
+    /// the run's first library.
+    ///
+    /// **The per-read error sum is set to a plausible value and nothing on this path reads
+    /// it**, which is worth saying because it is what a reader would assume decides these
+    /// calls. A tract's row is scored from a stutter model and a per-base substitution rate;
+    /// `q_sum` is the SNP/indel emission's charge and neither `likelihood::ssr` nor its
+    /// emission model touches it. Zeroing it here would change no number below.
+    fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
+        SequenceObservation {
+            bases: tract_bases(repeats).into_boxed_slice(),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(0),
+            num_obs: reads,
+            num_fwd: reads / 2,
+            q_sum: -10.0 * f64::from(reads),
+            mapq_sum: 60 * reads,
+            mapq_sum_sq: u64::from(reads) * 3_600,
+            placed_left: reads / 2,
+            chain_ids: Vec::new(),
+        }
+    }
+
+    /// **`reads` reads that ran out inside the tract**, having seen `repeats` whole copies of it
+    /// before they did — a lower bound on the tract's length rather than a measurement of it.
+    ///
+    /// **Over half the reads overlapping a 60-base tract are these on real data**, and they are
+    /// scored by a different term of the row from a read that spanned the whole of it. A fixture
+    /// of complete reads only is the one shape in which counting the observations and counting
+    /// the *complete* observations are the same number.
+    fn tract_reads_that_ran_out(repeats: u32, reads: u32) -> SequenceObservation {
+        let bases = tract_bases(repeats);
+        let covered = u16::try_from(bases.len()).expect("a short fixture tract");
+        SequenceObservation {
+            read_witness: ReadWitness::from_left(
+                covered,
+                crate::ng::locus_generation::LocusLen::from_positions(u64::from(covered) + 4),
+            )
+            .expect("a reach that covers part of the locus"),
+            bases: bases.into_boxed_slice(),
+            read_group: ReadGroupId(0),
+            num_obs: reads,
+            num_fwd: reads / 2,
+            q_sum: -10.0 * f64::from(reads),
+            mapq_sum: 60 * reads,
+            mapq_sum_sq: u64::from(reads) * 3_600,
+            placed_left: reads / 2,
+            chain_ids: Vec::new(),
+        }
+    }
+
+    /// **A repeat fit that reached every stratum this file's tracts are called over**, each
+    /// with its own slippage numbers and its own length spectrum.
+    ///
+    /// **Three sources of coincidence are removed on purpose**, each because a mutation
+    /// survived it:
+    ///
+    /// - **the two strata share no number.** Level, direction split and fall-off all differ, so
+    ///   a lookup that answered from the wrong stratum changes a score rather than only the one
+    ///   number a reader happens to check;
+    /// - **the run's libraries do not share one slippage group.** Library 0 sits in group 0 and
+    ///   libraries 1 and 2 in group 1, whose numbers differ — so a parameter table filled
+    ///   candidate-major instead of read-group-major hands library 0's reads another group's
+    ///   polymerase;
+    /// - **no length spectrum is a palindrome and no two of its classes share a weight.** Each
+    ///   is heavier on the contraction side, as every real repeat fit is, so reversing one is a
+    ///   different prior; and reading class *i* for class *j* is a different number.
+    ///
+    /// Every warrant here is the cell's own, so a tract scored under it is
+    /// [`Provenance::FittedHere`] — which is what makes the calibration's own `Defaulted`
+    /// visible if it ever entered the tract's fold.
+    fn tract_strata() -> StratumFits {
+        tract_strata_describing(std::collections::BTreeMap::from([
+            (ReadGroupId(0), 0),
+            (ReadGroupId(1), 1),
+            (ReadGroupId(2), 1),
+        ]))
+    }
+
+    /// The same fit, over whichever of the run's libraries it claims to describe — what the
+    /// fixture about a library the fit never saw needs.
+    fn tract_strata_describing(
+        slippage_group_of_each_library: std::collections::BTreeMap<ReadGroupId, u32>,
+    ) -> StratumFits {
+        use crate::ng::parameter_estimation::joint::census::Stratum;
+        use crate::ng::parameter_estimation::joint::share_curve::ShareSource;
+        use crate::ng::parameter_estimation::joint::slippage_curve::LevelSource;
+        use crate::ng::parameter_estimation::joint::ssr_fit::{
+            LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+            StratumOutcome,
+        };
+
+        let level = LevelProvenance {
+            source: LevelSource::Cell,
+            curve: None,
+            reach: None,
+            slipped_reads: Some(400.0),
+        };
+        let share = ShareProvenance {
+            source: ShareSource::Stratum,
+            curve: None,
+            reach: None,
+        };
+        // One entry per slippage group: group 0 is library 0's, group 1 is libraries 1 and 2's.
+        let slippage_of_each_group = |level_in_group_0: f64| {
+            vec![
+                Some(Slippage {
+                    level: level_in_group_0,
+                    shorter_share: 0.83,
+                    fall_off: 0.25,
+                }),
+                Some(Slippage {
+                    level: level_in_group_0 * 1.75,
+                    shorter_share: 0.62,
+                    fall_off: 0.41,
+                }),
+            ]
+        };
+        let fitted_stratum =
+            |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
+                StratumOutcome::Fitted(Box::new(StratumFit {
+                    stratum: Stratum {
+                        period: 2,
+                        reference_repeats: repeats,
+                    },
+                    slippage: slippage_of_each_group(level_in_group_0),
+                    length_spectrum,
+                    concentration,
+                    log_likelihood_a_tract: -1.5,
+                    tracts_fitted: 40,
+                    borrowed: Vec::new(),
+                    converged: true,
+                    tracts_of_its_own: 40,
+                    reads_crossing: 400,
+                    level_provenance: vec![Some(level), Some(level)],
+                    shares_provenance: vec![
+                        Some(SharesProvenance {
+                            slipped_reads: Some(400.0),
+                            shorter_share: share,
+                            fall_off: share,
+                        }),
+                        Some(SharesProvenance {
+                            slipped_reads: Some(400.0),
+                            shorter_share: share,
+                            fall_off: share,
+                        }),
+                    ],
+                }))
+            };
+        StratumFits::over(
+            &[
+                // The weights run over offsets −2 … +2 whole repeats from the stratum's own
+                // reference tract length.
+                fitted_stratum(4, 0.03, vec![0.12, 0.28, 0.41, 0.14, 0.05], 16.0),
+                fitted_stratum(6, 0.04, vec![0.10, 0.25, 0.45, 0.15, 0.05], 20.0),
+                fitted_stratum(7, 0.06, vec![0.08, 0.22, 0.44, 0.18, 0.08], 25.0),
+            ],
+            slippage_group_of_each_library,
+        )
+    }
+
+    /// The run's libraries, none of them calibrated — a tract's row never reads a calibration,
+    /// so this says nothing about the tract and everything about whether the warrant fold has
+    /// wandered onto the wrong list.
+    fn tract_libraries() -> Vec<ReadGroupCalibration> {
+        vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS]
+    }
+
+    /// **A fitted per-base substitution rate for every `(library, stratum)` cell a tract's
+    /// parameter table covers** — every library of the run against every stratum this file's
+    /// tracts reach.
+    ///
+    /// **Every cell, not only the ones whose reads arrived**, because the table is built on the
+    /// run's read-group axis: a run that fitted only the library that sent reads still has
+    /// cells for the other two, and those cells fall to the stated constant and pull the
+    /// locus's warrant down with them. `a_library_that_sent_this_tract_no_read_still_weakens_it`
+    /// is that case; this is its opposite.
+    ///
+    /// The rate differs per stratum, so a lookup keyed by the wrong repeat count is a different
+    /// number rather than the same one.
+    fn tract_substitution_rates() -> std::collections::BTreeMap<
+        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+    > {
+        substitution_rates_over(&[4, 6, 7], TRACT_READ_GROUPS)
+    }
+
+    /// The same, over the strata and libraries named — so a fixture can leave a cell out.
+    fn substitution_rates_over(
+        strata: &[u32],
+        read_groups: usize,
+    ) -> std::collections::BTreeMap<
+        crate::ng::parameter_estimation::ssr::StratumKey,
+        crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+    > {
+        use crate::ng::parameter_estimation::Estimate;
+        use crate::ng::parameter_estimation::ssr::{
+            RepeatCount, Stratum as SsrStratum, StratumKey,
+        };
+        use crate::ng::types::{ErrorRate, SsrPeriod};
+
+        let period = SsrPeriod::try_new(2).expect("a dinucleotide");
+        let mut rates = std::collections::BTreeMap::new();
+        for library in 0..read_groups {
+            for repeats in strata {
+                rates.insert(
+                    StratumKey {
+                        read_group: ReadGroupId(
+                            u32::try_from(library).expect("a small library index"),
+                        ),
+                        stratum: SsrStratum::new(period, RepeatCount(*repeats)),
+                        ploidy: diploid(),
+                    },
+                    Estimate {
+                        // A different rate per stratum, so a lookup keyed by the wrong repeat
+                        // count is a different number.
+                        value: ErrorRate::try_new(0.001 * f64::from(*repeats))
+                            .expect("a probability"),
+                        provenance: Provenance::FittedHere,
+                        observations: 4_000,
+                    },
+                );
+            }
+        }
+        rates
+    }
     use proptest::prelude::*;
 
     use crate::ng::calling::GenericObservation;
@@ -1976,7 +2560,9 @@ mod tests {
         LocusEvidence, LocusInference, ReadGroupCalibration, SampleGenotypeCall, SsrSampleEvidence,
         UNWRITTEN_SCRATCH_VALUE,
     };
-    use crate::ng::locus_generation::{LocusKind, SsrDetail, WitnessedLocusPositions};
+    use crate::ng::locus_generation::{
+        LocusKind, ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
+    };
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
     use crate::ng::run::cohort_merge::build::PartialObservation;
@@ -5035,7 +5621,8 @@ mod tests {
         let table = GenotypeTable::build(diploid(), 2);
         let view = table.view();
         let per_sample = [SsrSampleEvidence::new(&[], &detail)];
-        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
 
         let inference = call_locus(
             &[vec![-4.0, 0.0, -4.0]],
@@ -6060,7 +6647,7 @@ mod tests {
                     parameters.sample_count(),
                 );
             }
-            build_locus_emissions(
+            fill_what_no_pass_recomputes(
                 &StutterSubstitutionEmission,
                 &evidence,
                 parameters,
@@ -6153,7 +6740,7 @@ mod tests {
             let buffers = scratch.sample_scoring_buffers_mut(row);
             buffers.sample_expected_copies.copy_from_slice(copies);
         }
-        build_locus_emissions(
+        fill_what_no_pass_recomputes(
             &StutterSubstitutionEmission,
             &evidence,
             &parameters,
@@ -6246,7 +6833,7 @@ mod tests {
             let buffers = scratch.sample_scoring_buffers_mut(row);
             buffers.sample_expected_copies.copy_from_slice(copies);
         }
-        build_locus_emissions(
+        fill_what_no_pass_recomputes(
             &StutterSubstitutionEmission,
             &evidence,
             &parameters,
@@ -6328,7 +6915,7 @@ mod tests {
             let buffers = scratch.sample_scoring_buffers_mut(row);
             buffers.sample_expected_copies.copy_from_slice(copies);
         }
-        build_locus_emissions(
+        fill_what_no_pass_recomputes(
             &StutterSubstitutionEmission,
             &evidence,
             &parameters,
@@ -6384,7 +6971,7 @@ mod tests {
         scratch.prepare_for_locus(1, &alleles, &genotypes);
         scratch.claim_row_for(0, outbred());
         scratch.prepare_contaminant_tables(parameters.batch_count(), parameters.sample_count());
-        build_locus_emissions(
+        fill_what_no_pass_recomputes(
             &StutterSubstitutionEmission,
             &evidence,
             &parameters,
@@ -6497,7 +7084,7 @@ mod tests {
             let buffers = scratch.sample_scoring_buffers_mut(row);
             buffers.sample_expected_copies.copy_from_slice(&[0.0, 2.0]);
         }
-        build_locus_emissions(
+        fill_what_no_pass_recomputes(
             &StutterSubstitutionEmission,
             &evidence,
             &parameters,
@@ -6749,46 +7336,626 @@ mod tests {
         );
     }
 
-    /// **A repeat tract is refused, and the message names what it is waiting for.** The row
-    /// exists and its parameters are assembled (`inference::repeat_tract_parameters`); what
-    /// does not is this driver's route from a tract's evidence to that row. Scoring the tract
-    /// through the SNP/indel path's evidence would be a genotype nobody could trace.
+    /// Call one repeat tract through the driver, over the two candidate lengths every tract
+    /// fixture here uses and against the run's fitted repeat parameters.
+    ///
+    /// **The candidates and their repeat counts are supplied, not selected.** The repeat-tract
+    /// half of candidate selection is unwritten (`candidate_alleles_ssr.md`), so a fixture
+    /// states them; a later reader must not take a supplied candidate set for a step's output.
+    fn call_tract(
+        observations_of_each_sample: &[&[SequenceObservation]],
+        strata: &StratumFits,
+        substitution: &std::collections::BTreeMap<
+            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+        >,
+        calibration: &[ReadGroupCalibration],
+        scratch: &mut CallingScratch<StutterSubstitutionScratch>,
+    ) -> LocusInference {
+        call_tract_over(
+            observations_of_each_sample,
+            &tract_alleles(),
+            &tract_repeat_counts(),
+            strata,
+            substitution,
+            calibration,
+            scratch,
+        )
+    }
+
+    /// The same, over a candidate table and repeat counts the caller chose — what the two
+    /// fixtures that are *about* the repeat counts need.
+    fn call_tract_over(
+        observations_of_each_sample: &[&[SequenceObservation]],
+        alleles: &CandidateAlleles,
+        repeat_counts: &[NonZeroU32],
+        strata: &StratumFits,
+        substitution: &std::collections::BTreeMap<
+            crate::ng::parameter_estimation::ssr::StratumKey,
+            crate::ng::parameter_estimation::Estimate<crate::ng::types::ErrorRate>,
+        >,
+        calibration: &[ReadGroupCalibration],
+        scratch: &mut CallingScratch<StutterSubstitutionScratch>,
+    ) -> LocusInference {
+        let detail = tract_detail();
+        let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
+            .iter()
+            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .collect();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, repeat_counts);
+        let inbreeding = vec![outbred(); per_sample.len()];
+        let parameters =
+            uncontaminated_run(calibration, &inbreeding, strata, substitution, diploid());
+        shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles.clone(),
+            &RunnableCallingLoopConfig::default(),
+            scratch,
+        )
+    }
+
+    /// The genotype a sample was called, as allele ids.
+    fn called_alleles(inference: &LocusInference, sample: usize) -> Vec<u16> {
+        inference.per_sample[sample]
+            .genotype()
+            .unwrap_or_else(|| panic!("sample {sample} was called missing"))
+            .alleles()
+            .iter()
+            .map(|allele| allele.get())
+            .collect()
+    }
+
+    /// **ng calls genotypes at a repeat tract**, and the three a reader can derive by hand come
+    /// out.
+    ///
+    /// Three samples at a dinucleotide `AT` tract called over two lengths — 6 whole repeats,
+    /// which is the reference, and 7. The first's twenty reads all showed the 7-repeat tract;
+    /// the second showed ten of each; the third showed twenty of the 6-repeat one, plus two
+    /// reads that ran out inside the tract. At a slippage level of 4 in 100 and twenty reads
+    /// apiece those are not close calls, so the answers do not turn on the prior's strength:
+    /// **`1/1`, `0/1` and `0/0`**.
+    ///
+    /// **The locus's likelihood table is built once**, whatever the pass count: a tract's row
+    /// reads no allele frequency where nothing is contaminated, so nothing the loop does to the
+    /// frequencies can move it. That is the same invariant the SNP/indel path holds, reached a
+    /// different way — the tract's row computes its emissions and assembles them in one call,
+    /// so both halves are charged together, one row of each per sample.
+    ///
+    /// **The three samples hold one, two and two observations, and one of the five ran out.**
+    /// Both are deliberate. Equal observation counts make the emission count a three-way
+    /// product, in which the candidate count and the sample count can be swapped for each other
+    /// (`EmissionCost::emission_evaluations`' own documentation names that shape); and a fixture
+    /// of complete reads only makes *count the observations* and *count the complete
+    /// observations* the same number, where on real data over half the reads overlapping a tract
+    /// run out inside it.
     #[test]
-    #[should_panic(expected = "cannot be scored yet")]
-    fn a_repeat_tract_is_refused_by_the_driver_rather_than_scored_against_invented_parameters() {
-        let detail = SsrDetail {
-            motif: Motif::new(b"AT").expect("a dinucleotide motif"),
-            left_flank: Box::from(b"CCCGGG".as_slice()),
-            right_flank: Box::from(b"TTTAAA".as_slice()),
-        };
-        let mut alleles = CandidateAlleles::new(
-            Box::from(b"ATAT".as_slice()),
-            LocusKind::Ssr(SsrDetail {
-                motif: Motif::new(b"AT").expect("a dinucleotide motif"),
-                left_flank: Box::from(b"CCCGGG".as_slice()),
-                right_flank: Box::from(b"TTTAAA".as_slice()),
-            }),
+    fn a_repeat_tract_is_called_from_its_reads() {
+        let carrier = [tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)];
+        let heterozygote = [
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 10),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 10),
+        ];
+        let reference_sample = [
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 20),
+            tract_reads_that_ran_out(TRACT_CANDIDATE_REPEATS[0], 2),
+        ];
+        let mut scratch = worker_scratch();
+        let inference = call_tract(
+            &[&carrier, &heterozygote, &reference_sample],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut scratch,
         );
-        alleles.admit(Box::from(b"ATATAT".as_slice()));
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
-        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
-        let calibration = [ReadGroupCalibration::defaulted()];
-        let inbreeding = [outbred()];
-        let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
-        let parameters = uncontaminated_run(
-            &calibration,
-            &inbreeding,
-            &strata,
+
+        assert_eq!(inference.region, locus_region());
+        assert_eq!(inference.alleles().len(), 2, "the two supplied lengths");
+        assert_eq!(
+            called_alleles(&inference, 0),
+            vec![1, 1],
+            "twenty reads of the seven-repeat tract"
+        );
+        assert_eq!(
+            called_alleles(&inference, 1),
+            vec![0, 1],
+            "ten reads of each length"
+        );
+        assert_eq!(
+            called_alleles(&inference, 2),
+            vec![0, 0],
+            "twenty reads of the six-repeat tract, and two that ran out inside it"
+        );
+        assert!(inference.converged, "a locus this one-sided settles");
+        assert_eq!(
+            scratch.emission_cost(),
+            EmissionCost {
+                emission_builds: 1,
+                emission_row_fills: 3,
+                // Five observations across the three samples — 1, 2 and 2 — against two
+                // candidates. Not `samples × observations × candidates`, which would be 12,
+                // and not the complete observations alone, which would be 8.
+                emission_evaluations: 10,
+                table_assemblies: 1,
+                row_assemblies: 3,
+            },
+            "a tract's table is built once and its two halves are charged together"
+        );
+    }
+
+    /// **The tract's prior seed is its stratum's fitted length spectrum, restricted to the
+    /// lengths this locus is called over and scaled by the strength the fit holds them with** —
+    /// asserted as numbers, because nothing else in this file can fail if it is wrong.
+    ///
+    /// The 6-repeat stratum's fitted spectrum runs `[0.10, 0.25, 0.45, 0.15, 0.05]` over offsets
+    /// −2 … +2 whole repeats from the reference tract length, at a concentration of 20. This
+    /// locus's candidates sit at offsets **0 and +1**, so they take **0.45 and 0.15**, and the
+    /// seed is `20 × [0.45, 0.15]` = **`[9.0, 3.0]`** — the reference length favoured three to
+    /// one, which is what the fit says about tracts of this stratum.
+    ///
+    /// **Every genotype fixture here is decided by its reads**, deliberately, so none of them
+    /// moves when the seed does. Three mistakes this catches and they would not:
+    ///
+    /// - the reference count taken from the wrong candidate — the last one, 7, instead of entry
+    ///   0 — which re-centres the shape and gives `[5.5, 11.0]`, the reference *dis*favoured two
+    ///   to one;
+    /// - the spectrum read backwards, which gives `[9.0, 5.0]`;
+    /// - the ordinary-site seed builder called instead of the tract's, which gives the run's two
+    ///   numbers and no length in sight.
+    #[test]
+    fn the_tracts_prior_seed_is_its_fitted_length_spectrum_over_the_candidates() {
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let mut scratch = worker_scratch();
+        let _ = call_tract(
+            &[&reads],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            scratch.seed_concentration(),
+            &[9.0, 3.0],
+            "20 × the fitted weights at offsets 0 and +1 from the reference tract length"
+        );
+    }
+
+    /// **A tract whose reads say nothing is decided by its fitted prior alone, and the prior it
+    /// is decided by is a length spectrum.**
+    ///
+    /// One sample with no reads at all. Its likelihood row is flat, so its posterior is its
+    /// prior, and at one sample the leave-one-out subtraction removes its own vote from its own
+    /// prior — leaving the seed. Against the seed `[9.0, 3.0]` the three genotypes come out
+    /// **0.577, 0.346 and 0.077**, so the call is `0/0`.
+    ///
+    /// **This is the fixture the others cannot be.** Every genotype asserted elsewhere in this
+    /// file rests on twelve to twenty reads a sample, where the likelihood separates the
+    /// genotypes by tens of nats and the largest prior shift a wrong seed can produce is about
+    /// four. Here the prior is the whole of it: taking the reference count from the wrong
+    /// candidate gives the seed `[5.5, 11.0]` and the call `1/1`.
+    #[test]
+    fn a_tract_whose_reads_decide_nothing_is_decided_by_its_fitted_prior() {
+        let mut scratch = worker_scratch();
+        let inference = call_tract(
+            &[&[]],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            called_alleles(&inference, 0),
+            vec![0, 0],
+            "the fitted spectrum favours the reference tract length three to one"
+        );
+    }
+
+    /// **A candidate's supplied repeat count is what picks its stratum, and it is not its byte
+    /// length divided by the motif's.**
+    ///
+    /// This is the reason `candidate_repeat_counts` travels from the locus generator through the
+    /// evidence and into the driver at all, and no other fixture in this file can fail if the
+    /// driver ignored it: everywhere else a candidate of *n* repeats spells exactly `2n` bases,
+    /// so counting the bases gives the right answer by accident.
+    ///
+    /// **Here the two candidates spell the same number of bases and hold different numbers of
+    /// whole repeats.** Both are twelve bases; the first is six clean `AT` copies, the second is
+    /// interrupted by a `C` and holds four.
+    ///
+    /// **The count is used twice and both uses are asserted**, because a driver that read it in
+    /// one place and derived it in the other would pass half of this:
+    ///
+    /// - **the prior.** Counting bases would put both candidates at offset 0 from the reference
+    ///   and seed them `[9.0, 9.0]`; reading the supplied counts puts the second at offset −2,
+    ///   whose fitted weight is 0.10, and seeds them **`[9.0, 2.0]`**;
+    /// - **the scoring.** The run's fit has a substitution rate at the 6-repeat stratum and none
+    ///   at the 4-repeat one, so reading the supplied counts makes the second candidate's cells
+    ///   fall to the stated constant and the locus **`Defaulted`**. Counting bases would put
+    ///   both candidates in the fitted stratum and claim `FittedHere`.
+    #[test]
+    fn an_interrupted_candidates_supplied_repeat_count_is_what_picks_its_stratum() {
+        let mut alleles = CandidateAlleles::new(
+            tract_bases(6).into_boxed_slice(),
+            LocusKind::Ssr(tract_detail()),
+        );
+        // Twelve bases like the reference, four whole repeats because of the `C`.
+        alleles.admit(Box::from(b"ATATATATCTAT".as_slice()));
+        let interrupted = [
+            NonZeroU32::new(6).expect("six whole repeats"),
+            NonZeroU32::new(4).expect("four whole repeats"),
+        ];
+        assert_eq!(
+            alleles
+                .bases_of(AlleleId(1))
+                .expect("the second candidate")
+                .len(),
+            alleles.reference().len(),
+            "the fixture only works while the two candidates spell the same number of bases"
+        );
+
+        let reads = [tract_reads(6, 12)];
+        let mut scratch = worker_scratch();
+        let inference = call_tract_over(
+            &[&reads],
+            &alleles,
+            &interrupted,
+            &tract_strata(),
+            // Fitted at the stratum a base count would reach, absent at the stratum the
+            // supplied count reaches.
+            &substitution_rates_over(&[6, 7], TRACT_READ_GROUPS),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            scratch.seed_concentration(),
+            &[9.0, 2.0],
+            "the interrupted candidate sits two whole repeats below the reference, not level \
+             with it"
+        );
+        assert_eq!(
+            inference.weakest_provenance,
+            Provenance::Defaulted,
+            "the interrupted candidate's stratum has no fitted substitution rate, and it is the \
+             supplied count that says which stratum that is"
+        );
+    }
+
+    /// **A library that sent this tract no read still weakens its warrant** — the one place the
+    /// two paths' warrant folds are not the same rule, and it is asserted rather than only
+    /// documented.
+    ///
+    /// The run has three libraries and only the first sends a read. The fit describes that one
+    /// and not the other two, so the tract's parameter table — which covers every library of the
+    /// run, because that is the axis the row's context table is indexed on — holds four
+    /// defaulted cells, and the locus comes back `Defaulted`.
+    ///
+    /// **It is the conservative direction and it is a departure**, from
+    /// `read_likelihoods.md` §4.4's *any parameter that entered the locus*: no read of libraries
+    /// 1 and 2 entered anything here. Narrowing it means narrowing what the parameter table
+    /// covers; until then this test is what stops the behaviour changing by accident.
+    #[test]
+    fn a_library_that_sent_this_tract_no_read_still_weakens_it() {
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        // The same strata, but a fit that names only the library whose reads arrived.
+        let describes_one_library =
+            tract_strata_describing(std::collections::BTreeMap::from([(ReadGroupId(0), 0)]));
+
+        let mut scratch = worker_scratch();
+        let inference = call_tract(
+            &[&reads],
+            &describes_one_library,
+            &substitution_rates_over(&[4, 6, 7], 1),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            inference.weakest_provenance,
+            Provenance::Defaulted,
+            "libraries 1 and 2 sent no read and the fit does not describe them, and the tract's \
+             parameter table covers them anyway"
+        );
+    }
+
+    /// **A repeat tract's prior comes from its stratum's length spectrum, and the record says
+    /// which rung of the ladder answered.**
+    ///
+    /// The run's repeat fit reached this tract's own stratum, so the rung is the stratum's own
+    /// fit. A run whose fit reached no stratum at all still gets a prior — the ladder always
+    /// answers — and the rung then says it was a stated flat shape, which is the difference
+    /// between a call resting on a measurement and one resting on a constant.
+    ///
+    /// **A SNP/indel locus carries no rung at all**, because its prior comes from the
+    /// population's frequency spectrum, whose ladder has different rungs. The two are different
+    /// quantities and `LocusInference::new` refuses one where the other belongs.
+    #[test]
+    fn the_rung_the_tracts_prior_came_from_travels_onto_the_locus() {
+        use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let mut scratch = worker_scratch();
+        let fitted = call_tract(
+            &[&reads],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            fitted.length_spectrum_rung,
+            Some(LengthSpectrumRung::StratumsOwnFit)
+        );
+
+        let mut unfitted_scratch = worker_scratch();
+        let unfitted = call_tract(
+            &[&reads],
+            &StratumFits::over(&[], std::collections::BTreeMap::new()),
             &NO_SUBSTITUTION_RATES,
+            &tract_libraries(),
+            &mut unfitted_scratch,
+        );
+        assert_eq!(
+            unfitted.length_spectrum_rung,
+            Some(LengthSpectrumRung::StatedFlat),
+            "the ladder always answers, and says from how far down"
+        );
+    }
+
+    /// **The middle rung of the tract ladder reaches the record too** — a stratum the fit never
+    /// reached, in a run whose fit pooled that motif period's tracts.
+    ///
+    /// **It is the rung neither of the fixtures beside it can produce**, and each of them can
+    /// be produced by a mistake: a lookup that ignored the pool answers `StatedFlat`, and one
+    /// that read the pool where a stratum's own fit exists answers `PeriodsPooledTracts` at the
+    /// fitted tract as well. So the three rungs are asserted at three fixtures rather than
+    /// two (`population_diversity.md` §8, check 3).
+    #[test]
+    fn a_tract_whose_stratum_the_fit_missed_is_seeded_from_its_motif_periods_pool() {
+        use crate::ng::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum;
+        use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+
+        // A fit that reached no stratum of its own, but pooled every dinucleotide tract it saw.
+        let pooled = StratumFits::over(&[], std::collections::BTreeMap::new())
+            .with_period_length_spectra(std::collections::BTreeMap::from([(
+                2,
+                PeriodLengthSpectrum {
+                    period: 2,
+                    length_spectrum: vec![0.10, 0.20, 0.40, 0.20, 0.10],
+                    concentration: 12.0,
+                    tracts_fitted: 900,
+                    strata_pooled: 7,
+                    converged: true,
+                },
+            )]));
+
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let mut scratch = worker_scratch();
+        let inference = call_tract(
+            &[&reads],
+            &pooled,
+            &NO_SUBSTITUTION_RATES,
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            inference.length_spectrum_rung,
+            Some(LengthSpectrumRung::PeriodsPooledTracts)
+        );
+    }
+
+    /// **A tract's warrant is the weakest of the repeat parameters it was scored under, and the
+    /// read-group calibration is not one of them.**
+    ///
+    /// The two halves of that sentence are checked apart, because a fold that read the wrong
+    /// list would pass either one alone:
+    ///
+    /// - a tract whose repeat fit reached both its strata is `FittedHere` **even though the run's
+    ///   one library was never calibrated** — the calibration scale does not enter a tract's
+    ///   likelihood, so charging the tract for it would report a worse warrant than the call has;
+    /// - a tract whose fit reached no stratum is `Defaulted` **even though the library was
+    ///   calibrated against a measurement** — the stutter model and the substitution rate then
+    ///   both fell to stated constants, which is what the record has to say.
+    #[test]
+    fn a_tracts_warrant_comes_from_its_repeat_parameters_and_not_from_the_calibration() {
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let calibrated = [ReadGroupCalibration {
+            scale: 1.0,
+            provenance: Provenance::FittedHere,
+        }];
+
+        let mut scratch = worker_scratch();
+        let fitted = call_tract(
+            &[&reads],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut scratch,
+        );
+        assert_eq!(
+            fitted.weakest_provenance,
+            Provenance::FittedHere,
+            "an uncalibrated library does not weaken a tract, whose row never reads the scale"
+        );
+
+        let mut unfitted_scratch = worker_scratch();
+        let unfitted = call_tract(
+            &[&reads],
+            &StratumFits::over(&[], std::collections::BTreeMap::new()),
+            &NO_SUBSTITUTION_RATES,
+            &calibrated,
+            &mut unfitted_scratch,
+        );
+        assert_eq!(
+            unfitted.weakest_provenance,
+            Provenance::Defaulted,
+            "a calibrated library does not rescue a tract scored on stated constants"
+        );
+    }
+
+    /// **The table assembly refuses a contaminated repeat tract rather than returning from it**,
+    /// and this test reaches that check the only way anything can: by calling the assembly
+    /// directly.
+    ///
+    /// **Through the driver it is unreachable, and that is the point of holding it here.** A
+    /// contaminated tract is turned away one function earlier, by the parameter assembly that
+    /// would have to supply the third term of its read-likelihood mixture, so no run gets this
+    /// far. **The day that refusal lifts** — the day that term is built — a contaminated tract
+    /// falling through this function's early return would have its table written once against no
+    /// contaminant frequency at all and read unchanged by every pass: a call that quietly used
+    /// none of the fraction the run measured. This check turns that into a failure here.
+    #[test]
+    #[should_panic(expected = "reached the table assembly")]
+    fn the_table_assembly_refuses_a_contaminated_repeat_tract() {
+        let detail = tract_detail();
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let per_sample = [
+            SsrSampleEvidence::new(&reads, &detail),
+            SsrSampleEvidence::new(&reads, &detail),
+        ];
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
+        let calibration = [
+            ReadGroupCalibration::defaulted(),
+            ReadGroupCalibration::defaulted(),
+        ];
+        let contamination = [contaminated_at(0.05), contaminated_at(0.05)];
+        let inbreeding = [outbred(), outbred()];
+        let strata = tract_strata();
+        let substitution = tract_substitution_rates();
+        let batching = one_batch(2, 2);
+        let parameters = FrozenParameters::new(
+            &calibration,
+            &contamination,
+            &batching,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            &substitution,
+            diploid(),
+        );
+        let alleles = tract_alleles();
+        let table = GenotypeTable::build(diploid(), alleles.len());
+        let genotypes = table.view();
+        let mut scratch = worker_scratch();
+        scratch.prepare_for_locus(2, &alleles, &genotypes);
+        scratch.claim_row_for(0, outbred());
+        scratch.claim_row_for(1, outbred());
+        scratch.prepare_contaminant_tables(parameters.batch_count(), parameters.sample_count());
+        assemble_genotype_likelihood_table(
+            &evidence,
+            &parameters,
+            &genotypes,
+            ContaminantFrequencies::TheReadsAlone,
+            &mut scratch,
+        );
+    }
+
+    /// **A contaminated repeat tract is refused by name**, because the third term of its
+    /// read-likelihood mixture — how common the length an observation showed is in the
+    /// contaminating population — is not built.
+    ///
+    /// **Refused rather than scored on the two-term form**, which is the whole point: the
+    /// two-term form returns perfectly plausible numbers with the fitted fraction silently
+    /// dropped, and a doc comment saying *the caller must not* would have been the same
+    /// guarantee without the mechanism. The SNP/indel path in the same run is called as usual;
+    /// it is the tract, not the run, that is turned away.
+    #[test]
+    #[should_panic(expected = "third mixture term")]
+    fn a_contaminated_repeat_tract_is_refused_because_its_third_mixture_term_is_unbuilt() {
+        let detail = tract_detail();
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
+        let per_sample = [
+            SsrSampleEvidence::new(&reads, &detail),
+            SsrSampleEvidence::new(&reads, &detail),
+        ];
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
+        let calibration = [
+            ReadGroupCalibration::defaulted(),
+            ReadGroupCalibration::defaulted(),
+        ];
+        let contamination = [contaminated_at(0.05), contaminated_at(0.05)];
+        let inbreeding = [outbred(), outbred()];
+        let strata = tract_strata();
+        let substitution = tract_substitution_rates();
+        let batching = one_batch(2, 2);
+        let parameters = FrozenParameters::new(
+            &calibration,
+            &contamination,
+            &batching,
+            &inbreeding,
+            human_like_seed(),
+            &strata,
+            &substitution,
             diploid(),
         );
         let mut scratch = worker_scratch();
         let _ = shipped_arm().call_locus(
             &evidence,
             &parameters,
-            alleles,
+            tract_alleles(),
             &RunnableCallingLoopConfig::default(),
             &mut scratch,
+        );
+    }
+
+    /// **One worker's scratch calls tract after tract, and the second is scored on its own
+    /// parameters** — nothing of the first survives into it.
+    ///
+    /// **The defaulting tract runs first, and here is exactly what that order buys.** Run the
+    /// fitted tract first and every cell the second tract reads would already hold a number
+    /// drawn from a fit, so a stutter model or a substitution rate left over from tract one
+    /// still looks like a fitted one and the warrant still comes back `FittedHere`. Run the
+    /// *empty* fit first and every one of those cells had to be written by tract two's own
+    /// gather to be right at all.
+    ///
+    /// **What it does not test, said so that nobody reads more into it.** Two of the buffers
+    /// refilled per tract are checked by an assertion rather than by this test — a stale
+    /// context table of the wrong width is refused by name before any row is scored — and the
+    /// three counters the gather resets are read by nothing outside their own module today, so
+    /// a dropped reset is invisible in either order. What this test genuinely covers is the
+    /// per-cell parameters, the tract's reachable-length support, the motif, the prior's seed
+    /// buffer and the row scratch's emission cache.
+    ///
+    /// It asserts the strongest form available — the second tract's whole inference, compared
+    /// against the same tract called on a scratch that has never seen another locus.
+    #[test]
+    fn a_second_tract_on_the_same_scratch_is_scored_on_its_own_parameters() {
+        let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[1], 16)];
+        let defaulted_first = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 5)];
+
+        let mut reused = worker_scratch();
+        let _ = call_tract(
+            &[&defaulted_first],
+            &StratumFits::over(&[], std::collections::BTreeMap::new()),
+            &NO_SUBSTITUTION_RATES,
+            &tract_libraries(),
+            &mut reused,
+        );
+        let second = call_tract(
+            &[&reads],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut reused,
+        );
+
+        let mut fresh = worker_scratch();
+        let alone = call_tract(
+            &[&reads],
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut fresh,
+        );
+
+        assert_eq!(
+            second, alone,
+            "the reused scratch must give the same locus, field for field and bit for bit"
+        );
+        assert_eq!(
+            reused.emission_cost(),
+            fresh.emission_cost(),
+            "the cost counters are reset per locus, so the second tract's are the first's"
         );
     }
 
@@ -7309,11 +8476,38 @@ mod tests {
         );
     }
 
-    /// **Spec §5.0.1's ruling, as a unit**, because no end-to-end fixture can reach it: a
-    /// repeat tract is refused at the driver's front door until it is wired through, so the
-    /// callable count it computes there is never observable. A discovery round at a tract can
-    /// put back a length the cap cut, so no sample is locked out of the locus for the rest of
-    /// its calling.
+    /// **Each path's evidence accessor refuses the other path's locus**, rather than reading a
+    /// field that happens to be there.
+    ///
+    /// Neither is reachable through the driver, which branches on the evidence before reading
+    /// it — that is what makes them worth asserting: a branch dropped later surfaces here,
+    /// naming the path, rather than as a genotype scored under the wrong read model.
+    #[test]
+    #[should_panic(expected = "reached the SNP/indel path's evidence")]
+    fn a_tract_handed_to_the_snp_paths_evidence_accessor_is_refused() {
+        let detail = tract_detail();
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
+        let _ = generic_evidence_of(&evidence);
+    }
+
+    /// The mirror of it, on the other path.
+    #[test]
+    #[should_panic(expected = "reached the repeat-tract path's evidence")]
+    fn a_snp_handed_to_the_tract_paths_evidence_accessor_is_refused() {
+        let rows = [observation(0, 0, 4, 2, 2)];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+        let _ = tract_evidence_of(&evidence);
+    }
+
+    /// **Spec §5.0.1's ruling, as a unit**: a discovery round at a tract can put back a length
+    /// the cap cut, so no sample is locked out of the locus for the rest of its calling.
+    ///
+    /// **Asked here rather than only through a called tract**, because a tract that came back
+    /// with every sample called is consistent both with this rule and with a tract where every
+    /// sample happened to be callable anyway — the two are the same output.
     #[test]
     fn is_callable_rules_no_sample_out_on_a_repeat_tract() {
         let detail = SsrDetail {
@@ -7325,7 +8519,8 @@ mod tests {
             SsrSampleEvidence::new(&[], &detail),
             SsrSampleEvidence::new(&[], &detail),
         ];
-        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail);
+        let repeat_counts = tract_repeat_counts();
+        let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
 
         assert!(is_callable(&evidence, 0));
         assert!(is_callable(&evidence, 1));

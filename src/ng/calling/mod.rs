@@ -94,6 +94,7 @@ use crate::ng::types::{
     InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
 };
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 /// The alleles one locus is called over: the reference allele, and every alternative
 /// the candidate step admitted — each stored as the bases it spells.
@@ -405,6 +406,21 @@ pub enum LocusEvidence<'a> {
         /// The tract's repeat unit and its two flanks — what the repeat read model scores
         /// against.
         detail: &'a SsrDetail,
+        /// **How many whole repeats each candidate carries**, parallel to the locus's
+        /// [`CandidateAlleles`] and in the same order.
+        ///
+        /// **It is not derivable from the bases, which is the whole reason it travels.** An
+        /// interrupted tract — one whose repeat is broken by a substitution — holds fewer whole
+        /// repeats than its length suggests, and the slippage fit is keyed by the count rather
+        /// than by the length (`doc/devel/ng/spec/read_likelihoods.md` §4.4). Two candidates of
+        /// equal length can therefore be drawn from different strata.
+        ///
+        /// **Its producer is repeat-tract candidate selection, which is unwritten**
+        /// ([`candidate_alleles_ssr.md`](../../../doc/devel/ng/impl_plan/candidate_alleles_ssr.md)),
+        /// so until that lands every caller supplies it — and a test that supplies one must say
+        /// so, because a supplied candidate set read as a selected one is a claim about a step
+        /// that does not exist.
+        candidate_repeat_counts: &'a [NonZeroU32],
     },
 }
 
@@ -439,6 +455,7 @@ impl<'a> LocusEvidence<'a> {
         region: GenomeRegion,
         per_sample: &'a [SsrSampleEvidence<'a>],
         detail: &'a SsrDetail,
+        candidate_repeat_counts: &'a [NonZeroU32],
     ) -> Self {
         assert!(
             !per_sample.is_empty(),
@@ -446,10 +463,18 @@ impl<'a> LocusEvidence<'a> {
              entry per sample of the run and a run has at least one sample, so an empty \
              list is evidence that went missing rather than a locus nobody covered"
         );
+        assert!(
+            !candidate_repeat_counts.is_empty(),
+            "the repeat tract at {region} supplied no candidate repeat counts: a tract is \
+             called over at least its reference length, and the count is what keys the \
+             slippage fit. Their number is checked against the candidate table by \
+             `assert_matches_locus_and_run`, which is where the two meet"
+        );
         Self::Ssr {
             region,
             per_sample,
             detail,
+            candidate_repeat_counts,
         }
     }
 
@@ -484,7 +509,7 @@ impl<'a> LocusEvidence<'a> {
     /// Check this evidence against the locus it claims to describe and the run it claims to
     /// come from — **the ordering contract, made a runtime fact rather than a promise.**
     ///
-    /// Two things are checked, and each is a caller bug whose symptom is a wrong genotype
+    /// Three things are checked, and each is a caller bug whose symptom is a wrong genotype
     /// rather than a crash:
     ///
     /// - **the path.** A repeat tract's evidence handed to a locus whose alleles say
@@ -492,11 +517,17 @@ impl<'a> LocusEvidence<'a> {
     ///   at every sample with nothing failing
     ///   (`doc/devel/ng/arch/calling_em_loop.md` §2). A repeat **bundle** goes to the
     ///   repeat path with a tract, which is how every other consumer of
-    ///   [`LocusKind`] groups the two.
+    ///   [`LocusKind`] groups the two. *(What happens to a bundle after that is a
+    ///   different question and the calling loop has no answer yet: the tract's candidate
+    ///   table refuses one by name, because nothing scores a bundle. No producer emits one
+    ///   into calling.)*
     /// - **the cohort.** One run-wide sample order indexes this evidence, every per-sample
     ///   slice of `parameters`, and the calls that come back. Two lists of different lengths
     ///   are two different orders, and a positional join between them silently pairs one
     ///   sample's reads with another's inbreeding coefficient.
+    /// - **the repeat counts, at a tract only.** They run parallel to the candidate table,
+    ///   and a table with more candidates than counts would pair one candidate's bases with
+    ///   another candidate's stratum.
     ///
     /// **The locus's genotype table is not checked here**, because this method never sees
     /// it. That check has its own home, at the one point the shape is fixed:
@@ -504,8 +535,8 @@ impl<'a> LocusEvidence<'a> {
     ///
     /// # Panics
     ///
-    /// On either disagreement, in release as well as debug: both are comparisons of two
-    /// integers or two discriminants, against a defect that would otherwise reach the
+    /// On any of the three disagreements, in release as well as debug: each is a comparison
+    /// of two integers or two discriminants, against a defect that would otherwise reach the
     /// output as a genotype.
     pub fn assert_matches_locus_and_run(
         &self,
@@ -526,6 +557,26 @@ impl<'a> LocusEvidence<'a> {
             self.path_word(),
             locus_kind_word(alleles.kind())
         );
+        // **The join a repeat tract adds, and it is the one no type enforces.** Its repeat
+        // counts run
+        // parallel to the candidate table, and a table with more candidates than counts would
+        // pair one candidate's bases with another's stratum — a wrong slippage model per
+        // candidate, with a well-formed genotype coming back.
+        if let Self::Ssr {
+            candidate_repeat_counts,
+            ..
+        } = self
+        {
+            assert_eq!(
+                candidate_repeat_counts.len(),
+                alleles.len(),
+                "the repeat tract at {} is called over {} candidates and {} repeat counts \
+                 arrived, so one of the two belongs to a different locus",
+                self.region(),
+                alleles.len(),
+                candidate_repeat_counts.len()
+            );
+        }
         assert_eq!(
             self.sample_count(),
             parameters.sample_count(),
@@ -1271,6 +1322,17 @@ pub struct CallingScratch<SsrEmissionScratch> {
     run_sample_count: usize,
     /// The repeat-tract row's own scratch, including the emission model's.
     ssr_row: SsrRowScratch<SsrEmissionScratch>,
+    /// **The tract's fitted scoring parameters, one cell per `(read group, candidate)`** —
+    /// gathered once per repeat tract and read by every row of it
+    /// ([`inference::repeat_tract_parameters`](super::calling::inference::repeat_tract_parameters)).
+    ///
+    /// **Held here rather than built per locus** for the reason every buffer in this type is:
+    /// its four vectors are cleared and refilled at each tract, so a worker allocates them once
+    /// for a whole run. What cannot be held here is the *contexts* built from it — they borrow
+    /// these vectors, so a struct owning both would be self-referential — and those are one
+    /// allocation per tract, which is the cost the repeat path pays and the SNP/indel path does
+    /// not.
+    tract_fits: crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits,
     /// How many **rows** the buffers above are sized for. Zero means never prepared.
     ///
     /// **Rows, not the run's samples, and the difference is this type's whole shape**: a
@@ -2133,6 +2195,62 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.ssr_row
     }
 
+    /// **The tract's fitted scoring parameters, to gather into once per repeat tract.**
+    ///
+    /// Cleared and refilled by
+    /// [`TractScoringFits::gather_for_locus`](super::calling::inference::repeat_tract_parameters::TractScoringFits::gather_for_locus),
+    /// which is the only thing that writes it.
+    #[inline]
+    pub(crate) fn tract_fits_mut(
+        &mut self,
+    ) -> &mut crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits {
+        &mut self.tract_fits
+    }
+
+    /// The same fits to read — **what the locus's warrant is folded from**, once the rows have
+    /// been scored.
+    ///
+    /// **Separate from [`tract_locus_buffers_mut`](Self::tract_locus_buffers_mut) because the
+    /// warrant is read after the scoring rather than during it**, and by then nothing else of
+    /// this scratch is borrowed.
+    #[inline]
+    pub(crate) fn tract_fits(
+        &self,
+    ) -> &crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits {
+        &self.tract_fits
+    }
+
+    /// **Everything a repeat tract's rows are scored from, borrowed from one scratch at once.**
+    ///
+    /// **It exists because the contexts the row takes borrow the fits, and the row writes into
+    /// this same scratch.** The contexts are built once per tract, from `fits`, and every row
+    /// then needs them alive while `ssr_row` and the likelihood table are written — three
+    /// borrows of three different fields, which no sequence of one-field accessors can hold at
+    /// once. **The borrows are disjoint by construction**: every field below is a different
+    /// field of this scratch.
+    ///
+    /// **The whole table rather than one row**, unlike the SNP/indel path's, because the tract's
+    /// row scratch is one buffer reused across rows rather than one per row — so the loop over
+    /// rows lives inside this borrow instead of outside it.
+    ///
+    /// # Panics
+    ///
+    /// On an unprepared scratch, and on a row map that is not one entry per prepared row —
+    /// both of which say the locus's shape was never fixed. **The row map is checked here
+    /// rather than where it is read**, because the walk over rows reads it inside this borrow,
+    /// where no accessor of this scratch can be called.
+    #[inline]
+    pub(crate) fn tract_locus_buffers_mut(&mut self) -> TractLocusBuffers<'_, SsrEmissionScratch> {
+        self.assert_rows_claimed();
+        TractLocusBuffers {
+            fits: &self.tract_fits,
+            run_sample_of_each_row: &self.run_sample_of_each_row,
+            row_scratch: &mut self.ssr_row,
+            genotype_likelihoods: &mut self.genotype_likelihoods,
+            genotype_count: self.genotype_count,
+        }
+    }
+
     /// Every buffer scoring **one sample** at this locus reads or writes, handed out
     /// together.
     ///
@@ -2375,6 +2493,35 @@ pub(crate) struct GenericRowBuffers<'a> {
     pub(crate) genotype_likelihoods: &'a mut [LogProb],
 }
 
+/// **Everything one repeat tract's rows are scored from**, borrowed from one
+/// [`CallingScratch`] at once — [`CallingScratch::tract_locus_buffers_mut`] is the only way to
+/// make one.
+///
+/// **It hands out the whole likelihood table rather than one row**, which is the difference from
+/// [`GenericRowBuffers`]: a tract's row scratch is one reused buffer rather than one per row, so
+/// the walk over rows happens inside this borrow.
+#[derive(Debug)]
+pub(crate) struct TractLocusBuffers<'a, SsrEmissionScratch> {
+    /// This tract's fitted scoring parameters — what the contexts are built from, and what the
+    /// locus's warrant is folded from.
+    pub(crate) fits: &'a crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits,
+    /// Which sample of the run each scratch row holds — **the map the walk over rows needs and
+    /// cannot ask for separately**, since asking would be a second borrow of this scratch while
+    /// the three below are held.
+    ///
+    /// **At a repeat tract this is provably the run's sample order unchanged**, because a tract
+    /// rules no sample out — so no test of the tract path exercises the difference between a
+    /// row and the sample it holds. It is carried rather than assumed so that the day a tract
+    /// can set a sample aside, the walk that reads it needs no change.
+    pub(crate) run_sample_of_each_row: &'a [usize],
+    /// The repeat-tract row's working memory, reused across rows.
+    pub(crate) row_scratch: &'a mut SsrRowScratch<SsrEmissionScratch>,
+    /// `rows × genotypes`, row-major: the whole genotype-likelihood table, to fill.
+    pub(crate) genotype_likelihoods: &'a mut [LogProb],
+    /// How many candidate genotypes this locus has — the table's stride.
+    pub(crate) genotype_count: usize,
+}
+
 /// The buffers each **sequencing batch's** expected allele copies are summed between, borrowed
 /// from one [`CallingScratch`] at once — [`CallingScratch::batch_copy_buffers_mut`] is the only
 /// way to make one, because it is what performs the scatter the first field's name implies.
@@ -2604,11 +2751,17 @@ pub struct LocusInference {
     /// below a borrowed fit, on the ground that a handed-in number says nothing about this
     /// data where a borrowed one is at least a measurement of a neighbouring grain.
     ///
-    /// **What the loop folds today is the calibrations of the read groups whose reads reached
-    /// the locus**, and nothing else: the prior's fitted spectrum carries no provenance at
-    /// all, and a repeat tract's slippage warrants travel on the scoring contexts
-    /// `inference::repeat_tract_parameters` gathers, which no tract reaches until the driver
-    /// scores one.
+    /// **The two paths fold two different lists, because they read two different
+    /// parameters.** A SNP/indel locus folds the calibrations of the read groups whose reads
+    /// reached it. A repeat tract folds the stutter and substitution warrants of its own
+    /// `(read group, candidate)` parameter table, which `inference::repeat_tract_parameters`
+    /// gathers — the calibration scale never enters a tract's likelihood, so charging a tract
+    /// for it would report a worse warrant than the call has.
+    ///
+    /// **What is in neither is the prior's own shape**, which carries no provenance on the
+    /// SNP/indel path at all; at a tract, the rung its shape came from travels on
+    /// [`Self::length_spectrum_rung`] rather than through this fold, because that is a
+    /// statement about the prior where every rung here is a statement about the reads.
     pub weakest_provenance: Provenance,
     /// **Which rung of the tract ladder this repeat tract's prior shape came from** — the
     /// stratum's own fitted length spectrum, its motif period's pooled tracts, or a flat
@@ -2620,9 +2773,8 @@ pub struct LocusInference {
     /// says is how well founded the shape was.
     ///
     /// `None` on the SNP/indel path, which seeds from a frequency spectrum rather than
-    /// from a length spectrum — [`Self::new`] refuses a rung set there. **Also `None` at a
-    /// repeat tract today**, because the driver still refuses every tract at its front
-    /// door; step E3b of `doc/devel/ng/impl_plan/calling_loop.md` is what fills it.
+    /// from a length spectrum — [`Self::new`] refuses a rung set there. **Always `Some` at a
+    /// repeat tract**, since the ladder always answers.
     ///
     /// *(It replaced a `seed_diversity_unreachable` flag, whose whole subject was a
     /// failure that no longer exists: the prior used to scale a constructed geometric
@@ -3662,6 +3814,16 @@ mod tests {
     use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
     use std::collections::BTreeMap;
 
+    /// Two candidates' repeat counts, **different from each other**, for a tract fixture whose
+    /// candidate table holds two lengths. Distinct so that a lookup reading one candidate's
+    /// count for another is a different stratum rather than the same one.
+    fn two_repeat_counts() -> Vec<NonZeroU32> {
+        vec![
+            NonZeroU32::new(6).expect("six repeats"),
+            NonZeroU32::new(7).expect("seven repeats"),
+        ]
+    }
+
     fn ssr_detail() -> SsrDetail {
         SsrDetail {
             motif: Motif::new(b"AT").expect("a dinucleotide motif"),
@@ -4192,7 +4354,8 @@ mod tests {
             SsrSampleEvidence::new(&[], &detail),
             SsrSampleEvidence::new(&[], &detail),
         ];
-        let tract = LocusEvidence::ssr(region(), &tract_samples, &detail);
+        let counts = two_repeat_counts();
+        let tract = LocusEvidence::ssr(region(), &tract_samples, &detail, &counts);
         tract.assert_matches_locus_and_run(&tract_alleles, &parameters);
         assert_eq!(tract.region(), region());
         assert_eq!(tract.sample_count(), 2);
@@ -4303,6 +4466,24 @@ mod tests {
             &[1.0, 1.0],
             "sample 1's own expected copies"
         );
+    }
+
+    /// **The buffers a repeat tract's rows are scored from refuse a scratch whose rows were
+    /// never claimed**, and refuse it at the door rather than inside the walk.
+    ///
+    /// The walk over a tract's rows runs inside that one borrow, where no accessor of this
+    /// scratch can be called — so the map from a row back to the run's sample has to be checked
+    /// on the way in. Without the check, a scratch prepared for two rows and claimed for one
+    /// reads row 1 of a map one entry long, which is an index panic naming a slice where the
+    /// reader needs the cohort.
+    #[test]
+    #[should_panic(expected = "of them were claimed")]
+    fn the_tracts_locus_buffers_refuse_a_scratch_whose_rows_were_never_claimed() {
+        let (alleles, table) = biallelic_locus();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(2, &alleles, &table.view());
+        scratch.claim_row_for(0, InbreedingF::try_new(0.0).expect("an outbred sample"));
+        let _ = scratch.tract_locus_buffers_mut();
     }
 
     /// A sample past the count the scratch was prepared for is refused by name, rather than
@@ -4476,7 +4657,10 @@ mod tests {
         let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
         let detail = ssr_detail();
         let per_sample = [SsrSampleEvidence::new(&[], &detail)];
-        let evidence = LocusEvidence::ssr(region(), &per_sample, &detail);
+        // One repeat count, because a bundle built from a reference alone is called over one
+        // allele — the counts run parallel to the candidate table, which the same method checks.
+        let counts = [NonZeroU32::new(6).expect("six repeats")];
+        let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);
         evidence.assert_matches_locus_and_run(&bundle, &parameters);
     }
 
@@ -4521,7 +4705,58 @@ mod tests {
     #[should_panic(expected = "evidence that went missing")]
     fn ssr_evidence_naming_no_sample_at_all_is_refused() {
         let detail = ssr_detail();
-        let _ = LocusEvidence::ssr(region(), &[], &detail);
+        let _ = LocusEvidence::ssr(region(), &[], &detail, &two_repeat_counts());
+    }
+
+    /// **A tract with no candidate repeat counts at all is refused**, and it is a different
+    /// failure from the empty sample list beside it: a tract is called over at least its
+    /// reference length, so a run that supplied none lost the counts on the way in.
+    ///
+    /// **Refused here rather than left to the parameter assembly**, which would otherwise ask
+    /// for a table of `read groups × 0` cells and refuse it naming the table rather than the
+    /// locus.
+    #[test]
+    #[should_panic(expected = "supplied no candidate repeat counts")]
+    fn ssr_evidence_with_no_candidate_repeat_counts_is_refused() {
+        let detail = ssr_detail();
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let _ = LocusEvidence::ssr(region(), &per_sample, &detail, &[]);
+    }
+
+    /// **Repeat counts that are not one per candidate are refused where the two still name each
+    /// other**, rather than at whichever genotype first read the wrong cell.
+    ///
+    /// The counts run parallel to the candidate table, so a table with more candidates than
+    /// counts would pair one candidate's bases with another candidate's stratum — a wrong
+    /// slippage model per candidate, with a well-formed genotype coming back and nothing
+    /// failing.
+    #[test]
+    #[should_panic(expected = "called over 2 candidates and 1 repeat counts")]
+    fn a_tract_whose_repeat_counts_are_not_one_per_candidate_is_refused() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let batching = SequencingBatches::all_together_over(1, 1);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &batching,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
+
+        let detail = ssr_detail();
+        let mut alleles = CandidateAlleles::new(
+            Box::from(b"ATATAT".as_slice()),
+            LocusKind::Ssr(ssr_detail()),
+        );
+        alleles.admit(Box::from(b"ATATATAT".as_slice()));
+        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        // Two candidates, one count.
+        let counts = [NonZeroU32::new(6).expect("six repeats")];
+        let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);
+        evidence.assert_matches_locus_and_run(&alleles, &parameters);
     }
 
     /// The third class the constructor's own documentation refuses, and the only one that

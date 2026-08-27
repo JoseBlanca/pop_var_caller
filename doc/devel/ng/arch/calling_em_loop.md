@@ -136,7 +136,15 @@ own, so their *contents* are settled and only their wrapper is not:
 /// the row builder is chosen by the same discriminant that chose the candidates.
 pub enum LocusEvidence<'a> {
     Generic { region: GenomeRegion, per_sample: &'a [GenericSampleEvidence<'a>] },
-    Ssr     { region: GenomeRegion, per_sample: &'a [SsrSampleEvidence<'a>], detail: &'a SsrDetail },
+    /// `candidate_repeat_counts` runs parallel to the locus's `CandidateAlleles`: how many
+    /// whole repeats each candidate holds. **Added 2026-08-27, and it is contract rather
+    /// than illustration** — it is not derivable from a candidate's bases, since an
+    /// interrupted tract holds fewer whole repeats than its length suggests, and it is what
+    /// keys both the slippage lookup and the prior's length spectrum. Its producer is
+    /// repeat-tract candidate selection, which is unwritten, so today every caller supplies
+    /// it.
+    Ssr     { region: GenomeRegion, per_sample: &'a [SsrSampleEvidence<'a>], detail: &'a SsrDetail,
+              candidate_repeat_counts: &'a [NonZeroU32] },
 }
 
 /// Everything the pre-pass froze, borrowed for the run — the `ModelParams` successor of

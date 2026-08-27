@@ -220,9 +220,11 @@ A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty 
   `SsrSelectionConfig` has three fields and production's `CandidateCfg` has seven
   ([`candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs)). — spec §6.
 - **Periodicity is per sample.** — spec §7.
-- **`repeat_counts` and `modal_repeat_count` are returned, not recomputed downstream.** One
-  producer for an integer two modules must agree on. — this doc §2.3; the spec states the
-  coupling, not the field.
+- **`repeat_counts` is returned, not recomputed downstream.** One producer for an integer two
+  modules must agree on — the calling loop keys both the slippage lookup and the prior's length
+  spectrum on it, and it is not derivable from a candidate's bases. — this doc §2.3; the spec
+  states the coupling, not the field. *(`modal_repeat_count` was returned for the same reason
+  until 2026-08-27; nothing consumes it now — see §5.)*
 - **`ploidy` comes from `FrozenParameters`**, never a constant in this module. Production hard-
   asserts diploid at its EM ([`em.rs:489`](../../../../src/ssr/cohort/em.rs)); ng does not, and a
   polyploid run changes only how many rungs a sample promotes.
@@ -245,7 +247,7 @@ A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty 
 | the reference seeded first | [`candidate_set.rs:200-202`](../../../../src/ssr/cohort/candidate_set.rs) | ported; it is [`candidate_alleles.md`](candidate_alleles.md) §1's invariant, held by `CandidateAlleles::new` |
 | the depth gate, sibling constants, cap of 24 | [`CandidateCfg::dev_default`, `candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported** (§4) |
 | the motif and its period | [`Motif`, `types.rs:1107`](../../../../src/ng/types.rs), `period()` at [`:1138`](../../../../src/ng/types.rs) | reused; reached through `SsrDetail::motif` ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)) |
-| the prior's consumer | `fill_ssr_seed`, [`calling_priors.md`](calling_priors.md) §5 | `repeat_counts` and `modal_repeat_count` fill its first two arguments exactly |
+| the prior's consumer | `fill_ssr_seed`, [`population_diversity.md`](../spec/population_diversity.md) §4 | **`modal_repeat_count` is no longer taken, corrected 2026-08-27.** That builder was rewritten in step E2e: a tract's prior is read from its stratum's fitted length spectrum, which is indexed by offset from the **reference** tract length, so what it takes beside `repeat_counts` is the reference repeat count — which every locus already knows. The cohort's commonest length is not an input to anything |
 | the junk term's denominator | `reachable_length_count`, [`read_likelihoods.md`](read_likelihoods.md) §4.1 | computed **from** the candidate set this returns; no field crosses, but widening the set changes it (spec §8) |
 
 ---

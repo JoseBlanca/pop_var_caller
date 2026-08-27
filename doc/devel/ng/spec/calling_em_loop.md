@@ -837,10 +837,22 @@ prior puts an `lgamma` in it (§2). Neither has been measured for ng.
 
 **What is held.** Per locus: the read-likelihood table, `samples × genotypes` floating-point values;
 the current and previous expected copies, `2 × alleles`; and one sample's posterior row,
-`genotypes`. **Nothing is allocated inside the loop** — the caller hands in scratch sized by the
-locus's shape and the loop fills it. Production lifted exactly these buffers out of its own
-iteration after a profile put the allocator's self-time at about 16% of cycles
+`genotypes`. **Nothing is allocated inside the frequency loop** — the caller hands in scratch sized
+by the locus's shape and the loop fills it, so what a pass costs does not include the allocator.
+Production lifted exactly these buffers out of its own iteration after a profile put the
+allocator's self-time at about 16% of cycles
 ([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs)).
+
+**A repeat tract allocates three vectors per locus, outside the passes, and the reason is a
+borrow.** They are the candidate table as the row sees it and the scoring contexts, both in the
+table fill, plus one copy of the candidates' repeat counts for the prior's seed builder. **The
+contexts cannot live on the worker's scratch**: each borrows the fitted parameters it was built
+from, which are a field of that same scratch, so a type owning both would refer to itself, and
+`#![forbid(unsafe_code)]` closes the usual escape. They are `candidates` and
+`read groups × candidates` long — six and eighteen values at a six-candidate tract in a
+three-library run. The SNP/indel path allocates none of the three. *(Recorded 2026-08-27, when the
+tract path was wired into the driver; the zero-allocation-per-pass invariant is unaffected, and the
+test that pins it covers the SNP/indel path only.)*
 
 **Determinism has one rule and it is the M-step's.** The cohort's expected copies are a sum over
 samples, floating-point addition is not associative, so **the sum runs in a fixed sample order**.

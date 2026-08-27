@@ -57,9 +57,11 @@ scores complete observations only.
    `(read group, candidate)`, and nothing outside `likelihood/ssr.rs`'s own tests had ever built
    one — the gap the owner's ruling of 2026-08-26 turned into **E2c**, which is where the
    sentence *"supplying the candidates is enough"* was retired.
-3. **The driver has no route from a tract's evidence to that row.** Its emission build and its row
-   assembly both take the SNP/indel path's per-sample evidence, so `call_locus` still refuses every
-   repeat tract at its front door. That is **E3b**.
+3. **The driver had no route from a tract's evidence to that row** — its emission build and its
+   row assembly both took the SNP/indel path's per-sample evidence. **Closed by E3b, 2026-08-27**:
+   five places branch, the front-door refusal is gone, and a tract is scored. What is still
+   refused is narrower — a *contaminated* tract, by the assembly that would have to supply the
+   third term of its read-likelihood mixture, which is **E2d**.
 
 ---
 
@@ -371,8 +373,9 @@ borrow the stutter models, so the models and the contexts cannot live in one str
 **contaminant seed at a tract**, which is E2d's. The assembly **refuses a run whose fit found
 contamination** rather than handing back the two-term form, and the panic names E2d — a
 mechanism rather than a doc comment, because the two-term row returns perfectly plausible
-numbers. *(The driver's own refusal is unchanged and unconditional: it still turns away every
-repeat tract, because it has no route from a tract's evidence to the row. That is E3b.)*
+numbers. *(When E2c landed, the driver still turned away every repeat tract because it had no route
+from a tract's evidence to the row. **E3b built that route**, so the only refusal left on this
+path is the contaminated one above.)*
 *Depends:* D1, E1, E2. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.2, §4.3, §4.4, §4.5;
 [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §4.1, §4.2.
@@ -542,7 +545,7 @@ is answered *no floor* on the branch `ng-seed-shrinkage`. See
 measurement, and gains a fitted shape wherever the panel supports one. *Depends:* E2. *Source:*
 [`../spec/population_diversity.md`](../spec/population_diversity.md) §3.
 
-**E3b. The repeat-tract path, end to end.**  ☐
+**E3b. The repeat-tract path, end to end.**  ✅
 The same fixture at a tract, with the candidates and their repeat counts **fixture-supplied**
 rather than selected — the STR selection path is unwritten
 ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)), so the test's own doc comment must say
@@ -573,8 +576,16 @@ the fixture.**
 *Depends:* E3a, E2e. *Source:* spec §1, §5, §9;
 [`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
 
+**⚖ Owner's ruling, 2026-08-27, on the one point where this step and a spec section disagreed.**
+[`../spec/population_diversity.md`](../spec/population_diversity.md) §5 wanted a tract in a run
+carrying no repeat-tract parameters **refused by name**; §4.4 wants the tract ladder to always
+answer. The two meet only at a run whose fit produced no length spectrum anywhere. **The tract is
+called**, and its record carries the bottom rung — *"refusing turns a whole class of runs into a
+hard failure for a condition the output already states"*. §5 and §6 of that spec now record the
+ruling; nothing in the code changed, because this is what E3b built.
+
 > **Checkpoint E:** genotypes come out of real evidence — over selected candidates on the generic
-> path (E3a, done), over supplied ones at a repeat tract (E3b). Pause for review.
+> path (E3a, done), over supplied ones at a repeat tract (E3b, done). Pause for review.
 
 ### Milestone F — the two loop oracles
 

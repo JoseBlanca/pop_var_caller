@@ -64,9 +64,9 @@
 //! fit found contamination**, naming that step: scoring such a run on the two-term form would
 //! drop a fraction the pre-pass measured with nothing saying so.
 //!
-//! **Nor does anything here score a tract.** The driver still refuses every repeat tract at its
-//! own front door, because its emission build and row assembly take the SNP/indel path's
-//! per-sample evidence; wiring a tract through them is the next step's.
+//! **Nor does anything here score a tract.** What this module assembles is what a tract's row
+//! is scored *from*; the walk that hands each sample's reads to that row belongs to the calling
+//! loop's driver (`inference::summarise_condition`).
 
 use crate::ng::alignment::StutterModel;
 use crate::ng::calling::likelihood::ssr::{
@@ -557,15 +557,25 @@ fn default_substitution_rate() -> ErrorRate {
 ///
 /// # Panics
 ///
-/// If the two lists are different lengths, or if `alleles` is not a repeat tract's table. The
-/// second is the join worth checking: `LocusKind` is fixed when the locus is generated, so a
-/// SNP/indel table reaching here is a locus routed to the wrong read model, which would
-/// otherwise surface as a stutter score over bases that are not a tract.
+/// If the two lists are different lengths, or if `alleles` is not a single repeat tract's
+/// table. **The two ways the second can fail are different failures and say so.** A SNP/indel
+/// table reaching here is a locus routed to the wrong read model, which would otherwise surface
+/// as a stutter score over bases that are not a tract. A repeat **bundle** is not misrouted —
+/// the calling seam sends a bundle down the repeat path deliberately, which is how every other
+/// consumer of [`LocusKind`] groups the two — but nothing here scores one, and no producer
+/// emits a bundle into calling today.
 #[must_use]
 pub fn tract_candidates<'a>(
     alleles: &'a CandidateAlleles,
     repeat_counts: &[NonZeroU32],
 ) -> Vec<SsrCandidate<'a>> {
+    assert!(
+        !matches!(alleles.kind(), LocusKind::SsrBundle),
+        "the locus at this table is a bundle of repeat tracts, and nothing scores a bundle \
+         yet: this path is written for one tract, whose candidates are its own lengths. The \
+         calling seam sends a bundle down the repeat path on purpose, so this is a gap in \
+         what the repeat path covers rather than a locus routed to the wrong read model"
+    );
     assert!(
         matches!(alleles.kind(), LocusKind::Ssr(_)),
         "these candidates were generated at a {:?} locus and are being scored as a repeat \
@@ -1945,6 +1955,21 @@ mod tests {
     fn a_snp_locus_is_refused_as_a_repeat_tract() {
         let alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
         let _ = tract_candidates(&alleles, &[repeats(1)]);
+    }
+
+    /// **A bundle of repeat tracts is refused, and it is not the same refusal as a misrouted
+    /// SNP.** The calling seam sends a bundle down the repeat path deliberately — that is how
+    /// every consumer of `LocusKind` groups the two — so a bundle reaching here is a gap in
+    /// what this path covers, not a locus handed to the wrong read model. The message says
+    /// which, because the two ask a reader to do different things.
+    ///
+    /// Nothing constructs a bundle into calling today; this is what keeps the two messages from
+    /// merging back into one when something does.
+    #[test]
+    #[should_panic(expected = "nothing scores a bundle")]
+    fn a_bundle_of_repeat_tracts_is_refused_as_one_tract() {
+        let alleles = CandidateAlleles::new(Box::from(tract(6).as_slice()), LocusKind::SsrBundle);
+        let _ = tract_candidates(&alleles, &[repeats(6)]);
     }
 
     /// **A repeat-count list that does not match the candidate table is refused**, because a

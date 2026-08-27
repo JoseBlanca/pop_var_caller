@@ -64,6 +64,8 @@
 //! dozen bytes per sample, against a called locus's own output — one `Genotype` per sample —
 //! which is the same order.
 
+use std::num::NonZeroU32;
+
 use super::SsrSampleEvidence;
 use super::allele_candidates::LocusSelection;
 use super::{GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence};
@@ -426,9 +428,15 @@ pub fn shape_generic_locus<'a>(
 /// tract**: a discovery round there can put back a length the cap cut, so nobody is locked out of
 /// the locus for the rest of its calling (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
 ///
+/// `candidate_repeat_counts` is the one per-locus input a tract needs beyond its candidates, and
+/// it travels because **it is not derivable from the candidates' bases**: an interrupted tract
+/// holds fewer whole repeats than its length suggests, and the slippage fit is keyed by the count
+/// (`doc/devel/ng/spec/read_likelihoods.md` §4.4). Its producer is repeat-tract candidate
+/// selection, which is unwritten, so today every caller supplies it.
+///
 /// # Panics
 ///
-/// If the list is empty — by [`LocusEvidence::ssr`], which owns that refusal. A run has at
+/// If either list is empty — by [`LocusEvidence::ssr`], which owns both refusals. A run has at
 /// least one sample and every sample gets an entry, so an empty list is evidence that went
 /// missing rather than a tract nobody covered, which is one empty entry per sample.
 #[must_use]
@@ -436,6 +444,7 @@ pub fn shape_ssr_locus<'a>(
     region: GenomeRegion,
     observations_of_each_run_sample: &'a [&'a [SequenceObservation]],
     detail: &'a SsrDetail,
+    candidate_repeat_counts: &'a [NonZeroU32],
     views: &'a mut Vec<SsrSampleEvidence<'a>>,
 ) -> LocusEvidence<'a> {
     // **The emptiness check is [`LocusEvidence::ssr`]'s**, not restated here: a run has at
@@ -448,17 +457,31 @@ pub fn shape_ssr_locus<'a>(
             .iter()
             .map(|observations| SsrSampleEvidence::new(observations, detail)),
     );
-    LocusEvidence::ssr(region, views, detail)
+    LocusEvidence::ssr(region, views, detail, candidate_repeat_counts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::ng::calling::CandidateAlleles;
     use crate::ng::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
     use crate::ng::locus_generation::LocusKind;
     use crate::ng::run::cohort_merge::build::{AlleleSupport, SampleSupport, SupportedAllele};
     use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+
+    /// Two candidates' repeat counts, different from each other — the shape a tract's evidence
+    /// carries beside its samples until repeat-tract selection produces them.
+    ///
+    /// **Supplied, not selected**: the repeat-tract half of candidate selection is unwritten, so
+    /// a fixture states its candidates' repeat counts and a reader must not take them for a
+    /// step's output.
+    fn repeat_counts() -> Vec<NonZeroU32> {
+        vec![
+            NonZeroU32::new(6).expect("six repeats"),
+            NonZeroU32::new(7).expect("seven repeats"),
+        ]
+    }
 
     fn region() -> GenomeRegion {
         GenomeRegion {
@@ -987,7 +1010,8 @@ mod tests {
         }];
         let per_run_sample: [&[SequenceObservation]; 2] = [&seen, &[]];
         let mut views = Vec::new();
-        let evidence = shape_ssr_locus(region(), &per_run_sample, &detail, &mut views);
+        let counts = repeat_counts();
+        let evidence = shape_ssr_locus(region(), &per_run_sample, &detail, &counts, &mut views);
 
         assert_eq!(
             evidence.sample_count(),
@@ -1018,7 +1042,7 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let mut views = Vec::new();
-        let _ = shape_ssr_locus(region(), &[], &detail, &mut views);
+        let _ = shape_ssr_locus(region(), &[], &detail, &repeat_counts(), &mut views);
     }
 
     /// **A sample ruled uncallable at one locus is callable again at the next** — the reset the

@@ -288,10 +288,10 @@ pub use checked_spectrum::{FittedFrom, LengthSpectrum};
 /// in the run's output beside the call (`doc/devel/ng/spec/population_diversity.md` §4.4 for the
 /// ladder, §1's third goal for why it has to travel).
 ///
-/// **Nothing carries it there yet**, and saying so is the point: the driver refuses every repeat
-/// tract at its front door until step E3b of `impl_plan/calling_loop.md` wires one in, and that
-/// step is where this reaches [`LocusInference`](crate::ng::calling::LocusInference). Until then
-/// the rung is available and unread.
+/// **The calling loop's driver carries it there**: it looks the spectrum up once per tract and
+/// puts the rung on the locus's
+/// [`LocusInference`](crate::ng::calling::LocusInference). A SNP/indel locus carries none,
+/// because its prior comes from a frequency spectrum instead.
 ///
 /// **Separate from [`LengthSpectrum`] because it outlives it.** The spectrum borrows the run's
 /// frozen parameters and dies with the locus; the rung is what an output carries.
