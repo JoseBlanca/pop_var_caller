@@ -57,14 +57,17 @@ use super::run_report::{
     ContaminationUsed, ReadGroupContamination, RunParameterReport, SequencingBatchingUsed,
 };
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
-use crate::ng::parameter_estimation::Estimate;
+use crate::ng::parameter_estimation::generic::GenericSampleParameters;
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
+use crate::ng::parameter_estimation::joint::fit::JointFit;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::ng::parameter_estimation::ssr::SsrSampleParameters;
 use crate::ng::parameter_estimation::ssr::StratumKey;
+use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{
     ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, Ploidy,
@@ -129,6 +132,71 @@ impl RunParameters {
         diversity: Option<ExpectedHeterozygosity>,
     ) -> SpectrumSeed {
         seed_from_population_moments(expected_frequency, diversity)
+    }
+
+    /// **What the parameter pre-pass produced, turned into what calling reads.**
+    ///
+    /// The pre-pass measures a run three ways and reports in three shapes: one value per sample
+    /// for the SNP/indel path, one per sample for the repeat tracts, and one fit over the whole
+    /// cohort at once. Calling reads a single object. This is the join between them, and it does
+    /// nothing else — no walk, no input or output, and **no number of its own**: every value it
+    /// hands on was computed by one of the three.
+    ///
+    /// # The joins, and the two that no type enforces
+    ///
+    /// Four of the arguments are read per sample and three are passed through. The two joins
+    /// worth stating are the ones a compiler cannot check:
+    ///
+    /// - **Sample order.** `generic_by_sample` and `repeat_tract_by_sample` are the run's samples
+    ///   in the run's own order, which is `read_groups.read_groups_per_sample()`'s order.
+    ///   Position `i` of both lists is the sample named at position `i` of that table. The
+    ///   cohort fit keys its own per-sample results by **name**, so the names are what join the
+    ///   two — and a list handed in permuted gives every sample a coefficient and a contamination
+    ///   fraction, just not its own.
+    /// - **The read-group union.** Each sample's error rates, minted-error totals and tract
+    ///   substitution rates are keyed by identifiers that are unique across the whole run,
+    ///   because a read group belongs to exactly one sample. So the run's maps are the samples'
+    ///   maps put together, and a key arriving twice means two samples claimed one library.
+    ///
+    /// # Errors
+    ///
+    /// [`ParameterEstimationError::InbreedingNotFittedForSample`] where a sample carries no
+    /// inbreeding coefficient. **The run stops and the sample is named**, which is the pre-pass's
+    /// own rule repeated at this edge: a cohort's diversity divides by `1 − F`, so a coefficient
+    /// invented rather than measured is amplified rather than absorbed. The cohort fit's
+    /// homozygote excess is not used as a fallback — it is measured by the same fit whose
+    /// diversity the coefficient exists to correct.
+    ///
+    /// # Panics
+    ///
+    /// On the joins above being untrue, and on everything [`Self::assemble`] refuses. Each is a
+    /// run-assembly bug rather than a data condition, and each would otherwise surface as a
+    /// wrong genotype rather than as a crash:
+    ///
+    /// - the two per-sample lists and the run's sample table do not all name the same number of
+    ///   samples;
+    /// - a sample of the run is missing from the cohort fit's contamination results, so the fit
+    ///   and the run were made over different cohorts;
+    /// - one read group is claimed by two samples.
+    pub fn from_prepass(
+        generic_by_sample: &[GenericSampleParameters],
+        repeat_tract_by_sample: &[SsrSampleParameters],
+        joint: &JointFit,
+        read_groups: &ReadGroups,
+        sequencing_batches: SequencingBatches,
+        ssr_slippage_fits: StratumFits,
+        ploidy: Ploidy,
+    ) -> Result<Self, ParameterEstimationError> {
+        let _ = (
+            generic_by_sample,
+            repeat_tract_by_sample,
+            joint,
+            read_groups,
+            sequencing_batches,
+            ssr_slippage_fits,
+            ploidy,
+        );
+        todo!("the body lands in the next step")
     }
 
     /// **Gather one run's frozen parameters.**

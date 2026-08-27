@@ -46,7 +46,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
-use crate::ng::types::{ExpectedHeterozygosity, Ploidy, ReadGroupId};
+use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
@@ -384,6 +384,27 @@ impl JointFit {
     #[must_use]
     pub fn fitted_diversity(&self) -> Option<ExpectedHeterozygosity> {
         ExpectedHeterozygosity::try_new(self.expected_heterozygosity).ok()
+    }
+
+    /// **How often a base drawn at random from the population is not the reference's**, in the
+    /// type the caller's genotype prior takes — the other of the two numbers that prior is
+    /// seeded from (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
+    ///
+    /// **A wrap, not a computation**, exactly as [`Self::fitted_diversity`] beside it:
+    /// [`FrequencyDensity::expected_alternative_frequency`] is the number, and this puts it
+    /// behind the constructor that refuses a value outside `[0, 1]`. The two travel together
+    /// into [`RunParameters::seed_from_moments`](crate::ng::calling::RunParameters::seed_from_moments),
+    /// and having one of them wrapped here and the other wrapped at each call site is how they
+    /// come to be wrapped differently.
+    ///
+    /// **`None` means the fit produced something that is not a frequency**, and the seed's own
+    /// ladder takes over rather than the run failing — the same rule as its neighbour. It is not
+    /// reachable from a fit that converged: the value is a mass plus a mass times a Beta mean,
+    /// all three of which are in `[0, 1]`.
+    #[must_use]
+    pub fn fitted_alternative_frequency(&self) -> Option<ExpectedAlternativeFrequency> {
+        ExpectedAlternativeFrequency::try_new(self.density.value.expected_alternative_frequency())
+            .ok()
     }
 }
 
