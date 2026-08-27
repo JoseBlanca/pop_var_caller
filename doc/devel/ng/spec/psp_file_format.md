@@ -49,7 +49,10 @@ any point on the curve above.
    size, the depth or the length of the genome. *(The owner's working budget, 2026-08-25: 1.5 GB
    across three thousand samples. It supersedes the "tens of kilobytes" of
    [`run_streaming.md`](run_streaming.md) §7.2, which should be corrected when that document is next
-   touched.)* **The independence from depth is measured, not assumed — §5.2.**
+   touched.)* **The independence from depth is measured, not assumed — §5.2.** The one thing that
+   *can* push a reader past this is a single record larger than its buffer, which §8 forbids fixing
+   a limit on in the format; §4.4 gives the reader its own ceiling instead, set so that three
+   thousand readers at it come to the budget rather than a multiple of it.
 2. **A reader can start at any block** without reading what comes before it.
 3. **A file that is not complete is refused, not read short.** A run killed part-way must not look
    like a sample with less of the genome.
@@ -295,9 +298,25 @@ Keeping the rule genomic rather than byte-based buys three things:
 **One consequence to design for rather than discover: a span-cut block has a variable size in
 bytes.** At three hundred reads a position a 5 kb span is a great deal of data; on a sample with
 almost no coverage it is a handful of records, and a very small block compresses badly because the
-compressor starts cold each time. **So the writer may declare a secondary rule** — close a block
-early if it exceeds a byte ceiling, and keep accumulating across empty spans rather than emitting
-near-empty blocks. Both are the user's choices and both are recorded.
+compressor starts cold each time. **So the writer may declare one secondary rule** — close a block
+early once it exceeds a byte ceiling. It is the user's choice and it is recorded in the manifest.
+
+**A grid cell holding no records produces no block.** The rule cuts where a block *ends*; it never
+asks for one per 100 kb of reference. A sample covering two cells ninety apart writes two blocks, so
+a thin sample pays no index entry and no compressed frame for reference it did not cover.
+
+**⚠ Blocks that are merely *small* are not merged, and this section used to say they were.**
+An earlier version offered a second secondary rule — accumulate across empty spans so a patchy
+sample gets one large block instead of several thin ones — and §12 question 3 recorded it as
+shipping, with only its threshold left open. **The owner ruled against it on 2026-08-27: merging
+would complicate the alignment between samples**, which is the first thing this section lists as
+what the grid buys. Merge, and one sample's block may begin ninety cells before its neighbour's, so
+which block holds a given position differs from sample to sample and a cohort reader wanting one
+position decodes from far behind it.
+
+**What merging would have saved was never measured.** The figures below compare *block sizes* on the
+same non-merging writer; no writer that accumulates across empty spans has been built. If someone
+later wants the price, they have to build it to get it.
 
 #### What the size actually costs — measured 2026-08-25
 
@@ -316,12 +335,18 @@ fold range.** That is the capped window doing what §4.2 says it does: a match c
 32 kB, so a larger block gives the match finder nothing extra, and the entropy tables are already
 amortised at the small end.
 
-**On patchy coverage it costs 10 %, and that is what the secondary rule is for.** The human sample
-here is 74,623 covered positions scattered over 644 small regions, so a 5 kb grid gives blocks of
-about 119 records and the compressor's cold start dominates. **Its patchiness is an artefact of the
-region-restricted pileup that produced it, not a property of a 279× sample** — but patchy coverage is
-real for exomes, panels and thin samples, so a writer that accumulates across empty spans rather than
-emitting near-empty blocks earns its place.
+**On patchy coverage a 5 kb grid costs 10 % against a 1,000 kb one**, because blocks of about 119
+records make the compressor start cold each time. The human sample here is 74,623 covered positions
+scattered over small regions. **Its patchiness is an artefact of the region-restricted pileup that
+produced it, not a property of a 279× sample** — but patchy coverage is real for exomes, panels and
+thin samples. **The answer is the block size, not merging** (owner, 2026-08-27): the 100 kb default
+already recovers most of that penalty, 17.557 bytes a record against 18.242 at 5 kb, and 1,000 kb
+recovers the rest — which is the live question below, not a second cut rule.
+
+*⚠ The "644 regions" in the sentence above is not re-derivable from the file: the corpus gives 1,217
+maximal runs of consecutive covered positions in 281 occupied 100 kb cells. The figure is kept as
+written because the measurements in the table were taken against it; the count itself carries no
+weight in the argument.*
 
 **Why 100 kb and not something else.** It is a round number that satisfies goal 2 directly, sits in
 the flat part of the tomato curve, and recovers most of the patchy-data penalty (17.557 against
@@ -481,6 +506,33 @@ falling out of cache is the obvious guess and it is a guess; nothing here measur
 
 **Against the 500 kB budget an open sample is 257 kB**, which leaves room to spend later if something
 justifies it.
+
+#### The rolling buffer's ceiling — the third number, and the only one a corrupt file can move
+
+The rolling buffer starts at 16 kB and **grows for a record that does not fit**, because §8 says a
+maximum record size is not safe to assume. On a well-formed file that growth is bounded by the
+largest record the caller can produce, and it shrinks back at the next block. **On a corrupt file
+nothing bounds it**: no record parses, so nothing ever fits, and the buffer doubles until the frame
+runs out — and a block's *decompressed* size is not bounded by its size on disk. Measured, a
+4,132-byte block drove a reader with no ceiling to hold **67,125,248 bytes**.
+
+**So the reader carries a ceiling on how far the rolling buffer may grow for one record, and it is
+the reader's budget rather than a maximum record size the format fixes.** Two numbers set the
+default of **512 kB** and both are measured:
+
+- **It is ten times the largest record this caller's own depth cap can produce.** At three hundred
+  reads a position, one observation each, a record encodes to 18,292 bytes over a 50-base span and
+  48,693 over 150. *(Milestone E's chain ids are not in those figures — the encoder drops them
+  today — and the number wants re-measuring when they arrive.)*
+- **It keeps the worst case inside goal 1's budget.** Three thousand open samples every one of which
+  met a damaged block at the same moment is 1,572,864,000 bytes, against the 1.5 GB §1.1 gives three
+  thousand — the same number to within 5 %. At 1 MiB, the value first proposed, it would have been
+  3.07 GB.
+
+**It is a per-reader setting rather than a constant**, so a run that genuinely needs more can raise
+it without a format change, and the refusal names it (§7). A ceiling in the *format* would make a
+legitimate file unreadable everywhere at once, which is what §8 rules out; a ceiling in the *reader*
+is the same shape as §4.2's look-back window budget.
 
 *An earlier draft of this section recommended 4 kB on a sweep taken while other work was running on
 the same machine, and that sweep's timings were not usable. The memory figures were.*
@@ -757,13 +809,14 @@ before committing to a run.
 
 ### 6.7 What the caller sees when something is wrong
 
-The four error classes of §7, and which operation raises each:
+The five error classes of §7, and which operation raises each:
 
 | | raised by |
 |---|---|
 | no valid footer — the run was interrupted | `open`, `append`, `replace_trailer` |
 | unknown format version | `open`, `read_header`, `append` |
 | the file's look-back window exceeds the reader's budget | `open` |
+| a record needs more of the reader's buffer than it allows one to hold | any record walk |
 | a block fails to decompress, or a record runs past its block | any record walk |
 | a record out of coordinate order | `push` |
 
@@ -777,7 +830,7 @@ an input, not a bug.
 **Memory.** The subject of the document; §5 measures it. One number to carry: **an open file is 227
 to 346 kB depending on the reader's buffer choices, and the budget is 500 kB.**
 
-**Errors.** Four classes, and they want to be distinguishable because they mean different things to
+**Errors.** Five classes, and they want to be distinguishable because they mean different things to
 whoever sees them:
 
 | what happened | what the user has to do |
@@ -785,7 +838,15 @@ whoever sees them:
 | no valid footer | the run was interrupted — rebuild the file |
 | unknown format version | upgrade the reader |
 | declared window exceeds the reader's budget | raise the budget, or rewrite the file |
+| a record needs more of the buffer than the reader allows one to hold | raise the reader's buffer ceiling, or the block is corrupt |
 | a block fails to decompress, or a record runs past its block | the file is corrupt |
+
+**The fourth is the newest and the one whose two readings differ most**, which is why it is its own
+class rather than damage: a genuine record can be larger than any fixed budget — §8 says a maximum
+record size is not safe to assume — but a corrupt block that never parses grows the buffer until the
+frame runs out, and both arrive at the same line. Measured: a 4,132-byte block drove a reader with no
+ceiling to hold 67,125,248 bytes. The refusal names the ceiling so the first reading has an action;
+the class exists so the second is not silently reported as the first.
 
 None of these may reach a caller as a half-built record.
 
@@ -812,7 +873,12 @@ in the header.
   resume from the record's *start* with the running position, coverage and chain-id bases restored.
   **A parse that half-advances that state before failing corrupts every record after it, plausibly.**
 - **A single record can exceed the rolling buffer** — many alleles, many chain ids. The buffer must
-  grow; a fixed maximum record size is not a safe assumption.
+  grow; a fixed maximum record size is not a safe assumption. **⚠ And the growth still needs a
+  bound, because on a corrupt block nothing else provides one**: no record parses, so nothing ever
+  fits, and the buffer doubles until the frame runs out. The bound belongs to the *reader*, not the
+  format (§4.4) — a limit in the format would make a legitimate file unreadable everywhere at once,
+  which is what this trap is about. Getting the two confused is the trap inside the trap: refusing a
+  well-formed large record as damage sends the operator to rebuild a file that is fine.
 - **Every running difference resets at a block boundary** (§3.2), and a block that forgets one reads
   back wrong from its first record without failing.
 - **A missing footer means refuse, not read short** (§3.3). This is the only thing standing between a
@@ -924,12 +990,14 @@ corrupted.
    whole-genome deep-coverage sample, which nothing here has produced. *Not* by seek time: the owner
    ruled on 2026-08-25 that reading a file start to end is the common case.
 3. **How badly do near-empty blocks compress on a patchy sample?** — **ANSWERED 2026-08-25 (§4.1):
-   about 10 % of the file.** A 5 kb grid on a sample with 74,623 covered positions scattered over 644
-   regions gives blocks of about 119 records and costs 18.242 bytes a record against 16.444 at
-   1,000 kb. **So the rule that accumulates across empty spans ships**, and the question that
-   replaces it is what threshold it uses. *Still unmeasured:* a genuinely thin whole-genome sample —
-   1× rather than a region-restricted one — where the gaps are between positions rather than between
-   regions.
+   a 5 kb grid costs about 10 % against a 1,000 kb one.** A sample with 74,623 covered positions
+   scattered over small regions gives blocks of about 119 records and costs 18.242 bytes a record
+   against 16.444 at 1,000 kb. **⚠ This entry used to conclude "so the rule that accumulates across
+   empty spans ships", leaving only its threshold open. That is reversed: the owner ruled against
+   merging on 2026-08-27** — it would break the cross-sample block alignment the grid exists for
+   (§4.1). **The lever is the block size instead**, which is question 2's neighbour and live.
+   *Still unmeasured:* a genuinely thin whole-genome sample — 1× rather than a region-restricted one
+   — where the gaps are between positions rather than between regions.
 4. **What does the reader's buffer pair cost in speed as it shrinks?** — **CLOSED 2026-08-26**
    (§4.4). Re-measured on a quiet machine with repeats: there is an optimum near 16 kB rather than a
    trend, and both larger and smaller are slower. 64 kB is 13 % slower and 256 kB is 40 % slower, so

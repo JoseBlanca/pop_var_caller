@@ -126,11 +126,10 @@ Skills and agents are instructed to leave it untouched.
 > same non-merging writer, which prices a different change; no merging writer has been built.*
 > *Separately, and already true: a grid cell holding no
 > records has never produced a block — the cut decides where a block ends, not that one is owed
-> per 100 kb — and that now has a test rather than being implied.* **⛦ Spec §4.1 and §12
-> question 3 still say the merge rule ships, and need correcting — a Checkpoint D item, not a
-> "when that document is next touched" one, because nothing schedules that. So does spec §6.7/§7,
-> which enumerate the reader's error classes and have no row for the record ceiling that Milestone
-> F4's `PspReadError` mapping will have to carry.**
+> per 100 kb — and that now has a test rather than being implied.* **✅ The spec now records this:
+> §4.1 and §12 question 3 carry the ruling instead of the withdrawn rule, §6.7 and §7 have the
+> record-ceiling row that Milestone F4's `PspReadError` mapping reads them for, §4.4 has the
+> ceiling's two measured numbers, and §8's trap says where the bound belongs.**
 > [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
 > [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
 > [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).

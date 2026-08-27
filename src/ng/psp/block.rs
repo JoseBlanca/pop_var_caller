@@ -408,10 +408,8 @@ impl OpenBlock {
 /// alignment argument above, which does not need a number; if someone later wants the price,
 /// they have to build the merging writer to get it.
 ///
-/// **Spec §4.1 and §12 question 3 still say this rule ships**, so the design authority currently
-/// instructs the opposite of this code. Correcting them is owed at Checkpoint D and is listed in
-/// `PROJECT_STATUS.md` — not deferred to "when that document is next touched", which nothing
-/// schedules.
+/// **Spec §4.1 and §12 question 3 record the ruling** as of 2026-08-27; before that they said the
+/// rule shipped and only its threshold was open, which is what this comment used to flag.
 ///
 /// # What it refuses
 ///
@@ -1131,6 +1129,8 @@ pub const ROLLING_BYTES: usize = 16 * 1024;
 /// uses for a look-back window wider than a reader budgeted for — *the fix is a knob rather than a
 /// rebuild*. **⚠ It was a `const` read straight out of the reader when this was first written, so
 /// "raisable" meant recompiling**; the knob is what makes the sentence true.
+///
+/// Spec §4.4 carries the same two numbers, §7 the refusal's row, and §8 the trap they answer.
 pub const ROLLING_BUFFER_CEILING_BYTES: usize = 512 * 1024;
 
 const _: () = assert!(

@@ -167,11 +167,10 @@ restart-equals-sequential: reading from an arbitrary block gives what a full rea
 >
 > ✅ **Reviewed** — eight checklists across three worktrees, 21 mutations, 1,523,400 fuzzed inputs:
 > [the review](../../reports/reviews/ng_psp_d4d5_2026-08-27.md),
-> [the fixes](../../reports/reviews/fixes_applied_ng_psp_d4d5_2026-08-27.md). **Two spec
-> corrections are owed before Milestone E**: §4.1 and §12 question 3 still say the
-> merge-across-empty-spans rule ships, and the owner ruled against it on 2026-08-27; and §6.7/§7
-> have no row for the reader's record ceiling, which Milestone F4's `PspReadError` mapping reads
-> them for.
+> [the fixes](../../reports/reviews/fixes_applied_ng_psp_d4d5_2026-08-27.md). **The two spec
+> corrections it owed are made**: §4.1 and §12 question 3 carry the owner's 2026-08-27 ruling
+> against merging near-empty blocks instead of the withdrawn rule, and §6.7/§7 have the row for the
+> reader's record ceiling that Milestone F4's `PspReadError` mapping reads them for.
 
 ## Milestone E — the chain ids
 
