@@ -886,3 +886,73 @@ test in the tree that runs a fit across more than one chunk.
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib` — **4,841 passed, 0 failed, 11 ignored**, from 4,840. One test added.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+---
+
+## C2 — the segregating-position count and the spreads
+
+**Contract (plan C2).** A **soft** count — `Σ P(the position segregates)` — not a count of
+positions with a non-zero expected copy count, which spec §6.2 records an earlier draft getting
+wrong and which returns 100% of positions. The spread of each moment travels with it and is
+**labelled a floor, not an interval**, because linked positions make an independence assumption too
+narrow by 3 to 16 times. **No floor is applied.**
+
+### The soft count, and the trap it avoids
+
+```text
+P(the position segregates)  =  1  −  Π over samples of P(no alternative copy)
+                                  −  Π over samples of P(both copies non-reference)
+```
+
+formed in the same loop over samples that `E[k]` is already made in, so the hot path does not gain
+a pass.
+
+**The test for it is the trap itself.** Five samples, each with a 1 in 100 posterior of being
+heterozygous and no more — the shape a real census has. Every such position's expected
+alternative-copy count is 0.05, **above zero**, so the hard version calls every one of them
+segregating and a run over two million positions reports 100% segregating. The soft count asks what
+the words mean: the panel is all-reference at `0.99⁵ = 0.951`, so the position segregates at
+**0.049**. Over a hundred such positions the run reports **4.9** where the hard version reports 100.
+
+**Two things it assumes, both stated where it is computed.** The samples are treated as independent
+given the position's posteriors, and they are not — they are coupled through the frequency they
+share, exactly as `Var(k)` is. Positive coupling makes both ends more likely than the products, so
+the true probability of segregating is a little lower and this count runs a little **high**; **its
+size has not been measured and nothing here claims one**. And the carrier posterior takes no part,
+for the same reason it takes no part in `E[k]`.
+
+### The spreads, and why they are floors
+
+The plain standard error of the mean across positions, on both moments. **What makes it a floor is
+that census positions are linked** — a run of homozygosity or a shared haplotype makes neighbours
+carry the same evidence twice — so a spread computed as though they were independent counts that
+evidence more than once and comes back too narrow, by a factor
+`parameter_prepass_census_sites.md` §5 puts between **3 and 16**. The field names say `floor` so a
+reader cannot take one for an interval.
+
+The heterozygosity's spread carries the inbreeding correction and the frequency's does not, because
+the correction scales the one and leaves the other alone — a spread that did not travel with its own
+number would describe a different quantity. There is a test for that.
+
+Below two positions the spread is zero rather than `NaN`: one position has nothing to disagree with.
+
+### No floor is applied, and no threshold
+
+**Nothing branches on the segregating count.** Spec §6.2 forbids picking a floor until it is
+measured and the measurement needs a real census; the run reports the count and takes no action,
+which is distinguishable in the output from a floor that never fires. Nothing here computes the gap
+between the two heterozygosity estimates either — that is C3's to print and §7's fourth open
+question to threshold.
+
+### Mutations run
+
+Two, on the soft count, against the module's twenty-one tests: dropping the all-alternative end
+fails 1, and **replacing the soft count with the hard one the spec forbids fails 2**.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,847 passed, 0 failed, 11 ignored**, from 4,841. Six tests added.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged. One new break was introduced
+  and fixed: a `#[cfg(test)]` function cannot be the target of a doc link from code that is always
+  compiled.

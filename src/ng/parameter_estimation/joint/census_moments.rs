@@ -31,6 +31,11 @@ use crate::ng::types::InbreedingF;
 struct AlternativeCopiesAtAPosition {
     expected_copies: f64,
     copy_count_variance: f64,
+    /// **The probability that this position segregates in this panel** — that the panel's `2N`
+    /// chromosomes are not all reference and not all alternative.
+    ///
+    /// See `probability_that_the_panel_segregates` below for how it is formed and what it assumes.
+    segregating: f64,
 }
 
 /// **The two moments, averaged over the census positions.**
@@ -76,6 +81,37 @@ pub struct CensusMoments {
     /// ten samples and three reads, which bounds the residual above by that and no lower (spec
     /// §3.1, §8's first open question).
     pub heterozygosity: f64,
+    /// **How many census positions the fit walked** — the denominator both moments were averaged
+    /// over, not the count of positions that carry any variation.
+    pub positions: u64,
+    /// **How many of those positions segregate in this panel**, as a **soft count**:
+    /// `Σ over positions of P(the position segregates)`.
+    ///
+    /// **Both moments' precision rests on this rather than on [`Self::positions`]**: a position
+    /// where the population carries one allele contributes zero to the heterozygosity and tells
+    /// you nothing about the frequency. A two-million-position census on a panel segregating at 1
+    /// in 200 carries about ten thousand segregating positions; one run over a small `--regions`
+    /// BED may carry a few hundred (spec §6.2).
+    ///
+    /// **It is a soft count and not a count above a threshold**, and
+    /// `probability_that_the_panel_segregates` in this module says why: the obvious hard version
+    /// reports 100% of positions.
+    ///
+    /// **No floor is applied to it anywhere.** Spec §6.2 forbids picking one until it is measured
+    /// and the measurement needs a real census, so the run reports the count and takes no action —
+    /// which is distinguishable in the output from a floor that never fires.
+    pub segregating_positions: f64,
+    /// **A lower bound on how far [`Self::mean_alternative_frequency`] would move if the census
+    /// were drawn again** — the standard error of the mean across positions.
+    ///
+    /// **A floor and not an interval.** See [`standard_error_of_the_mean`]: census positions are
+    /// linked, so a spread computed as though they were independent is too narrow by a factor
+    /// `parameter_prepass_census_sites.md` §5 puts between 3 and 16.
+    pub frequency_standard_error_floor: f64,
+    /// The same for [`Self::heterozygosity`], and a floor for the same reason. It carries the
+    /// inbreeding correction, because the correction is a constant divide and scales the spread
+    /// with the number it belongs to.
+    pub heterozygosity_standard_error_floor: f64,
 }
 
 impl CensusMoments {
@@ -192,6 +228,12 @@ pub struct CensusMomentSums {
     positions: u64,
     frequency: f64,
     heterozygosity: f64,
+    /// The sums of squares, which are what a spread across positions needs beside the sums.
+    frequency_squares: f64,
+    heterozygosity_squares: f64,
+    /// `Σ P(the position segregates in this panel)` — the soft count of
+    /// [`probability_that_the_panel_segregates`].
+    segregating: f64,
 }
 
 impl CensusMomentSums {
@@ -212,6 +254,9 @@ impl CensusMomentSums {
             positions: 0,
             frequency: 0.0,
             heterozygosity: 0.0,
+            frequency_squares: 0.0,
+            heterozygosity_squares: 0.0,
+            segregating: 0.0,
         }
     }
 
@@ -236,13 +281,18 @@ impl CensusMomentSums {
             position_genotype.len()
         );
         let copies = alternative_copies_in(position_genotype, self.samples);
-        self.positions += 1;
-        self.frequency += copies.expected_copies / self.chromosomes;
-        self.heterozygosity += nei_heterozygosity(
+        let frequency = copies.expected_copies / self.chromosomes;
+        let heterozygosity = nei_heterozygosity(
             copies.expected_copies,
             copies.copy_count_variance,
             self.chromosomes,
         );
+        self.positions += 1;
+        self.frequency += frequency;
+        self.heterozygosity += heterozygosity;
+        self.frequency_squares += frequency * frequency;
+        self.heterozygosity_squares += heterozygosity * heterozygosity;
+        self.segregating += copies.segregating;
     }
 
     /// Fold another chunk's sums in. Every field is a sum over positions, so this is addition.
@@ -261,6 +311,9 @@ impl CensusMomentSums {
         self.positions += other.positions;
         self.frequency += other.frequency;
         self.heterozygosity += other.heterozygosity;
+        self.frequency_squares += other.frequency_squares;
+        self.heterozygosity_squares += other.heterozygosity_squares;
+        self.segregating += other.segregating;
     }
 
     /// How many census positions have been added.
@@ -277,13 +330,57 @@ impl CensusMomentSums {
     #[must_use]
     pub fn finish(&self, panel_inbreeding: InbreedingF) -> CensusMoments {
         let positions = self.positions.max(1) as f64;
+        let correction = inbreeding_factor(panel_inbreeding, self.chromosomes);
         CensusMoments {
             mean_alternative_frequency: self.frequency / positions,
-            heterozygosity: self.heterozygosity
-                / positions
-                / inbreeding_factor(panel_inbreeding, self.chromosomes),
+            heterozygosity: self.heterozygosity / positions / correction,
+            positions: self.positions,
+            segregating_positions: self.segregating,
+            // **The inbreeding correction is a constant divide, so it scales the spread with the
+            // number.** Applying it to one and not the other would make the two describe different
+            // quantities.
+            frequency_standard_error_floor: standard_error_of_the_mean(
+                self.frequency,
+                self.frequency_squares,
+                self.positions,
+            ),
+            heterozygosity_standard_error_floor: standard_error_of_the_mean(
+                self.heterozygosity,
+                self.heterozygosity_squares,
+                self.positions,
+            ) / correction,
         }
     }
+}
+
+/// **How far the mean over positions would move if the census were drawn again — if the positions
+/// were independent, which they are not.**
+///
+/// The plain standard error of the mean: the spread across positions divided by the square root of
+/// how many there are, using the one-pass form `Σx² / n − (Σx / n)²` for the variance.
+///
+/// **What it is for is being labelled a floor.** Census positions are scattered across the genome
+/// but they are linked — a run of homozygosity or a shared haplotype makes neighbours carry the
+/// same information twice — so a spread computed as though they were independent counts the same
+/// evidence more than once and comes back **too narrow**.
+/// `parameter_prepass_census_sites.md` §5 puts that factor **between 3 and 16**. So the honest
+/// reading is *the true spread is at least this*, never *the answer is within this*.
+///
+/// **Below two positions it is zero**, because one position has no spread to measure and the
+/// `n − 1` a sample variance divides by is zero there. That is a run whose fit kept almost
+/// nothing, and the segregating count beside it is what says so.
+///
+/// The variance is clamped at zero: the one-pass form can return a tiny negative from
+/// cancellation when every position carries nearly the same value, which is exactly what a census
+/// of a nearly invariant cohort is.
+fn standard_error_of_the_mean(sum: f64, sum_of_squares: f64, count: u64) -> f64 {
+    if count < 2 {
+        return 0.0;
+    }
+    let n = count as f64;
+    let mean = sum / n;
+    let variance = (sum_of_squares / n - mean * mean).max(0.0) * n / (n - 1.0);
+    (variance / n).sqrt()
 }
 
 /// **What the panel's inbreeding takes off the heterozygosity before the correction puts it
@@ -347,6 +444,8 @@ fn alternative_copies_in(
 ) -> AlternativeCopiesAtAPosition {
     let mut expected_copies = 0.0_f64;
     let mut copy_count_variance = 0.0_f64;
+    let mut all_reference = 1.0_f64;
+    let mut all_alternative = 1.0_f64;
     for sample in 0..samples {
         let heterozygous = position_genotype[sample * 3];
         let both_non_reference = position_genotype[sample * 3 + 1];
@@ -354,11 +453,63 @@ fn alternative_copies_in(
         let copies_squared = heterozygous + 4.0 * both_non_reference;
         expected_copies += copies;
         copy_count_variance += copies_squared - copies * copies;
+        all_reference *= (1.0 - heterozygous - both_non_reference).max(0.0);
+        all_alternative *= both_non_reference;
     }
     AlternativeCopiesAtAPosition {
         expected_copies,
         copy_count_variance,
+        segregating: (1.0 - all_reference - all_alternative).clamp(0.0, 1.0),
     }
+}
+
+/// **The probability that a position segregates in this panel** — that its `2N` chromosomes are
+/// neither all reference nor all alternative.
+///
+/// ```text
+/// P(segregates)  =  1  −  Π over samples of P(no alternative copy)
+///                      −  Π over samples of P(both copies non-reference)
+/// ```
+///
+/// ## Why it has to be a probability and not a count
+///
+/// **`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.2 records an earlier draft of that spec
+/// getting this wrong**, and the shape of the error is worth keeping: it defined the segregating
+/// positions as *those whose expected alternative-copy count is above zero*. Posteriors from reads
+/// are continuous, so at a census of two million positions essentially every one of them has an
+/// expected count above zero and the run would report **100% of positions segregating** — a number
+/// that looks like a measurement and is a property of arithmetic.
+///
+/// A soft count needs no threshold constant and degrades smoothly where the reads are thin, where
+/// a hard one steps.
+///
+/// ## What it assumes
+///
+/// **That the samples' genotypes are independent given the position's posteriors, which they are
+/// not.** They are coupled through the frequency they share, exactly as `Var(k)` is
+/// (`ordinary_site_prior_moments.md` §3.1). So this is an approximation, and the direction is
+/// knowable: positive coupling makes *all-reference* and *all-alternative* more likely than the
+/// products above, so the true probability of segregating is a little **lower** and this count runs
+/// a little high. **Its size has not been measured and this claims none.**
+///
+/// **The carrier posterior takes no part**, for the same reason it takes no part in `E[k]`: a
+/// sample carrying an extra copy of the position contributes no alternative copies to `k`, so a
+/// position where every sample is a carrier reads as all-reference here — consistent with the
+/// count it is a count of.
+///
+/// **What the count is for**: a run over a small `--regions` BED may carry a few hundred
+/// segregating positions where the shipped census carries about ten thousand, and both moments'
+/// precision rests on that number rather than on how many positions were walked. **No floor is
+/// applied to it** — spec §6.2 forbids picking one until it is measured, and the measurement needs
+/// a real census. The run reports it and takes no action.
+///
+/// **The run's own path does not call this**, because [`alternative_copies_in`] forms the same
+/// number in the loop it is already making over the samples and a second pass would double the
+/// hot path's work. This is that field under the name it deserves, so the argument above has
+/// somewhere to live and the tests have something to call.
+#[cfg(test)]
+fn probability_that_the_panel_segregates(position_genotype: &[f64], samples: usize) -> f64 {
+    alternative_copies_in(position_genotype, samples).segregating
 }
 
 /// **How often two of the panel's chromosomes drawn at random differ at one position** — Nei's
@@ -819,6 +970,178 @@ mod tests {
         let with_term = CensusMoments::from_posteriors(&certain, 3, 2, outbred()).heterozygosity;
         let without = without_the_variance_term(&certain, 3, 2);
         assert_eq!(with_term, without);
+    }
+
+    /// **The soft count is not a count of positions whose expected copy count is above zero, and
+    /// this is the difference** — `doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.2 records
+    /// an earlier draft of that spec defining it the second way.
+    ///
+    /// The fixture is the shape a real census has: five samples whose reads leave each of them a
+    /// **1 in 100** posterior of being heterozygous and no more. Every such position has an
+    /// expected alternative-copy count of 0.05, which is above zero — so a hard count calls **every
+    /// one of them segregating**, and a run over two million positions reports 100% segregating,
+    /// which is a property of arithmetic and not a measurement.
+    ///
+    /// The soft count asks what it means instead: the panel is all-reference with probability
+    /// `0.99⁵ = 0.951`, so the position segregates with probability **0.049**. Over a hundred such
+    /// positions the soft count reports about five and the hard one reports a hundred.
+    #[test]
+    fn the_segregating_count_is_soft_and_the_hard_version_reports_every_position() {
+        let samples = 5;
+        let barely = [0.01_f64, 0.0, 0.0].repeat(samples);
+        let soft = probability_that_the_panel_segregates(&barely, samples);
+        let expected_copies = alternative_copies_in(&barely, samples).expected_copies;
+
+        assert!(
+            expected_copies > 0.0,
+            "the hard version's test is `expected copies above zero`, and it passes here at \
+             {expected_copies}"
+        );
+        let all_reference = 0.99_f64.powi(5);
+        assert!(
+            (soft - (1.0 - all_reference)).abs() < 1e-12,
+            "the panel is all-reference at 0.99^5 = {all_reference}, so it segregates at {}; got \
+             {soft}",
+            1.0 - all_reference
+        );
+        assert!(
+            (soft - 0.049).abs() < 5e-4,
+            "about 5 positions in 100, not 100 in 100; got {soft}"
+        );
+
+        // And over a census of a hundred such positions, that is what the run reports.
+        let mut sums = CensusMomentSums::over(samples);
+        for _ in 0..100 {
+            sums.add_position(&barely);
+        }
+        let moments = sums.finish(outbred());
+        assert_eq!(moments.positions, 100);
+        assert!(
+            (moments.segregating_positions - 4.9).abs() < 0.1,
+            "about 5 of the 100 positions segregate; the hard count would say 100. Got {}",
+            moments.segregating_positions
+        );
+    }
+
+    /// **The two ends: a panel that is certainly all-reference or certainly all-alternative does
+    /// not segregate, and one certain heterozygote makes it certain that it does.**
+    ///
+    /// The all-alternative end is the one a formula that only subtracted the all-reference term
+    /// would get wrong, and no fixture in which some sample is reference can see it.
+    #[test]
+    fn a_panel_fixed_for_either_allele_does_not_segregate() {
+        let all_reference = as_f64(&point_masses(&[&[0, 0, 0]]));
+        assert_eq!(
+            probability_that_the_panel_segregates(&all_reference, 3),
+            0.0
+        );
+
+        let all_alternative = as_f64(&point_masses(&[&[2, 2, 2]]));
+        assert_eq!(
+            probability_that_the_panel_segregates(&all_alternative, 3),
+            0.0
+        );
+
+        let one_heterozygote = as_f64(&point_masses(&[&[1, 0, 0]]));
+        assert_eq!(
+            probability_that_the_panel_segregates(&one_heterozygote, 3),
+            1.0
+        );
+        // A panel of one homozygous-alternative sample beside two reference ones segregates too —
+        // the alternative allele is there and so is the reference one.
+        let one_homozygous_alternative = as_f64(&point_masses(&[&[2, 0, 0]]));
+        assert_eq!(
+            probability_that_the_panel_segregates(&one_homozygous_alternative, 3),
+            1.0
+        );
+    }
+
+    /// **The carrier posterior does not make a position segregate**, because it contributes no
+    /// alternative copies to `k` — the same reason it takes no part in either moment.
+    #[test]
+    fn a_panel_of_carriers_does_not_segregate() {
+        let carriers = [0.0_f64, 0.0, 1.0].repeat(4);
+        assert_eq!(probability_that_the_panel_segregates(&carriers, 4), 0.0);
+    }
+
+    /// **The spread across positions is the standard error of the mean, and a census that says the
+    /// same thing everywhere has none.**
+    ///
+    /// Two arms. A census of identical positions has a spread of exactly zero, whatever the value —
+    /// which is what says the spread is measuring disagreement between positions and not the size
+    /// of the numbers. And a census alternating between two values has the sample standard
+    /// deviation of those two over `√n`, which is written out here rather than taken from the same
+    /// one-pass form the code uses.
+    #[test]
+    fn the_spread_is_the_standard_error_of_the_mean_across_positions() {
+        let heterozygous = as_f64(&point_masses(&[&[1, 0]]));
+        let mut identical = CensusMomentSums::over(2);
+        for _ in 0..8 {
+            identical.add_position(&heterozygous);
+        }
+        let moments = identical.finish(outbred());
+        assert_eq!(moments.frequency_standard_error_floor, 0.0);
+        assert_eq!(moments.heterozygosity_standard_error_floor, 0.0);
+        assert!(moments.mean_alternative_frequency > 0.0);
+
+        // Four positions at a frequency of 1/4 and four at 0: a mean of 1/8, a sample standard
+        // deviation of √(4·(1/8)² · 2/7) = 0.13363, and a standard error of that over √8.
+        let reference = as_f64(&point_masses(&[&[0, 0]]));
+        let mut alternating = CensusMomentSums::over(2);
+        for _ in 0..4 {
+            alternating.add_position(&heterozygous);
+            alternating.add_position(&reference);
+        }
+        let moments = alternating.finish(outbred());
+        assert!((moments.mean_alternative_frequency - 0.125).abs() < 1e-15);
+        let deviation = (8.0 * 0.125_f64 * 0.125 / 7.0).sqrt();
+        let truth = deviation / 8.0_f64.sqrt();
+        assert!(
+            (moments.frequency_standard_error_floor - truth).abs() < 1e-15,
+            "got {} against {truth}",
+            moments.frequency_standard_error_floor
+        );
+    }
+
+    /// **A census of one position reports no spread rather than a `NaN`**, because one position has
+    /// nothing to disagree with and the `n − 1` a sample variance divides by is zero there.
+    #[test]
+    fn one_position_has_no_spread() {
+        let mut sums = CensusMomentSums::over(2);
+        sums.add_position(&as_f64(&point_masses(&[&[1, 0]])));
+        let moments = sums.finish(outbred());
+        assert_eq!(moments.positions, 1);
+        assert_eq!(moments.frequency_standard_error_floor, 0.0);
+        assert_eq!(moments.heterozygosity_standard_error_floor, 0.0);
+    }
+
+    /// **The heterozygosity's spread carries the inbreeding correction and the frequency's does
+    /// not** — because the correction scales the heterozygosity and leaves the frequency alone, and
+    /// a spread that did not travel with its own number would describe a different quantity.
+    #[test]
+    fn the_inbreeding_correction_scales_the_heterozygosity_and_its_spread_together() {
+        let mut sums = CensusMomentSums::over(2);
+        for copies in [&[1u8, 0][..], &[0, 0], &[2, 1], &[0, 1]] {
+            sums.add_position(&as_f64(&point_masses(&[copies])));
+        }
+        let plain = sums.finish(outbred());
+        let selfing = sums.finish(InbreedingF::try_new(0.6).expect("a legal coefficient"));
+        // At two individuals the factor is 1 − F/3 = 0.8.
+        let lift = 1.0 / 0.8;
+        assert!((selfing.heterozygosity / plain.heterozygosity - lift).abs() < 1e-12);
+        assert!(
+            (selfing.heterozygosity_standard_error_floor
+                / plain.heterozygosity_standard_error_floor
+                - lift)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            selfing.frequency_standard_error_floor,
+            plain.frequency_standard_error_floor
+        );
+        // And the count of segregating positions is untouched by any of it.
+        assert_eq!(selfing.segregating_positions, plain.segregating_positions);
     }
     /// **A posterior array of the wrong length is refused rather than read by offset.**
     ///

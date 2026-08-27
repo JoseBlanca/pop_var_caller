@@ -153,7 +153,7 @@ with `genotype_posteriors` off, or turn the flag on and reduce afterwards. **Whi
 its memory cost in the module's own documentation** — the flag is 12 bytes a position a sample, 1.5
 GB for fifty samples over two million positions. *Depends:* B2, B3. *Source:* spec §5.
 
-**C2. The segregating-position count and the spreads.**  ☐
+**C2. The segregating-position count and the spreads.**  ✅
 A **soft** count — `Σ P(the position segregates)` — not a count of positions with a non-zero
 expected copy count, which spec §6.2 records an earlier draft getting wrong and which returns 100%
 of positions. The spread of each moment travels with it and is **labelled a floor, not an
