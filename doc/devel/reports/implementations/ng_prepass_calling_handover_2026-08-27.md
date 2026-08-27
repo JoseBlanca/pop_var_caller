@@ -10,22 +10,27 @@ run**.
 The parameter pre-pass measures what a run's data is like and reports it three ways: one value per
 sample from the SNP/indel path, one value per sample from the repeat tracts, and one fit over the
 whole cohort at once. Calling reads a single object, `RunParameters`. **Nothing built that object
-from what the pre-pass produced** — the constructor was called from 28 places at the branch point
+from what the pre-pass produced** — the constructor was called from 29 places at the branch point
 and every one of them was inside its own test module, each handing it values written by hand. (The
-plan says ten; counted at `629e84ff` it is 28, and the point is the same: none of them was a run.)
-There is now one function that does it,
-`RunParameters::from_prepass`, and it computes nothing: every number it hands on was measured by
-one of the three.
+plan says ten; counted at `629e84ff` it is 29, and the point is the same: none of them was a run.)
+There is now one function between the two, `RunParameters::from_prepass` — **this report calls it
+the seam**, since it does nothing but join.
 
-Two quantities had to be given a route out of the pre-pass first, because the seam cannot be
-written without them, and one rule had to be decided.
+**It gathers rather than fits**: every per-library and per-sample number it hands on is one of the
+three pre-pass outputs, unchanged. The one derived value is the genotype prior's seed, which
+`seed_from_moments` solves in closed form from the cohort fit's two moments and which falls back to
+its own constants where a moment is missing.
+
+Two quantities had to be given a route out of the pre-pass first, and one rule had to be decided.
+**One of the two had no route at all and the seam cannot be written without it; the other had a
+route and the wrong shape**, and giving it the right one keeps the join out of every consumer.
 
 ## The library suite
 
 | | tests |
 | --- | --- |
 | at the branch point (`629e84ff`) | 4,920 passing, 0 failing, 11 ignored |
-| now | **4,928** passing, 0 failing, 11 ignored |
+| now | **4,930** passing, 0 failing, 11 ignored |
 
 `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` both
 exit 0. `cargo doc --no-deps --lib` reports **25 unresolved links and exits 101**. It reported 26
@@ -38,20 +43,24 @@ this branch added, and none of the 25 sites the compiler names is in code this b
 
 ### The reads' own claim about their errors now leaves the fit (`1eafa835`)
 
-The calling step scores each read at the error probability the read itself claims — from its base
-and mapping qualities — multiplied by the ratio between that claim and the rate the pre-pass fitted
-for its library. It has had the fitted rate for a while. **The claim, summed per read group while
-the loci were counted, went out of scope with the accumulators**, so nothing that assembled a run's
-parameters could supply it. `GenericSampleParameters` now carries it, copied from the tally the
-rest of that value's numbers were fitted from.
+The calling step scores each read at the error probability the read itself claims — its **minted**
+error, the number its base and mapping qualities imply before any fit — multiplied by the ratio
+between that claim and the rate the pre-pass fitted for its library. It has had the fitted rate for
+a while. **The claim, summed per read group while the loci were counted, went out of scope with the
+accumulators**, so nothing that assembled a run's parameters could supply it.
+`GenericSampleParameters` now carries it, copied from the tally the rest of that value's numbers
+were fitted from.
 
-**What made this worth a fixture rather than a line.** A read group with a fitted rate and no
-minted total is not refused downstream. It takes the defaulted calibration — scale one, every read
-of the library charged the error floor — and the run finishes normally with quietly overconfident
-reads. So *the map is not empty* is not what the test asserts. The fixture gives the two libraries
-different depths and different per-read qualities, 8 reads a site at 7 nats against 12 at 9, and
-checks both the whole map against the tally's own and each library's two numbers against the
-fixture's arithmetic.
+**What made this worth a fixture rather than a line — and the first draft of this paragraph had it
+wrong.** It said a missing total takes the defaulted calibration and the run finishes. It does not:
+`RunParameters::assemble` requires a read group to have a fitted rate and a minted total or
+neither, so an empty map stops the run at assembly naming the first read group, and a map keyed by
+another sample's libraries is refused by the seam. **What survives all of that is a map with the
+right keys and the wrong numbers in them** — another read group's total under this one's
+identifier, which moves every scale it touches and looks exactly like a correct map. So *the map is
+not empty* is not what the test asserts. The fixture gives the two libraries different depths and
+different per-read qualities, 8 reads a site at 7 nats against 12 at 9, and checks both the whole
+map against the tally's own and each library's two numbers against the fixture's arithmetic.
 
 Emptying the map and swapping the two libraries' totals both fail it. Both left the other ten tests
 in that file green — including the one asserting that the two entry points return equal values,
@@ -80,7 +89,15 @@ The fixture gives its three strata unlike rates — 2, 5 and 10 mismatched bases
 because every other fixture that reaches these records is built from reads that show their tract
 perfectly, so every rate is the same measured zero and a rate read from under a neighbour's key is
 the right number. Pairing each key with its neighbour's rate, and keeping only the first key, both
-fail the new test; **the permutation left all 201 other tests in that file green.**
+fail the new test; **the permutation left every other test of the repeat-tract module green — 201
+of them ran**, the 90 in this file among them. (An earlier draft said "in that file", which was the
+wrong subject: the file holds 91 tests and the module tree 203, one of them ignored.)
+
+**One thing the plan asked for could not be built.** Its test was to be "three strata, two with
+different rates and one with none; the map holds two entries" — and a stratum with no rate cannot
+reach a sample's parameters at all, because `assemble_sample_parameters` panics rather than
+building a record for it. The rule the plan wanted that test to hold is held three tests upstream,
+on the gather itself.
 
 ### A sample with no inbreeding coefficient stops the run, by name (`5f61bed4`)
 
@@ -133,13 +150,15 @@ returns a `RunParameters` or the refusal above.
   carrying *no* read-group-keyed value at all, which the SNP/indel fit does not produce —
   `GenericAccumulators::estimate` refuses a sample with no read group with reads.
 
-The fixture is three samples over four libraries with **no two numbers alike** — four error rates,
-four minted-error means, four contamination fractions, four tract substitution rates, three
-inbreeding coefficients, and four *calibration scales*, which two libraries can share even when
-their rates and their minted means both differ. The first sample holds two of the four libraries,
-so a library's index is not its sample's; a fixture giving each sample one library makes the two
-axes the same list of numbers, which is the accident that has hidden a join in this project four
-times.
+The fixture is three samples over four libraries in which **every quantity the seam carries differs
+between every pair it could be swapped across** — four error rates, four minted-error means, four
+contamination fractions, four tract substitution rates, three inbreeding coefficients, and four
+*calibration scales*, which two libraries can share even when their rates and their minted means
+both differ. The first sample holds two of the four libraries, so a library's index is not its
+sample's; a fixture giving each sample one library makes the two axes the same list of numbers,
+which is the accident that hid **five of the seven deliberate defects** the reviews of the calling
+loop's contamination step planted, all of which its 4,776 tests passed (PROJECT_STATUS, the
+2026-08-26 entry for that step).
 
 **The four substitution rates share one stratum on purpose.** With a stratum apiece, a rate swapped
 between two libraries lands on a key nothing asks about and the lookup answers *absent*, which is a
@@ -155,17 +174,37 @@ Five deliberate defects, all killed:
 | the library-ownership check disabled | the refusal test written for it |
 | the seed's two moments swapped | the tracing test, and the one-sample test |
 
+**The last of those takes explaining, because the naive version does not compile.** The two moments
+are different types, so swapping the two arguments is a type error; the mutation had to unwrap each
+and re-wrap it as the other, which is what a caller reading them out of the fit by hand could
+plausibly do. That the type stops the direct swap is a property worth having and is why
+`JointFit::fitted_alternative_frequency` was added rather than the frequency being wrapped at this
+call site.
+
+**Two more refusals were added after review**, both for failures that end with a run finishing:
+a repeat-tract rate fitted at a ploidy other than the run's, which the lookup can never find, so
+every tract would be called on the model's stated constant instead; and a library the run declared
+that no sample carries a rate for, which shortens the read-group axis silently and defers the
+failure to a locus. The second is reachable from data — a library whose reads were all refused at
+admission has no entry anywhere — and **what such a run should get is a design question this does
+not settle**: refuse it, as here, or give that library the defaulted calibration a fitted-and-
+unmeasurable one would get.
+
 ### One sample and a thousand (`2f35e8a4`)
 
 The project requires an answer at both ends of the cohort range.
 
-**One sample** is a test: the run assembles, and it comes back **uncontaminated** — absent rather
-than a fitted zero — because there is no panel for a stray-read fraction to be surprised by. The
-read likelihood then computes its plain formula, which is the simple case for that model rather
-than the weak one. The seam has nothing to special-case for it.
+**One sample** is a test. What is new in it is that the seam accepts single-element lists and the
+calibration comes back traced to that sample's own two numbers; the contamination comes back
+**absent rather than a fitted zero**, which the fixture states rather than derives — that a
+one-sample cohort has no panel is `fit_contamination_over`'s own rule (`count < 2`), not this
+seam's. The read likelihood then computes its plain formula, which is the simple case for that
+model rather than the weak one. The seam has nothing to special-case.
 
-**A thousand** is a measurement, in `examples/ng_prepass_handover_footprint.rs`, taken with dhat's
-allocator as live bytes. At one library a sample holding 338 repeat-tract strata:
+**A thousand** is a measurement, in `examples/ng_prepass_handover_footprint.rs`, live bytes from
+dhat's allocator. It builds the union the way the seam builds it and calls `assemble` directly,
+because the only constructor that mints a read-group table without an alignment header is test-only
+and an example cannot reach it. At one library a sample holding 338 repeat-tract strata:
 
 | samples | the per-sample results | the run-wide maps | what assembling adds | peak | peak a sample |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -177,14 +216,22 @@ allocator as live bytes. At one library a sample holding 338 repeat-tract strata
 **1.14 GB at a thousand samples, and the per-sample results are 97.7% of it** — 1,114,632 bytes
 against 26,596 of run-wide maps and 24 of dense vectors. Take the repeat tracts out — the same run
 at zero strata — and a sample weighs **3,391 bytes** instead of 1,141,251, so **the repeat-tract
-records are 99.7% of what a sample weighs**. What that is made of is the allele-length genotype
-table each stratum's fit carries: 3,366 bytes a stratum at 338 strata and 3,334 at 141. Calling
-reads one number off each of those records — the substitution rate — and nothing else.
+records are 99.7% of what a sample weighs**. That is 3,366 bytes a stratum at 338 strata and 3,334
+at 141; running the example with its genotype count set to zero splits it further — **2,496 bytes
+of allele-length genotype table** (78 entries of 32 bytes) and 792 bytes of the rest of the record,
+plus 79 of the projected rate in the run-wide map. Calling reads one number off each record, the
+substitution rate, and nothing else.
 
 **So this is a finding for the run driver's plan and not for the seam.** What a run must hold for
 the whole of calling is the 26.6 kB a sample of run-wide maps — 26.6 MB at a thousand. A driver
 that projects each sample's substitution rates as that sample finishes, and releases the rest,
 peaks at **1/43rd** of the figure above: 26,620 bytes a sample against 1,141,251.
+
+**That 26.6 kB is a lower bound, not the figure.** The measurement leaves contamination empty, so
+a run where every library has a fitted fraction carries one estimate per library in the map and one
+dense view per library in the result that this table does not count — which is also why its last
+column is 24 bytes a library rather than the "vectors" its heading implies. Both are small beside
+1.1 MB a sample, and neither changes the conclusion.
 
 The shape a sample is given is stated and sourced rather than chosen: one library, which is every
 sample of both benchmark cohorts here; 338 strata a library, from the repeat-tract fit's own report
@@ -196,8 +243,9 @@ reader can re-run rather than rescale by hand.
 
 **What the measurement does not say.** Nothing in it runs a pre-pass or reads a file; the values
 are synthesised at that shape, so it is a footprint measurement and not an accuracy one. And the 78
-genotypes a stratum is a floor — that is a five-copy dinucleotide tract at two genome copies, and
-longer tracts carry more.
+genotypes a stratum is not a floor over the whole range, as an earlier draft said: the allele
+support is `min(repeats, 6) + 7` lengths, so a three-copy tract has 55 genotypes and a four-copy
+one 66. It is the value from five copies up, where the support stops growing.
 
 ## Where the code went its own way
 
@@ -208,12 +256,41 @@ longer tracts carry more.
   cohort fit nor a sample's parameters carries one, so it has to be passed in.
 - **The cohort fit gained one accessor.** `JointFit::fitted_alternative_frequency`, beside the
   `fitted_diversity` that was already there. The two are the pair the genotype prior's seed is built
-  from, and one of them was being wrapped into its checked type at each call site — which is how
-  two numbers that travel together come to be wrapped differently.
+  from, and until now only one of them left the fit already wrapped in its checked type — the other
+  was wrapped by whoever read it. That asymmetry is also what makes the two moments hard to swap by
+  accident: they are different types, so the direct swap does not compile.
 - **A test-only constructor on `SsrSampleParameters`.** `of_substitution_rates` builds records
   carrying the stated rates and nothing else worth reading, so that the seam's own test does not
   assemble ten fields of a record whose other nine are not the point. It lives beside the type
   whose fields it fills, which is where `ReadGroups::of_libraries` lives for the same reason.
+- **The seam checks two things the plan did not ask for.** That every value a sample carries is
+  keyed by one of that sample's own libraries, and — after review — that every library the run
+  declared got a rate and that no repeat-tract rate was fitted at another ploidy. All three are
+  checks rather than values, and each replaces a run that finishes with a message about the run.
+
+## What the reviews found
+
+Three reviews, one brief each: the arithmetic, the tests and their mutations, and plan conformance
+with claim-checking. **They found no defect in the seam's arithmetic** — every one of the seven
+inputs lands where the doc says, the seed's two moments are in the right order, and no value is
+dropped or overwritten on any path a caller can reach. They found **two silent failures the seam
+did not check for**, both now refused and both listed above; and **eleven wrong claims**, of which
+nine were in this report and its commit messages and two were doc comments. Four of the eleven were
+the stated *reason* for a design or a test, which is the failure this project's review history puts
+at about 60 in 300.
+
+The wrong claims, all corrected in place: that a missing minted-error total lets a run finish;
+that a permuted per-sample list silently mis-assigns coefficients and contamination fractions; that
+the seam computes nothing; the constructor's caller count (29, not ten); the count and subject of
+the tests a mutation left green; two footprint ratios on different bases; the attribution of a
+stratum's whole 3.35 kB to its genotype table; "78 genotypes is a floor"; the accessor's symmetry
+with its neighbour; and the repeat-tract gather's "refuses to build a record", which is a panic
+that aborts the whole sample.
+
+**Four of them were found and fixed before the reviews reported**, by re-checking the report's own
+claims against the code: the permuted-list mechanism, the caller count, the doc-link provenance and
+the two ratios. The reviews confirmed all four and corrected the caller count again — it is 29, and
+the first correction said 28.
 
 ## What this does not do, and who owns it
 
