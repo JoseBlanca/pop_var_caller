@@ -162,24 +162,35 @@ floor exists in the code**.
 
 ### 3.4 The ordinary-site ladder
 
-The consumer already implements three regimes
-(`src/ng/calling/genotype_prior/seed_generic.rs:597`), and this document changes none of them — it
-supplies the inputs they were written for:
+**⚠ Superseded in part by [`ordinary_site_seed.md`](ordinary_site_seed.md), 2026-08-26, and built.**
+The top two rungs below are no longer alternatives: they are the two ends of one ramp, and a run
+sits somewhere between them at a weight that rises with the panel (that document's §4). The bottom
+rung is unchanged and stays a rung, because there is nothing to interpolate when no diversity was
+fitted at all. The table is kept because the *inputs* each rung needs are still what this document
+supplies.
 
 | rung | when | what the seed is |
 |---|---|---|
-| **fitted frequency spectrum** | a panel above the floor of §9's question 3 | shape and scale both from it; the diversity is not read |
-| **fitted diversity** | below that floor, or no fit | a neutral shape at the measured diversity |
-| **stated constant** | no fit at all | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
+| **fitted frequency spectrum** | a spectrum arrived | its **shape**, blended toward the neutral one; the **scale** is solved from the measured diversity, which is read on every rung |
+| **fitted diversity** | no spectrum arrived | a neutral shape at the measured diversity |
+| **stated constant** | no diversity fitted at all | a neutral shape at `ExpectedHeterozygosity::SPECIES_FALLBACK` |
 
-**The middle rung carries the small cohort**, and it is why the diversity is worth carrying even
-though the frequency spectrum exists.
+**The middle rung carries the run with no spectrum**, and it is why the diversity is worth carrying
+even though the frequency spectrum exists. **⚠ The row above it used to read *"shape and scale both
+from it; the diversity is not read"*, and that is false as of `ordinary_site_seed.md` §3**: what the
+two-parameter family loses when it compresses a spectrum is exactly the scale — 9.9% of the
+heterozygosity at 63 individuals on a tomato-like density and 18.6% on a human-like one — so the
+scale is now the measurement's and the search supplies the shape alone.
 
-**⚠ One sentence in the consumer's own documentation contradicts this** and should be re-derived
-rather than repeated when that file is next touched: `seed_generic.rs:604` says *"a cohort of five
-arrives here without one while a single sample arrives with one"*, which has the two cohort sizes
-the wrong way round. Nothing depends on it — the code branches on whether a frequency spectrum arrived,
-never on cohort size — so it is a wrong sentence rather than a wrong behaviour.
+**Two further rungs exist that this table did not have**, both of them refusals of the pin that must
+not be silent (`ordinary_site_seed.md` §3.1): a run whose measured diversity no total can reach at
+its blended shape, and a run whose measured diversity is exactly zero.
+
+**⚠ One sentence in the consumer's own documentation contradicted this** and was re-derived when
+that file was next touched, which was 2026-08-26: `seed_generic.rs` said *"a cohort of five arrives
+here without one while a single sample arrives with one"*, which has the two cohort sizes the wrong
+way round. Nothing depended on it — the code branches on whether a frequency spectrum arrived, never
+on cohort size — so it was a wrong sentence rather than a wrong behaviour, and it is gone.
 
 ### 3.5 The other route, and why it is not this one
 
@@ -427,15 +438,21 @@ read-only thereafter.
    tracts genuinely spread over more lengths. **Leaning: leave it** until the loci it applies to are
    worth more than 7%. **What would settle it:** the spread of the pooled length spectrum against repeat
    count within one period, on tomato, where the thin rung carries the larger share.
-3. **Where does the class-weight projection stop being worth doing?** At `N` diploid individuals
-   the frequency spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape. The
-   consumer's documentation refers to a panel-size floor below which the frequency spectrum is emitted as
-   absent; **no such floor exists in the code**, and the ordinary-site ladder's top two rungs are otherwise
-   separated by nothing. **Leaning:** a floor low enough that it never fires on a real panel is
-   worse than none, so set it from measurement rather than from taste. **What would settle it:** the
-   projection is already instrumented for cost by panel size, and its fit reports how far its answer
-   sits from the measurement it was fitted to — sweep that divergence against panel size and put the
-   floor where it stops falling. **Confirm before code.**
+3. **Where does the class-weight projection stop being worth doing? — ANSWERED, 2026-08-26: nowhere,
+   because there is no switch left to place a floor at.** At `N` diploid individuals the frequency
+   spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no shape, and
+   this question asked where to put a floor below which it is not projected. The ordinary-site
+   ladder's top two rungs are no longer separated by nothing: they are the two ends of one ramp,
+   and a run slides between them at a weight that rises with the panel
+   ([`ordinary_site_seed.md`](ordinary_site_seed.md) §4). A floor would be a switch on a curve.
+   **And the statistic this question named cannot locate one anyway** — the fit's divergence from
+   the measurement is *smallest* at the smallest panel, 1.5 × 10⁻⁹ nats at one individual against
+   6.4 × 10⁻⁴ at two hundred, because at one diploid the family reproduces the panel's three
+   classes exactly (`examples/ng_spectrum_panel_floor.rs`). **What did settle it** was
+   `ordinary_site_seed.md` §4.1's sweep of the two shapes' errors against panel size. The sampling
+   question this one is often confused with — is a *small panel's estimate* too noisy to use — is
+   still open, and it is [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §10's third:
+   subsample the tomato cohort and watch where the spectrum stops being stable.
 4. **What concentration does the bottom rung state?** A flat shape has an obvious answer; its
    strength does not. **Leaning:** the run's own median fitted concentration where the run fitted
    any stratum, and a stated constant only where it fitted none. **Confirm before code.**

@@ -1,0 +1,45 @@
+feat(ng): the ordinary-site seed pins its diversity, and shrinks its shape
+
+The SNP/indel prior's two concentrations are an expected allele frequency and a
+total conviction in other clothes. The total is now solved from the run's own
+fitted heterozygosity instead of taken from the search, so the seed reproduces
+that measurement exactly at every panel size and every shape — where the
+two-parameter fit lost 9.9% of it at 63 individuals on a tomato-like density and
+18.6% on a human-like one. The expected frequency is blended in log space
+between the neutral shape and the panel's own, at a weight that rises with the
+panel and travels to the run's output. spec/ordinary_site_seed.md §3 and §4.
+
+The diversity is now read on every path through project_spectrum_seed, which is
+a change to that function's contract: a spectrum used to make it moot.
+
+Three refusals, each a regime rather than a silence: no total reaches the
+measured diversity at the blended shape; a heterozygosity above a half, which no
+pair can imply; and a cohort that measured no variation at all.
+
+TWO RULINGS REMAIN OPEN AND ARE THE OWNER'S, both recorded in the report's §8.
+The ramp has no measured support — every arm puts the best half-weight panel
+size at zero, and the shipped 0.25 is a hedge costing 2.7% on held-out drawn
+cohorts and 26% at a real cohort's segregating share. And the sweep's own
+control contradicts §4's premise: the panel's fitted shape is exact at one
+individual and degrades as the panel grows, because the shape is read back out
+of allele-count classes rather than off the density that produced them. The
+recommendation on file is to read it off the density in closed form, which
+retires the ramp rather than retuning it.
+
+RECOVERED WORK, recorded because the record should not be tidy. About 1,500
+lines of seed_generic.rs were destroyed by a `git checkout --` run against this
+worktree while the work was uncommitted. The file was recovered from a dangling
+git object, which turned out to be an intermediate save three tests short. The
+three were identified by re-running this branch's own documented mutation
+battery against the restore, and rewritten from the report's descriptions of
+what each closes: the refusal bound at exactly a half, the census-versus-
+regulariser flag at a tie, and the shape wrapper returning the search's own pair
+at the fast precision. All four mutations that survived the restore are caught
+again, each confirmed by re-running the mutation. The library total is 4,874,
+which is the figure the report recorded before the loss.
+
+Library target 4,858 -> 4,874 passing. fmt and clippy --all-targets
+--all-features -D warnings exit 0. cargo doc --no-deps --lib reports 27
+unresolved links against the branch's 28, none added.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

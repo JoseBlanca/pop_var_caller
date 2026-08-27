@@ -87,53 +87,63 @@ impl FittedFrequencySpectrum {
     /// It is not read off the density, which has no panel in it: the density describes a
     /// population, and which panel it is projected at is the run's fact.
     ///
-    /// **This function applies no panel-size floor, and does not settle whether one belongs.**
-    /// `population_diversity.md` §9's third question asks where to put one and ends *"Confirm
-    /// before code"*; the honest answer this step can give is that **the statistic that question
-    /// names cannot locate a floor**, and why.
+    /// **This function applies no panel-size floor, and the question of whether one belongs is
+    /// answered.** `population_diversity.md` §9's third question asked where to put one and ended
+    /// *"Confirm before code"*. **There is no floor, because there is no switch left to put one
+    /// at**: the ordinary-site ladder's top two rungs became the two ends of one ramp on
+    /// 2026-08-26 (`doc/devel/ng/spec/ordinary_site_seed.md` §4), and a run slides between them
+    /// rather than jumping. What settled it was that document's §4.1 sweep, not the divergence
+    /// sweep §9 proposed — and the paragraph below says why the second cannot settle anything.
     ///
-    /// §9 says to sweep how far the fit's answer sits from the measurement it was fitted to and
+    /// §9 said to sweep how far the fit's answer sits from the measurement it was fitted to and
     /// *"put the floor where it stops falling"*. Swept across four densities in
     /// `examples/ng_spectrum_panel_floor.rs`, it does not fall: the divergence is **smallest at
     /// the smallest panel** — 1.5 × 10⁻⁹ nats at one individual against 6.4 × 10⁻⁴ at two
     /// hundred — and rises monotonically. That is structural rather than a property of any
-    /// cohort: at one diploid individual the spectrum's three classes are, after normalisation,
-    /// two free numbers against the two-parameter family's two, and the Beta-binomial at two
-    /// draws *is* a Dirichlet-multinomial, so the family lands on the measurement exactly and
-    /// would do so whatever the measurement said.
+    /// cohort: at one diploid individual the panel's three classes are exactly what the
+    /// two-parameter family predicts — the Beta-binomial at two draws *is* a
+    /// Dirichlet-multinomial, with the density's two point masses folding into the two
+    /// parameters — so the family lands on the measurement exactly and would do so whatever the
+    /// measurement said.
     ///
     /// **And the sweep is the wrong experiment for the question, which is a sampling one.** It
     /// projects one *exact* density at many panel sizes, so nothing in it is about a small panel's
-    /// estimate being noisy — which is what a floor is for. The experiment that would settle it is
-    /// already named, in `parameter_prepass_cohort.md` §10's third question: subsample the tomato
-    /// cohort and watch where the spectrum stops being stable. **That question is still open and
-    /// this step did not run it.**
+    /// estimate being noisy — which is what a floor is for. The experiment that would settle
+    /// *that* is already named, in `parameter_prepass_cohort.md` §10's third question: subsample
+    /// the tomato cohort and watch where the spectrum stops being stable. **That question is
+    /// still open and this step did not run it.**
     ///
-    /// **Who applies a floor, if one is set:** not this function. It projects at the panel it is
-    /// given; whether the run's assembly hands the prior `Some(spectrum)` or `None` at a small
-    /// panel is the assembly's decision, and the assembly is unbuilt. So the ordinary-site
-    /// ladder's middle rung — `SeedRegime::NeutralShape`, a neutral shape at the fitted
-    /// diversity — stays reachable, by that decision and by the per-sample histogram route
-    /// (`population_diversity.md` §3.5).
+    /// **Who decides whether a spectrum is projected at all:** not this function. It projects at
+    /// the panel it is given; whether the run's assembly hands the prior `Some(spectrum)` or
+    /// `None` is the assembly's decision, and the assembly is unbuilt. So
+    /// `SeedRegime::NeutralShape` stays reachable, by that decision and by the per-sample
+    /// histogram route (`population_diversity.md` §3.5 — which supplies the *ingredient* rather
+    /// than the number, and nothing computes the number yet).
     ///
-    /// **⚑ What the sweep did find, and it is not this step's to fix.** The projected pair's
-    /// implied heterozygosity falls away from the density's as the panel grows, because the
+    /// **⚑ What the sweep found, and it is fixed as of 2026-08-26.** The projected pair's implied
+    /// heterozygosity used to fall away from the density's as the panel grew, because the
     /// two-parameter family cannot hold a point mass: at **63 individuals**, this project's tomato
-    /// cohort, it is **9.9% below** the measurement on a strong rare-allele pile-up, **18.6%**
+    /// cohort, it was **9.9% below** the measurement on a strong rare-allele pile-up, **18.6%**
     /// below on a human-like shape, **40.9%** below on a flat one and **53.9%** below where the
     /// population's alleles sit at middling frequencies. The projection itself is exact — the
     /// classes carry the density's heterozygosity at every panel size, which
-    /// `fit::tests::the_classes_carry_the_densitys_heterozygosity_at_every_panel` pins. What loses
-    /// it is `project_spectrum_seed`, which `calling_priors.md` §4.1 owns and
-    /// `population_diversity.md` names as a non-goal here. **Read that way, the sweep argues for a
-    /// ceiling rather than against a floor** — at one individual the two rungs agree on the
-    /// diversity to within 0.1% and it is the large panels where the top rung loses it.
+    /// `fit::tests::the_classes_carry_the_densitys_heterozygosity_at_every_panel` pins. What lost
+    /// it was `project_spectrum_seed`.
     ///
-    /// **The two rungs are not interchangeable at one individual even so, and it is worth saying
-    /// which way.** They agree on the heterozygosity; they disagree on how much conviction it is
-    /// held with. On the tomato-like density at one individual the projection returns a total of
-    /// 0.223 chromosomes where the neutral rung's is 1.001 — a prior four and a half times more
-    /// easily moved by the reads. Nothing here has measured which is better.
+    /// **That function no longer takes its total from the search**
+    /// (`ordinary_site_seed.md` §3): it solves one from the run's measured heterozygosity, so the
+    /// seed reproduces the measurement at every panel size and every shape, which
+    /// `seed_generic::projection_tests::the_seeds_implied_diversity_is_the_measured_one_at_every_panel_and_shape`
+    /// asserts. The four numbers above are what the *search* still loses, and
+    /// `examples/ng_spectrum_panel_floor.rs` is where they are measured.
+    ///
+    /// **The two rungs are still not interchangeable, and it is worth saying which way.** They
+    /// agree on the heterozygosity — now by construction on both — and they disagree on how much
+    /// conviction it is held with, because the pair's *shape* differs. On the tomato-like density
+    /// at one individual the shipped seed is `(0.287, 3.91e-4)` where the neutral rung's pair is
+    /// `(1.000, 6.06e-4)`: a total of 0.287 chromosomes against 1.001, **a prior about three and a
+    /// half times more easily moved by the reads**. At 63 individuals the shipped seed is
+    /// `(0.184, 3.60e-4)`. Nothing here has measured which is better.
     ///
     /// **Every number above is from an illustrative density, not a fitted one.** No cohort's
     /// fitted `FrequencyDensity` is recorded in this repository; the sweep uses a grid of Beta
@@ -509,6 +519,18 @@ mod tests {
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("a diploid")
     }
+    /// The diversity that density itself implies — **the number the seed's total is now solved
+    /// from**, so a test that projects the density must hand the projection this and not a
+    /// convenient constant (`doc/devel/ng/spec/ordinary_site_seed.md` §3).
+    ///
+    /// On this fixture it is 6.06 differences per 10,000 bases: 4.0 in 1,000 positions segregate
+    /// and a Beta(0.20, 1.00) population is heterozygous at 0.152 of those.
+    fn its_own_diversity(density: &Estimate<FrequencyDensity>) -> Option<ExpectedHeterozygosity> {
+        Some(
+            ExpectedHeterozygosity::try_new(density.value.expected_heterozygosity())
+                .expect("a fitted density's heterozygosity is a probability"),
+        )
+    }
 
     /// A density whose four parameters are all different, at a diversity near this project's
     /// tomato cohort's — 6 differences per 10,000 bases.
@@ -538,7 +560,11 @@ mod tests {
             "a panel of 63 diploids has 127 allele-count classes"
         );
 
-        let seed = RunParameters::project_seed(Some(spectrum.view()), None, outbred());
+        let seed = RunParameters::project_seed(
+            Some(spectrum.view()),
+            its_own_diversity(&density),
+            outbred(),
+        );
         assert!(
             matches!(seed.regime(), SeedRegime::FittedSpectrum { .. }),
             "a spectrum arrived, so the run is on its own measurement rather than a fallback: \
@@ -607,10 +633,14 @@ mod tests {
     /// **The panel is the run's fact and not the density's**, so the same density at two panel
     /// sizes gives two different vectors — and the seed the caller would use moves with it.
     ///
-    /// Measured on this density in `examples/ng_spectrum_panel_floor.rs`: the reference
-    /// concentration runs 0.222 at one individual to 0.145 at two hundred. This pins the
-    /// direction and that the two are not the same call, which is what a projection ignoring its
-    /// `individuals` argument would make them.
+    /// **What moves it is the *shape*, not the scale.** Both seeds imply the density's own
+    /// heterozygosity exactly, because the total is solved from it
+    /// (`doc/devel/ng/spec/ordinary_site_seed.md` §3); what differs is the expected
+    /// alternative-allele frequency, which the larger panel reads more of off its own data.
+    /// A higher expected frequency needs less conviction to reach the same heterozygosity, so
+    /// the reference concentration falls as the panel grows. This pins the direction, and that
+    /// the two are not the same call — which is what a projection ignoring its `individuals`
+    /// argument would make them.
     #[test]
     fn the_same_density_at_two_panels_is_two_different_spectra() {
         let density = a_fitted_density();
@@ -620,14 +650,39 @@ mod tests {
         assert_eq!(small.class_weights().len(), 3);
         assert_eq!(large.class_weights().len(), 127);
 
-        let small_seed = RunParameters::project_seed(Some(small.view()), None, outbred());
-        let large_seed = RunParameters::project_seed(Some(large.view()), None, outbred());
+        let small_seed =
+            RunParameters::project_seed(Some(small.view()), its_own_diversity(&density), outbred());
+        let large_seed =
+            RunParameters::project_seed(Some(large.view()), its_own_diversity(&density), outbred());
         assert!(
             small_seed.alpha_ref() > large_seed.alpha_ref(),
             "the pair drifts down with the panel: {} at one individual against {} at 63",
             small_seed.alpha_ref(),
             large_seed.alpha_ref()
         );
+        // **And both imply this density's own heterozygosity**, which is what makes the sentence
+        // above about *shape* rather than about scale.
+        //
+        // **This is the assertion that makes `its_own_diversity` load-bearing**, and until a
+        // review put the old hard-coded `1e-3` back and watched all 26 tests pass, nothing here
+        // read the argument at all. The density's own heterozygosity is 6.06 in 10,000, so the
+        // constant was 65% high and the seed's total 65% wrong — invisible to an ordering.
+        //
+        // A Dirichlet(`α_ref`, `α_alt`) makes a diploid drawn from it heterozygous
+        // `2 α_ref α_alt / (A (A + 1))` of the time, with `A` the pair's total.
+        let implied = |seed: SpectrumSeed| {
+            let total = seed.alpha_ref() + seed.alpha_alt_total();
+            2.0 * seed.alpha_ref() * seed.alpha_alt_total() / (total * (total + 1.0))
+        };
+        let theta = density.value.expected_heterozygosity();
+        for (panel, seed) in [(1, small_seed), (63, large_seed)] {
+            assert!(
+                (implied(seed) / theta - 1.0).abs() < 1e-9,
+                "at {panel} individuals the seed implies a heterozygosity of {} against the \
+                 density's own {theta}",
+                implied(seed)
+            );
+        }
     }
 
     /// **The count of variable census sites is a count of sites in *this panel***, not the
@@ -684,7 +739,11 @@ mod tests {
         let spectrum = FittedFrequencySpectrum::of(&density, 10);
         assert_eq!(spectrum.view().regularizer_site_weight(), 0.0);
 
-        let seed = RunParameters::project_seed(Some(spectrum.view()), None, outbred());
+        let seed = RunParameters::project_seed(
+            Some(spectrum.view()),
+            its_own_diversity(&density),
+            outbred(),
+        );
         match seed.regime() {
             SeedRegime::FittedSpectrum {
                 regularizer_site_weight,

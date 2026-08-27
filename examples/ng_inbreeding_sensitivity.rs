@@ -21,6 +21,17 @@
 //!    recover it. That factor is exact arithmetic rather than a simulation, and it is printed
 //!    beside the fitted results.
 //!
+//! **⚠ Since `doc/devel/ng/spec/ordinary_site_seed.md` §3 this measures a much smaller thing than
+//! it used to, and that is the finding rather than a caveat.** The seed's *total* — how much
+//! conviction the pair carries — is now solved from the run's measured heterozygosity rather than
+//! taken from the search, and a wrong inbreeding coefficient moves mostly the total. So the two
+//! `search` columns below still show the old sensitivity and the two beside them show what
+//! actually reaches the caller. **At one individual the shipped pair does not move at all**, to
+//! five digits, while the search's reference concentration moves by a factor of three across a
+//! `±0.10` error: at one individual a wrong `F` rescales the search's pair without moving its
+//! ratio, and the ratio is the only thing the seed keeps. At 63 individuals the same error moves
+//! the shipped number by at most 1.4%, against 4% for the search's own.
+//!
 //! **Read the one-sample rows as a bound, not as a prediction.** At one sample no site can vary
 //! *across* the panel, so the distribution the fit is handed is the pre-pass's own neutral prior,
 //! built from the same coefficient the fit then uses. A coefficient that is wrong is therefore
@@ -42,7 +53,7 @@
 
 use pop_var_caller::ng::calling::GenotypeTable;
 use pop_var_caller::ng::calling::genotype_prior::seed_generic::{
-    FittedSpectrum, fill_expected_spectrum, project_spectrum_seed,
+    FittedSpectrum, fill_expected_spectrum, fit_spectrum_shape, project_spectrum_seed,
 };
 use pop_var_caller::ng::calling::genotype_prior::{
     Concentration, GenotypePriorModel, MarginalizedDirichletPrior, PriorRow,
@@ -95,8 +106,23 @@ fn main() {
          wrong. The panel really is at `F true`; the fit is told `F used`. Truth is (1, {THETA:e}).\n"
     );
     println!(
-        "{:>6}  {:>6}  {:>6}  {:>10}  {:>10}  {:>9}  {:>8}",
-        "people", "F true", "F used", "alpha_ref", "alpha_alt", "alt / th", "het:hom"
+        "The two `search` columns are the pair the search returns on its own; the two beside them\n\
+         are the pair the caller actually seeds from, whose total is solved from the measured\n\
+         heterozygosity instead of taken from the search (ordinary_site_seed.md 3) and whose\n\
+         shape is blended toward the neutral one by how large the panel is (4). So an error in F\n\
+         reaches the shipped pair only through the shape.\n"
+    );
+    println!(
+        "{:>6}  {:>6}  {:>6}  {:>11}  {:>11}  {:>10}  {:>10}  {:>9}  {:>8}",
+        "people",
+        "F true",
+        "F used",
+        "search a_ref",
+        "search a_alt",
+        "alpha_ref",
+        "alpha_alt",
+        "alt / th",
+        "het:hom"
     );
 
     for individuals in [1u32, 26, 63] {
@@ -104,13 +130,18 @@ fn main() {
             let weights = exact_spectrum(1.0, THETA, individuals, f_true);
             for delta in [-0.10f64, -0.05, 0.0, 0.05, 0.10] {
                 let f_used = (f_true + delta).clamp(0.0, 0.999);
+                let view = FittedSpectrum::new(&weights, 10.0, 3_000.0);
+                let coefficient = InbreedingF::try_new(f_used).unwrap();
+                let (search_ref, search_alt) =
+                    fit_spectrum_shape(&view, coefficient).concentrations();
                 let seed = project_spectrum_seed(
-                    Some(FittedSpectrum::new(&weights, 10.0, 3_000.0)),
+                    Some(view),
                     Some(ExpectedHeterozygosity::try_new(THETA).unwrap()),
-                    InbreedingF::try_new(f_used).unwrap(),
+                    coefficient,
                 );
                 println!(
-                    "{individuals:>6}  {f_true:>6.2}  {f_used:>6.2}  {:>10.4}  {:>10.3e}  {:>9.4}  {:>7.3}:1",
+                    "{individuals:>6}  {f_true:>6.2}  {f_used:>6.2}  {search_ref:>11.4}  \
+                     {search_alt:>11.3e}  {:>10.4}  {:>10.3e}  {:>9.4}  {:>7.3}:1",
                     seed.alpha_ref(),
                     seed.alpha_alt_total(),
                     seed.alpha_alt_total() / THETA,

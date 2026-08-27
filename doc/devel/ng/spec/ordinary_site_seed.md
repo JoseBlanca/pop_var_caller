@@ -294,6 +294,29 @@ fell there because `w` was zero.
    projected once and frozen (`calling_priors.md` §2.3).
 7. **Two runs that leaned differently on their panels emit different records** (goal 3).
 
+**⚠ Built on 2026-08-26 (`ng-seed-shrinkage`), and three of these seven need correcting against
+what was measured.** The design is unchanged; these are factual amendments to the checklist.
+
+- **Item 2's 0.15% is the diversity's, not the pair's.** At `w = 0` the seed's implied
+  heterozygosity is `θ` by construction, and the *pair* is `(1, θ)` moved up by about `3 θ` on each
+  concentration — because the literal `(1, θ)` implies `2θ/((1+θ)(2+θ))`, short of `θ` by about
+  `1.5 θ`, and making that up costs twice as much on the pair. Measured: **0.03% at `θ = 10⁻⁴`,
+  0.18% at 6 × 10⁻⁴ and 3.07% at 10⁻²**
+  (`seed_generic::projection_tests::a_neutral_panel_projects_to_one_and_theta`). So the two ends
+  are the two rungs at every realistic diversity and visibly not at `θ = 10⁻²`.
+- **Item 3 is not what the measurement supports, and it is not what `N₀` was fitted to.** Per drawn
+  cohort the blended shape can never be worse than *both* ends — in log space it is a convex
+  combination of the two errors — so "better than either end" is not a testable claim in that
+  direction. What was measured over 42 held-out cells is: at least as good as both in some, between
+  the two in the rest, worse than both in none. And the crossing this item assumes — the panel's
+  own shape worse below `N₀` and better above — **does not exist**: the panel's own shape is
+  exact at one individual and degrades monotonically with the panel. §4.1's criterion was replaced
+  by *the value that puts the blended shape nearest the truth over the whole grid*. See
+  [`../../reports/implementations/ng_seed_shrinkage_2026-08-26.md`](../../reports/implementations/ng_seed_shrinkage_2026-08-26.md) §5.
+- **Item 6's second half is arithmetic, not a test.** The 399-prediction count is asserted; that the
+  pin and the blend add no prediction is visible in the code and pinned by nothing, because there is
+  nothing to instrument — both are closed-form arithmetic on the pair the search already returned.
+
 ---
 
 ## 7. Open questions, and one thing deliberately left shut

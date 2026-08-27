@@ -356,6 +356,19 @@ because a run at the fallback and a run at a fitted `θ` are otherwise indisting
 
 ### 4.1 Where the two numbers come from: the fitted spectrum, projected
 
+**⚠ Superseded in part by [`ordinary_site_seed.md`](ordinary_site_seed.md), 2026-08-26, and built.**
+What follows describes the seed as *the pair whose predicted spectrum best matches the fitted one*.
+That is now the source of the seed's **shape** only. Its **scale** — how much conviction the pair
+carries — is solved from the run's measured heterozygosity instead, because compressing a spectrum
+into two numbers loses exactly that: with the density known exactly, the pair implies a
+heterozygosity 9.9% below the density's own at 63 individuals on a tomato-like shape and 18.6% below
+on a human-like one, and further below the larger the panel. And the shape itself is blended toward
+the neutral one at a weight that rises with the panel, so this section's rung and §3.4's neutral
+rung of [`population_diversity.md`](population_diversity.md) are the two ends of one ramp rather
+than alternatives. **The objective, the two-branch prediction and the panel's `F` are all unchanged**
+— everything below about *how* the search works still holds.
+
+
 **The neutral `1/p` density and the neutral frequency spectrum are the same statement written
 twice** — once at a locus, once across a panel. Under neutrality the expected number of sites at
 which `k` of `2N` sampled chromosomes carry the alternative allele is `θ/k`; draw `2N` chromosomes

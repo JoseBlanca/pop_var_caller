@@ -87,7 +87,8 @@ pub mod seed_ssr;
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{
-    FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
+    FittedShape, FittedSpectrum, HALF_WEIGHT_PANEL_SIZE, VariantClass, fill_locus_concentration,
+    fit_spectrum_shape, panel_shape_weight, project_spectrum_seed,
 };
 pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 
@@ -553,60 +554,120 @@ mod checked {
 
 pub use checked::{CohortAlleleCopies, Concentration, PriorRow, SampleAlleleCopies, SpectrumSeed};
 
-/// Where the run's seed came from.
+/// Where the run's seed came from, and how much of its shape the panel supplied.
 ///
 /// **It has to reach the run's output.** Two runs that used different information are
 /// otherwise indistinguishable in what they emit, which is the complaint
 /// `doc/devel/ng/spec/calling_priors.md` §4 makes about production's own fallback.
 ///
-/// **Every variant is a branch on what the pre-pass had, never on how many samples there
-/// are**, and nothing downstream may test the cohort size (spec §4.1). **⚠ The illustration that
-/// used to stand here — a cohort of five arriving without a spectrum while a single sample
-/// arrives with one — left out the three routes that are the whole of why that is not a
-/// cohort-size rule, and without them it reads as a floor that keeps out the larger panel.**
-/// What the routes do: the joint route fits the density and the diversity together, so a run on
-/// it always has a spectrum to project, at one sample and at a thousand
+/// **The panel's size enters as a weight and never as a switch.** A run at a weight of 0.1 and a
+/// run at 0.9 leaned on their data differently and must not look the same, which is why
+/// [`Self::FittedSpectrum`] carries the weight rather than merely naming the rung
+/// (`doc/devel/ng/spec/ordinary_site_seed.md` §4.2). Nothing downstream may test the cohort size
+/// itself.
+///
+/// **Which variant a run lands in is a branch on what the pre-pass had.** The joint route fits
+/// the population's allele-frequency density and the diversity together, so a run on it always
+/// has both, at one sample and at a thousand
 /// (`ng::calling::run_parameters::FittedFrequencySpectrum`); the cohort gather, unbuilt, is
-/// designed to emit it as absent below a floor `parameter_prepass_cohort.md` §10's third question
-/// has not yet set; and the per-sample histogram route supplies a diversity and no density at
-/// all.
+/// designed to emit the density as absent below a floor `parameter_prepass_cohort.md` §10's third
+/// question has not yet set; and the per-sample histogram route supplies a diversity and no
+/// density at all.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SeedRegime {
-    /// Read off the pre-pass's fitted frequency spectrum by the projection of spec §4.1.
+    /// **The panel's own shape, blended toward the neutral one, at a total solved from the run's
+    /// measured diversity** — the top of the ladder.
+    ///
+    /// `shape_from_panel` is that blend's weight: what share of the seed's expected frequency,
+    /// in log space, came from the panel's own fitted spectrum rather than from the neutral
+    /// shape. It is `N / (N + N₀)` for a panel of `N` diploid individuals
+    /// ([`panel_shape_weight`](crate::ng::calling::genotype_prior::seed_generic::panel_shape_weight)), so it rises with the
+    /// panel and reaches neither end.
     ///
     /// `regularizer_site_weight` is how many sites' worth of pseudo-counts held the fitted
     /// spectrum at the neutral shape, and `census_sites_outweigh_regularizer` says whether
     /// the real sites won. **Report that per allele-count class, not as one panel-wide
-    /// ratio**: on the panel spec §4.1 measures, the aggregate was 3,100 to 1 while the
-    /// thinnest class held two sites and was outweighed only 39 to 1, and the tail is where
-    /// the regularizer binds.
+    /// ratio**: on the panel `calling_priors.md` §4.1 measures, the aggregate was 3,100 to 1
+    /// while the thinnest class held two sites and was outweighed only 39 to 1, and the tail is
+    /// where the regularizer binds.
     ///
-    /// `spectrum_match` says **how far** the two numbers are from what was measured, and whether
-    /// the search ran out of range before it got there. **A run that used a compromised starting
-    /// point and one that matched must not look the same in the output**, which is the complaint
-    /// this whole enum exists to answer.
+    /// `spectrum_match` says **how far** the search's own pair was from what was measured, and
+    /// whether the search ran out of range before it got there. It is a report on the shape the
+    /// blend drew from, not on the seed: the seed's total is the measurement's, whatever the
+    /// search returned.
     FittedSpectrum {
+        shape_from_panel: f64,
         regularizer_site_weight: f64,
         census_sites_outweigh_regularizer: bool,
         spectrum_match: SpectrumMatch,
     },
-    /// No spectrum was emitted, so the pair is the neutral `(1, θ)` at the heterozygosity the
-    /// pre-pass **did** fit.
+    /// No spectrum was emitted, so there was no second shape to blend toward and the pair is the
+    /// neutral `(1, θ)` at the heterozygosity the pre-pass **did** fit.
     ///
-    /// **Which routes reach this, because they are not all the same claim.** The joint fit
-    /// produces the density and the heterozygosity together, so a run on that route always has a
-    /// spectrum to project. This rung is reached by the per-sample histogram route, which
-    /// supplies a diversity and no density (`doc/devel/ng/spec/population_diversity.md` §3.5); by
-    /// the cohort gather below its designed panel-size floor
-    /// (`parameter_prepass_cohort.md` §10's third question); and by a run whose assembly chose
-    /// not to project one.
+    /// **A rung and not a point on the ramp**, which is the one place
+    /// `doc/devel/ng/spec/ordinary_site_seed.md` §4 leaves a switch: there is nothing to
+    /// interpolate when there is no measurement of shape, so the weight has nothing to weigh.
+    /// (§4's own *bottom* rung is [`Self::FallbackDiversity`], where no diversity was fitted
+    /// either; this is the middle one.)
+    ///
+    /// **Which routes reach it, and one of them is a design intent rather than today's
+    /// behaviour.** The cohort gather below its designed panel-size floor
+    /// (`parameter_prepass_cohort.md` §10's third question) and a run whose assembly chose not to
+    /// project a spectrum both reach it as the tree stands. The per-sample histogram route is
+    /// meant to, and cannot yet: `population_diversity.md` §3.5 says it supplies the *ingredient*
+    /// — each sample's observed heterozygosity — rather than the diversity itself, and **nothing
+    /// computes the mean of `Hobs / (1 − F)` across samples**, so a run on that route alone
+    /// reaches [`Self::FallbackDiversity`] instead.
     NeutralShape,
-    /// The same neutral `(1, θ)` pair as [`SeedRegime::NeutralShape`], but `θ` itself is a
-    /// guess rather than a fit — too few sites, or no inbreeding coefficient for the sample —
-    /// so the run is on
+    /// **The blended shape's own largest implied diversity is at or below the one that was
+    /// measured**, so no total reaches it and the pair falls back to the neutral `(1, θ)`.
+    ///
+    /// A pair of expected frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the
+    /// time, however much conviction it carries. A run whose blended shape sits far out in the
+    /// rare-allele tail — `f` of a few parts in a thousand million is reachable, since that is
+    /// the search's own floor — has a ceiling far below a measured `θ` of one in a thousand.
+    ///
+    /// **It is its own variant so that this fall to the neutral rung is distinguishable from
+    /// [`Self::NeutralShape`]'s**, where no spectrum arrived at all. *This is the failure the
+    /// repeat-tract seed used to have — a shape scaled to a measurement it could not reach, which
+    /// fired at every tract at one outbred sample — and it was deleted with the construction that
+    /// caused it (`population_diversity.md` §4.2). It does not return silently here.*
+    ///
+    /// `shape_from_panel` is the weight the blend used and `expected_frequency` the shape it
+    /// produced, so a reader can see how far out the tail the run had gone.
+    ///
+    /// `spectrum_match` is carried here as well as on [`Self::FittedSpectrum`], because the run
+    /// still has to be able to say how well the search matched the panel it was given — the
+    /// pair it produced was discarded, and how good that pair was is the difference between a
+    /// contradictory measurement and a search that never got near one.
+    DiversityUnreachable {
+        spectrum_match: SpectrumMatch,
+        shape_from_panel: f64,
+        expected_frequency: f64,
+    },
+    /// **The run's measured diversity was exactly zero** — a cohort with no variation at all.
+    ///
+    /// Solving for the total gives zero and every entry of the pair with it, so the alternative
+    /// concentration is floored at
+    /// [`MIN_ALT_CONCENTRATION`](crate::genetics::MIN_ALT_CONCENTRATION) and the reference
+    /// concentration stays at the neutral 1. **A run here must say the diversity was zero**: the
+    /// pair it gets is a legal one and says nothing about how it was arrived at.
+    ///
+    /// **It carries no shape weight, and that is not an omission.** With no diversity there is
+    /// nothing for a shape to scale, so a run that had a spectrum and one that did not receive
+    /// the same seed.
+    ZeroDiversity,
+    /// **No diversity was fitted at all** — too few sites, or no inbreeding coefficient for the
+    /// sample — so the pair is the neutral `(1, θ)` on
     /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`](crate::ng::types::ExpectedHeterozygosity::SPECIES_FALLBACK),
     /// a species-range value taken from human data. **This is the variant that must never be
     /// silent.**
+    ///
+    /// **A run that had a spectrum but no diversity lands here too, and its shape is discarded.**
+    /// After `doc/devel/ng/spec/ordinary_site_seed.md` §3 the pair's total comes from the
+    /// measured diversity, so a run with no measurement has nothing to pin a shape to. In
+    /// practice the two arrive together: the joint route reads its heterozygosity off the same
+    /// density it projects.
     FallbackDiversity,
 }
 
@@ -1368,6 +1429,7 @@ mod tests {
             1.0,
             6e-4, // tomato1's fitted θ, spec §4.1
             SeedRegime::FittedSpectrum {
+                shape_from_panel: 0.8,
                 regularizer_site_weight: 10.0,
                 census_sites_outweigh_regularizer: true,
                 spectrum_match: SpectrumMatch::new(0.0, false),

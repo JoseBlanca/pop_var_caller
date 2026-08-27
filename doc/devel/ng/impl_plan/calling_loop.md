@@ -529,11 +529,13 @@ nothing supplies them. **So this is a representation change, not an estimator.**
    into `2N + 1` classes with the two point masses at the ends — plus the two bookkeeping numbers
    `FittedSpectrum` carries.
 
-**⚑ One decision this step must take rather than inherit: the panel-size floor.** At `N`
-individuals the frequency spectrum has `2N + 1` classes, so a panel of one gives three and carries almost no
-shape. The consumer's documentation refers to a floor below which the frequency spectrum is emitted as absent;
-**no such floor exists in the code**, and without one the ordinary-site ladder's top two rungs are
-separated by nothing. Spec §9's question 3 says what would settle it and carries the leaning.
+**⚑ ANSWERED elsewhere, 2026-08-26 — this step has no panel-size floor to decide.** The entry used
+to say that without a floor *"the ordinary-site ladder's top two rungs are separated by nothing"*
+and point at spec §9's question 3. Both halves are retired: the top two rungs are now the two ends
+of one ramp, a run slides between them at a weight that rises with the panel, and §9's question 3
+is answered *no floor* on the branch `ng-seed-shrinkage`. See
+[`../spec/ordinary_site_seed.md`](../spec/ordinary_site_seed.md) §4 and
+[`../../reports/implementations/ng_seed_shrinkage_2026-08-26.md`](../../reports/implementations/ng_seed_shrinkage_2026-08-26.md).
 
 **What this buys, and it is worth stating because the step is small:** the SNP/indel prior moves off
 `ExpectedHeterozygosity::SPECIES_FALLBACK` — a species-range constant — onto this cohort's own

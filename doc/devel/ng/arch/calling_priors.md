@@ -151,6 +151,18 @@ with `error[E0451]`.
 /// How the run's starting concentration was obtained — must reach the run's output,
 /// because a run on the fallback and a run on a fitted spectrum are otherwise
 /// indistinguishable (spec §4, §4.1).
+///
+/// ⚠ SUPERSEDED 2026-08-26 by `spec/ordinary_site_seed.md` §4.2, and built. The shipped
+/// enum has FIVE variants, not three, and the fitted one carries the blend's weight:
+/// `shape_from_panel: f64` — what share of the seed's expected frequency came from the
+/// panel's own fitted shape rather than from the neutral one. Two runs that leaned
+/// differently on their panels must not look the same, and the panel's size enters as a
+/// weight rather than as a switch. The two variants added are refusals of the pin that
+/// must not be silent: `DiversityUnreachable { spectrum_match, shape_from_panel,
+/// expected_frequency }` — no total reaches the measured diversity at the blended shape,
+/// so the pair falls to the neutral rung and says which of the two ways it got there —
+/// and `ZeroDiversity`, a cohort with no variation at all.
+/// The `data_dominated` field below shipped as `census_sites_outweigh_regularizer`.
 pub enum SeedRegime {
     /// Read off the pre-pass's fitted spectrum by the §4.1 projection.
     /// `data_dominated` is the PANEL-WIDE comparison, and spec §4.1 is explicit that a
@@ -166,14 +178,18 @@ pub enum SeedRegime {
         data_dominated: bool,
         spectrum_match: SpectrumMatch,
     },
-    /// No spectrum emitted (absent below the panel-size floor, or one sample):
-    /// the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE, never on cohort
-    /// size (spec §4.1).
+    /// No spectrum emitted: the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE,
+    /// never on cohort size (spec §4.1). ⚠ The parenthesis here used to read "absent below
+    /// the panel-size floor, or one sample"; there is no panel-size floor and there is no
+    /// switch left to place one at (`ordinary_site_seed.md` §4, `population_diversity.md`
+    /// §9 question 3, answered).
     NeutralShape,
     /// No fitted θ at all: the species-range fallback.
     FallbackDiversity,
 }
+```
 
+```rust
 /// How far the fit's pair is from the measured spectrum. REPORTED, never returned as though it
 /// had matched — the rule spec §12 test 11 sets for the STR seed, applied here.
 pub struct SpectrumMatch { divergence_nats: f64, at_search_limit: bool }   // both by accessor
@@ -531,7 +547,7 @@ Every row read on 2026-08-21.
 | `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |
 | `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs) | import value + reasoning; carried as overridable, regime-reported |
 | `InbreedingF` | [`types.rs:412`](../../../../src/ng/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
-| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit the four-variant enum |
+| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit `Provenance`'s own variants onto it. **It shipped with five, not the three §2.3 draws** — see the ⚠ there |
 | Wright biallelic formulas | [`genetics.rs:66`](../../../../src/genetics.rs) | **test oracle only** (spec §3.2) — plus the row basis of `PlugInWrightPrior` |
 | independent parity oracle | `pochhammer_ln` / `dm_log_prior_oracle`, [`genetics.rs:240`](../../../../src/genetics.rs) | carry the test across (spec §9) |
 

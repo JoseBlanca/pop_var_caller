@@ -15,11 +15,22 @@
 //! its leaning is that a floor low enough never to fire is worse than none — **set it from
 //! measurement, not from taste**.
 //!
+//! **⚠ What this measures is now a fact about the search, not about the shipped seed.** Since
+//! `doc/devel/ng/spec/ordinary_site_seed.md` §3 the seed's *total* — how much conviction the pair
+//! carries — is solved from the run's measured heterozygosity rather than taken from the search,
+//! precisely because of the loss this program measures. So the "the pair's heterozygosity,
+//! against the density's" column below is what the seed **would** lose if it still read the
+//! search's total, and what it now loses is nothing: the pinned pair implies the measurement
+//! exactly at every panel size
+//! (`seed_generic::projection_tests::the_seeds_implied_diversity_is_the_measured_one_at_every_panel_and_shape`).
+//! The program is kept because that column is the evidence for the pin, and because the pair's
+//! *shape* still comes from this search.
+//!
 //! ## What this measures
 //!
 //! One fitted allele-frequency density — two point masses and a Beta over what segregates — is
 //! projected into `2N + 1` allele-count classes at a range of panel sizes, and the projection the
-//! caller actually runs (`project_spectrum_seed`) is fitted to each. Two numbers come back per
+//! caller's own search (`fit_spectrum_shape`) is fitted to each. Two numbers come back per
 //! panel size:
 //!
 //! - **how far the fitted pair sits from the same density's answer at a large panel**, which is
@@ -57,9 +68,7 @@
 
 use std::time::Instant;
 
-use pop_var_caller::ng::calling::genotype_prior::{
-    FittedSpectrum, SeedRegime, project_spectrum_seed,
-};
+use pop_var_caller::ng::calling::genotype_prior::{FittedSpectrum, fit_spectrum_shape};
 use pop_var_caller::ng::parameter_estimation::joint::fit::FrequencyDensity;
 use pop_var_caller::ng::types::InbreedingF;
 
@@ -184,28 +193,23 @@ fn main() {
             .map(|individuals| {
                 let classes = allele_count_classes(&population.density, *individuals);
                 let started = Instant::now();
-                let seed = project_spectrum_seed(
-                    Some(FittedSpectrum::new(&classes, 0.0, 1_000.0)),
-                    None,
-                    outbred,
-                );
+                // **The search's own pair, which is what this sweep is about.** The shipped seed
+                // no longer uses the search's total — it solves one from the run's measured
+                // heterozygosity instead (`doc/devel/ng/spec/ordinary_site_seed.md` §3), so the
+                // loss measured below is now a fact about the search rather than about the seed.
+                let shape =
+                    fit_spectrum_shape(&FittedSpectrum::new(&classes, 0.0, 1_000.0), outbred);
                 let seconds = started.elapsed().as_secs_f64();
-                let (divergence_nats, at_search_limit) = match seed.regime() {
-                    SeedRegime::FittedSpectrum { spectrum_match, .. } => (
-                        spectrum_match.divergence_nats(),
-                        spectrum_match.at_search_limit(),
-                    ),
-                    other => panic!("a spectrum was supplied and the regime came back {other:?}"),
-                };
-                let (alpha_ref, alpha_alt) = (seed.alpha_ref(), seed.alpha_alt_total());
+                let spectrum_match = shape.spectrum_match();
+                let (alpha_ref, alpha_alt) = shape.concentrations();
                 let total = alpha_ref + alpha_alt;
                 Row {
                     individuals: *individuals,
                     alpha_ref,
                     alpha_alt,
                     pair_heterozygosity: 2.0 * alpha_ref * alpha_alt / (total * (total + 1.0)),
-                    divergence_nats,
-                    at_search_limit,
+                    divergence_nats: spectrum_match.divergence_nats(),
+                    at_search_limit: spectrum_match.at_search_limit(),
                     seconds,
                 }
             })
