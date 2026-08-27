@@ -38,7 +38,7 @@ Skills and agents are instructed to leave it untouched.
 > bases rather than calling it zero, and its records already carried the rate — what was missing
 > was only the shape calling asks for, so what shipped is a projection rather than a second copy of
 > numbers that could drift from the first.
-> **⛦ And a thousand samples cost 1.14 GB, of which 99.7% is nothing the seam reads.** Per sample:
+> **⛦ And a thousand samples cost 1.14 GB, of which the per-sample results are 97.7%.** Per sample:
 > 1,114,632 bytes of per-sample pre-pass results against 26,596 bytes of the run-wide maps built
 > from them. The difference is the allele-length genotype table each repeat-tract stratum's fit
 > carries, about 3.35 kB a stratum, which calling never asks for — **a finding for the run driver's

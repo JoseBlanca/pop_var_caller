@@ -174,16 +174,17 @@ allocator as live bytes. At one library a sample holding 338 repeat-tract strata
 | 100 | 111,463,200 | 2,659,264 | 2,400 | 114,124,864 | 1,141,248 |
 | 1,000 | 1,114,632,000 | 26,595,880 | 24,000 | 1,141,251,880 | 1,141,251 |
 
-**1.14 GB at a thousand samples, and 99.7% of it is nothing the seam reads.** Take the repeat
-tracts out — the same run at zero strata — and a sample weighs **3,391 bytes** instead of
-1,141,251. What the difference is made of is the allele-length genotype table each stratum's fit
-carries: about **3.35 kB a stratum**, at both stratum counts measured here. Calling never asks for
-it.
+**1.14 GB at a thousand samples, and the per-sample results are 97.7% of it** — 1,114,632 bytes
+against 26,596 of run-wide maps and 24 of dense vectors. Take the repeat tracts out — the same run
+at zero strata — and a sample weighs **3,391 bytes** instead of 1,141,251, so **the repeat-tract
+records are 99.7% of what a sample weighs**. What that is made of is the allele-length genotype
+table each stratum's fit carries: 3,366 bytes a stratum at 338 strata and 3,334 at 141. Calling
+reads one number off each of those records — the substitution rate — and nothing else.
 
 **So this is a finding for the run driver's plan and not for the seam.** What a run must hold for
 the whole of calling is the 26.6 kB a sample of run-wide maps — 26.6 MB at a thousand. A driver
 that projects each sample's substitution rates as that sample finishes, and releases the rest,
-never holds the other 43 parts in 44.
+peaks at **1/43rd** of the figure above: 26,620 bytes a sample against 1,141,251.
 
 The shape a sample is given is stated and sourced rather than chosen: one library, which is every
 sample of both benchmark cohorts here; 338 strata a library, from the repeat-tract fit's own report
