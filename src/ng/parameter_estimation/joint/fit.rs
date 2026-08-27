@@ -3234,6 +3234,51 @@ mod tests {
         assert!(fit.fitted_diversity().is_none());
     }
 
+    /// **The seed's other moment reaches the caller wrapped too, and it is the density's own
+    /// mean frequency rather than its heterozygosity.**
+    ///
+    /// The two are read out side by side and handed to the prior's seed together, so returning
+    /// one where the other was asked is the mistake worth pinning. **Until this test there was
+    /// none**: a review found that returning the heterozygosity here was caught only by a test in
+    /// another module, one that assembles a whole run.
+    ///
+    /// **The fixture has to keep the two apart or the test cannot tell them apart**, and on this
+    /// density they are close: a `Beta(0.5, 2.0)` over 9 in 100 segregating positions, plus 1 in
+    /// 100 fixed for a non-reference base, gives a mean frequency of **2.80 in 100** and a
+    /// heterozygosity of **2.06 in 100** — the frequency 36% the larger. The guard below is a
+    /// fifth, so it holds with room and would fail on a density that made them equal.
+    #[test]
+    fn the_fitted_frequency_is_the_densitys_own_mean_and_not_its_heterozygosity() {
+        let density = a_lopsided_density();
+        let fit = a_fit_carrying(density, density.expected_heterozygosity());
+        let wrapped = fit
+            .fitted_alternative_frequency()
+            .expect("the mean frequency of a real density is a probability");
+
+        assert_eq!(wrapped.get(), density.expected_alternative_frequency());
+        let diversity = density.expected_heterozygosity();
+        assert!(
+            (wrapped.get() / diversity - 1.0).abs() > 0.2,
+            "the fixture must keep the two moments apart: frequency {}, heterozygosity {diversity}",
+            wrapped.get()
+        );
+    }
+
+    /// **A density whose mean frequency is not a probability hands back nothing**, the same rule
+    /// as its neighbour — and the case is `a = b = 0`, where the Beta mean is `0/0`.
+    #[test]
+    fn a_frequency_that_is_not_a_probability_does_not_reach_the_caller() {
+        let degenerate = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.0,
+            b: 0.0,
+        };
+        assert!(degenerate.expected_alternative_frequency().is_nan());
+        let fit = a_fit_carrying(degenerate, 0.01);
+        assert!(fit.fitted_alternative_frequency().is_none());
+    }
+
     // The whole fit, against a cohort whose truth is known, is in `whole_fit_tests` below —
     // the drawn-cohort generator it needs sits between the two modules, because the benchmark
     // reaches it too.

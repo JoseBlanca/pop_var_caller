@@ -6188,6 +6188,67 @@ mod tests {
         }
     }
 
+    /// **All three axes of a stratum's key survive the projection, and two of them are held
+    /// constant in every other fixture here.**
+    ///
+    /// A key is `(library, tract shape, ploidy)`. The tract shape varies in the walked fixture
+    /// above; the other two do not. Every accumulator built in these tests is diploid and the
+    /// walked fixture gives all its strata to read group 0, so the projection could **drop a
+    /// whole ploidy** or **rewrite every key onto one library** and this file stayed green —
+    /// measured: a `filter(|(key, _)| key.ploidy == diploid)` left all 4,928 tests passing, and
+    /// forcing `read_group: ReadGroupId(0)` was caught only by a test in another module.
+    ///
+    /// A haploid stratum is not hypothetical at the range this caller commits to: a genome with a
+    /// haploid sex chromosome has loci at two ploidies, and [`StratumKey`] keeps them apart for
+    /// the reason the type documents — the fit scores each entry against the genotypes of *one*
+    /// ploidy.
+    ///
+    /// Built through the test constructor rather than through an accumulator, because what is
+    /// under test is the projection and not the fit: a mixed-ploidy accumulator needs a ploidy
+    /// map over genome regions, which would put a second thing in the fixture that can be wrong.
+    #[test]
+    fn every_axis_of_a_stratum_key_survives_the_projection() {
+        let keyed = |group: u32, repeats: u32, copies: u8, rate: f64| {
+            (
+                StratumKey {
+                    read_group: ReadGroupId(group),
+                    stratum: stratum(2, repeats),
+                    ploidy: Ploidy::try_new(copies).expect("a positive copy number"),
+                },
+                Estimate {
+                    value: ErrorRate::try_new(rate).expect("a legal rate"),
+                    provenance: Provenance::FittedHere,
+                    observations: 500_000,
+                },
+            )
+        };
+        // Four keys, no two alike on any axis they share, and four different rates.
+        let entries = [
+            keyed(0, 5, 1, 0.002),
+            keyed(0, 5, 2, 0.007),
+            keyed(1, 5, 2, 0.011),
+            keyed(0, 6, 2, 0.013),
+        ];
+        let parameters = SsrSampleParameters::of_substitution_rates(&entries);
+
+        let rates = parameters.substitution_rate_by_stratum();
+        assert_eq!(
+            rates.len(),
+            entries.len(),
+            "one entry per key, and the four keys are four keys"
+        );
+        for (key, fitted) in &entries {
+            assert_eq!(
+                rates[key].value.get(),
+                fitted.value.get(),
+                "read group {}, {} repeats, ploidy {} kept its own rate",
+                key.read_group.get(),
+                key.stratum.repeats.0,
+                key.ploidy.get()
+            );
+        }
+    }
+
     /// **A stratum that kept the level it measured and borrowed the two shares it could not says
     /// so in two lists that differ** — the third claim of the three, and the common one at the
     /// bottom of the repeat range.
