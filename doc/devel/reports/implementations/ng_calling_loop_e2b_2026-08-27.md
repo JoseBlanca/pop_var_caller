@@ -122,7 +122,8 @@ never reset would read zero anyway and the test would pass against the defect it
 ## 6. Mutation testing: sixteen deliberate defects, sixteen caught
 
 Twelve were the author's own, applied one at a time to the non-test source and each restored
-afterwards (`tmp/e2b_mutations/run.py`, `rerun.py`). **Three more came from the mutation review and
+afterwards by a throwaway script in the branch's scratch, which the worktree took with it — the
+table below is the record. **Three more came from the mutation review and
 survived on the tree it reviewed** — each is listed below with the fixture that closed it and was
 re-run against the fixed tree. The sixteenth checks the constructor that review asked for.
 
