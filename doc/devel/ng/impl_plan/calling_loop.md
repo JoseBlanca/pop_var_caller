@@ -433,7 +433,7 @@ either picks one or summarises; §3.6 asks for per sample and the finer grain is
 produces. *Depends:* E2a, E3a. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §3.6.
 
-**E3. The integration fixture — ng calls genotypes.**  **split into E3a ✅ and E3b ☐, 2026-08-26**
+**E3. The integration fixture — ng calls genotypes.**  **split into E3a ✅ and E3b ✅, 2026-08-26**
 
 **Why it split, and it is a change of character rather than a blockage.** E3a is a **test**: the
 generic path needed no library code that did not already exist, and the step is one fixture.
