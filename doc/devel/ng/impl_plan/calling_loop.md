@@ -624,12 +624,26 @@ ruling; nothing in the code changed, because this is what E3b built.
 
 ### Milestone F — the two loop oracles
 
-**F1. The SNP/indel parity oracle.**  ☐
+**F1. The SNP/indel parity oracle.**  ✅
 Given the same likelihood table, the same prior parameters and the same candidate set,
 production's loop ([`posterior_engine.rs:2733`](../../../../src/var_calling/posterior_engine.rs))
 and ng's produce the same genotypes — any difference traced to a decision one of the three
 calling documents records, and the trace written into the test. *Depends:* E3a. *Source:* spec
 §10; §13 test 8.
+
+**⚖ Two differences exist, the oracle found both by failing, and both are asserted rather than
+excused.** **The inbreeding mixture** is the one place the port departs on purpose: production
+mixes its two branches on two different scales, so its coefficient does a fraction of the work it
+should, and ng adds the missing term. At `F = 0` the branch short-circuits away on both sides —
+which is why every other fixture agrees exactly and why production's own default hides it — and at
+`F = 0.9` over ten samples the two call a thin sample `0/0` against `0/1`. **The pass count** is a
+difference in what is counted rather than in where either stopped: both begin with one E-step on
+the reads alone, production counts it and ng does not, so production's count is ng's plus one on
+every fixture.
+
+**Where it lives, and it needed no edit to the frozen tree**: `src/ng/calling/loop_parity.rs`,
+beside `genotype_table_parity.rs`, so ng's `use crate::var_calling::` stays in one greppable place.
+The entry points it needs are already `pub(crate)`.
 
 **F2. The STR differential.**  ☐
 On the same likelihood table, run ng's loop under **production's convergence rule and
