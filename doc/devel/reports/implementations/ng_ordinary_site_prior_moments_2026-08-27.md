@@ -1020,3 +1020,27 @@ same fact the soft count's own end-case test pins, read from the other side.
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib` — **4,853 passed, 0 failed, 11 ignored**, from 4,847. Six tests added.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+---
+
+## The merge with `main`, and what it brought back
+
+`main` at `283c5a28` — the calling loop through step F2 — merged in after C3, at the owner's
+request. Two conflicts, both where the two branches edited the same lines for unrelated reasons:
+`run_parameters.rs`'s import block, and the `calling/mod.rs` field whose doc comment this branch had
+corrected and which main replaced outright.
+
+**⛦ It also brought back two copies of a retired sentence and one `compile_fail` doctest that now
+passes for the wrong reason** — which is what a tree-wide grep is for after every merge, not only
+after every deletion.
+
+- *"a SNP/indel locus seeds from a frequency spectrum"*, in a **release panic message** in
+  `calling/mod.rs` and in a test assertion in `summarise_condition.rs`. Both corrected.
+- `stratum_fits.rs`'s doctest handed a `FittedSpectrum` where a `LengthSpectrum` belonged, to prove
+  the two spectra cannot be crossed. **That type is deleted, so the test still fails to compile —
+  for the wrong reason.** A `compile_fail` test that passes because the type it names is gone
+  proves nothing about the type it was written to protect. Removed, with what it protected and why
+  it has no subject any more recorded in its place: this caller fits one spectrum now, not two.
+
+Library target 4,853 → **4,904**; `cargo test --tests` green across every integration target;
+clippy, fmt and the 25 broken intra-doc links all unchanged.
