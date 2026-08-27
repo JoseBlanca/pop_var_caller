@@ -28,9 +28,11 @@ written without them, and one rule had to be decided.
 | now | **4,928** passing, 0 failing, 11 ignored |
 
 `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` both
-exit 0. `cargo doc --no-deps --lib` reports **25 unresolved links and exits 101, exactly as it did
-at the branch point** — one link added here pointed at a module path that does not exist and was
-corrected, which is what took it back to 25.
+exit 0. `cargo doc --no-deps --lib` reports **25 unresolved links and exits 101**. It reported 26
+before the last commit: one link added on this branch pointed at a module path that does not exist
+(`RunParameters` lives in `ng::calling::run_parameters`, not in `ng::calling`) and was corrected.
+**The branch point was not measured directly** — 25 is what remains after removing the one link
+this branch added, and none of the 25 sites the compiler names is in code this branch wrote.
 
 ## Step by step
 
