@@ -15,14 +15,19 @@
 //!
 //! **Only the changes.** At each record, which ids started covering it and which stopped; a
 //! reader carries the set forward. A read covering 150 positions then costs about two entries in
-//! total rather than appearing in 150 lists. Measured on the same two corners: 0.432 bytes a
-//! position at 11.4 reads and 6.42 at 293, against 43.78 for the whole list as raw identifiers.
+//! total rather than appearing in 150 lists. Measured on the same two corners: **0.432 bytes a
+//! position at 11.4 reads against 1.020 for the whole list as raw identifiers, and 6.42 at 293
+//! reads against 43.78** — so 2.4 times smaller at the shallow corner and 6.8 times at the deep
+//! one. (An earlier version of this paragraph gave 43.78 as *the* baseline for both, which reads
+//! as a hundredfold saving at 11.4 reads.)
 //!
 //! **The set restarts at every block** (spec [`psp_file_format.md`] §3.2), which is what lets a
 //! reader begin at any block: [`start_block`](LiveSetWriter::start_block) empties it, so a
 //! block's first record has no departures and its arrivals *are* the whole live set. The
-//! restatement is not a separate field — it falls out of the reset, and costs 12 % of this
-//! form's own bytes at the settled block size.
+//! restatement is not a separate field — it falls out of the reset. Spec
+//! [`psp_record_encoding.md`] §6 measured that reset at 12 % of this form's own bytes **with
+//! blocks cut every 1,500 positions** (0.385 → 0.432 on tomato); the settled genomic block size
+//! is 100 kb, over which the same per-block restatement amortises to a fraction of a percent.
 //!
 //! # What is not here
 //!
@@ -42,11 +47,12 @@
 //! [`psp_record_encoding.md`]: ../../../../doc/devel/ng/spec/psp_record_encoding.md
 //! [`psp_chain_id_encoding.md`]: ../../../../doc/devel/ng/spec/psp_chain_id_encoding.md
 
+use std::cmp::Ordering;
+
+use crate::ng::psp::record::{FieldReader, RecordDecodeError, put_varint};
 use crate::pileup_record::ChainId;
 
-use super::record::{FieldReader, RecordDecodeError, put_varint};
-
-/// The name this module's faults are reported under, so a message says which field it was.
+// The names this module's faults are reported under, so a message says which field it was.
 const DEPARTURE_COUNT: &str = "chain-id departure count";
 const DEPARTURE_POSITION: &str = "chain-id departure position";
 const ARRIVAL_COUNT: &str = "chain-id arrival count";
@@ -55,7 +61,7 @@ const ARRIVAL_ID: &str = "chain-id arrival";
 /// The fewest bytes one departure or one arrival can take, for the count bound.
 ///
 /// **A count is refused when no record could hold that many entries**, the same guard
-/// [`FieldReader::read_count`] applies to observations: a declared 2⁴⁰ arrivals is not a buffer
+/// [`FieldReader::read_count`] applies to observations: a declared 2⁶³ arrivals is not a buffer
 /// that stopped early, and reporting it as one would ask Milestone D's reader to grow its buffer
 /// to a terabyte instead of reporting damage.
 const LEAST_BYTES_PER_ENTRY: usize = 1;
@@ -101,7 +107,7 @@ impl LiveSet {
 
     /// Whether `id` is live. A binary search, because the set is sorted.
     #[must_use]
-    pub fn holds(&self, id: ChainId) -> bool {
+    pub fn contains(&self, id: ChainId) -> bool {
         self.ids.binary_search(&id).is_ok()
     }
 }
@@ -134,8 +140,12 @@ impl LiveSetChanges {
         &self.arrived
     }
 
-    /// Whether nothing changed — the common case at depth between two adjacent positions, and
-    /// the reason this form is cheap.
+    /// Whether nothing changed — the common case at depth between two adjacent positions, and the
+    /// reason this form is cheap.
+    ///
+    /// **Kept because a test exercises the claim.** A review found it uncalled and unchecked,
+    /// which is where an inverted condition survives to its first caller; it is
+    /// `an_empty_set_and_an_empty_change_say_so` that makes it a fact rather than a comment.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.departed.is_empty() && self.arrived.is_empty()
@@ -157,32 +167,39 @@ fn sort_and_dedup(ids: &mut Vec<ChainId>) {
     ids.dedup();
 }
 
-/// Fill `changes` with what it takes to get from `live` to `wanted`.
+/// Fill `changes` with what it takes to get from `previously_live` to `now_live`.
 ///
 /// Both inputs are sorted and distinct, so this is one merge pass rather than two set
-/// differences: an id in `live` and not in `wanted` departed, one in `wanted` and not in `live`
-/// arrived, and one in both did not change — which is nearly all of them.
-fn derive_changes(live: &LiveSet, wanted: &[ChainId], changes: &mut LiveSetChanges) {
+/// differences: an id in `previously_live` and not in `now_live` departed, one in `now_live` and
+/// not in `previously_live` arrived, and one in both did not change — which is nearly all of them.
+fn derive_changes(previously_live: &LiveSet, now_live: &[ChainId], changes: &mut LiveSetChanges) {
     changes.clear();
-    let (mut in_live, mut in_wanted) = (0usize, 0usize);
-    while in_live < live.ids.len() && in_wanted < wanted.len() {
-        match live.ids[in_live].cmp(&wanted[in_wanted]) {
-            std::cmp::Ordering::Equal => {
-                in_live += 1;
-                in_wanted += 1;
+    let (mut was, mut now) = (0usize, 0usize);
+    while was < previously_live.ids.len() && now < now_live.len() {
+        match previously_live.ids[was].cmp(&now_live[now]) {
+            Ordering::Equal => {
+                was += 1;
+                now += 1;
             }
-            std::cmp::Ordering::Less => {
-                changes.departed.push(live.ids[in_live]);
-                in_live += 1;
+            Ordering::Less => {
+                changes.departed.push(previously_live.ids[was]);
+                was += 1;
             }
-            std::cmp::Ordering::Greater => {
-                changes.arrived.push(wanted[in_wanted]);
-                in_wanted += 1;
+            // **An arrival below an id already live**, which is what a returning read looks like:
+            // it sorts under everything allocated since it left. Spec `psp_record_encoding.md` §6
+            // measures that at 83 % of ids on the human sample and 91 % on tomato, so this arm is
+            // the ordinary case rather than the exotic one — see
+            // `an_id_that_goes_live_again_below_the_ids_allocated_since_reads_back`.
+            Ordering::Greater => {
+                changes.arrived.push(now_live[now]);
+                now += 1;
             }
         }
     }
-    changes.departed.extend_from_slice(&live.ids[in_live..]);
-    changes.arrived.extend_from_slice(&wanted[in_wanted..]);
+    changes
+        .departed
+        .extend_from_slice(&previously_live.ids[was..]);
+    changes.arrived.extend_from_slice(&now_live[now..]);
 }
 
 /// Take `departed` out of `live`. Both are ascending, so this is one pass.
@@ -209,25 +226,27 @@ fn apply_departures(live: &mut LiveSet, departed: &[ChainId]) {
 /// **A merge rather than an append and a sort**: both sides are already ascending, and at depth
 /// the live set is hundreds of ids where the arrivals are a handful, so re-sorting the whole set
 /// once a record would be the expensive part of the walk.
-fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], scratch: &mut Vec<ChainId>) {
+fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], merged_ids: &mut Vec<ChainId>) {
     if arrived.is_empty() {
         return;
     }
-    scratch.clear();
-    scratch.reserve(live.ids.len() + arrived.len());
-    let (mut in_live, mut in_arrived) = (0usize, 0usize);
-    while in_live < live.ids.len() && in_arrived < arrived.len() {
-        if live.ids[in_live] < arrived[in_arrived] {
-            scratch.push(live.ids[in_live]);
-            in_live += 1;
+    merged_ids.clear();
+    merged_ids.reserve(live.ids.len() + arrived.len());
+    let (mut was, mut arriving) = (0usize, 0usize);
+    while was < live.ids.len() && arriving < arrived.len() {
+        if live.ids[was] < arrived[arriving] {
+            merged_ids.push(live.ids[was]);
+            was += 1;
         } else {
-            scratch.push(arrived[in_arrived]);
-            in_arrived += 1;
+            // **The interleaving arm**, reached when an arrival sorts below an id already live —
+            // a returning read, which is most of them. `derive_changes` says why.
+            merged_ids.push(arrived[arriving]);
+            arriving += 1;
         }
     }
-    scratch.extend_from_slice(&live.ids[in_live..]);
-    scratch.extend_from_slice(&arrived[in_arrived..]);
-    std::mem::swap(&mut live.ids, scratch);
+    merged_ids.extend_from_slice(&live.ids[was..]);
+    merged_ids.extend_from_slice(&arrived[arriving..]);
+    std::mem::swap(&mut live.ids, merged_ids);
 }
 
 /// Write a record's live-set changes, and carry the set forward.
@@ -244,13 +263,13 @@ fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], scratch: &mut Vec<Cha
 #[derive(Debug, Default)]
 pub struct LiveSetWriter {
     // ---- what lives for the whole file: scratch, reused so a record does not allocate ----
-    /// The ids this record wants, gathered, sorted and deduplicated.
-    wanted: Vec<ChainId>,
+    /// The ids this record names, gathered, sorted and deduplicated.
+    now_live: Vec<ChainId>,
     /// This record's changes.
     changes: LiveSetChanges,
     /// Where the live set is rebuilt when arrivals are merged into it. Swapped with the set's own
     /// vector rather than copied back, so the two trade places and neither reallocates.
-    merged: Vec<ChainId>,
+    merged_ids: Vec<ChainId>,
 
     // ---- what lives for one block, and is replaced whole at every boundary ----
     //
@@ -270,10 +289,20 @@ pub struct LiveSetWriter {
 ///
 /// **Not `Copy`**, so a collection added here gives the `error[E0063]` that points at the reset
 /// rather than an `error[E0204]` whose cheapest answer is to put the field somewhere else.
-#[derive(Debug, Default, Clone)]
+/// **`Default` routes through [`at_block_start`](Self::at_block_start) rather than being
+/// derived**, so there is genuinely one constructor. A derived `Default` would let
+/// `LiveSetWriter::new` build this state without touching the literal the `error[E0063]` above
+/// depends on, and a field added here would be default-initialised on that path in silence.
+#[derive(Debug)]
 struct PerBlockState {
     /// The reads live at the record last handled.
     live: LiveSet,
+}
+
+impl Default for PerBlockState {
+    fn default() -> Self {
+        Self::at_block_start()
+    }
 }
 
 impl PerBlockState {
@@ -287,6 +316,12 @@ impl PerBlockState {
 }
 
 impl LiveSetWriter {
+    /// A writer at the start of a file's first block: nothing is live.
+    ///
+    /// **Equivalent to a [`start_block`](Self::start_block) that has already happened**, so the
+    /// first record written restates its whole set as arrivals. Every *later* block boundary
+    /// still needs the call — that is the one whose absence produces a file that parses perfectly
+    /// and is wrong from that block's first record.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -310,23 +345,23 @@ impl LiveSetWriter {
 
     /// Append this record's changes to `out`, and move the live set to what `live_now` names.
     ///
-    /// `live_now` is every id the record names, in any order and with any repeats — the union of
+    /// `now_live` is every id the record names, in any order and with any repeats — the union of
     /// its observations' lists.
     pub fn write_changes(
         &mut self,
-        live_now: impl IntoIterator<Item = ChainId>,
+        now_live: impl IntoIterator<Item = ChainId>,
         out: &mut Vec<u8>,
     ) {
-        self.wanted.clear();
-        self.wanted.extend(live_now);
-        sort_and_dedup(&mut self.wanted);
-        derive_changes(&self.block.live, &self.wanted, &mut self.changes);
+        self.now_live.clear();
+        self.now_live.extend(now_live);
+        sort_and_dedup(&mut self.now_live);
+        derive_changes(&self.block.live, &self.now_live, &mut self.changes);
         encode_changes(&self.changes, &self.block.live, out);
         apply_departures(&mut self.block.live, &self.changes.departed);
         apply_arrivals(
             &mut self.block.live,
             &self.changes.arrived,
-            &mut self.merged,
+            &mut self.merged_ids,
         );
     }
 }
@@ -334,15 +369,25 @@ impl LiveSetWriter {
 /// **Departures first, then arrivals**, and the order is load-bearing rather than a convention.
 ///
 /// A departure is written as its *position* in the live set, which is small where an identifier
-/// is large. Positions only mean anything against a particular set, so writing the departures
-/// first — and applying them before the arrivals are read — means the set a position indexes is
-/// always the set as it stands at that moment. Written the other way round, both sides would
-/// have to agree to resolve positions against a set that no longer existed, which is the kind of
-/// agreement that holds until someone reorders two lines.
+/// is large. **Both sides resolve a position against the set as the previous record left it** —
+/// this function binary-searches `live` before `write_changes` applies anything, and the reader
+/// decodes the whole record before it applies anything either. So there is one set a position can
+/// mean, and neither side has to remember a set that has already moved.
+///
+/// The order is still load-bearing for a different reason: an arrival is checked against the set
+/// minus this record's departures, which the reader can only do once it has read them.
+///
+/// ⚠ *An earlier version of this comment said the departures were applied before the arrivals
+/// were read, and that this was what made positions resolvable. Neither half was true, and the
+/// eager apply was a Blocker — see `read_changes`.*
 fn encode_changes(changes: &LiveSetChanges, live: &LiveSet, out: &mut Vec<u8>) {
     put_varint(out, changes.departed.len() as u64);
     let mut previous_position: Option<u64> = None;
     for id in &changes.departed {
+        // PANIC-FREE: `changes.departed` comes from `derive_changes`, which pushes only ids it
+        // read out of `live.ids`, and `LiveSetChanges`'s fields are private, so nothing else can
+        // build one. `apply_departures` has not run yet — see `write_changes` — so `live` still
+        // holds every one of them.
         let position = live
             .ids
             .binary_search(id)
@@ -380,13 +425,17 @@ pub struct LiveSetReader {
     // ---- what lives for the whole file ----
     changes: LiveSetChanges,
     /// Scratch for the arrival merge — see [`LiveSetWriter`]'s field of the same name.
-    merged: Vec<ChainId>,
+    merged_ids: Vec<ChainId>,
 
     // ---- what lives for one block, and is replaced whole at every boundary ----
     block: PerBlockState,
 }
 
 impl LiveSetReader {
+    /// A reader at the start of a block: nothing is live.
+    ///
+    /// **Equivalent to a [`start_block`](Self::start_block) that has already happened**, which is
+    /// what lets a caller that seeked to an arbitrary block just build one of these and read.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -398,6 +447,10 @@ impl LiveSetReader {
     }
 
     /// The reads live at the record last read.
+    ///
+    /// **Exact after a fault too**: `read_changes` moves the set only once both halves of a
+    /// record's stream have been read, so a refused record leaves this as the record before it
+    /// left it — which is what makes a retry from the record's first byte safe.
     #[must_use]
     pub fn live(&self) -> &LiveSet {
         &self.block.live
@@ -405,6 +458,11 @@ impl LiveSetReader {
 
     /// What changed at the record last read. Handed back so a caller can see the shape of the
     /// stream without diffing two sets.
+    ///
+    /// **Only after a [`read_changes`](Self::read_changes) that returned `Ok`.** After a fault it
+    /// holds however much of the record was decoded before the fault, which is not a record's
+    /// changes — spec §6.7's *"none of these may reach a caller as a half-built record"* is about
+    /// exactly this.
     #[must_use]
     pub fn changes(&self) -> &LiveSetChanges {
         &self.changes
@@ -425,23 +483,72 @@ impl LiveSetReader {
     ///
     /// **A slice rather than this module's byte cursor**, so that where the stream sits inside a
     /// record stays E3's question and not a constraint the type imposes now.
+    ///
+    /// # Errors
+    ///
+    /// - [`RecordDecodeError::Truncated`] when the bytes run out mid-stream — **fetch more and
+    ///   call this again with the record's whole stream.** The set is untouched, so the retry is
+    ///   a retry.
+    /// - [`RecordDecodeError::Malformed`] when the stream cannot mean what it says: a departure
+    ///   count larger than the live set, a departure position past its end, an arrival for a read
+    ///   already live, or a gap walking past the largest identifier there is. **The block is
+    ///   damaged**; no quantity of further bytes changes the answer.
+    ///
+    /// [`encode_changes`] is the mirror of this function, and the field order the two agree on is
+    /// written there.
     pub fn read_changes(&mut self, bytes: &[u8]) -> Result<usize, RecordDecodeError> {
         let reader = &mut FieldReader::new(bytes);
         self.changes.clear();
 
+        self.read_departures(reader)?;
+        self.read_arrivals(reader)?;
+
+        // **Nothing above this line touched the live set**, and that is the whole reason the two
+        // reads and the two applies are separated. A fault in the arrivals half returns
+        // `Truncated`, whose contract is *fetch more bytes and re-parse the record from its first
+        // byte* — so the set has to be exactly what the previous record left it. Spec §8 names the
+        // alternative: *"a parse that half-advances that state before failing corrupts every
+        // record after it, plausibly."*
+        //
+        // ⚠ **This function used to apply the departures between the two reads**, on a stated
+        // rationale that was not even true of the code: the departure loop had already finished,
+        // and both sides resolve a position against the *pre-departure* set anyway. Measured over
+        // a record that departs one read and gains one, five of its six cut points retried to
+        // `Ok` with a read silently gone from the set for the rest of the block.
+        apply_departures(&mut self.block.live, &self.changes.departed);
+        apply_arrivals(
+            &mut self.block.live,
+            &self.changes.arrived,
+            &mut self.merged_ids,
+        );
+
+        Ok(reader.bytes_read())
+    }
+
+    /// The departures, each a position in the live set as it stands, resolved back to the
+    /// identifier it names.
+    ///
+    /// **A position past the end of the set is damage.** It is the one place a `usize` from the
+    /// wire indexes something, and an unchecked index here would be a panic on a corrupt file
+    /// where spec §6.7 requires a refusal.
+    fn read_departures(&mut self, reader: &mut FieldReader<'_>) -> Result<(), RecordDecodeError> {
         let departures = reader.read_count(DEPARTURE_COUNT, LEAST_BYTES_PER_ENTRY)?;
-        let mut previous_position: Option<u64> = None;
+        // **A departure is a position in the live set**, and the positions are strictly ascending,
+        // so there cannot be more of them than the set holds. That is exact where the count bound
+        // above is the record body's byte ceiling borrowed from a different container — and it
+        // names the fault at the count rather than at whichever position first runs off the end.
+        if departures > self.block.live.len() as u64 {
+            return Err(reader.malformed(
+                DEPARTURE_COUNT,
+                format!(
+                    "{departures} departures from a live set holding {} reads",
+                    self.block.live.len()
+                ),
+            ));
+        }
+        let mut previous: Option<u64> = None;
         for _ in 0..departures {
-            let gap = reader.read_varint(DEPARTURE_POSITION)?;
-            let position = value_after(previous_position, gap).ok_or_else(|| {
-                reader.malformed(
-                    DEPARTURE_POSITION,
-                    format!(
-                        "a gap of {gap} past position {}, which is past every position there is",
-                        previous_position.unwrap_or(0)
-                    ),
-                )
-            })?;
+            let position = read_ascending(reader, DEPARTURE_POSITION, "position", previous)?;
             let id = *usize::try_from(position)
                 .ok()
                 .and_then(|position| self.block.live.ids.get(position))
@@ -455,26 +562,27 @@ impl LiveSetReader {
                     )
                 })?;
             self.changes.departed.push(id);
-            previous_position = Some(position);
+            previous = Some(position);
         }
-        // **Applied before the arrivals are read**, so the positions above indexed the set they
-        // were written against — see `encode_changes`.
-        apply_departures(&mut self.block.live, &self.changes.departed);
+        Ok(())
+    }
 
+    /// The arrivals, each an identifier.
+    ///
+    /// **An identifier already live is damage**: accepted, it would put a read in the set twice,
+    /// which Milestone E4's residual arithmetic then subtracts once — silently.
+    fn read_arrivals(&mut self, reader: &mut FieldReader<'_>) -> Result<(), RecordDecodeError> {
         let arrivals = reader.read_count(ARRIVAL_COUNT, LEAST_BYTES_PER_ENTRY)?;
-        let mut previous_id: Option<u64> = None;
+        let mut previous: Option<u64> = None;
         for _ in 0..arrivals {
-            let gap = reader.read_varint(ARRIVAL_ID)?;
-            let id = value_after(previous_id, gap).ok_or_else(|| {
-                reader.malformed(
-                    ARRIVAL_ID,
-                    format!(
-                        "a gap of {gap} past id {}, which is past every id there is",
-                        previous_id.unwrap_or(0)
-                    ),
-                )
-            })?;
-            if self.block.live.holds(id) {
+            let id = read_ascending(reader, ARRIVAL_ID, "id", previous)?;
+            // **The set has not moved yet**, so this asks the set as the *previous* record left
+            // it — which also refuses a record that departs an id and arrives the same id.
+            // `derive_changes` puts an id in at most one of the two lists, so no writer produces
+            // that; a stream that does is internally inconsistent, and honouring it would report
+            // one departure and one arrival for a record where nothing changed, which is what
+            // Milestone E4's residual arithmetic counts.
+            if self.block.live.contains(id) {
                 return Err(reader.malformed(
                     ARRIVAL_ID,
                     format!(
@@ -483,16 +591,33 @@ impl LiveSetReader {
                 ));
             }
             self.changes.arrived.push(id);
-            previous_id = Some(id);
+            previous = Some(id);
         }
-        apply_arrivals(
-            &mut self.block.live,
-            &self.changes.arrived,
-            &mut self.merged,
-        );
-
-        Ok(reader.bytes_read())
+        Ok(())
     }
+}
+
+/// The next value of a strictly ascending run, read as its gap from the one before.
+///
+/// **One helper for both runs**, because the departures and the arrivals differ only in what the
+/// numbers mean — `noun` is what the message calls them. Written twice, the two would be free to
+/// drift in exactly the place where identifiers and positions must not be confused.
+fn read_ascending(
+    reader: &mut FieldReader<'_>,
+    field: &'static str,
+    noun: &str,
+    previous: Option<u64>,
+) -> Result<u64, RecordDecodeError> {
+    let gap = reader.read_varint(field)?;
+    value_after(previous, gap).ok_or_else(|| {
+        reader.malformed(
+            field,
+            format!(
+                "a gap of {gap} past {noun} {}, which is past every {noun} there is",
+                previous.unwrap_or(0)
+            ),
+        )
+    })
 }
 
 /// The value a gap names, or `None` when it names one past `u64`.
@@ -509,6 +634,8 @@ fn value_after(previous: Option<u64>, gap: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use proptest::prelude::*;
 
     /// Write a whole file's worth of records and read them back, restarting at every block.
     ///
@@ -653,7 +780,10 @@ mod tests {
 
         writer.start_block();
         writer.write_changes([5u64, 9, 12], &mut bytes);
-        writer.write_changes([9u64, 12, 40], &mut Vec::new());
+        // The same set, reached from inside a block. ⚠ This was written into a throwaway `Vec`,
+        // so the contrast the comment below claims was never made.
+        let mut inside_a_block = Vec::new();
+        writer.write_changes([9u64, 12, 40], &mut inside_a_block);
 
         // A second block whose first record is that same set: it must restate all three.
         let mut restated = Vec::new();
@@ -666,10 +796,15 @@ mod tests {
         assert!(reader.changes().departed().is_empty());
         assert_eq!(reader.live().ids(), [9, 12, 40]);
 
-        // And the same set written *inside* a block costs almost nothing, which is the contrast.
-        reader.start_block();
-        reader.read_changes(&bytes).expect("it reads");
-        assert_eq!(reader.live().ids(), [5, 9, 12]);
+        // **And the contrast, as bytes.** Restating {9, 12, 40} is a count of three and three
+        // gaps; stepping to it from {5, 9, 12} is one departure at position 0 and one arrival,
+        // and it never names 9 or 12 at all.
+        assert_eq!(restated, [0, 3, 9, 2, 27], "no departures, three arrivals");
+        assert_eq!(
+            inside_a_block,
+            [1, 0, 1, 40],
+            "one departure at position 0, and 40 arriving"
+        );
     }
 
     /// **A departure is a position in the live set, not an identifier**, and that is worth a test
@@ -689,7 +824,8 @@ mod tests {
         assert_eq!(
             bytes,
             [1, 0, 0],
-            "a departure spelled as its identifier would cost four bytes more"
+            "a departure spelled as its identifier would cost four bytes where the position \
+             costs one"
         );
     }
 
@@ -811,6 +947,15 @@ mod tests {
             bytes.len()
         );
 
+        // What an uninterrupted read gives, to compare every interrupted one against.
+        let mut uninterrupted = LiveSetReader::new();
+        uninterrupted.start_block();
+        uninterrupted
+            .read_changes(&opening_bytes)
+            .expect("the opening record reads");
+        uninterrupted.read_changes(&bytes).expect("and the next");
+        let uninterrupted = uninterrupted.live().ids().to_vec();
+
         for cut in 0..bytes.len() {
             let mut reader = LiveSetReader::new();
             reader.start_block();
@@ -823,6 +968,20 @@ mod tests {
             assert!(
                 matches!(refused, RecordDecodeError::Truncated { .. }),
                 "cutting at {cut} of {} gave {refused}",
+                bytes.len()
+            );
+
+            // **And the retry the class instructs gives the uninterrupted answer**, on the same
+            // reader. ⚠ This half was missing, and its absence is why a Blocker survived: with a
+            // fresh reader per cut the sweep checks the fault's *class* and never the state the
+            // fault leaves behind, which is the only thing the class split exists to protect.
+            reader
+                .read_changes(&bytes)
+                .unwrap_or_else(|refused| panic!("the retry after a cut at {cut}: {refused}"));
+            assert_eq!(
+                reader.live().ids(),
+                uninterrupted.as_slice(),
+                "retrying after a cut at {cut} of {} gave a different set",
                 bytes.len()
             );
         }
@@ -879,6 +1038,314 @@ mod tests {
             matches!(refused, RecordDecodeError::Malformed { .. }),
             "got {refused}"
         );
+    }
+
+    /// **An id that goes live, stops, and goes live again while larger ids are live.**
+    ///
+    /// A pair's mates rarely overlap, so most identifiers cover two stretches — spec
+    /// `psp_record_encoding.md` §6 measures 83 % of them on the human sample and 91 % on tomato.
+    /// **The returning id sorts below every id allocated since it left**, and that is the only
+    /// shape that makes either merge in this module interleave: `derive_changes`'s `Greater` arm
+    /// and `apply_arrivals`'s `else`.
+    ///
+    /// ⚠ **Both arms were unreached by all 214 `ng::psp` tests** before this one — measured by
+    /// replacing each with `panic!` and watching the suite stay green. Every other fixture
+    /// allocates ids in walk order, so an arrival was always the largest. Counting two-stretch
+    /// ids on a real corpus is Milestone E2's; making the arms reachable at all is this step's,
+    /// because they are E1's code.
+    #[test]
+    fn an_id_that_goes_live_again_below_the_ids_allocated_since_reads_back() {
+        let records = vec![
+            vec![10u64, 20, 30],
+            vec![20u64, 30],
+            vec![20u64, 30, 40, 50],
+            // 10 comes back, below 20, 30, 40 and 50.
+            vec![10u64, 20, 30, 40, 50],
+            // and 15 arrives between two live ids while three others leave.
+            vec![10u64, 15, 50],
+        ];
+        let (back, _) = round_trip(std::slice::from_ref(&records));
+        assert_eq!(
+            back,
+            vec![
+                vec![10, 20, 30],
+                vec![20, 30],
+                vec![20, 30, 40, 50],
+                vec![10, 20, 30, 40, 50],
+                vec![10, 15, 50],
+            ]
+        );
+    }
+
+    /// **The stream reports the bytes it used, not the buffer's length**, because Milestone E3
+    /// hands it the rest of the record head and the count is how the next field is found.
+    ///
+    /// ⚠ Nothing could see this before: every fixture handed `read_changes` a `Vec` holding
+    /// exactly one record's stream, so returning `bytes.len()` instead was the same number.
+    #[test]
+    fn read_changes_reports_only_the_bytes_it_used() {
+        let mut writer = LiveSetWriter::new();
+        writer.start_block();
+        let mut bytes = Vec::new();
+        writer.write_changes([1u64, 2, 3], &mut bytes);
+        let its_own = bytes.len();
+        bytes.extend_from_slice(&[0xAA; 8]);
+
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        assert_eq!(reader.read_changes(&bytes).expect("it reads"), its_own);
+        assert_eq!(
+            reader.live().ids(),
+            [1, 2, 3],
+            "and whatever follows the stream is not read as arrivals"
+        );
+    }
+
+    /// **What the two halves say when nothing is happening.** A gap in coverage empties the set; a
+    /// record between two positions of the same reads changes nothing, which is the common case at
+    /// depth and the reason this form is cheap.
+    #[test]
+    fn an_empty_set_and_an_empty_change_say_so() {
+        let mut writer = LiveSetWriter::new();
+        writer.start_block();
+        assert!(writer.live().is_empty(), "a block opens with nothing live");
+
+        let mut bytes = Vec::new();
+        writer.write_changes([7u64, 8], &mut bytes);
+        assert!(!writer.live().is_empty());
+        assert_eq!(
+            writer.live().ids(),
+            [7, 8],
+            "the writer's set is the record just written, not the one before it"
+        );
+
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        reader.read_changes(&bytes).expect("it reads");
+        assert!(!reader.changes().is_empty(), "two reads arrived");
+
+        let mut unchanged = Vec::new();
+        writer.write_changes([7u64, 8], &mut unchanged);
+        reader.read_changes(&unchanged).expect("it reads");
+        assert!(
+            reader.changes().is_empty(),
+            "the cheap case: nothing arrived, nothing left"
+        );
+
+        let mut gone = Vec::new();
+        writer.write_changes([], &mut gone);
+        reader.read_changes(&gone).expect("it reads");
+        assert!(reader.live().is_empty(), "coverage stopped");
+    }
+
+    /// **A departure count larger than the live set is damage at the count**, not at whichever
+    /// position first happens to run off the end — which is where the record-body ceiling alone
+    /// would have reported it.
+    #[test]
+    fn more_departures_than_the_live_set_holds_is_damage() {
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        reader.read_changes(&[0, 2, 4, 0]).expect("two arrive");
+
+        let refused = reader
+            .read_changes(&[9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            .expect_err("nine departures from a set of two");
+        assert!(
+            matches!(refused, RecordDecodeError::Malformed { .. }),
+            "got {refused}"
+        );
+        assert!(
+            refused.to_string().contains("9 departures"),
+            "the message must name the count: {refused}"
+        );
+    }
+
+    /// **The gap is biased by one on both halves**, and only a run of more than one entry shows
+    /// it: with a run of one, the first value is written absolutely and the bias never applies.
+    /// Every other byte-exact test in this module holds a run of one.
+    #[test]
+    fn a_run_of_arrivals_costs_its_gaps_biased_by_one() {
+        let mut writer = LiveSetWriter::new();
+        writer.start_block();
+
+        // Three arrivals: 4, then 5 and 6 adjacent — gaps of nothing if the bias is there, of one
+        // if it is not.
+        let mut opening = Vec::new();
+        writer.write_changes([4u64, 5, 6], &mut opening);
+        assert_eq!(
+            opening,
+            [0, 3, 4, 0, 0],
+            "no departures, three arrivals: 4 absolutely, then two gaps of nothing"
+        );
+
+        // Two departures at adjacent positions 0 and 1 of [4, 5, 6].
+        let mut departing = Vec::new();
+        writer.write_changes([6u64], &mut departing);
+        assert_eq!(
+            departing,
+            [2, 0, 0, 0],
+            "two departures at positions 0 and 1, then no arrivals"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(600))]
+
+        /// **A `Truncated` fault must leave the reader exactly where it was**, because
+        /// Milestone D's reader answers it by re-parsing the record from its first byte (spec
+        /// `psp_file_format.md` §8).
+        ///
+        /// ⚠ **This found the Blocker on its first generated case** — `records = [[0], [1, 2]]` —
+        /// where thirteen hand-written tests could not, because the sweep over cuts built a fresh
+        /// reader each time and so never retried.
+        #[test]
+        fn a_truncated_read_retried_with_the_whole_record_gives_the_uninterrupted_answer(
+            records in prop::collection::vec(prop::collection::vec(0u64..3_000, 0..8), 2..8),
+            cut_seed in any::<usize>(),
+        ) {
+            let mut writer = LiveSetWriter::new();
+            writer.start_block();
+            let mut per_record = Vec::new();
+            for record in &records {
+                let mut bytes = Vec::new();
+                writer.write_changes(record.iter().copied(), &mut bytes);
+                per_record.push(bytes);
+            }
+            let last = per_record.len() - 1;
+            if per_record[last].len() >= 2 {
+                let cut = 1 + cut_seed % (per_record[last].len() - 1);
+
+                let mut uninterrupted = LiveSetReader::new();
+                uninterrupted.start_block();
+                for bytes in &per_record {
+                    uninterrupted
+                        .read_changes(bytes)
+                        .map_err(|refused| TestCaseError::fail(refused.to_string()))?;
+                }
+                let uninterrupted = uninterrupted.live().ids().to_vec();
+
+                let mut retried = LiveSetReader::new();
+                retried.start_block();
+                for bytes in &per_record[..last] {
+                    retried
+                        .read_changes(bytes)
+                        .map_err(|refused| TestCaseError::fail(refused.to_string()))?;
+                }
+                let fault = retried.read_changes(&per_record[last][..cut]);
+                prop_assert!(
+                    matches!(fault, Err(RecordDecodeError::Truncated { .. })),
+                    "a strict prefix gave {fault:?}"
+                );
+                let after = retried.read_changes(&per_record[last]);
+                prop_assert!(after.is_ok(), "the retry refused a good record: {after:?}");
+                prop_assert_eq!(retried.live().ids().to_vec(), uninterrupted);
+            }
+        }
+
+        /// **Any run of records round trips through one buffer**, over the whole `u64` range
+        /// rather than identifiers allocated in order — and read back by advancing on the byte
+        /// count the reader returns, which is what Milestone E3 will do.
+        #[test]
+        fn any_run_of_records_round_trips_through_one_buffer(
+            records in prop::collection::vec(prop::collection::vec(any::<u64>(), 0..8), 1..25),
+        ) {
+            let mut writer = LiveSetWriter::new();
+            writer.start_block();
+            let mut stream = Vec::new();
+            let mut wanted = Vec::new();
+            for record in &records {
+                writer.write_changes(record.iter().copied(), &mut stream);
+                wanted.push(as_a_set(record));
+            }
+
+            let mut reader = LiveSetReader::new();
+            reader.start_block();
+            let mut at = 0usize;
+            let mut back = Vec::new();
+            for _ in &records {
+                let used = reader
+                    .read_changes(&stream[at..])
+                    .map_err(|refused| TestCaseError::fail(format!("record at {at}: {refused}")))?;
+                at += used;
+                back.push(reader.live().ids().to_vec());
+            }
+            prop_assert_eq!(back, wanted);
+            prop_assert_eq!(at, stream.len());
+        }
+
+        /// **Arbitrary bytes are refused, or leave the live set a set** — ascending and without
+        /// duplicates. A decode that returns `Ok` having put an id in twice or out of order is
+        /// what silently breaks Milestone E4's residual subtraction, and it is what a bias defect
+        /// on the arrival gap produces.
+        #[test]
+        fn arbitrary_bytes_are_refused_or_keep_the_live_set_a_sorted_set(
+            chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..24), 1..8),
+        ) {
+            let mut reader = LiveSetReader::new();
+            reader.start_block();
+            for chunk in &chunks {
+                if reader.read_changes(chunk).is_err() {
+                    break;
+                }
+                let ids = reader.live().ids();
+                prop_assert!(
+                    ids.windows(2).all(|pair| pair[0] < pair[1]),
+                    "the live set stopped being a sorted set: {ids:?}"
+                );
+            }
+        }
+    }
+
+    /// **A record that departs an id and arrives the same id is damage.**
+    ///
+    /// No writer produces it — `derive_changes` puts an id in at most one of the two lists — so a
+    /// stream that does is internally inconsistent. Honouring it would report one departure and
+    /// one arrival for a record where nothing changed, and those two counts are what Milestone
+    /// E4's residual arithmetic is specified against.
+    #[test]
+    fn an_id_that_departs_and_arrives_in_one_record_is_damage() {
+        let mut reader = LiveSetReader::new();
+        reader.start_block();
+        reader.read_changes(&[0, 2, 7, 1]).expect("7 and 9 arrive");
+        assert_eq!(reader.live().ids(), [7, 9]);
+
+        // one departure at position 0 — id 7 — then one arrival of id 7.
+        let refused = reader
+            .read_changes(&[1, 0, 1, 7])
+            .expect_err("departing and arriving one id in one record means nothing");
+        assert!(
+            matches!(refused, RecordDecodeError::Malformed { .. }),
+            "got {refused}"
+        );
+    }
+
+    /// **The edges of the range**: nothing at all, the largest identifier there is, and a live set
+    /// far larger than any fixture above.
+    #[test]
+    fn the_edges_of_the_range_read_back() {
+        let mut nothing = LiveSetReader::new();
+        nothing.start_block();
+        let refused = nothing
+            .read_changes(&[])
+            .expect_err("an empty slice is a stream that stopped before it started");
+        assert!(
+            matches!(refused, RecordDecodeError::Truncated { .. }),
+            "got {refused}"
+        );
+
+        let a_thousand: Vec<ChainId> = (0..1_000).collect();
+        let records = vec![
+            a_thousand.clone(),
+            // the last read of the thousand leaves, and the largest identifier there is arrives
+            a_thousand[..999].to_vec(),
+            {
+                let mut with_the_largest = a_thousand[..999].to_vec();
+                with_the_largest.push(u64::MAX);
+                with_the_largest
+            },
+        ];
+        let (back, _) = round_trip(std::slice::from_ref(&records));
+        assert_eq!(back, records);
     }
 
     /// A gap of nothing and a set that empties: coverage stops, and the next record starts again.

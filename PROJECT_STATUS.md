@@ -19,10 +19,35 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **which reads are live at a record, written as what
+> - **Last completed task (2026-08-27):** **E1 reviewed — a short read left the live set
+> half-advanced, and the retry it instructs silently dropped a read** (the eight-checklist review
+> of step E1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Three agents, 19 mutations, **1,500,000 fuzzed
+> inputs**, one Blocker and four Majors. **The Blocker is a decision E1's own report calls
+> deliberate.** The reader applied a record's departures before it read the arrivals, so a buffer
+> that stopped in the arrival half returned *this record stopped early* — whose whole contract is
+> *fetch more bytes and re-parse it from its first byte* — with the set already moved. Measured
+> over a record that departs one read and gains one, **five of its six cut points retried to
+> success with a read silently gone from the live set for the rest of the block**; on another
+> fixture seven of nine cuts turned a good record into damage. Two of the three agents found it
+> independently, one with a generated-input test that failed on its first case. The rationale in
+> the code was not even true of the code: the departure loop had already finished, and both sides
+> resolve a position against the same earlier set anyway. **The test that should have caught it
+> structurally could not** — it built a fresh reader for each cut, so it checked the fault's class
+> and never the state the fault left behind, which is the only thing the class split protects.
+> **A second gap of the same shape: no fixture ever made an arriving read sort below one already
+> live**, so both interleaving arms of the module's two merges were dead code under test — and
+> that shape is precisely a read coming back, which is 83 % of reads on the human sample and 91 %
+> on tomato. **Two figures of mine were wrong**, both in prose: the raw-identifier baseline quoted
+> for both depths is the deep one's alone (the real savings are 2.4× and 6.8×, not a hundredfold),
+> and the block restatement's 12 % was measured at blocks sixty-seven times smaller than the one
+> that ships. Fifteen defects re-injected, fifteen caught.
+> [the review](doc/devel/reports/reviews/ng_psp_e1_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e1_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **which reads are live at a record, written as what
 > changed since the last one** (step E1 of
-> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). A chain id names the read that produced a piece of evidence, and since the
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A chain id names the read that produced a piece of evidence, and since the
 > owner's ruling of 2026-08-17 ng names every read it folds rather than only the ones that
 > disagreed — which is what lets the cohort merge tell a read that covered a position and agreed
 > from one that never reached it. **That makes this the field that decides the file's size at

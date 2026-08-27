@@ -178,7 +178,7 @@ restart-equals-sequential: reading from an arbitrary block gives what a full rea
 merge composes an allele for a read that was never there. Every step is its own commit with its
 oracle green either side.
 
-☐ **E1 — the live set and its changes.** Per position, who arrived and who left; the set restated at
+✅ **E1 — the live set and its changes.** Per position, who arrived and who left; the set restated at
 each block's start.
 ***Depends:*** D5. ***Source:*** [spec psp_chain_id_encoding §4](../spec/psp_chain_id_encoding.md).
 
