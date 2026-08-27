@@ -1100,10 +1100,13 @@ pub const UNWRITTEN_SCRATCH_VALUE: f64 = f64::NAN;
 ///
 /// # The build has two halves, and this has to say which it is counting
 ///
-/// **With contamination on, a caller may no longer cache a whole row across iterations**:
-/// `q(o)`, the contaminating population's frequency for the allele an observation shows, is the
-/// locus's own number and moves with the loop
-/// (`doc/devel/ng/spec/read_likelihoods.md` §3.6, corrected 2026-08-24).
+/// **With contamination on at an ordinary site, a caller may no longer cache a whole row across
+/// iterations**: `q(o)`, the contaminating population's frequency for the allele an observation
+/// shows, is the locus's own number and moves with the loop
+/// (`doc/devel/ng/spec/read_likelihoods.md` §3.6, corrected 2026-08-24). **A repeat tract's third
+/// term does not move** — it is the fit's length spectrum for the tract's stratum, frozen before
+/// calling starts (§4.5.1) — so a contaminated tract caches its whole row like an uncontaminated
+/// one.
 ///
 /// What it may still cache — and what the first three fields count — is the **emission**: the
 /// answer to how one copy of one allele produced one observed sequence. It reads no frequency,
@@ -1144,9 +1147,13 @@ pub(crate) struct EmissionCost {
     /// hold equal observation counts is the one shape that hides the difference (§13 test 5).
     pub(crate) emission_evaluations: u64,
     /// **The cheap half.** How many times the whole `rows × genotypes` table was assembled
-    /// from those emissions. **One** on an uncontaminated run, whatever the pass count; on a
-    /// contaminated one, one for the initialisation pass, one at the head of each pass, and one
-    /// more against the settled frequencies before the final pass.
+    /// from those emissions.
+    ///
+    /// **One wherever the assembled row reads no allele frequency**, whatever the pass count —
+    /// which is every uncontaminated locus, **and every repeat tract**, whose third mixture term
+    /// is frozen before calling starts (spec §4.5.1). At a **contaminated ordinary site** it is
+    /// one for the initialisation pass, one at the head of each pass, and one more against the
+    /// settled frequencies before the final pass.
     pub(crate) table_assemblies: u64,
     /// How many rows were assembled, counted one at a time — `rows × table_assemblies` on a
     /// whole table, and less where an assembly stopped short.
@@ -1192,12 +1199,14 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// `doc/devel/ng/spec/read_likelihoods.md` §1, as against `Lr`, which is one read
     /// against one allele.
     ///
-    /// **Assembled from the emissions below, and how often depends on contamination**: with no
-    /// fraction fitted the assembled row reads no allele frequency, so it is the same value at
-    /// every pass and is written once per locus; with one fitted it holds `q(o)`, which moves
-    /// with the loop, and is written again at every pass
-    /// (`doc/devel/ng/spec/read_likelihoods.md` §3.6, §6.1). What is written once either way is
-    /// the emissions.
+    /// **Assembled from the emissions below, and how often depends on whether the assembled row
+    /// reads an allele frequency.** With no fraction fitted it does not, so the row is the same
+    /// value at every pass and is written once per locus. With one fitted, an **ordinary site's**
+    /// row holds `q(o)` — the cohort's own frequency for the allele an observation shows — which
+    /// moves with the loop, so it is written again at every pass; a **repeat tract's** third term
+    /// is the fit's length spectrum for its stratum, frozen before calling starts, so its row is
+    /// written once too (`doc/devel/ng/spec/read_likelihoods.md` §3.6, §4.5.1, §6.1). What is
+    /// written once in every case is the emissions.
     genotype_likelihoods: Vec<LogProb>,
     /// One entry per genotype: the sample being scored, its log-prior.
     prior_row: Vec<LogProb>,
@@ -1291,14 +1300,15 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// the first half of spec §3.6's `q(o)`, and the half that does not depend on which
     /// sample is being scored. Refilled **once per pass**.
     ///
-    /// Empty on a run the fit found no contamination in, where nothing reads it.
+    /// Empty wherever nothing reads it — a run the fit found no contamination in, and **every
+    /// repeat tract of any run**, whose mixture reads no per-batch frequency.
     batch_allele_copies: Vec<f64>,
     /// `batches × alleles`, batch-major: the contaminant allele frequencies **one sample** is
     /// scored against — the copies above turned into a distribution with that sample's own
     /// copies taken out of its own batch. Refilled **once per sample per pass**, because the
     /// subtraction is that sample's.
     ///
-    /// Empty on a run the fit found no contamination in.
+    /// Empty wherever nothing reads it — see [`batch_allele_copies`](Self::batch_allele_copies).
     contaminant_allele_frequencies: Vec<f64>,
     /// `run samples × alleles`, sample-major: the expected copies above, scattered from the
     /// scratch rows back onto the **run's** sample axis, with zero at every sample this locus
@@ -1311,7 +1321,7 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// gives such a batch a row of zeros instead, which is what the M-step already does with an
     /// uncallable sample: it contributes nothing.
     ///
-    /// Empty on a run the fit found no contamination in.
+    /// Empty wherever nothing reads it — see [`batch_allele_copies`](Self::batch_allele_copies).
     expected_copies_by_run_sample: Vec<f64>,
     /// How many sequencing batches the two tables above are sized for. **Zero means the
     /// contaminant tables were not prepared**, which is what an uncontaminated locus leaves
@@ -1327,7 +1337,7 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// ([`inference::repeat_tract_parameters`](super::calling::inference::repeat_tract_parameters)).
     ///
     /// **Held here rather than built per locus** for the reason every buffer in this type is:
-    /// its four vectors are cleared and refilled at each tract, so a worker allocates them once
+    /// its seven vectors are cleared and refilled at each tract, so a worker allocates them once
     /// for a whole run. What cannot be held here is the *contexts* built from it — they borrow
     /// these vectors, so a struct owning both would be self-referential — and those are one
     /// allocation per tract, which is the cost the repeat path pays and the SNP/indel path does
@@ -1989,10 +1999,12 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// **Size this locus's two contaminant tables** — one row per sequencing batch, and the
     /// run's whole sample axis for the copies those rows are summed from.
     ///
-    /// **Called only where the run fitted a contamination fraction**, and after
+    /// **Called only where the locus's own mixture reads a per-batch frequency**, which is an
+    /// **ordinary site** in a run that fitted a fraction — a repeat tract's third term is the
+    /// fit's frozen length spectrum and reads none. And called after
     /// [`prepare_for_locus`](Self::prepare_for_locus), which un-sizes them. That order is what
-    /// makes an uncontaminated locus unable to read a contaminated one's frequencies: the
-    /// tables come back empty and every accessor below refuses them.
+    /// makes a locus unable to read another's frequencies: the tables come back empty and every
+    /// accessor below refuses them.
     ///
     /// **The run's sample axis and not the locus's rows.** The batching is declared over the
     /// run, so a batch whose samples were all ruled uncallable at this locus still has a row in

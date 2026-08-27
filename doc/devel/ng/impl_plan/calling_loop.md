@@ -59,9 +59,9 @@ scores complete observations only.
    sentence *"supplying the candidates is enough"* was retired.
 3. **The driver had no route from a tract's evidence to that row** — its emission build and its
    row assembly both took the SNP/indel path's per-sample evidence. **Closed by E3b, 2026-08-27**:
-   five places branch, the front-door refusal is gone, and a tract is scored. What is still
-   refused is narrower — a *contaminated* tract, by the assembly that would have to supply the
-   third term of its read-likelihood mixture, which is **E2d**.
+   five places branch, the front-door refusal is gone, and a tract is scored. A *contaminated*
+   tract was refused for one step longer, until the third term of its read-likelihood mixture was
+   built; **that is E2d, closed the same day**. Nothing on this path is refused now.
 
 ---
 
@@ -369,21 +369,22 @@ borrow the stutter models, so the models and the contexts cannot live in one str
   **Answered** with a stated constant, defined as the SNP/indel path's default so that a run
   cannot default its two error parameters to two different guesses.
 
-**What it does not build**, so that the boundary is a sentence rather than a discovery: the
-**contaminant seed at a tract**, which is E2d's. The assembly **refuses a run whose fit found
-contamination** rather than handing back the two-term form, and the panic names E2d — a
-mechanism rather than a doc comment, because the two-term row returns perfectly plausible
-numbers. *(When E2c landed, the driver still turned away every repeat tract because it had no route
-from a tract's evidence to the row. **E3b built that route**, so the only refusal left on this
-path is the contaminated one above.)*
+**What it did not build**, recorded because the boundary was a sentence rather than a discovery:
+the **contaminant seed at a tract**. While it was missing, this assembly **refused a run whose fit
+found contamination** rather than handing back the two-term form — a mechanism rather than a doc
+comment, because the two-term row returns perfectly plausible numbers with the fitted fraction
+silently dropped. **E2d built the seed and retired that refusal**; what is left in its place is a
+check that the seed and the fractions came from one run. *(When E2c landed the driver also still
+turned away every repeat tract, having no route from a tract's evidence to the row; E3b built
+it.)*
 *Depends:* D1, E1, E2. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.2, §4.3, §4.4, §4.5;
 [`../arch/read_likelihoods.md`](../arch/read_likelihoods.md) §4.1, §4.2.
 
-**E2d. The contaminant seed at a repeat tract.**  ☐
-**Runs after E3b, not before it**: E2c refuses a contaminated run by name, so E3b's tract fixture
-does not need this and nothing else reaches a tract yet. The third term of §4.5.1's mixture, which
-is the one field of the row's locus parameters E2c leaves empty.
+**E2d. The contaminant seed at a repeat tract.**  ✅
+**Ran after E3b, not before it**: E2c refused a contaminated run by name, so E3b's tract fixture
+did not need this and nothing else reached a tract yet. The third term of §4.5.1's mixture, which
+was the one field of the row's locus parameters E2c left empty.
 
 The prior's seed shape is built **per candidate**
 (`genotype_prior::seed_ssr::fill_seed_share_per_candidate`) and `c · seed(o)` asks for a
@@ -398,6 +399,16 @@ share that length's mass in the *prior*; keying to lengths is what keeps that on
 place. *Depends:* E2a, E2c. *Source:*
 [`../spec/read_likelihoods.md`](../spec/read_likelihoods.md) §4.5.1;
 [`../arch/calling_priors.md`](../arch/calling_priors.md) §5.
+
+**⚑ What this step turned up, and it changes a cost claim rather than a number.** A repeat tract's
+contaminant term is the **fit's** length spectrum, frozen before calling — §4.5.1 weighed the
+cohort's own per-locus frequencies against it and refused them, because contamination must not
+move from one pass to the next. So **a contaminated tract's genotype-likelihood table is still
+built once**, where a contaminated ordinary site is assembled again at the head of every pass
+(§3.6). The driver's per-locus flag is therefore *does this locus's table move as the loop
+iterates*, which is contamination **and** the SNP/indel path — not contamination alone. E2a's
+entry above describes the ordinary-site half and is unchanged; this is the tract half it did not
+have to consider.
 
 **E2b. The run says what contamination it used, per sample.**  ☐
 **Runs after E3a, not before it** — its own *Depends* line says so, and it is listed here because

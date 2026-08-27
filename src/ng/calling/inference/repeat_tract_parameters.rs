@@ -55,31 +55,43 @@
 //! own literals — and no provenance mentions it either. What the constant is owed instead is a line in the run's output, which is where
 //! `spec/read_likelihoods.md` §3.6 already puts the contamination fraction.
 //!
-//! # What this module does not build
+//! # The contaminant seed, and why it is frozen where the SNP/indel path's is not
 //!
-//! **The contaminant seed** — spec §4.5.1's third term, the one field of
-//! [`SsrLocusParameters`] left `None` here. Converting the genotype prior's per-candidate seed
-//! shape into a distribution over these same reachable lengths is the calling loop's job and
-//! its own step. Until it exists, [`TractScoringFits::locus_parameters`] **refuses a run whose
-//! fit found contamination**, naming that step: scoring such a run on the two-term form would
-//! drop a fraction the pre-pass measured with nothing saying so.
+//! **Spec §4.5.1's third term is built here**, on every run whose fit found a fraction: how
+//! common each of this tract's reachable lengths is in the contaminating population. It is the
+//! genotype prior's own belief about which lengths this tract can be — the stratum's fitted
+//! **length spectrum** — converted from the per-candidate shape the prior builds into a
+//! distribution over lengths, which is what `c · seed(o)` asks for.
+//!
+//! **The cohort's own fitted frequencies at the locus would be the natural source and are
+//! refused.** They are specific to the locus, which is the first thing the term needs; they fail
+//! the second, because contamination is frozen before calling and they are what the caller
+//! rewrites at every pass. The fitted spectrum meets both — it is indexed from *this tract's*
+//! reference length, and it does not move while the loop iterates. **So a repeat tract's whole
+//! row is frequency-free even under contamination**, which is the opposite of the SNP/indel
+//! path, where `q(o)` is the loop's own estimate and moves with it (spec §3.6).
+//!
+//! # What this module does not build
 //!
 //! **Nor does anything here score a tract.** What this module assembles is what a tract's row
 //! is scored *from*; the walk that hands each sample's reads to that row belongs to the calling
 //! loop's driver (`inference::summarise_condition`).
 
 use crate::ng::alignment::StutterModel;
+use crate::ng::calling::genotype_prior::fill_seed_share_per_candidate;
 use crate::ng::calling::likelihood::ssr::{
-    DEFAULT_OUTLIER_WEIGHT, SsrLocusParameters, SsrScoringContextTable,
+    DEFAULT_OUTLIER_WEIGHT, SsrContaminationMixture, SsrLocusParameters, SsrScoringContextTable,
 };
 use crate::ng::calling::likelihood::ssr_emission::{
     SsrCandidate, SsrScoringContext, fill_reachable_lengths,
 };
 use crate::ng::calling::likelihood::stutter_rates::stutter_model_for;
-use crate::ng::calling::{CandidateAlleles, FrozenParameters};
+use crate::ng::calling::{CandidateAlleles, ContaminationView, FrozenParameters};
 use crate::ng::locus_generation::LocusKind;
 use crate::ng::parameter_estimation::Provenance;
-use crate::ng::parameter_estimation::joint::stratum_fits::{FittedSlippage, NoSlippage};
+use crate::ng::parameter_estimation::joint::stratum_fits::{
+    FittedSlippage, LengthSpectrum, NoSlippage,
+};
 use crate::ng::parameter_estimation::ssr::RepeatCount;
 use crate::ng::types::{ErrorRate, Motif, ReadGroupId};
 
@@ -157,9 +169,10 @@ pub struct TractScoringFits {
     /// [`SsrScoringContext::new`] makes for taking the mass from the distribution rather than
     /// from its caller: a fact taken twice is a fact that can disagree.
     motif: Option<Motif>,
-    /// Whether the run's parameter fit found contamination — **read only to refuse**, because
-    /// the third term of the mixture is not built here (the module's own documentation says
-    /// where it belongs).
+    /// Whether the run's parameter fit found contamination — **what decides whether this tract
+    /// gets the three-term form or the two**, and what
+    /// [`Self::contaminant_length_frequencies`] was built, or left empty, from. Its one other
+    /// reader checks that the fractions the row is handed came from the same run.
     run_fitted_contamination: bool,
     /// `read groups × candidates`, read-group-major — the same order
     /// [`SsrScoringContextTable`] indexes.
@@ -172,6 +185,16 @@ pub struct TractScoringFits {
     /// The tract lengths the junk term is spread over — ascending, without repeats, and a
     /// property of the candidate set and the two slip cutoffs with no cohort in it (spec §4.5).
     reachable_lengths: Vec<u32>,
+    /// **How common each of those lengths is in the contaminating population** — parallel to
+    /// [`Self::reachable_lengths`], entry for entry, summing to one. **Empty on a run whose fit
+    /// found no contamination**, where there is no third term to spread.
+    ///
+    /// It is the prior's own belief about which lengths this tract can be, converted from the
+    /// per-candidate shape the prior builds into a distribution over lengths
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §4.5.1). Most entries are zero: the reachable
+    /// support is every length the slip cutoffs admit from any candidate, and only the
+    /// candidates themselves carry mass.
+    contaminant_length_frequencies: Vec<f64>,
     /// How many candidates each read group's row covers — the stride, held so that the one
     /// spelling of it is this type's.
     candidates: usize,
@@ -195,6 +218,16 @@ pub struct TractScoringFits {
     /// How many cells took [`DEFAULT_SSR_SUBSTITUTION_RATE`] because the fit has no entry for
     /// them.
     substitution_defaulted: usize,
+    /// The candidates' repeat counts as plain numbers, for the prior's seed builder — a type
+    /// conversion held here rather than allocated per tract.
+    ///
+    /// **Empty on an uncontaminated run**, where the prior's shape is still read — every tract
+    /// is seeded from it — but not through this type: what is not needed there is the
+    /// *normalised per-candidate share* below, which only the contaminant term takes.
+    candidate_repeat_counts: Vec<u32>,
+    /// The prior's share for each candidate, summing to one, before it is scattered onto the
+    /// length support. Empty on an uncontaminated run, which has no third term to spread.
+    share_of_each_candidate: Vec<f64>,
 }
 
 impl TractScoringFits {
@@ -220,12 +253,32 @@ impl TractScoringFits {
         &mut self,
         motif: &Motif,
         candidates: &[SsrCandidate<'_>],
+        tract_prior: TractPrior<'_>,
         parameters: &FrozenParameters<'_>,
     ) {
+        let reference_repeats = tract_prior.reference_repeats;
         assert!(
             !candidates.is_empty(),
             "a repeat tract is called over at least its reference allele, so a locus with no \
              candidates is a candidate set that went missing on the way in"
+        );
+        // **The reference tract's repeat count is a second spelling of `candidates[0]`, and
+        // this is what stops the two coming apart.** The reference allele is id 0 of every
+        // candidate table and these candidates are in that order, so the caller has the number
+        // already; it is taken as an argument because *which* repeat count keys the prior's
+        // length spectrum is the one thing at a tract that is easy to get wrong, and naming it
+        // makes the wrong one something somebody has to type. A candidate's count passed here
+        // re-centres the spectrum on that candidate and flattens the prior, and the seed still
+        // sums to one — which is why `fill_seed_share_per_candidate`'s own documentation lists
+        // it among the mistakes nothing inside it can catch. Here it is catchable.
+        assert_eq!(
+            reference_repeats.get(),
+            candidates[0].repeat_count.get(),
+            "this tract's reference allele holds {} whole repeats and the prior was asked to \
+             centre on {}: a candidate's count passed as the reference tract's re-centres the \
+             fitted length spectrum on that candidate",
+            candidates[0].repeat_count.get(),
+            reference_repeats.get()
         );
         let read_groups = parameters.read_group_count();
         // **Held in debug only, and no test can reach it**: `FrozenParameters` refuses an empty
@@ -295,6 +348,131 @@ impl TractScoringFits {
         }
 
         fill_reachable_lengths(candidates, motif, &mut self.reachable_lengths);
+        self.fill_contaminant_length_frequencies(candidates, tract_prior, parameters);
+    }
+
+    /// **Turn the prior's belief about this tract's lengths into the third term of the row's
+    /// mixture** — how common each reachable length is in the contaminating population.
+    ///
+    /// Left empty on a run whose fit found no contamination, where there is no third term.
+    ///
+    /// # The two halves speak different units, and this is where they meet
+    ///
+    /// **The prior speaks in whole repeats.** Its length spectrum is indexed by offset from the
+    /// reference tract's repeat count, so what it hands back is one share per *candidate*, each
+    /// candidate placed by the repeat count the locus generator measured for it.
+    ///
+    /// **The reads speak in bases.** An observation shows a byte length, and the reachable
+    /// support the outlier term is spread over is a list of byte lengths — so this term has to
+    /// be one too, or the row's three terms would not be probabilities of the same event.
+    ///
+    /// So each candidate's share is added at the support entry its **bases** land on. **Two
+    /// candidates of one byte length therefore share one entry**, and they sum into it rather
+    /// than each taking the full share — which is what
+    /// [`SsrContaminationMixture::contaminant_length_frequencies`]' own documentation asks for.
+    ///
+    /// **An interrupted tract is exactly that case, and what it costs is worth stating
+    /// precisely.** Such a candidate can spell as many bases as a clean one while holding fewer
+    /// whole repeats, so the prior places the two at different offsets and gives them different
+    /// shares. The *read likelihood* separates them easily — a read carrying the interruption
+    /// scores higher against the interrupted allele by about 28 Phred per distinguishing base at
+    /// an error rate of 1 in 200 (spec §4.6). It is this term that cannot: a contaminating read
+    /// shows a length, and two spellings of one length are one length. **How the prior should
+    /// divide a length class between two such candidates is a separate question and is not
+    /// answered here** — it is `spec/calling_priors.md`'s open question 3, stated in its §5.2,
+    /// and keying this to lengths is what keeps it in one place.
+    ///
+    /// # The shares are renormalised over the candidates, and that raises the term
+    ///
+    /// The prior's shape is divided by its total **over this locus's candidates only**, so the
+    /// spectrum's mass at lengths no candidate carries is spread onto the ones that do rather
+    /// than dropped. The row's own contract forces it — a distribution that did not sum to one
+    /// would make the three terms incomparable — and it is what
+    /// [`fill_seed_share_per_candidate`] is documented to return.
+    ///
+    /// **What it costs, with its size.** On this module's own two-candidate fixture — reference
+    /// 6 repeats, candidates at 6 and 7, the fit's spectrum putting 0.44 of a stratum's
+    /// chromosomes at the reference length — the seed says 0.8 rather than 0.44. At a fitted
+    /// fraction of 5 in 100 the mixture then credits 0.040 of a read at that length to the
+    /// contaminant where the spectrum alone would credit 0.022: **1.8 times the fitted weight**.
+    /// The effective fraction at a candidate length is `c` divided by the share of the
+    /// spectrum's mass the candidate set covers, and a locus whose candidates cover little of
+    /// what the stratum spreads over inflates it most.
+    ///
+    /// **What that is not.** Spec §4.5.1 says a contaminating read at a length no candidate
+    /// carries "falls to the outlier floor instead — which is where they go today, so nothing
+    /// is lost", and that stays true: such a length gets no entry here. What moves is the
+    /// weight *between* the candidates' own lengths, and it moves toward them.
+    ///
+    /// # Why the shares are the prior's rather than the loop's own frequencies
+    ///
+    /// The cohort's fitted frequencies at this locus are the natural answer to *how common is
+    /// each length here*, and they are refused: contamination is frozen before calling, and
+    /// those are what the loop rewrites at every pass (spec §4.5.1). The fitted length spectrum
+    /// is specific to this locus — it is indexed from this tract's own reference length — and it
+    /// does not move while the loop iterates. **So a repeat tract's whole row is frequency-free
+    /// even under contamination**, which is the opposite of the SNP/indel path, where `q(o)` is
+    /// the loop's own estimate and moves with it (§3.6).
+    ///
+    /// # Panics
+    ///
+    /// If a candidate's own byte length is not in the reachable support. It always is — the
+    /// support is built from each candidate's length plus every slip the cutoffs admit, and a
+    /// slip of nothing is among them — so this is a check on that construction rather than on
+    /// the caller.
+    fn fill_contaminant_length_frequencies(
+        &mut self,
+        candidates: &[SsrCandidate<'_>],
+        tract_prior: TractPrior<'_>,
+        parameters: &FrozenParameters<'_>,
+    ) {
+        // **Cleared before the early return, so an uncontaminated tract cannot carry a
+        // contaminated one's seed.** Only the first of the three is load-bearing in a run — a
+        // stale `contaminant_length_frequencies` of the same width would survive the `resize`
+        // below and the `+=` would accumulate onto it — because a run is contaminated or not
+        // as a whole and cannot change between two of its loci. The other two are cleared
+        // here because this type is public and default-constructible, and because the two
+        // fields say they are empty on an uncontaminated run.
+        self.contaminant_length_frequencies.clear();
+        self.candidate_repeat_counts.clear();
+        self.share_of_each_candidate.clear();
+        if parameters.contamination_is_absent() {
+            return;
+        }
+
+        // The prior's shape, one share per candidate, summing to one.
+        self.candidate_repeat_counts.extend(
+            candidates
+                .iter()
+                .map(|candidate| candidate.repeat_count.get()),
+        );
+        self.share_of_each_candidate
+            .resize(candidates.len(), f64::NAN);
+        fill_seed_share_per_candidate(
+            &self.candidate_repeat_counts,
+            tract_prior.reference_repeats.get(),
+            tract_prior.length_spectrum,
+            &mut self.share_of_each_candidate,
+        );
+
+        self.contaminant_length_frequencies
+            .resize(self.reachable_lengths.len(), 0.0);
+        for (candidate, share) in candidates.iter().zip(&self.share_of_each_candidate) {
+            let spelled = candidate.bases.len() as u32;
+            let at = self
+                .reachable_lengths
+                .binary_search(&spelled)
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "a candidate spelling {spelled} bases is not among the {} lengths this \
+                         tract can reach, and every candidate's own length is reachable by \
+                         construction — the support and the candidates were built from \
+                         different sets",
+                        self.reachable_lengths.len()
+                    )
+                });
+            self.contaminant_length_frequencies[at] += share;
+        }
     }
 
     /// The scoring contexts, in the order [`SsrScoringContextTable`] indexes them.
@@ -348,22 +526,27 @@ impl TractScoringFits {
         contexts
     }
 
-    /// Everything the row takes at this tract, with the contaminant seed absent.
+    /// **Everything the row takes at this tract** — the candidates, their scoring contexts, the
+    /// outlier weight, the lengths it is spread over, and, on a run whose fit found
+    /// contamination, the third term of the mixture.
     ///
-    /// **The seed is `None` and that is this step's boundary rather than a two-term model.**
-    /// Spec §4.5.1's third term is built and on by default wherever the pre-pass emits a
-    /// fraction; what is unwritten is the conversion of the genotype prior's per-candidate seed
-    /// shape into a distribution over [`Self::reachable_lengths`]. **So a run whose fit found
-    /// contamination is refused here rather than quietly scored on the two-term form**, which
-    /// would drop a measured fraction with nothing saying so — the failure §4.5.1 exists to
-    /// stop. A doc comment saying *the caller must not* would have been the same guarantee
-    /// without the mechanism.
+    /// **The third term is present exactly when the run's fit found a fraction**, which is spec
+    /// §4.5.1's rule and the same one the SNP/indel path follows: contamination is a property of
+    /// the sample rather than of the marker, so a caller that corrects for it at one kind of
+    /// locus and not the other is treating one number as two.
+    ///
+    /// `contamination_of_each_read_group` is the run's own list, in read-group order — the
+    /// fractions the pre-pass fitted, each carrying whose reads it was fitted from. It must be
+    /// empty exactly when the fit found nothing, which is what
+    /// [`FrozenParameters::contamination_is_absent`] answers.
     ///
     /// # Panics
     ///
-    /// If the run's parameter fit found contamination anywhere. The boundary is named in the
-    /// message, so a reader of the panic learns which step supplies the missing term rather
-    /// than that something is unimplemented.
+    /// If `contamination_of_each_read_group` disagrees with what this was gathered under about
+    /// whether the run is contaminated. The seed was built, or not built, from that same
+    /// predicate one call earlier, so a disagreement means the two came from different runs —
+    /// and the row would then be handed a fraction against an empty seed, or a seed nothing
+    /// scales.
     ///
     /// If `candidates` or `contexts` is not the shape this was gathered for — the same
     /// mispairing [`Self::scoring_contexts`] refuses, restated because a caller may hold
@@ -376,15 +559,33 @@ impl TractScoringFits {
         &'a self,
         candidates: &'a [SsrCandidate<'a>],
         contexts: &'a [SsrScoringContext<'a>],
+        contamination_of_each_read_group: &'a [ContaminationView],
     ) -> SsrLocusParameters<'a> {
-        assert!(
+        assert_eq!(
+            contamination_of_each_read_group.is_empty(),
             !self.run_fitted_contamination,
-            "this run's parameter fit found contamination, and a repeat tract's third mixture \
-             term — how common the length an observation showed is in the contaminating \
-             population — is not built yet. Scoring the tract on the two-term form would drop \
-             the fitted fraction in silence; step E2d of the calling loop's plan is where the \
-             prior's per-candidate seed shape becomes a distribution over this tract's \
-             reachable lengths"
+            "these fits were gathered for a run whose parameter fit {} contamination, and a \
+             contamination list of {} read groups reached the row — so the seed and the \
+             fractions came from different runs",
+            if self.run_fitted_contamination {
+                "found"
+            } else {
+                "found no"
+            },
+            contamination_of_each_read_group.len()
+        );
+        // **And it must be one fraction per read group of the run**, which is the axis the
+        // context table below is indexed on. A shorter list is not caught by the emptiness
+        // check above and would surface only if a read from a high-numbered library happened to
+        // arrive at this tract — at which point the row refuses it several frames away, naming
+        // the table rather than the locus.
+        assert!(
+            contamination_of_each_read_group.is_empty()
+                || contamination_of_each_read_group.len() == self.read_groups,
+            "these fits cover {} read groups and {} contamination fractions reached the row, so \
+             one of the two describes a different run",
+            self.read_groups,
+            contamination_of_each_read_group.len()
         );
         assert_eq!(
             candidates.len(),
@@ -406,7 +607,12 @@ impl TractScoringFits {
             contexts: SsrScoringContextTable::new(contexts, self.candidates),
             outlier_weight: DEFAULT_OUTLIER_WEIGHT,
             reachable_lengths: &self.reachable_lengths,
-            contamination: None,
+            contamination: self
+                .run_fitted_contamination
+                .then(|| SsrContaminationMixture {
+                    fraction_of_each_read_group: contamination_of_each_read_group,
+                    contaminant_length_frequencies: &self.contaminant_length_frequencies,
+                }),
         }
     }
 
@@ -490,6 +696,31 @@ impl TractScoringFits {
             )
         })
     }
+}
+
+/// **What a repeat tract's genotype prior believes about its lengths** — the two things every
+/// consumer of that belief needs, looked up **once** per tract and handed to both.
+///
+/// # Why one value rather than two arguments
+///
+/// The prior's belief is used twice at each tract: the genotype prior's own seed, and the third
+/// term of the read-likelihood mixture, which asks how common each length is in the
+/// contaminating population. Both read the same fitted **length spectrum**, and both must read
+/// the *same* one — the run reports which rung of the tract ladder answered, and a run that
+/// reported one rung while scoring against another would be saying something false about its own
+/// calls.
+///
+/// **Two lookups keyed identically is a coincidence somebody can break**; one lookup passed to
+/// both is not. So the caller looks it up and this carries the pair.
+#[derive(Debug, Clone, Copy)]
+pub struct TractPrior<'a> {
+    /// **The tract's own reference repeat count**, which is what the spectrum's offsets are
+    /// measured from — not any candidate's. It is entry 0 of the candidate table, and
+    /// [`TractScoringFits::gather_for_locus`] checks that it is.
+    pub reference_repeats: RepeatCount,
+    /// How that stratum's chromosomes are spread over tract lengths, and how strongly the fit
+    /// holds them — with the rung of the tract ladder it came from on it.
+    pub length_spectrum: LengthSpectrum<'a>,
 }
 
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
@@ -662,6 +893,26 @@ mod tests {
 
     fn period() -> SsrPeriod {
         motif().ssr_period()
+    }
+
+    /// The reference tract's own repeat count — entry 0 of [`CANDIDATE_REPEATS`], because the
+    /// reference allele is id 0 of every candidate table. It is what the prior's length
+    /// spectrum measures its offsets from, and it is not any other candidate's.
+    fn reference_repeats() -> RepeatCount {
+        RepeatCount(CANDIDATE_REPEATS[0])
+    }
+
+    /// What the genotype prior believes about a tract of this reference length, looked up the
+    /// way the driver looks it up.
+    fn tract_prior<'a>(
+        reference_repeats: RepeatCount,
+        parameters: &FrozenParameters<'a>,
+    ) -> TractPrior<'a> {
+        TractPrior {
+            reference_repeats,
+            length_spectrum: parameters
+                .ssr_length_spectrum_at(motif().ssr_period(), reference_repeats),
+        }
     }
 
     fn repeats(count: u32) -> NonZeroU32 {
@@ -912,7 +1163,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -958,7 +1214,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -993,7 +1254,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1045,7 +1311,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1086,7 +1357,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1151,7 +1427,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1204,7 +1485,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1238,7 +1524,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         let lengths = gathered.reachable_lengths();
         assert_eq!(lengths.len(), 41);
@@ -1286,7 +1577,14 @@ mod tests {
             repeat_count: repeats(20),
         }];
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &lone, &parameters);
+        // Its own reference count, because it is its own tract — the gather refuses a
+        // reference count that is not its first candidate's.
+        gathered.gather_for_locus(
+            motif(),
+            &lone,
+            tract_prior(RepeatCount(20), &parameters),
+            &parameters,
+        );
         assert_eq!(gathered.cell_count(), READ_GROUPS);
         assert_eq!(gathered.cells_with_no_fitted_slippage(), READ_GROUPS);
         assert_eq!(
@@ -1299,7 +1597,12 @@ mod tests {
 
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         assert_eq!(gathered.cell_count(), READ_GROUPS * CANDIDATE_REPEATS.len());
         assert_eq!(gathered.cells_with_no_fitted_slippage(), 0);
@@ -1378,7 +1681,7 @@ mod tests {
         genotype_log_likelihood_row(
             &StutterSubstitutionEmission,
             &evidence,
-            gathered.locus_parameters(alleles, &contexts),
+            gathered.locus_parameters(alleles, &contexts, &[]),
             &view,
             &mut out,
             &mut scratch,
@@ -1405,7 +1708,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         let observations = [spanning(&tract(CANDIDATE_REPEATS[1]), 20, 0)];
         let row = score_row(&gathered, &alleles, &observations);
@@ -1446,7 +1754,12 @@ mod tests {
         let fits = fits_for_both_candidates();
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         // The same table with the longer candidate's stratum carrying the shorter one's
         // numbers — what a lookup keyed by the reference tract rather than by the candidate
@@ -1472,7 +1785,12 @@ mod tests {
         );
         let flat_parameters = run(&calibration, &inbreeding, &flattened, &rates);
         let mut flat_gathered = TractScoringFits::default();
-        flat_gathered.gather_for_locus(motif(), &alleles, &flat_parameters);
+        flat_gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &flat_parameters),
+            &flat_parameters,
+        );
 
         let observations = [
             spanning(&tract(CANDIDATE_REPEATS[0]), 10, 0),
@@ -1506,9 +1824,14 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
-        let locus = gathered.locus_parameters(&alleles, &contexts);
+        let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
 
         assert_eq!(locus.outlier_weight, DEFAULT_OUTLIER_WEIGHT);
         assert_eq!(locus.outlier_weight, 0.01);
@@ -1591,7 +1914,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(&trinucleotide, &alleles, &parameters);
+        gathered.gather_for_locus(
+            &trinucleotide,
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         assert_eq!(
             gathered.cells_with_no_fitted_slippage(),
@@ -1645,7 +1973,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1710,7 +2043,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
         let table = SsrScoringContextTable::new(&contexts, alleles.len());
 
@@ -1758,7 +2096,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         assert_eq!(gathered.cell_count(), CANDIDATE_REPEATS.len());
         assert_eq!(gathered.cells_with_no_fitted_slippage(), 0);
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
@@ -1796,7 +2139,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
 
         // Read groups 1 and 2 are unknown to the fit, so all four of their cells are lost that
         // way — an unknown library is answered before the stratum is even looked up. Read group
@@ -1810,16 +2158,27 @@ mod tests {
         assert_eq!(gathered.weakest_warrant(), Provenance::Defaulted);
     }
 
-    /// **A run whose fit found contamination is refused rather than scored on the two-term
-    /// form**, naming the step that supplies the missing term.
+    /// **A run whose fit found contamination gets the three-term form, and the third term is a
+    /// distribution over this tract's reachable lengths.**
     ///
-    /// Spec §4.5.1 puts the third term on by default wherever the pre-pass emits a fraction. A
-    /// doc comment saying a caller must not reach here would have been the same guarantee
-    /// without a mechanism — and the failure it prevents is silent, since the two-term row
-    /// returns perfectly plausible numbers.
+    /// Spec §4.5.1 puts it on wherever the pre-pass emits a fraction. What it must be is a
+    /// probability over the *same* support the outlier term is spread over — otherwise the row's
+    /// three terms are not probabilities of one event — so this checks the width, the total, and
+    /// where the mass actually sits.
+    ///
+    /// **The mass sits at the candidates' byte lengths and nowhere else.** This fixture's two
+    /// candidates hold 6 and 11 whole `AC` repeats, so they spell **12 and 22 bases**, and the
+    /// reachable support is far wider than that — every length the slip cutoffs admit from
+    /// either. Every other entry is zero, which is the shape rather than a defect: a
+    /// contaminating read at a length no candidate carries falls to the outlier floor, which is
+    /// where §4.5.1 puts it.
+    ///
+    /// The fit behind this fixture carries no length spectrum, so the prior answers from the
+    /// ladder's bottom rung — a flat shape — and the two candidates take **half each**. A fit
+    /// with a spectrum would divide it unevenly; what would not change is the width or the
+    /// total.
     #[test]
-    #[should_panic(expected = "found contamination")]
-    fn a_contaminated_run_is_refused_rather_than_scored_without_the_third_term() {
+    fn a_contaminated_run_gets_a_seed_over_the_lengths_its_candidates_reach() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
         let fits = fits_for_both_candidates();
@@ -1840,9 +2199,181 @@ mod tests {
         );
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
-        let _ = gathered.locus_parameters(&alleles, &contexts);
+        let locus = gathered.locus_parameters(&alleles, &contexts, &views);
+
+        let contamination = locus
+            .contamination
+            .expect("a run whose fit found a fraction is scored on the three-term form");
+        let seed = contamination.contaminant_length_frequencies;
+        assert_eq!(
+            seed.len(),
+            gathered.reachable_lengths().len(),
+            "the seed is keyed to the same support the outlier term is spread over"
+        );
+        assert!(
+            (seed.iter().sum::<f64>() - 1.0).abs() < 1e-12,
+            "the seed is how common each length is, so it sums to one: {seed:?}"
+        );
+        assert!(
+            gathered.reachable_lengths().len() > 4,
+            "the support must be wider than the candidate set for this test to say anything"
+        );
+
+        for (length, share) in gathered.reachable_lengths().iter().zip(seed) {
+            let a_candidates_own_length = *length == 12 || *length == 22;
+            assert_eq!(
+                *share > 0.0,
+                a_candidates_own_length,
+                "length {length} carries {share} of the seed"
+            );
+            if a_candidates_own_length {
+                assert!(
+                    (*share - 0.5).abs() < 1e-12,
+                    "a flat prior over two candidates gives each half: {share}"
+                );
+            }
+        }
+    }
+
+    /// **A reference repeat count that is not the reference allele's is refused**, and this is
+    /// the one mistake at a tract that would otherwise come back as a plausible number.
+    ///
+    /// The prior's length spectrum is indexed by offset from the tract's *reference* length, so
+    /// a candidate's count passed in its place re-centres the whole shape on that candidate: the
+    /// seed still sums to one, every genotype still gets a prior, and the locus is called under
+    /// a belief about which lengths are common that the fit never expressed.
+    /// `fill_seed_share_per_candidate`'s own documentation lists it among the mistakes nothing
+    /// inside it can catch. Here the candidate table is in hand and it is catchable.
+    #[test]
+    #[should_panic(expected = "re-centres the fitted length spectrum")]
+    fn a_reference_count_that_is_not_the_reference_alleles_is_refused() {
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let fits = fits_for_both_candidates();
+        let rates = all_substitution_rates();
+        let calibration = calibrations();
+        let inbreeding = outbred(READ_GROUPS);
+        let parameters = run(&calibration, &inbreeding, &fits, &rates);
+
+        // The *second* candidate's count, where the reference allele's belongs.
+        let wrong = RepeatCount(CANDIDATE_REPEATS[1]);
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(wrong, &parameters),
+            &parameters,
+        );
+    }
+
+    /// **The other direction of the same check, and it is the one that loses a measurement.**
+    /// An uncontaminated gather handed a run's fitted fractions would return the two-term form
+    /// and drop them — a genotype computed as though the library were clean, with nothing in
+    /// the output saying so, which is the failure spec §3.6 exists to prevent.
+    #[test]
+    #[should_panic(expected = "came from different runs")]
+    fn an_uncontaminated_gather_handed_fractions_is_refused() {
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let fits = fits_for_both_candidates();
+        let rates = all_substitution_rates();
+        let calibration = calibrations();
+        let inbreeding = outbred(READ_GROUPS);
+        let parameters = run(&calibration, &inbreeding, &fits, &rates);
+
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
+        let contexts = gathered.scoring_contexts(&alleles);
+        let views = vec![a_contamination_view(0.03); READ_GROUPS];
+        let _ = gathered.locus_parameters(&alleles, &contexts, &views);
+    }
+
+    /// **A fraction list that is not one per read group of the run is refused**, which the
+    /// emptiness check above cannot catch.
+    ///
+    /// A short list is the dangerous shape: the row indexes it by [`ReadGroupId`], so it would
+    /// score every library the list does cover and fail only if a read from one past its end
+    /// happened to reach this tract.
+    #[test]
+    #[should_panic(expected = "describes a different run")]
+    fn a_fraction_list_of_the_wrong_width_is_refused() {
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let fits = fits_for_both_candidates();
+        let rates = all_substitution_rates();
+        let calibration = calibrations();
+        let inbreeding = outbred(READ_GROUPS);
+        let views = vec![a_contamination_view(0.03); READ_GROUPS];
+        let batching = crate::ng::calling::tests::one_batch(READ_GROUPS, READ_GROUPS);
+        let parameters = FrozenParameters::new(
+            &calibration,
+            &views,
+            &batching,
+            &inbreeding,
+            SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+            &fits,
+            &rates,
+            diploid(),
+        );
+
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
+        let contexts = gathered.scoring_contexts(&alleles);
+        let _ = gathered.locus_parameters(&alleles, &contexts, &views[..1]);
+    }
+
+    /// **The seed and the fractions must come from one run.** The seed is built, or left empty,
+    /// from the same predicate that says whether the fractions exist, so a disagreement means
+    /// the two were assembled against different runs — and the row would then scale an empty
+    /// distribution by a fraction, or hold a distribution nothing scales.
+    #[test]
+    #[should_panic(expected = "came from different runs")]
+    fn a_contaminated_gather_handed_no_fractions_is_refused() {
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let fits = fits_for_both_candidates();
+        let rates = all_substitution_rates();
+        let calibration = calibrations();
+        let inbreeding = outbred(READ_GROUPS);
+        let views = vec![a_contamination_view(0.03); READ_GROUPS];
+        let batching = crate::ng::calling::tests::one_batch(READ_GROUPS, READ_GROUPS);
+        let parameters = FrozenParameters::new(
+            &calibration,
+            &views,
+            &batching,
+            &inbreeding,
+            SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+            &fits,
+            &rates,
+            diploid(),
+        );
+
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
+        let contexts = gathered.scoring_contexts(&alleles);
+        let _ = gathered.locus_parameters(&alleles, &contexts, &[]);
     }
 
     /// **Nothing gathered means no warrant to report**, rather than the strongest rung on the
@@ -1885,7 +2416,12 @@ mod tests {
         let calibration = calibrations();
         let inbreeding = outbred(1);
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
-        TractScoringFits::default().gather_for_locus(motif(), &[], &parameters);
+        TractScoringFits::default().gather_for_locus(
+            motif(),
+            &[],
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
     }
 
     /// **Contexts asked for a different candidate set than the fits were gathered over are
@@ -1903,7 +2439,12 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let _ = gathered.scoring_contexts(&alleles[..1]);
     }
 
@@ -1923,9 +2464,14 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
-        let _ = gathered.locus_parameters(&alleles[..1], &contexts);
+        let _ = gathered.locus_parameters(&alleles[..1], &contexts, &[]);
     }
 
     /// **Contexts built at an earlier tract are refused by the row's parameters**, which is a
@@ -1942,9 +2488,14 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 
         let mut gathered = TractScoringFits::default();
-        gathered.gather_for_locus(motif(), &alleles, &parameters);
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &parameters),
+            &parameters,
+        );
         let contexts = gathered.scoring_contexts(&alleles);
-        let _ = gathered.locus_parameters(&alleles, &contexts[..alleles.len()]);
+        let _ = gathered.locus_parameters(&alleles, &contexts[..alleles.len()], &[]);
     }
 
     /// **A SNP/indel candidate table is refused as a repeat tract** — a locus routed to the

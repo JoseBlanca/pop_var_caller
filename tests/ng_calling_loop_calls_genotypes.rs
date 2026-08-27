@@ -56,14 +56,16 @@ use pop_var_caller::ng::calling::likelihood::ssr_emission::{
     StutterSubstitutionEmission, StutterSubstitutionScratch,
 };
 use pop_var_caller::ng::calling::{
-    CallingScratch, CandidateAlleles, FrozenParameters, GenericLocusSample, LocusInference,
-    ReadGroupCalibration, SsrSampleEvidence,
+    CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
+    LocusInference, ReadGroupCalibration, SsrSampleEvidence,
 };
 use pop_var_caller::ng::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
 };
 use pop_var_caller::ng::parameter_estimation::Provenance;
 use pop_var_caller::ng::parameter_estimation::joint::census::Stratum as FitStratum;
+use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationSource;
+use pop_var_caller::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use pop_var_caller::ng::parameter_estimation::joint::share_curve::ShareSource;
 use pop_var_caller::ng::parameter_estimation::joint::slippage_curve::LevelSource;
 use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
@@ -869,8 +871,12 @@ fn tract_strata() -> StratumFits {
         };
     StratumFits::over(
         &[
-            fitted_stratum(6, 0.04, vec![0.10, 0.25, 0.45, 0.15, 0.05], 20.0),
-            fitted_stratum(7, 0.06, vec![0.08, 0.22, 0.44, 0.18, 0.08], 25.0),
+            // **No two adjacent pairs of these weights are in the same ratio.** The first
+            // version's upper tail fell by a factor of three at each step, so a spectrum read
+            // one repeat off centre gave the two candidates the same pair of shares and the
+            // re-centring was invisible.
+            fitted_stratum(6, 0.04, vec![0.10, 0.30, 0.44, 0.11, 0.05], 20.0),
+            fitted_stratum(7, 0.06, vec![0.09, 0.21, 0.43, 0.19, 0.08], 25.0),
         ],
         BTreeMap::from([
             (ReadGroupId(0), 0),
@@ -939,6 +945,66 @@ fn call_tract(
         SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
         strata,
         substitution,
+        diploid(),
+    );
+    let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
+    let config = CallingLoopConfig::DEFAULT
+        .validate()
+        .expect("the shipped configuration");
+    let mut scratch: CallingScratch<StutterSubstitutionScratch> = CallingScratch::default();
+    arm.call_locus(
+        &evidence,
+        &parameters,
+        tract_alleles(),
+        &config,
+        &mut scratch,
+    )
+}
+
+/// The same, in a run whose parameter fit found `fraction` of each library's reads to have come
+/// from another individual.
+fn call_contaminated_tract(
+    observations_of_each_sample: &[Vec<SequenceObservation>],
+    fraction: f64,
+) -> LocusInference {
+    let detail = tract_detail();
+    let per_run_sample: Vec<&[SequenceObservation]> = observations_of_each_sample
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let repeat_counts = tract_repeat_counts();
+    let mut views: Vec<SsrSampleEvidence<'_>> = Vec::new();
+    let evidence = shape_ssr_locus(
+        region(),
+        &per_run_sample,
+        &detail,
+        &repeat_counts,
+        &mut views,
+    );
+
+    let calibration = vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+    let contamination = vec![
+        ContaminationView {
+            fraction,
+            markers_with_reads: 400,
+            reads_on_markers: 1_000,
+            source: ContaminationSource::ThisReadGroupsReads,
+        };
+        TRACT_READ_GROUPS
+    ];
+    let inbreeding =
+        vec![InbreedingF::try_new(0.0).expect("an outbred sample"); per_run_sample.len()];
+    let batching = SequencingBatches::all_together_over(TRACT_READ_GROUPS, per_run_sample.len());
+    let strata = tract_strata();
+    let substitution = tract_substitution_rates();
+    let parameters = FrozenParameters::new(
+        &calibration,
+        &contamination,
+        &batching,
+        &inbreeding,
+        SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape),
+        &strata,
+        &substitution,
         diploid(),
     );
     let arm = SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior);
@@ -1089,4 +1155,76 @@ fn a_repeat_tract_carries_no_artifact_summary_where_a_snp_carries_one() {
 
     let at_a_snp = call(&[sample_locus(vec![showed(b"T", 20)])]);
     assert!(at_a_snp.artifact_test_counts().is_some());
+}
+
+/// **A contaminated library's reads are not called as a second allele at a repeat tract** — the
+/// failure the third term of the tract's read-likelihood mixture exists to prevent, end to end.
+///
+/// Three samples. The middle one carries two copies of the 6-repeat tract and shows twenty reads
+/// of its own plus four at the 7-repeat length that came from another individual's DNA. **With
+/// no fraction fitted it is called `0/1`**. The other two explanations cannot carry four reads:
+/// slippage to exactly one repeat longer runs about **one read in two hundred** at this
+/// stratum's fitted numbers, and the outlier term — reads no allele explains — is spread flat
+/// over every length the tract can reach and is smaller still. **With the fraction the pre-pass
+/// measured, 8 in 100, it is called `0/0`**, which is what it is.
+///
+/// **How this differs from the same correction at a SNP.** At an ordinary site the contaminating
+/// population's frequency for the allele an observation shows is the cohort's own estimate, so it
+/// moves as the loop iterates. At a tract there is no such number per length that is fixed before
+/// calling — so the mixture uses the genotype prior's own belief about which lengths this tract
+/// can be, which is the joint repeat fit's length spectrum for this tract's stratum. It is
+/// specific to the locus, because it is indexed from this tract's own reference length, and it is
+/// frozen, because the fit produced it before calling started.
+#[test]
+fn a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele() {
+    let per_sample = vec![
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)],
+        vec![
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 20),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 4),
+        ],
+        vec![tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)],
+    ];
+
+    let clean = call_tract(&per_sample, &tract_strata(), &tract_substitution_rates());
+    assert_eq!(
+        genotype_of(&clean, 1),
+        vec![0, 1],
+        "with no fraction fitted, four reads at another length are a second allele"
+    );
+
+    let contaminated = call_contaminated_tract(&per_sample, 0.08);
+    assert_eq!(
+        genotype_of(&contaminated, 1),
+        vec![0, 0],
+        "with the fitted fraction they are somebody else's DNA"
+    );
+
+    // **The fraction's own value has to do work, not merely its existence.** At the same four
+    // reads a fitted 5 in 100 is not enough mass to beat a heterozygote that must also account
+    // for twenty reference reads, so it still calls `0/1`. A model that read `c` as a flag would
+    // pass the two assertions above and fail this one.
+    let barely = call_contaminated_tract(&per_sample, 0.05);
+    assert_eq!(
+        genotype_of(&barely, 1),
+        vec![0, 1],
+        "a smaller fitted fraction cannot explain the same four reads"
+    );
+
+    for sample in [0, 2] {
+        assert_eq!(
+            genotype_of(&clean, sample),
+            genotype_of(&contaminated, sample),
+            "sample {sample} is unambiguous at twenty reads and is called the same either way"
+        );
+    }
+    // **The warrant does not cover the fraction, and this assertion does not claim it does.**
+    // A tract's warrant is folded over the stutter and substitution parameters its row reads
+    // per `(read group, candidate)`; the contamination fraction carries where it was fitted
+    // from, and nothing folds that in. Reporting it is a separate job.
+    assert_eq!(
+        contaminated.weakest_provenance,
+        Provenance::FittedHere,
+        "every slippage number and every substitution rate this tract read was the fit's"
+    );
 }
