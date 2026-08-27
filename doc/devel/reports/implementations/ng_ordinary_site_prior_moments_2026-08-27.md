@@ -764,3 +764,62 @@ Recorded as gaps rather than defects, because Milestone A is not the step that c
 - **No test pins an absolute seed value.** The change moves `α_ref` off 1.0 for the first time: on
   the fixture density the pair is `(0.2223, 3.711e-4)` where production's was `(1.0, 6.06e-4)`. A
   reader cannot see the size of that from the suite.
+
+---
+
+## B3 — the inbreeding correction
+
+**Contract (plan B3).** Divide the heterozygosity by `1 − F/(2N − 1)`. Own commit, do not bundle.
+The fixture is one individual at `F = 0.8`, where the factor is `1 − F` and its absence is an 80%
+error; the companion is a panel of a thousand.
+
+### What shipped
+
+`CensusMoments::from_posteriors` takes the panel's inbreeding coefficient and divides the
+heterozygosity by `inbreeding_factor(F, 2N) = 1 − F/(2N − 1)`. **The frequency is untouched**, and
+that is not an omission: inbreeding rearranges copies between an individual's two chromosomes
+without changing how many the panel holds, and the frequency is linear in that count.
+
+**Why the factor is what it is, in one sentence**: a pair of chromosomes drawn at random from the
+panel comes from the *same individual* with probability `1/(2N − 1)`, and with probability `F` such
+a pair is one ancestral copy counted twice and cannot differ.
+
+**It never divides by zero**, because `InbreedingF` admits `[0, 1)` and the factor is smallest at
+one individual, where it is `1 − F`.
+
+### The fixture the spec names, and its companion
+
+| | one individual | a thousand individuals |
+|---|---:|---:|
+| the factor `1 − F/(2N − 1)` at `F = 0.8` | 0.200 | 0.99960 |
+| what the panel shows, against the population | 20% of it | 99.96% of it |
+| what putting it back lifts the answer by | ×5 | 4.004 parts in 10,000 |
+
+**A test written at a thousand would pass with the correction deleted** at any tolerance loose
+enough to survive a real census's own scatter. That is the whole reason the fixture runs at one
+individual, and the companion is there to say so with a number rather than a claim.
+
+**⛦ And a slip caught by the test itself, of exactly the kind the arithmetic review caught earlier
+in this branch.** The first version asserted the lift at a thousand was `0.8/1999`. It is not: that
+is the *shortfall* — what the panel is missing — and the lift that puts it back is
+`(0.8/1999)/(1 − 0.8/1999)`, 4.004 parts in 10,000 against 4.002. The two are the same fact from
+opposite sides and they are not the same number; the test now asserts both and a comment says which
+is which.
+
+### Mutations run
+
+Three, each against the whole 4,840-test library suite:
+
+| mutation | tests failing |
+|---|---|
+| the correction removed entirely | 3 |
+| `2N` written where `2N − 1` belongs | 2 |
+| the sign flipped — multiplying by `1 + F/(2N − 1)` | 3 |
+
+The source was restored from a backup and the restore checked with `git diff`.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,840 passed, 0 failed, 11 ignored**, from 4,837. Three tests added.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.

@@ -135,7 +135,7 @@ dropping the term returns 2.5× the truth. **A cohort test cannot catch this** �
 two agree to three decimals — so a test written on a panel is not a test of it.
 *Depends:* B1. *Source:* spec §3.1, §9 test 2.
 
-**B3. The inbreeding correction.**  ☐
+**B3. The inbreeding correction.**  ✅
 Divide the heterozygosity by `1 − F/(2N − 1)`. **Own commit, do not bundle.** The fixture is one
 individual at `F = 0.8`, where the factor is `1 − F` and its absence is an 80% error; the companion
 is a panel of a thousand, where a `2N` written for `2N − 1` is 0.05% and only the single-individual
