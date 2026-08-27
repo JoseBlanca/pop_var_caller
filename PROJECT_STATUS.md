@@ -42,6 +42,14 @@ Skills and agents are instructed to leave it untouched.
 > the failure to a locus. The second is reachable from data — a library whose reads were all
 > refused at admission — and **what such a run should get is a question for the owner**: refuse it,
 > as now, or give that library the defaulted calibration.
+> **⛦ Eight of 24 planted defects passed every test, and four mattered.** Three of the four
+> library-ownership checks had no test at all — only the error-rate one did, and deleting each of
+> the others left the file green. The seed's fitted diversity could be halved unseen, because the
+> tracing test read the seed's mean frequency and that ratio is exactly the frequency for **any**
+> total, so the diversity cancels. A filter dropping every non-diploid key from the tract
+> projection left all 4,928 tests passing, since every fixture here is diploid. And two samples
+> shared a batch, so that axis could not see them exchanged. Six survivors now fail; one is benign
+> and one is not a defect — an equivalent mutant the review misread.
 > **⛦ They also found eleven wrong claims, four of them the stated reason for a design or a
 > test** — including that a missing minted-error total lets a run finish, which the assembly
 > refuses, and that a permuted per-sample list silently mis-assigns coefficients, which the
@@ -52,7 +60,7 @@ Skills and agents are instructed to leave it untouched.
 > stratum of which 2,496 is the allele-length genotype table, and calling reads one number off each
 > record — **a finding for the run driver's plan**, which can project each sample's rates as that
 > sample finishes and release the rest, peaking at 1/43rd of that.
-> The library's own test suite, 4,920 → **4,930** passing.
+> The library's own test suite, 4,920 → **4,937** passing.
 > [What was built](doc/devel/reports/implementations/ng_prepass_calling_handover_2026-08-27.md).
 >
 > - **Previously (2026-08-26):** **the SNP/indel prior's two numbers stop being one

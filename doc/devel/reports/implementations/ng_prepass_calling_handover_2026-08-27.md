@@ -30,7 +30,7 @@ route and the wrong shape**, and giving it the right one keeps the join out of e
 | | tests |
 | --- | --- |
 | at the branch point (`629e84ff`) | 4,920 passing, 0 failing, 11 ignored |
-| now | **4,930** passing, 0 failing, 11 ignored |
+| now | **4,937** passing, 0 failing, 11 ignored |
 
 `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` both
 exit 0. `cargo doc --no-deps --lib` reports **25 unresolved links and exits 101**. It reported 26
@@ -274,10 +274,30 @@ Three reviews, one brief each: the arithmetic, the tests and their mutations, an
 with claim-checking. **They found no defect in the seam's arithmetic** — every one of the seven
 inputs lands where the doc says, the seed's two moments are in the right order, and no value is
 dropped or overwritten on any path a caller can reach. They found **two silent failures the seam
-did not check for**, both now refused and both listed above; and **eleven wrong claims**, of which
-nine were in this report and its commit messages and two were doc comments. Four of the eleven were
-the stated *reason* for a design or a test, which is the failure this project's review history puts
-at about 60 in 300.
+did not check for**, both now refused and both listed above; **eight of 24 planted defects that
+every test passed**; and **eleven wrong claims**, of which nine were in this report and its commit
+messages and two were doc comments. Four of the eleven were the stated *reason* for a design or a
+test, which is the failure this project's review history puts at about 60 in 300.
+
+### The eight tests that could not fail
+
+Six are now fixed and re-checked by re-running the mutation that found them. One is benign and one
+is not a defect at all:
+
+| the defect that survived | what it means | now |
+| --- | --- | --- |
+| each of three ownership checks deleted | the check is called four times and only the error-rate call had a test | four tests, one per route, each naming its quantity |
+| the seed's fitted diversity halved | the tracing test read only the seed's mean frequency, which is `α_alt/(α_ref+α_alt)` — exactly `f` for *any* total, so the diversity cancels | the total is asserted against the identity the two moments imply |
+| every non-diploid key filtered out of the tract projection | every fixture here is diploid, and the walked one gives all its strata to one library, so two of the key's three axes never varied | four keys differing on each axis in turn |
+| two samples sharing a batch | the assertions on those two read the same number, so the axis could not see them exchanged | a batch per sample, and the read-group view checked beside it |
+| `fitted_alternative_frequency` returning the heterozygosity | the accessor added here had no test of its own | two, in the module that owns it |
+| the ownership check's quantity label crossed | every route's refusal message shares the phrase the test expected | the four expectations name the four quantities |
+| `insert` → `entry().or_insert()` | **benign**: the two differ only on a duplicate key, which the ownership check refuses first | left alone, recorded here |
+| the repeat-tract length assert pointed at the SNP/indel list | **not a defect**: the assertion above it has already established the two are the same number, so the mutant is equivalent | the new test stays — nothing exercised that assertion before |
+
+**The review's account of that last one is wrong**, and it is worth saying which half: it holds that
+a short repeat-tract list would then index past the end of the list and panic with `index out of
+bounds`. It would not — the assertion still fires, with the message written for it.
 
 The wrong claims, all corrected in place: that a missing minted-error total lets a run finish;
 that a permuted per-sample list silently mis-assigns coefficients and contamination fractions; that
