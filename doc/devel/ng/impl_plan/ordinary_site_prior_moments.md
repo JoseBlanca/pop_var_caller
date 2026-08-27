@@ -128,7 +128,7 @@ A function in `parameter_estimation::joint` taking the converged posteriors, the
 the panel's `F`, returning the two numbers. **Types and the reduction only** — Milestone C wires it
 to a run. *Depends:* A5. *Source:* spec §3, §5.
 
-**B2. The variance term.**  ☐
+**B2. The variance term.**  ✅
 `E[k(2N − k)] = 2N·E[k] − E[k]² − Var(k)`. **Own commit, do not bundle, and the fixture is named
 in the spec**: posteriors midway between genotypes at **one sample and three reads**, where
 dropping the term returns 2.5× the truth. **A cohort test cannot catch this** — at 63 samples the

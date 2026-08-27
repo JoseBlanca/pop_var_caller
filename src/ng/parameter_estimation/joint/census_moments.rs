@@ -54,12 +54,15 @@ pub struct CensusMoments {
     /// of the panel.** Dropping it returns the heterozygosity `1/(2N)` low, which is 50% at one
     /// individual (`doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md` §10).
     ///
-    /// **⚠ Two things this number still owes, and both are named in the plan rather than hidden.**
-    /// It substitutes `E[k]` into a formula that is quadratic in `k`, which returns it **high** by
-    /// the variance — at one sample and three reads a position, measured, 2.538 ± 0.165 times the
-    /// truth rather than 1.219 ± 0.152 (report §4.1). And it applies no inbreeding correction,
-    /// which is a further 80% at one individual with an inbreeding coefficient of 0.8 (spec §4).
-    /// Plan steps B2 and B3 are those two terms.
+    /// **`k` is an expectation and `k (2N − k)` is quadratic, so the curvature term is carried
+    /// rather than dropped**: `E[k(2N − k)] = 2N·E[k] − E[k]² − Var(k)`. Without it this comes
+    /// back high by exactly `Var(k)`, which at one sample and three reads a position is most of
+    /// the answer — 2.538 ± 0.165 times the truth against 1.219 ± 0.152 with it (report §4.1).
+    /// See [`nei_heterozygosity`].
+    ///
+    /// **⚠ One thing this number still owes, and it is named in the plan rather than hidden.** It
+    /// applies no inbreeding correction, which is an 80% error at one individual with an
+    /// inbreeding coefficient of 0.8 and 0.6% at 63 (spec §4). Plan step B3 is that term.
     pub heterozygosity: f64,
 }
 
@@ -120,7 +123,11 @@ impl CensusMoments {
         for position in 0..positions {
             let copies = alternative_copies_at(genotype_posterior, samples, position);
             frequency += copies.expected_copies / chromosomes;
-            heterozygosity += nei_heterozygosity(copies.expected_copies, chromosomes);
+            heterozygosity += nei_heterozygosity(
+                copies.expected_copies,
+                copies.copy_count_variance,
+                chromosomes,
+            );
         }
         // A census of no positions leaves both sums at zero and the divide undefined. It is a run
         // whose fit kept nothing, which the caller's own fallback ladder handles by regime; what
@@ -180,12 +187,38 @@ fn alternative_copies_at(
 /// than of the panel: it is the count of *other* chromosomes the first draw can be paired with.
 /// Writing `2N` there returns the heterozygosity `1/(2N)` low, which is 50% at one individual and
 /// 0.8% at 63.
-fn nei_heterozygosity(expected_copies: f64, chromosomes: f64) -> f64 {
+///
+/// ## Why the variance is an argument, and what happens without it
+///
+/// **`k` is never counted — it is an expectation under the read model — and `k (2N − k)` is
+/// quadratic, so substituting `E[k]` is not the same as taking the expectation:**
+///
+/// ```text
+///   E[k (2N − k)]  =  2N · E[k]  −  E[k]²  −  Var(k)
+/// ```
+///
+/// **Leaving `Var(k)` out returns the heterozygosity high by exactly it**, and at low depth that
+/// is not a correction but most of the answer. Measured on drawn cohorts read through the fit, at
+/// one sample and three reads a position: **2.538 ± 0.165 times the truth without the term and
+/// 1.219 ± 0.152 with it** (`doc/devel/reports/ng_ordinary_site_prior_moments_2026-08-27.md`
+/// §4.1).
+///
+/// **A cohort test cannot see this**, which is why the fixture that pins it runs at one sample.
+/// `Var(k)` grows with the panel and `E[k]²` grows with its square, so the term's share of the
+/// answer falls like `1/N`: at 63 samples of the same per-sample uncertainty it is under 1%, and a
+/// real 63-sample fit is more certain per sample than that, which is where the report's *three
+/// decimals* comes from.
+///
+/// **The variance passed in is the sum of the samples' own and is an under-estimate** — see
+/// [`alternative_copies_at`] — so what comes back is still slightly high, in the same direction
+/// and much smaller.
+fn nei_heterozygosity(expected_copies: f64, copy_count_variance: f64, chromosomes: f64) -> f64 {
     debug_assert!(
         chromosomes >= 2.0,
         "two chromosomes are needed before a pair of them can differ; got {chromosomes}"
     );
-    2.0 * expected_copies * (chromosomes - expected_copies) / (chromosomes * (chromosomes - 1.0))
+    2.0 * (chromosomes * expected_copies - expected_copies * expected_copies - copy_count_variance)
+        / (chromosomes * (chromosomes - 1.0))
 }
 
 #[cfg(test)]
@@ -347,6 +380,152 @@ mod tests {
         }
     }
 
+    /// Posteriors that are **midway between genotypes** — the shape low depth produces, where the
+    /// reads have not decided which of the three a sample carries.
+    ///
+    /// `(reference, heterozygous, both non-reference)` per sample, the same three at every sample
+    /// and every position.
+    fn midway(
+        reference: f64,
+        heterozygous: f64,
+        both: f64,
+        samples: usize,
+        positions: usize,
+    ) -> Vec<f32> {
+        assert!(
+            (reference + heterozygous + both - 1.0).abs() < 1e-12,
+            "a sample's three genotype posteriors are a distribution"
+        );
+        let mut out = Vec::new();
+        for _ in 0..positions * samples {
+            // The third number is the carrier posterior, which takes no part.
+            out.extend_from_slice(&[heterozygous as f32, both as f32, 0.0]);
+        }
+        out
+    }
+
+    /// The heterozygosity this reduction would return if it substituted `E[k]` and stopped there —
+    /// **the defect plan step B2 exists to prevent**, written out so a test can measure the gap
+    /// rather than assert it.
+    fn without_the_variance_term(
+        genotype_posterior: &[f32],
+        samples: usize,
+        positions: usize,
+    ) -> f64 {
+        let chromosomes = 2.0 * samples as f64;
+        let mut total = 0.0_f64;
+        for position in 0..positions {
+            let copies = alternative_copies_at(genotype_posterior, samples, position);
+            total += nei_heterozygosity(copies.expected_copies, 0.0, chromosomes);
+        }
+        total / positions as f64
+    }
+
+    /// **At one individual the heterozygosity is exactly the posterior that it is heterozygous**,
+    /// and that is the oracle the variance term has to reproduce.
+    ///
+    /// It is what the question means: an individual's two chromosomes differ at a position exactly
+    /// when it is heterozygous there, so averaging over the posterior gives `P(het)` and nothing
+    /// else. **The algebra collapses to it and shares nothing with the formula** — with `h` the
+    /// heterozygous posterior and `d` the both-non-reference one, `E[k] = h + 2d`,
+    /// `Var(k) = h + 4d − (h + 2d)²`, and
+    ///
+    /// ```text
+    ///   2 E[k] − E[k]² − Var(k)  =  2(h + 2d) − (h + 2d)² − h − 4d + (h + 2d)²  =  h
+    /// ```
+    ///
+    /// so every term but `h` cancels. **Drop `Var(k)` and it does not**: what is left is
+    /// `2(h + 2d) − (h + 2d)²`, which is a different number at every `d` above zero.
+    #[test]
+    fn at_one_individual_the_heterozygosity_is_the_heterozygous_posterior() {
+        for (reference, heterozygous, both) in [
+            (0.3, 0.4, 0.3),
+            (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            (0.8, 0.15, 0.05),
+            (0.05, 0.05, 0.90),
+            (0.5, 0.5, 0.0),
+        ] {
+            let posteriors = midway(reference, heterozygous, both, 1, 1);
+            let moments = CensusMoments::from_posteriors(&posteriors, 1, 1);
+            // **Against what the array actually holds, not against the literal.** The fit writes
+            // `f32`, so 0.4 arrives as 0.40000000596; comparing to the `f64` literal would need a
+            // tolerance a thousand million times looser than the arithmetic deserves, and would
+            // then admit a real error of that size.
+            let in_the_array = f64::from(heterozygous as f32);
+            assert!(
+                (moments.heterozygosity - in_the_array).abs() < 1e-15,
+                "at posteriors ({reference}, {heterozygous}, {both}) the heterozygosity is {} \
+                 where the sample's own heterozygous posterior is {in_the_array}",
+                moments.heterozygosity
+            );
+        }
+    }
+
+    /// **The variance term, at one sample — where dropping it returns two and a half times the
+    /// truth.** `doc/devel/ng/spec/ordinary_site_prior_moments.md` §9's second test.
+    ///
+    /// The posteriors are `(0.3, 0.4, 0.3)` over reference, heterozygous and both non-reference:
+    /// reads that have barely decided, which is the shape three reads a position produces. **The
+    /// truth is 0.400** — the heterozygous posterior, by the test above. Substituting `E[k]` and
+    /// stopping gives `2 E[k] − E[k]²`, and `E[k]` is exactly 1 here, so it gives **1.000**:
+    /// **2.5 times the truth**, against the 2.538 ± 0.165 the report measures through a whole fit.
+    ///
+    /// **A cohort fixture cannot catch this, and the second half of this test shows why rather
+    /// than asserting it.** `Var(k)` grows with the panel while `E[k]²` grows with its square, so
+    /// the term's share of the answer falls like `1/N`: at 63 samples of the *same* per-sample
+    /// uncertainty the two differ by **0.96%**, and a real 63-sample fit is far more certain
+    /// per sample than this — which is where the report's *agree to three decimals* comes from.
+    #[test]
+    fn dropping_the_variance_term_returns_two_and_a_half_times_the_truth_at_one_sample() {
+        let one_sample = midway(0.3, 0.4, 0.3, 1, 1);
+        let with_term = CensusMoments::from_posteriors(&one_sample, 1, 1).heterozygosity;
+        let without = without_the_variance_term(&one_sample, 1, 1);
+        // The fit writes `f32`, so the tolerances here are about what the array holds rather than
+        // about the arithmetic: 0.4 arrives as 0.40000000596 and 0.3 as 0.30000001192.
+        assert!(
+            (with_term - 0.4).abs() < 1e-7,
+            "the truth at these posteriors is the heterozygous one, 0.4; got {with_term}"
+        );
+        assert!(
+            (without - 1.0).abs() < 1e-7,
+            "substituting E[k] = 1 gives 2·1 − 1² = 1; got {without}"
+        );
+        assert!(
+            (without / with_term - 2.5).abs() < 1e-6,
+            "dropping the term must return 2.5 times the truth here; got {}",
+            without / with_term
+        );
+
+        // **And the same posteriors at 63 samples, which is the point.** A test written here
+        // instead would pass with the term deleted.
+        let sixty_three = midway(0.3, 0.4, 0.3, 63, 1);
+        let with_term = CensusMoments::from_posteriors(&sixty_three, 63, 1).heterozygosity;
+        let without = without_the_variance_term(&sixty_three, 63, 1);
+        // 63 samples of these posteriors: `E[k] = 63`, `Var(k) = 63 · 0.6 = 37.8`, so the term
+        // moves 0.5040 to 0.4992 — an inflation of 0.0048/0.4992, or 0.96%. **Pinned rather than
+        // bounded**, because a bound of "under 1%" is also satisfied by zero, and zero is exactly
+        // what a deleted term gives.
+        let inflation = without / with_term - 1.0;
+        assert!(
+            (inflation - 0.009_615).abs() < 1e-5,
+            "at 63 samples of the same per-sample uncertainty the term is 0.96% of the answer, \
+             which is why the fixture that pins it runs at one; got {inflation}"
+        );
+    }
+
+    /// **A census of certain genotypes is unmoved by the term**, which is what makes the fixture
+    /// above about uncertainty rather than about the arithmetic.
+    ///
+    /// Point-mass posteriors have no variance, so `E[k(2N − k)]` and `2N·E[k] − E[k]²` are the
+    /// same number — and the point-mass tests above therefore say nothing about the term. Stated
+    /// here so nobody reads them as covering it.
+    #[test]
+    fn certain_genotypes_leave_the_variance_term_at_zero() {
+        let certain = point_masses(&[&[1, 0, 2], &[2, 2, 0]]);
+        let with_term = CensusMoments::from_posteriors(&certain, 3, 2).heterozygosity;
+        let without = without_the_variance_term(&certain, 3, 2);
+        assert_eq!(with_term, without);
+    }
     /// **A posterior array of the wrong length is refused rather than read by offset.**
     ///
     /// The reduction indexes by `position × samples × 3`, so a disagreement between the length and

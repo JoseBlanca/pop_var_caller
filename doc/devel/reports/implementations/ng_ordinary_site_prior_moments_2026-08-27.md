@@ -638,3 +638,74 @@ quoted from the design documents and the measurement report — 34 of 36, 0.749�
 1.22×, 399 predictions, 11.8 minutes, 6.6-fold — all verified correct. The arithmetic review also
 swept the box the fit clamps to and found no input on which the new release assertion can fire from
 one fitted curve, with about 1% of headroom.
+
+---
+
+## B2 — the variance term
+
+**Contract (plan B2).** `E[k(2N − k)] = 2N·E[k] − E[k]² − Var(k)`. Own commit, do not bundle, and
+the fixture is named in the spec: posteriors midway between genotypes at one sample, where dropping
+the term returns 2.5× the truth. **A cohort test cannot catch this.**
+
+### What shipped
+
+`nei_heterozygosity` takes the position's copy-count variance and subtracts it. That is the whole
+change to the arithmetic; the variance was already being formed per position at B1 and was not
+being read.
+
+### The oracle, and it is exact
+
+**At one individual the heterozygosity is exactly the posterior that the individual is
+heterozygous.** That is what the question means — an individual's two chromosomes differ at a
+position exactly when it is heterozygous there — and the algebra collapses to it. With `h` the
+heterozygous posterior and `d` the both-non-reference one, `E[k] = h + 2d` and
+`Var(k) = h + 4d − (h + 2d)²`, so
+
+```text
+2 E[k] − E[k]² − Var(k)  =  2(h + 2d) − (h + 2d)² − h − 4d + (h + 2d)²  =  h
+```
+
+— every term but `h` cancels. **Drop `Var(k)` and it does not**: what is left is
+`2(h + 2d) − (h + 2d)²`, a different number at every `d` above zero. Pinned over five posterior
+shapes.
+
+### The fixture the spec names, and the number it gives
+
+Posteriors `(0.3, 0.4, 0.3)` over reference, heterozygous and both non-reference at **one sample**
+— reads that have barely decided, which is the shape three reads a position produces.
+
+| | value |
+|---|---:|
+| the truth (the heterozygous posterior) | 0.400 |
+| substituting `E[k]` and stopping — `E[k]` is exactly 1 here, so `2·1 − 1²` | 1.000 |
+| **the ratio** | **2.5** |
+
+Against the **2.538 ± 0.165** the report measures through a whole fit at one sample and three
+reads. The fixture is not that measurement — it is a hand-chosen posterior — and it lands within
+1.5% of it.
+
+### Why a cohort test cannot catch it, shown rather than asserted
+
+The same posteriors at **63 samples**: `E[k] = 63`, `Var(k) = 63 × 0.6 = 37.8`, and the term moves
+the heterozygosity from 0.5040 to 0.4992 — an inflation of **0.96%**. `Var(k)` grows with the panel
+while `E[k]²` grows with its square, so the term's share falls like `1/N`; and a real 63-sample fit
+is far more certain per sample than this fixture, which is where the report's *agree to three
+decimals* comes from.
+
+**That figure is pinned, not bounded.** A test asserting only "under 1%" is also satisfied by zero,
+and zero is exactly what a deleted term gives.
+
+**And a note against a false comfort**: the point-mass tests B1 added say nothing about this term.
+A certain genotype has no variance, so `E[k(2N − k)]` and `2N·E[k] − E[k]²` are the same number
+there — stated in a test of its own so nobody reads those as covering it.
+
+### Mutation run
+
+Setting the variance passed to `nei_heterozygosity` to zero — the exact defect this step
+prevents — fails **2 tests** of the whole 4,835-test library suite, and both are the two written
+here for it. The source was restored from a backup and the restore checked with `git diff`.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,835 passed, 0 failed, 11 ignored**, from 4,832. Three tests added.
