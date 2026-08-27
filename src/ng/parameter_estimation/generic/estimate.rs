@@ -192,6 +192,13 @@ impl GenericAccumulators {
             // classes had been averaged away, putting back inside it exactly the bias the
             // second class exists to remove.
             error_rate: as_marginal_rates(coupled.error_rate, coupled.site_noise),
+            // **Copied out of the tally rather than fitted from it.** Nothing here computes a
+            // minted total: the reads' own claims are summed while the loci are being counted,
+            // and this is the one moment they can still be reached — the accumulators go out of
+            // scope with the fit. Taken from `self`, which is the same accumulator every other
+            // number in this value was fitted from, so the totals and the rates cannot describe
+            // different reads.
+            minted_errors: self.minted_errors().clone(),
             rates: coupled.rates,
             inbreeding,
             runs_model,
@@ -307,6 +314,7 @@ mod tests {
     use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::generic::MIN_SITES_TO_FIT;
     use crate::ng::parameter_estimation::generic::accumulators::ConstantPloidy;
+    use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
     use crate::ng::types::{ContigId, GenomeRegion, InbreedingF, Position};
 
     /// One diploid site at ten reads, `alt_reads` of them showing an alternative base.
@@ -582,6 +590,106 @@ mod tests {
             MIN_SITES_TO_FIT + 1,
             "each site covers one reference position, however many libraries covered it"
         );
+    }
+
+    /// The two libraries of a sample sequenced twice, and **no two numbers about them are
+    /// alike**: identifier, depth, and how wrong each of their reads says it is.
+    ///
+    /// Every other fixture in this file leaves `q_sum` at zero and gives its groups equal
+    /// depths, and on such a fixture the two libraries' minted-error totals are the same pair
+    /// of numbers — so a total filed under the wrong identifier, or both filed under one, reads
+    /// exactly like a correct one.
+    const UNLIKE_LIBRARIES: [(ReadGroupId, u32, f64); 2] =
+        [(ReadGroupId(0), 8, -7.0), (ReadGroupId(1), 12, -9.0)];
+
+    /// One site both libraries covered, each at its own depth and its own per-read minted
+    /// error.
+    fn unlike_libraries_site(start: u64, heterozygous: bool) -> SampleLocusObservations {
+        let mut observations = Vec::new();
+        for (group, depth, ln_error_per_read) in UNLIKE_LIBRARIES {
+            let alt_reads = if heterozygous { depth / 2 } else { 0 };
+            for (bases, reads) in [
+                (b"C".as_slice(), alt_reads),
+                (b"A".as_slice(), depth - alt_reads),
+            ] {
+                if reads > 0 {
+                    observations.push(SequenceObservation {
+                        q_sum: ln_error_per_read * f64::from(reads),
+                        ..observation(bases, group, reads)
+                    });
+                }
+            }
+        }
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(start),
+            },
+            reference_bases: b"A".as_slice().into(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// **Each library's reads say how wrong they are, and that total now leaves the fit** —
+    /// the denominator the calling step divides the fitted error rate by
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §3.2).
+    ///
+    /// **The failure this is written against does not stop a run.** A total that never arrives
+    /// — an empty map, or one filled from another sample's tally — leaves the calling step with
+    /// a fitted rate and no denominator, and its answer to that is not a refusal but a
+    /// **default**: scale one, every read of the library charged the error floor, and the run
+    /// finishing normally with quietly overconfident reads. So *the map is non-empty* is not
+    /// what is asserted here.
+    ///
+    /// Two things are checked, and the second is what makes the first mean something. The
+    /// totals equal the tally's own, whole map against whole map — so a key dropped, added or
+    /// renamed shows. And each library's two numbers are checked against the fixture's own
+    /// arithmetic, on a fixture where the two libraries share neither: 8 reads a site at 7 nats
+    /// against 12 at 9. Swapping the two totals fails both halves.
+    #[test]
+    fn each_read_groups_minted_error_total_leaves_the_fit() {
+        let groups: Vec<ReadGroupId> = UNLIKE_LIBRARIES.iter().map(|&(group, ..)| group).collect();
+        let mut config = config(supplied(0.3));
+        config.read_groups = groups.clone();
+        let sites = MIN_SITES_TO_FIT + 1;
+        let loci: Vec<SampleLocusObservations> = (0..sites)
+            .map(|index| unlike_libraries_site(index + 1, index.is_multiple_of(20)))
+            .collect();
+
+        let mut driven = config.accumulators();
+        for locus in &loci {
+            driven.add_locus(locus);
+        }
+        let parameters = estimate_generic_parameters(loci.into_iter().map(Ok), &config)
+            .expect("a two-library sample above the site floor is fittable");
+
+        assert_eq!(
+            &parameters.minted_errors,
+            driven.minted_errors(),
+            "the totals the fit carries out are the ones the tally holds"
+        );
+        for (group, depth, ln_error_per_read) in UNLIKE_LIBRARIES {
+            let totals = parameters.minted_errors[&group];
+            assert_eq!(
+                totals.reads(),
+                u64::from(depth) * sites,
+                "read group {} covered every one of the {sites} sites at depth {depth}",
+                group.get()
+            );
+            let mean = totals
+                .mean_log_error()
+                .expect("a library that covered every site has a mean");
+            assert!(
+                (mean - ln_error_per_read).abs() <= MintedReadErrors::LOG_ERROR_QUANTUM,
+                "read group {}: every one of its reads claimed {ln_error_per_read} nats and \
+                 the mean came out {mean}",
+                group.get()
+            );
+        }
     }
 
     /// **The `Fitted` arm is entered at all**, which no other test here does — every other
