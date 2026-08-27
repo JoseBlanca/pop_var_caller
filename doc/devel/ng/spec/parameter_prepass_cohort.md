@@ -221,6 +221,31 @@ bar and the honest claim.
 
 ## 4. The frequency spectrum
 
+> **⚖ Owner's ruling, 2026-08-27: what this step hands the caller is two moments or a curve, never
+> allele-count classes.** The estimator below is unchanged and so is everything it is good for;
+> what changes is the *shape of its output at the seam into calling*.
+>
+> **Why.** The caller's genotype prior holds exactly two numbers, and the route that turned a
+> spectrum into them was a curve fit in allele-count-class space — search for the pair whose own
+> predicted classes minimise a divergence against the measured ones. **That objective has `2N + 1`
+> terms, so its answer moves with the cohort**: measured, it is the worse of three routes in 34 of
+> 36 cells and 0.749× the truth at worst, where reading the same information as two moments is
+> exact at every panel size
+> ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md), and the report behind it).
+> **That defect belongs to the class-space fit and not to the joint route that happens to feed it
+> today**, so a second producer emitting classes would reintroduce it by another door.
+>
+> **What this step must emit instead**, when it is built: the population's expected alternative
+> allele frequency and its heterozygosity — or a parametric curve those two integrate out of, as
+> the joint route's `FrequencyDensity` is. **Not `2N + 1` class weights**, and not a
+> `FittedSpectrum`, which is the type being deleted along with the search that consumed it.
+>
+> **What this does not touch.** §4's estimator, its regulariser, and everything it says about
+> low-coverage spectra. The classes remain the natural *internal* representation of an
+> expectation-maximization over allele counts — the ruling is about the boundary, not the method.
+> **A frequency spectrum is still worth having for its own sake**; it is simply not the object the
+> prior can read.
+
 **Across the sites that vary, how many copies of the allele does the panel carry?** Most variants are
 rare and few are common, and the shape of that fall-off is a richer description of a population's
 variation than any single number.
