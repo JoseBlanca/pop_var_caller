@@ -110,7 +110,7 @@ pub struct RecordHead {
 ///
 /// **Variable-length integers, and that is an implementation choice with a measurement owed.**
 /// Spec `psp_file_format.md` §4.3 leaves the width to the manifest and records that a fixed width
-/// is quicker to read and costs less than it looks after compression — the four head fields
+/// is quicker to read and costs less than it looks after compression — the four scalar head fields
 /// together compressed to 0.077 bytes a record when measured on their own — but that the two
 /// encodings have never been compared *in place*. That comparison needs a compressor, which
 /// arrives at Milestone D2, so the choice here is the one that composes with every other field and
@@ -173,7 +173,7 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(3);
 /// this array and the manifest tests fail. **Change both together and you have changed the
 /// format — raise the version.**
 ///
-/// **The head's four fields are not here.** They are the fixed part in front of the body (see
+/// **The head's five fields are not here.** They are the part in front of the body (see
 /// the module doc) and they arrive with C2; this array is what a reader meets *after* deciding
 /// it wants the record.
 ///
@@ -322,7 +322,7 @@ pub fn record_fields() -> Vec<FieldSpec> {
     fields_this_build_knows().collect()
 }
 
-/// The head's four fields and then the body's nineteen — **this build's**, not a file's, which
+/// The head's five fields and then the body's nineteen — **this build's**, not a file's, which
 /// is the distinction that matters where `manifest.fields` is in scope beside it.
 fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
     RECORD_HEAD_FIELDS
@@ -342,7 +342,7 @@ const KNOWN_FIELD_COUNT: usize = RECORD_HEAD_FIELDS.len() + BODY_FIELDS.len();
 /// How this reader must read the records in one particular file.
 ///
 /// Built once per file from its manifest and then used for every record, because checking a
-/// twenty-three-field declaration per record on a path that decodes about twenty million records a
+/// twenty-four-field declaration per record on a path that decodes about twenty million records a
 /// second (spec §4.5) is work with one possible answer.
 ///
 /// **What it carries is the part that differs between files: the fields this reader does not
@@ -886,8 +886,19 @@ impl<'a> FieldReader<'a> {
 
     /// One variable-length integer, read through production's codec.
     /// Advance past bytes another parser has already accounted for.
+    ///
+    /// **Bounded, unlike a plain addition**, because this is the one advancing method whose
+    /// argument comes from somewhere else. The type's invariant is `bytes_read <= bytes.len()`,
+    /// and `read_varint` slices on it unconditionally — so an overshoot here is a panic in a
+    /// decoder whose whole contract is that corrupt input gives an error. Today's one caller
+    /// cannot overshoot; the next one has no compiler help, which is why the bound is here
+    /// rather than in a comment about the caller.
     fn skip(&mut self, bytes: usize) {
-        self.bytes_read += bytes;
+        debug_assert!(
+            self.bytes_read + bytes <= self.bytes.len(),
+            "a skip past the end would make every later slice a panic"
+        );
+        self.bytes_read = self.bytes_read.saturating_add(bytes).min(self.bytes.len());
     }
 
     pub(super) fn read_varint(&mut self, field: &'static str) -> Result<u64, RecordDecodeError> {
@@ -1259,14 +1270,18 @@ pub struct RecordEncoder {
 
 /// Everything of the encoder's that **restarts when a block does** (spec §3.2).
 ///
-/// **A struct rather than loose fields, and the reason is the next two milestones.** Spec §3.2
-/// requires every running difference inside a block to restart — the position difference, the
-/// coverage difference, the chain-id difference — and Milestone E adds the chain-id live set,
-/// which is exactly such a difference. While this was one field on [`RecordEncoder`], adding a
-/// second was a compile error in `for_block` and **not** in `start_block`: measured, a field
-/// added and initialised in the constructor alone builds clean and passes every test, and the
-/// file it then writes is wrong from each block's first record — plausibly wrong, because
+/// **A struct rather than loose fields**, because a field added beside a running difference and
+/// initialised once is one that silently never resets: measured at Milestone D, a field added to
+/// [`RecordEncoder`] and initialised in its constructor alone builds clean, passes every test,
+/// and writes a file that is wrong from each block's first record — plausibly wrong, because
 /// coverage is smooth.
+///
+/// **⚠ The second running difference is *not* in here, and that is deliberate.** Milestone E's
+/// chain-id live set lives in [`RecordEncoder::live_reads`] beside this struct, because
+/// [`LiveSetWriter`] owns scratch buffers that must survive a block boundary — only the *set*
+/// must not, and `LiveSetWriter::start_block` is what empties it. What keeps that from being the
+/// hazard this doc describes is that there is one way to open a block,
+/// [`RecordEncoder::encode_record_starting_a_block`], and it resets both.
 ///
 /// **What the split buys, exactly, because it is less than it looks.** A field added *here* is
 /// a compile error at `at_block_start`, which is the only constructor, so it cannot be left out
@@ -1297,6 +1312,15 @@ impl PerBlockState {
 
 impl RecordEncoder {
     /// A writer for one block, whose first record sits at `first_position`.
+    ///
+    /// **⚠ A second way in, and the weaker one.** It sets the coordinate base from its argument
+    /// and leaves the live set empty, so a caller that reaches
+    /// [`encode_record`](Self::encode_record) without going through
+    /// [`encode_record_starting_a_block`](Self::encode_record_starting_a_block) first gets a
+    /// block measured from whatever it passed — a file that parses perfectly and is wrong from
+    /// its first record if that was a guess. `BlockBuilder` passes a placeholder and always
+    /// opens through the other one; this exists for the codec's own tests, which lay records down
+    /// with no builder above them.
     pub fn for_block(first_position: Position) -> Self {
         Self {
             body_scratch: Vec::new(),
@@ -1307,7 +1331,7 @@ impl RecordEncoder {
 
     /// **Write the record that opens a block**, resetting everything a block restarts first.
     ///
-    /// This is the only way to start a block, and that is the point. Spec §3.2 requires every
+    /// This is the only way to *re*start a block, and that is the point. Spec §3.2 requires every
     /// running difference to restart at a block boundary, and there are two of them now — the
     /// coordinate the next offset is measured from, and the set of reads live. A separate
     /// `start_block` call that a caller had to remember beside `encode_record` would be one more
@@ -1484,6 +1508,20 @@ pub struct LocatedRecord<'a> {
 /// runs, and on the corner it was measured on — the tomato panel at about three reads a
 /// position — it is all that runs at roughly ninety-nine positions in a hundred
 /// (`cohort_merge.md`, "roughly one position in a hundred is variable at the measured corner").
+///
+/// **⚠ This moves `live_reads`, so call it exactly once a record.** The head carries the chain
+/// ids' arrivals and departures, and reading it applies them; a caller that has read a head
+/// reaches the body through [`decode_the_body_of`], never by parsing the same bytes again.
+/// `live_reads` is the walk's own reader — one per block, emptied by
+/// [`LiveSetReader::start_block`] at every boundary — not a fresh one per record.
+///
+/// # Errors
+///
+/// - [`RecordDecodeError::Truncated`] when the bytes stop inside the record: **fetch more and
+///   call this again from the record's first byte.** `live_reads` is exactly where it was, which
+///   is what makes that a retry rather than a second application of this record's changes.
+/// - [`RecordDecodeError::Malformed`] when the head cannot mean what it says — a span of no
+///   bases, a coordinate off the axis, or a chain-id stream inconsistent with the live set.
 pub fn read_record_head<'a>(
     bytes: &'a [u8],
     contig: ContigId,
@@ -1537,15 +1575,23 @@ pub fn read_record_head<'a>(
     // skipped them would build every record after this one against a stale live set — silently,
     // because a stale set is still a plausible set (spec `psp_record_encoding.md` §6).
     //
-    // ⚠ **Applied here, so this function must be called exactly once a record.**
-    // [`decode_record`] reaches the body through the head this returns rather than parsing the
-    // head a second time, which is what keeps that true.
+    // ⚠ **Parsed here and applied below, with the body's bounding in between.** A body that stops
+    // early is a `Truncated`, whose contract is *fetch more bytes and re-parse this record from
+    // its first byte* — so the set may not have moved by then. Measured on the version that
+    // applied them here: a well-formed file of 1,999 records read a byte at a time was refused at
+    // record 149 with *"id 150, which is already live"*, and a record that only departs reads
+    // retried to `Ok` with a read silently gone from the set for the rest of the block.
+    //
+    // ⚠ **And this function must still be called exactly once a record**, because applying twice
+    // would move the set twice. [`decode_record`] reaches the body through the head this returns
+    // rather than parsing the head again, which is what keeps that true.
     let changes_bytes = live_reads
-        .read_changes(&bytes[reader.bytes_read()..])
+        .parse_changes(&bytes[reader.bytes_read()..])
         .map_err(|fault| fault.further_in(reader.bytes_read()))?;
     reader.skip(changes_bytes);
 
     let body = reader.take(body_bytes as usize, RECORD_BODY_BYTE_COUNT)?;
+    live_reads.apply_the_changes_just_parsed();
 
     Ok(LocatedRecord {
         head: RecordHead {
@@ -1587,6 +1633,11 @@ pub struct DecodedRecord {
 /// zero is one the cohort's first pass skips, and nothing downstream looks at it again. The
 /// check costs one more pass over the observations already in hand, which is small beside
 /// building them.
+///
+/// **⚠ And it is two calls now, which this doc used to argue against.** Reading a head moves the
+/// live set, so the body must be reached through [`decode_the_body_of`] rather than by parsing
+/// the same bytes twice — that is what this function does internally, and what a caller that has
+/// already read a head must do instead of calling this.
 ///
 /// **A fault inside the body is damage here, never a short read**, and that is the third thing
 /// this function does that its two halves cannot. [`read_record_head`] hands the body a slice of
@@ -3501,9 +3552,11 @@ mod tests {
         let (mut bytes, block_starts_at) = a_run_of_records(&records);
 
         let body_bytes = record_body_length(&records[0]);
-        let head_bytes = 4; // the first record's four head fields are one byte each
-        assert_eq!(usize::from(bytes[head_bytes - 1]), body_bytes);
-        bytes[head_bytes - 1] = (body_bytes - 1) as u8;
+        // The first record's four scalar head fields are one byte each, so the fourth is the
+        // body's length. (The chain-id changes follow it, and this record names no reads.)
+        let at_the_body_length = 3;
+        assert_eq!(usize::from(bytes[at_the_body_length]), body_bytes);
+        bytes[at_the_body_length] = (body_bytes - 1) as u8;
 
         assert!(
             decode_a_record(
@@ -3565,13 +3618,175 @@ mod tests {
         );
     }
 
+    /// **A fault a sub-parser reports is re-based to the record's first byte, and keeps its
+    /// class.**
+    ///
+    /// The chain-id changes are parsed by their own reader, which counts from its own first
+    /// byte; a caller holding the record needs the offset measured from the record's. ⚠ And the
+    /// class must *not* change the way [`RecordDecodeError::inside_a_bounded_body`] changes it:
+    /// that one converts `Truncated` to `Malformed` because a body is handed a slice of exactly
+    /// its declared length, so running off *that* end can never be fixed by more bytes. The
+    /// chain-id parser is handed the rest of the record, where more bytes is exactly what helps.
+    ///
+    /// Nothing tested this until a review pointed out that both mutations — dropping the
+    /// re-basing, and converting the class — left every test green.
+    #[test]
+    fn a_sub_parsers_fault_is_re_based_and_keeps_its_class() {
+        let truncated = RecordDecodeError::Truncated {
+            field: "chain-id arrival",
+            bytes_in: 3,
+        }
+        .further_in(7);
+        assert!(
+            matches!(
+                truncated,
+                RecordDecodeError::Truncated {
+                    field: "chain-id arrival",
+                    bytes_in: 10
+                }
+            ),
+            "got {truncated:?}"
+        );
+
+        let malformed = RecordDecodeError::Malformed {
+            field: "chain-id departure position",
+            bytes_in: 2,
+            reason: "position 9 of a live set holding 2 reads".to_string(),
+        }
+        .further_in(5);
+        let RecordDecodeError::Malformed { bytes_in, .. } = malformed else {
+            panic!("the class must not change: {malformed:?}")
+        };
+        assert_eq!(bytes_in, 7);
+
+        let unsupported = RecordDecodeError::Unsupported {
+            field: "locus-kind",
+            bytes_in: 1,
+            tag: 9,
+        }
+        .further_in(4);
+        let RecordDecodeError::Unsupported { bytes_in, .. } = unsupported else {
+            panic!("the class must not change: {unsupported:?}")
+        };
+        assert_eq!(bytes_in, 5);
+
+        // And through a real head: a record whose chain-id stream is cut reports the fault at the
+        // record's own offset, not the stream's.
+        let mut record = a_rich_record();
+        record.observations[0].chain_ids = vec![5, 6, 7];
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+        let mut live_reads = a_live_set_reader();
+        let cut_in_the_changes = 6;
+        match read_a_record_head(
+            &mut live_reads,
+            &bytes[..cut_in_the_changes],
+            A_CONTIG,
+            OffsetBase::at_block_start(block_starts_at),
+        ) {
+            Err(RecordDecodeError::Truncated { field, bytes_in }) => {
+                assert!(field.starts_with("chain-id "), "got {field}");
+                assert!(
+                    bytes_in >= 4,
+                    "the offset counts from the record's first byte, not the chain-id stream's: \
+                     {bytes_in}"
+                );
+            }
+            other => panic!("a cut inside the changes is a short read, got {other:?}"),
+        }
+    }
+
+    /// **A later writer's chain-id-changes field at the end of a body is measured and stepped
+    /// over**, whatever it holds.
+    ///
+    /// ⚠ This is the one arm of `skip_unknown_field` the suite could not see: replacing its
+    /// arrival-count read with a constant left all 4,770 library tests green. It is reached only
+    /// by a file from a *later* writer, so nothing this build writes exercises it.
+    #[test]
+    fn a_later_writers_chain_id_changes_field_is_measured_and_stepped_over() {
+        let record = a_rich_record();
+        let mut fields = record_fields();
+        fields.push(FieldSpec {
+            name: FieldName("some-later-live-set".to_string()),
+            encoding: FieldEncoding::ChainIdChanges,
+        });
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
+            .expect("one unknown field at the end is not a reason to refuse the file");
+
+        // Two departures and three arrivals, as a later writer would lay them down.
+        let mut trailing = Vec::new();
+        put_varint(&mut trailing, 2);
+        put_varint(&mut trailing, 0);
+        put_varint(&mut trailing, 4);
+        put_varint(&mut trailing, 3);
+        put_varint(&mut trailing, 900);
+        put_varint(&mut trailing, 0);
+        put_varint(&mut trailing, 12);
+
+        let mut body = Vec::new();
+        encode_record_body(&record, &mut body);
+        body.extend_from_slice(&trailing);
+
+        let decoded = decode_record_body(&body, record.region, &layout)
+            .expect("a field this reader does not know is measured, not refused");
+        assert_eq!(decoded.record, record);
+        assert_eq!(
+            decoded.bytes_read,
+            body.len(),
+            "the whole of the later writer's field was stepped over, and nothing else"
+        );
+    }
+
+    /// **The reads a record names are the union over all of its observations**, not the first
+    /// one's.
+    ///
+    /// A record's observations are split by allele, by witness and by read group, so a locus with
+    /// two alleles from two lanes is four observations and the reads are spread across them. ⚠
+    /// Measured: a writer that named only the first observation's reads passed all 4,770 library
+    /// tests, because no fixture had ever put ids on two observations.
+    #[test]
+    fn the_reads_a_record_names_are_the_union_over_its_observations() {
+        let mut record = a_rich_record();
+        record.observations[0].chain_ids = vec![7, 3];
+        record.observations[1].chain_ids = vec![3, 900];
+        record.observations[2].chain_ids = vec![41];
+
+        let mut bytes = Vec::new();
+        let mut encoder = RecordEncoder::for_block(record.region.start);
+        encoder
+            .encode_record_starting_a_block(&record, &mut bytes)
+            .expect("a record at its own block's first position");
+        assert_eq!(
+            encoder.live_reads().ids(),
+            [3, 7, 41, 900],
+            "sorted, deduplicated, and from every observation"
+        );
+
+        let mut live_reads = a_live_set_reader();
+        let _ = read_a_record_head(
+            &mut live_reads,
+            &bytes,
+            A_CONTIG,
+            OffsetBase::at_block_start(record.region.start),
+        )
+        .expect("the head reads");
+        assert_eq!(live_reads.live().ids(), [3, 7, 41, 900]);
+    }
+
     /// A whole record cut anywhere is `Truncated` — including the cut where the head is complete
     /// and the body is one byte short, which is what a record straddling Milestone D's rolling
     /// buffer looks like.
+    ///
+    /// **And the live set does not move at any of those cuts**, which is the half this test was
+    /// blind to. ⚠ Its record had no chain ids, so every cut met the two bytes `0, 0` and a set
+    /// moved by them is a set unchanged — the fixture names reads now. Measured on the version
+    /// that applied the changes before bounding the body: the retry after a cut in the body met
+    /// an arrival already live and refused a perfectly good record.
     #[test]
     fn a_record_cut_short_is_truncated_at_every_cut() {
         let mut live_reads = a_live_set_reader();
-        let record = a_rich_record();
+        let mut record = a_rich_record();
+        record.observations[0].chain_ids = vec![10, 11, 12];
+        record.observations[1].chain_ids = vec![12, 40];
         let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
         let layout = RecordLayout::as_this_build_writes_it();
         let head_bytes = bytes.len() - record_body_length(&record);
@@ -3603,6 +3818,11 @@ mod tests {
                 }
                 other => panic!("{cut} bytes of a record must be Truncated, got {other:?}"),
             }
+            assert!(
+                live_reads.live().is_empty(),
+                "a record cut at {cut} moved the live set before it failed, so the retry the \
+                 fault instructs would meet its own changes a second time"
+            );
             assert!(
                 matches!(
                     decode_a_record(

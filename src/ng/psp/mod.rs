@@ -85,7 +85,7 @@ pub use index::BlockIndexEntry;
 pub use record::{
     BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
-    decode_record_body, encode_record_body, read_record_head, record_fields,
+    decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
 
 // ---------------------------------------------------------------------

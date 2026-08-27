@@ -249,12 +249,13 @@ pub enum FieldEncoding {
     /// (spec `psp_chain_id_encoding.md` §4).
     ///
     /// **The one composite in an otherwise scalar set, and it earns the exception.** The others
-    /// exist so a reader can measure a field it does not recognise and walk past it; this one
-    /// cannot be walked past by anybody, because it carries the state every later record is
-    /// decoded against. A reader either knows it or cannot read the file at all — which is why
-    /// it is a named scheme rather than an opaque byte run: the name is what makes a file that
-    /// carries it refuse an older reader, instead of that reader skipping the field and building
-    /// every subsequent record against a stale set.
+    /// exist so a reader can measure a field it does not recognise and walk past it. This one can
+    /// be measured the same way — two counted runs of varints — but **walking past the copy in a
+    /// record's head would be wrong**, because that copy carries the state every later record is
+    /// decoded against, and a reader that stepped over it would build all of them against a stale
+    /// set. So the head's copy is a field this reader knows by name and refuses a file that moves
+    /// or renames; what the measure-and-step-over path exists for is a *later* writer putting
+    /// another one at the end of a body, which nothing today does.
     ChainIdChanges,
 }
 
@@ -1952,7 +1953,7 @@ mod tests {
         let refused = decoded(&one_field_declared_as(
             "name = \"chain-ids\"\nencoding = \"roaring-bitmap\"\n",
         ))
-        .expect_err("that is not one of the six");
+        .expect_err("that is not one of the seven");
         let said = refused.to_string();
         assert!(said.contains("roaring-bitmap"), "got {said}");
         for known in ALL_ENCODINGS {

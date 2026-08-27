@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **the chain ids' changes move into the record head,
+> - **Last completed task (2026-08-27):** **E3 reviewed — the live set moved before the record
+> could still be refused, which is E1's defect one level up** (the eight-checklist review of step
+> E3 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`,
+> status `fixes-applied`). Three agents, 35 mutations, **12,000,000 fuzzed inputs**, two Blockers.
+> **The first: the head applied a record's chain-id changes and only then checked the body was
+> there.** A body that stops early means *fetch more bytes and read this record again from its
+> first byte* — and the reader does exactly that, under a comment saying the restart resumes
+> against state it has not touched. It had. Measured two ways: a well-formed file of 1,999 records
+> in blocks larger than the reader's buffer is **rejected as damaged at record 149**, because the
+> second attempt meets a read the first already added; and a record that only *loses* reads
+> retries to success with the wrong set, `[1, 2]` where the truth is `[1, 2, 4]`, silently, for
+> the rest of the block. All three agents found it. **The second Blocker is why the suite was
+> silent about both: every fixture on that path named no reads at all**, so each record's changes
+> were two zero bytes and applying them twice is applying them never — and a writer that named
+> only the *first* observation's reads passed all 4,770 tests, because no fixture had ever put
+> reads on two observations. A record's observations split by allele, by witness and by read
+> group, so a locus with two alleles from two lanes is four of them. Both fixed, with fixtures
+> that name reads on the retry path; six defects re-injected, five caught and the sixth reported
+> as a defensive guard rather than counted.
+> [the review](doc/devel/reports/reviews/ng_psp_e3_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **the chain ids' changes move into the record head,
 > because a reader that skips a record's body must still see them** (step E3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). Two things the format wants pull against each other: a reader may skip a

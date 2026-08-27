@@ -4956,6 +4956,90 @@ mod tests {
         );
     }
 
+    /// **A record that straddles the reader's buffer is retried, and its reads come back once.**
+    ///
+    /// ⚠ **This is the regression test for a defect that shipped in this milestone twice, one
+    /// level apart.** Answering a short read means *fetch more bytes and re-parse this record
+    /// from its first byte*, so a parse that moved the live set before it could still fail meets
+    /// its own changes a second time: an arrival into a set it is already in, refused as damage
+    /// on a perfectly good file; or a departure position resolved against an already-shrunk set,
+    /// which removes a different read and says nothing at all.
+    ///
+    /// **The suite could not see either.** Every fixture that reaches the retry path had empty
+    /// chain-id lists, so each record's changes were the two bytes `0, 0` and applying them twice
+    /// is applying them never. This one names reads, and its blocks are larger than the 16 kB
+    /// rolling buffer, so records really do straddle it — asserted, not assumed.
+    #[test]
+    fn records_that_straddle_the_buffer_name_their_reads_exactly_once() {
+        let records: Vec<_> = (1..1_400u64)
+            .map(|at| {
+                let mut record = an_incompressible_record(at);
+                record.observations[0].chain_ids =
+                    (at.saturating_sub(19)..=at).map(|id| id * 3).collect();
+                record
+            })
+            .collect();
+        let on_disk = blocks_on_disk(&records, Bp(400), None);
+        let biggest = on_disk
+            .payloads
+            .iter()
+            .map(Vec::len)
+            .max()
+            .expect("some blocks");
+        assert!(
+            biggest > ROLLING_BYTES * 2,
+            "the blocks must be larger than the buffer, or nothing straddles it: {biggest} \
+             against {ROLLING_BYTES}"
+        );
+
+        let manifest = a_manifest();
+        // What a reader handed the whole file at once has live at each record.
+        let mut whole = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let mut live_at_each = Vec::new();
+        while let Some(next) = whole.next_record() {
+            let _ = next.expect("a well-formed file reads");
+            live_at_each.push(whole.live_reads().ids().to_vec());
+        }
+        assert_eq!(live_at_each.len(), records.len());
+
+        // And the same file dribbled in, so records are retried on the way.
+        let mut restarts_at_a_byte_a_read = 0u64;
+        for most_bytes_a_read in [1usize, 3, 1_024] {
+            let source = DribblingSource::new(on_disk.bytes.clone(), most_bytes_a_read);
+            let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+            let mut at = 0usize;
+            while let Some(next) = stream.next_record() {
+                let _ = next.unwrap_or_else(|refused| {
+                    panic!(
+                        "at {most_bytes_a_read} bytes a read, record {at} of a well-formed file \
+                         was refused: {refused}"
+                    )
+                });
+                assert_eq!(
+                    stream.live_reads().ids(),
+                    live_at_each[at].as_slice(),
+                    "at {most_bytes_a_read} bytes a read, record {at}'s reads"
+                );
+                at += 1;
+            }
+            assert_eq!(at, records.len());
+            assert!(
+                stream.parses_restarted() > 0,
+                "at {most_bytes_a_read} bytes a read nothing was retried, so this schedule says \
+                 nothing about a record that straddles the buffer"
+            );
+            if most_bytes_a_read == 1 {
+                restarts_at_a_byte_a_read = stream.parses_restarted();
+            }
+        }
+        assert!(
+            restarts_at_a_byte_a_read > records.len() as u64,
+            "a byte a read has to retry more often than there are records for this to be about \
+             retries at all: {restarts_at_a_byte_a_read} over {} records",
+            records.len()
+        );
+    }
+
     /// **A walk that skips almost every body still knows which reads are live.**
     ///
     /// This is the whole of why the chain ids' changes are in the record *head*. They carry

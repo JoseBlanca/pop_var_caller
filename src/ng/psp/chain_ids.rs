@@ -424,6 +424,13 @@ fn gap_from(previous: Option<u64>, value: u64) -> u64 {
 pub struct LiveSetReader {
     // ---- what lives for the whole file ----
     changes: LiveSetChanges,
+    /// Whether `changes` holds a record that has been parsed and not yet applied.
+    ///
+    /// **The split exists because the caller can still refuse the record.**
+    /// `read_record_head` bounds the record's body *after* the changes, and a body that stops
+    /// early is a `Truncated` whose contract is *fetch more bytes and re-parse this record from
+    /// its first byte* — so a set already moved would meet those bytes a second time.
+    parsed_but_not_applied: bool,
     /// Scratch for the arrival merge — see [`LiveSetWriter`]'s field of the same name.
     merged_ids: Vec<ChainId>,
 
@@ -444,6 +451,7 @@ impl LiveSetReader {
     /// Start a block: nothing is live, and the block's first record restates everything.
     pub fn start_block(&mut self) {
         self.block = PerBlockState::at_block_start();
+        self.parsed_but_not_applied = false;
     }
 
     /// The reads live at the record last read.
@@ -497,32 +505,65 @@ impl LiveSetReader {
     /// [`encode_changes`] is the mirror of this function, and the field order the two agree on is
     /// written there.
     pub fn read_changes(&mut self, bytes: &[u8]) -> Result<usize, RecordDecodeError> {
+        let used = self.parse_changes(bytes)?;
+        self.apply_the_changes_just_parsed();
+        Ok(used)
+    }
+
+    /// Read one record's changes off the front of `bytes` **without moving the live set**,
+    /// returning how many bytes they took.
+    ///
+    /// **For a caller that can still refuse the record after this point**, which is
+    /// `read_record_head`: it bounds the record's body *after* the changes, and a body that stops
+    /// early is a `Truncated` answered by fetching more bytes and re-parsing the record from its
+    /// first byte. A set already moved would meet those bytes a second time — an arrival into a
+    /// set it is already in, refused as damage on a perfectly good file, or worse, a departure
+    /// position resolved against an already-shrunk set, which removes a different read and says
+    /// nothing.
+    pub fn parse_changes(&mut self, bytes: &[u8]) -> Result<usize, RecordDecodeError> {
         let reader = &mut FieldReader::new(bytes);
         self.changes.clear();
+        self.parsed_but_not_applied = false;
 
         self.read_departures(reader)?;
         self.read_arrivals(reader)?;
+        self.parsed_but_not_applied = true;
+        Ok(reader.bytes_read())
+    }
 
-        // **Nothing above this line touched the live set**, and that is the whole reason the two
-        // reads and the two applies are separated. A fault in the arrivals half returns
-        // `Truncated`, whose contract is *fetch more bytes and re-parse the record from its first
-        // byte* — so the set has to be exactly what the previous record left it. Spec §8 names the
-        // alternative: *"a parse that half-advances that state before failing corrupts every
-        // record after it, plausibly."*
+    /// Move the live set by the changes [`parse_changes`](Self::parse_changes) last read.
+    ///
+    /// **A no-op unless a parse is waiting**, so a caller that applies twice moves the set once,
+    /// and a caller that refused the record between the two applies nothing.
+    ///
+    /// **Defensive, and measured to be so**: removing the guard passes every test in the module,
+    /// because no caller applies twice today. It is here because `read_changes` parses *and*
+    /// applies while `read_record_head` calls the two separately, so the two spellings sit beside
+    /// each other and the mistake is one line away — the same reason `begin_next_block` resets
+    /// zstd's decoder.
+    pub fn apply_the_changes_just_parsed(&mut self) {
+        if !self.parsed_but_not_applied {
+            return;
+        }
+        self.parsed_but_not_applied = false;
+
+        // **The set moves here and nowhere else.** Spec §8: *"a parse that half-advances that
+        // state before failing corrupts every record after it, plausibly."*
         //
-        // ⚠ **This function used to apply the departures between the two reads**, on a stated
-        // rationale that was not even true of the code: the departure loop had already finished,
-        // and both sides resolve a position against the *pre-departure* set anyway. Measured over
-        // a record that departs one read and gains one, five of its six cut points retried to
-        // `Ok` with a read silently gone from the set for the rest of the block.
+        // ⚠ **Twice now that has been got wrong, one level apart.** `read_changes` used to apply
+        // the departures between reading them and reading the arrivals, so a stream cut in the
+        // arrivals half left the set shrunk — five of six cut points retried to `Ok` with a read
+        // silently gone. And then `read_record_head` applied the whole thing before it bounded
+        // the record's body, so a body that stopped early did the same: measured end to end, a
+        // well-formed file of 1,999 records was refused at record 149 as *"already live"*, and a
+        // record that only departs reads retried to `Ok` with `[1, 2]` where the truth was
+        // `[1, 2, 4]`.
         apply_departures(&mut self.block.live, &self.changes.departed);
         apply_arrivals(
             &mut self.block.live,
             &self.changes.arrived,
             &mut self.merged_ids,
         );
-
-        Ok(reader.bytes_read())
     }
 
     /// The departures, each a position in the live set as it stands, resolved back to the
