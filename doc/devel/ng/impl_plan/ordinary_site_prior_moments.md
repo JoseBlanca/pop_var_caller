@@ -160,7 +160,7 @@ of positions. The spread of each moment travels with it and is **labelled a floo
 interval**, because linked positions make an independence assumption too narrow by 3 to 16 times.
 **No floor is applied** (Out, above). *Depends:* C1. *Source:* spec §6.2.
 
-**C3. What the run reports.**  ☐
+**C3. What the run reports.**  ✅
 The two measured moments; the fit's own `expected_heterozygosity` beside them, because two routes to
 one quantity is a diagnostic; the segregating count; the spreads; and where the inbreeding
 coefficient came from. **The last one carries a circularity the output must not hide** — the joint

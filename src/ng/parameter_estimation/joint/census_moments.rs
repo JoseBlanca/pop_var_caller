@@ -18,6 +18,7 @@
 //! **Nothing calls this yet.** Wiring it to a run is that spec's §5 and the implementation plan's
 //! Milestone C; what is here is the reduction and the type it returns.
 
+use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
 use crate::ng::types::InbreedingF;
 
 /// **How many alternative copies a position carries across the panel, and how uncertain that
@@ -512,6 +513,206 @@ fn probability_that_the_panel_segregates(position_genotype: &[f64], samples: usi
     alternative_copies_in(position_genotype, samples).segregating
 }
 
+/// **Where the panel's inbreeding coefficient came from**, which a run must say because the three
+/// sources are not interchangeable and one of them carries a circularity
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §4.1, §7).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum InbreedingSource {
+    /// **The runs-of-homozygosity estimator** — a two-state model over genome windows returning
+    /// the share of the analysable genome lying in stretches where an individual's two copies
+    /// descend from one recent ancestor (`parameter_estimation::generic::runs`).
+    ///
+    /// **This is the source §4.1 prefers**, on three reasons of which the first is decisive: it
+    /// reads the *distribution* of heterozygosity along a genome and needs no population
+    /// expectation, so nothing about it depends on the diversity this correction is computing. It
+    /// is also what the derivation asks for — realized autozygosity is what a run of homozygosity
+    /// *is* — and it works at one sample.
+    ///
+    /// `windows` is how many the model was fitted over. **Below
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`](crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING)
+    /// what it returns is its own noise**, and the report says so.
+    RunsOfHomozygosity { windows: u32 },
+    /// **The joint fit's homozygote excess** — how much less heterozygous an individual is than
+    /// the fitted frequencies predict.
+    ///
+    /// **⚠ It is circular here and the output must not hide that.** This quantity is measured
+    /// against a population expectation the same fit produced, and the correction it feeds divides
+    /// a diversity by `1 − F`. `parameter_prepass_generic.md` §6.3 states the rule in as many
+    /// words: *"Do not take `F` from the ratio estimator and then compute the cohort's diversity
+    /// from it… the ratio estimator needs a diversity to produce `F`, so feeding its `F` back in
+    /// returns whatever was assumed."*
+    ///
+    /// **The joint fit is not the pure ratio estimator** — from two samples up it also sees how
+    /// many samples carry the allele at each position, which is real information the ratio has
+    /// not got, and it recovers 0.80 from a truth of 0.8 there (report §3.5). **But the direction
+    /// of the dependence is the wrong way round**, and the runs estimator has no such dependence
+    /// at all.
+    ///
+    /// It also absorbs population structure: a cohort that is really two subpopulations looks
+    /// homozygote-excessive for reasons no individual's parents caused.
+    JointFitHomozygoteExcess,
+    /// **The user said so** — per sample or one value for the whole panel, including zero.
+    ///
+    /// A user who knows how their material was bred knows it whatever the cohort size, so this is
+    /// not a single-sample feature: a fitted coefficient at three samples is worth overriding for
+    /// the same reason it is at one (§4.2, owner's decision of 2026-08-27).
+    User,
+}
+
+/// **Everything a run owes its reader about the two numbers its SNP/indel prior was built from** —
+/// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7's list, assembled so that a run that used
+/// different information cannot look like one that did not.
+///
+/// **It judges nothing.** Two of the numbers here have thresholds that would be useful and neither
+/// has been measured: how few segregating positions is too few (§6.2), and how far apart the two
+/// heterozygosity estimates may drift before a fit is suspect (§8's fourth open question). Both
+/// measurements need a real census, which this checkout cannot rebuild. So the report prints and
+/// the reader decides — and *no threshold applied* is distinguishable in the output from a
+/// threshold that never fired.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct CensusMomentsReport {
+    /// The two moments the census average produced, with their spreads and the counts behind them.
+    pub measured: CensusMoments,
+    /// **The same heterozygosity by the other route** — `∫ π(f) · 2f(1−f) df` off the fitted
+    /// curve, with no census pass and no inbreeding coefficient
+    /// (`JointFit::expected_heterozygosity`).
+    ///
+    /// **Two routes to one quantity, and that is why both are printed.** They are computed from
+    /// the same converged fit: one averages the per-position posteriors, the other integrates the
+    /// curve. Measured at 63 samples across three populations and four depths, the curve's number
+    /// sits between **1.1% below and 10.7% above** the census average's — and which population is
+    /// the wide one is *not* predicted by whether the curve can hold its shape (§7).
+    pub curve_heterozygosity: f64,
+    /// The coefficient the heterozygosity was corrected by, and where it came from.
+    pub panel_inbreeding: f64,
+    pub inbreeding_source: InbreedingSource,
+    /// How many samples the panel holds — which the one-sample warning below needs, and which
+    /// nothing else here branches on.
+    pub samples: usize,
+}
+
+impl CensusMomentsReport {
+    /// **The curve's heterozygosity over the census average's** — the two-route ratio §7 asks a
+    /// run to print.
+    ///
+    /// **A threshold on it cannot be set at a tenth**: a converged, healthy fit already reaches
+    /// 10.7% on one of the three populations measured, and the widest cell is the rare-allele
+    /// population, whose shape the curve *can* hold exactly. Calibrating one needs a fit that
+    /// genuinely failed to converge, and nothing in this work produced one (§8's fourth open
+    /// question). Returns `None` where the census average is zero, which is a cohort with no
+    /// variation rather than a disagreement.
+    #[must_use]
+    pub fn curve_over_census(&self) -> Option<f64> {
+        (self.measured.heterozygosity > 0.0)
+            .then(|| self.curve_heterozygosity / self.measured.heterozygosity)
+    }
+
+    /// **What share of the census positions segregate**, as the soft count over the walked count.
+    /// `None` where no position was walked.
+    #[must_use]
+    pub fn segregating_share(&self) -> Option<f64> {
+        (self.measured.positions > 0)
+            .then(|| self.measured.segregating_positions / self.measured.positions as f64)
+    }
+
+    /// **The warnings this run owes, in the order a reader needs them.** Empty is the ordinary
+    /// case and is not itself a claim that anything is well founded.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        match self.inbreeding_source {
+            InbreedingSource::RunsOfHomozygosity { windows } => {
+                if (windows as usize) < MIN_WINDOWS_TO_FIT_INBREEDING {
+                    warnings.push(format!(
+                        "the inbreeding coefficient was fitted over {windows} genome windows, \
+                         below the {MIN_WINDOWS_TO_FIT_INBREEDING} its estimator needs before what \
+                         it returns is a measurement rather than its own noise"
+                    ));
+                }
+            }
+            InbreedingSource::JointFitHomozygoteExcess => {
+                warnings.push(
+                    "the inbreeding coefficient is the joint fit's own homozygote excess, which \
+                     is measured against a population expectation this same fit produced — so the \
+                     heterozygosity below has been divided by a number that depends on it. The \
+                     runs-of-homozygosity estimator has no such dependence and is what the design \
+                     prefers"
+                        .to_owned(),
+                );
+                if self.samples == 1 {
+                    warnings.push(format!(
+                        "and at one sample that excess is 0.000 whatever the truth, because a \
+                         single genome's totals cannot identify it — so the coefficient of {:.3} \
+                         is a floor and the heterozygosity is a floor with it. A user who knows \
+                         their material is selfing at F should multiply by 1/(1 − F): at F = 0.8 \
+                         the population's diversity is five times what is printed",
+                        self.panel_inbreeding
+                    ));
+                }
+            }
+            InbreedingSource::User => {}
+        }
+        warnings
+    }
+}
+
+impl std::fmt::Display for CensusMomentsReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let measured = &self.measured;
+        writeln!(
+            f,
+            "the population's two numbers, averaged over {} census positions",
+            measured.positions
+        )?;
+        writeln!(
+            f,
+            "  mean alternative-allele frequency  {:.4e}   at least ±{:.1e} (a floor, not an \
+             interval)",
+            measured.mean_alternative_frequency, measured.frequency_standard_error_floor
+        )?;
+        writeln!(
+            f,
+            "  heterozygosity                     {:.4e}   at least ±{:.1e} (a floor, not an \
+             interval)",
+            measured.heterozygosity, measured.heterozygosity_standard_error_floor
+        )?;
+        match self.segregating_share() {
+            Some(share) => writeln!(
+                f,
+                "  positions that segregate           {:.1} of {} ({:.3}%), a soft count",
+                measured.segregating_positions,
+                measured.positions,
+                100.0 * share
+            )?,
+            None => writeln!(f, "  positions that segregate           none walked")?,
+        }
+        writeln!(
+            f,
+            "  the same heterozygosity off the fitted curve: {:.4e}{}",
+            self.curve_heterozygosity,
+            match self.curve_over_census() {
+                Some(ratio) => format!(" ({ratio:.3}x the census average's)"),
+                None => String::new(),
+            }
+        )?;
+        writeln!(
+            f,
+            "  inbreeding coefficient             {:.3}, from {}",
+            self.panel_inbreeding,
+            match self.inbreeding_source {
+                InbreedingSource::RunsOfHomozygosity { windows } =>
+                    format!("the runs-of-homozygosity estimator over {windows} genome windows"),
+                InbreedingSource::JointFitHomozygoteExcess =>
+                    "the joint fit's own homozygote excess".to_owned(),
+                InbreedingSource::User => "the user".to_owned(),
+            }
+        )?;
+        for warning in self.warnings() {
+            writeln!(f, "  ⚠ {warning}")?;
+        }
+        Ok(())
+    }
+}
 /// **How often two of the panel's chromosomes drawn at random differ at one position** — Nei's
 /// gene diversity with the finite-panel correction, `2 k (2N − k) / (2N (2N − 1))`.
 ///
@@ -1142,6 +1343,166 @@ mod tests {
         );
         // And the count of segregating positions is untouched by any of it.
         assert_eq!(selfing.segregating_positions, plain.segregating_positions);
+    }
+
+    /// A report over a small census, so the tests below can name every number in it.
+    fn a_report(inbreeding_source: InbreedingSource, samples: usize) -> CensusMomentsReport {
+        let mut sums = CensusMomentSums::over(samples);
+        for copies in [1u8, 0, 0, 2] {
+            sums.add_position(&as_f64(&point_masses(&[&vec![copies; samples]])));
+        }
+        CensusMomentsReport {
+            measured: sums.finish(outbred()),
+            curve_heterozygosity: 7.0e-4,
+            panel_inbreeding: 0.0,
+            inbreeding_source,
+            samples,
+        }
+    }
+
+    /// **The report prints both routes to the heterozygosity and the ratio between them, and
+    /// judges neither** — `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7.
+    ///
+    /// **A threshold on that ratio cannot be set at a tenth**: a converged, healthy fit already
+    /// shows the curve's number 10.7% above the census average's on one of the three populations
+    /// measured, and that population is the one whose shape the curve *can* hold exactly. So the
+    /// number is printed and nothing branches on it — which this test pins by checking that a
+    /// report whose two routes disagree by a factor of two still produces no warning.
+    #[test]
+    fn the_two_heterozygosity_routes_are_both_printed_and_neither_is_judged() {
+        let mut report = a_report(InbreedingSource::User, 2);
+        report.curve_heterozygosity = 2.0 * report.measured.heterozygosity;
+        assert!((report.curve_over_census().expect("it segregates") - 2.0).abs() < 1e-12);
+        assert!(
+            report.warnings().is_empty(),
+            "no threshold on this gap has been measured, so a run that shows one must not be \
+             warned about it; got {:?}",
+            report.warnings()
+        );
+        let printed = report.to_string();
+        assert!(printed.contains("2.000x the census average's"), "{printed}");
+        assert!(printed.contains("off the fitted curve"), "{printed}");
+    }
+
+    /// **The segregating count and both spreads reach the output, and the spreads say they are
+    /// floors** — the one word that stops a reader taking one for an interval.
+    #[test]
+    fn the_report_carries_the_counts_and_calls_the_spreads_floors() {
+        let report = a_report(InbreedingSource::User, 2);
+        let printed = report.to_string();
+        assert!(printed.contains("a soft count"), "{printed}");
+        assert!(printed.contains("positions that segregate"), "{printed}");
+        assert_eq!(
+            printed.matches("a floor, not an interval").count(),
+            2,
+            "both spreads are floors and both must say so: {printed}"
+        );
+        // **One of the four positions segregates, not two.** The fixture's samples are identical,
+        // so the position where both carry two alternative copies is fixed *for the alternative*
+        // and does not segregate any more than the two all-reference ones do. An earlier version
+        // of this assertion said two, which is the mistake the count exists to prevent read from
+        // the other side.
+        assert!(
+            (report.segregating_share().expect("positions were walked") - 0.25).abs() < 1e-12,
+            "got {:?}",
+            report.segregating_share()
+        );
+    }
+
+    /// **A coefficient taken from the joint fit's own homozygote excess is circular, and the
+    /// output must not hide it** — §4.1, and the one row of §7's table that exists because of a
+    /// rule stated elsewhere in as many words.
+    ///
+    /// The fit measures that excess against a population expectation it produced itself, and the
+    /// correction divides a diversity by `1 − F`. So the warning is unconditional on that source,
+    /// whatever the cohort size.
+    #[test]
+    fn the_homozygote_excess_source_warns_about_its_own_circularity() {
+        let report = a_report(InbreedingSource::JointFitHomozygoteExcess, 10);
+        let warnings = report.warnings();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].contains("measured against a population expectation this same fit"));
+        assert!(report.to_string().contains("⚠"));
+
+        // And the other two sources are not circular, so neither warns on that account.
+        assert!(a_report(InbreedingSource::User, 10).warnings().is_empty());
+        assert!(
+            a_report(InbreedingSource::RunsOfHomozygosity { windows: 8_004 }, 10)
+                .warnings()
+                .is_empty()
+        );
+    }
+
+    /// **At one sample the homozygote excess is 0.000 whatever the truth, so the run says its
+    /// coefficient is a floor and what the diversity would be at a stated one** — §4.2, where a
+    /// single genome's census is shown to be drawn from the identical distribution under two
+    /// populations whose diversities stand in the ratio `1 − F`.
+    ///
+    /// **The warning is for one sample and no other**, and that is a measurement rather than a
+    /// taste: the fit's coefficient goes from 0.000 at one sample to 0.833 at two against a truth
+    /// of 0.8, and stays within 0.03 of the truth from three samples to sixty-three (report §3.5).
+    #[test]
+    fn one_sample_on_the_homozygote_excess_is_told_its_diversity_is_a_floor() {
+        let one = a_report(InbreedingSource::JointFitHomozygoteExcess, 1);
+        let warnings = one.warnings();
+        assert_eq!(warnings.len(), 2, "got {warnings:?}");
+        assert!(warnings[1].contains("is a floor"), "{:?}", warnings[1]);
+        assert!(
+            warnings[1].contains("five times what is printed"),
+            "{:?}",
+            warnings[1]
+        );
+
+        // Two samples is where the fit starts recovering the coefficient, so the second warning
+        // stops there.
+        let two = a_report(InbreedingSource::JointFitHomozygoteExcess, 2);
+        assert_eq!(two.warnings().len(), 1, "got {:?}", two.warnings());
+    }
+
+    /// **The runs estimator warns below its own floor of 3,000 windows and not above it** — below
+    /// that, `parameter_prepass_generic.md` §6.1 records that what it returns is its own noise.
+    #[test]
+    fn the_runs_estimator_warns_below_its_own_window_floor() {
+        let thin = a_report(InbreedingSource::RunsOfHomozygosity { windows: 1_200 }, 4);
+        let warnings = thin.warnings();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains("1200 genome windows"),
+            "{:?}",
+            warnings[0]
+        );
+
+        // A tomato genome is 8,004 windows, which is well above the floor.
+        let whole_genome = a_report(InbreedingSource::RunsOfHomozygosity { windows: 8_004 }, 4);
+        assert!(whole_genome.warnings().is_empty());
+        // And exactly at the floor is not below it.
+        let at_the_floor = a_report(
+            InbreedingSource::RunsOfHomozygosity {
+                windows: MIN_WINDOWS_TO_FIT_INBREEDING as u32,
+            },
+            4,
+        );
+        assert!(at_the_floor.warnings().is_empty());
+    }
+
+    /// **Where the coefficient came from reaches the printed output**, distinguishably — which is
+    /// the whole requirement §7 restates from `calling_priors.md` §4: two runs that used different
+    /// information must not look the same.
+    #[test]
+    fn each_inbreeding_source_prints_differently() {
+        let printed: Vec<String> = [
+            InbreedingSource::User,
+            InbreedingSource::JointFitHomozygoteExcess,
+            InbreedingSource::RunsOfHomozygosity { windows: 8_004 },
+        ]
+        .into_iter()
+        .map(|source| a_report(source, 4).to_string())
+        .collect();
+        assert!(printed[0].contains("from the user"));
+        assert!(printed[1].contains("from the joint fit's own homozygote excess"));
+        assert!(printed[2].contains("runs-of-homozygosity estimator over 8004 genome windows"));
+        assert_ne!(printed[0], printed[1]);
+        assert_ne!(printed[1], printed[2]);
     }
     /// **A posterior array of the wrong length is refused rather than read by offset.**
     ///

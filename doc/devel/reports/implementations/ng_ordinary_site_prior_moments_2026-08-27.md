@@ -956,3 +956,67 @@ fails 1, and **replacing the soft count with the hard one the spec forbids fails
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged. One new break was introduced
   and fixed: a `#[cfg(test)]` function cannot be the target of a doc link from code that is always
   compiled.
+
+---
+
+## C3 — what the run reports
+
+**Contract (plan C3).** The two measured moments; the fit's own `expected_heterozygosity` beside
+them, because two routes to one quantity is a diagnostic; the segregating count; the spreads; and
+where the inbreeding coefficient came from. **The last one carries a circularity the output must
+not hide.**
+
+### What shipped
+
+`CensusMomentsReport`, with a `Display` that prints spec §7's whole list, and
+`InbreedingSource` — three variants, because the three sources are not interchangeable:
+
+- **`RunsOfHomozygosity { windows }`** — the source §4.1 prefers, on three reasons of which the
+  first is decisive: it reads the *distribution* of heterozygosity along a genome and needs no
+  population expectation, so nothing about it depends on the diversity this correction is
+  computing. The window count travels with it because its estimator's own floor is 3,000, below
+  which what it returns is its noise.
+- **`JointFitHomozygoteExcess`** — **circular here, and the report says so unconditionally**. That
+  excess is measured against a population expectation the same fit produced, and the correction it
+  feeds divides a diversity by `1 − F`. `parameter_prepass_generic.md` §6.3 states the rule in as
+  many words, and the warning quotes the mechanism rather than the rule.
+- **`User`** — per sample or one value for the whole panel, including zero. Not a single-sample
+  feature: a user who knows how their material was bred knows it whatever the cohort size.
+
+### Two thresholds not applied, and both are on the type's own documentation
+
+**Nothing branches on the segregating count** (spec §6.2's floor, unmeasured) **and nothing
+branches on the gap between the two heterozygosity estimates** (§8's fourth open question). The
+second has a test of its own: a report whose two routes disagree **by a factor of two** produces no
+warning. **A threshold at a tenth would fire on good runs** — a converged, healthy fit already
+shows the curve's number 10.7% above the census average's on one of three populations measured, and
+that population is the one whose shape the curve can hold exactly.
+
+### The one-sample warning, and why it stops at one sample
+
+Where the coefficient is the fit's own homozygote excess **and the panel holds one sample**, the
+report adds a second warning: that excess is 0.000 whatever the truth, so the coefficient is a
+floor and the heterozygosity is a floor with it — and it says what to multiply by. **That the
+warning stops at one sample is a measurement rather than a taste**: the fit's coefficient goes from
+0.000 at one sample to 0.833 at two against a truth of 0.8, and stays within 0.03 of the truth from
+three samples to sixty-three (report §3.5). Pinned by a test at one sample and at two.
+
+### What the tests pin
+
+Six. Beyond the two above: that both spreads print the words *a floor, not an interval* — checked
+by counting two occurrences, so dropping the label on one of them fails; that the runs estimator
+warns at 1,200 windows, does not at 8,004, and **does not at exactly 3,000**, which is the boundary;
+and that the three sources print differently, which is the whole requirement §7 restates from
+`calling_priors.md` §4.
+
+**⛦ A test caught a wrong claim of mine while it was being written.** The fixture's four positions
+carry 1, 0, 0 and 2 alternative copies in a panel of two identical samples, and I asserted that two
+of them segregate. One does: the position where both samples carry two alternative copies is fixed
+*for the alternative* and does not segregate any more than the all-reference ones do — which is the
+same fact the soft count's own end-case test pins, read from the other side.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,853 passed, 0 failed, 11 ignored**, from 4,847. Six tests added.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
