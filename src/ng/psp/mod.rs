@@ -58,11 +58,13 @@ use crate::ng::types::GenomeRegion;
 // would render each twice, and the first example to reach for `ng::psp::header::Header` would
 // pin the path the re-export list exists to make canonical. Production does the same for two
 // of its own submodules.
+pub(crate) mod block;
 pub(crate) mod footer;
 pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod record;
 
+pub use block::{BlockBuilder, BlockHead, BlockHeadError, BlockRecords, BlockWriteError};
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{
     ContigIdentity, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
