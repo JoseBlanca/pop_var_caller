@@ -151,7 +151,7 @@ early.
 it over, keep nothing. 16 kB buffers.
 ***Depends:*** D2. ***Source:*** [spec §5.1, §4.4](../spec/psp_file_format.md).
 
-☐ **D4 — the restartable parse.** A record that straddles the rolling buffer is retried from its
+✅ **D4 — the restartable parse.** A record that straddles the rolling buffer is retried from its
 start with the running state restored, and the buffer grows for a record larger than it.
 **Own commit, do not bundle**: a parse that half-advances the state before failing corrupts every
 record after it, plausibly. The oracle is a decode forced to refill at every possible boundary.

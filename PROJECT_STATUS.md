@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-27):** **a run of blocks streams back a record at a time,
+> - **Last completed task (2026-08-27):** **a record cut in half by the reader's buffer is
+> retried from its first byte, and the oracle for that caught itself being useless** (step D4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). The
+> retry loop was already there — a reader cannot work without one — so what this step owes is the
+> proof, and the plan names it: a decode forced to refill at every possible boundary. The obvious
+> reading is to hand the reader one byte at a time, then two, and so on to the whole file, and
+> require the same records every time. That sweep passes at all 837 schedules **and retried a
+> record exactly zero times**: zstd decodes in internal blocks and emits one whole, so a block
+> that fits a single emission arrives in one piece however slowly its input did. Slowing the
+> input moves *when* the data arrives, not whether a record is cut in half. What cuts one is the
+> buffer running out — so the real sweep uses blocks larger than the buffer, which is what data at
+> depth looks like, and **counts the retries as part of the test**: 58,778 of them at one byte a
+> read over 1,999 records, and sixteen even when the whole file arrives at once. Spec §8's exact
+> defect — advancing the coordinate before asking for more bytes — failed one test before this
+> step and fails four now.
+> [D4](doc/devel/reports/implementations/ng_psp_d4_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a run of blocks streams back a record at a time,
 > holding two 16 kB buffers and nothing that grows with them** (step D3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That is
 > the half of the design that gets lost: a reader can decompress a block perfectly and then gather

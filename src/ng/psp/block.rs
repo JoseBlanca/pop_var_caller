@@ -1162,6 +1162,13 @@ pub struct BlockStream<R> {
 
     // ---- what lives for one block, and is replaced whole at every boundary ----
     cursor: BlockCursor,
+    /// How many times a record's parse has been retried after a refill. **Test-only, because it
+    /// is the one thing about a restartable parse that cannot be seen from outside**: a walk
+    /// that comes out right proves nothing if the retry never ran, and a fixture small enough
+    /// to fit one buffer never runs it.
+    #[cfg(test)]
+    retries_after_a_refill: usize,
+
     /// Set once this reader has refused, and never cleared. **A stream that has refused is
     /// finished**: without a state that says so, what stopped a refused reader was only that its
     /// compressed buffer had been emptied — which lasts exactly as long as the whole file fits in
@@ -1250,6 +1257,8 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             compressed_filled,
             rolling,
             cursor,
+            #[cfg(test)]
+                retries_after_a_refill: _,
             refused,
         } = self;
         f.debug_struct("BlockStream")
@@ -1309,8 +1318,16 @@ impl<R: std::io::Read> BlockStream<R> {
             compressed_filled: 0,
             rolling: Vec::with_capacity(ROLLING_BYTES),
             cursor: BlockCursor::between_blocks(),
+            #[cfg(test)]
+            retries_after_a_refill: 0,
             refused: false,
         })
+    }
+
+    /// How many times a record's parse has been retried after a refill — see the field.
+    #[cfg(test)]
+    fn retries_after_a_refill(&self) -> usize {
+        self.retries_after_a_refill
     }
 
     /// The look-back window this reader's decoder is configured for, as the file declared it.
@@ -1410,19 +1427,28 @@ impl<R: std::io::Read> BlockStream<R> {
                         record,
                     }));
                 }
-                Err(RecordDecodeError::Truncated { .. }) => match self.pump() {
-                    // More of the block arrived. **The parse starts again from the record's
-                    // first byte**, against state this arm has not touched — which is what makes
-                    // it restartable rather than half-advanced.
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Some(Err(self.fail(BlockReadError::RecordRunsPastItsBlock {
-                            records_left: self.cursor.records_left,
-                            bytes_left: self.rolling.len() - self.cursor.rolling_at,
-                        })));
+                Err(RecordDecodeError::Truncated { .. }) => {
+                    #[cfg(test)]
+                    {
+                        self.retries_after_a_refill += 1;
                     }
-                    Err(refused) => return Some(Err(self.fail(refused))),
-                },
+                    // **Nothing but `pump` may go here.** The parse starts again from the
+                    // record's first byte, against state this arm has not touched — which is
+                    // what makes it restartable rather than half-advanced. Spec §8: "a parse
+                    // that half-advances that state before failing corrupts every record after
+                    // it, plausibly."
+                    let refilled = self.pump();
+                    match refilled {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Some(Err(self.fail(BlockReadError::RecordRunsPastItsBlock {
+                                records_left: self.cursor.records_left,
+                                bytes_left: self.rolling.len() - self.cursor.rolling_at,
+                            })));
+                        }
+                        Err(refused) => return Some(Err(self.fail(refused))),
+                    }
+                }
                 Err(damage) => return Some(Err(self.fail(BlockReadError::from_record(damage)))),
             }
         }
@@ -4423,6 +4449,180 @@ mod tests {
             matches!(upgrade, BlockReadError::UnsupportedRecord { .. }),
             "a tag a later writer added is *upgrade the reader*, not damage"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The restartable parse
+    // -----------------------------------------------------------------
+
+    /// Read a whole file through a source that hands over exactly `most` bytes a read, and say
+    /// how many times a record's parse had to be retried on the way.
+    fn stream_through_a_source_yielding(
+        bytes: &[u8],
+        most: usize,
+    ) -> (Vec<SampleLocusObservations>, usize) {
+        let manifest = a_manifest();
+        let source = ADribblingSource::new(bytes.to_vec(), most);
+        let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+        let mut back = Vec::new();
+        while let Some(next) = stream.next_record() {
+            back.push(
+                next.unwrap_or_else(|refused| panic!("at {most} bytes a read: {refused}"))
+                    .record
+                    .expect("every record is built"),
+            );
+        }
+        (back, stream.retries_after_a_refill())
+    }
+
+    /// **The oracle: a decode forced to refill at every possible boundary.**
+    ///
+    /// A reader meets the file as a stream of compressed bytes, so a refill can fall between any
+    /// two of them — and a source that hands over `n` bytes a read puts the refills at every
+    /// multiple of `n`. Running `n` from one byte to the whole file therefore places a refill at
+    /// **every byte offset the reader can meet one at**, and every run must give the same
+    /// records as a single-shot read.
+    ///
+    /// **Why this is the property and not the walk's success**: a record that straddles a refill
+    /// is retried from its first byte, and a retry that advanced the running coordinate before
+    /// asking for more bytes would give the right *number* of records at the wrong positions.
+    /// Spec §8 calls that out by name — *"a parse that half-advances that state before failing
+    /// corrupts every record after it, plausibly"*.
+    #[test]
+    fn a_decode_forced_to_refill_at_every_boundary_gives_the_same_records() {
+        // Small enough to run a schedule per byte, varied enough that records differ in width.
+        let records: Vec<_> = (0..40)
+            .map(|index| a_record(0, 100 + index * 3, 1 + index % 4))
+            .collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, Some(90));
+        assert!(
+            on_disk.block_offsets.len() >= 3,
+            "several blocks, so refills land inside block heads as well as inside records"
+        );
+
+        let (whole, _) = stream_through_a_source_yielding(&on_disk.bytes, usize::MAX);
+        assert_eq!(whole, records, "a single-shot read is the thing to match");
+        for most in 1..=on_disk.bytes.len() {
+            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
+            assert_eq!(back, records, "reading {most} bytes a read");
+        }
+    }
+
+    /// **And the same sweep over blocks the rolling buffer cannot hold, which is where a record
+    /// actually straddles one.**
+    ///
+    /// The sweep above moves the point at which *compressed* bytes arrive, and on small blocks
+    /// that turns out not to move where a *record* is cut in half: zstd decodes in internal
+    /// blocks and emits one whole, so a payload that fits a single emission is delivered in one
+    /// piece however slowly its input arrived. Measured on the fixture above — **837 schedules,
+    /// none of which retried a record even once**. A test that stopped there would have proved
+    /// the walk works and nothing about restarting it.
+    ///
+    /// What straddles a record is the buffer running out, so the blocks here are larger than it.
+    #[test]
+    fn a_decode_of_blocks_larger_than_the_buffer_is_retried_and_still_exact() {
+        let records: Vec<_> = (1..2_000u64).map(a_bulky_record).collect();
+        let on_disk = blocks_on_disk(&records, Bp(4_000), None);
+        let biggest = on_disk
+            .payloads
+            .iter()
+            .map(|payload| payload.len())
+            .max()
+            .expect("some blocks");
+        assert!(
+            biggest > ROLLING_BYTES * 2,
+            "the blocks must be larger than the buffer, or no record straddles one: {biggest} \
+             bytes against {ROLLING_BYTES}"
+        );
+
+        let mut most_retries = 0usize;
+        for most in [1usize, 2, 3, 17, 251, 1024, READ_CHUNK_BYTES, usize::MAX] {
+            let (back, retries) = stream_through_a_source_yielding(&on_disk.bytes, most);
+            assert_eq!(back, records, "reading {most} bytes a read");
+            most_retries = most_retries.max(retries);
+        }
+        // **The schedules have to actually retry, or the loop above proves nothing.**
+        assert!(
+            most_retries > records.len() / 10,
+            "the sweep retried at most {most_retries} times over {} records, too few to have \
+             crossed many of them",
+            records.len()
+        );
+    }
+
+    /// **A record larger than the rolling buffer is read at every refill schedule too**, and the
+    /// buffer that grew for it goes back to what a reader budgets for at the next block.
+    ///
+    /// This is the case spec §8 refuses to bake a ceiling for — "many alleles, many chain ids" —
+    /// met at the boundaries where it is hardest: a record that does not fit is retried until it
+    /// does, so every retry is one the buffer has to survive.
+    #[test]
+    fn a_record_larger_than_the_buffer_survives_every_refill_schedule() {
+        let mut enormous = a_record(0, 500, 1);
+        enormous.observations = (0..2_600u32)
+            .map(|read| SequenceObservation {
+                bases: vec![b"ACGT"[(read % 4) as usize]; 12].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(read % 7),
+                num_obs: 1,
+                num_fwd: read % 2,
+                q_sum: SummedLogError::from_steps(-(i64::from(read) + 1)),
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 1,
+                chain_ids: Vec::new(),
+            })
+            .collect();
+        let records = vec![enormous, a_record(0, 200_000, 1), a_record(0, 200_001, 2)];
+
+        let payloads =
+            cut(BlockBuilder::new(A_GRID, None).expect("a grid"), &records).expect("in order");
+        assert!(
+            payloads[0].len() > ROLLING_BYTES,
+            "the record must exceed the rolling buffer: {} bytes against {ROLLING_BYTES}",
+            payloads[0].len()
+        );
+
+        let on_disk = blocks_on_disk(&records, A_GRID, None);
+        for most in [1usize, 3, 64, 1024, usize::MAX] {
+            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
+            assert_eq!(back, records, "reading {most} bytes a read");
+        }
+
+        // And the buffer comes back down: the last block's records are ordinary.
+        let manifest = a_manifest();
+        let source = ADribblingSource::new(on_disk.bytes.clone(), 7);
+        let mut stream = BlockStream::new(source, &manifest).expect("a manifest");
+        while let Some(next) = stream.next_record() {
+            let _ = next.expect("it reads");
+        }
+        assert_eq!(
+            stream.buffered_bytes(),
+            READ_CHUNK_BYTES + ROLLING_BYTES,
+            "the buffer that grew for one record is back to the budget"
+        );
+    }
+
+    /// **A refill inside a block's own opening fields is retried too.** A block head is three
+    /// variable-length integers and the first thing a reader meets after a block's length, so a
+    /// schedule that hands over one byte at a time refills inside every one of them.
+    #[test]
+    fn a_refill_inside_a_block_head_is_retried() {
+        // A contig, first position and record count that each need several bytes, so a
+        // one-byte-a-read schedule stops inside each of them.
+        let records: Vec<_> = (0..300)
+            .map(|index| a_record(300, 90_600_000 + index, 1))
+            .collect();
+        let on_disk = blocks_on_disk(&records, A_GRID, None);
+        let head = walk(&on_disk.payloads[0]).head;
+        assert_eq!(head.contig, ContigId(300));
+        assert!(head.first_position.get() > 1 << 21, "a four-byte position");
+        assert!(head.record_count.get() > 0x7f, "a multi-byte count");
+
+        for most in [1usize, 2, 3] {
+            let (back, _) = stream_through_a_source_yielding(&on_disk.bytes, most);
+            assert_eq!(back, records, "reading {most} bytes a read");
+        }
     }
 
     // -----------------------------------------------------------------
