@@ -71,7 +71,7 @@ pub struct CensusMoments {
     ///
     /// **⚠ What this number still owes is one term, and it is bounded rather than unknown.** The
     /// variance above is the sum of the samples' own and ignores the positive coupling between
-    /// samples at a position, so this comes back slightly **high** — see [`alternative_copies_at`].
+    /// samples at a position, so this comes back slightly **high** — see [`alternative_copies_in`].
     /// Nothing has measured the size; the whole variance term is 1.6 to 2.2 parts in a hundred at
     /// ten samples and three reads, which bounds the residual above by that and no lower (spec
     /// §3.1, §8's first open question).
@@ -147,27 +147,141 @@ impl CensusMoments {
             positions * samples * 3,
             genotype_posterior.len()
         );
-        let chromosomes = 2.0 * samples as f64;
-        let mut frequency = 0.0_f64;
-        let mut heterozygosity = 0.0_f64;
+        let mut running = CensusMomentSums::over(samples);
+        let mut one_position = vec![0.0_f64; samples * 3];
         for position in 0..positions {
-            let copies = alternative_copies_at(genotype_posterior, samples, position);
-            frequency += copies.expected_copies / chromosomes;
-            heterozygosity += nei_heterozygosity(
-                copies.expected_copies,
-                copies.copy_count_variance,
-                chromosomes,
-            );
+            let base = position * samples * 3;
+            for (slot, value) in one_position
+                .iter_mut()
+                .zip(&genotype_posterior[base..base + samples * 3])
+            {
+                *slot = f64::from(*value);
+            }
+            running.add_position(&one_position);
         }
-        // A census of no positions leaves both sums at zero and the divide undefined. It is a run
-        // whose fit kept nothing, which the caller's own fallback ladder handles by regime; what
-        // this must not do is return a `NaN` that looks like a number.
-        let positions = positions.max(1) as f64;
+        running.finish(panel_inbreeding)
+    }
+}
+
+/// **The two moments as running sums, so a run never stores the array they are summed from.**
+///
+/// One of these lives on the fit's per-chunk statistics, is fed one position at a time from the
+/// expectation step's own scratch buffer, and is merged chunk into chunk the way every other sum
+/// there is. What it holds is a handful of `f64`s, whatever the census and whatever the cohort.
+///
+/// ## Why this and not the stored array
+///
+/// The fit can be asked to keep every position's genotype posteriors
+/// (`JointFitConfig::genotype_posteriors`), and [`CensusMoments::from_posteriors`] reduces that
+/// array. **It is off by default because it weighs twelve bytes a position a sample** — three
+/// `f32`s — which is **1.5 GB for fifty samples over the shipped two-million-position census**,
+/// held to be summed once and thrown away. The design asks for the sums instead
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5), and this is them.
+///
+/// **The array route is kept and is not dead**: it is what the measurement harnesses reduce, and
+/// it is the oracle these sums are checked against — the two must agree to the last bit on the
+/// same posteriors, which is a test.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CensusMomentSums {
+    /// The panel's size in diploid individuals. Held rather than derived from the chromosome count
+    /// because [`Self::add_position`] runs once per census position per pass of the fit — on the
+    /// shipped census that is two million times a pass — and a stored count is one field read
+    /// where a derived one is a divide and a cast.
+    samples: usize,
+    chromosomes: f64,
+    positions: u64,
+    frequency: f64,
+    heterozygosity: f64,
+}
+
+impl CensusMomentSums {
+    /// Start a run's sums over a panel of `samples` diploid individuals.
+    ///
+    /// # Panics
+    ///
+    /// On a panel of no samples, which has no chromosomes for a frequency to be a share of.
+    #[must_use]
+    pub fn over(samples: usize) -> Self {
+        assert!(
+            samples > 0,
+            "a census average over no samples has no chromosomes to be a share of"
+        );
         Self {
-            mean_alternative_frequency: frequency / positions,
-            heterozygosity: heterozygosity
+            samples,
+            chromosomes: 2.0 * samples as f64,
+            positions: 0,
+            frequency: 0.0,
+            heterozygosity: 0.0,
+        }
+    }
+
+    /// Add one census position, from **three numbers a sample in sample order** — the posterior
+    /// that the sample is heterozygous there, that both its copies are non-reference, and that it
+    /// carries an extra copy of the position.
+    ///
+    /// That is the expectation step's own per-position scratch buffer, unchanged and uncopied.
+    ///
+    /// # Panics
+    ///
+    /// On a buffer that is not three long per sample. It is read by computed offset, so a
+    /// disagreement would read one sample's numbers as another's rather than fail.
+    pub fn add_position(&mut self, position_genotype: &[f64]) {
+        assert_eq!(
+            position_genotype.len(),
+            self.samples * 3,
+            "one position carries three numbers a sample, so {} samples is {} values; the buffer \
+             holds {}",
+            self.samples,
+            self.samples * 3,
+            position_genotype.len()
+        );
+        let copies = alternative_copies_in(position_genotype, self.samples);
+        self.positions += 1;
+        self.frequency += copies.expected_copies / self.chromosomes;
+        self.heterozygosity += nei_heterozygosity(
+            copies.expected_copies,
+            copies.copy_count_variance,
+            self.chromosomes,
+        );
+    }
+
+    /// Fold another chunk's sums in. Every field is a sum over positions, so this is addition.
+    ///
+    /// # Panics
+    ///
+    /// On sums taken over a different panel, which cannot be added: the per-position terms are
+    /// already divided by the panel's chromosome count.
+    pub fn merge(&mut self, other: &Self) {
+        assert_eq!(
+            self.samples, other.samples,
+            "two chunks of one run share a panel, so their sums are over the same sample count; \
+             got {} and {}",
+            self.samples, other.samples
+        );
+        self.positions += other.positions;
+        self.frequency += other.frequency;
+        self.heterozygosity += other.heterozygosity;
+    }
+
+    /// How many census positions have been added.
+    #[must_use]
+    pub fn positions(&self) -> u64 {
+        self.positions
+    }
+
+    /// Divide through by the positions and apply the panel's inbreeding correction.
+    ///
+    /// **A census of no positions returns zeros rather than `NaN`.** It is a run whose fit kept
+    /// nothing; the caller's own fallback ladder handles that by regime, and what this must not do
+    /// is return two numbers that look like measurements.
+    #[must_use]
+    pub fn finish(&self, panel_inbreeding: InbreedingF) -> CensusMoments {
+        let positions = self.positions.max(1) as f64;
+        CensusMoments {
+            mean_alternative_frequency: self.frequency / positions,
+            heterozygosity: self.heterozygosity
                 / positions
-                / inbreeding_factor(panel_inbreeding, chromosomes),
+                / inbreeding_factor(panel_inbreeding, self.chromosomes),
         }
     }
 }
@@ -227,17 +341,15 @@ fn inbreeding_factor(panel_inbreeding: InbreedingF, chromosomes: f64) -> f64 {
 /// which makes the heterozygosity come back slightly high. **Its size has not been measured**; the
 /// whole variance term is between 1.6 and 2.2 parts in a hundred at ten samples and three reads,
 /// which bounds the residual above by that and no lower (spec §3.1, §8's first open question).
-fn alternative_copies_at(
-    genotype_posterior: &[f32],
+fn alternative_copies_in(
+    position_genotype: &[f64],
     samples: usize,
-    position: usize,
 ) -> AlternativeCopiesAtAPosition {
-    let base = position * samples * 3;
     let mut expected_copies = 0.0_f64;
     let mut copy_count_variance = 0.0_f64;
     for sample in 0..samples {
-        let heterozygous = f64::from(genotype_posterior[base + sample * 3]);
-        let both_non_reference = f64::from(genotype_posterior[base + sample * 3 + 1]);
+        let heterozygous = position_genotype[sample * 3];
+        let both_non_reference = position_genotype[sample * 3 + 1];
         let copies = heterozygous + 2.0 * both_non_reference;
         let copies_squared = heterozygous + 4.0 * both_non_reference;
         expected_copies += copies;
@@ -279,7 +391,7 @@ fn alternative_copies_at(
 /// decimals* comes from.
 ///
 /// **The variance passed in is the sum of the samples' own and is an under-estimate** — see
-/// [`alternative_copies_at`] — so what comes back is still slightly high, in the same direction
+/// [`alternative_copies_in`] — so what comes back is still slightly high, in the same direction
 /// and much smaller.
 fn nei_heterozygosity(expected_copies: f64, copy_count_variance: f64, chromosomes: f64) -> f64 {
     debug_assert!(
@@ -530,8 +642,8 @@ mod tests {
     /// would give `5.0 − 9.0`, a negative number — which is the check.
     #[test]
     fn the_copy_count_variance_is_summed_per_sample() {
-        let midway = vec![0.5_f32, 0.5, 0.0, 0.5, 0.5, 0.0];
-        let copies = alternative_copies_at(&midway, 2, 0);
+        let midway = vec![0.5_f64, 0.5, 0.0, 0.5, 0.5, 0.0];
+        let copies = alternative_copies_in(&midway, 2);
         assert!((copies.expected_copies - 3.0).abs() < 1e-15);
         assert!(
             (copies.copy_count_variance - 0.5).abs() < 1e-15,
@@ -545,8 +657,8 @@ mod tests {
     #[test]
     fn a_certain_genotype_has_no_copy_count_variance() {
         for copies in [0u8, 1, 2] {
-            let certain = point_masses(&[&[copies]]);
-            let at = alternative_copies_at(&certain, 1, 0);
+            let certain = as_f64(&point_masses(&[&[copies]]));
+            let at = alternative_copies_in(&certain, 1);
             assert_eq!(
                 at.copy_count_variance, 0.0,
                 "a sample certain of carrying {copies} copies has no uncertainty about it"
@@ -587,12 +699,19 @@ mod tests {
         positions: usize,
     ) -> f64 {
         let chromosomes = 2.0 * samples as f64;
+        let wide = as_f64(genotype_posterior);
         let mut total = 0.0_f64;
         for position in 0..positions {
-            let copies = alternative_copies_at(genotype_posterior, samples, position);
+            let base = position * samples * 3;
+            let copies = alternative_copies_in(&wide[base..base + samples * 3], samples);
             total += nei_heterozygosity(copies.expected_copies, 0.0, chromosomes);
         }
         total / positions as f64
+    }
+
+    /// The fit writes `f32`; every helper here reads `f64`. Widening is exact.
+    fn as_f64(narrow: &[f32]) -> Vec<f64> {
+        narrow.iter().map(|value| f64::from(*value)).collect()
     }
 
     /// **At one individual the heterozygosity is exactly the posterior that it is heterozygous**,

@@ -823,3 +823,66 @@ The source was restored from a backup and the restore checked with `git diff`.
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib` — **4,840 passed, 0 failed, 11 ignored**, from 4,837. Three tests added.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+---
+
+## C1 — where the moments are accumulated
+
+**Contract (plan C1).** Spec §5 leaves the implementer a choice: accumulate inside the expectation
+step's per-position loop with `genotype_posteriors` off, or turn the flag on and reduce afterwards.
+**Whichever ships states its memory cost in the module's own documentation** — the flag is 12 bytes
+a position a sample, 1.5 GB for fifty samples over two million positions.
+
+### What shipped: the running sums, which is what the design wants
+
+`CensusMomentSums` — four numbers, whatever the census and whatever the cohort — lives on the fit's
+per-chunk `Statistics`, is fed one position at a time from the expectation step's own scratch
+buffer, and is merged chunk into chunk the way every other sum there is. **Nothing is copied and
+nothing is stored.** `JointFit` carries it.
+
+**The memory the other route would have cost is stated on the field itself**: the stored array is
+three `f32`s a sample a position, 1.5 GB at fifty samples over the shipped two-million-position
+census, held only to be summed once.
+
+**It is collected on every pass and only the last pass's value is read.** A sum costs less than the
+branch that would skip it, and a pass that skipped it would leave the field describing whichever
+earlier pass last filled it.
+
+### Two decisions inside that, both about not diverging from the array route
+
+- **A position whose likelihood underflowed counts, carrying nothing.** That path returns early and
+  pushes zeros into the stored array so later positions are not attributed to their neighbours; the
+  sums now record a position of no alternative copies there too. Otherwise the two routes would
+  divide by different position counts.
+- **The sums go on `JointFit`, not the finished moments.** The heterozygosity needs the panel's
+  inbreeding coefficient, and §4.1 prefers one this route does not produce — the runs estimator
+  walks genome windows in the per-sample histogram route and this one walks census positions.
+  `CensusMomentSums::finish` takes the coefficient, so choosing where it comes from stays with
+  whoever assembles the run. **That choice is step C4.**
+
+### The test that makes the memory decision safe
+
+**`the_summed_moments_and_the_stored_array_agree`** runs a real fit on a drawn cohort of six samples
+over 2,000 positions with the flag on, and compares the running sums against
+`CensusMoments::from_posteriors` over the stored array. **The stored array is what every
+measurement behind this design was made on**, so if the two ever part company the sums are the
+wrong ones.
+
+**They agree to `f32`, which is where the array rounds and the sums do not.** Measured: **2.9e-11 on
+the frequency and 8.2e-10 on the heterozygosity**, four to five orders inside the `1e-6` asserted.
+The tolerance is deliberately loose against the measurement, because it bounds a rounding rather
+than an arithmetic, and a figure that tight would fail on a different cohort. The test also pins
+that both routes saw the same number of positions, and that both moments are above `1e-4` — so the
+agreement is not two zeros matching.
+
+### Mutations run
+
+Two, on the chunk merge, each against the whole library suite: dropping the position count fails
+1 test, dropping the frequency sum fails 1 — the agreement test in both cases, which is the only
+test in the tree that runs a fit across more than one chunk.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,841 passed, 0 failed, 11 ignored**, from 4,840. One test added.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.

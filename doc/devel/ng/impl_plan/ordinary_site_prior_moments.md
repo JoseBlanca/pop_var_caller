@@ -147,7 +147,7 @@ case would see it. *Depends:* B1. *Source:* spec §4, §9 test 1.
 
 ### Milestone C — step two wired to a run, and what it reports
 
-**C1. Where the moments are accumulated.**  ☐
+**C1. Where the moments are accumulated.**  ✅
 Spec §5 leaves the implementer a choice: accumulate inside the expectation step's per-position loop
 with `genotype_posteriors` off, or turn the flag on and reduce afterwards. **Whichever ships states
 its memory cost in the module's own documentation** — the flag is 12 bytes a position a sample, 1.5

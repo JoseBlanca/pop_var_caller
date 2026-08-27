@@ -51,6 +51,7 @@ use crate::ng::types::{ExpectedHeterozygosity, Ploidy, ReadGroupId};
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
 };
+use super::census_moments::CensusMomentSums;
 use super::contamination::{
     ContaminationConfig, SampleContaminationEstimates, fit_contamination_over,
 };
@@ -285,6 +286,26 @@ pub struct JointFit {
     pub contamination: BTreeMap<String, SampleContaminationEstimates>,
     /// The population's expected heterozygosity, read off the density.
     pub expected_heterozygosity: f64,
+    /// **The same two numbers the SNP/indel genotype prior wants, averaged over the census
+    /// positions instead of integrated off the curve** — as running sums, which is all the fit can
+    /// carry without choosing an inbreeding coefficient.
+    ///
+    /// [`Self::expected_heterozygosity`] above and
+    /// `FrequencyDensity::expected_alternative_frequency` are the *other* route to the same pair:
+    /// two integrals of the fitted curve, with no census pass and no coefficient. **A run should
+    /// emit both and they should agree** — two routes to one quantity, and a large gap between
+    /// them is the fit telling you something (`doc/devel/ng/spec/ordinary_site_prior_moments.md`
+    /// §7). Measured at 63 samples across three populations and four depths, the curve's number
+    /// sits between 1.1% below and 10.7% above the census average's, and **which population is the
+    /// wide one is not predicted by whether the curve can hold its shape**.
+    ///
+    /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
+    /// needs the panel's inbreeding coefficient, and §4.1 prefers a coefficient this route does not
+    /// produce — the runs-of-homozygosity estimator walks genome windows in the per-sample
+    /// histogram route, and this one walks census positions. Choosing where it comes from is §8's
+    /// fifth open question. [`CensusMomentSums::finish`] takes it, so the choice belongs to
+    /// whoever assembles the run rather than to the fit.
+    pub census_moments: CensusMomentSums,
     /// **For every kept position, in position order, the probability that it is mismapped** —
     /// that two stretches of genome the reference holds once are both piling reads up here.
     ///
@@ -1172,6 +1193,18 @@ struct Statistics {
     /// class**, in the same position order. Collected with `genotype_posterior`.
     duplicated_posterior: Vec<f32>,
     collect_genotype_posterior: bool,
+    /// **The two population moments as running sums over the census positions this chunk saw** —
+    /// [`CensusMomentSums`], four numbers whatever the census and whatever the cohort.
+    ///
+    /// It is here rather than reduced afterwards from `genotype_posterior` because that array is
+    /// twelve bytes a position a sample — **1.5 GB for fifty samples over the shipped
+    /// two-million-position census** — held only to be summed once
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
+    ///
+    /// **It is collected on every pass and only the last pass's value is read**, because a sum
+    /// costs less than the branch that would skip it, and a pass that skipped it would leave the
+    /// field describing whichever earlier pass last filled it.
+    census_moments: CensusMomentSums,
 }
 
 /// What one pass of the alternation ended at. **Collected only when a run asks for it**, and
@@ -1226,6 +1259,11 @@ impl Statistics {
             genotype_posterior: Vec::new(),
             duplicated_posterior: Vec::new(),
             collect_genotype_posterior: false,
+            // A fit over no samples cannot happen — `fit_jointly` refuses one — but `Statistics`
+            // is constructed before that check runs in some test paths, and the accumulator
+            // refuses a panel of none. One is as harmless a stand-in as there is: no position is
+            // ever added to it.
+            census_moments: CensusMomentSums::over(samples.max(1)),
         }
     }
 }
@@ -1290,6 +1328,7 @@ impl Statistics {
             .extend_from_slice(&other.genotype_posterior);
         self.duplicated_posterior
             .extend_from_slice(&other.duplicated_posterior);
+        self.census_moments.merge(&other.census_moments);
     }
 }
 
@@ -1505,6 +1544,7 @@ pub fn fit_jointly(
         rates,
         contamination,
         expected_heterozygosity: parameters.density.expected_heterozygosity(),
+        census_moments: statistics.census_moments.clone(),
         duplicated: parameters.duplicated.map(|value| Estimate {
             value,
             provenance: Provenance::FittedHere,
@@ -2136,6 +2176,14 @@ fn one_position(
                 .extend(std::iter::repeat_n(0.0_f32, samples * 3));
             statistics.duplicated_posterior.push(0.0);
         }
+        // **And it counts as a position for the two population moments, carrying nothing.** Both
+        // routes to those moments have to see the same census: the stored array records this
+        // position as all-zero posteriors, so the running sums must record a position of no
+        // alternative copies rather than skip it, or the two would divide by different counts.
+        scratch.position_genotype.fill(0.0);
+        statistics
+            .census_moments
+            .add_position(&scratch.position_genotype);
         return;
     }
     scratch.position_genotype.fill(0.0);
@@ -2377,6 +2425,12 @@ fn one_position(
         }
     }
 
+    // **The two population moments, summed here rather than stored and reduced afterwards.**
+    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
+    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
+    statistics
+        .census_moments
+        .add_position(&scratch.position_genotype);
     if statistics.collect_genotype_posterior {
         statistics
             .genotype_posterior
@@ -3068,6 +3122,7 @@ mod tests {
     /// over a value no density produces and see what the wrap does with it.
     fn a_fit_carrying(density: FrequencyDensity, expected_heterozygosity: f64) -> JointFit {
         JointFit {
+            census_moments: CensusMomentSums::over(1),
             noise: BTreeMap::new(),
             noisy_share: 0.0,
             density: Estimate {
@@ -3497,6 +3552,8 @@ mod whole_fit_tests {
     };
     use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCap;
+    use crate::ng::parameter_estimation::joint::census_moments::CensusMoments;
+    use crate::ng::types::InbreedingF;
 
     /// The mean of one of the two rates over every library the fit produced.
     ///
@@ -3511,6 +3568,83 @@ mod whole_fit_tests {
             / fit.noise.len() as f64
     }
 
+    /// **The two routes to the two population moments agree on a real fit** — the running sums the
+    /// expectation step keeps, and the reduction over the stored per-position array.
+    ///
+    /// This is what makes the memory decision safe. `JointFitConfig::genotype_posteriors` is off by
+    /// default because the array weighs twelve bytes a position a sample — 1.5 GB for fifty samples
+    /// over the shipped two-million-position census — so the moments are summed as the fit walks
+    /// and nothing is stored (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). **The stored
+    /// array stays as the harnesses' input and as this oracle**, and if the two ever part company
+    /// the sums are wrong, because the array is what every measurement behind the design was made
+    /// on.
+    ///
+    /// **They agree to `f32` and not to the last bit**, and the difference is where the array goes
+    /// through `f32` on the way out while the sums stay in `f64` throughout. Measured on this
+    /// cohort: **2.9e-11 on the frequency and 8.2e-10 on the heterozygosity** — four to five
+    /// orders inside the `1e-6` asserted, which is the `f32` significand itself. The tolerance is
+    /// deliberately loose against that measurement, because it bounds the rounding rather than the
+    /// arithmetic, and a rounding figure that tight would fail on a different cohort.
+    ///
+    /// It also pins the **position count**: both routes must divide by the same number, which is
+    /// the thing an early return on an underflowed position could quietly break.
+    #[test]
+    fn the_summed_moments_and_the_stored_array_agree() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let positions = 2_000;
+        let samples = 6;
+        let cohort = draw_cohort(
+            samples,
+            positions,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x243F_6A88_85A3_08D3,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            max_passes: 12,
+            duplicated_positions: false,
+            genotype_posteriors: true,
+            ..JointFitConfig::default()
+        };
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+
+        assert_eq!(
+            fit.genotype_posterior.len(),
+            fit.census_moments.positions() as usize * samples * 3,
+            "the stored array and the running sums must have seen the same census"
+        );
+
+        let selfing = InbreedingF::try_new(0.2).expect("a legal coefficient");
+        let summed = fit.census_moments.finish(selfing);
+        let stored = CensusMoments::from_posteriors(
+            &fit.genotype_posterior,
+            samples,
+            fit.census_moments.positions() as usize,
+            selfing,
+        );
+        let frequency_gap =
+            (summed.mean_alternative_frequency / stored.mean_alternative_frequency - 1.0).abs();
+        let heterozygosity_gap = (summed.heterozygosity / stored.heterozygosity - 1.0).abs();
+        assert!(
+            frequency_gap < 1e-6 && heterozygosity_gap < 1e-6,
+            "the two routes disagree by {frequency_gap:e} on the frequency and \
+             {heterozygosity_gap:e} on the heterozygosity, which is more than the f32 the stored \
+             array passes through: summed {summed:?}, stored {stored:?}"
+        );
+        // **And both are measuring something**, so the agreement above is not two zeros matching.
+        assert!(
+            summed.mean_alternative_frequency > 1e-4 && summed.heterozygosity > 1e-4,
+            "this cohort segregates at 9 positions in 100; got {summed:?}"
+        );
+    }
     /// **The test that says whether any of this works.** A cohort drawn at known parameters
     /// must come back at them.
     #[test]
