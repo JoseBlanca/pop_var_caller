@@ -15,8 +15,13 @@
 //!
 //! Design: `doc/devel/ng/spec/ordinary_site_prior_moments.md` §3.
 //!
-//! **Nothing calls this yet.** Wiring it to a run is that spec's §5 and the implementation plan's
-//! Milestone C; what is here is the reduction and the type it returns.
+//! **Where this is reached from.** The joint fit's expectation step feeds [`CensusMomentSums`] one
+//! position at a time and `JointFit` carries the result; [`CensusMomentsReport::of`] turns that
+//! plus the panel's inbreeding coefficient into what a run reports.
+//!
+//! **What is not built is anything downstream of that.** `RunParameters::assemble` — which takes
+//! the seed these two numbers imply — has no caller outside its own tests, so the pre-pass to
+//! calling handover does not exist as a whole. Nothing here waits on it.
 
 use super::fit::JointFit;
 use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
@@ -212,13 +217,26 @@ impl CensusMoments {
 /// The fit can be asked to keep every position's genotype posteriors
 /// (`JointFitConfig::genotype_posteriors`), and [`CensusMoments::from_posteriors`] reduces that
 /// array. **It is off by default because it weighs twelve bytes a position a sample** — three
-/// `f32`s — which is **1.5 GB for fifty samples over the shipped two-million-position census**,
-/// held to be summed once and thrown away. The design asks for the sums instead
-/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5), and this is them.
+/// `f32`s — which over the shipped two-million-position census is **1.2 GB at fifty samples and
+/// 1.5 GB at the tomato cohort's sixty-three**, held to be summed once and thrown away. The design
+/// asks for the sums instead (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5), and this is
+/// them.
 ///
-/// **The array route is kept and is not dead**: it is what the measurement harnesses reduce, and
-/// it is the oracle these sums are checked against — the two must agree to the last bit on the
-/// same posteriors, which is a test.
+/// **⚑ Spec §5 pairs the 1.5 GB figure with fifty samples, and 1.5 GB is the sixty-three-sample
+/// number**; `12 × 50 × 2×10⁶` is 1.2 GB and `12 × 63 × 2×10⁶` is 1.512 GB. The same pairing is on
+/// `JointFitConfig::genotype_posteriors` and predates this module. Corrected here rather than
+/// propagated.
+///
+/// **And the array's peak is about twice whichever figure applies.** The pass that collects it
+/// gathers every chunk's own vector and *then* absorbs them into an exactly-reserved merged one,
+/// so both are live at once — the collect is deliberate, because `reduce` may join chunks in any
+/// order and the array is in position order.
+///
+/// **The array route is kept and is not dead**: it is what the sums are checked against, at a
+/// relative `1e-6` and **not** to the last bit — the array passes through `f32` on the way out
+/// while the sums stay in `f64` throughout
+/// ([`fit::whole_fit_tests::the_summed_moments_and_the_stored_array_agree`](super::fit)). It is
+/// also what `examples/ng_prior_moments_from_reads.rs` sets the flag for.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CensusMomentSums {
     /// The panel's size in diploid individuals. Held rather than derived from the chromosome count
@@ -795,14 +813,34 @@ impl CensusMomentsReport {
                         .to_owned(),
                 );
                 if self.samples == 1 {
-                    warnings.push(format!(
-                        "and at one sample that excess is 0.000 whatever the truth, because a \
-                         single genome's totals cannot identify it — so the coefficient of {:.3} \
-                         is a floor and the heterozygosity is a floor with it. A user who knows \
-                         their material is selfing at F should multiply by 1/(1 − F): at F = 0.8 \
-                         the population's diversity is five times what is printed",
-                        self.panel_inbreeding
-                    ));
+                    // **The multiplier a user needs depends on what was already divided out**, and
+                    // at one sample the factor applied was `1 − F_printed`. So the residual is
+                    // `(1 − F_printed)/(1 − F_true)`, which is `1/(1 − F_true)` only where the
+                    // printed coefficient is zero. The design says it *is* zero here — a single
+                    // genome's totals cannot identify the excess — but this type's fields are
+                    // public and `of` takes whatever it is handed, so the two cases are told
+                    // apart rather than assumed. An earlier version printed the zero-coefficient
+                    // advice unconditionally and would have told a user holding 0.4 to multiply
+                    // by 5 where the right factor is 3.
+                    if self.panel_inbreeding == 0.0 {
+                        warnings.push(
+                            "and at one sample that excess is 0.000 whatever the truth, because a \
+                             single genome's totals cannot identify it — so the heterozygosity \
+                             below is uncorrected and is a floor. A user who knows their material \
+                             is selfing at F should multiply by 1/(1 − F): at F = 0.8 the \
+                             population's diversity is five times what is printed"
+                                .to_owned(),
+                        );
+                    } else {
+                        warnings.push(format!(
+                            "and at one sample the joint fit's excess is 0.000 whatever the truth, \
+                             because a single genome's totals cannot identify it — so this {:.3} \
+                             did not come from a single genome's own excess. The heterozygosity \
+                             below has been divided by 1 − {:.3}; a user who knows their material \
+                             is selfing at F should multiply by (1 − {:.3})/(1 − F)",
+                            self.panel_inbreeding, self.panel_inbreeding, self.panel_inbreeding
+                        ));
+                    }
                 }
             }
             InbreedingSource::User => {}
@@ -1548,7 +1586,8 @@ mod tests {
     /// sixty-two whole genomes.
     ///
     /// Here: sixty-two samples at a tomato genome's 8,004 windows and one at 3,100. The mean is
-    /// 7,926 and says nothing; the minimum is 3,100 and is one tenth above the estimator's floor.
+    /// 7,926 and says nothing; the minimum is 3,100, which clears the estimator's 3,000 floor by
+    /// 3.3%.
     #[test]
     fn the_reported_window_count_is_the_thinnest_samples() {
         let mut fitted: Vec<(InbreedingF, u32)> =
@@ -1690,6 +1729,30 @@ mod tests {
         // stops there.
         let two = a_report(InbreedingSource::JointFitHomozygoteExcess, 2);
         assert_eq!(two.warnings().len(), 1, "got {:?}", two.warnings());
+
+        // **And a one-sample report carrying a non-zero coefficient is told a different thing**,
+        // because the advice above is only right when nothing has been divided out yet. The
+        // heterozygosity has already been divided by `1 − 0.4`, so the residual factor a user
+        // needs is `(1 − 0.4)/(1 − F)` and not `1/(1 − F)` — telling them to multiply by 5 at a
+        // true F of 0.8 where the right factor is 3 is the defect this branch prevents. The fields
+        // are public, so this state is constructible even though the design says a single genome's
+        // own excess is 0.000.
+        let mismatched = CensusMomentsReport {
+            panel_inbreeding: 0.4,
+            ..a_report(InbreedingSource::JointFitHomozygoteExcess, 1)
+        };
+        let warnings = mismatched.warnings();
+        assert_eq!(warnings.len(), 2, "got {warnings:?}");
+        assert!(
+            warnings[1].contains("(1 − 0.400)/(1 − F)"),
+            "{:?}",
+            warnings[1]
+        );
+        assert!(
+            !warnings[1].contains("five times what is printed"),
+            "the zero-coefficient advice must not be given here: {:?}",
+            warnings[1]
+        );
     }
 
     /// **The runs estimator warns below its own floor of 3,000 windows and not above it** — below

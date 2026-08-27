@@ -1172,3 +1172,114 @@ exactly its own `#[should_panic]` test and no other.
 - `cargo test --lib` — **4,910 passed, 0 failed, 11 ignored**, from 4,904. Six tests added.
 - `cargo test --tests` — green on every integration target.
 - `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.
+
+---
+
+## The Milestone B and C review — arithmetic, and design conformance
+
+Two agents in worktrees at `84bc3120`, one on arithmetic and numerics, one on design conformance and
+claim-checking. **Every finding was one of my own claims about my own work**; both reviewers
+independently verified every figure quoted from the design documents and the measurement report and
+found none wrong. That is the same split this project keeps measuring, now three reviews running.
+
+### The one that is a gap and not a sentence
+
+**⛦ The plan's own Milestone C verification row had not been done, and no report section said so.**
+It asks that `examples/ng_prior_moments_from_reads.rs` reproduce the report's figures *against the
+wired-in estimators*. The harness was never repointed: it keeps its own `MomentsFromPosteriors` and
+its own `nei_heterozygosity`, and never touches the shipped module. So **a change to the library's
+arithmetic would have moved nothing the harness prints** — which is precisely what the plan's *"a
+change that moves these numbers and leaves the tests green is a change whose effect nobody has
+looked at"* exists to prevent.
+
+Closed by `check_against_the_shipped_estimator`, which reduces the same posterior array through
+`CensusMoments::from_posteriors` and **refuses to let the program print anything** if the two
+disagree by more than 1 part in 10⁹. The copy stays, because two of its three columns are
+quantities the library deliberately does not compute — the heterozygosity with the curvature term
+*dropped* (report §4.1's subject) and the one weighted by each position's mismapped posterior
+(§6's). What is now checked is the third, which is the one the library ships.
+
+### Two wrong mechanisms
+
+**1. "The two must agree to the last bit, which is a test."** They must not, there is no such test,
+and the test that does exist says so in bold two files away: the array passes through `f32` on the
+way out while the sums stay in `f64`, so the assertion is a relative `1e-6` and the measured gaps
+are 2.9e-11 and 8.2e-10. The `CensusMomentSums` doc claimed bit-exactness while the thing it pointed
+at claimed the opposite.
+
+**2. The reason given for adding `RunsModelFit::windows_holding_sites` was false.** I wrote that
+`resolution` folds the count into a number and so the count "cannot be recovered from anything else
+this type carries". `resolution_at` is a strictly monotone log–log interpolation of that same count
+and **inverts exactly** between 1,200 and 76,800 windows — which covers every fit that clears the
+3,000 floor on any genome up to roughly 7.7 Gb. A tomato fit's 8,004 windows come back out of a
+resolution of 0.00997. The field is still right to add; the reason is that inverting a measured
+interpolation to recover an integer is absurd, not that it is impossible.
+
+### Two wrong numbers
+
+**3. "1.5 GB for fifty samples over the shipped two-million-position census."** `12 × 50 × 2×10⁶` is
+**1.2 GB**. 1.5 GB is the figure for **sixty-three** samples — the tomato cohort — and the sentence
+pairs it with fifty. Spec §5 carries the same pairing, and so did
+`JointFitConfig::genotype_posteriors` before this work; I propagated it into three new places.
+Corrected in all four, with the pairing named. **And the array's real peak is about twice whichever
+figure applies**: the collecting pass gathers every chunk's own vector and *then* absorbs them into
+an exactly-reserved merged one, so both are live at once — the collect being deliberate, since
+`reduce` may join chunks in any order and the array is in position order.
+
+**4. "3,100 … is one tenth above the estimator's floor."** 3,100/3,000 is 1.033 — **3.3%**. One
+tenth above would be 3,300.
+
+### Two claims that were wrong about what the code does
+
+**5. "Without the clamp, `p_segregating` sends both moments negative at once."** Only the
+heterozygosity goes negative. `E[f] = p_fixed_alt(1 − r) + r(1 − p_invariant)` with `r = a/(a+b)`,
+and both terms are non-negative whenever the two masses are probabilities — only a `p_invariant`
+above one could do it, and that is not one. On the fixture the unclamped frequency is 0.46, not
+negative. **The test's own next line asserted 0.5 and contradicted the comment above it.**
+
+**6. The one-sample warning's multiplier was right only where the printed coefficient is zero.** It
+advised multiplying by `1/(1 − F)`, but the heterozygosity has already been divided by
+`1 − F_printed`, so the residual factor is `(1 − F_printed)/(1 − F_true)`. The design says the
+printed value *is* zero at one sample — a single genome's totals cannot identify the excess — but
+the type's fields are public and `of` takes what it is handed, so a report carrying 0.4 would have
+told a user to multiply by 5 where the right factor is 3. The two cases are now told apart, with a
+test for the second.
+
+### Three stale sentences in live documents
+
+- **`census_moments.rs`'s module header still said "Nothing calls this yet."** False since C1: the
+  expectation step feeds it at every kept position. Replaced with what does reach it, and with what
+  genuinely is unbuilt downstream.
+- **`JointFit::census_moments`'s own doc still called the coefficient's source an open question.**
+  C4 answered it; the doc now carries the answer and why the question's premise was half wrong.
+- **`impl_plan/calling_loop.md` step E2f** still described the seed as a projection into
+  allele-count classes taking a `FittedSpectrum`. Bannered, on the same reasoning as the E2 fix in
+  `8c326ae3` — which corrected one step of that file and missed this one.
+
+### One departure now recorded in the plan rather than only in a commit
+
+C4's step still read *"a stop-and-ask, not an implementation … do not pick one"*, and the plan's
+*Out* list names reaching the runs estimator from the joint route as out of scope — both resting on
+the premise the ruling overturned. The step now carries what was asked, what came back, and that
+spec §8's fifth question is answered for the joint route and stands for the census-position
+estimator nothing here builds.
+
+### What both reviewers found sound
+
+Every formula: the per-sample variance and the direction of its bias, the Nei estimator and its
+collapse to `P(heterozygous)` at one individual, the inbreeding factor and its whole shortfall table,
+the soft count's two products (disjoint, no double-count, the clamp reachable only by rounding), the
+standard error and its Bessel correction, the unweighted mean, and the sums' merge. Every measured
+ratio quoted anywhere in this work — 2.5×, 0.96%, 4.002 against 4.004, 0.049 against 100, 2.9e-11,
+8.2e-10, 1.0155, the per-step test deltas and the 4,910 total. **C4's central justification is
+faithful to `parameter_prepass.md`.** No constant was invented for any of the three banked
+questions, and all three absences are visible in what the report prints. Spec §7's six items all
+reach the output; §9's three tests are all present.
+
+### Validation
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib` — **4,910 passed, 0 failed, 11 ignored**, unchanged: the fixes are to
+  documentation, to one warning's branching and to the harness.
+- `examples/ng_prior_moments_from_reads.rs` run to completion with the new check in place.
+- `cargo doc --no-deps --lib` — **25 unresolved links**, unchanged.

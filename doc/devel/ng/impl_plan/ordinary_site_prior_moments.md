@@ -174,6 +174,16 @@ and this route walks census positions. Three shapes are possible and the spec do
 **This step is a stop-and-ask, not an implementation** — bring the three options and a
 recommendation, and do not pick one in the plan. *Depends:* C3. *Source:* spec §4.1, §8.5.
 
+> **⚖ Asked and answered, 2026-08-27, and the step became an implementation.** Two things came back
+> from putting the options to the owner. **The question's premise was half wrong**: the coefficient
+> is not something the joint route has to obtain, because `parameter_prepass.md`'s step table
+> fits `F` once per sample after that sample's walk, over a section saying both routes are built
+> and both run — so it already exists and only the join was missing. **And the owner ruled**: use
+> the fit already done; fitting runs from the census positions is later work, deferred rather than
+> conditional. What shipped is that join, which this plan's *Out* list names as out of scope on the
+> strength of the same premise. **Spec §8's fifth question is answered for the joint route and
+> stands for the census-position estimator**, which nothing here builds.
+
 > **Checkpoint C:** a run estimates both moments from its own census, reports what they rest on, and
 > says where its inbreeding coefficient came from. Pause for review — and C4 is a pause whether or
 > not the checkpoint is honoured.

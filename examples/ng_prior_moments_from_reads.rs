@@ -94,6 +94,7 @@ use pop_var_caller::ng::parameter_estimation::joint::census::{
     GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
     SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
+use pop_var_caller::ng::parameter_estimation::joint::census_moments::CensusMoments;
 use pop_var_caller::ng::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, StartingPoint, fit_jointly,
 };
@@ -506,6 +507,24 @@ fn run_depth(
 
             let posterior =
                 MomentsFromPosteriors::of(&fit.genotype_posterior, individuals, positions);
+            // **The shipped estimator, over the same posteriors, checked against this program's
+            // own reduction.** The implementation plan's verification table asks that this harness
+            // reproduce the report's figures *against the wired-in estimators*, and until this
+            // check existed it did not: the reduction below is a copy, so a change to the library's
+            // arithmetic would have moved nothing here and every number this program prints would
+            // have gone on describing code that no longer ran.
+            //
+            // The copy is kept rather than replaced, because two of the three columns it produces
+            // are quantities the library deliberately does not compute — the heterozygosity
+            // *without* the curvature term (report §4.1's subject) and the one weighted by each
+            // position's mismapped posterior (§6's). What is checked is the third, which is the
+            // one the library ships.
+            check_against_the_shipped_estimator(
+                &fit.genotype_posterior,
+                individuals,
+                positions,
+                &posterior,
+            );
             // **Both numbers integrated off the fitted curve in closed form**, with no projection,
             // no search and no census average. This is the two-line repair, and the column it
             // feeds asks the question the recommendation turns on — whether choosing between it
@@ -848,6 +867,51 @@ impl FromTheCurve {
             seed,
         }
     }
+}
+
+/// **Refuse to print a number this program computed itself if the shipped estimator disagrees with
+/// it.**
+///
+/// `MomentsFromPosteriors` below is this program's own reduction, and it exists because two of the
+/// three quantities it produces are ones the library deliberately does not: the heterozygosity with
+/// the curvature term *dropped*, which is what §4.1 measures the cost of, and the one weighted by
+/// each position's mismapped posterior, which is §6's subject. The library computes only the third.
+///
+/// **Without this check the copy would drift silently.** Every figure this program prints would go
+/// on describing arithmetic that no longer ran anywhere, which is exactly what the implementation
+/// plan's *"a change that moves these numbers and leaves the tests green is a change whose effect
+/// nobody has looked at"* is about.
+///
+/// The tolerance is relative and `1e-9`: both routes read the same `f32` array into `f64` and do
+/// the same arithmetic in the same order, so what separates them is summation order alone.
+///
+/// **Run at `F = 0`, because the copy applies no inbreeding correction** — the correction is a
+/// constant divide the harness's own arms do not want, so comparing at any other coefficient would
+/// be comparing two different quantities.
+fn check_against_the_shipped_estimator(
+    genotype_posterior: &[f32],
+    individuals: usize,
+    positions: usize,
+    ours: &MomentsFromPosteriors,
+) {
+    let outbred = InbreedingF::try_new(0.0).expect("a legal coefficient");
+    let shipped =
+        CensusMoments::from_posteriors(genotype_posterior, individuals, positions, outbred);
+    let apart = |ours: f64, shipped: f64| {
+        if ours == 0.0 && shipped == 0.0 {
+            0.0
+        } else {
+            (shipped / ours - 1.0).abs()
+        }
+    };
+    let frequency = apart(ours.frequency, shipped.mean_alternative_frequency);
+    let heterozygosity = apart(ours.heterozygosity_with_variance, shipped.heterozygosity);
+    assert!(
+        frequency < 1e-9 && heterozygosity < 1e-9,
+        "this program's own reduction and the shipped `CensusMoments` disagree — frequency by \
+         {frequency:e}, heterozygosity by {heterozygosity:e}. Every number below is then about \
+         code that no longer runs; fix the copy or the library before reading any of it."
+    );
 }
 
 /// Turn a mean frequency and a heterozygosity into the concentration pair the genotype prior

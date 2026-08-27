@@ -300,11 +300,19 @@ pub struct JointFit {
     /// wide one is not predicted by whether the curve can hold its shape**.
     ///
     /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
-    /// needs the panel's inbreeding coefficient, and §4.1 prefers a coefficient this route does not
-    /// produce — the runs-of-homozygosity estimator walks genome windows in the per-sample
-    /// histogram route, and this one walks census positions. Choosing where it comes from is §8's
-    /// fifth open question. [`CensusMomentSums::finish`] takes it, so the choice belongs to
-    /// whoever assembles the run rather than to the fit.
+    /// needs the panel's inbreeding coefficient, which is not this fit's to choose.
+    /// [`CensusMomentSums::finish`] takes it, and
+    /// [`CensusMomentsReport::of`](super::census_moments::CensusMomentsReport::of) is where the two
+    /// meet.
+    ///
+    /// **Where that coefficient comes from is settled and is not this route's problem.** §4.1
+    /// prefers the runs-of-homozygosity estimator, and §8's fifth question asked how a run on this
+    /// route obtains one, since that estimator walks genome windows in the per-sample histogram
+    /// route while this one walks census positions. **That is true of where it lives and not of
+    /// whether a run can reach it**: `parameter_prepass.md`'s step table gives `F` its own row —
+    /// fitted after each sample's walk, from that sample's windowed histogram and nothing else —
+    /// over a section stating that both routes are built and both run. So the coefficient is
+    /// already there, per sample, and what was missing was only the join.
     pub census_moments: CensusMomentSums,
     /// **For every kept position, in position order, the probability that it is mismapped** —
     /// that two stretches of genome the reference holds once are both piling reads up here.
@@ -518,10 +526,13 @@ pub struct JointFitConfig {
     /// extra copy of the position — and, once per position, the probability that the position
     /// belongs to the duplicated class at all.
     ///
-    /// **Off by default because of what it weighs**: twelve bytes a position a sample, which
-    /// is 16 MB for three samples over the benchmark trio's positions and 1.5 GB for fifty
-    /// samples over two million. What it is for is checking the fitted rates against a truth
-    /// set position by position rather than as one mean.
+    /// **Off by default because of what it weighs**: twelve bytes a position a sample, which is
+    /// 16 MB for three samples over the benchmark trio's positions, **1.2 GB for fifty samples
+    /// over two million and 1.5 GB for the tomato cohort's sixty-three**. What it is for is
+    /// checking the fitted rates against a truth set position by position rather than as one mean.
+    ///
+    /// *(This said 1.5 GB for **fifty** until 2026-08-27. `12 × 50 × 2×10⁶` is 1.2 GB; 1.5 is the
+    /// sixty-three-sample figure, and spec §5 carries the same pairing.)*
     pub genotype_posteriors: bool,
     /// Whether to keep one line per pass of the alternation ([`PassSummary`]). Costs nothing
     /// but a few hundred bytes; off by default because a converged fit has nothing to say
@@ -1197,8 +1208,9 @@ struct Statistics {
     /// [`CensusMomentSums`], four numbers whatever the census and whatever the cohort.
     ///
     /// It is here rather than reduced afterwards from `genotype_posterior` because that array is
-    /// twelve bytes a position a sample — **1.5 GB for fifty samples over the shipped
-    /// two-million-position census** — held only to be summed once
+    /// twelve bytes a position a sample — **1.2 GB for fifty samples over the shipped
+    /// two-million-position census, 1.5 GB at the tomato cohort's sixty-three, and about twice
+    /// either while the chunks are merged** — held only to be summed once
     /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
     ///
     /// **It is collected on every pass and only the last pass's value is read**, because a sum
@@ -3027,11 +3039,17 @@ mod tests {
     /// library suite stayed green.
     ///
     /// `p_segregating` is the shared input to both of this density's integrals, so without the
-    /// clamp a density whose masses total above one sends **both moments negative at once** — an
-    /// expected frequency below zero and a heterozygosity below zero, neither of which any
-    /// downstream type refuses on this path. The two moments would then reach the genotype prior's
-    /// own newtypes, which do refuse them, and the run would die naming a probability rather than
-    /// the density that produced it.
+    /// clamp a density whose masses total above one sends **the heterozygosity negative** — on
+    /// this fixture `−0.2 · 2ab/((a+b)(a+b+1))`, or `−0.0457`. Nothing on this path refuses it; it
+    /// would reach the genotype prior's own newtypes, which do, and the run would die naming a
+    /// probability rather than the density that produced it.
+    ///
+    /// **The mean frequency is pulled down but cannot go negative, and that is worth stating
+    /// because an earlier version of this comment claimed both moments went negative at once.**
+    /// `E[f] = p_fixed_alt·(1 − r) + r·(1 − p_invariant)` with `r = a/(a+b)`, and both terms are
+    /// non-negative whenever the two masses are probabilities — only a `p_invariant` above one,
+    /// which is not one, could do it. Unclamped, this fixture's frequency is 0.46 rather than the
+    /// 0.5 the clamp gives.
     ///
     /// **It is not reachable from a fit that converged** — the M-step clamps both masses off a
     /// normalised branch total — which is exactly why the fields are public and this test exists:
@@ -3045,7 +3063,8 @@ mod tests {
             b: 2.0,
         };
         assert_eq!(impossible.p_segregating(), 0.0);
-        // And both integrals follow it to zero rather than through it.
+        // The heterozygosity follows the segregating share to zero; the frequency lands on the
+        // fixed-non-reference mass, which is what a population with nothing segregating has.
         assert_eq!(impossible.expected_heterozygosity(), 0.0);
         assert_eq!(impossible.expected_alternative_frequency(), 0.5);
     }
@@ -3667,7 +3686,7 @@ mod whole_fit_tests {
     /// expectation step keeps, and the reduction over the stored per-position array.
     ///
     /// This is what makes the memory decision safe. `JointFitConfig::genotype_posteriors` is off by
-    /// default because the array weighs twelve bytes a position a sample — 1.5 GB for fifty samples
+    /// default because the array weighs twelve bytes a position a sample — 1.2 GB for fifty samples
     /// over the shipped two-million-position census — so the moments are summed as the fit walks
     /// and nothing is stored (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). **The stored
     /// array stays as the harnesses' input and as this oracle**, and if the two ever part company

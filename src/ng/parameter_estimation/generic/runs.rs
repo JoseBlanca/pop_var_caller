@@ -158,11 +158,18 @@ pub struct RunsModelFit {
     /// [`Self::resolution`] is computed from the same count: the chain pads every contig from
     /// window zero, so a region-restricted run's chain is far longer than its evidence.
     ///
-    /// **It is here because a consumer needs the count and not only what was derived from it.**
-    /// `resolution` folds this into a number its own documentation forbids using as a threshold,
-    /// so a run that has to say *what its coefficient was fitted over* — which
-    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7 requires of the SNP/indel prior's
-    /// report — cannot recover it from anything else this type carries.
+    /// **It is here because a consumer needs the count itself**, which
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7 requires a run to print beside the
+    /// coefficient the SNP/indel prior's heterozygosity was corrected by.
+    ///
+    /// **Not because the count is otherwise unrecoverable — it very nearly is recoverable, and
+    /// saying so is the point.** [`resolution_at`] is a strictly monotone log–log interpolation of
+    /// this same number, so it inverts exactly between 1,200 and 76,800 windows, which covers every
+    /// fit that clears the 3,000 floor on any genome up to roughly 7.7 Gb; a tomato fit's 8,004
+    /// windows come back out of a resolution of 0.00997. What is wrong with recovering it that way
+    /// is that it is absurd — inverting a measured interpolation to get an integer back, through a
+    /// function that clamps outside its measured range and whose own documentation says it is not
+    /// a threshold. The count is cheaper to keep than to reconstruct.
     pub windows_holding_sites: u32,
 
     /// Windows whose posterior landed between 0.01 and 0.99 — the ones the chain rather

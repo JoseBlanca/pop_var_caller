@@ -554,6 +554,15 @@ newtype, and project the density into the `2N + 1` allele-count classes the seed
 
 **E2f. The ordinary-site prior's seed, from the fit.**  ✅
 
+> **⛔ The mechanism below is superseded, 2026-08-27**, by
+> [`../spec/ordinary_site_prior_moments.md`](../spec/ordinary_site_prior_moments.md) §2 and §5.
+> **There is no projection into allele-count classes and no `FittedSpectrum`** — both are deleted,
+> along with the two-parameter search that consumed them. The seed's two numbers are two *integrals*
+> of the same fitted density, `expected_alternative_frequency` and `expected_heterozygosity`, and
+> the seam is `RunParameters::seed_from_moments`, not `project_seed`. **Piece 1 below stands** — the
+> heterozygosity is still wrapped in its newtype, and the frequency now arrives beside it in one of
+> its own; **piece 2 is the part that went.** Kept as the record of what was built.
+
 **Both numbers are already fitted and neither reaches the caller.** `JointFit`
 ([`joint/fit.rs:198`](../../../../src/ng/parameter_estimation/joint/fit.rs)) carries the
 population's allele-frequency density (`:207`) — a Beta over the segregating positions plus a point
