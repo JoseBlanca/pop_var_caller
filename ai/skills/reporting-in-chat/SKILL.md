@@ -780,3 +780,49 @@ opening the code — not by reasoning from the design document's description of 
 ruling instead. This is the D-paragraph form of the failure the plan-driven skill already names for
 reports: **run the thing and read the number; do not recall it.** In a decision paragraph the cost
 *is* the number.
+
+### 2026-08-27 — a failure mode stated five times, in the words of the plan rather than of the code
+
+Reporting a finished seam between the parameter pre-pass and calling, the same wrong mechanism
+appeared in the report, in PROJECT_STATUS, in a commit message and in two doc comments:
+
+> ❌ "A read group with a fitted rate and no minted-error total is not refused downstream. It takes
+> the defaulted calibration — scale one, every read of the library charged the error floor — and
+> the run finishes normally with quietly overconfident reads."
+
+Three errors in one sentence. `RunParameters::assemble` **does** refuse it, and had done so since
+before the branch — its own assertion says a read group has a fitted rate and a minted total or
+neither. *Scale one* and *the error floor* are mutually exclusive: scale one means the qualities
+are used as reported; the floor is what a scale of **zero** does. And the doc comment carrying the
+claim contradicted itself four lines later.
+
+> ✅ "A map that never arrives is refused: assembly requires a rate and a total or neither, so an
+> empty map stops the run naming the first read group. **What survives all of that is a map with
+> the right keys and the wrong numbers in them** — another read group's total under this one's
+> identifier — which moves every scale it touches and looks exactly like a correct map."
+
+And the same day, in the same work:
+
+> ❌ "a list handed in permuted gives every sample a coefficient and a contamination fraction, just
+> not its own"
+
+Wrong twice. Contamination is looked up by the sample name the run's own table gives that position,
+so it cannot be permuted at all; and a permuted list is *refused*, because the sample then carries
+its neighbour's read-group identifiers and the ownership check fires.
+
+Two rules, and the first is why five copies existed:
+
+1. **A failure mode inherited from a plan is a claim, not a premise.** Both sentences came from the
+   plan's own wording and were repeated as fact without being run against the code. The plan is
+   written before the code and is the *least* reliable source for what the code does. **Check every
+   "what happens if this is wrong" against the function that would handle it, and check it once —
+   before it is copied into a doc comment, a commit message and a status entry.**
+2. **"It fails silently" is a claim about a specific line refusing to fire.** Name that line. Both
+   errors above dissolve on one reading of the assertion that was five lines from the code being
+   described.
+
+**What went right, and it is the cheap habit worth keeping:** four of the eleven wrong claims in
+that work were caught by re-reading the report's own sentences against the code *before* the
+reviews reported — the caller count, the doc-link provenance, two footprint ratios on different
+bases. That pass costs minutes. The reviews then found seven more, and corrected one of the four
+again.
