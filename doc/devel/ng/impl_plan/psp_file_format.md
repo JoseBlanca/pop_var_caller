@@ -234,7 +234,7 @@ honest; *building* one while writing is F3's and *reading* one at open is F4's.
 trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 ***Depends:*** F2, E4. ***Source:*** [spec §6.3](../spec/psp_file_format.md).
 
-☐ **F4 — `open`, and refusal.** Footer, index, header, no block touched. A file with no footer is
+✅ **F4 — `open`, and refusal.** Footer, index, header, no block touched. A file with no footer is
 `Incomplete`; a window larger than the reader's budget is `WindowTooLarge`.
 ***Depends:*** F3. ***Source:*** [spec §6.2, §6.7](../spec/psp_file_format.md).
 

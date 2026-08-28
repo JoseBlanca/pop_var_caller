@@ -63,6 +63,7 @@ pub(crate) mod chain_ids;
 pub(crate) mod footer;
 pub(crate) mod header;
 pub(crate) mod index;
+pub(crate) mod reader;
 pub(crate) mod record;
 pub(crate) mod writer;
 
@@ -88,6 +89,7 @@ pub use header::{
 pub use index::{
     BlockIndexEntry, IndexDecodeError, IndexEntryField, checksum_index, decode_index, encode_index,
 };
+pub use reader::{DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader};
 pub use record::{
     BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
@@ -277,6 +279,18 @@ pub enum PspReadError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+
+    /// The file is damaged somewhere outside its blocks: its footer's offsets do not describe
+    /// the file it sits in, its block index does not match the checksum the footer carries, or
+    /// the index names a block that is not in the blocks.
+    ///
+    /// **One class rather than a variant per rule**, because they share an instruction — the
+    /// file is damaged, rebuild it — and `reason` carries which rule broke. It is deliberately
+    /// *not* [`Incomplete`](Self::Incomplete): that one means a writer was killed and the file
+    /// can be rebuilt by re-running, where this one means the bytes on disk disagree with each
+    /// other.
+    #[error("{}: {reason}", path.display())]
+    Damaged { path: PathBuf, reason: String },
 
     /// A block failed to decompress, or a record ran past the end of its block. The file
     /// is damaged.

@@ -19,7 +19,50 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a psp is written to a real file, and a writer that
+> - **Last completed task (2026-08-28):** **F3 reviewed — a write that failed and then recovered
+> produced a file every reader accepts, with a thousand bases missing from the middle** (step F3
+> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Eight checklists across three agents, 17 mutations, **two Blockers**. **The
+> first is the worst defect this milestone has produced.** The block builder hands a closed block
+> over and reopens in the same call, so once the writer holds it nothing can offer it again — and
+> everything after that point can still fail. Nothing marked the writer unusable, so `finish`
+> stayed callable: with one write failure injected, `finish` returned **success** and wrote a file
+> with a valid footer, a matching index checksum, entries in ascending order, and contig 0
+> jumping from position 1,001 to 3,001. **That is worse than the unreadable stump a killed run
+> leaves, because every reader takes it.** My own comment argued the opposite — that an I/O
+> failure is terminal — which holds only while the failure holds. **The second: the test named for
+> checking that each index entry points at the block it names never decoded a block.** Shifting
+> every entry 100 bases past its block survived all twelve tests. **And the gap I had recorded as
+> untestable was testable**: `/dev/full` fails every write, and the fixture is small enough that
+> nothing reaches the device until `finish` flushes — so the durability contract is pinned here
+> rather than deferred. Also: the compression level never reached the file, though the block
+> module's own doc assigns that to this step by name. Seven defects re-injected, seven caught.
+> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a psp is opened without touching a block, and a
+> killed run is refused rather than read short** (step F4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **This closes Milestone F: a file can be written, closed, reopened and read end
+> to end.** Opening reads the footer, the index it points at, and the plain-text header — three
+> reads at fixed places, which is what a cohort pays per sample before it reads anything. **That
+> no block is touched is shown rather than asserted**: a test overwrites every byte of the blocks
+> region with rubbish and the file still opens and still reports the same header, blocks and
+> trailer. **A writer killed before it finished is refused as incomplete** — the file holds a
+> header and blocks, which is exactly why reading it short would be so easy and so wrong — **and
+> a file that was never an ng psp is told apart from it by the head magic**, read only on the
+> failure path, because only one of the two can be fixed by re-running the pileup. `open` adds
+> the three checks the footer could not make about itself, having the file's length: the sections
+> must end where the footer begins, the index must not start inside the header, and every block
+> offset must land in the blocks. ⚠ **One number is derived, not measured**: the reader refuses a
+> compression window wider than 256 kB, which is arithmetic on the spec's own figures — an open
+> file at 227–346 kB against a 500 kB budget, less zstd's 190 kB context and two 16 kB buffers —
+> and eight times what this build writes. H4 is where it is confirmed or moved, and that is
+> written on the constant. Ten defects injected, ten caught.
+> [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a psp is written to a real file, and a writer that
 > is dropped leaves one no reader will touch** (step F3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). `create` writes the header, `push` writes each block as the cut rule closes it,
@@ -1206,10 +1249,11 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
 - **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
 - **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
-- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md), [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md).
+- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md), [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md), [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
 - **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
 - **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
-- **Latest review:** [F2](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Majors and three wrong numbers of mine, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md)). 51 mutations. Every accepted footer had an empty trailer; and a defect table's ten rows described nine defects.
+- **Latest review:** [F3](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Blockers, 4 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md)). A recovered write failure produced a file every reader accepts with records missing from the middle.
+- **Previous review:** [F2](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Majors and three wrong numbers of mine, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md)). 51 mutations. Every accepted footer had an empty trailer; and a defect table's ten rows described nine defects.
 - **Previous review:** [F1](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md) — eight checklists across six agents, Request-changes: **2 Blockers, 6 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md)). 41 mutations. A two-entry fixture that could only ever check one pair, and an error that panicked while rendering itself.
 - **Previous review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite; the largest Major was a key name colliding with production's word for a different concept in a format sharing the `.psp` extension.
 - **Previous review:** [C3](doc/devel/reports/reviews/ng_psp_c3_2026-08-26.md) — eight checklists across five agents, each in its own worktree, Request-changes: **2 Blockers and 9 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c3_2026-08-26.md).** 63 mutations, and every agent reproduced the step's own falsification independently. **The pairing of checklists is because a test-only commit gives three of them almost no surface** — each was told a small surface is not no surface, and each found something.

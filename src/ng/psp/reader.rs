@@ -1,0 +1,673 @@
+//! Opening a psp: the footer, the index and the header — and no block at all.
+//!
+//! **What opening costs is what a cohort pays per sample before it reads anything** (spec §6.2),
+//! multiplied by the cohort size, so it is deliberately three reads at fixed places rather than
+//! a walk: the fixed tail, the index it points at, and the plain-text header at the front.
+//!
+//! **A file with no valid footer is refused rather than read short** (spec §3.3, goal 3). That
+//! is the only thing distinguishing a run that was killed from a sample that genuinely covers
+//! less of the genome, and reading one short would hand a caller a chromosome that stops in the
+//! middle with nothing said.
+
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use super::footer::{FOOTER_BYTES, Footer, decode_footer};
+use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
+use super::index::BlockIndexEntry;
+use super::{PspReadError, index, read_header};
+
+/// How large a compressor look-back window this reader will hold, unless told otherwise.
+///
+/// **256 kB, and the number is derived rather than chosen.** Spec §7 puts an open file at 227 to
+/// 346 kB against a budget of 500 kB; §5.3 puts zstd's own context at about 190 kB and the
+/// reader's two buffers at 16 kB each. That leaves roughly 278 kB of the budget for the window,
+/// and 2^18 is the largest power of two under it.
+///
+/// It is **eight times the window this build's writer produces** (2^15, `DEFAULT_LOOK_BACK_
+/// WINDOW_LOG`), so an ordinary psp opens with room to spare, and a file written with a
+/// deliberately wide window is refused with a number the operator can act on rather than a zstd
+/// error code (spec §4.2).
+///
+/// **⚠ The derivation is arithmetic on the spec's figures, not a measurement of this reader.**
+/// Milestone H4 measures what an open sample actually costs and is where this constant is
+/// confirmed or moved.
+pub const DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES: u64 = 1 << 18;
+
+/// A finished psp, open: its header, its block index, and where everything in it is.
+///
+/// **No block has been touched** — that is the property spec §6.2 fixes and the reason a cohort
+/// can hold thousands of these open. Reading records is [`super::BlockStream`]'s, from a source
+/// this reader's index tells the caller where to seek.
+#[derive(Debug)]
+pub struct PspReader {
+    path: PathBuf,
+    file: File,
+    header: Header,
+    footer: Footer,
+    blocks: Vec<BlockIndexEntry>,
+}
+
+impl PspReader {
+    /// Open a finished psp: footer, then index, then header. **No block is touched.**
+    ///
+    /// The order is the one spec §6.2 fixes, and it is forced by the layout: the footer is the
+    /// only part at a known place, and it is what says where the index is.
+    pub fn open(path: &Path) -> Result<Self, PspReadError> {
+        Self::open_with_a_look_back_window_budget(path, DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES)
+    }
+
+    /// The same, with a different ceiling on the look-back window this reader will hold.
+    ///
+    /// **This is the knob [`DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES`] is the default of**, and it
+    /// exists because spec §4.2 makes the fix for a too-wide window *a setting rather than a
+    /// rebuilt file*.
+    pub fn open_with_a_look_back_window_budget(
+        path: &Path,
+        window_budget_bytes: u64,
+    ) -> Result<Self, PspReadError> {
+        let mut file = File::open(path).map_err(|source| PspReadError::Io {
+            path: path.to_path_buf(),
+            while_doing: "opening the file",
+            source,
+        })?;
+        let file_bytes = file
+            .metadata()
+            .map_err(|source| PspReadError::Io {
+                path: path.to_path_buf(),
+                while_doing: "measuring the file",
+                source,
+            })?
+            .len();
+
+        let footer = Self::read_footer(path, &mut file, file_bytes)?;
+        let blocks = Self::read_index(path, &mut file, &footer, file_bytes)?;
+        let header = read_header(path)?;
+
+        let needed_bytes = 1u64 << header.manifest.look_back_window_log;
+        if needed_bytes > window_budget_bytes {
+            return Err(PspReadError::WindowTooLarge {
+                path: path.to_path_buf(),
+                needed_bytes,
+                allowed_bytes: window_budget_bytes,
+            });
+        }
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            header,
+            footer,
+            blocks,
+        })
+    }
+
+    /// The file's own account of how it was written, the manifest included.
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// One entry per block, in genomic order — the cheap survey, with no block decompressed.
+    pub fn blocks(&self) -> &[BlockIndexEntry] {
+        &self.blocks
+    }
+
+    /// Where each section of the file is.
+    pub fn footer(&self) -> &Footer {
+        &self.footer
+    }
+
+    /// The writer's closing payload: one seek and one read, and it may be empty.
+    ///
+    /// **Opaque here.** The container stores bytes and hands them back; what is in them is the
+    /// writer's business (spec §3.4).
+    pub fn trailer(&mut self) -> Result<Vec<u8>, PspReadError> {
+        let mut payload = vec![0u8; self.footer.trailer_bytes as usize];
+        if payload.is_empty() {
+            return Ok(payload);
+        }
+        self.seek_to(self.footer.trailer_offset, "seeking to the trailer")?;
+        self.file
+            .read_exact(&mut payload)
+            .map_err(|source| PspReadError::Io {
+                path: self.path.clone(),
+                while_doing: "reading the trailer",
+                source,
+            })?;
+        Ok(payload)
+    }
+
+    /// Read and check the fixed tail.
+    ///
+    /// **A file too short to hold a footer is incomplete, not damaged** — it is what a writer
+    /// killed before it finished leaves, which is the everyday case.
+    fn read_footer(path: &Path, file: &mut File, file_bytes: u64) -> Result<Footer, PspReadError> {
+        let footer_bytes = FOOTER_BYTES as u64;
+        let Some(footer_at) = file_bytes.checked_sub(footer_bytes) else {
+            return Err(PspReadError::Incomplete {
+                path: path.to_path_buf(),
+            });
+        };
+        file.seek(SeekFrom::Start(footer_at))
+            .map_err(|source| PspReadError::Io {
+                path: path.to_path_buf(),
+                while_doing: "seeking to the footer",
+                source,
+            })?;
+        let mut tail = [0u8; FOOTER_BYTES];
+        file.read_exact(&mut tail)
+            .map_err(|source| PspReadError::Io {
+                path: path.to_path_buf(),
+                while_doing: "reading the footer",
+                source,
+            })?;
+
+        let footer = decode_footer(&tail).map_err(|refused| match refused {
+            // **No tail magic has two readings and they need telling apart**: a psp whose writer
+            // never finished, and a file that was never a psp. The head magic is what separates
+            // them, and it is read only on this path — the everyday open pays nothing for it.
+            super::footer::FooterDecodeError::NotAFooter { .. } => {
+                match Self::head_magic(path, file) {
+                    Some(found) if found != HEAD_MAGIC => PspReadError::NotAnNgPsp {
+                        path: path.to_path_buf(),
+                        found,
+                        expected: HEAD_MAGIC,
+                    },
+                    _ => PspReadError::Incomplete {
+                        path: path.to_path_buf(),
+                    },
+                }
+            }
+            damaged => PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: damaged.to_string(),
+            },
+        })?;
+
+        // **What the footer could not check about itself, because it does not know the length.**
+        // The trailer must end exactly where the footer begins: a file whose sections stop short
+        // has bytes nothing accounts for, and one that runs past has sections overlapping the
+        // footer.
+        let sections_end = footer
+            .trailer_offset
+            .checked_add(footer.trailer_bytes)
+            .ok_or_else(|| PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: "the trailer's end is past any address".to_string(),
+            })?;
+        if sections_end != footer_at {
+            return Err(PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "the footer says the file's sections end at byte {sections_end}, but the \
+                     footer itself begins at byte {footer_at}"
+                ),
+            });
+        }
+        if footer.index_offset < HEAD_MAGIC.len() as u64 {
+            return Err(PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "the footer puts the block index at byte {}, which is inside the header",
+                    footer.index_offset
+                ),
+            });
+        }
+        Ok(footer)
+    }
+
+    /// Read the index, check it against the footer's checksum, and decode it.
+    fn read_index(
+        path: &Path,
+        file: &mut File,
+        footer: &Footer,
+        file_bytes: u64,
+    ) -> Result<Vec<BlockIndexEntry>, PspReadError> {
+        if footer.index_bytes > file_bytes {
+            return Err(PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "the footer declares a {}-byte block index in a {file_bytes}-byte file",
+                    footer.index_bytes
+                ),
+            });
+        }
+        file.seek(SeekFrom::Start(footer.index_offset))
+            .map_err(|source| PspReadError::Io {
+                path: path.to_path_buf(),
+                while_doing: "seeking to the block index",
+                source,
+            })?;
+        let mut bytes = vec![0u8; footer.index_bytes as usize];
+        file.read_exact(&mut bytes)
+            .map_err(|source| PspReadError::Io {
+                path: path.to_path_buf(),
+                while_doing: "reading the block index",
+                source,
+            })?;
+
+        // **The checksum before the decode.** The index is the one region of a psp no zstd frame
+        // checksum covers and which carries no framing of its own, so this is what says its bytes
+        // are the bytes that were written — and a damaged index that still happens to decode
+        // would seek a reader to the wrong block without failing.
+        let found = index::checksum_index(&bytes);
+        if found != footer.index_checksum {
+            return Err(PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "the block index checksums to {found:#010x}; the footer says {:#010x}",
+                    footer.index_checksum
+                ),
+            });
+        }
+
+        let blocks = index::decode_index(&bytes, footer.n_blocks).map_err(|refused| {
+            PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: format!("the block index reads as: {refused}"),
+            }
+        })?;
+
+        // Every block must start inside the blocks, which end where the index begins.
+        for entry in &blocks {
+            if entry.block_offset >= footer.index_offset {
+                return Err(PspReadError::Damaged {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "the index puts a block at byte {}, which is not in the blocks — they \
+                         end at byte {}",
+                        entry.block_offset, footer.index_offset
+                    ),
+                });
+            }
+        }
+        Ok(blocks)
+    }
+
+    /// The file's first four bytes, or `None` if it is shorter than that. **Only ever read to
+    /// tell a killed writer from a foreign file**, so an ordinary open never pays for it.
+    fn head_magic(_path: &Path, file: &mut File) -> Option<[u8; 4]> {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic).ok()?;
+        Some(magic)
+    }
+
+    fn seek_to(&mut self, at: u64, while_doing: &'static str) -> Result<(), PspReadError> {
+        self.file
+            .seek(SeekFrom::Start(at))
+            .map(|_| ())
+            .map_err(|source| PspReadError::Io {
+                path: self.path.clone(),
+                while_doing,
+                source,
+            })
+    }
+}
+
+const _: () = assert!(
+    DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES < (1u64 << MAX_LOOK_BACK_WINDOW_LOG),
+    "a budget at or above the format's widest window could never refuse anything"
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ng::psp::footer::{FOOTER_MAGIC, encode_footer};
+    use crate::ng::psp::header::DEFAULT_LOOK_BACK_WINDOW_LOG;
+    use crate::ng::psp::writer::PspWriter;
+    use crate::ng::psp::writer::tests_support::{a_file, a_header, a_record, a_sample, bytes_of};
+    use std::io::Write;
+
+    /// Write a finished psp holding a sample, and hand back where it is.
+    fn a_finished_psp() -> (tempfile::TempDir, PathBuf) {
+        let (dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        for record in a_sample() {
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+        (dir, path)
+    }
+
+    fn rewrite(path: &Path, bytes: &[u8]) {
+        let mut file = File::create(path).expect("the file is writable");
+        file.write_all(bytes).expect("it writes");
+    }
+
+    // -----------------------------------------------------------------
+    // What opening gives
+    // -----------------------------------------------------------------
+
+    /// Opening gives the header, the block list and the trailer — everything the file says about
+    /// itself.
+    #[test]
+    fn opening_gives_the_header_the_blocks_and_the_trailer() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+
+        assert_eq!(psp.header().sample, "SRR7279481");
+        assert_eq!(psp.header().contigs.len(), 2);
+        assert_eq!(psp.blocks().len() as u64, psp.footer().n_blocks);
+        assert!(psp.blocks().len() >= 8, "two contigs of four grid cells");
+        assert_eq!(
+            psp.trailer().expect("the trailer reads"),
+            b"a per-sample summary"
+        );
+
+        // The blocks come back in genomic order, which is what a seek searches on.
+        let mut sorted = psp.blocks().to_vec();
+        sorted.sort();
+        assert_eq!(sorted, psp.blocks());
+    }
+
+    /// **Opening touches no block**, and this is how that is shown rather than asserted: every
+    /// byte of the blocks region is overwritten with rubbish, and the file still opens and still
+    /// says the same things about itself.
+    ///
+    /// A reader that decompressed anything at open would fail here.
+    #[test]
+    fn opening_touches_no_block() {
+        let (_dir, path) = a_finished_psp();
+        let intact = PspReader::open(&path).expect("it opens");
+        let (blocks_start, blocks_end) = (
+            intact.blocks()[0].block_offset,
+            intact.footer().index_offset,
+        );
+        let expected_blocks = intact.blocks().to_vec();
+        drop(intact);
+
+        let mut bytes = bytes_of(&path);
+        assert!(blocks_end > blocks_start, "the file holds blocks");
+        for byte in &mut bytes[blocks_start as usize..blocks_end as usize] {
+            *byte = 0xA5;
+        }
+        rewrite(&path, &bytes);
+
+        let mut wrecked = PspReader::open(&path).expect("open must not read a block");
+        assert_eq!(wrecked.blocks(), expected_blocks);
+        assert_eq!(wrecked.header().sample, "SRR7279481");
+        assert_eq!(
+            wrecked.trailer().expect("still reads"),
+            b"a per-sample summary"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // What is refused
+    // -----------------------------------------------------------------
+
+    /// **A file whose writer never finished is refused, not read short.** This is goal 3, and
+    /// the file here is not empty — it holds a header and blocks, which is exactly why reading
+    /// it short would be so easy and so wrong.
+    #[test]
+    fn a_file_with_no_footer_is_refused_as_incomplete() {
+        let (_dir, path) = a_file();
+        {
+            let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            // Dropped without `finish`.
+        }
+        let refused = PspReader::open(&path).expect_err("an unfinished psp must be refused");
+        assert!(
+            matches!(refused, PspReadError::Incomplete { .. }),
+            "got {refused}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "{} has no valid footer — the writer did not finish",
+                path.display()
+            )
+        );
+    }
+
+    /// A file too short to hold even a footer is incomplete, and does not panic on the
+    /// subtraction that finds the footer.
+    #[test]
+    fn a_file_shorter_than_a_footer_is_refused_without_panicking() {
+        for length in [0usize, 1, FOOTER_BYTES - 1] {
+            let (_dir, path) = a_file();
+            rewrite(&path, &vec![0u8; length]);
+            let refused = PspReader::open(&path).expect_err("too short to be a psp");
+            assert!(
+                matches!(refused, PspReadError::Incomplete { .. }),
+                "at {length} bytes, got {refused}"
+            );
+        }
+    }
+
+    /// **A file that was never an ng psp is told apart from one whose writer was killed**, and
+    /// the head magic is what separates them. Both lack the tail magic; only one can be rebuilt
+    /// by re-running the pileup.
+    #[test]
+    fn a_foreign_file_is_refused_as_foreign_and_not_as_unfinished() {
+        let (_dir, path) = a_file();
+        // Production's own psp head magic: the everyday wrong file, since both use `.psp`.
+        let mut bytes = b"PSP\n".to_vec();
+        bytes.extend_from_slice(&[0u8; 200]);
+        rewrite(&path, &bytes);
+        let refused = PspReader::open(&path).expect_err("that is not an ng psp");
+        match refused {
+            PspReadError::NotAnNgPsp {
+                found, expected, ..
+            } => {
+                assert_eq!(found, *b"PSP\n");
+                assert_eq!(expected, HEAD_MAGIC);
+            }
+            other => panic!("expected a foreign file, got {other}"),
+        }
+    }
+
+    /// A footer whose sections do not end where the footer begins is damage, not incompleteness:
+    /// the bytes on disk disagree with each other.
+    #[test]
+    fn a_footer_that_does_not_account_for_the_file_is_refused_as_damaged() {
+        let (_dir, path) = a_finished_psp();
+        let mut bytes = bytes_of(&path);
+        let tail_at = bytes.len() - FOOTER_BYTES;
+        let mut footer =
+            crate::ng::psp::footer::decode_footer(&bytes[tail_at..].try_into().unwrap())
+                .expect("a footer");
+        // Claim a trailer one byte shorter than it is: the sections then stop short of the tail.
+        footer.trailer_bytes -= 1;
+        bytes[tail_at..].copy_from_slice(&encode_footer(&footer));
+        rewrite(&path, &bytes);
+
+        let refused = PspReader::open(&path).expect_err("the sections must account for the file");
+        assert!(
+            matches!(refused, PspReadError::Damaged { .. }),
+            "got {refused}"
+        );
+        assert!(
+            refused.to_string().contains("sections end at byte"),
+            "got {refused}"
+        );
+    }
+
+    /// **A damaged index is caught by the checksum, before it is decoded.** A flipped bit inside
+    /// an offset gives a perfectly well-formed index pointing somewhere else, so nothing but the
+    /// checksum can see it.
+    #[test]
+    fn an_index_that_does_not_match_its_checksum_is_refused() {
+        let (_dir, path) = a_finished_psp();
+        let mut bytes = bytes_of(&path);
+        let footer = crate::ng::psp::footer::decode_footer(
+            &bytes[bytes.len() - FOOTER_BYTES..].try_into().unwrap(),
+        )
+        .expect("a footer");
+        // One bit, inside the index, in a byte that is part of an offset.
+        bytes[footer.index_offset as usize + 4] ^= 0x01;
+        rewrite(&path, &bytes);
+
+        let refused = PspReader::open(&path).expect_err("a damaged index must be refused");
+        assert!(
+            matches!(refused, PspReadError::Damaged { .. }),
+            "got {refused}"
+        );
+        assert!(
+            refused.to_string().contains("checksums to"),
+            "got {refused}"
+        );
+    }
+
+    /// An index naming a block outside the blocks is refused: the offset is where a reader would
+    /// seek, and seeking into the index would decompress the index.
+    #[test]
+    fn an_index_pointing_outside_the_blocks_is_refused() {
+        let (_dir, path) = a_finished_psp();
+        let mut bytes = bytes_of(&path);
+        let tail_at = bytes.len() - FOOTER_BYTES;
+        let footer = crate::ng::psp::footer::decode_footer(&bytes[tail_at..].try_into().unwrap())
+            .expect("a footer");
+
+        // Rebuild the index with its last block moved into the index's own bytes, and restamp
+        // the checksum so the checksum test is not what fires.
+        let mut entries = index::decode_index(
+            &bytes
+                [footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize],
+            footer.n_blocks,
+        )
+        .expect("the index reads");
+        let last = entries.len() - 1;
+        entries[last].block_offset = footer.index_offset + 1;
+        let rebuilt = index::encode_index(&entries);
+        assert_eq!(rebuilt.len() as u64, footer.index_bytes, "same width");
+        bytes[footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize]
+            .copy_from_slice(&rebuilt);
+        let mut footer = footer;
+        footer.index_checksum = index::checksum_index(&rebuilt);
+        bytes[tail_at..].copy_from_slice(&encode_footer(&footer));
+        rewrite(&path, &bytes);
+
+        let refused = PspReader::open(&path).expect_err("a block outside the blocks");
+        assert!(
+            refused.to_string().contains("not in the blocks"),
+            "got {refused}"
+        );
+    }
+
+    /// **A window wider than this reader budgeted for is its own refusal, and the message names
+    /// both numbers** — because the fix is a setting rather than a rebuilt file (spec §4.2).
+    #[test]
+    fn a_window_wider_than_the_budget_is_refused_by_name() {
+        let (_dir, path) = a_file();
+        let mut header = a_header(1_000);
+        header.manifest.look_back_window_log = 22; // 4 MiB
+        let writer = PspWriter::create(&path, header).expect("a wide window is writable");
+        let _ = writer.finish(&[]).expect("it finishes");
+
+        let refused = PspReader::open(&path).expect_err("wider than the default budget");
+        match refused {
+            PspReadError::WindowTooLarge {
+                needed_bytes,
+                allowed_bytes,
+                ..
+            } => {
+                assert_eq!(needed_bytes, 1 << 22);
+                assert_eq!(allowed_bytes, DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES);
+            }
+            other => panic!("expected a window refusal, got {other}"),
+        }
+
+        // And raising the budget opens it, which is what makes the refusal a setting.
+        let raised = PspReader::open_with_a_look_back_window_budget(&path, 1 << 22)
+            .expect("a raised budget opens it");
+        assert_eq!(raised.header().manifest.look_back_window_log, 22);
+    }
+
+    /// The window this build writes opens under the default budget with room to spare.
+    #[test]
+    fn the_window_this_build_writes_is_well_inside_the_default_budget() {
+        let written = 1u64 << DEFAULT_LOOK_BACK_WINDOW_LOG;
+        assert_eq!(written, 32 * 1024);
+        assert_eq!(DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, 256 * 1024);
+        assert_eq!(
+            DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES / written,
+            8,
+            "the budget is eight times the window this build produces"
+        );
+    }
+
+    /// A psp with no records opens, and says so: no blocks, and a trailer that is still there.
+    #[test]
+    fn a_psp_with_no_records_opens() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let _ = writer.finish(b"nothing was found").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("an empty psp is a psp");
+        assert!(psp.blocks().is_empty());
+        assert_eq!(psp.footer().n_blocks, 0);
+        assert_eq!(psp.trailer().expect("it reads"), b"nothing was found");
+    }
+
+    /// An empty trailer reads back as no bytes rather than as an error.
+    #[test]
+    fn an_empty_trailer_reads_back_empty() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        writer.push(&a_record(0, 1, 1)).expect("one record");
+        let _ = writer.finish(&[]).expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("it opens");
+        assert!(psp.trailer().expect("it reads").is_empty());
+    }
+
+    /// A file that does not exist names itself and what was being done to it.
+    #[test]
+    fn a_missing_file_names_itself() {
+        let (dir, path) = a_file();
+        drop(dir);
+        let refused = PspReader::open(&path).expect_err("it is not there");
+        assert!(matches!(refused, PspReadError::Io { .. }), "got {refused}");
+        assert!(
+            refused.to_string().contains("opening the file"),
+            "got {refused}"
+        );
+    }
+
+    /// **Every truncation of a finished psp is refused, and none panics.** A file cut anywhere
+    /// is either incomplete or damaged — never quietly readable.
+    #[test]
+    fn every_truncation_of_a_finished_psp_is_refused_without_panicking() {
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let mut incomplete = 0;
+        let mut damaged = 0;
+        // Every 16th cut, so the test stays quick while still crossing every section boundary.
+        for cut in (0..whole.len()).step_by(16) {
+            rewrite(&path, &whole[..cut]);
+            match PspReader::open(&path) {
+                Err(PspReadError::Incomplete { .. }) => incomplete += 1,
+                Err(PspReadError::Damaged { .. }) => damaged += 1,
+                Err(PspReadError::NotAnNgPsp { .. }) => incomplete += 1,
+                Err(other) => panic!("a cut at {cut} gave {other}"),
+                Ok(_) => panic!("a cut at {cut} opened"),
+            }
+        }
+        assert!(
+            incomplete > 0 && damaged == 0,
+            "a truncated psp has lost its footer, so every cut is incomplete: \
+             {incomplete} incomplete, {damaged} damaged"
+        );
+    }
+
+    /// The tail magic alone is not enough: a file that ends with it but holds nothing else is
+    /// refused rather than opened.
+    #[test]
+    fn a_file_that_is_only_a_footer_magic_is_refused() {
+        let (_dir, path) = a_file();
+        let mut bytes = vec![0u8; FOOTER_BYTES];
+        bytes[FOOTER_BYTES - 4..].copy_from_slice(&FOOTER_MAGIC);
+        rewrite(&path, &bytes);
+        let refused = PspReader::open(&path).expect_err("that describes no file");
+        assert!(
+            matches!(refused, PspReadError::Damaged { .. }),
+            "got {refused}"
+        );
+    }
+}
