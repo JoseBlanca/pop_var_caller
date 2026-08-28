@@ -119,7 +119,7 @@ rows as one inline table a line, the repeat-tract tables as arrays of arrays rat
 tables.
 *Depends:* B1. *Source:* §4.
 
-☐ **B3. The provenance comments.** Each defaulted value gets a comment beside it saying where the
+✅ **B3. The provenance comments.** Each defaulted value gets a comment beside it saying where the
 default came from — for the repeat-tract slippage numbers, which alignments and at what depth
 (§8). **This is why the format is TOML**, so it is built here rather than deferred.
 *Depends:* B2. *Source:* §4, §8.

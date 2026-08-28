@@ -82,10 +82,29 @@ impl ParametersFile {
     pub fn to_toml(&self) -> String {
         let mut out = String::new();
 
+        note(
+            &mut out,
+            &[
+                "Every number this run scored its reads under, and what each one rests on.",
+                "",
+                "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way.",
+                "",
+                "The slippage numbers, the prior's two concentrations and the length spectra carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
+                "",
+                "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured; a zero means it was measured and found to be zero. The sections below say which is which where it matters.",
+            ],
+        );
+
         writeln!(out, "format_version = {}", self.format_version).expect("a string never fails");
         writeln!(out, "ploidy = {}", self.ploidy).expect("a string never fails");
 
         section(&mut out, "fitted_from");
+        note(
+            &mut out,
+            &[
+                "What these numbers were fitted from. A run whose reference, samples or read groups do not match these is refused; one whose census does not match keeps the numbers and reports every one of them as supplied rather than fitted.",
+            ],
+        );
         scalar(
             &mut out,
             "reference_digest",
@@ -110,19 +129,43 @@ impl ParametersFile {
         );
 
         section(&mut out, "base_quality_calibration");
-        one_a_line(
+        note(
+            &mut out,
+            &[
+                "What each read's own reported error probability is multiplied by, per read group. Above one says the instrument was optimistic and the reads are worse than it claimed; one leaves the qualities exactly as reported. It is not a multiplier on the Phred score, which moves the other way.",
+            ],
+        );
+        one_a_line_with_notes(
             &mut out,
             "by_read_group",
             self.base_quality_calibration
                 .by_read_group
                 .iter()
-                .map(a_calibration_row),
+                .map(|row| {
+                    (
+                        a_calibration_row(row),
+                        where_it_came_from(
+                            &row.error_probability_multiplier,
+                            origins::CALIBRATION_MULTIPLIER,
+                        ),
+                    )
+                }),
         );
 
         // **Absent means uncontaminated**, and the section is where that is said. A table of
         // zeros would claim every library was measured and found clean, which nothing measured.
         if let Some(contamination) = &self.contamination {
             section(&mut out, "contamination");
+            note(
+                &mut out,
+                &[
+                    "How much of each read group's reads came from somebody else — one row a lane, because two lanes of one library can differ: index hopping happens on a flowcell, not in a tube. Three states, three different claims:",
+                    "  - this whole section absent  -> nobody identified any contamination",
+                    "  - a row with no `measurement` -> this lane could not be measured",
+                    "  - `fraction = 0.0` with non-zero counts -> measured, and found clean",
+                    "To stop correcting one lane, delete its `measurement = { ... }` and leave the row; a library sequenced over several lanes has a row for each. Setting a fraction to zero says something else: that it was measured and found clean.",
+                ],
+            );
             one_a_line(
                 &mut out,
                 "by_read_group",
@@ -131,6 +174,12 @@ impl ParametersFile {
         }
 
         section(&mut out, "sequencing_batches");
+        note(
+            &mut out,
+            &[
+                "Who was sequenced beside whom — the population a contaminating read is drawn from. `was_declared_by_the_run = false` means nobody said, so everything went in one batch. A declared batching that happens to have one batch writes identical rows, and this flag is the only thing that tells those two apart.",
+            ],
+        );
         scalar(
             &mut out,
             "was_declared_by_the_run",
@@ -158,13 +207,33 @@ impl ParametersFile {
         );
 
         section(&mut out, "inbreeding");
-        one_a_line(
+        note(
+            &mut out,
+            &[
+                "How inbred each sample is, as a fraction in [0, 1) — one row a sample, counted over the reference positions that sample's reads covered.",
+            ],
+        );
+        one_a_line_with_notes(
             &mut out,
             "by_sample",
-            self.inbreeding.by_sample.iter().map(an_inbreeding_row),
+            self.inbreeding.by_sample.iter().map(|row| {
+                (
+                    an_inbreeding_row(row),
+                    where_it_came_from(
+                        &row.inbreeding_coefficient,
+                        origins::INBREEDING_COEFFICIENT,
+                    ),
+                )
+            }),
         );
 
         section(&mut out, "ordinary_site_prior");
+        note(
+            &mut out,
+            &[
+                "What the SNP and indel prior starts from at an ordinary position: how much belief the reference allele carries, and how much is shared out across whatever alternative alleles a position turns out to have. `rung` says which measurement the pair came off — a fitted population curve, the neutral shape at a fitted heterozygosity, a cohort with no variation at all, or a stated heterozygosity taken from human data, which is the one that rests on nothing this run measured.",
+            ],
+        );
         scalar(
             &mut out,
             "reference_concentration",
@@ -183,10 +252,26 @@ impl ParametersFile {
 
         section(&mut out, "repeat_tracts");
         let tracts = &self.repeat_tracts;
-        scalar(
+        note(
+            &mut out,
+            &[
+                "Everything about repeat tracts. A **stratum** is a class of tract, and every row here spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries.",
+                "",
+                "A pair with no row put no read there; a stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
+                "",
+                "Three numbers a stratum: `level` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `slipped_reads` is fractional because it is how many reads the fitted level says slipped, not a count anybody labelled.",
+                "",
+                "Where each of those came from is in `level_origin` and `shares_origin` beside it: its stratum's own fit, its period's curve, or a blend of the two, with the curve itself recorded so an interpolation can be told from a measurement. A `rung` inside one of those curves is not the `rung` in [ordinary_site_prior]: here it says what the curve itself was fitted on — this period's own strata, the other periods pooled, or a stated constant.",
+            ],
+        );
+        scalar_with_note(
             &mut out,
             "stated_length_spectrum_concentration",
             &a_warranted_value(&tracts.stated_length_spectrum_concentration),
+            where_it_came_from(
+                &tracts.stated_length_spectrum_concentration,
+                origins::FLAT_CONCENTRATION,
+            ),
         );
         one_a_line(
             &mut out,
@@ -204,6 +289,12 @@ impl ParametersFile {
                 .iter()
                 .map(a_slippage_row),
         );
+        note(
+            &mut out,
+            &[
+                "`shares_by_repeat_offset` runs from -span to +span in whole repeat units from the **reference** tract length, so the middle entry is the reference length itself, the count is odd, and the shares sum to one. An array read as starting at zero shifts every length this stratum expects by one repeat.",
+            ],
+        );
         one_a_line(
             &mut out,
             "length_spectrum_by_stratum",
@@ -220,20 +311,38 @@ impl ParametersFile {
                 .iter()
                 .map(a_period_length_spectrum_row),
         );
-        one_a_line(
+        note(
+            &mut out,
+            &[
+                "How often a base reads wrong inside a tract — per read group as well as per stratum, because that is a property of the chemistry. Counted in bases compared, not reads: a read crossing a tract contributes as many bases as it crosses.",
+            ],
+        );
+        one_a_line_with_notes(
             &mut out,
             "substitution_rate_by_stratum",
-            tracts
-                .substitution_rate_by_stratum
-                .iter()
-                .map(a_substitution_rate_row),
+            tracts.substitution_rate_by_stratum.iter().map(|row| {
+                (
+                    a_substitution_rate_row(row),
+                    where_it_came_from(&row.rate, origins::SUBSTITUTION_RATE),
+                )
+            }),
         );
 
         section(&mut out, "stated_constants");
-        scalar(
+        note(
+            &mut out,
+            &[
+                "The numbers no fit produces, written out so that what a run inherited is visible and editable rather than buried in the binary.",
+            ],
+        );
+        scalar_with_note(
             &mut out,
             "repeat_tract_outlier_weight",
             &a_warranted_value(&self.stated_constants.repeat_tract_outlier_weight),
+            where_it_came_from(
+                &self.stated_constants.repeat_tract_outlier_weight,
+                origins::OUTLIER_WEIGHT,
+            ),
         );
 
         out
@@ -258,16 +367,158 @@ fn scalar(out: &mut String, key: &str, value: &str) {
 /// `key = []` where there is nothing, and otherwise **one element a line**, four spaces in, each
 /// with a trailing comma so that adding a row by hand is a one-line edit.
 fn one_a_line(out: &mut String, key: &str, elements: impl Iterator<Item = String>) {
+    one_a_line_with_notes(out, key, elements.map(|element| (element, None)));
+}
+
+/// The same, where a row may carry **a comment saying where its value came from** — which is what
+/// spec §4 chose this format for, and what a `defaulted` number owes its reader (§8).
+///
+/// **The note is per row and only on the rows that need one**, so its cost does not scale with the
+/// cohort: a run of 3,000 samples whose coefficients were all fitted writes 3,000 rows and no
+/// notes.
+fn one_a_line_with_notes(
+    out: &mut String,
+    key: &str,
+    elements: impl Iterator<Item = (String, Option<&'static str>)>,
+) {
     let mut elements = elements.peekable();
     if elements.peek().is_none() {
         writeln!(out, "{key} = []").expect("a string never fails");
         return;
     }
     writeln!(out, "{key} = [").expect("a string never fails");
-    for element in elements {
+    for (element, note) in elements {
+        // **Above the row rather than after it.** A trailing comment lengthens a line that is
+        // already the longest thing in the file, and TOML lets a comment sit inside a multi-line
+        // array, so the note goes where a reader meets it before the row it is about.
+        if let Some(note) = note {
+            for line in wrapped(note, ROOM_BESIDE_A_ROW) {
+                writeln!(out, "    # {line}").expect("a string never fails");
+            }
+        }
         writeln!(out, "    {element},").expect("a string never fails");
     }
     writeln!(out, "]").expect("a string never fails");
+}
+
+/// How wide a comment line may be, all in: its `# ` and any indent are part of it.
+const COMMENT_WIDTH: usize = 80;
+
+/// What a note at the left margin has room for, after its `# `.
+const ROOM_AT_THE_MARGIN: usize = COMMENT_WIDTH - 2;
+
+/// What a note indented with the row it is about has room for, after four spaces and its `# `.
+const ROOM_BESIDE_A_ROW: usize = COMMENT_WIDTH - 6;
+
+/// **A note, broken at word boundaries so that no comment line runs past [`COMMENT_WIDTH`]** —
+/// counting the `# ` every line carries and the indent a row's note sits at.
+///
+/// The rows this file writes are long and there is nothing to be done about that; a comment is
+/// prose, and prose that needs scrolling is prose nobody reads.
+///
+/// `room` is what is left for the words after the prefix, which is why the two callers pass
+/// different numbers: a section's note starts at the left margin and a row's is indented with the
+/// row it is about.
+fn wrapped(note: &str, room: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in note.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > room {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// **A comment, one line each**, written where it stands rather than beside a value.
+///
+/// TOML's comment runs to the end of its line, so a note that has to say more than a few words
+/// goes above the thing it is about — which is where a section's framing belongs anyway, since it
+/// is about every row rather than one.
+fn note(out: &mut String, paragraphs: &[&str]) {
+    for paragraph in paragraphs {
+        if paragraph.is_empty() {
+            writeln!(out, "#").expect("a string never fails");
+        } else if paragraph.starts_with("  ") {
+            // **A line that is laid out on purpose is emitted as it stands** — the bullet lists
+            // where spec §5's states are set against each other are a table in all but name, and
+            // reflowing one would run the three claims together.
+            writeln!(out, "# {paragraph}").expect("a string never fails");
+        } else {
+            note_lines(out, &wrapped(paragraph, ROOM_AT_THE_MARGIN));
+        }
+    }
+}
+
+/// The same, for lines that had to be wrapped at run time.
+fn note_lines(out: &mut String, lines: &[String]) {
+    for line in lines {
+        writeln!(out, "# {line}").expect("a string never fails");
+    }
+}
+
+/// A `key = value` whose note, where it has one, goes on the lines above it.
+fn scalar_with_note(out: &mut String, key: &str, value: &str, note: Option<&'static str>) {
+    if let Some(note) = note {
+        note_lines(out, &wrapped(note, ROOM_AT_THE_MARGIN));
+    }
+    writeln!(out, "{key} = {value}").expect("a string never fails");
+}
+
+/// **Where each of the file's defaultable numbers gets its default from** (spec §8).
+///
+/// One place, so that a number's origin and the sentence a reader is shown cannot drift apart, and
+/// so that step E1 — which turns these into named constants with their origin recorded beside
+/// them — has one list to reconcile against rather than five call sites.
+///
+/// **§8's fourth default has no entry here and cannot have one yet.** The per-(stratum × slippage
+/// group) slippage numbers are to be defaulted from the GIAB HG002 alignments, and §8 asks for
+/// "which alignments, at what depth, on which date" beside them — but a slippage number carries a
+/// *smoothing origin* and no `Warrant`, so the file has no state in which one is `defaulted` and
+/// nothing for the comment to attach to. The measurement does not exist either (§12 question 1).
+/// Both halves are recorded at Checkpoint B.
+mod origins {
+    /// The base-quality multiplier, where no usable rate was fitted.
+    pub const CALIBRATION_MULTIPLIER: &str = concat!(
+        "no calibration: this read group's reported qualities are used exactly as they ",
+        "came, because no usable error rate could be fitted for it"
+    );
+
+    /// The tract ladder's bottom rung, which a run states rather than fits.
+    pub const FLAT_CONCENTRATION: &str = concat!(
+        "stated rather than fitted: this many chromosomes' worth of belief, spread flat ",
+        "over whatever lengths a tract offers. A run that fitted any stratum states the ",
+        "median of its own instead, and says so with a warrant of fitted_here"
+    );
+
+    /// The repeat-tract outlier weight — always defaulted as this build stands.
+    pub const OUTLIER_WEIGHT: &str = concat!(
+        "inherited from the existing caller and never measured here: the share of ",
+        "repeat-tract reads that came from nowhere the model can explain"
+    );
+
+    /// A repeat-tract substitution rate that nothing could be fitted for.
+    pub const SUBSTITUTION_RATE: &str =
+        "nothing was fitted for this read group at this stratum, and nothing was supplied";
+
+    /// An inbreeding coefficient nothing could be fitted for — **which the pre-pass has no
+    /// default for**, so a run should never write one.
+    pub const INBREEDING_COEFFICIENT: &str = concat!(
+        "no coefficient was fitted for this sample, and inbreeding has no default: a run ",
+        "should not be able to write this line"
+    );
+}
+
+/// The note a warranted number owes its reader, which is one only where it was defaulted.
+fn where_it_came_from(value: &WarrantedValue, origin: &'static str) -> Option<&'static str> {
+    (value.warrant == Warrant::Defaulted).then_some(origin)
 }
 
 /// One inline table: `{ a = 1, b = 2 }`, or `{}` for one with no keys.
@@ -818,6 +1069,13 @@ mod tests {
                 file.fitted_from.read_groups.len(),
             ),
             ("[fitted_from]", "samples", file.fitted_from.samples.len()),
+            // **This one already carries a note**, on the read group whose multiplier is
+            // defaulted — so it is the table that proves a note is a line and not a row.
+            (
+                "[base_quality_calibration]",
+                "by_read_group",
+                file.base_quality_calibration.by_read_group.len(),
+            ),
             (
                 "[sequencing_batches]",
                 "by_sample",
@@ -849,19 +1107,68 @@ mod tests {
                 .position(|line| *line == "]")
                 .expect("and closes it")
                 + opens;
+            // **A note is a line and not a row.** A defaulted value writes an indented comment
+            // above its row, so the count is over the rows rather than over the lines — and the
+            // stated invariant would be false for any run that defaults one.
+            let written: Vec<&&str> = lines[opens + 1..closes]
+                .iter()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .collect();
             assert_eq!(
-                closes - opens - 1,
+                written.len(),
                 rows,
-                "`{section}`'s `{key}` holds {rows} rows and its table spans {} lines",
-                closes - opens - 1
+                "`{section}`'s `{key}` holds {rows} rows and its table writes {} of them",
+                written.len()
             );
-            for row in &lines[opens + 1..closes] {
+            for row in written {
                 assert!(
                     row.starts_with("    ") && row.ends_with(','),
                     "every row of `{key}` is one indented line ending in a comma: {row}"
                 );
             }
         }
+
+        // **And the same file with a note inside two of those tables**, which is the shape the
+        // invariant above was originally stated wrongly for: a note is a line and not a row.
+        let mut with_notes = a_file_using_every_shape();
+        with_notes.inbreeding.by_sample[0]
+            .inbreeding_coefficient
+            .warrant = Warrant::Defaulted;
+        with_notes.repeat_tracts.substitution_rate_by_stratum[0]
+            .rate
+            .warrant = Warrant::Defaulted;
+        let noted = with_notes.to_toml();
+        let noted_lines: Vec<&str> = noted.lines().collect();
+        // Anchored to its section: two sections hold a `by_sample`, and the first from the top
+        // of the file is the batching's.
+        let header = noted_lines
+            .iter()
+            .position(|line| *line == "[inbreeding]")
+            .expect("the file opens `[inbreeding]`");
+        let opens = noted_lines[header..]
+            .iter()
+            .position(|line| *line == "by_sample = [")
+            .expect("the inbreeding table opens")
+            + header;
+        let closes = noted_lines[opens..]
+            .iter()
+            .position(|line| *line == "]")
+            .expect("and closes")
+            + opens;
+        assert!(
+            noted_lines[opens + 1..closes]
+                .iter()
+                .any(|line| line.trim_start().starts_with('#')),
+            "the defaulted coefficient's note is inside the table:\n{noted}"
+        );
+        assert_eq!(
+            noted_lines[opens + 1..closes]
+                .iter()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .count(),
+            with_notes.inbreeding.by_sample.len(),
+            "and the rows are still one a line, with the note not counted as one:\n{noted}"
+        );
 
         assert!(
             lines.contains(&"[repeat_tracts]"),
@@ -1067,7 +1374,7 @@ mod tests {
         let text = file.to_toml();
         let row = text
             .lines()
-            .find(|line| line.contains("shares_origin"))
+            .find(|line| line.contains("shares_origin") && !line.trim_start().starts_with('#'))
             .expect("the row is written");
         assert_eq!(
             row.matches("slipped_reads").count(),
@@ -1138,6 +1445,245 @@ mod tests {
         );
     }
 
+    /// **Every defaulted number says where its default came from, and no fitted one does.**
+    ///
+    /// This is what spec §4 chose TOML for: "what a person needs beside a number is where it came
+    /// from and what moving it costs". The comment is on the rows that carry a default and only
+    /// those, so its cost does not scale with the cohort — a run of 3,000 samples whose
+    /// coefficients were all fitted writes 3,000 rows and no notes.
+    #[test]
+    fn every_defaulted_number_says_where_its_default_came_from() {
+        let text = a_file_using_every_shape().to_toml();
+        let lines: Vec<&str> = text.lines().collect();
+
+        // The calibration's defaulted row: the note sits on the lines above it.
+        let defaulted = lines
+            .iter()
+            .position(|line| {
+                line.contains("warrant = \"defaulted\"") && line.contains("read_group = 1")
+            })
+            .expect("read group 1's multiplier is defaulted");
+        // **However many lines the note wrapped to.** A correct writer whose origin happens to
+        // wrap to one line, or to three, must not fail this.
+        let note_above: String = lines[..defaulted]
+            .iter()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with('#'))
+            .fold(String::new(), |all, line| format!("{line} {all}"));
+        assert!(
+            note_above.contains("no calibration"),
+            "the note is on the lines above the row it is about, and they say: {note_above}"
+        );
+
+        // **Each note above its own key, not merely somewhere in the file.** Two defaulted
+        // scalars sit six lines apart, and swapping the two origins at their call sites leaves
+        // both texts present and both wrong.
+        for (key, note) in [
+            (
+                "stated_length_spectrum_concentration",
+                "stated rather than fitted",
+            ),
+            (
+                "repeat_tract_outlier_weight",
+                "inherited from the existing caller and never measured here",
+            ),
+        ] {
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with(key))
+                .unwrap_or_else(|| panic!("`{key}` is written:\n{text}"));
+            let above: String = lines[..at]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with('#'))
+                .fold(String::new(), |all, line| format!("{line} {all}"));
+            assert!(
+                above.contains(note),
+                "`{key}`'s note is the one about it, and the note above it is: {above}"
+            );
+        }
+
+        // **The two origins no fixture defaults**, reached by defaulting them here: five origins
+        // are five interchangeable strings, and a text put beside the wrong quantity is invisible
+        // wherever the quantity is never defaulted.
+        let mut nothing_fitted = a_file_using_every_shape();
+        nothing_fitted.repeat_tracts.substitution_rate_by_stratum[0]
+            .rate
+            .warrant = Warrant::Defaulted;
+        nothing_fitted.inbreeding.by_sample[0]
+            .inbreeding_coefficient
+            .warrant = Warrant::Defaulted;
+        let text = nothing_fitted.to_toml();
+        assert!(
+            text.contains("nothing was fitted for this read group at this stratum"),
+            "a defaulted substitution rate says so:\n{text}"
+        );
+        assert!(
+            text.contains("inbreeding has no default"),
+            "a defaulted inbreeding coefficient says a run should not be able to write it:\n{text}"
+        );
+
+        // And the two fitted rows above and below it carry no note of their own.
+        let fitted = lines
+            .iter()
+            .position(|line| {
+                line.contains("warrant = \"fitted_here\"") && line.contains("read_group = 0")
+            })
+            .expect("read group 0's multiplier is fitted");
+        assert!(
+            !lines[fitted - 1].trim_start().starts_with('#'),
+            "a fitted number has no default to explain: {}",
+            lines[fitted - 1]
+        );
+    }
+
+    /// **A run whose every number was fitted writes no per-row notes at all** — so the comments
+    /// cost a fixed number of lines rather than one a row.
+    #[test]
+    fn a_run_that_defaulted_nothing_writes_no_per_row_notes() {
+        let mut file = a_file_using_every_shape();
+        for row in &mut file.base_quality_calibration.by_read_group {
+            row.error_probability_multiplier.warrant = Warrant::FittedHere;
+        }
+        for row in &mut file.repeat_tracts.substitution_rate_by_stratum {
+            row.rate.warrant = Warrant::FittedHere;
+        }
+        file.repeat_tracts
+            .stated_length_spectrum_concentration
+            .warrant = Warrant::FittedHere;
+        file.stated_constants.repeat_tract_outlier_weight.warrant = Warrant::Supplied;
+
+        let text = file.to_toml();
+        for note in [
+            "no calibration:",
+            "inherited from the existing",
+            "stated rather than fitted",
+            "nothing was fitted for this read group",
+            "inbreeding has no default",
+        ] {
+            assert!(
+                !text.contains(note),
+                "nothing was defaulted, so nothing explains a default — and this one is still \
+                 here: {note}\n{text}"
+            );
+        }
+        assert!(
+            text.lines()
+                .all(|line| !line.trim_start().starts_with("# ") || line.starts_with("# ")),
+            "the notes that remain are the sections' own, at the left margin:\n{text}"
+        );
+    }
+
+    /// **The comments do not change what the file means.**
+    ///
+    /// A comment runs to the end of its line in TOML, so a note that landed inside a row rather
+    /// than above it would silently truncate the document. Stripping every comment must leave a
+    /// file that reads back as the same value.
+    #[test]
+    fn the_comments_change_what_a_reader_learns_and_not_what_it_reads() {
+        let file = a_file_using_every_shape();
+        let text = file.to_toml();
+
+        let commented: usize = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with('#'))
+            .count();
+        assert!(
+            commented > 20,
+            "the file carries its explanations: {commented} comment lines"
+        );
+
+        let without_comments: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let read: ParametersFile = toml::from_str(&without_comments)
+            .unwrap_or_else(|error| panic!("{error}\n\n{without_comments}"));
+        assert_eq!(read, file, "the comments carry no meaning the values need");
+
+        let with_comments: ParametersFile =
+            toml::from_str(&text).unwrap_or_else(|error| panic!("{error}\n\n{text}"));
+        assert_eq!(with_comments, file);
+    }
+
+    /// **No comment line runs off the side of the page**, because a comment is prose and prose
+    /// that needs scrolling is prose nobody reads.
+    ///
+    /// The rows themselves are long and this step cannot help that — the longest is a slippage
+    /// row, and why it is long is the shape's business rather than the writer's.
+    #[test]
+    fn no_comment_line_is_longer_than_the_prose_it_carries() {
+        let text = a_file_using_every_shape().to_toml();
+        for line in text
+            .lines()
+            .filter(|line| line.trim_start().starts_with('#'))
+        {
+            assert!(
+                line.chars().count() <= COMMENT_WIDTH,
+                "a comment line is {} characters against a width of {COMMENT_WIDTH}: {line}",
+                line.chars().count()
+            );
+        }
+    }
+
+    /// **A note is wrapped by characters and at the width it says**, which two mutations of the
+    /// wrapper survived the rest of the suite because no note in the file happens to sit on the
+    /// boundary or to carry a byte that is not a character.
+    #[test]
+    fn a_note_wraps_by_characters_at_the_width_it_states() {
+        // Exactly 78 characters fits; one more does not. The words are sized so the boundary is
+        // the only thing that decides.
+        let exactly = format!("{} {}", "a".repeat(39), "b".repeat(38));
+        assert_eq!(exactly.chars().count(), ROOM_AT_THE_MARGIN);
+        assert_eq!(
+            wrapped(&exactly, ROOM_AT_THE_MARGIN).len(),
+            1,
+            "{ROOM_AT_THE_MARGIN} characters is one line"
+        );
+
+        let one_over = format!("{} {}", "a".repeat(40), "b".repeat(38));
+        assert_eq!(one_over.chars().count(), ROOM_AT_THE_MARGIN + 1);
+        assert_eq!(
+            wrapped(&one_over, ROOM_AT_THE_MARGIN).len(),
+            2,
+            "one more character is two lines"
+        );
+
+        // **A row's note has less room**, because it carries the row's indent as well as its `# `.
+        assert_eq!(ROOM_BESIDE_A_ROW + 6, COMMENT_WIDTH);
+        assert_eq!(
+            wrapped(&exactly, ROOM_BESIDE_A_ROW).len(),
+            2,
+            "what fits at the margin does not fit beside a row"
+        );
+
+        // **Characters and not bytes.** A sample name or a plant's name in a note can be
+        // non-ASCII, and counting its bytes would wrap a line that fits.
+        let accented = format!("{} {}", "é".repeat(39), "b".repeat(38));
+        assert_eq!(accented.chars().count(), ROOM_AT_THE_MARGIN);
+        assert_eq!(
+            wrapped(&accented, ROOM_AT_THE_MARGIN).len(),
+            1,
+            "78 accented characters are 117 bytes and still one line"
+        );
+
+        // A single word longer than the width is not cut in half; it goes on its own line.
+        let one_long_word = "x".repeat(200);
+        assert_eq!(
+            wrapped(&one_long_word, ROOM_AT_THE_MARGIN),
+            vec![one_long_word.clone()]
+        );
+        assert!(
+            wrapped("", ROOM_AT_THE_MARGIN).is_empty(),
+            "an empty note writes no lines"
+        );
+        assert!(
+            wrapped("   ", ROOM_AT_THE_MARGIN).is_empty(),
+            "and neither does one of only spaces"
+        );
+    }
+
     /// **Absence is a section that is not there, and a key that is not there** — spec §5's rule,
     /// on the way onto disk.
     #[test]
@@ -1150,14 +1696,16 @@ mod tests {
             "an uncontaminated run writes no contamination section at all:\n{text}"
         );
         assert!(
-            !text.contains("measurement"),
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .all(|line| !line.contains("measurement")),
             "and no row of one either:\n{text}"
         );
 
         let with_rows = a_file_using_every_shape().to_toml();
         let unmeasured = with_rows
             .lines()
-            .find(|line| line.contains("library = \"lib4\""))
+            .find(|line| line.contains("library = \"lib4\"") && !line.trim_start().starts_with('#'))
             .expect("read group 1 has a row");
         assert!(
             !unmeasured.contains("measurement"),
@@ -1166,7 +1714,7 @@ mod tests {
 
         let defaulted = with_rows
             .lines()
-            .find(|line| line.contains("stated_length_spectrum_concentration"))
+            .find(|line| line.starts_with("stated_length_spectrum_concentration"))
             .expect("the stated concentration is written");
         assert!(
             defaulted.contains("warrant = \"defaulted\"") && !defaulted.contains("observations"),
