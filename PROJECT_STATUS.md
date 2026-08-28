@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **G4 reviewed, and Milestone G is complete — a footer
+> - **Last completed task (2026-08-28):** **the store gives back what it was handed, and an
+> encoder that is not it agrees** (step H1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Milestone H is the milestone of numbers, and H1 is the first of them measured on
+> this code rather than on the prototype the specs quote. One production `.psp` is the source;
+> every record in it becomes an ng record, **both** stores are written from that same sequence, and
+> all three streams are walked in lockstep. **7,687,686 records on tomato and 74,623 on hg002,
+> every field of every observation compared, and both pass.** The second arm is the point: a
+> round-trip through one codec proves self-consistency, and a defect planted in the harness's own
+> mapping — reading `mapq_sum` one too high out of the source — leaves the round-trip passing and
+> fails against the prototype. **The prototype is asked for ng's own 1/4,096-of-a-nat step**, so
+> the summed log-error is compared as an *equality* across the two stores rather than inside a
+> tolerance wide enough for both; the step appears once, against the source, where the worst
+> distance is 0.000122064 against a half-step of 0.000122070. ⚠ **The corpus synthesises the four
+> fields production has no equivalent of** — the read witness, the read group and the two counts of
+> reads that showed nothing — and that is not tidiness: with the two counts left at zero, an
+> encoder writing a constant 0 for `reads_discarded_by_cap` **passed** a 3,000-record run, the only
+> one of six injected defects that did. Seven defects now, seven caught — **but two of them never
+> reach the comparison**: rewriting every witness as `Complete` and dropping a chain id are both
+> refused by the reader's own guards, because the head's non-reference read count is derived
+> through the witness and the residual list is derived from the live set. No file under `src/`
+> changed.
+> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G4 reviewed, and Milestone G is complete — a footer
 > with an empty block index let `append` truncate the header away and report success** (step G4 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). **This is Checkpoint G: all five operations exist** — open, walk, walk from a

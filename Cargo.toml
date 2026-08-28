@@ -330,6 +330,14 @@ test = true
 name = "ng_psp_head_encoding"
 test = true
 
+# The parity harness carries its own tests because the one thing it cannot show by passing is
+# that it is able to fail: it reports a clean run over millions of records, and a comparison that
+# had quietly stopped looking at a field would report exactly the same thing. Its tests change one
+# field at a time and require the refusal. `test = true` puts them in a plain `cargo test`.
+[[example]]
+name = "ng_psp_parity"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.

@@ -44,10 +44,10 @@ const MAGIC: &[u8; 4] = b"NGR1";
 /// direct mode: an approximated field makes the two routes see different
 /// numbers, and `run_streaming.md` §1.2 makes their agreement the oracle for
 /// the whole psp path.
-struct Scales {
-    gc: f64,
-    coverage: f64,
-    q_sum: f64,
+pub(crate) struct Scales {
+    pub(crate) gc: f64,
+    pub(crate) coverage: f64,
+    pub(crate) q_sum: f64,
 }
 
 impl Default for Scales {
@@ -999,7 +999,7 @@ fn read_chunk_bytes() -> usize {
     READ_CHUNK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn encode_streaming(
+pub(crate) fn encode_streaming(
     psp: &str,
     out_path: &str,
     block_bytes: usize,
@@ -1150,7 +1150,7 @@ impl<'a> TryCursor<'a> {
 /// One open sample. Everything it holds is bounded and none of it is the
 /// block: a compressed read chunk, the rolling decompressed buffer, zstd's own
 /// state sized by the window, and the record being built.
-struct StreamingStore {
+pub(crate) struct StreamingStore {
     record_head: bool,
     light_only: bool,
     scales: Scales,
@@ -1176,7 +1176,7 @@ struct StreamingStore {
 }
 
 impl StreamingStore {
-    fn open(path: &std::path::Path) -> Self {
+    pub(crate) fn open(path: &std::path::Path) -> Self {
         let mut src = BufReader::with_capacity(1 << 16, File::open(path).expect("open"));
         let mut magic = [0u8; 4];
         src.read_exact(&mut magic).expect("magic");
@@ -1296,7 +1296,7 @@ impl StreamingStore {
 
     /// The next record, or None at the end of the file. Nothing is retained:
     /// the caller gets the record and the store keeps only its running state.
-    fn next(&mut self) -> Option<PileupRecord> {
+    pub(crate) fn next(&mut self) -> Option<PileupRecord> {
         loop {
             if self.remaining == 0 {
                 if self.block_done && self.out_at >= self.out.len() && !self.next_block() {
