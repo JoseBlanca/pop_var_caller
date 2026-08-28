@@ -27,7 +27,9 @@
 use rayon::prelude::*;
 
 use super::build::{RegionOutcome, build_region};
-use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
+use super::observation_cache::{
+    ObservationCache, ObservationSource, ReleasedWindows, building_regions_of,
+};
 use super::organise::{Organiser, RegionIndex};
 use super::timing;
 use super::{
@@ -155,7 +157,11 @@ where
             let beside_the_builders = rayon::current_num_threads() > 1;
             let evicting = timing::Stopwatch::start();
             if beside_the_builders {
-                cache.evict_before_into(evicted_base, &mut graveyard);
+                // **Evicting is per sample and shares nothing between them**, and it runs
+                // between rounds when every worker but this one is idle — so it goes on the
+                // pool. Measured at 63 tomato accessions it was 13.6% of the merge and the
+                // largest part no thread but this one ever ran.
+                cache.evict_before_in_parallel(evicted_base, &mut graveyard);
             } else {
                 cache.evict_before(evicted_base);
             }
@@ -252,6 +258,201 @@ where
 
     whole_merge.add_to(&timing::MERGE_WALL_NANOS);
     Ok(merged)
+}
+
+/// [`merge_cohort_in_parallel`] with the next round's ground drawn while this round is built.
+///
+/// **Same answer, and that is the only reason it may exist**: the regions are the same, the
+/// builders are [`build_region`], the ordering is the organiser's, and a locus still belongs to
+/// the region its first position falls in. What changes is when the readers advance.
+///
+/// **What it is for.** In the round-at-a-time driver the organiser draws every sample's reader
+/// forward while no builder runs, and on the tomato benchmark's 63 accessions that phase is about
+/// two thirds of the merge while the builders are about a fifth. Drawing is where a psp reader's
+/// decoding will live, so it is the half worth hiding behind the other. Here the two run at once:
+/// a round's builders read what the last cover released while the next round's cover appends to
+/// buffers no builder can see ([`ObservationCache::cover_beside`]).
+///
+/// **What it costs is a second round of observations resident.** The cache holds the round being
+/// built and the round being drawn, so spec §8's term doubles — `2 × regions_in_flight ×
+/// cohort_locus_builder_regions_len` bases plus the tails. On this module's defaults that is
+/// 6,400 bases rather than 3,200.
+///
+/// **A round still never crosses an analysed region**, for [`merge_cohort_in_parallel`]'s reason,
+/// and the look-ahead does not either: the last round of an interval is built with no cover
+/// running beside it, and the next interval's first cover happens on its own. So an interval
+/// boundary costs one un-overlapped round, which is the same shape as the idle builders that
+/// boundary already costs.
+///
+/// **Eviction stays in front of the builders rather than beside them**, unlike the
+/// round-at-a-time driver's: it drops from the very windows a cover would be appending to, so it
+/// runs between rounds, when neither is happening. What that gives up is the freeing this
+/// driver's predecessor hands to an idle worker — measured there at about 6% of a one-thread
+/// merge — and what it buys is not needing a second set of buffers to evict from.
+pub fn merge_cohort_overlapping<S, E>(
+    analysed: &[GenomeRegion],
+    cache: &mut ObservationCache<S>,
+    cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    regions_in_flight: CohortLocusBuilderRegionsInFlight,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+) -> Result<RegionOutcome, E>
+where
+    S: ObservationSource<Error = E> + Sync + Send,
+    E: Send,
+{
+    let whole_merge = timing::Stopwatch::start();
+    let mut merged = RegionOutcome::default();
+    refuse_malformed_analysed_regions(analysed);
+
+    let mut organiser = Organiser::new();
+    let mut regions_handed_out = 0u64;
+    // The round being built, and the round whose ground is being drawn beside it. Two buffers
+    // rather than one, swapped each time round, for the reason the cache keeps two windows.
+    let mut this_round: Vec<GenomeRegion> = Vec::new();
+    let mut next_round: Vec<GenomeRegion> = Vec::new();
+
+    for analysed_region in analysed {
+        let mut building_regions =
+            building_regions_of(*analysed_region, cohort_locus_builder_regions_len);
+        this_round.clear();
+        this_round.extend(building_regions.by_ref().take(regions_in_flight.get()));
+        if this_round.is_empty() {
+            continue;
+        }
+
+        // The first round of an interval has nothing to overlap with, so its ground is drawn on
+        // its own — the one cover per interval this driver pays in full.
+        let evicting = timing::Stopwatch::start();
+        cache.evict_before(first_base_of(&this_round));
+        evicting.add_to(&timing::EVICT_NANOS);
+        let covering = timing::Stopwatch::start();
+        cache.cover_in_parallel(span_of(&this_round))?;
+        covering.add_to(&timing::COVER_NANOS);
+
+        loop {
+            next_round.clear();
+            next_round.extend(building_regions.by_ref().take(regions_in_flight.get()));
+
+            timing::ROUNDS.add(1);
+            timing::REGIONS.add(this_round.len() as u64);
+            timing::SLOWEST_IN_THIS_ROUND_NANOS.take();
+
+            let round = timing::Stopwatch::start();
+            let outcomes = if next_round.is_empty() {
+                let windows = cache.released_windows();
+                build_the_round(&windows, &this_round, max_cohort_locus_span, min_alt_reads)
+            } else {
+                let (outcomes, covered) = cache.cover_beside(span_of(&next_round), |windows| {
+                    build_the_round(windows, &this_round, max_cohort_locus_span, min_alt_reads)
+                });
+                // **The round's outcomes are kept whatever the cover did.** They were built from
+                // ground already released, so a reader that died drawing the *next* round says
+                // nothing about them — but the merge still ends here, as it does in the
+                // round-at-a-time driver, and for the same reason: the cache is left advanced.
+                covered?;
+                outcomes
+            };
+            round.add_to(&timing::ROUND_WALL_NANOS);
+            timing::SLOWEST_BUILDER_NANOS.add(timing::SLOWEST_IN_THIS_ROUND_NANOS.take());
+
+            let organising = timing::Stopwatch::start();
+            for outcome in outcomes {
+                let RegionOutcome {
+                    cohort_observations: _,
+                    failed_locus_spans,
+                } = &outcome;
+                merged.failed_locus_spans.extend(failed_locus_spans);
+                organiser.submit(RegionIndex(regions_handed_out), outcome);
+                regions_handed_out += 1;
+            }
+            merged.cohort_observations.extend(organiser.drain_ready());
+            organising.add_to(&timing::ORGANISE_NANOS);
+
+            if next_round.is_empty() {
+                break;
+            }
+            // **Evict, then release, and both between the rounds.** Eviction drops from the
+            // released windows and promotion appends to them, so neither may run while a builder
+            // is reading one. The mark is the next round's first base, which is what the
+            // round-at-a-time driver uses and for the same reason: what ends before it can reach
+            // no locus any builder in that round can own.
+            let evicting = timing::Stopwatch::start();
+            cache.evict_before(first_base_of(&next_round));
+            evicting.add_to(&timing::EVICT_NANOS);
+            let releasing = timing::Stopwatch::start();
+            cache.promote();
+            releasing.add_to(&timing::PROMOTE_NANOS);
+            std::mem::swap(&mut this_round, &mut next_round);
+        }
+    }
+
+    let tally = organiser
+        .finish(regions_handed_out)
+        .expect("every region handed out was submitted and every locus drained");
+    assert_eq!(
+        tally.failed_loci,
+        merged.failed_locus_spans.len() as u64,
+        "the organiser kept {} of the {} refused spans this merge gathered, so one was displaced \
+         by an earlier locus and the two no longer describe the same ground",
+        tally.failed_loci,
+        merged.failed_locus_spans.len(),
+    );
+    assert_eq!(
+        tally.displaced_loci, 0,
+        "a builder produced a locus on ground an earlier locus already owned",
+    );
+
+    whole_merge.add_to(&timing::MERGE_WALL_NANOS);
+    Ok(merged)
+}
+
+/// The first base of a round — where eviction may drop to before it is built.
+fn first_base_of(round: &[GenomeRegion]) -> GenomePosition {
+    let first = round.first().expect("a round is never empty");
+    GenomePosition {
+        contig: first.contig,
+        position: first.start,
+    }
+}
+
+/// The ground a round spans, first region's first base to last region's last.
+///
+/// **One cover for the round, not one per region**: a cover draws every sample forward until the
+/// chain from its region's last base closes, and the chain from the round's last base contains
+/// every one of those.
+fn span_of(round: &[GenomeRegion]) -> GenomeRegion {
+    let first = round.first().expect("a round is never empty");
+    let last = round.last().expect("a round is never empty");
+    GenomeRegion {
+        contig: first.contig,
+        start: first.start,
+        end: last.end,
+    }
+}
+
+/// Every region of one round, built at the same time as the others, in the order handed out.
+fn build_the_round(
+    windows: &ReleasedWindows<'_>,
+    round: &[GenomeRegion],
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+) -> Vec<RegionOutcome> {
+    in_region_order(round.par_iter().map(|building_region| {
+        let builder = timing::Stopwatch::start();
+        let outcome = windows.with_observations(*building_region, |observations_per_sample| {
+            build_region(
+                *building_region,
+                observations_per_sample,
+                max_cohort_locus_span,
+                min_alt_reads,
+            )
+        });
+        let busy = builder.elapsed_nanos();
+        timing::BUILDER_BUSY_NANOS.add(busy);
+        timing::SLOWEST_IN_THIS_ROUND_NANOS.raise_to(busy);
+        outcome
+    }))
 }
 
 /// The round's outcomes, in the order its regions were handed out.
