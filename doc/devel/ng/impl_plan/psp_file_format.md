@@ -230,7 +230,7 @@ honest; *building* one while writing is F3's and *reading* one at open is F4's.
 ✅ **F2 — the footer**, magic last, with the index checksum.
 ***Depends:*** F1. ***Source:*** [arch §3.4](../arch/psp_file_format.md), [spec §3.3](../spec/psp_file_format.md).
 
-☐ **F3 — `create`, `push`, `finish`.** `push` rejects an out-of-order record; `finish` writes index,
+✅ **F3 — `create`, `push`, `finish`.** `push` rejects an out-of-order record; `finish` writes index,
 trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 ***Depends:*** F2, E4. ***Source:*** [spec §6.3](../spec/psp_file_format.md).
 

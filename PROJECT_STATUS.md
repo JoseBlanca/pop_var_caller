@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **F2 reviewed — every footer the tests accepted had an
+> - **Last completed task (2026-08-28):** **a psp is written to a real file, and a writer that
+> is dropped leaves one no reader will touch** (step F3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). `create` writes the header, `push` writes each block as the cut rule closes it,
+> and `finish` writes the last block, the index, the trailer and the footer and makes the file
+> durable. **`finish` reads back what it is about to write** — the index and the footer, decoded
+> by the very functions a reader will use — which is the obligation F1 and F2 both raised and
+> both routed here, because each of those modules' own tests must be able to *write* the bytes
+> that prove the reader refuses them. **Nothing touches the filesystem until the header is
+> accepted**, so a header this writer cannot honour leaves no file at all rather than an empty one
+> refused for a different reason. **And the durability step turned out to be one call, not
+> three**: the spec asks for flush, surface, sync, and the first draft wrote flush-then-surface —
+> where a successful flush empties the buffer, so the surfacing step could not fail and deleting
+> its error arm changed nothing. Twelve defects injected, eleven caught; **the twelfth is a real
+> gap and is recorded rather than papered over** — no test here can make a real file's flush
+> fail, so a swallowed flush error survives, and H2 is where a writer is killed for real.
+> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F2 reviewed — every footer the tests accepted had an
 > empty trailer, which is the one shape a finished psp never has** (step F2 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Eight checklists across three agents, **51 mutations** and a 200,000-draw
@@ -1188,7 +1206,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
 - **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
 - **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
-- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md).
+- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md), [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md).
 - **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
 - **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
 - **Latest review:** [F2](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Majors and three wrong numbers of mine, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md)). 51 mutations. Every accepted footer had an empty trailer; and a defect table's ten rows described nine defects.

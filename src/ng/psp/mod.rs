@@ -64,6 +64,7 @@ pub(crate) mod footer;
 pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod record;
+pub(crate) mod writer;
 
 pub use block::{
     BlockBuilder, BlockCompressError, BlockCompressor, BlockCutRuleError, BlockHead,
@@ -92,6 +93,7 @@ pub use record::{
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
     decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
+pub use writer::{PspWriter, WriteStats};
 
 // ---------------------------------------------------------------------
 // Inspecting a file without opening it as a reader
@@ -356,6 +358,28 @@ pub enum PspWriteError {
         #[source]
         source: PspReadError,
     },
+
+    /// A record the block builder or the record codec refused: an empty region, a region at
+    /// the coordinate ceiling, a body longer than a head can describe, or a contig already
+    /// written and revisited.
+    ///
+    /// **Not [`OutOfOrder`](Self::OutOfOrder)**, which is the one refusal a caller can act on by
+    /// reordering its input; these say the record itself cannot be written.
+    #[error("{}: a record could not be written: {reason}", path.display())]
+    RecordRefused { path: PathBuf, reason: String },
+
+    /// A block the compressor refused — its own configuration, or a frame longer than the
+    /// four-byte length in front of it can describe.
+    #[error("{}: a block could not be compressed: {reason}", path.display())]
+    BlockRefused { path: PathBuf, reason: String },
+
+    /// **The writer was about to produce a file its own reader would refuse**, and stopped.
+    ///
+    /// Raised by `finish`, which decodes the index and the footer it is about to write with the
+    /// very functions that will read them back. A file that reaches disk and is then rejected is
+    /// a walk thrown away; this turns that into an error before the bytes land.
+    #[error("{}: this writer would have produced a file it cannot read — {reason}", path.display())]
+    WouldNotBeReadable { path: PathBuf, reason: String },
 
     /// Writing the file's bytes failed. Named and sourced the way
     /// [`PspReadError::Io`] is, and for the same reason.
