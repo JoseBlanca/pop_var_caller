@@ -16,23 +16,31 @@ use std::path::{Path, PathBuf};
 use super::footer::{FOOTER_BYTES, Footer, decode_footer};
 use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
 use super::index::BlockIndexEntry;
-use super::{PspReadError, index, read_header};
+use super::{PspReadError, index, read_header_from};
 
 /// How large a compressor look-back window this reader will hold, unless told otherwise.
 ///
-/// **256 kB, and the number is derived rather than chosen.** Spec §7 puts an open file at 227 to
-/// 346 kB against a budget of 500 kB; §5.3 puts zstd's own context at about 190 kB and the
-/// reader's two buffers at 16 kB each. That leaves roughly 278 kB of the budget for the window,
-/// and 2^18 is the largest power of two under it.
+/// **256 kB, derived from the spec's own figures rather than chosen.** The budget is 500 kB an
+/// open sample (spec §1.1, §7). Of that, zstd's decoder floor is about 190 kB (§5.3) and the
+/// reader's two buffers are 16 kB each (§4.4). **The 190 kB already contains a 32 kB window** —
+/// §5.3 says so in its first line — so a wider window costs only the difference, and the room
+/// for one is `500 − 190 − 16 − 16 + 32 = 310 kB`. 2^18 is the largest power of two under that.
 ///
-/// It is **eight times the window this build's writer produces** (2^15, `DEFAULT_LOOK_BACK_
-/// WINDOW_LOG`), so an ordinary psp opens with room to spare, and a file written with a
-/// deliberately wide window is refused with a number the operator can act on rather than a zstd
-/// error code (spec §4.2).
+/// ⚠ **An earlier version of this arithmetic charged the window twice** and cited §5.3 for the
+/// buffer figure, which is §4.4's. It reached 278 kB, and 2^18 is the largest power of two under
+/// that too — a wrong derivation for a right number, which is the kind that survives review by
+/// looking finished.
 ///
-/// **⚠ The derivation is arithmetic on the spec's figures, not a measurement of this reader.**
-/// Milestone H4 measures what an open sample actually costs and is where this constant is
-/// confirmed or moved.
+/// It is **eight times the window this build's writer produces** (2^15 = 32 kB), so an ordinary
+/// psp opens with room to spare, and a file written with a deliberately wide window is refused
+/// with a number the operator can act on rather than a zstd error code. Spec §7's table names the
+/// two ways out: *raise the budget, or rewrite the file*.
+///
+/// **⚠ Two things this is not.** It is arithmetic on the spec's figures, not a measurement of
+/// this reader; and the budget it is carved out of does not account for the block index, which
+/// `open` also holds — at spec §3.3's ~14,000 entries for a whole genome and 24 bytes an entry
+/// that is about 336 kB, more than half the budget on its own. **Milestone H4 measures what an
+/// open sample actually costs**, and is where both of those are settled.
 pub const DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES: u64 = 1 << 18;
 
 /// A finished psp, open: its header, its block index, and where everything in it is.
@@ -47,6 +55,10 @@ pub struct PspReader {
     header: Header,
     footer: Footer,
     blocks: Vec<BlockIndexEntry>,
+    /// The ceiling this reader was opened under. **Kept because an open reader should be able to
+    /// say what it holds**: at several thousand open samples the budget is the number that
+    /// multiplies, and a caller tuning it needs to read back what it actually got.
+    window_budget_bytes: u64,
 }
 
 impl PspReader {
@@ -83,7 +95,36 @@ impl PspReader {
 
         let footer = Self::read_footer(path, &mut file, file_bytes)?;
         let blocks = Self::read_index(path, &mut file, &footer, file_bytes)?;
-        let header = read_header(path)?;
+        // **From the handle already open**, rather than opening the file a second time: a
+        // cohort opens thousands of these, and a second `open(2)` per sample buys nothing.
+        let for_the_header = file.try_clone().map_err(|source| PspReadError::Io {
+            path: path.to_path_buf(),
+            while_doing: "reading the header",
+            source,
+        })?;
+        let (header, header_bytes) = read_header_from(for_the_header, path)?;
+
+        // **Every block must start inside the blocks**, which begin where the header ends and
+        // end where the index begins. An offset is where a reader would seek: one pointing into
+        // the header would inflate the header, and one at or past the index would inflate the
+        // index.
+        //
+        // ⚠ The lower bound was missing. An entry at byte 0 opened, and the refusal was deferred
+        // to a corrupt block at read time — the wrong instruction, arriving after a cohort had
+        // committed to the sample.
+        for entry in &blocks {
+            let inside = (header_bytes as u64..footer.index_offset).contains(&entry.block_offset);
+            if !inside {
+                return Err(PspReadError::Damaged {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "the index puts a block at byte {}; the blocks run from byte \
+                         {header_bytes} to byte {}",
+                        entry.block_offset, footer.index_offset
+                    ),
+                });
+            }
+        }
 
         let needed_bytes = 1u64 << header.manifest.look_back_window_log;
         if needed_bytes > window_budget_bytes {
@@ -100,6 +141,7 @@ impl PspReader {
             header,
             footer,
             blocks,
+            window_budget_bytes,
         })
     }
 
@@ -116,6 +158,11 @@ impl PspReader {
     /// Where each section of the file is.
     pub fn footer(&self) -> &Footer {
         &self.footer
+    }
+
+    /// The look-back window ceiling this reader was opened under.
+    pub fn look_back_window_budget_bytes(&self) -> u64 {
+        self.window_budget_bytes
     }
 
     /// The writer's closing payload: one seek and one read, and it may be empty.
@@ -224,12 +271,33 @@ impl PspReader {
         footer: &Footer,
         file_bytes: u64,
     ) -> Result<Vec<BlockIndexEntry>, PspReadError> {
-        if footer.index_bytes > file_bytes {
+        // **What actually bounds this allocation, and it is not the check below.**
+        //
+        // `decode_footer` has already proved `index_offset + index_bytes == trailer_offset`, and
+        // `read_footer` has already proved `trailer_offset + trailer_bytes` is exactly where the
+        // footer begins, which is `file_bytes - 48`. Together those give
+        // `index_offset + index_bytes <= file_bytes` before this function is entered — so the
+        // length can never exceed the file, and the buffer below can never be sized past it.
+        //
+        // ⚠ **The check that follows therefore cannot fire, and it is kept anyway.** It was
+        // written believing it was the bound; it is not, and a reader who assumed it was would be
+        // trusting the wrong line. It stays because the bound it restates lives in two other
+        // functions with nothing in this signature saying so, and a rule this cheap should not
+        // depend on both of them continuing to hold. Replacing its body with `unreachable!()`
+        // leaves the suite green, which is how it was found.
+        let index_end = footer
+            .index_offset
+            .checked_add(footer.index_bytes)
+            .ok_or_else(|| PspReadError::Damaged {
+                path: path.to_path_buf(),
+                reason: "the block index's end is past any address".to_string(),
+            })?;
+        if index_end > file_bytes {
             return Err(PspReadError::Damaged {
                 path: path.to_path_buf(),
                 reason: format!(
-                    "the footer declares a {}-byte block index in a {file_bytes}-byte file",
-                    footer.index_bytes
+                    "the footer puts a {}-byte block index at byte {} of a {file_bytes}-byte file",
+                    footer.index_bytes, footer.index_offset
                 ),
             });
         }
@@ -269,19 +337,6 @@ impl PspReader {
             }
         })?;
 
-        // Every block must start inside the blocks, which end where the index begins.
-        for entry in &blocks {
-            if entry.block_offset >= footer.index_offset {
-                return Err(PspReadError::Damaged {
-                    path: path.to_path_buf(),
-                    reason: format!(
-                        "the index puts a block at byte {}, which is not in the blocks — they \
-                         end at byte {}",
-                        entry.block_offset, footer.index_offset
-                    ),
-                });
-            }
-        }
         Ok(blocks)
     }
 
@@ -362,13 +417,19 @@ mod tests {
         assert_eq!(sorted, psp.blocks());
     }
 
-    /// **Opening touches no block**, and this is how that is shown rather than asserted: every
-    /// byte of the blocks region is overwritten with rubbish, and the file still opens and still
-    /// says the same things about itself.
+    /// **Opening decompresses no block**, shown rather than asserted: every byte of the blocks
+    /// region is overwritten with rubbish and the file still opens and still says the same things
+    /// about itself. Verified in review — making `open` decompress the first block fails this
+    /// test and only this one.
     ///
-    /// A reader that decompressed anything at open would fail here.
+    /// ⚠ **It was called `opening_touches_no_block`, and it does not show that.** An `open` that
+    /// read every byte of the blocks region into a buffer without decompressing passes it, and
+    /// *touching* is the cost spec §6.2 is about. The stronger statement is
+    /// `the_opener_cannot_reach_any_block_decoding_code`, which reads it off the module's
+    /// imports; showing that nothing is *read* needs `open` drivable over an arbitrary source,
+    /// which it is not.
     #[test]
-    fn opening_touches_no_block() {
+    fn opening_decompresses_no_block() {
         let (_dir, path) = a_finished_psp();
         let intact = PspReader::open(&path).expect("it opens");
         let (blocks_start, blocks_end) = (
@@ -532,8 +593,11 @@ mod tests {
             footer.n_blocks,
         )
         .expect("the index reads");
+        // **Exactly at `index_offset`, not past it.** The old fixture used `+ 1`, so relaxing
+        // the bound from `>=` to `>` — a block starting precisely where the index does — left
+        // every test green.
         let last = entries.len() - 1;
-        entries[last].block_offset = footer.index_offset + 1;
+        entries[last].block_offset = footer.index_offset;
         let rebuilt = index::encode_index(&entries);
         assert_eq!(rebuilt.len() as u64, footer.index_bytes, "same width");
         bytes[footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize]
@@ -545,9 +609,133 @@ mod tests {
 
         let refused = PspReader::open(&path).expect_err("a block outside the blocks");
         assert!(
-            refused.to_string().contains("not in the blocks"),
+            refused.to_string().contains("the blocks run from byte"),
             "got {refused}"
         );
+    }
+
+    /// **Both sides of "the sections end where the footer begins."**
+    ///
+    /// ⚠ Only one side was tested: the fixture claimed a trailer one byte *shorter* than it was.
+    /// Weakening the rule from `!=` to `<` kept all fifteen tests green — and **62 of the 384
+    /// single-bit flips in a real psp's footer stopped being refused and started opening**. One
+    /// character removed the property the whole format rests on, and the suite said nothing.
+    #[test]
+    fn sections_that_stop_short_or_run_past_the_footer_are_both_refused() {
+        for (nudge, what) in [(-1i64, "stop short of"), (1, "run past")] {
+            let (_dir, path) = a_finished_psp();
+            let mut bytes = bytes_of(&path);
+            let tail_at = bytes.len() - FOOTER_BYTES;
+            let mut footer =
+                crate::ng::psp::footer::decode_footer(&bytes[tail_at..].try_into().unwrap())
+                    .expect("a footer");
+            footer.trailer_bytes = footer.trailer_bytes.wrapping_add(nudge as u64);
+            bytes[tail_at..].copy_from_slice(&encode_footer(&footer));
+            rewrite(&path, &bytes);
+
+            let refused =
+                PspReader::open(&path).expect_err("the sections must account for the file");
+            assert!(
+                refused.to_string().contains("sections end at byte"),
+                "sections that {what} the footer must be refused: {refused}"
+            );
+        }
+    }
+
+    /// A block offset inside the header is refused **at open**, not deferred to a corrupt block
+    /// at read time.
+    ///
+    /// ⚠ The range check bounded offsets above and not below, so an entry at byte 0 opened. The
+    /// wrong instruction, and it arrives after a cohort has committed to the sample.
+    #[test]
+    fn an_index_pointing_into_the_header_is_refused() {
+        let (_dir, path) = a_finished_psp();
+        let mut bytes = bytes_of(&path);
+        let tail_at = bytes.len() - FOOTER_BYTES;
+        let mut footer =
+            crate::ng::psp::footer::decode_footer(&bytes[tail_at..].try_into().unwrap())
+                .expect("a footer");
+        let mut entries = index::decode_index(
+            &bytes
+                [footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize],
+            footer.n_blocks,
+        )
+        .expect("the index reads");
+        entries[0].block_offset = 0;
+        let rebuilt = index::encode_index(&entries);
+        assert_eq!(rebuilt.len() as u64, footer.index_bytes, "same width");
+        bytes[footer.index_offset as usize..(footer.index_offset + footer.index_bytes) as usize]
+            .copy_from_slice(&rebuilt);
+        footer.index_checksum = index::checksum_index(&rebuilt);
+        bytes[tail_at..].copy_from_slice(&encode_footer(&footer));
+        rewrite(&path, &bytes);
+
+        let refused = PspReader::open(&path).expect_err("byte 0 is the header, not a block");
+        assert!(
+            refused.to_string().contains("the blocks run from byte"),
+            "got {refused}"
+        );
+    }
+
+    /// A footer declaring an index larger than the file is refused **before a buffer for it
+    /// exists**, which is the discipline `read_header` states for the header's own length.
+    #[test]
+    fn an_index_longer_than_the_file_does_not_size_a_buffer() {
+        let (_dir, path) = a_finished_psp();
+        let mut bytes = bytes_of(&path);
+        let tail_at = bytes.len() - FOOTER_BYTES;
+        let mut footer =
+            crate::ng::psp::footer::decode_footer(&bytes[tail_at..].try_into().unwrap())
+                .expect("a footer");
+        // Keep the sections abutting so it is this rule that fires, not that one.
+        footer.index_bytes = u64::MAX / 2;
+        footer.trailer_offset = footer.index_offset.wrapping_add(footer.index_bytes);
+        footer.trailer_bytes = 0;
+        bytes[tail_at..].copy_from_slice(&encode_footer(&footer));
+        rewrite(&path, &bytes);
+
+        let refused = PspReader::open(&path).expect_err("that index cannot be in that file");
+        assert!(
+            matches!(refused, PspReadError::Damaged { .. }),
+            "got {refused}"
+        );
+    }
+
+    /// The trailer reads the same twice: the seek is not an accident of where the cursor
+    /// happened to be.
+    ///
+    /// ⚠ Every other test calls it once, when the cursor is already in the right place — so a
+    /// missing seek would return the footer's bytes on the second call and nothing would notice.
+    #[test]
+    fn the_trailer_reads_the_same_twice() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("it opens");
+        let first = psp.trailer().expect("the trailer reads");
+        let second = psp.trailer().expect("and reads again");
+        assert_eq!(first, b"a per-sample summary");
+        assert_eq!(first, second);
+    }
+
+    /// **`open` reaches no block-decoding code at all** — a stronger statement than the
+    /// rubbish-bytes test, which shows only that opening does not *decode* a block.
+    ///
+    /// Read off the module's own imports: `reader.rs` names neither the block module nor the
+    /// record module, so nothing that inflates a frame is callable from here. A future edit that
+    /// reached for one has to add the import, and this test is what that trips.
+    #[test]
+    fn the_opener_cannot_reach_any_block_decoding_code() {
+        let source = include_str!("reader.rs");
+        let before_tests = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a non-test half");
+        for forbidden in ["psp::block", "psp::record", "super::block", "super::record"] {
+            assert!(
+                !before_tests.contains(forbidden),
+                "opening must not be able to reach {forbidden}: a block is decompressed only \
+                 by a walk, never by an open"
+            );
+        }
     }
 
     /// **A window wider than this reader budgeted for is its own refusal, and the message names

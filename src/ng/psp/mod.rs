@@ -31,11 +31,18 @@
 //! +---------------------------+
 //! ```
 //!
-//! **Three words this module uses differently from production's `src/psp/`**, and a coder
-//! moving between the two will get them wrong: what production calls its *metadata
-//! section* is the **trailer** here, what production calls its *trailer* is the **footer**
-//! here, and *block* here always means a **psp block** — a span of reference and the
-//! records in it — never one of zstd's own internal subdivisions.
+//! **Words this module uses differently from production's `src/psp/`**, and a coder moving
+//! between the two will get them wrong: what production calls its *metadata section* is the
+//! **trailer** here, what production calls its *trailer* is the **footer** here, and *block*
+//! here always means a **psp block** — a span of reference and the records in it — never one of
+//! zstd's own internal subdivisions.
+//!
+//! **⚠ That collision reaches the method names, and it is sharpest on one pair.** Production has
+//! a `PspReader` too, and `PspReader::trailer()` means *the fixed tail* there and *the writer's
+//! closing payload* here — where the fixed tail is [`PspReader::footer`]. Two types of the same
+//! name with a method of the same name returning different sections of a file is the worst shape
+//! this vocabulary can take, and it is kept because spec §6.2 fixes both words. `seek_to` is the
+//! milder case: a genomic coordinate in production, a byte offset here.
 //!
 //! **This module is not a pipeline step.** It is infrastructure beside
 //! [`crate::ng::ref_seq`], used by the locus generator to write and by the cohort merge to
@@ -118,6 +125,39 @@ pub use writer::{PspWriter, WriteStats};
 /// [`MAX_HEADER_BODY_BYTES`] before a buffer for it exists, so a corrupt or hostile file
 /// cannot ask for memory on its own say-so.
 pub fn read_header(path: &Path) -> Result<Header, PspReadError> {
+    read_header_and_its_length(path).map(|(header, _)| header)
+}
+
+/// The same, and **how many bytes it occupies** — which is where the file's blocks begin.
+///
+/// `PspReader::open` needs that to say whether a block offset from the index lands in the blocks
+/// or inside the header; without it an index entry pointing at byte 0 opened, and the refusal was
+/// deferred to a corrupt-block error at read time, which is the wrong instruction arriving after
+/// a cohort has committed to the sample.
+pub(crate) fn read_header_and_its_length(path: &Path) -> Result<(Header, usize), PspReadError> {
+    let file = File::open(path).map_err(|source| PspReadError::Io {
+        path: path.to_path_buf(),
+        while_doing: "opening the file",
+        source,
+    })?;
+    read_header_from(file, path)
+}
+
+/// The same, from a handle already open on the file.
+///
+/// **`PspReader::open` holds one**, and opening the file a second time to read its header is a
+/// second `open(2)` per sample in a cohort that opens thousands. It rewinds first, so it does not
+/// depend on where the caller left the cursor.
+pub(crate) fn read_header_from(
+    mut file: File,
+    path: &Path,
+) -> Result<(Header, usize), PspReadError> {
+    use std::io::Seek;
+    file.rewind().map_err(|source| PspReadError::Io {
+        path: path.to_path_buf(),
+        while_doing: "rewinding to the header",
+        source,
+    })?;
     let io = |while_doing: &'static str| {
         move |source: std::io::Error| PspReadError::Io {
             path: path.to_path_buf(),
@@ -125,8 +165,6 @@ pub fn read_header(path: &Path) -> Result<Header, PspReadError> {
             source,
         }
     };
-
-    let mut file = File::open(path).map_err(io("opening the file"))?;
 
     // The magic and the declared length are a fixed-size prefix. Reading exactly those first
     // is what keeps the length from sizing a buffer before it has been believed.
@@ -180,7 +218,7 @@ pub fn read_header(path: &Path) -> Result<Header, PspReadError> {
             _ => io("reading the header body")(source),
         })?;
 
-    Header::decode(&whole_header, path).map(|(header, _)| header)
+    Header::decode(&whole_header, path)
 }
 
 // ---------------------------------------------------------------------

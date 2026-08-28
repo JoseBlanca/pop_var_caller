@@ -239,6 +239,20 @@ trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 ***Depends:*** F3. ***Source:*** [spec §6.2, §6.7](../spec/psp_file_format.md).
 
 > **Checkpoint F: a file can be written, closed, reopened and read end to end. Pause for review.**
+>
+> ✅ **Reviewed** — five rounds of eight checklists (F0–F4), each in isolated worktrees:
+> [F0](../../reports/reviews/ng_psp_f0_2026-08-28.md) ·
+> [F1](../../reports/reviews/ng_psp_f1_2026-08-28.md) ·
+> [F2](../../reports/reviews/ng_psp_f2_2026-08-28.md) ·
+> [F3](../../reports/reviews/ng_psp_f3_2026-08-28.md) ·
+> [F4](../../reports/reviews/ng_psp_f4_2026-08-28.md), with their fix reports beside them.
+> **Four Blockers, and every one was a test that could not fail rather than code that was
+> wrong** — a suite that proved the encoding table consistent with itself, an ordering scan
+> exercised on one pair, a writer whose recovered failure produced a valid file with records
+> missing, and a sections rule tested on one side. **What Milestone F leaves unmeasured is what an
+> open sample costs.** F4 ships a refusal threshold carved out of the 500 kB budget by arithmetic
+> on the spec's figures, and the block index alone is about 336 kB of that budget for a whole
+> genome — H4 is where both are measured.
 
 ## Milestone G — the rest of the surface
 
