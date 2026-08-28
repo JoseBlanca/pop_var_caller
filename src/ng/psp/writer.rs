@@ -500,6 +500,29 @@ pub(crate) mod tests_support {
         crate::ng::psp::footer::decode_footer(&tail).expect("a finished file's footer reads")
     }
 
+    /// Fill one block's compressed frame with `0xff`, leaving the four-byte length in front of
+    /// it, so the block cannot inflate.
+    ///
+    /// **`0xff` rather than a flipped bit**, and deliberately: zstd refuses a frame with no magic
+    /// outright, where a flipped bit inside a frame can inflate to something plausible and make
+    /// the test depend on which byte was chosen.
+    pub(crate) fn wreck_the_block(path: &Path, ordinal: usize) {
+        let mut whole = bytes_of(path);
+        let (at, ends) = {
+            let psp = crate::ng::psp::PspReader::open(path).expect("a finished psp opens");
+            let entries = psp.block_index();
+            let at = entries[ordinal].block_offset as usize;
+            let ends = entries
+                .get(ordinal + 1)
+                .map_or(psp.footer().index_offset as usize, |next| {
+                    next.block_offset as usize
+                });
+            (at, ends)
+        };
+        whole[at + crate::ng::psp::COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
+        rewrite(path, &whole);
+    }
+
     /// Replace a file's contents wholesale — how a test lays down a psp it has damaged.
     pub(crate) fn rewrite(path: &Path, bytes: &[u8]) {
         use std::io::Write as _;

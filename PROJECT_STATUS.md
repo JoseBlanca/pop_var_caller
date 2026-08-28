@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a walk that hands over every record's head and
+> - **Last completed task (2026-08-28):** **G2 reviewed — nothing held the one claim the type
+> exists for** (step G2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Nine checklists across two agents, no Blocker, five
+> Majors — **and every one of them was about what the tests do not hold rather than what the code
+> does**. All seven new tests checked only that a declined record's body came back empty, which an
+> implementation that decodes the body and then throws it away satisfies exactly as well; the
+> mutant left all 355 tests green. **A second finding is a property that is correct and was
+> unwritten**: a walk that declines bodies is a materially weaker reader of damage than a full
+> one, because the two agreements between a record's head and its body are checked while the body
+> is decoded. Measured here rather than quoted: on a three-record block of 102 payload bytes, every
+> byte flipped in turn, a full walk refuses 93 and a walk declining every body accepts **72 of
+> those 93**. The cohort's first pass is exactly a walk that declines most bodies, so *it walked
+> without an error* does not mean the sample read back sound. **And one of my tests could not fail
+> on the half it names**: the fixture's records all read zero for the field the predicate reads,
+> so the predicate was constant-false. Six tests added, four of them the agents' own bodies; two
+> renames — `only_where` and `SelectiveIter` were named for the filter the doc spends two
+> paragraphs denying. ⚠ **One suggested fix did not compile as written and was reported green**:
+> its replacement comment contained a path the guard test forbids, comments included.
+> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g2_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a walk that hands over every record's head and
 > builds only the bodies a predicate asks for** (step G2 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). **It is not a filter, and the type's doc says so first**: every record of every

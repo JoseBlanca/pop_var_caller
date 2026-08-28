@@ -22,8 +22,12 @@ use std::path::{Path, PathBuf};
 use super::footer::{FOOTER_BYTES, Footer, decode_footer};
 use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
 use super::index::BlockIndexEntry;
-use super::walk::{self, RecordHead, RecordIter, SelectiveIter};
-use super::{PspReadError, index, read_header_from};
+use super::walk::{self, RecordIter, SelectiveRecordIter};
+// **The head through the module root, which is where its public path already is.** Naming the
+// type a predicate is shown is not importing a decoder — but a path into the record module is
+// what `the_opener_cannot_reach_any_block_decoding_code` forbids this file, comments included,
+// so the type comes through `super` and this note spells no such path.
+use super::{PspReadError, RecordHead, index, read_header_from};
 use crate::ng::types::GenomePosition;
 
 /// How large a compressor look-back window this reader will hold, unless told otherwise.
@@ -246,7 +250,7 @@ impl PspReader {
     /// Every record in the file, building only the bodies `want` asks for.
     ///
     /// **This is the shape the cohort's first pass uses** (spec §6.2), and it is the whole-file
-    /// case of [`RecordIter::only_where`] — a walk from a coordinate takes a predicate the same
+    /// case of [`RecordIter::building_only_where`] — a walk from a coordinate takes a predicate the same
     /// way. A record the predicate declines still arrives, in order, with its head; what it does
     /// not carry is a body.
     ///
@@ -263,11 +267,11 @@ impl PspReader {
     /// }
     /// # Ok(()) }
     /// ```
-    pub fn records_where<F>(&mut self, want: F) -> Result<SelectiveIter<'_, F>, PspReadError>
+    pub fn records_where<F>(&mut self, want: F) -> Result<SelectiveRecordIter<'_, F>, PspReadError>
     where
         F: FnMut(&RecordHead) -> bool,
     {
-        Ok(self.records()?.only_where(want))
+        Ok(self.records()?.building_only_where(want))
     }
 
     /// Every record from one block onwards, named by its ordinal in

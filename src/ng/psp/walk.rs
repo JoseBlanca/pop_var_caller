@@ -21,10 +21,7 @@ use super::PspReadError;
 use super::block::{BlockReadError, BlockStream, ROLLING_BYTES, StreamedRecord};
 use super::chain_ids::LiveSet;
 use super::header::Manifest;
-/// **Re-exported, so that `reader.rs` can name it in a signature without naming the record
-/// module** — which its own guard test forbids, and rightly: a file that may not decode a record
-/// has no business importing the decoder. The head is what a predicate is shown.
-pub(super) use super::record::RecordHead;
+use super::record::RecordHead;
 
 /// The default ceiling on how much of a walk's rolling buffer **one record** may have.
 ///
@@ -206,18 +203,18 @@ impl<'a> RecordIter<'a> {
     /// The same walk, building only the records `want` asks for.
     ///
     /// **Here rather than only on [`super::PspReader`]** so that every entry point gets the skip:
-    /// `records_from(at)?.only_where(…)` is what a cohort reading one region of every sample
+    /// `records_from(at)?.building_only_where(…)` is what a cohort reading one region of every sample
     /// writes, and spec §6.2's `records_where` is the whole-file case of it.
-    pub fn only_where<F>(self, want: F) -> SelectiveIter<'a, F>
+    pub fn building_only_where<F>(self, want: F) -> SelectiveRecordIter<'a, F>
     where
         F: FnMut(&RecordHead) -> bool,
     {
-        SelectiveIter { walk: self, want }
+        SelectiveRecordIter { walk: self, want }
     }
 
     /// One record out of the stream, with its failure put in the class whose instruction fits.
     ///
-    /// **The one place a record is stepped**, so [`Iterator`] and [`SelectiveIter`] cannot drift:
+    /// **The one place a record is stepped**, so [`Iterator`] and [`SelectiveRecordIter`] cannot drift:
     /// the only difference between a full walk and a selective one is the predicate handed here.
     fn step(
         &mut self,
@@ -349,19 +346,54 @@ impl Iterator for RecordIter<'_> {
 /// **The bytes still have to arrive either way.** Skipping saves building the record, not
 /// decompressing it: a block comes out of zstd sequentially and there is nothing to seek past.
 ///
-/// **⚠ What that is worth was measured on the prototype's reader and not on this one**: over
+/// **⚠ A declined body is never checked, so this is a weaker reader of damage than a full
+/// walk.** The two agreements between a record's head and its body — the declared body length
+/// against the bytes the body used, and the head's non-reference read count against the body's —
+/// are made in [`super::record::decode_the_body_of`], which a declined record never reaches.
+/// **A walk that came back without an `Err` says the file's framing held, not that the records
+/// it skipped are sound**, and a caller re-walking to build them may meet damage the first pass
+/// did not report. Measured on a three-record block of 102 payload bytes, every byte flipped in
+/// turn: a full walk refuses 93 of them, and **a walk declining every body accepts 72 of those
+/// 93** — about three in four. `a_declining_walk_accepts_damage_a_full_walk_refuses` is that
+/// measurement.
+///
+/// **⚠ What the skip is worth was measured on the prototype's reader and not on this one**: over
 /// 7.69 M records of a tomato accession, a walk keeping one record in a hundred took 0.141 s
 /// against 0.29 s for one building every record. Milestone H5 times this reader, on the
 /// 279-reads-a-position sample as well as on tomato — and the chain-id changes ride in the head
 /// and grow with depth, so how much of that 2.06× survives at depth is an open question.
-#[derive(Debug)]
 #[must_use = "a walk that is not iterated reads nothing"]
-pub struct SelectiveIter<'a, F> {
+pub struct SelectiveRecordIter<'a, F> {
     walk: RecordIter<'a>,
     want: F,
 }
 
-impl<F> SelectiveIter<'_, F> {
+/// **Written out rather than derived, because a derived one needs `F: Debug` and a closure is
+/// not** — so the derive was inert for every predicate a caller can actually pass, and the type
+/// looked printable in rustdoc while being unprintable at every call site. The predicate is the
+/// one field a reader cannot be shown, so it is named and skipped.
+impl<F> std::fmt::Debug for SelectiveRecordIter<'_, F> {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured with no `..`: a field added here has to be considered.
+        let Self { walk, want: _ } = self;
+        out.debug_struct("SelectiveRecordIter")
+            .field("walk", walk)
+            .field("want", &"<predicate>")
+            .finish()
+    }
+}
+
+impl<'a, F> SelectiveRecordIter<'a, F> {
+    /// The walk underneath, for everything a full walk can be asked.
+    ///
+    /// **An accessor rather than a forwarded method each.** The three below are the questions a
+    /// selective walk is asked often enough to be worth spelling; anything added to
+    /// [`RecordIter`] later — Milestone H4 and H5 are both about numbers a walk could be asked
+    /// for — is reachable through this without also having to be added here.
+    pub fn walk(&self) -> &RecordIter<'a> {
+        &self.walk
+    }
+
     /// Which reads are live at the record last handed back — see [`RecordIter::live_reads`].
     ///
     /// **Exact after a declined record too**, which is the whole point of putting the chain-id
@@ -383,7 +415,7 @@ impl<F> SelectiveIter<'_, F> {
     }
 }
 
-impl<F: FnMut(&RecordHead) -> bool> Iterator for SelectiveIter<'_, F> {
+impl<F: FnMut(&RecordHead) -> bool> Iterator for SelectiveRecordIter<'_, F> {
     type Item = Result<StreamedRecord, PspReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -403,6 +435,7 @@ mod tests {
     use crate::ng::psp::writer::PspWriter;
     use crate::ng::psp::writer::tests_support::{
         a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, footer_of, rewrite,
+        wreck_the_block,
     };
     use crate::ng::psp::{DamageFound, PspReadError, PspReader};
     use crate::ng::types::{ContigId, GenomePosition, Position};
@@ -874,21 +907,8 @@ mod tests {
     #[test]
     fn a_block_that_will_not_inflate_names_itself_and_ends_the_walk() {
         let (_dir, path) = a_finished_psp();
-        let mut whole = bytes_of(&path);
-        let wrecked_block = 2usize;
-        let (at, ends) = {
-            let psp = PspReader::open(&path).expect("a finished psp opens");
-            let entries = psp.block_index();
-            assert!(entries.len() > wrecked_block + 1);
-            (
-                entries[wrecked_block].block_offset as usize,
-                entries[wrecked_block + 1].block_offset as usize,
-            )
-        };
-        // Everything after the four-byte length: zstd is handed a frame with no magic, which it
-        // refuses outright rather than inflating to something plausible.
-        whole[at + COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
-        rewrite(&path, &whole);
+        let wrecked_block = 2_usize;
+        wreck_the_block(&path, wrecked_block);
 
         let mut psp = PspReader::open(&path).expect("the index and footer are untouched");
         let mut walk = psp.records().expect("the walk starts");
@@ -1165,19 +1185,8 @@ mod tests {
     #[test]
     fn a_walk_from_a_later_block_names_the_failing_block_by_its_own_ordinal() {
         let (_dir, path) = a_finished_psp();
-        let mut whole = bytes_of(&path);
-        let wrecked_block = 5usize;
-        let (at, ends) = {
-            let psp = PspReader::open(&path).expect("a finished psp opens");
-            let entries = psp.block_index();
-            assert!(entries.len() > wrecked_block + 1);
-            (
-                entries[wrecked_block].block_offset as usize,
-                entries[wrecked_block + 1].block_offset as usize,
-            )
-        };
-        whole[at + COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
-        rewrite(&path, &whole);
+        let wrecked_block = 5_usize;
+        wreck_the_block(&path, wrecked_block);
 
         let mut psp = PspReader::open(&path).expect("the index and footer are untouched");
         let mut walk = psp.records_from_block(4).expect("the walk starts");
@@ -1198,24 +1207,18 @@ mod tests {
         }
     }
 
-    /// **A record naming a locus kind this build does not know is *upgrade the reader*, not
-    /// *rebuild the file*.** The file is another build's, not a damaged one — and re-running a
-    /// pileup would produce the very same bytes.
+    /// A finished psp of one record whose locus-kind tag no build knows — what a **newer
+    /// writer's** file looks like to this reader, framed correctly and unreadable in its body.
     ///
-    /// **Built by re-compressing one block with a single byte changed**, and the byte is located
-    /// rather than hard-coded: the same record is written twice, once `Generic` and once
-    /// `SsrBundle`, and the two decompressed payloads differ in exactly the kind tag.
-    ///
-    /// It is the record-level arm of the *upgrade the reader* class.
-    /// `a_manifest_this_build_cannot_read_asks_for_a_newer_reader` reaches the same class
-    /// through the manifest, which is a different arm a hundred lines earlier.
-    #[test]
-    fn a_record_naming_a_locus_kind_this_build_does_not_know_asks_for_a_newer_reader() {
+    /// **The byte is located rather than hard-coded**: the same record is written twice, once
+    /// `Generic` and once `SsrBundle`, and the two decompressed payloads differ in exactly the
+    /// kind tag. The block is then recompressed and the footer's offsets moved with it, so the
+    /// file still opens and only the record's body is beyond this build.
+    fn a_psp_whose_record_this_build_cannot_read() -> (tempfile::TempDir, std::path::PathBuf) {
         use crate::ng::locus_generation::LocusKind;
         use crate::ng::psp::block::BlockCompressor;
-        use std::path::PathBuf;
 
-        fn a_one_block_psp(kind: LocusKind) -> (tempfile::TempDir, PathBuf) {
+        fn a_one_block_psp(kind: LocusKind) -> (tempfile::TempDir, std::path::PathBuf) {
             let (dir, path) = a_file();
             let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
             let mut record = a_record(0, 1, 1);
@@ -1243,7 +1246,7 @@ mod tests {
             (at, payload)
         }
 
-        let (_dir_a, path_a) = a_one_block_psp(LocusKind::Generic);
+        let (dir_a, path_a) = a_one_block_psp(LocusKind::Generic);
         let (_dir_b, path_b) = a_one_block_psp(LocusKind::SsrBundle);
         let (block_at, mut generic) = the_only_block(&path_a);
         let (_, bundle) = the_only_block(&path_b);
@@ -1283,8 +1286,20 @@ mod tests {
         footer.trailer_offset = (footer.trailer_offset as i64 + shift) as u64;
         patched.extend_from_slice(&encode_footer(&footer));
         rewrite(&path_a, &patched);
+        (dir_a, path_a)
+    }
 
-        let mut psp = PspReader::open(&path_a).expect("the header and index are untouched");
+    /// **A record naming a locus kind this build does not know is *upgrade the reader*, not
+    /// *rebuild the file*.** The file is another build's, not a damaged one — and re-running a
+    /// pileup would produce the very same bytes.
+    ///
+    /// It is the record-level arm of the *upgrade the reader* class.
+    /// `a_manifest_this_build_cannot_read_asks_for_a_newer_reader` reaches the same class
+    /// through the manifest, which is a different arm a hundred lines earlier.
+    #[test]
+    fn a_record_naming_a_locus_kind_this_build_does_not_know_asks_for_a_newer_reader() {
+        let (_dir, path) = a_psp_whose_record_this_build_cannot_read();
+        let mut psp = PspReader::open(&path).expect("the header and index are untouched");
         let mut walk = psp.records().expect("the walk starts");
         let refused = walk
             .next()
@@ -1294,6 +1309,27 @@ mod tests {
             matches!(refused, PspReadError::UnsupportedRecordEncoding { .. }),
             "got {refused}"
         );
+    }
+
+    /// **A declined record's body is never decoded, not merely dropped.** That claim is what the
+    /// selective walk is *for*, and only a body a full walk **cannot** read can hold it: this
+    /// file's one record carries a locus-kind tag no build knows, so a walk that builds it is
+    /// refused and a walk that declines it walks past without ever looking.
+    ///
+    /// ⚠ **Every other test of the skip checks only that the body came back `None`**, which a
+    /// decode-then-discard implementation satisfies exactly as well.
+    #[test]
+    fn a_declined_records_body_is_never_decoded() {
+        let (_dir, path) = a_psp_whose_record_this_build_cannot_read();
+        let mut psp = PspReader::open(&path).expect("the header and index are untouched");
+        let mut walk = psp.records_where(|_| false).expect("the walk starts");
+        let found = walk
+            .next()
+            .expect("the record still arrives")
+            .expect("its body was never decoded, so nothing in it can be refused");
+        assert!(found.record.is_none());
+        assert_eq!(found.head.region.start, Position(1));
+        assert!(walk.next().is_none(), "and the walk ends cleanly");
     }
 
     /// **A corrupt psp is an input, not a bug** (spec §6.7): bytes flipped inside the blocks are
@@ -1588,30 +1624,49 @@ mod tests {
         assert_eq!(walk.blocks_begun(), blocks);
     }
 
-    /// **The predicate spec §6.2 writes is the one that works.** A walk keeping only the records
-    /// where something varied is the cohort's first pass, and on this fixture — whose reads all
-    /// agreed with the reference — it keeps none of the 40 while still seeing all of them.
+    /// **The predicate spec §6.2 writes is the one that works** — the cohort's first pass,
+    /// keeping the records where a read showed something other than the reference.
+    ///
+    /// ⚠ **The fixture has to separate the run or this proves nothing.** `a_record`'s
+    /// observation is a copy of its own reference bases, so on `a_finished_psp` every head reads
+    /// zero, the predicate is constant-false, and a reader whose `non_reference_reads` did not
+    /// come from the file at all would pass. Every third record here carries a read that
+    /// disagrees.
     #[test]
-    fn the_first_passs_predicate_keeps_only_what_varies() {
-        let (_dir, path) = a_finished_psp();
+    fn the_cohorts_first_pass_predicate_keeps_the_records_where_something_varied() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let mut varies = Vec::new();
+        for step in 0..12u64 {
+            let mut record = a_record(0, 1 + step * 100, 1);
+            let differs = step.is_multiple_of(3);
+            if differs {
+                record.observations[0].bases = Box::new(*b"N");
+            }
+            varies.push(differs);
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"").expect("it finishes");
+        assert!(
+            varies.iter().any(|it| *it) && varies.iter().any(|it| !it),
+            "the head has to separate the run, or this proves nothing"
+        );
+
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let mut kept = 0;
-        let mut seen = 0;
-        for found in psp
+        let built: Vec<bool> = psp
             .records_where(|head| head.non_reference_reads > 0)
             .expect("the walk starts")
-        {
-            let found = found.expect("a finished psp walks");
-            seen += 1;
-            if found.record.is_some() {
-                kept += 1;
-            }
-        }
-        assert_eq!(seen, 40, "every head was offered");
-        assert_eq!(
-            kept, 0,
-            "the fixture's reads all agree with the reference, so nothing varies"
-        );
+            .map(|found| {
+                let found = found.expect("a finished psp walks");
+                assert_eq!(
+                    found.head.non_reference_reads > 0,
+                    found.record.is_some(),
+                    "the head the predicate saw and the body it got must agree"
+                );
+                found.record.is_some()
+            })
+            .collect();
+        assert_eq!(built, varies, "exactly the records where something varied");
     }
 
     /// **A walk from a coordinate takes a predicate too**, which is what a cohort reading one
@@ -1630,7 +1685,7 @@ mod tests {
         let found: Vec<_> = psp
             .records_from(asked)
             .expect("the walk starts")
-            .only_where(|_| {
+            .building_only_where(|_| {
                 at += 1;
                 at == 1
             })
@@ -1653,18 +1708,8 @@ mod tests {
     #[test]
     fn a_selective_walk_refuses_a_wrecked_block_the_same_way() {
         let (_dir, path) = a_finished_psp();
-        let mut whole = bytes_of(&path);
-        let wrecked_block = 2usize;
-        let (at, ends) = {
-            let psp = PspReader::open(&path).expect("a finished psp opens");
-            let entries = psp.block_index();
-            (
-                entries[wrecked_block].block_offset as usize,
-                entries[wrecked_block + 1].block_offset as usize,
-            )
-        };
-        whole[at + COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
-        rewrite(&path, &whole);
+        let wrecked_block = 2_usize;
+        wreck_the_block(&path, wrecked_block);
 
         let mut psp = PspReader::open(&path).expect("the index and footer are untouched");
         let mut walk = psp.records_where(|_| false).expect("the walk starts");
@@ -1682,5 +1727,219 @@ mod tests {
             other => panic!("got {other}"),
         }
         assert!(walk.next().is_none(), "a refused walk is finished");
+    }
+
+    /// **A walk that declines every body accepts damage a full walk refuses**, and this measures
+    /// how much.
+    ///
+    /// A record's two self-consistency checks — the body length its head declared against the
+    /// bytes the body used, and the head's non-reference read count against the body's — are made
+    /// while the body is decoded, so a declined record never reaches them. That is inherent and
+    /// correct: **you cannot check a body you did not decode.** What it means for a caller is
+    /// that a clean selective walk says the file's *framing* held, and no more.
+    ///
+    /// The fixture is one block of three records; every byte of its decompressed payload is
+    /// flipped in turn, the block recompressed, and the file walked twice — once building every
+    /// body, once building none.
+    #[test]
+    fn a_declining_walk_accepts_damage_a_full_walk_refuses() {
+        use crate::ng::psp::block::BlockCompressor;
+
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+        for at in [1u64, 101, 201] {
+            writer.push(&a_record(0, at, 4)).expect("in order");
+        }
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let whole = bytes_of(&path);
+        let (block_at, blocks_end, header) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            assert_eq!(psp.block_index().len(), 1, "one block");
+            (
+                psp.block_index()[0].block_offset as usize,
+                psp.footer().index_offset as usize,
+                psp.header().clone(),
+            )
+        };
+        let frame_at = block_at + COMPRESSED_BLOCK_LENGTH_BYTES;
+        let payload =
+            zstd::decode_all(&whole[frame_at..blocks_end]).expect("the block's frame inflates");
+        assert!(payload.len() > 32, "there is a payload to damage");
+
+        let mut compressor =
+            BlockCompressor::from_manifest(&header.manifest).expect("the file's own compressor");
+        let footer = footer_of(&whole);
+        let footer_at = whole.len() - FOOTER_BYTES;
+
+        let (mut both_refuse, mut only_the_full_walk) = (0usize, 0usize);
+        for byte in 0..payload.len() {
+            let mut damaged = payload.clone();
+            damaged[byte] ^= 0xff;
+            let reframed = compressor
+                .compress(&damaged)
+                .expect("it compresses")
+                .to_vec();
+
+            let mut footer = footer;
+            let mut patched = whole[..block_at].to_vec();
+            patched.extend_from_slice(&reframed);
+            let moved = patched.len() as i64 - footer.index_offset as i64;
+            patched.extend_from_slice(&whole[footer.index_offset as usize..footer_at]);
+            footer.index_offset = (footer.index_offset as i64 + moved) as u64;
+            footer.trailer_offset = (footer.trailer_offset as i64 + moved) as u64;
+            patched.extend_from_slice(&encode_footer(&footer));
+            rewrite(&path, &patched);
+
+            let Ok(mut psp) = PspReader::open(&path) else {
+                continue;
+            };
+            let full_refused = psp
+                .records()
+                .expect("the walk starts")
+                .any(|found| found.is_err());
+            let declining_refused = psp
+                .records_where(|_| false)
+                .expect("the walk starts")
+                .any(|found| found.is_err());
+            match (full_refused, declining_refused) {
+                (true, true) => both_refuse += 1,
+                (true, false) => only_the_full_walk += 1,
+                (false, true) => panic!("a declining walk refused where a full walk did not"),
+                (false, false) => {}
+            }
+        }
+
+        assert!(
+            only_the_full_walk > both_refuse,
+            "most of the damage a full walk catches is in the bodies a predicate skips: \
+             {only_the_full_walk} against {both_refuse} over {} payload bytes",
+            payload.len()
+        );
+    }
+
+    /// **A selective walk names its block by the file's own ordinal**, like a full one — the
+    /// addend that makes it absolute is invisible on a walk from block 0, which is where every
+    /// other test of it starts.
+    #[test]
+    fn a_selective_walk_from_a_later_block_names_that_blocks_own_ordinal() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let mut walk = psp
+            .records_from_block(6)
+            .expect("the walk starts")
+            .building_only_where(|_| false);
+        assert_eq!(walk.current_block(), 6, "before the first record");
+        let _ = walk
+            .next()
+            .expect("a record")
+            .expect("a finished psp walks");
+        assert_eq!(walk.current_block(), 6, "the block the record came from");
+        assert_eq!(walk.blocks_begun(), 1, "one block opened so far");
+    }
+
+    /// **`records_where` refuses at the walk, not at the record**, and the predicate is never
+    /// shown a head from a file whose record encoding this build cannot read.
+    #[test]
+    fn records_where_refuses_a_manifest_this_build_cannot_read() {
+        let (_dir, path) = a_finished_psp();
+        let mut whole = bytes_of(&path);
+        let declared = b"position-offset";
+        let at = whole
+            .windows(declared.len())
+            .position(|window| window == declared)
+            .expect("the manifest names the record's first field");
+        whole[at..at + declared.len()].copy_from_slice(b"position-offsex");
+        rewrite(&path, &whole);
+
+        let mut psp = PspReader::open(&path).expect("the header parses");
+        let mut called = 0usize;
+        let refused = psp
+            .records_where(|_| {
+                called += 1;
+                true
+            })
+            .expect_err("the records cannot be read against this manifest");
+        assert!(
+            matches!(refused, PspReadError::UnsupportedRecordEncoding { .. }),
+            "got {refused}"
+        );
+        assert_eq!(called, 0, "the predicate was never shown a head");
+    }
+
+    /// **A sample with no records walks selectively to nothing**, rather than being refused —
+    /// the same contract `records` carries, through the predicate-taking entry point.
+    #[test]
+    fn records_where_on_a_psp_with_no_records_is_empty() {
+        let (_dir, path) = a_file();
+        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        assert!(psp.block_index().is_empty(), "no blocks");
+        let mut walk = psp.records_where(|_| true).expect("the walk starts");
+        assert!(walk.next().is_none());
+        assert_eq!(walk.blocks_begun(), 0);
+        assert_eq!(walk.current_block(), 0);
+    }
+
+    /// **A corrupt psp is an input on the selective walk too** (spec §6.7). The skip branch
+    /// advances the cursor on a length the file supplied without ever decoding a body, so it is
+    /// the branch a damaged file reaches furthest into — and no sweep reached it before.
+    #[test]
+    fn a_psp_with_damaged_blocks_walks_selectively_without_panicking() {
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let (blocks_start, blocks_end) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            (
+                psp.block_index()[0].block_offset as usize,
+                psp.footer().index_offset as usize,
+            )
+        };
+
+        // A seeded xorshift, so a failure is reproducible from the source alone.
+        let mut state: u64 = 0x5eed_1234_9abc_def0;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let (mut refused, mut opened) = (0u32, 0u32);
+        for _ in 0..400 {
+            let mut bytes = whole.clone();
+            let flips = 1 + (next() % 4) as usize;
+            for _ in 0..flips {
+                let at = blocks_start + (next() as usize % (blocks_end - blocks_start));
+                bytes[at] = (next() % 256) as u8;
+            }
+            rewrite(&path, &bytes);
+            let Ok(mut psp) = PspReader::open(&path) else {
+                continue;
+            };
+            opened += 1;
+            let mut walk = psp.records_where(|_| false).expect("the walk starts");
+            let mut broke = false;
+            while let Some(found) = walk.next() {
+                match found {
+                    Ok(found) => {
+                        assert!(!broke, "a record arrived after a refusal");
+                        assert!(found.record.is_none(), "nothing was wanted");
+                    }
+                    Err(_) => {
+                        broke = true;
+                        assert!(walk.next().is_none(), "a refused walk is finished");
+                        break;
+                    }
+                }
+            }
+            if broke {
+                refused += 1;
+            }
+        }
+        assert!(opened > 0);
+        assert!(refused > 0, "the damage must reach the selective walk");
     }
 }

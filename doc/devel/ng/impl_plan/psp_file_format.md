@@ -267,8 +267,15 @@ trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 > may share a first position, and *the last block starting at or before the coordinate* entered
 > that run at its end and lost the earlier block's records with no error.
 
-☐ **G2 — `records_where`**, the head-driven skip as a public iterator.
+✅ **G2 — `records_where`**, the head-driven skip as a public iterator.
 ***Depends:*** F4, C2. ***Source:*** [spec §6.2](../spec/psp_file_format.md).
+> **Reviewed** — nine checklists across two agents:
+> [the review](../../reports/reviews/ng_psp_g2_2026-08-28.md),
+> [the fixes](../../reports/reviews/fixes_applied_ng_psp_g2_2026-08-28.md). No Blocker; **every
+> Major was about what the tests did not hold**. Nothing held the claim the type exists for — a
+> decode-then-discard implementation passed all 355 tests — and the property that a declining walk
+> is a weaker reader of damage than a full one was correct and unwritten: **of 93 single-byte
+> corruptions a full walk refuses on one small file, a walk declining every body accepts 72**.
 
 ☐ **G3 — `replace_trailer`**, rewriting from the trailer's offset and leaving blocks and index alone.
 ***Depends:*** F3. ***Source:*** [spec §6.5](../spec/psp_file_format.md).

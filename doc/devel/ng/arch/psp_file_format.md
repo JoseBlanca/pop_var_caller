@@ -23,7 +23,8 @@ src/ng/psp/
 ├── index.rs      – BlockIndex, BlockIndexEntry
 ├── footer.rs     – the fixed tail: offsets, checksum, magic
 ├── reader.rs     – PspReader: open a finished file, and find the block a coordinate is in
-├── walk.rs       – RecordIter: seek to a block and stream to where the blocks end
+├── walk.rs       – RecordIter and SelectiveRecordIter: seek to a block, stream to where
+│                  the blocks end, and build only the bodies a predicate asks for
 ├── writer.rs     – PspWriter: create, push, finish
 └── chain_ids.rs  – the live set and its changes (spec psp_chain_id_encoding.md)
 ```
@@ -258,8 +259,21 @@ impl PspReader {
 
     /// The cohort's first pass: `want` sees each record's head and says whether to
     /// build the body. A record the predicate declines costs the head plus a pointer
-    /// advance.
-    pub fn records_where<F>(&mut self, want: F) -> SelectiveIter<'_, F>
+    /// advance — and **still arrives**, with its body `None`. This is not a filter.
+    ///
+    /// **A `Result` for the same reason `records()` is** (2026-08-28).
+    pub fn records_where<F>(&mut self, want: F)
+        -> Result<SelectiveRecordIter<'_, F>, PspReadError>
+    where
+        F: FnMut(&RecordHead) -> bool;
+}
+
+impl<'a> RecordIter<'a> {
+    /// **The predicate is a builder on the walk** (2026-08-28), so every entry point gets the
+    /// skip: `records_from(at)?.building_only_where(…)` is what a cohort reading one region of
+    /// every sample writes, and `PspReader::records_where` is the whole-file case of it.
+    /// Taken literally, the sketch above wants one predicate-taking method per starting point.
+    pub fn building_only_where<F>(self, want: F) -> SelectiveRecordIter<'a, F>
     where
         F: FnMut(&RecordHead) -> bool;
 }
