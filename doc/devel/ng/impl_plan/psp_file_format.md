@@ -319,7 +319,7 @@ order across the seam and **fails on a manifest it cannot honour**.
 
 ## Milestone H — the oracles, and the numbers
 
-☐ **H1 — parity with the prototype.** A store written by `psp/` and one written by
+✅ **H1 — parity with the prototype.** A store written by `psp/` and one written by
 `examples/psp_row_stream_roundtrip.rs` yield the same records, compared with the strictness each
 field requires: integers, sequences, witnesses and chain-id lists **exactly**; the fixed-point fields
 inside their own step. **A blanket tolerance would pass while a chain-id list was being corrupted.**

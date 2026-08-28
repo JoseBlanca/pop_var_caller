@@ -23,6 +23,15 @@
 //! disagrees, so a size claim is never made about a store that cannot be read
 //! back. The three quantised fields are compared against the tolerance their
 //! quantisation implies; everything else must match exactly.
+//!
+//! # ⚠ This file is also the oracle for `examples/ng_psp_parity.rs`
+//!
+//! That harness includes it whole with `#[path]` and writes a second store from the same
+//! records, so `src/ng/psp/` is checked against a codec that is not it. **The only thing this
+//! file has that the module's own tests do not is that it was written before that module and
+//! shares no code with it** — so do not change its behaviour to suit it, and do not "fix" it to
+//! satisfy a lint reported against the module. Widening a declaration's visibility is fine, and
+//! is all that has been done.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -254,6 +263,10 @@ impl FrameWriter {
     }
 
     /// `record_head`'s layout: the head, then a body that stands on its own.
+    // `prev_cov_q`'s last write is dead: the loop body reassigns it and the function returns
+    // straight after. Allowed rather than removed — this file is an oracle and its behaviour is
+    // not edited (see the module doc).
+    #[allow(unused_assignments)]
     fn push_with_head(&mut self, rec: &PileupRecord) {
         if self.n_records == 0 {
             self.chrom_id = rec.chrom_id;
@@ -999,6 +1012,10 @@ fn read_chunk_bytes() -> usize {
     READ_CHUNK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// Ten arguments, every one of them a format switch this program's command line sets. Allowed
+// for the same reason as above: the oracle's shape is not changed to suit a lint. `TryCursor`
+// four hundred lines below carries the same attribute for the same reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_streaming(
     psp: &str,
     out_path: &str,

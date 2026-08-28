@@ -19,7 +19,35 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **the store gives back what it was handed, and an
+> - **Last completed task (2026-08-28):** **H1 reviewed — the oracle could not fail on eighteen
+> of its twenty-six comparisons, and a store with every region a base too long passed it** (step H1
+> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Ten checklists across five agents, **three Blockers, and the first two were
+> reproduced here before anything was changed**. The cross-encoder arm — the whole reason this step
+> is not a round-trip test — never compared `placed_left`, the reference bases or the record's
+> extent, and its doc said the opposite: a store written with `placed_left` one too high **and**
+> every region a base too long **passed all 74,623 hg002 records with a clean report**. Both
+> defects are in the harness's own mapping, which the round-trip arm carries on both sides and
+> cannot see. **And eighteen of the twenty-six field comparisons had no test that they could
+> fail** — neutered one at a time, they left all 23 tests green. The fix for both is structural:
+> **both arms destructure with no `..`**, so a field added to the record is a compile error rather
+> than a field the oracle stops comparing, and two table-driven tests hold every comparison by
+> name. **The third Blocker is not H1's doing and is worth knowing**: CI runs `clippy
+> --all-targets` under `-D warnings`, and the measuring prototype has failed it since `b0e1a54a` —
+> four milestones — because the local gate is `--lib --tests`. Moving two lints onto the
+> prototype's own items makes CI's command clean. **Everything the store holds that is not a record
+> was written and never read back**: a contig length one too long, an index whose every first
+> position was a base too far, and a truncated trailer all passed a 100,000-record run. All three
+> are caught now — and ⚠ **the index check had to be strengthened twice**, because entering blocks
+> by *ordinal* never reads the coordinate `records_from` searches on. **Three of my numbers were
+> wrong again**, against forty-nine right: seven declarations is eight, two allowed lints is three
+> suppressing twenty-four findings, and a module doc saying two synthesised fields where four are —
+> the last inverting the very point the step exists to make.
+> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_h1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_h1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **the store gives back what it was handed, and an
 > encoder that is not it agrees** (step H1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). Milestone H is the milestone of numbers, and H1 is the first of them measured on
