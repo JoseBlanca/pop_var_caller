@@ -11,6 +11,7 @@
 //! scheme `run_streaming.md` §7.2 asks for must not be built.
 
 use crate::ng::types::{ContigId, GenomePosition, Position};
+use crate::psp::errors::VarintError;
 use crate::psp::varint::{decode_u64_leb128, encode_u64_leb128};
 
 /// One psp block, as the index names it.
@@ -29,7 +30,14 @@ pub struct BlockIndexEntry {
     /// (spec §3.2), so one entry names one contig.
     pub first_position: GenomePosition,
     /// Byte offset of the block's first byte from the start of the file.
-    pub offset: u64,
+    ///
+    /// **`block_offset` and not `offset`**, because unqualified *offset* already means a
+    /// base-pair distance inside this module: a record's first wire field is its
+    /// `position-offset`, the number of bases since the record before it. Both are `u64` and
+    /// they would sit on one struct. Production spells this same value `block_offset`, and the
+    /// two neighbours in the footer that mean bytes qualify it too (`index_offset`,
+    /// `trailer_offset`).
+    pub block_offset: u64,
 }
 
 /// Bytes one entry can occupy at its smallest: two one-byte varints and the fixed offset.
@@ -45,9 +53,17 @@ pub struct BlockIndexEntry {
 /// keeps a hostile tail an error rather than a crash, and the memory is the lesser half of it.
 const SMALLEST_ENTRY_BYTES: u64 = 1 + 1 + 8;
 
-/// Bytes one entry can occupy at its largest: two five-byte varints and the fixed offset.
-/// Used to size the writer's buffer once, so the worst case still allocates once.
-const LARGEST_ENTRY_BYTES: usize = 5 + 5 + 8;
+/// Bytes one entry can occupy at its largest, used to size the writer's buffer once.
+///
+/// **A contig number is a `u32` and a position is a `u64`**, so their variable-length forms run
+/// to five bytes and **ten**, not five and five: 23 bytes an entry, not 18.
+///
+/// ⚠ The 18 was here first, carried over from production, where all four of the index's fields
+/// genuinely are `u32` ([`src/psp/index.rs`](../../../../src/psp/index.rs)). ng's position is
+/// not, and `the_widest_value_of_every_field_round_trips` already builds the very entry the old
+/// comment said could not exist. Nothing was corrupt — a `Vec` grows — but a constant named for
+/// a bound has to hold it.
+const LARGEST_ENTRY_BYTES: usize = 5 + 10 + 8;
 
 /// The index's own bytes: for each block in order, its contig, its first position, and the
 /// byte offset it starts at.
@@ -64,9 +80,17 @@ const LARGEST_ENTRY_BYTES: usize = 5 + 5 + 8;
 pub fn encode_index(entries: &[BlockIndexEntry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(entries.len() * LARGEST_ENTRY_BYTES);
     for entry in entries {
-        encode_u64_leb128(u64::from(entry.first_position.contig.0), &mut out);
-        encode_u64_leb128(entry.first_position.position.get(), &mut out);
-        out.extend_from_slice(&entry.offset.to_le_bytes());
+        // Destructured with no `..`: **a field added to the entry is a compile error here**
+        // rather than a field silently left out of every index this build writes. Reading the
+        // fields one at a time compiled clean through exactly that mutation, and the round trip
+        // stayed green because the fixtures zero-filled the new field.
+        let BlockIndexEntry {
+            first_position,
+            block_offset,
+        } = *entry;
+        encode_u64_leb128(u64::from(first_position.contig.0), &mut out);
+        encode_u64_leb128(first_position.position.get(), &mut out);
+        out.extend_from_slice(&block_offset.to_le_bytes());
     }
     out
 }
@@ -84,6 +108,13 @@ pub fn encode_index(entries: &[BlockIndexEntry]) -> Vec<u8> {
 /// and the records that come back are a real sample's records from the wrong place. The check
 /// costs one comparison per entry, paid once per open file.
 ///
+/// **What it does not check, and where those live.** A contig number is checked against the
+/// width of a [`ContigId`] and **not** against the header's contig list, so an index may name a
+/// contig the file does not have; and a byte offset is not checked against the file's length,
+/// because nothing here knows it. Both belong to `open`, which has the header and the file size
+/// — this function's guarantee is that the entries are well-formed and ordered, not that they
+/// point anywhere real.
+///
 /// **Two blocks may share a first position, and the rule is written for it.** A block closed
 /// early by the byte ceiling is followed by one that starts at the next record, and two records
 /// may begin on the same base — a repeat tract and a generic locus do. So positions must be
@@ -96,47 +127,66 @@ pub fn decode_index(
     let bounded = (bytes.len() as u64 / SMALLEST_ENTRY_BYTES).saturating_add(1);
     let mut entries = Vec::with_capacity(expected_blocks.min(bounded) as usize);
 
-    let mut at = 0usize;
-    for entry in 0..expected_blocks {
-        let entry = entry as usize;
-        let contig = take_varint(bytes, &mut at, entry, "contig")?;
-        let contig = u32::try_from(contig).map_err(|_| IndexDecodeError::FieldTooLarge {
-            entry,
-            field: "contig",
+    let mut byte_cursor = 0usize;
+    for entry_number in 0..expected_blocks {
+        let entry_number = entry_number as usize;
+        let contig = take_varint(
+            bytes,
+            &mut byte_cursor,
+            entry_number,
+            IndexEntryField::Contig,
+        )?;
+        let contig = u32::try_from(contig).map_err(|_| IndexDecodeError::ContigNumberTooLarge {
+            entry_number,
             found: contig,
         })?;
-        let position = take_varint(bytes, &mut at, entry, "first-position")?;
-        let offset = take_offset(bytes, &mut at, entry)?;
+        let position = take_varint(
+            bytes,
+            &mut byte_cursor,
+            entry_number,
+            IndexEntryField::FirstPosition,
+        )?;
+        let block_offset = take_block_offset(bytes, &mut byte_cursor, entry_number)?;
         entries.push(BlockIndexEntry {
             first_position: GenomePosition {
                 contig: ContigId(contig),
                 position: Position(position),
             },
-            offset,
+            block_offset,
         });
     }
 
-    if at != bytes.len() {
+    if byte_cursor != bytes.len() {
         return Err(IndexDecodeError::TrailingBytes {
-            trailing: bytes.len() - at,
-            entries: entries.len(),
+            trailing_bytes: bytes.len() - byte_cursor,
+            entries_read: entries.len(),
         });
     }
 
-    for (entry, pair) in entries.windows(2).enumerate() {
+    // **Every consecutive pair, and the numbers are carried rather than computed.** An earlier
+    // version worked the earlier entry's number out as `entry - 1` inside the message template,
+    // which panics with `attempt to subtract with overflow` when rendering an error whose entry
+    // is 0 — a panic in `Display`, on the path that reports a damaged file, from the very type
+    // whose contract is that a damaged file is never a panic. `decode_index` cannot produce
+    // entry 0 here, but the variants are public and constructible, and this file's own tests
+    // build them by hand.
+    for (earlier, pair) in entries.windows(2).enumerate() {
         let (previous, offered) = (pair[0], pair[1]);
+        let (previous_entry, entry_number) = (earlier, earlier + 1);
         if offered.first_position < previous.first_position {
             return Err(IndexDecodeError::OutOfOrder {
-                entry: entry + 1,
+                entry_number,
+                previous_entry,
                 previous: previous.first_position,
                 offered: offered.first_position,
             });
         }
-        if offered.offset <= previous.offset {
+        if offered.block_offset <= previous.block_offset {
             return Err(IndexDecodeError::OffsetNotAscending {
-                entry: entry + 1,
-                previous: previous.offset,
-                offered: offered.offset,
+                entry_number,
+                previous_entry,
+                previous: previous.block_offset,
+                offered: offered.block_offset,
             });
         }
     }
@@ -149,8 +199,18 @@ pub fn decode_index(
 /// **Production's function, called rather than copied**
 /// ([`src/psp/index.rs`](../../../../src/psp/index.rs)): it is XXH3-64 truncated to its low 32
 /// bits, which is the truncation zstd uses for its own frame checksum, and the reason to share
-/// it is that there is then one XXH3 in the codebase rather than two that could differ. The
-/// index is the one region of a psp no zstd frame checksum covers, which is why it has this.
+/// it is that there is then one XXH3 in the codebase rather than two that could differ.
+///
+/// **Why the index carries one when the header and the footer do not.** All four regions
+/// outside the blocks are uncompressed and so are outside zstd's own per-frame checksum, but
+/// the other three carry their own framing that damage shows up in: the header is length-
+/// prefixed with a sentinel that must follow it, and the footer ends in a magic. The index has
+/// neither — it is a bare run of entries whose only cross-check is the block count in the
+/// footer, and a bit flipped inside an offset produces a perfectly well-formed index pointing
+/// somewhere else.
+///
+/// *(This comment previously said the index is the one region no frame checksum covers. It is
+/// not; that is true of production's layout, not of ng's.)*
 pub fn checksum_index(bytes: &[u8]) -> u32 {
     crate::psp::index::checksum_index(bytes)
 }
@@ -159,32 +219,69 @@ fn take_varint(
     bytes: &[u8],
     at: &mut usize,
     entry: usize,
-    field: &'static str,
+    field: IndexEntryField,
 ) -> Result<u64, IndexDecodeError> {
-    let rest = bytes
-        .get(*at..)
-        .ok_or(IndexDecodeError::Truncated { entry, field })?;
-    let (value, used) =
-        decode_u64_leb128(rest).map_err(|_| IndexDecodeError::Truncated { entry, field })?;
+    let rest = bytes.get(*at..).ok_or(IndexDecodeError::Truncated {
+        entry_number: entry,
+        field,
+    })?;
+    // **The two damages a varint has are two errors, not one.** `Truncated` means the bytes
+    // ran out; `Overflow` means there are more continuation bytes than any `u64` can carry, and
+    // the bytes have *not* run out. Collapsing them printed "the index ends inside entry 0"
+    // about a buffer with nine bytes still unread, which sends whoever holds the file looking
+    // for a cut that is not there.
+    let (value, used) = decode_u64_leb128(rest).map_err(|damage| match damage {
+        VarintError::Overflow => IndexDecodeError::Overlong {
+            entry_number: entry,
+            field,
+        },
+        _ => IndexDecodeError::Truncated {
+            entry_number: entry,
+            field,
+        },
+    })?;
     *at += used;
     Ok(value)
 }
 
-fn take_offset(bytes: &[u8], at: &mut usize, entry: usize) -> Result<u64, IndexDecodeError> {
-    let field = "offset";
-    let end = at
-        .checked_add(8)
-        .ok_or(IndexDecodeError::Truncated { entry, field })?;
-    let slice = bytes
-        .get(*at..end)
-        .ok_or(IndexDecodeError::Truncated { entry, field })?;
-    let offset = u64::from_le_bytes(
-        slice
-            .try_into()
-            .expect("an eight-byte slice converts to an eight-byte array"),
-    );
-    *at = end;
-    Ok(offset)
+fn take_block_offset(bytes: &[u8], at: &mut usize, entry: usize) -> Result<u64, IndexDecodeError> {
+    let field = IndexEntryField::BlockOffset;
+    // **The width is stated once, as a type.** It used to be written three times — a
+    // `checked_add(8)`, a slice, and an `expect` that the slice was eight bytes — and changing
+    // only the first to 4 compiled and turned eight tests into *panics* inside a module whose
+    // contract is that a damaged psp is an error and never a panic.
+    let chunk: &[u8; 8] =
+        bytes
+            .get(*at..)
+            .and_then(<[u8]>::first_chunk)
+            .ok_or(IndexDecodeError::Truncated {
+                entry_number: entry,
+                field,
+            })?;
+    *at += chunk.len();
+    Ok(u64::from_le_bytes(*chunk))
+}
+
+/// Which field of an entry a fault was found in.
+///
+/// **A closed set rather than a `&'static str`**, so a message cannot name a field the format
+/// does not have, and so the three are spelled in one place. They are the three an entry holds,
+/// in wire order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexEntryField {
+    Contig,
+    FirstPosition,
+    BlockOffset,
+}
+
+impl std::fmt::Display for IndexEntryField {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
+            IndexEntryField::Contig => "contig",
+            IndexEntryField::FirstPosition => "first position",
+            IndexEntryField::BlockOffset => "block offset",
+        })
+    }
 }
 
 /// Why an index could not be read.
@@ -197,31 +294,57 @@ fn take_offset(bytes: &[u8], at: &mut usize, entry: usize) -> Result<u64, IndexD
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IndexDecodeError {
     /// The index ended in the middle of an entry the footer said was there.
-    #[error("the index ends inside entry {entry}, before its {field}")]
-    Truncated { entry: usize, field: &'static str },
+    #[error("the index ends inside entry {entry_number}, before its {field}")]
+    Truncated {
+        entry_number: usize,
+        field: IndexEntryField,
+    },
+
+    /// A variable-length integer with no end in sight: more continuation bytes than any `u64`
+    /// can carry.
+    ///
+    /// **Not a truncation.** The bytes are there and cannot mean a number, which is a different
+    /// fault with a different instruction — telling whoever holds the file that it ends where it
+    /// does not sends them looking for a cut that is not there.
+    #[error("entry {entry_number}'s {field} runs past any number a u64 can hold")]
+    Overlong {
+        entry_number: usize,
+        field: IndexEntryField,
+    },
 
     /// A contig number too large for a [`ContigId`]. **Refused rather than truncated**: a
     /// wrapped contig number indexes a real contig, and the seek would land on it.
-    #[error("entry {entry} declares {field} {found}, which is too large for a contig number")]
-    FieldTooLarge {
-        entry: usize,
-        field: &'static str,
-        found: u64,
-    },
+    ///
+    /// **Named for the one field that can raise it**, because it is the only one: the position
+    /// is a `u64` and so is its type, and the offset is read as eight fixed bytes.
+    #[error("entry {entry_number} declares contig number {found}, which is not a contig number")]
+    ContigNumberTooLarge { entry_number: usize, found: u64 },
 
     /// The footer's block count and the index's bytes disagree — bytes are left over once that
     /// many entries have been read.
-    #[error("the index holds {trailing} bytes after the {entries} entries the footer declares")]
-    TrailingBytes { trailing: usize, entries: usize },
+    #[error(
+        "the index holds {trailing_bytes} bytes after the {entries_read} entries the footer \
+         declares"
+    )]
+    TrailingBytes {
+        trailing_bytes: usize,
+        entries_read: usize,
+    },
 
     /// An entry starts before the one before it. **A search over these does not fail on
     /// disorder, it returns the wrong block**, which is why this is refused at open.
+    ///
+    /// Both entry numbers are carried rather than one computed from the other: `entry - 1` in
+    /// the message template panics when rendering an error whose entry is 0.
     #[error(
-        "index entry {entry} starts at {offered:?}, before entry {} at {previous:?}",
-        entry - 1
+        "index entry {entry_number} starts at contig {}, position {}, before entry \
+         {previous_entry} at contig {}, position {}",
+        offered.contig.0, offered.position.get(),
+        previous.contig.0, previous.position.get()
     )]
     OutOfOrder {
-        entry: usize,
+        entry_number: usize,
+        previous_entry: usize,
         previous: GenomePosition,
         offered: GenomePosition,
     },
@@ -230,11 +353,12 @@ pub enum IndexDecodeError {
     /// — a block closed by the byte ceiling is followed by one starting at the same base — but
     /// the offsets are what say two entries are two blocks.
     #[error(
-        "index entry {entry} is at byte {offered}, which does not follow entry {} at byte {previous}",
-        entry - 1
+        "index entry {entry_number} is at byte {offered}, which does not follow entry \
+         {previous_entry} at byte {previous}"
     )]
     OffsetNotAscending {
-        entry: usize,
+        entry_number: usize,
+        previous_entry: usize,
         previous: u64,
         offered: u64,
     },
@@ -250,15 +374,8 @@ mod tests {
     /// on an earlier one whenever the numbers happen to fall that way.
     #[test]
     fn entries_sort_by_contig_before_position() {
-        let entry = |contig: u32, position: u64, offset: u64| BlockIndexEntry {
-            first_position: GenomePosition {
-                contig: ContigId(contig),
-                position: Position(position),
-            },
-            offset,
-        };
-        let late_on_the_first_contig = entry(0, 90_000_000, 4_096);
-        let early_on_the_second = entry(1, 1, 8_192);
+        let late_on_the_first_contig = index_entry(0, 90_000_000, 4_096);
+        let early_on_the_second = index_entry(1, 1, 8_192);
         assert!(late_on_the_first_contig < early_on_the_second);
 
         let mut blocks = [early_on_the_second, late_on_the_first_contig];
@@ -270,13 +387,13 @@ mod tests {
     // F1 — the index's own bytes
     // -----------------------------------------------------------------
 
-    fn at(contig: u32, position: u64, offset: u64) -> BlockIndexEntry {
+    fn index_entry(contig: u32, position: u64, block_offset: u64) -> BlockIndexEntry {
         BlockIndexEntry {
             first_position: GenomePosition {
                 contig: ContigId(contig),
                 position: Position(position),
             },
-            offset,
+            block_offset,
         }
     }
 
@@ -286,7 +403,7 @@ mod tests {
     fn an_index_round_trips_entry_for_entry() {
         let entries: Vec<BlockIndexEntry> = (0..154)
             .map(|block| {
-                at(
+                index_entry(
                     block / 20,
                     1 + u64::from(block) * 100_000,
                     4_096 + u64::from(block) * 65_536,
@@ -314,9 +431,9 @@ mod tests {
     #[test]
     fn the_widest_value_of_every_field_round_trips() {
         let entries = vec![
-            at(0, 1, 0),
-            at(1, u64::MAX / 2, 1),
-            at(u32::MAX, u64::MAX, u64::MAX),
+            index_entry(0, 1, 0),
+            index_entry(1, u64::MAX / 2, 1),
+            index_entry(u32::MAX, u64::MAX, u64::MAX),
         ];
         let bytes = encode_index(&entries);
         assert_eq!(
@@ -333,53 +450,114 @@ mod tests {
     /// strictly increasing positions would refuse a file this writer produces.
     #[test]
     fn two_blocks_starting_on_the_same_base_are_accepted() {
-        let entries = vec![at(0, 500, 4_096), at(0, 500, 8_192)];
+        let entries = vec![index_entry(0, 500, 4_096), index_entry(0, 500, 8_192)];
         let bytes = encode_index(&entries);
         assert_eq!(decode_index(&bytes, 2).expect("a legal file"), entries);
     }
 
-    /// A position that goes backwards is refused, and the message names the entry and both
-    /// coordinates. **A search over a disordered index does not fail — it returns the wrong
-    /// block**, and the records that come back are real records from the wrong place.
+    /// A position that goes backwards is refused **wherever in the index it happens**, and the
+    /// message names both entries and both coordinates.
+    ///
+    /// ⚠ **The fixture is eight entries and the break is walked across all seven pairs,
+    /// deliberately.** The first version of this test used two entries, so the scan over
+    /// consecutive pairs ran exactly one iteration in every test that could fail — and
+    /// `.take(1)` on that scan left all thirteen tests green while the decoder accepted an index
+    /// whose *third* entry went backwards. On a 154-entry index that is 152 of 153 pairs
+    /// unchecked.
     #[test]
-    fn an_index_whose_positions_go_backwards_is_refused() {
-        for (previous, offered) in [
-            (at(0, 900, 4_096), at(0, 800, 8_192)),
-            (at(1, 10, 4_096), at(0, 10, 8_192)),
-        ] {
-            let bytes = encode_index(&[previous, offered]);
-            let refused = decode_index(&bytes, 2).expect_err("backwards must be refused");
+    fn a_position_that_goes_backwards_anywhere_in_the_index_is_refused() {
+        // **Starting at 1,001 leaves room below every entry.** Starting at 1 made the broken
+        // entry *equal* to its predecessor at the first break position, and equal positions are
+        // legal — so the case the loop exists to cover was not a step back at all.
+        let ascending = |n: u64| index_entry(0, 1_001 + n * 100, 4_096 + n * 4_096);
+        for break_at in 1..8usize {
+            let mut entries: Vec<BlockIndexEntry> = (0..8).map(ascending).collect();
+            // Only the position moves: the offsets stay ascending, so this test can fail on the
+            // position rule and on nothing else.
+            entries[break_at].first_position.position = Position(1);
+            let bytes = encode_index(&entries);
             assert_eq!(
-                refused,
+                decode_index(&bytes, entries.len() as u64)
+                    .expect_err("a step back must be refused"),
                 IndexDecodeError::OutOfOrder {
-                    entry: 1,
-                    previous: previous.first_position,
-                    offered: offered.first_position,
+                    entry_number: break_at,
+                    previous_entry: break_at - 1,
+                    previous: entries[break_at - 1].first_position,
+                    offered: entries[break_at].first_position,
                 }
             );
         }
+    }
+
+    /// A contig that goes backwards is the same refusal, and it is a separate fixture because
+    /// the coordinate that moves is the other half of the key.
+    #[test]
+    fn an_index_whose_contigs_go_backwards_is_refused() {
+        let entries = vec![
+            index_entry(0, 10, 4_096),
+            index_entry(1, 10, 8_192),
+            index_entry(0, 10, 12_288),
+        ];
+        let bytes = encode_index(&entries);
+        assert_eq!(
+            decode_index(&bytes, 3).expect_err("a contig going backwards"),
+            IndexDecodeError::OutOfOrder {
+                entry_number: 2,
+                previous_entry: 1,
+                previous: entries[1].first_position,
+                offered: entries[2].first_position,
+            }
+        );
+    }
+
+    /// **A position resets when a new contig begins, and that is what every real psp looks
+    /// like.** Chromosome 2 starts at base 1 again, far below where chromosome 1 ended.
+    ///
+    /// ⚠ The 154-entry round-trip fixture does not cover this: its positions rise across contig
+    /// boundaries as well as within them, so a decoder that compared raw positions and ignored
+    /// contigs would pass it. Measured — adding such a rule left all thirteen tests green while
+    /// refusing this index.
+    #[test]
+    fn a_position_that_resets_at_a_new_contig_is_accepted() {
+        let entries = vec![
+            index_entry(0, 1, 4_096),
+            index_entry(0, 90_000_000, 8_192),
+            index_entry(1, 1, 12_288),
+            index_entry(1, 500, 16_384),
+            index_entry(2, 1, 20_480),
+        ];
+        let bytes = encode_index(&entries);
+        assert_eq!(
+            decode_index(&bytes, entries.len() as u64).expect("a real multi-contig index"),
+            entries
+        );
     }
 
     /// Offsets must strictly increase: two entries at one offset are one block indexed twice,
     /// and an offset that goes backwards points a seek behind where it has already read.
     ///
     /// **This is the half positions cannot carry**, because positions are allowed to repeat.
+    /// Walked across the pairs for the reason given on the position test.
     #[test]
     fn an_index_whose_offsets_repeat_or_go_backwards_is_refused() {
-        for (previous, offered) in [
-            (at(0, 500, 4_096), at(0, 600, 4_096)),
-            (at(0, 500, 8_192), at(0, 600, 4_096)),
-        ] {
-            let bytes = encode_index(&[previous, offered]);
-            let refused = decode_index(&bytes, 2).expect_err("offsets must ascend");
-            assert_eq!(
-                refused,
-                IndexDecodeError::OffsetNotAscending {
-                    entry: 1,
-                    previous: previous.offset,
-                    offered: offered.offset,
-                }
-            );
+        for break_at in 1..8usize {
+            for backwards in [false, true] {
+                let mut entries: Vec<BlockIndexEntry> = (0..8)
+                    .map(|n| index_entry(0, 1 + n * 100, 4_096 + n * 4_096))
+                    .collect();
+                let previous = entries[break_at - 1].block_offset;
+                entries[break_at].block_offset = if backwards { previous - 1 } else { previous };
+                let bytes = encode_index(&entries);
+                assert_eq!(
+                    decode_index(&bytes, entries.len() as u64).expect_err("offsets must ascend"),
+                    IndexDecodeError::OffsetNotAscending {
+                        entry_number: break_at,
+                        previous_entry: break_at - 1,
+                        previous,
+                        offered: entries[break_at].block_offset,
+                    }
+                );
+            }
         }
     }
 
@@ -391,21 +569,24 @@ mod tests {
     #[test]
     fn a_block_count_that_disagrees_with_the_bytes_is_refused_both_ways() {
         let entries = vec![
-            at(0, 1, 4_096),
-            at(0, 100_001, 8_192),
-            at(0, 200_001, 16_384),
+            index_entry(0, 1, 4_096),
+            index_entry(0, 100_001, 8_192),
+            index_entry(0, 200_001, 16_384),
         ];
         let entries_left_over = vec![entries[2]];
         let bytes = encode_index(&entries);
 
         let refused = decode_index(&bytes, 2).expect_err("a tail must be refused");
         match refused {
-            IndexDecodeError::TrailingBytes { trailing, entries } => {
-                assert_eq!(entries, 2);
+            IndexDecodeError::TrailingBytes {
+                trailing_bytes,
+                entries_read,
+            } => {
+                assert_eq!(entries_read, 2);
                 // The third entry's own bytes, computed rather than recalled: a contig varint,
                 // a three-byte position varint for 200,001, and the eight-byte offset.
-                assert_eq!(trailing, encode_index(&entries_left_over).len());
-                assert_eq!(trailing, 12);
+                assert_eq!(trailing_bytes, encode_index(&entries_left_over).len());
+                assert_eq!(trailing_bytes, 12);
             }
             other => panic!("expected trailing bytes, got {other}"),
         }
@@ -414,8 +595,8 @@ mod tests {
         assert_eq!(
             refused,
             IndexDecodeError::Truncated {
-                entry: 3,
-                field: "contig",
+                entry_number: 3,
+                field: IndexEntryField::Contig,
             }
         );
     }
@@ -425,9 +606,9 @@ mod tests {
     #[test]
     fn every_truncation_of_an_index_is_refused_without_panicking() {
         let entries = vec![
-            at(0, 1, 4_096),
-            at(3, 100_001, 8_192),
-            at(3, 200_001, 16_384),
+            index_entry(0, 1, 4_096),
+            index_entry(3, 100_001, 8_192),
+            index_entry(3, 200_001, 16_384),
         ];
         let whole = encode_index(&entries);
         // Ten bytes, then twelve, then twelve: a contig varint, a position varint that is one
@@ -459,9 +640,8 @@ mod tests {
         bytes.extend_from_slice(&4_096u64.to_le_bytes());
         assert_eq!(
             decode_index(&bytes, 1).expect_err("it does not fit a contig number"),
-            IndexDecodeError::FieldTooLarge {
-                entry: 0,
-                field: "contig",
+            IndexDecodeError::ContigNumberTooLarge {
+                entry_number: 0,
                 found: u64::from(u32::MAX) + 1,
             }
         );
@@ -477,23 +657,32 @@ mod tests {
     /// so this test fails loudly on that mutation rather than merely reporting more memory.
     #[test]
     fn a_block_count_from_a_damaged_footer_does_not_size_the_allocation() {
-        let bytes = encode_index(&[at(0, 1, 4_096)]);
+        let bytes = encode_index(&[index_entry(0, 1, 4_096)]);
         let refused = decode_index(&bytes, u64::MAX).expect_err("the file cannot hold them");
         assert!(matches!(
             refused,
-            IndexDecodeError::Truncated { entry: 1, .. }
+            IndexDecodeError::Truncated {
+                entry_number: 1,
+                ..
+            }
         ));
     }
 
-    /// The checksum is over the index's bytes, and a single changed byte moves it.
+    /// The checksum is over the index's bytes: a golden value, then a bit flipped in each byte.
     ///
-    /// **It is production's function**, so this test is about the wiring rather than the hash:
-    /// the one region of a psp no zstd frame checksum covers is this one.
+    /// ⚠ **The golden value is the half that pins which hash it is.** Without it this test
+    /// asserted only avalanche, which any hash satisfies — swapping the body for FNV-1a left all
+    /// thirteen tests green while every psp this build wrote carried a checksum no other build
+    /// would agree with. The number below is XXH3-64 truncated to its low 32 bits, which is what
+    /// production computes and what zstd uses for its own frames.
     #[test]
     fn the_checksum_moves_when_any_byte_of_the_index_does() {
-        let entries = vec![at(0, 1, 4_096), at(0, 100_001, 8_192)];
+        let entries = vec![index_entry(0, 1, 4_096), index_entry(0, 100_001, 8_192)];
         let bytes = encode_index(&entries);
         let pristine = checksum_index(&bytes);
+        // XXH3-64 over these 22 bytes, truncated to its low 32 bits. Swapping the body for
+        // FNV-1a gives 1,094,245,170 here and left every other assertion in this test green.
+        assert_eq!(pristine, 683_841_834);
         assert_eq!(pristine, checksum_index(&encode_index(&entries)));
 
         let mut changed = 0;
@@ -512,12 +701,210 @@ mod tests {
         );
     }
 
+    /// A variable-length integer with no end is **not** a truncation, and does not say the file
+    /// ends where it does not.
+    ///
+    /// Ten continuation bytes is more than any `u64` can carry. Measured before the split: this
+    /// 19-byte buffer, with nine bytes still unread, was reported as *"the index ends inside
+    /// entry 0, before its contig"* — which sends whoever holds the file looking for a cut that
+    /// is not there. No test reached this varint error at all.
+    #[test]
+    fn a_variant_length_integer_with_no_end_is_refused_as_overlong_not_truncated() {
+        let mut bytes = vec![0x80u8; 10];
+        bytes.push(0x01);
+        bytes.extend_from_slice(&4_096u64.to_le_bytes());
+        assert_eq!(bytes.len(), 19);
+        assert_eq!(
+            decode_index(&bytes, 1).expect_err("no u64 is that long"),
+            IndexDecodeError::Overlong {
+                entry_number: 0,
+                field: IndexEntryField::Contig,
+            }
+        );
+    }
+
+    /// **Every refusal renders**, including at entry 0, and none of them panics while doing it.
+    ///
+    /// ⚠ Two of these used to work the earlier entry's number out as `entry - 1` inside the
+    /// message template. Rendering one whose entry is 0 panicked with *attempt to subtract with
+    /// overflow* — a panic inside `Display`, on the path that reports a damaged file, from the
+    /// one type whose whole contract is that a damaged file is never a panic. `decode_index`
+    /// cannot produce entry 0 there, but these variants are public and constructible, and this
+    /// very test builds them by hand.
+    #[test]
+    fn every_refusal_renders_at_entry_zero_without_panicking() {
+        let somewhere = GenomePosition {
+            contig: ContigId(0),
+            position: Position(1),
+        };
+        let rendered: Vec<String> = vec![
+            IndexDecodeError::Truncated {
+                entry_number: 0,
+                field: IndexEntryField::Contig,
+            },
+            IndexDecodeError::Overlong {
+                entry_number: 0,
+                field: IndexEntryField::FirstPosition,
+            },
+            IndexDecodeError::ContigNumberTooLarge {
+                entry_number: 0,
+                found: u64::MAX,
+            },
+            IndexDecodeError::TrailingBytes {
+                trailing_bytes: 0,
+                entries_read: 0,
+            },
+            IndexDecodeError::OutOfOrder {
+                entry_number: 0,
+                previous_entry: 0,
+                previous: somewhere,
+                offered: somewhere,
+            },
+            IndexDecodeError::OffsetNotAscending {
+                entry_number: 0,
+                previous_entry: 0,
+                previous: 0,
+                offered: 0,
+            },
+        ]
+        .into_iter()
+        .map(|refusal| refusal.to_string())
+        .collect();
+
+        assert_eq!(rendered.len(), 6);
+        for message in &rendered {
+            assert!(!message.is_empty());
+            // A struct dump in a user-facing message is what `{:?}` on a coordinate gives.
+            assert!(
+                !message.contains("GenomePosition"),
+                "a message must read as a sentence, not a struct dump: {message}"
+            );
+        }
+    }
+
+    /// **The messages are the contract**, so they are pinned rather than left to whatever
+    /// `thiserror` last rendered.
+    ///
+    /// ⚠ Nothing pinned them before: cutting `Truncated`'s message down to *"the index is
+    /// damaged"*, or mislabelling the position as the contig, left all thirteen tests green.
+    /// Only `contig` was ever asserted; the other two field names appeared nowhere.
+    #[test]
+    fn each_refusal_says_what_is_wrong_and_where() {
+        assert_eq!(
+            IndexDecodeError::Truncated {
+                entry_number: 4,
+                field: IndexEntryField::FirstPosition,
+            }
+            .to_string(),
+            "the index ends inside entry 4, before its first position"
+        );
+        assert_eq!(
+            IndexDecodeError::Overlong {
+                entry_number: 4,
+                field: IndexEntryField::BlockOffset,
+            }
+            .to_string(),
+            "entry 4's block offset runs past any number a u64 can hold"
+        );
+        assert_eq!(
+            IndexDecodeError::ContigNumberTooLarge {
+                entry_number: 2,
+                found: 4_294_967_296,
+            }
+            .to_string(),
+            "entry 2 declares contig number 4294967296, which is not a contig number"
+        );
+        assert_eq!(
+            IndexDecodeError::TrailingBytes {
+                trailing_bytes: 12,
+                entries_read: 2,
+            }
+            .to_string(),
+            "the index holds 12 bytes after the 2 entries the footer declares"
+        );
+        assert_eq!(
+            IndexDecodeError::OutOfOrder {
+                entry_number: 3,
+                previous_entry: 2,
+                previous: GenomePosition {
+                    contig: ContigId(1),
+                    position: Position(900),
+                },
+                offered: GenomePosition {
+                    contig: ContigId(1),
+                    position: Position(800),
+                },
+            }
+            .to_string(),
+            "index entry 3 starts at contig 1, position 800, before entry 2 at contig 1, \
+             position 900"
+        );
+        assert_eq!(
+            IndexDecodeError::OffsetNotAscending {
+                entry_number: 3,
+                previous_entry: 2,
+                previous: 8_192,
+                offered: 4_096,
+            }
+            .to_string(),
+            "index entry 3 is at byte 4096, which does not follow entry 2 at byte 8192"
+        );
+    }
+
+    /// Each field of an entry is named in the message by the same words in every refusal.
+    #[test]
+    fn every_field_of_an_entry_has_one_spelling() {
+        let spellings: Vec<String> = [
+            IndexEntryField::Contig,
+            IndexEntryField::FirstPosition,
+            IndexEntryField::BlockOffset,
+        ]
+        .iter()
+        .map(|field| field.to_string())
+        .collect();
+        assert_eq!(spellings, ["contig", "first position", "block offset"]);
+    }
+
+    /// **Both width constants, against the bytes the encoder actually produces.**
+    ///
+    /// ⚠ Without this, neither can fail. `LARGEST_ENTRY_BYTES` was 18 for the whole of F1 — five
+    /// bytes for the contig, five for the position — and nothing noticed, because a reservation
+    /// that is too small only makes a `Vec` grow. But a position is a `u64`, so its
+    /// variable-length form runs to ten bytes and the widest entry is 23. The number was carried
+    /// over from production, where all four of the index's fields genuinely are `u32`.
+    #[test]
+    fn the_width_constants_are_the_widths_the_encoder_produces() {
+        let widest = encode_index(&[index_entry(u32::MAX, u64::MAX, u64::MAX)]);
+        assert_eq!(
+            widest.len(),
+            23,
+            "five varint bytes, ten, and the fixed eight"
+        );
+        assert!(
+            LARGEST_ENTRY_BYTES >= widest.len(),
+            "the reservation is sized by a bound the widest entry breaks: \
+             {LARGEST_ENTRY_BYTES} against {}",
+            widest.len()
+        );
+
+        let smallest = encode_index(&[index_entry(0, 0, 0)]);
+        assert_eq!(
+            smallest.len(),
+            10,
+            "one varint byte, one, and the fixed eight"
+        );
+        assert!(
+            SMALLEST_ENTRY_BYTES <= smallest.len() as u64,
+            "the allocation bound assumes entries no smaller than any entry can be"
+        );
+    }
+
     /// The bytes are the format, so their layout is stated once against a literal rather than
     /// only against this module's own decoder. **A change here is a format change**; from
     /// Milestone F it costs a version.
     #[test]
     fn one_entry_encodes_to_these_exact_bytes() {
-        let bytes = encode_index(&[at(3, 300, 4_096)]);
+        let bytes = encode_index(&[index_entry(3, 300, 4_096)]);
         assert_eq!(
             bytes,
             vec![

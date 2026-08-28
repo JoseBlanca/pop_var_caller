@@ -19,24 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **the block index goes to bytes and back, and refuses
-> an order a seek could not be driven by** (step F1 of
+> - **Last completed task (2026-08-28):** **F1 reviewed — the ordering check was only ever
+> exercised on its first pair, and a refusal panicked while printing itself** (step F1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
-> `implemented`). One entry a block — a contig, a first position, a byte offset — as two
-> variable-length integers and eight fixed bytes, which is production's split and its reasoning.
-> **The order is checked in the decoder, where production leaves it to a caller**, because of
-> what the failure looks like: a search over a disordered index does not fail, it returns the
-> wrong block, and the records that come back are a real sample's records from the wrong place.
-> **Positions may repeat and offsets may not**, and that asymmetry was probed out of the writer
-> rather than assumed — a block closed early by the byte ceiling is followed by one starting at
-> the same base, because a repeat tract and a generic locus may begin together, so a rule
-> demanding strictly increasing positions would have refused a file this writer produces. The
-> block count comes from the footer and is bounded before it sizes anything: **with the bound
-> removed the decode panics with `capacity overflow`**, and a panic is the wrong answer to a
-> damaged file. Eight defects injected, seven caught — **and the eighth was a bad mutation of
-> mine**, `Vec::new()` in place of a capped `with_capacity`, which over-allocates nothing either
-> and so was never evidence about anything; the mutation that expresses the real hazard is
-> caught. [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md).
+> `fixes-applied`). Eight checklists across six agents in their own worktrees, **41 mutations**,
+> two Blockers and six Majors. **The first Blocker: every fixture that could fail was two entries
+> long**, so the scan over consecutive pairs ran exactly one iteration — cutting it to one pair
+> deliberately left all thirteen tests green while the decoder accepted an index whose third
+> entry went backwards, which on a 154-entry index is 152 of 153 pairs unchecked. **The second:
+> two refusals worked out the earlier entry's number as `entry - 1` inside the message template**,
+> so rendering one whose entry is zero panicked — a panic inside `Display`, on the path that
+> reports a damaged file, from the one type whose contract is that a damaged file is never a
+> panic. **A third of the numbers in my own comments were wrong**: the widest entry is 23 bytes
+> and I wrote 18, because a position is a 64-bit number and I carried the arithmetic across from
+> production where every index field is 32-bit. Nothing was corrupt — a buffer grows — but
+> nothing could have caught it either, since no test can see a reservation, so the constants are
+> now asserted against the bytes the encoder actually produces. **Eighteen of the nineteen
+> numbers the review re-derived were right**, and no test took its expectation from the function
+> it tested — the previous step's Blocker shape did not recur. Seven defects re-injected, seven
+> caught. [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md).
 >
 > - **Previously (2026-08-28):** **F0 reviewed — the key went in under production's word
 > for a different thing, and the tests proved the code agreed with itself rather than that it was
@@ -1165,7 +1168,8 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md).
 - **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
 - **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
-- **Latest review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite; the largest Major was a key name colliding with production's word for a different concept in a format sharing the `.psp` extension.
+- **Latest review:** [F1](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md) — eight checklists across six agents, Request-changes: **2 Blockers, 6 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md)). 41 mutations. A two-entry fixture that could only ever check one pair, and an error that panicked while rendering itself.
+- **Previous review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite; the largest Major was a key name colliding with production's word for a different concept in a format sharing the `.psp` extension.
 - **Previous review:** [C3](doc/devel/reports/reviews/ng_psp_c3_2026-08-26.md) — eight checklists across five agents, each in its own worktree, Request-changes: **2 Blockers and 9 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c3_2026-08-26.md).** 63 mutations, and every agent reproduced the step's own falsification independently. **The pairing of checklists is because a test-only commit gives three of them almost no surface** — each was told a small surface is not no surface, and each found something.
 - **Previous review:** [C2](doc/devel/reports/reviews/ng_psp_c2_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **2 Blockers and 13 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c2_2026-08-26.md).** Between them the agents ran **106 mutations** and **811,520 fuzzed inputs**, and took the first timing anyone has of a head-only walk against a full decode — 13.5× on 30,000 uncompressed records, which is **not** the spec's 2.06× and should be read against the 5.3× that figure becomes once its decompression is stripped out. H5 still owes the real number.
 - **Previous review:** [C1](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **1 Blocker and 13 Majors, twelve of the Majors applied and one deferred to Milestone D with its hazard recorded at the code**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).** Between them the agents ran **91 mutations** (36 survived, 10 of those proved to change nothing) and **600,492 fuzzed decodes**. `cargo clippy --lib --tests --all-features -- -D warnings` was red on this branch for three errors in A1–A3 test code, which is why C1's test code had never been linted; it is green now and joins the gate.
