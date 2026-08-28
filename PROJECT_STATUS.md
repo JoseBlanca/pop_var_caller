@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **F1 reviewed — the ordering check was only ever
+> - **Last completed task (2026-08-28):** **the footer goes to bytes and back, and a file that
+> does not end with the magic is refused** (step F2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Forty-eight fixed bytes at the very end: where the index and the trailer are,
+> how long each is, how many blocks, a checksum over the index, and the magic **last** — so a
+> four-byte read at end-of-file rejects a foreign or unfinished file before anything else is
+> touched. **This is the step goal 3 rests on**: a psp with no valid footer is a run that was
+> killed part-way, and there is no safe way to read one short, because the caller would get a
+> sample that stops in the middle of a chromosome and says nothing about it. Three refusals, and
+> they are exactly the three that need nothing outside the forty-eight bytes: the magic, an
+> offset-plus-length that overflows, and an index that does not end where the trailer begins.
+> **The magic is checked *first*, and a test says so** — a footer whose numbers are nonsense and
+> whose magic is wrong is refused for the magic, because *rebuild this file* is an instruction
+> and *it is damaged* is not. What the footer cannot check is written on the function: nothing
+> here knows the file's length. Ten defects injected, ten caught.
+> [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F1 reviewed — the ordering check was only ever
 > exercised on its first pair, and a refusal panicked while printing itself** (step F1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Eight checklists across six agents in their own worktrees, **41 mutations**,
@@ -1165,7 +1182,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
 - **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
 - **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
-- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md).
+- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md).
 - **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
 - **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
 - **Latest review:** [F1](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md) — eight checklists across six agents, Request-changes: **2 Blockers, 6 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md)). 41 mutations. A two-entry fixture that could only ever check one pair, and an error that panicked while rendering itself.

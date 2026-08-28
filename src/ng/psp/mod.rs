@@ -73,7 +73,10 @@ pub use block::{
     compressed_block_at,
 };
 pub use chain_ids::{LiveSet, LiveSetChanges, LiveSetReader, LiveSetWriter};
-pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
+pub use footer::{
+    FOOTER_BYTES, FOOTER_MAGIC, FileSection, Footer, FooterDecodeError, decode_footer,
+    encode_footer,
+};
 pub use header::{
     ContigIdentity, DEFAULT_BLOCK_BYTE_CEILING, DEFAULT_GENOMIC_BLOCK_SIZE_BP,
     DEFAULT_LOOK_BACK_WINDOW_LOG, FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding,

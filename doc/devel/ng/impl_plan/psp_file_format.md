@@ -227,7 +227,7 @@ format-version bump is free until a psp file exists that someone keeps.
 honest; *building* one while writing is F3's and *reading* one at open is F4's.
 ***Depends:*** D5. ***Source:*** [arch §3.4](../arch/psp_file_format.md).
 
-☐ **F2 — the footer**, magic last, with the index checksum.
+✅ **F2 — the footer**, magic last, with the index checksum.
 ***Depends:*** F1. ***Source:*** [arch §3.4](../arch/psp_file_format.md), [spec §3.3](../spec/psp_file_format.md).
 
 ☐ **F3 — `create`, `push`, `finish`.** `push` rejects an out-of-order record; `finish` writes index,
