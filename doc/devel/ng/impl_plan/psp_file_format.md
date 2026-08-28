@@ -307,11 +307,15 @@ order across the seam and **fails on a manifest it cannot honour**.
 > [G2](../../reports/reviews/ng_psp_g2_2026-08-28.md) ·
 > [G3](../../reports/reviews/ng_psp_g3_2026-08-28.md) ·
 > [G4](../../reports/reviews/ng_psp_g4_2026-08-28.md), with their fix reports beside them.
-> **Four Blockers, and three of them were one defect meeting three operations**: a lower bound on
-> an offset that nobody could reach through, met by `records_from`, by `replace_trailer` and by
-> `append` in turn. **What Milestone G leaves owed is the same list Milestone F left**: every
-> figure about the store's cost is still the spec's, from a prototype over alignments, and H is
-> where this code is measured.
+> **Four Blockers, every one of them a wrong answer rather than a crash.** Two were the same
+> defect meeting two operations — **an offset with no lower bound anything could reach through**:
+> `replace_trailer` seeked to a trailer inside the header, and `append` truncated at a block index
+> inside it, each destroying a file and reporting success. The other two were `records_from`
+> entering a run of blocks sharing one position at its **end**, losing records with no error, and
+> a trailer rewrite that left a file which **opened** with a payload that was neither the old one
+> nor the new. **What Milestone G leaves owed is the same list Milestone F left**: every figure
+> about the store's cost is still the spec's, from a prototype over alignments, and H is where
+> this code is measured.
 
 ## Milestone H — the oracles, and the numbers
 
