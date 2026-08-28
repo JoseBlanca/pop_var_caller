@@ -96,10 +96,12 @@ use pop_var_caller::psp::PspReader as ProductionPspReader;
 // that this module's own tests do not is that it was written by someone who was not writing this
 // module. `#[path]` keeps one copy.
 //
-// **`dead_code` is this harness's doing, not the prototype's.** The include pulls in all 2,047
-// lines and this file calls four of them, `fn main` among the rest. The prototype's own two lint
-// findings are allowed on the items they belong to, in that file, where they cover its own
-// target as well — CI runs `clippy --all-targets`, which builds it either way.
+// **`dead_code` is this harness's doing, not the prototype's**, and it is the only lint allowed
+// here. The include pulls in all 2,047 lines and this file calls four of them, `fn main` among
+// the rest. The prototype's own two clippy findings were *fixed* rather than suppressed — a dead
+// store removed and a ten-argument list grouped into `EncodeSettings` — because CI runs
+// `clippy --all-targets`, which builds that file as its own target and had been failing on both
+// since it was committed.
 //
 // Remove this the day the prototype is retired; nothing here should outlive it.
 #[allow(dead_code)]
@@ -493,23 +495,21 @@ fn main() {
         coverage: prototype_defaults.coverage,
         q_sum: SummedLogError::STEPS_PER_NAT as f64,
     };
-    // The prototype's three format switches, named here because its signature takes them
-    // positionally: the store carries every field rather than the light subset, does not
-    // length-prefix its records, and does write a record head — which is the shape ng writes.
-    let light_only = false;
-    let length_prefix = false;
-    let record_head = true;
     prototype::encode_streaming(
         source.to_str().expect("a utf-8 path"),
         prototype_store.to_str().expect("a utf-8 path"),
-        PROTOTYPE_BLOCK_BYTES,
-        GRID_BP,
-        light_only,
-        length_prefix,
-        record_head,
-        ZSTD_COMPRESSION_LEVEL,
-        u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG),
-        scales,
+        prototype::EncodeSettings {
+            block_bytes: PROTOTYPE_BLOCK_BYTES,
+            genomic_block_bp: GRID_BP,
+            // The store carries every field rather than the light subset, does not length-prefix
+            // its records, and does write a record head — which is the shape ng writes.
+            light_only: false,
+            length_prefix: false,
+            record_head: true,
+            level: ZSTD_COMPRESSION_LEVEL,
+            window_log: u32::from(DEFAULT_LOOK_BACK_WINDOW_LOG),
+            scales,
+        },
     );
 
     let (shape, worst) =

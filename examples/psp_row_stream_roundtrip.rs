@@ -29,9 +29,13 @@
 //! That harness includes it whole with `#[path]` and writes a second store from the same
 //! records, so `src/ng/psp/` is checked against a codec that is not it. **The only thing this
 //! file has that the module's own tests do not is that it was written before that module and
-//! shares no code with it** — so do not change its behaviour to suit it, and do not "fix" it to
-//! satisfy a lint reported against the module. Widening a declaration's visibility is fine, and
-//! is all that has been done.
+//! shares no code with it** — so do not change what it *writes* to suit that module, and never
+//! make a number here agree with a number there.
+//!
+//! What has been done to it is three things that change no byte it produces: declarations
+//! widened to `pub(crate)`, a dead store removed, and the ten arguments of `encode_streaming`
+//! grouped into [`EncodeSettings`]. The check on any such edit is the one below — a store
+//! written before and after must be byte-identical.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -263,10 +267,6 @@ impl FrameWriter {
     }
 
     /// `record_head`'s layout: the head, then a body that stands on its own.
-    // `prev_cov_q`'s last write is dead: the loop body reassigns it and the function returns
-    // straight after. Allowed rather than removed — this file is an oracle and its behaviour is
-    // not edited (see the module doc).
-    #[allow(unused_assignments)]
     fn push_with_head(&mut self, rec: &PileupRecord) {
         if self.n_records == 0 {
             self.chrom_id = rec.chrom_id;
@@ -293,8 +293,13 @@ impl FrameWriter {
 
         // The body, built apart so its length can precede it. Both running
         // bases restart here; see `record_head`.
+        //
+        // The coverage base is a *constant* zero and the chain base is not: a body carries one
+        // coverage value and any number of chain ids, so the first has nothing to difference
+        // against and the second differences against the id before it. That is why only one of
+        // these two is `mut`.
         self.body.clear();
-        let mut prev_cov_q = 0i64;
+        let prev_cov_q = 0i64;
         let mut last_chain = 0u64;
         put_varint(&mut self.body, rec.alleles.len() as u64);
         if self.scales.gc == 0.0 {
@@ -317,7 +322,6 @@ impl FrameWriter {
                 let q = (f64::from(rec.windowed_coverage).max(0.0) * self.scales.coverage).round()
                     as i64;
                 let d = q - prev_cov_q;
-                prev_cov_q = q;
                 1 + (((d << 1) ^ (d >> 63)) as u64)
             };
             put_varint(&mut self.body, cov);
@@ -1012,22 +1016,44 @@ fn read_chunk_bytes() -> usize {
     READ_CHUNK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-// Ten arguments, every one of them a format switch this program's command line sets. Allowed
-// for the same reason as above: the oracle's shape is not changed to suit a lint. `TryCursor`
-// four hundred lines below carries the same attribute for the same reason.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_streaming(
-    psp: &str,
-    out_path: &str,
-    block_bytes: usize,
-    genomic_block_bp: u32,
-    light_only: bool,
-    length_prefix: bool,
-    record_head: bool,
-    level: i32,
-    window_log: u32,
-    scales: Scales,
-) {
+/// How a streaming store is written: everything the command line sets about the *file*, as
+/// against the two paths it is written from and to.
+///
+/// **The three flags were three bare `bool`s in a row** in the argument list this replaces, so
+/// `encode_streaming(psp, out, 1 << 20, 10_000, false, false, true, 9, 15, scales)` was a line
+/// nobody could check by reading. Named fields make the caller say which switch it means.
+#[derive(Clone, Copy)]
+pub(crate) struct EncodeSettings {
+    /// The byte target that closes a block early, whatever the grid says.
+    pub(crate) block_bytes: usize,
+    /// The genomic grid a block is cut on, in base pairs. 0 leaves the cut to `block_bytes`.
+    pub(crate) genomic_block_bp: u32,
+    /// Write only what a cohort scan reads — the position and the summed non-reference support.
+    pub(crate) light_only: bool,
+    /// Append the length a record-length prefix would have carried, so its compressed cost is
+    /// real even though nothing reads it.
+    pub(crate) length_prefix: bool,
+    /// Give every record the head that lets a reader skip its body.
+    pub(crate) record_head: bool,
+    /// zstd's compression level.
+    pub(crate) level: i32,
+    /// The log of the compressor's look-back window, which is what a reader must hold.
+    pub(crate) window_log: u32,
+    /// How finely the three quantities that arrive as floating point are stored.
+    pub(crate) scales: Scales,
+}
+
+pub(crate) fn encode_streaming(psp: &str, out_path: &str, settings: EncodeSettings) {
+    let EncodeSettings {
+        block_bytes,
+        genomic_block_bp,
+        light_only,
+        length_prefix,
+        record_head,
+        level,
+        window_log,
+        scales,
+    } = settings;
     let t0 = Instant::now();
     let mut comp = zstd::bulk::Compressor::new(level).expect("compressor");
     comp.set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false))
@@ -2044,14 +2070,16 @@ fn main() {
         "encode-streaming" => encode_streaming(
             &psp,
             &store,
-            block_kib * 1024,
-            genomic_block_kb * 1000,
-            light_only,
-            length_prefix,
-            record_head,
-            level,
-            window_log,
-            scales,
+            EncodeSettings {
+                block_bytes: block_kib * 1024,
+                genomic_block_bp: genomic_block_kb * 1000,
+                light_only,
+                length_prefix,
+                record_head,
+                level,
+                window_log,
+                scales,
+            },
         ),
         "decode-streaming" => decode_streaming(&store),
         "decode-raw" => decode_raw(&store),

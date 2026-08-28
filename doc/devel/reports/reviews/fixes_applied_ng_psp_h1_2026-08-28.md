@@ -45,19 +45,53 @@ same allele, is refused as a reference-bases difference before the per-allele lo
 test passed without the per-allele sequence comparison existing at all. It changes allele 1 now,
 and says why in its doc.
 
-### B3 — CI's clippy command is green, and the report's claim about it is corrected
+### B3 — CI's clippy command is green, both findings **fixed** rather than suppressed
 
-The two lints move onto the prototype's **own items** — `#[allow(unused_assignments)]` on
-`push_with_head`, `#[allow(clippy::too_many_arguments)]` on `encode_streaming` — where they cover
-its own target as well as the included copy. A lint attribute changes no behaviour, which is the
-ground the visibility widening was already accepted on. `cargo clippy --all-targets --all-features
--- -D warnings`, the command CI runs, is now clean; it had been failing since `b0e1a54a`.
+**The first version of this fix moved the two lints onto the prototype's own items as `#[allow]`s.
+The owner's instruction was to fix the problem, and it was the right call** — an `#[allow]` on an
+oracle is a standing promise that nobody will look again, and one of the two turned out to be
+worth looking at.
 
-What stays at the `mod` declaration is `dead_code` alone, with a comment saying it is this
-harness's doing rather than the prototype's and naming the condition for removing it.
+**The dead store was hiding a design point.** `push_with_head` opened with
 
-**And the prototype now says it is an oracle**, at the top of its own file, where someone about to
-"fix" that dead store will see it.
+```rust
+let mut prev_cov_q = 0i64;
+let mut last_chain = 0u64;
+```
+
+under a comment saying *both running bases restart here*. Only one of them is a running base. A
+body carries **one** coverage value and **any number** of chain ids, so the coverage delta is
+taken against a constant zero and the write back to `prev_cov_q` can never be read — while
+`last_chain` genuinely advances id by id. The decoder mirrors it exactly (`prev_cov_q = 0`, one
+`+=`, one use). The variable is now a `let` rather than a `let mut`, the dead write is gone, and
+the comment says which of the two bases is a base and why.
+
+**The ten arguments are grouped into `EncodeSettings`**, a struct with a named field each. That
+also settles M7 properly rather than at one call site: the line
+
+```rust
+encode_streaming(psp, out, 1 << 20, 10_000, false, false, true, 9, 15, scales)
+```
+
+is now eight named fields, so `light_only`, `length_prefix` and `record_head` say which is which
+everywhere the prototype is called, including its own `main`.
+
+**Neither edit may move a byte, and that was checked rather than argued.** A store written by the
+prototype's own `encode-streaming` phase before and after the two fixes, under identical flags:
+**1,521,415 bytes each and `cmp` reports no difference.** Its own `verify-streaming` phase still
+walks that store against the source and passes — 74,623 records, worst q-sum error 0.000122 inside
+a tolerance of 0.000244.
+
+`cargo clippy --all-targets --all-features -- -D warnings`, the command CI runs, is now clean with
+**no `#[allow]` for either finding**; it had been failing on both since `b0e1a54a`.
+
+What stays at the `mod` declaration in the harness is `dead_code` alone, which is the include's
+own doing — all 2,047 lines come in and four are called.
+
+**And the prototype now says it is an oracle**, at the top of its own file, with the rule stated
+as what it is: do not change what it *writes*, and never make a number here agree with a number
+there. Widening a declaration, removing a dead store and grouping an argument list are none of
+those, and the byte comparison is the check on any such edit.
 
 ## 2. The Majors
 
