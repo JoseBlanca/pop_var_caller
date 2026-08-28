@@ -138,6 +138,7 @@ use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
 use pop_var_caller::ng::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
+use pop_var_caller::ng::run::cohort_merge::timing as merge_timing;
 use pop_var_caller::ng::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs,
     MinAltReadShare, MinAltReads,
@@ -650,178 +651,218 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
     if let Ok(driver) = std::env::var("NG_REAL_ONLY") {
         let rounds = limit_of("NG_REAL_ROUNDS").unwrap_or(20).max(1);
         let bases = u32::try_from(limit_of("NG_REAL_WIDTH").unwrap_or(200)).expect("a width");
-        let threads = limit_of("NG_REAL_THREADS").unwrap_or(8).max(1);
+        // **A list, and every entry is run in this one process.** Comparing thread counts
+        // across container starts compares two machines: this box has drifted by a factor of
+        // two between runs of one unchanged binary, which is larger than the effect the sweep
+        // is looking for. `NG_REAL_THREADS=1,2,4,8` puts them in one sitting.
+        let thread_counts: Vec<usize> = match std::env::var("NG_REAL_THREADS") {
+            Ok(list) => list
+                .split(',')
+                .map(|count| {
+                    count
+                        .trim()
+                        .parse::<usize>()
+                        .expect("a thread count")
+                        .max(1)
+                })
+                .collect(),
+            Err(_) => vec![8],
+        };
         let width =
             CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
-        let in_flight = CohortLocusBuilderRegionsInFlight(
-            std::num::NonZeroUsize::new(limit_of("NG_REAL_IN_FLIGHT").unwrap_or(threads).max(1))
-                .expect("non-zero"),
-        );
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .expect("a pool of the asked-for size");
         let slices: Vec<&[SampleLocusObservations]> = cohort.iter().map(Vec::as_slice).collect();
 
-        // **The cohort's observations are copied between rounds and that is not the merge.**
-        // A cache consumes its readers, so every round after the first needs a fresh copy of
-        // every sample's records; timing it with the merge would charge the two cached drivers
-        // for work the oracle is never asked to do. The copy happens before the inner clock
-        // starts, so `merge_seconds` below is the merge and nothing else.
         println!("# profile-start: {driver}");
-        let started = Instant::now();
-        // **Every round's own time, not a running sum.** One descheduled round moves a mean
-        // and leaves nothing to show it did, and this machine's swing between two runs of one
-        // unchanged binary has been measured at 13–26% — larger than most of the effects this
-        // probe is used to judge. The three other probes in this module already print the
-        // median with its two extremes; this is the one that did not.
-        let mut each_round: Vec<f64> = Vec::with_capacity(rounds);
-        let mut loci = 0usize;
-        // **What the merge allocates, which is the same on every run of the same code on the
-        // same input where the milliseconds are not.** Counted only under `--features
-        // dhat-heap`; zero otherwise, and printed only when it is non-zero.
-        let mut blocks = 0u64;
-        let mut bytes = 0u64;
-        let mut freed = 0u64;
-        for _ in 0..rounds {
-            match driver.as_str() {
-                "oracle" => {
-                    let blocks_at = allocated_blocks();
-                    let bytes_at = allocated_bytes();
-                    let live_at = live_blocks();
-                    let at = Instant::now();
-                    let merged = merge_cohort_serially(
-                        &analysed,
-                        &slices,
-                        MaxCohortLocusSpan::DEFAULT,
-                        min_alt_reads,
-                    );
-                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
-                    let allocated_here = allocated_blocks() - blocks_at;
-                    blocks += allocated_here;
-                    bytes += allocated_bytes() - bytes_at;
-                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
-                        as u64;
-                    loci += merged.cohort_observations.len();
-                }
-                // **The oracle asked to own what it merges, so the two sides free the same
-                // records inside the same clock.** The plain `oracle` above borrows the
-                // cohort and so frees nothing while it is timed, while both cached drivers
-                // own their copy and free every record of it through eviction. Comparing
-                // those two charges the cache for a deallocation the oracle's caller pays
-                // later and out of shot. This arm gives the oracle its own copy — built
-                // before the clock, exactly as `sources_over` is — and drops it inside.
-                "oracle_owned" => {
-                    let owned: Vec<Vec<SampleLocusObservations>> = cohort.clone();
-                    let blocks_at = allocated_blocks();
-                    let bytes_at = allocated_bytes();
-                    let live_at = live_blocks();
-                    let at = Instant::now();
-                    let merged = {
-                        let slices: Vec<&[SampleLocusObservations]> =
-                            owned.iter().map(Vec::as_slice).collect();
-                        merge_cohort_serially(
-                            &analysed,
-                            &slices,
-                            MaxCohortLocusSpan::DEFAULT,
-                            min_alt_reads,
-                        )
-                    };
-                    let built = merged.cohort_observations.len();
-                    drop(owned);
-                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
-                    let allocated_here = allocated_blocks() - blocks_at;
-                    blocks += allocated_here;
-                    bytes += allocated_bytes() - bytes_at;
-                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
-                        as u64;
-                    loci += built;
-                    drop(merged);
-                }
-                "cache" => {
-                    let mut cache = ObservationCache::over(sources_over(&cohort));
-                    let blocks_at = allocated_blocks();
-                    let bytes_at = allocated_bytes();
-                    let live_at = live_blocks();
-                    let at = Instant::now();
-                    let merged = merge_cohort_through_cache(
-                        &analysed,
-                        &mut cache,
-                        width,
-                        MaxCohortLocusSpan::DEFAULT,
-                        min_alt_reads,
-                    )
-                    .expect("the probe's sources cannot fail");
-                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
-                    let allocated_here = allocated_blocks() - blocks_at;
-                    blocks += allocated_here;
-                    bytes += allocated_bytes() - bytes_at;
-                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
-                        as u64;
-                    loci += merged.cohort_observations.len();
-                }
-                "parallel" => {
-                    let mut cache = ObservationCache::over(sources_over(&cohort));
-                    let blocks_at = allocated_blocks();
-                    let bytes_at = allocated_bytes();
-                    let live_at = live_blocks();
-                    let at = Instant::now();
-                    let merged = pool
-                        .install(|| {
-                            merge_cohort_in_parallel(
-                                &analysed,
-                                &mut cache,
-                                width,
-                                in_flight,
-                                MaxCohortLocusSpan::DEFAULT,
-                                min_alt_reads,
-                            )
-                        })
-                        .expect("the probe's sources cannot fail");
-                    each_round.push(at.elapsed().as_secs_f64() * 1e3);
-                    let allocated_here = allocated_blocks() - blocks_at;
-                    blocks += allocated_here;
-                    bytes += allocated_bytes() - bytes_at;
-                    freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64).max(0)
-                        as u64;
-                    loci += merged.cohort_observations.len();
-                }
-                other => {
-                    return Err(format!(
-                        "NG_REAL_ONLY must be oracle, oracle_owned, cache or parallel, not {other}"
-                    )
-                    .into());
-                }
-            }
-        }
-        let seconds = started.elapsed().as_secs_f64();
-        if blocks > 0 {
-            println!(
-                "# heap blocks allocated inside the merge, per round: {}",
-                blocks / rounds as u64
-            );
-            println!(
-                "# heap bytes allocated inside the merge, per round: {}",
-                bytes / rounds as u64
-            );
-            println!(
-                "# heap blocks freed inside the merge, per round: {}",
-                freed / rounds as u64
-            );
-        }
-        each_round.sort_by(f64::total_cmp);
-        println!("# peak resident: {}", peak_resident());
         println!(
             "\ndriver, rounds, width_bases, threads, loci_per_round, median_ms, min_ms, \
              max_ms, seconds_all_rounds_including_copies"
         );
-        println!(
-            "{driver}, {rounds}, {bases}, {threads}, {}, {:.2}, {:.2}, {:.2}, {seconds:.2}",
-            loci / rounds,
-            each_round[each_round.len() / 2],
-            each_round[0],
-            each_round[each_round.len() - 1],
-        );
+
+        for threads in thread_counts {
+            let in_flight = CohortLocusBuilderRegionsInFlight(
+                std::num::NonZeroUsize::new(
+                    limit_of("NG_REAL_IN_FLIGHT").unwrap_or(threads).max(1),
+                )
+                .expect("non-zero"),
+            );
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a pool of the asked-for size");
+
+            // **The cohort's observations are copied between rounds and that is not the merge.**
+            // A cache consumes its readers, so every round after the first needs a fresh copy of
+            // every sample's records; timing it with the merge would charge the two cached drivers
+            // for work the oracle is never asked to do. The copy happens before the inner clock
+            // starts, so `merge_seconds` below is the merge and nothing else.
+            // **Where the merge's own wall time went**, summed over the rounds below and printed
+            // after them. Every counter is zero unless the build asked for `--features
+            // merge-timing`, in which case the merge itself is what timed each part
+            // (`pop_var_caller::ng::run::cohort_merge::timing`) — no sampling, no attribution.
+            merge_timing::reset();
+            let started = Instant::now();
+            // **Every round's own time, not a running sum.** One descheduled round moves a mean
+            // and leaves nothing to show it did, and this machine's swing between two runs of one
+            // unchanged binary has been measured at 13–26% — larger than most of the effects this
+            // probe is used to judge. The three other probes in this module already print the
+            // median with its two extremes; this is the one that did not.
+            let mut each_round: Vec<f64> = Vec::with_capacity(rounds);
+            let mut loci = 0usize;
+            // **What the merge allocates, which is the same on every run of the same code on the
+            // same input where the milliseconds are not.** Counted only under `--features
+            // dhat-heap`; zero otherwise, and printed only when it is non-zero.
+            let mut blocks = 0u64;
+            let mut bytes = 0u64;
+            let mut freed = 0u64;
+            for _ in 0..rounds {
+                match driver.as_str() {
+                    "oracle" => {
+                        let blocks_at = allocated_blocks();
+                        let bytes_at = allocated_bytes();
+                        let live_at = live_blocks();
+                        let at = Instant::now();
+                        let merged = merge_cohort_serially(
+                            &analysed,
+                            &slices,
+                            MaxCohortLocusSpan::DEFAULT,
+                            min_alt_reads,
+                        );
+                        each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                        let allocated_here = allocated_blocks() - blocks_at;
+                        blocks += allocated_here;
+                        bytes += allocated_bytes() - bytes_at;
+                        freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64)
+                            .max(0) as u64;
+                        loci += merged.cohort_observations.len();
+                    }
+                    // **The oracle asked to own what it merges, so the two sides free the same
+                    // records inside the same clock.** The plain `oracle` above borrows the
+                    // cohort and so frees nothing while it is timed, while both cached drivers
+                    // own their copy and free every record of it through eviction. Comparing
+                    // those two charges the cache for a deallocation the oracle's caller pays
+                    // later and out of shot. This arm gives the oracle its own copy — built
+                    // before the clock, exactly as `sources_over` is — and drops it inside.
+                    "oracle_owned" => {
+                        let owned: Vec<Vec<SampleLocusObservations>> = cohort.clone();
+                        let blocks_at = allocated_blocks();
+                        let bytes_at = allocated_bytes();
+                        let live_at = live_blocks();
+                        let at = Instant::now();
+                        let merged = {
+                            let slices: Vec<&[SampleLocusObservations]> =
+                                owned.iter().map(Vec::as_slice).collect();
+                            merge_cohort_serially(
+                                &analysed,
+                                &slices,
+                                MaxCohortLocusSpan::DEFAULT,
+                                min_alt_reads,
+                            )
+                        };
+                        let built = merged.cohort_observations.len();
+                        drop(owned);
+                        each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                        let allocated_here = allocated_blocks() - blocks_at;
+                        blocks += allocated_here;
+                        bytes += allocated_bytes() - bytes_at;
+                        freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64)
+                            .max(0) as u64;
+                        loci += built;
+                        drop(merged);
+                    }
+                    "cache" => {
+                        let mut cache = ObservationCache::over(sources_over(&cohort));
+                        let blocks_at = allocated_blocks();
+                        let bytes_at = allocated_bytes();
+                        let live_at = live_blocks();
+                        let at = Instant::now();
+                        let merged = merge_cohort_through_cache(
+                            &analysed,
+                            &mut cache,
+                            width,
+                            MaxCohortLocusSpan::DEFAULT,
+                            min_alt_reads,
+                        )
+                        .expect("the probe's sources cannot fail");
+                        each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                        let allocated_here = allocated_blocks() - blocks_at;
+                        blocks += allocated_here;
+                        bytes += allocated_bytes() - bytes_at;
+                        freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64)
+                            .max(0) as u64;
+                        loci += merged.cohort_observations.len();
+                    }
+                    "parallel" => {
+                        let mut cache = ObservationCache::over(sources_over(&cohort));
+                        let blocks_at = allocated_blocks();
+                        let bytes_at = allocated_bytes();
+                        let live_at = live_blocks();
+                        let at = Instant::now();
+                        let merged = pool
+                            .install(|| {
+                                merge_cohort_in_parallel(
+                                    &analysed,
+                                    &mut cache,
+                                    width,
+                                    in_flight,
+                                    MaxCohortLocusSpan::DEFAULT,
+                                    min_alt_reads,
+                                )
+                            })
+                            .expect("the probe's sources cannot fail");
+                        each_round.push(at.elapsed().as_secs_f64() * 1e3);
+                        let allocated_here = allocated_blocks() - blocks_at;
+                        blocks += allocated_here;
+                        bytes += allocated_bytes() - bytes_at;
+                        freed += (allocated_here as i64 + live_at as i64 - live_blocks() as i64)
+                            .max(0) as u64;
+                        loci += merged.cohort_observations.len();
+                    }
+                    other => {
+                        return Err(format!(
+                        "NG_REAL_ONLY must be oracle, oracle_owned, cache or parallel, not {other}"
+                    )
+                    .into());
+                    }
+                }
+            }
+            let seconds = started.elapsed().as_secs_f64();
+            if blocks > 0 {
+                println!(
+                    "# heap blocks allocated inside the merge, per round: {}",
+                    blocks / rounds as u64
+                );
+                println!(
+                    "# heap bytes allocated inside the merge, per round: {}",
+                    bytes / rounds as u64
+                );
+                println!(
+                    "# heap blocks freed inside the merge, per round: {}",
+                    freed / rounds as u64
+                );
+            }
+            each_round.sort_by(f64::total_cmp);
+            println!(
+                "{driver}, {rounds}, {bases}, {threads}, {}, {:.2}, {:.2}, {:.2}, {seconds:.2}",
+                loci / rounds,
+                each_round[each_round.len() / 2],
+                each_round[0],
+                each_round[each_round.len() - 1],
+            );
+            // Only the parallel driver has a pool; the others run whatever the calling thread
+            // gives them, so the "spread perfectly" line must divide by one for those.
+            let breakdown = merge_timing::report(if driver == "parallel" { threads } else { 1 });
+            if breakdown.merge_wall_ms > 0.0 {
+                println!(
+                    "# the merge's own stopwatches on {threads} threads, summed over all {rounds} \
+                 rounds"
+                );
+                println!("{breakdown}");
+            }
+            println!(
+                "# peak resident after {threads} threads: {}",
+                peak_resident()
+            );
+        }
         return Ok(());
     }
 

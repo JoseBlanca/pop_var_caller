@@ -39,6 +39,7 @@ pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
 pub mod serial;
+pub mod timing;
 
 /// The fixtures the module's test suites share — the coordinates every test writes and the
 /// failure every fake source yields.

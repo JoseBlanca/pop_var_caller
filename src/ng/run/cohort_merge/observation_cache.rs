@@ -253,6 +253,7 @@ impl<S> ObservationCache<S> {
         // again into its own array (`LocusCloser::over`); doing it twice costs nothing beside
         // the walk, and the alternative — a scratch buffer on the cache — would need interior
         // mutability on a `&self` method that several builders will hold at once.
+        let windowing = super::timing::Stopwatch::start();
         let observations_per_sample: Vec<&[SampleLocusObservations]> = self
             .samples
             .iter()
@@ -261,6 +262,7 @@ impl<S> ObservationCache<S> {
                 &held[first_reaching_index(held, left_edge)..]
             })
             .collect();
+        windowing.add_to(&super::timing::WINDOW_NANOS);
         f(&observations_per_sample)
     }
 
@@ -451,11 +453,14 @@ where
                 .samples
                 .par_iter_mut()
                 .map(|sample| {
+                    let drawing = super::timing::Stopwatch::start();
                     let mut reach = snapshot;
                     sample.draw_to(&mut reach)?;
+                    drawing.add_to(&super::timing::COVER_BUSY_NANOS);
                     Ok(reach)
                 })
                 .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
+            super::timing::COVER_SWEEPS.add(1);
             if widest == chain_reach {
                 break;
             }
@@ -472,10 +477,14 @@ where
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
     fn sweep(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
+        super::timing::COVER_SWEEPS.add(1);
         for sample in &mut self.samples {
             // Not `reach_grew |= sample.draw_to(…)?`: that reads as though the call could be
             // skipped, and a later `||` in its place would skip it.
-            if sample.draw_to(chain_reach)? {
+            let drawing = super::timing::Stopwatch::start();
+            let grew = sample.draw_to(chain_reach)?;
+            drawing.add_to(&super::timing::COVER_BUSY_NANOS);
+            if grew {
                 reach_grew = true;
             }
         }
