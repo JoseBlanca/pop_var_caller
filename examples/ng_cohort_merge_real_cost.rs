@@ -390,6 +390,28 @@ enum ProbeSource<'a> {
         template: &'a [SampleLocusObservations],
         at: usize,
     },
+    /// **Records made before the clock started, handed over by moving them.**
+    ///
+    /// Neither source above can say what the merge's *freeing* costs, because both build the
+    /// record inside the merge's clock — one clones a template, one refills the returned
+    /// buffer — and on this ground those two cost about the same, so their arms tie and the
+    /// free is invisible. A real run pays neither: the generator fills the record once,
+    /// upstream. These two arms do that. They differ in one thing only:
+    ///
+    /// - `Handing` lets the merge drop the record it hands back, which is what happens today;
+    /// - `Hoarding` keeps it instead, so nothing is freed inside the clock.
+    ///
+    /// **The difference between them is the merge's free, and nothing else.** What `Hoarding`
+    /// costs is memory — it holds every record the merge gives back — which is why it is a
+    /// measuring device and not a design.
+    Handing {
+        made: std::vec::IntoIter<SampleLocusObservations>,
+    },
+    /// [`Handing`](Self::Handing) keeping what the merge hands back rather than dropping it.
+    Hoarding {
+        made: std::vec::IntoIter<SampleLocusObservations>,
+        kept: Vec<SampleLocusObservations>,
+    },
 }
 
 impl ObservationSource for ProbeSource<'_> {
@@ -399,9 +421,29 @@ impl ObservationSource for ProbeSource<'_> {
         &mut self,
         spare: Option<SampleLocusObservations>,
     ) -> Option<Result<SampleLocusObservations, Never>> {
+        // The two arms that hand over a record made earlier answer first: they neither
+        // clone nor refill, so the only allocator work left inside the clock is the merge's.
+        match self {
+            ProbeSource::Handing { made } => {
+                // Dropped here, which is where the merge's free happens for a record the
+                // cache offered back.
+                drop(spare);
+                return made.next().map(Ok);
+            }
+            ProbeSource::Hoarding { made, kept } => {
+                if let Some(spare) = spare {
+                    kept.push(spare);
+                }
+                return made.next().map(Ok);
+            }
+            _ => {}
+        }
         let (template, at, leasing) = match self {
             ProbeSource::Minting { template, at } => (*template, at, false),
             ProbeSource::Leasing { template, at } => (*template, at, true),
+            ProbeSource::Handing { .. } | ProbeSource::Hoarding { .. } => {
+                unreachable!("the two arms that hand over a made record returned above")
+            }
         };
         let next = template.get(*at)?;
         *at += 1;
@@ -463,23 +505,70 @@ fn refill(into: &mut SampleLocusObservations, from: &SampleLocusObservations) {
 /// **The choice is the caller's rather than the environment's**, so that one process can run
 /// both and the two are compared on the same machine in the same minute. `NG_REAL_LEASE` is
 /// what sets it, and in the one-driver arm it takes a list — `0,1` runs both.
-fn sources_over(cohort: &[Vec<SampleLocusObservations>], leasing: bool) -> Vec<ProbeSource<'_>> {
+fn sources_over(cohort: &[Vec<SampleLocusObservations>], supply: Supply) -> Vec<ProbeSource<'_>> {
     cohort
         .iter()
-        .map(|sample| {
-            if leasing {
-                ProbeSource::Leasing {
-                    template: sample,
-                    at: 0,
-                }
-            } else {
-                ProbeSource::Minting {
-                    template: sample,
-                    at: 0,
-                }
-            }
+        .map(|sample| match supply {
+            Supply::Minted => ProbeSource::Minting {
+                template: sample,
+                at: 0,
+            },
+            Supply::Leased => ProbeSource::Leasing {
+                template: sample,
+                at: 0,
+            },
+            // **The copy is made here, outside the merge's clock**, which is the whole point of
+            // these two arms: a real run's generator makes the record once and the merge is not
+            // charged for it.
+            Supply::Handed => ProbeSource::Handing {
+                made: sample.to_vec().into_iter(),
+            },
+            Supply::Hoarded => ProbeSource::Hoarding {
+                made: sample.to_vec().into_iter(),
+                kept: Vec::new(),
+            },
         })
         .collect()
+}
+
+/// Where the merge's records come from, and what happens to the ones it gives back.
+///
+/// **The last two are a measuring device, not designs.** They exist to price the merge's
+/// freeing on its own: both hand over a record made before the clock started, and they differ
+/// only in whether the merge's returned record is dropped or kept.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Supply {
+    /// A fresh record every draw — what the generator does today.
+    Minted,
+    /// The returned record filled again.
+    Leased,
+    /// A record made earlier, handed over; the returned one dropped.
+    Handed,
+    /// A record made earlier, handed over; the returned one kept.
+    Hoarded,
+}
+
+impl Supply {
+    /// Read one setting from the `NG_REAL_LEASE` list.
+    fn from_name(name: &str) -> Self {
+        match name.trim() {
+            "0" | "mint" | "minted" => Self::Minted,
+            "1" | "lease" | "leased" => Self::Leased,
+            "hand" | "handed" => Self::Handed,
+            "hoard" | "hoarded" => Self::Hoarded,
+            other => panic!("NG_REAL_LEASE takes mint, lease, hand or hoard, not {other}"),
+        }
+    }
+
+    /// What the run's table calls it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Minted => "minted",
+            Self::Leased => "leased",
+            Self::Handed => "handed",
+            Self::Hoarded => "hoarded",
+        }
+    }
 }
 
 /// How many of the building regions at `width` hold an observation beginning in them, and how
@@ -723,9 +812,9 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         // **Both settings of the record supply in one process**, for the reason the thread
         // list is one: `0` mints a record a draw, which is what the generator does today, and
         // `1` refills the record the merge handed back. `NG_REAL_LEASE=0,1` runs both.
-        let lease_settings: Vec<bool> = match std::env::var("NG_REAL_LEASE") {
-            Ok(list) => list.split(',').map(|value| value.trim() != "0").collect(),
-            Err(_) => vec![false],
+        let lease_settings: Vec<Supply> = match std::env::var("NG_REAL_LEASE") {
+            Ok(list) => list.split(',').map(Supply::from_name).collect(),
+            Err(_) => vec![Supply::Minted],
         };
         let width =
             CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
@@ -748,7 +837,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                     std::num::NonZeroUsize::new(regions).expect("non-zero"),
                 );
                 // Minted, which is what a run does today; the check is about the schedule.
-                let mut cache = ObservationCache::over(sources_over(&cohort, false));
+                let mut cache = ObservationCache::over(sources_over(&cohort, Supply::Minted));
                 let merged = merge_cohort_in_parallel(
                     &analysed,
                     &mut cache,
@@ -778,7 +867,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
         );
 
         for threads in thread_counts {
-            for leasing in lease_settings.iter().copied() {
+            for supply in lease_settings.iter().copied() {
                 let in_flight = CohortLocusBuilderRegionsInFlight(
                     std::num::NonZeroUsize::new(
                         limit_of("NG_REAL_IN_FLIGHT").unwrap_or(threads).max(1),
@@ -870,7 +959,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                             drop(merged);
                         }
                         "cache" => {
-                            let mut cache = ObservationCache::over(sources_over(&cohort, leasing));
+                            let mut cache = ObservationCache::over(sources_over(&cohort, supply));
                             let blocks_at = allocated_blocks();
                             let bytes_at = allocated_bytes();
                             let live_at = live_blocks();
@@ -892,7 +981,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                             loci += merged.cohort_observations.len();
                         }
                         "parallel" => {
-                            let mut cache = ObservationCache::over(sources_over(&cohort, leasing));
+                            let mut cache = ObservationCache::over(sources_over(&cohort, supply));
                             let blocks_at = allocated_blocks();
                             let bytes_at = allocated_bytes();
                             let live_at = live_blocks();
@@ -944,7 +1033,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                 println!(
                     "{driver}, {rounds}, {bases}, {threads}, {}, {}, {:.2}, {:.2}, {:.2}, \
                  {seconds:.2}",
-                    if leasing { "leased" } else { "minted" },
+                    supply.name(),
                     loci / rounds,
                     each_round[each_round.len() / 2],
                     each_round[0],
@@ -958,7 +1047,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
                     println!(
                         "# the merge's own stopwatches on {threads} threads with records {}, \
                  summed over all {rounds} rounds",
-                        if leasing { "leased" } else { "minted" },
+                        supply.name(),
                     );
                     println!("{breakdown}");
                 }
@@ -999,13 +1088,14 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
 
     // The width sweep takes one setting of the record supply, not a list: it is already five
     // widths across four drivers, and the setting the sweep is about is the width.
-    let leasing = std::env::var("NG_REAL_LEASE").is_ok_and(|value| value != "0");
+    let supply =
+        std::env::var("NG_REAL_LEASE").map_or(Supply::Minted, |value| Supply::from_name(&value));
 
     for bases in WIDTHS {
         let width =
             CohortLocusBuilderRegionsLen(std::num::NonZeroU32::new(bases).expect("non-zero"));
         let (median, fastest, slowest) = timed(
-            || ObservationCache::over(sources_over(&cohort, leasing)),
+            || ObservationCache::over(sources_over(&cohort, supply)),
             |mut cache| {
                 std::hint::black_box(
                     &merge_cohort_through_cache(
@@ -1031,7 +1121,7 @@ fn run(fasta: &Path, crams: &Path, bed: &Path) -> Result<(), Box<dyn std::error:
             );
             let (median, fastest, slowest) = pool.install(|| {
                 timed(
-                    || ObservationCache::over(sources_over(&cohort, leasing)),
+                    || ObservationCache::over(sources_over(&cohort, supply)),
                     |mut cache| {
                         std::hint::black_box(
                             &merge_cohort_in_parallel(
