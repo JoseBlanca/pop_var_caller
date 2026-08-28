@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a finished psp is reopened and extended, and the
+> - **Last completed task (2026-08-28):** **G4 reviewed, and Milestone G is complete — a footer
+> with an empty block index let `append` truncate the header away and report success** (step G4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). **This is Checkpoint G: all five operations exist** — open, walk, walk from a
+> coordinate, replace the trailer, append. Nine checklists across two agents, one Blocker,
+> reproduced here first. **It is G3's Blocker one operation over, and the reason it survived is
+> exact**: the rule tying the block index to the header is written per *entry*, and **on an empty
+> index there are no entries to check**. A footer saying the index sits at byte 4 and holds
+> nothing passed every check the reader makes — so `append`, which truncates at that offset, cut a
+> 3,742-byte psp down to 109 bytes and returned `Ok`. The fix is in the reader, as a rule about the
+> file, so every operation that starts from `open` gets it. **Five Majors**, of which two are the
+> same shape: a level recorded as a *string* fell into the same arm as *absent* and the append
+> wrote level-9 blocks into a file claiming level 1 — the file §2.4 says must not exist, produced
+> without a word — and a level outside an `i32` was refused for a number that is not in the file.
+> **And the seam test could not tell the last record from the last block's first**: an
+> implementation keeping the wrong one passed all 381 tests. **Three of my numbers were wrong
+> again**, all about my own work: a defect table claiming eight rows with seven, an assertion I
+> said was worth nothing that is worth sixteen failing tests, and a stale figure from Milestone F
+> still standing in the code. A 7,484-mutant hostile sweep found no panic and left every refused
+> file byte-identical.
+> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g4_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a finished psp is reopened and extended, and the
 > order runs across the seam** (step G4 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). The footer says where the blocks end, so appending is truncating at the index

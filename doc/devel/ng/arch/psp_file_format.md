@@ -25,7 +25,7 @@ src/ng/psp/
 ├── reader.rs     – PspReader: open a finished file, and find the block a coordinate is in
 ├── walk.rs       – RecordIter and SelectiveRecordIter: seek to a block, stream to where
 │                  the blocks end, and build only the bodies a predicate asks for
-├── writer.rs     – PspWriter: create, push, finish
+├── writer.rs     – PspWriter: create, push, finish, and append to a finished file
 ├── trailer.rs    – replace_trailer: a finished file's closing payload, rewritten in place
 └── chain_ids.rs  – the live set and its changes (spec psp_chain_id_encoding.md)
 ```

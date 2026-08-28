@@ -533,14 +533,38 @@ pub enum ManifestRefusal {
     /// The genomic block size or the byte ceiling is one no cut rule can be built from.
     #[error(transparent)]
     CutRule(#[from] BlockCutRuleError),
+    /// The header records a compression level in a shape this writer cannot read — a string, a
+    /// float, a boolean.
+    ///
+    /// **A refusal rather than a fallback**, and the distinction is the point: *absent* is what a
+    /// file written before the parameter existed looks like and legitimately falls back to this
+    /// build's level, where *present and unreadable* is **a setting recorded and then ignored**,
+    /// which is worse than one not recorded (spec goal 4). Until the G4 review they were the same
+    /// arm, and a file recording `"1"` was appended to at level 9 with nothing said.
+    #[error("the header records a compression level of {recorded}, which is not an integer")]
+    UnreadableLevel { recorded: String },
+
+    /// The header records a compression level no `i32` can hold.
+    ///
+    /// **Its own variant so that the refusal names the level the file records.** It used to
+    /// saturate to `i32::MAX` before the range check saw it, so a file recording −5,000,000,000
+    /// was refused for recording 2,147,483,647 — a number that is not in the file, which is the
+    /// clamp `BlockCompressor::with_level` exists to prevent, moved one function upstream.
+    #[error(
+        "the header records a compression level of {recorded}, which is past what a level can be"
+    )]
+    LevelPastAnyLevel { recorded: i64 },
+
     /// The look-back window or the compression level is one no compressor can be built from.
     ///
-    /// **⚠ Nothing reaches this today, and it is kept anyway.** `PspWriter::create` encodes the
-    /// header first, and `header.rs`'s own validation already refuses an out-of-range window log
-    /// as [`PspWriteError::InvalidHeaderField`] — so the compressor never sees a manifest it
-    /// would reject. It stays because building a compressor is not the header's rule to own, and
-    /// the day that validation moves this is the class the failure belongs to (the G3 review
-    /// found it unreachable and asked for the note rather than the removal).
+    /// **Reached by `append` on a file whose recorded compression level zstd will not take** —
+    /// 99, say. It is *not* reachable through `create`, whose header is encoded first and whose
+    /// window log `header.rs`'s own validation refuses as
+    /// [`PspWriteError::InvalidHeaderField`] before the compressor sees it.
+    ///
+    /// ⚠ **The G3 review found it unreachable and this doc said so; G4 made it reachable and the
+    /// doc was not updated until G4's own review caught that.** A variant documented as
+    /// unreachable, quietly reachable, is a path nothing protects.
     #[error(transparent)]
     Compressor(#[from] BlockCompressError),
 }

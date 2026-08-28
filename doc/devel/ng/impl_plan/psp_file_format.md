@@ -289,11 +289,29 @@ trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 > classes for this operation, and reading the header — which is what bounds the trailer's offset
 > — earns it a third, `UnsupportedVersion`.
 
-☐ **G4 — `append`**, truncating at the index offset and keeping the manifest. Enforces coordinate
+✅ **G4 — `append`**, truncating at the index offset and keeping the manifest. Enforces coordinate
 order across the seam and **fails on a manifest it cannot honour**.
 ***Depends:*** F3. ***Source:*** [spec §6.4](../spec/psp_file_format.md).
+> **Reviewed** — nine checklists across two agents:
+> [the review](../../reports/reviews/ng_psp_g4_2026-08-28.md),
+> [the fixes](../../reports/reviews/fixes_applied_ng_psp_g4_2026-08-28.md). **One Blocker, and it
+> is G3's one operation over**: the rule tying the block index to the header is per *entry*, and
+> on an **empty** index there are no entries to check — so a footer putting the index at byte 4
+> passed the reader, and `append` truncated a 3,742-byte psp to 109 bytes and returned `Ok`. The
+> fix is a file-level rule in the reader, which every operation now gets.
 
 > **Checkpoint G: all five operations exist. Pause for review.**
+>
+> ✅ **Reviewed** — four rounds of nine checklists (G1–G4), each in isolated worktrees:
+> [G1](../../reports/reviews/ng_psp_g1_2026-08-28.md) ·
+> [G2](../../reports/reviews/ng_psp_g2_2026-08-28.md) ·
+> [G3](../../reports/reviews/ng_psp_g3_2026-08-28.md) ·
+> [G4](../../reports/reviews/ng_psp_g4_2026-08-28.md), with their fix reports beside them.
+> **Four Blockers, and three of them were one defect meeting three operations**: a lower bound on
+> an offset that nobody could reach through, met by `records_from`, by `replace_trailer` and by
+> `append` in turn. **What Milestone G leaves owed is the same list Milestone F left**: every
+> figure about the store's cost is still the spec's, from a prototype over alignments, and H is
+> where this code is measured.
 
 ## Milestone H — the oracles, and the numbers
 

@@ -128,6 +128,24 @@ impl PspReader {
         // ⚠ The lower bound was missing. An entry at byte 0 opened, and the refusal was deferred
         // to a corrupt block at read time — the wrong instruction, arriving after a cohort had
         // committed to the sample.
+        // **And the index itself must start after the header**, which is a rule about the file
+        // and not about any entry — so the loop below cannot carry it: **on an empty index there
+        // are no entries to check.**
+        //
+        // ⚠ That is not hypothetical. A footer saying `index_offset = 4, index_bytes = 0,
+        // n_blocks = 0` passed every check this reader made, and `PspWriter::append` — which
+        // truncates at exactly this offset — then cut a 3,742-byte psp down to 109 bytes and
+        // reported success. The four-byte bound `read_and_check_the_footer` applies is what 48
+        // bytes can say on their own; this is what the header's length adds, and it subsumes it.
+        if footer.index_offset < header_bytes as u64 {
+            return Err(PspReadError::damaged(
+                path,
+                format!(
+                    "the footer puts the block index at byte {}, which is inside the                      {header_bytes}-byte header",
+                    footer.index_offset
+                ),
+            ));
+        }
         for entry in &blocks {
             let inside = (header_bytes as u64..footer.index_offset).contains(&entry.block_offset);
             if !inside {
