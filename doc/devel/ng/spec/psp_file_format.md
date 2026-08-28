@@ -814,7 +814,7 @@ The five error classes of §7, and which operation raises each:
 | | raised by |
 |---|---|
 | no valid footer — the run was interrupted | `open`, `append`, `replace_trailer` |
-| unknown format version | `open`, `read_header`, `append` |
+| unknown format version | `open`, `read_header`, `append`, `replace_trailer` |
 | the file's look-back window exceeds the reader's budget | `open` |
 | a record needs more of the reader's buffer than it allows one to hold | any record walk |
 | a block fails to decompress, or a record runs past its block | any record walk |
@@ -822,6 +822,17 @@ The five error classes of §7, and which operation raises each:
 
 **None of these may reach a caller as a half-built record**, and none is a panic: a corrupt file is
 an input, not a bug.
+
+**⚠ `replace_trailer` joined the second row on 2026-08-28 (the owner), and it is a correction the
+implementation earned.** This section originally gave that operation two refusals — no valid
+footer, and the file's own bytes — on the reasoning that the trailer is opaque and the cheap
+operation should read nothing it does not need. **It has to read the header, and a file was
+destroyed proving it**: the footer says where the trailer starts and *nothing in the footer bounds
+that below*, because the only thing that knows where the blocks begin is the header's length. A
+file whose footer claimed the trailer began at byte 4 passed every check the 48 bytes can make
+about themselves, and the rewrite put a trailer over the header — a 3,742-byte psp reduced to 56
+bytes, reported as success. Reading the header to bound the offset means a file written by a newer
+format is now refused rather than rewritten, which is the safe answer and is this row.
 
 ---
 
