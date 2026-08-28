@@ -986,30 +986,63 @@ mod tests {
         assert_eq!(header.sample, "SRR7279481");
     }
 
-    /// The environment variable that turns this test binary into the writer the test kills.
+    /// The environment variable that turns this test binary into the writer the test kills. Its
+    /// **value is the path the child writes its psp to**.
     ///
-    /// **Re-executing the test binary is how the child is got.** A killed writer has to be a real
-    /// process, and the only program in the tree that writes a psp is this test suite.
+    /// **The child is this binary, run again.** A killed writer has to be a real process, and the
+    /// only program in this tree that writes a psp is this test suite.
     #[cfg(unix)]
-    const KILLED_WRITER_TARGET: &str = "NG_PSP_KILLED_WRITER_TARGET";
+    const WRITE_THE_PSP_HERE: &str = "NG_PSP_KILLED_WRITER_TARGET";
+
+    /// The name of the test the child is told to run. **Kept beside the test it names**, because
+    /// a rename that misses it makes the child run nothing at all.
+    #[cfg(unix)]
+    const THE_TEST_THE_CHILD_RUNS: &str = "ng::psp::writer::tests::a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses";
+
+    /// How long the parent waits for those bytes before failing rather than hanging, and how
+    /// often it looks.
+    #[cfg(unix)]
+    const WAIT_FOR_THE_CHILD: std::time::Duration = std::time::Duration::from_secs(6);
+    #[cfg(unix)]
+    const LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// The signal [`std::process::Child::kill`] sends. Asserted, so an ordinary exit cannot pass
+    /// for a kill.
+    #[cfg(unix)]
+    const SIGKILL: i32 = 9;
 
     /// **A writer killed with `SIGKILL` before `finish` leaves a file every reader refuses**, and
     /// its header still reads — which is Milestone H2's oracle and spec §6.3's goal 3.
     ///
     /// ⚠ **This is not the same test as
-    /// [`a_writer_dropped_without_finishing_leaves_a_file_with_no_footer`], and the difference is
-    /// the whole reason it exists.** Dropping a `PspWriter` in-process runs `BufWriter`'s own
-    /// `Drop`, which **flushes** — so the file on disk is everything the writer had produced, cut
-    /// at a record boundary. `SIGKILL` runs no destructor: whatever was still in the buffer is
-    /// gone, so the file can end anywhere at all, including part-way through a compressed block
-    /// or part-way through the header. That state is unreachable from inside the process, and it
-    /// is the state a killed pileup actually leaves.
+    /// [`a_writer_dropped_without_finishing_leaves_a_file_with_no_footer`].** Dropping a
+    /// `PspWriter` in-process runs `BufWriter`'s own `Drop`, which **flushes** — so the file on
+    /// disk is everything the writer had produced. `SIGKILL` runs no destructor, so **the blocks
+    /// still sitting in the buffer are lost**, and the file is shorter than the same work dropped
+    /// would leave.
+    ///
+    /// ⚠ **What the kill does *not* produce here is a cut inside a block, and the first version
+    /// of this doc claimed it did.** `PspWriter` hands each finished block to the `BufWriter` in
+    /// one `write_all`, and the buffer is the default 8 kB while this fixture's blocks average
+    /// about 57 bytes — so a flush can only ever land where a `write_all` ended, which is a block
+    /// boundary. Measured on the file the child leaves: **233 whole blocks, the chain ending
+    /// exactly at the file's last byte.** The mid-block state is real and is worth covering, and
+    /// what covers it is
+    /// [`super::super::reader::tests::every_truncation_of_a_finished_psp_is_refused_without_panicking`],
+    /// which manufactures every cut by truncation. **This test's own contribution is the
+    /// mechanism end to end on a real process**, plus the `Incomplete` refusal.
+    ///
+    /// The block-edge property is asserted below rather than left to this paragraph, so that a
+    /// change to the writer's buffering says the premise moved instead of quietly making the
+    /// claim true again.
     ///
     /// **What is asserted, and why each matters:**
     ///
     /// - the child really was killed by signal 9, so no destructor ran — without this the test
     ///   could be passing on an ordinary exit and proving nothing about the buffer;
-    /// - blocks reached disk, so the file is not empty and reading it short would be *easy*;
+    /// - blocks reached disk, so a reader that ignored the missing footer would hand back real
+    ///   records from this file — the *sample that covered less of the genome* spec §6.3's goal 3
+    ///   forbids;
     /// - `PspReader::open` refuses it as [`PspReadError::Incomplete`], not as damage — the
     ///   instruction is *the run was interrupted, rebuild it*;
     /// - `read_header` still succeeds (spec §6.6), because a tool that reports what a
@@ -1020,11 +1053,11 @@ mod tests {
         use std::os::unix::process::ExitStatusExt as _;
 
         // The child arm. Reached only in the re-executed copy of this binary.
-        if let Ok(target) = std::env::var(KILLED_WRITER_TARGET) {
+        if let Ok(psp_path) = std::env::var(WRITE_THE_PSP_HERE) {
             let mut writer =
-                PspWriter::create(Path::new(&target), a_header(1_000)).expect("a header");
-            // Enough records to cut many blocks, so the parent can catch it mid-write; then park
-            // rather than looping, so a parent that dies leaves no process filling the disk.
+                PspWriter::create(Path::new(&psp_path), a_header(1_000)).expect("a header");
+            // 80,000 records four bases apart on the 1 kb grid — about 320 blocks, so the parent
+            // has many stopping points to catch it at rather than one.
             for contig in 0..2u32 {
                 for at in 0..40_000u64 {
                     writer
@@ -1032,51 +1065,91 @@ mod tests {
                         .expect("in order");
                 }
             }
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            // Stop pushing and wait to be killed — **bounded**, so an orphan left by a parent
+            // that died itself does not sleep for ever on a machine these suites run on all day.
+            //
+            // **And it panics rather than returning**, because this branch is inside the test it
+            // is spawned to re-run: returning would be a *pass*. A process that reaches here was
+            // never killed, which means it was not the child the parent spawned — the usual cause
+            // being the environment variable already set in the shell.
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            panic!(
+                "this process took the writer branch and was never killed: {WRITE_THE_PSP_HERE} \
+                 was set in an environment this test did not create"
+            );
         }
 
         let (_dir, path) = a_file();
         let mut child = std::process::Command::new(
             std::env::current_exe().expect("the test binary knows its own path"),
         )
-        .args([
-            "--exact",
-            "ng::psp::writer::tests::a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses",
-            "--nocapture",
-        ])
-        .env(KILLED_WRITER_TARGET, &path)
+        .args(["--exact", THE_TEST_THE_CHILD_RUNS, "--nocapture"])
+        .env(WRITE_THE_PSP_HERE, &path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // **Kept, not discarded.** Every way the child can fail — a stale `--exact` name after a
+        // rename, a panic in `create`, a panic in `push` — reaches the parent only as an
+        // ordinary exit, and the assertion that fires first is the one about SIGKILL. Without
+        // the child's own words that refusal reads as *a destructor ran*, which sends the reader
+        // into `BufWriter::drop` instead of at the four characters that went stale.
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("re-executing this test binary");
 
         // Wait until blocks have reached disk, so the kill lands on a file worth refusing rather
         // than on an empty one. Bounded, so a child that never writes fails the test instead of
         // hanging it.
-        let enough = u64::try_from(FOOTER_BYTES * 8).expect("a small number");
-        let mut on_disk = 0;
-        for _ in 0..600 {
-            on_disk = std::fs::metadata(&path).map(|it| it.len()).unwrap_or(0);
-            if on_disk > enough {
+        //
+        // **The threshold is the header's own length, not a multiple of the footer.** An earlier
+        // version used eight footers — 384 bytes — against a header of 3,136, so a child killed
+        // before it had finished writing its *header* cleared the guard and then failed three
+        // assertions later, inside `read_header`, pointing at the header reader.
+        let enough_bytes = {
+            let (_scratch_dir, sound) = a_finished_psp();
+            let (_header, header_bytes) = crate::ng::psp::read_header_and_its_length(&sound)
+                .expect("a finished psp's header reads");
+            u64::try_from(header_bytes).expect("a header is a small number of bytes")
+        };
+        let mut bytes_on_disk = 0;
+        let mut why_the_file_could_not_be_measured = None;
+        let rounds = WAIT_FOR_THE_CHILD.as_millis() / LOOK_EVERY.as_millis();
+        for _ in 0..rounds {
+            match std::fs::metadata(&path) {
+                Ok(found) => bytes_on_disk = found.len(),
+                Err(source) => why_the_file_could_not_be_measured = Some(source),
+            }
+            if bytes_on_disk > enough_bytes {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(LOOK_EVERY);
         }
-        let killed = child.kill().and_then(|()| child.wait());
-        let status = killed.expect("the child is killed and reaped");
+        child
+            .kill()
+            .expect("the child is still alive and can be killed");
+        let status = child.wait().expect("the killed child is reaped");
+        let mut what_the_child_said = String::new();
+        if let Some(mut complaints) = child.stderr.take() {
+            use std::io::Read as _;
+            let _ = complaints.read_to_string(&mut what_the_child_said);
+        }
 
+        // **This assertion cannot tell its causes apart, so it names all of them.** It is the
+        // first to fire whenever the child exits on its own, whatever the reason.
         assert_eq!(
             status.signal(),
-            Some(9),
-            "the child has to die by SIGKILL — an ordinary exit would run every destructor, \
-             including the flush this test exists to prevent"
+            Some(SIGKILL),
+            "the child exited on its own instead of dying by SIGKILL (exit code {:?}, \
+             {bytes_on_disk} bytes written, file not measurable: \
+             {why_the_file_could_not_be_measured:?}). Either it never ran this test — \
+             `THE_TEST_THE_CHILD_RUNS` repeats this test's own name and goes stale on a rename, \
+             and a libtest binary whose filter matches nothing exits 0 — or it ran and exited, \
+             which would run the flush this test exists to prevent. The child said: \
+             {what_the_child_said}",
+            status.code()
         );
         assert!(
-            on_disk > enough,
-            "the child wrote {on_disk} bytes before the kill; with no blocks on disk this file \
-             is refused for being empty rather than for being unfinished"
+            bytes_on_disk > enough_bytes,
+            "the child wrote {bytes_on_disk} bytes before the kill; with no blocks on disk this \
+             file is refused for being empty rather than for being unfinished"
         );
 
         let bytes = bytes_of(&path);
@@ -1084,6 +1157,41 @@ mod tests {
             bytes.get(bytes.len().saturating_sub(4)..),
             Some(&FOOTER_MAGIC[..]),
             "a killed writer cannot have written a footer"
+        );
+
+        // **Where the kill actually cut.** Walk the length-prefixed block chain forward from the
+        // header's end: if it lands exactly on the file's last byte, every block on disk is
+        // whole, and the kill lost buffered blocks rather than splitting one.
+        let (_, header_bytes) = crate::ng::psp::read_header_and_its_length(&path)
+            .expect("the header survives the kill");
+        let mut at = header_bytes;
+        let mut whole_blocks = 0;
+        while at + crate::ng::psp::COMPRESSED_BLOCK_LENGTH_BYTES <= bytes.len() {
+            let declared: [u8; crate::ng::psp::COMPRESSED_BLOCK_LENGTH_BYTES] = bytes
+                [at..at + crate::ng::psp::COMPRESSED_BLOCK_LENGTH_BYTES]
+                .try_into()
+                .expect("a slice of exactly the prefix's width");
+            let next = at
+                + crate::ng::psp::COMPRESSED_BLOCK_LENGTH_BYTES
+                + u32::from_le_bytes(declared) as usize;
+            if next > bytes.len() {
+                break;
+            }
+            at = next;
+            whole_blocks += 1;
+        }
+        assert!(
+            whole_blocks > 0,
+            "the kill has to leave whole blocks on disk, or this file is a header and nothing else"
+        );
+        assert_eq!(
+            at,
+            bytes.len(),
+            "the kill left a partial block on disk. That is not a defect — it is the state this \
+             test's doc used to claim it produced and does not. If the writer's buffering has \
+             changed so that a block can now exceed the `BufWriter`, update the ⚠ paragraph \
+             above: {whole_blocks} whole blocks, chain ending at {at} of {} bytes",
+            bytes.len()
         );
         let refused = PspReader::open(&path).expect_err("a file with no footer is not readable");
         assert!(

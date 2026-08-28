@@ -1059,20 +1059,27 @@ mod tests {
     /// **Every byte, not every sixteenth** (Milestone H2). A killed writer stops at whatever byte
     /// the kernel had taken, and one cut in sixteen leaves fifteen of every sixteen stopping
     /// points unvisited — including most of the two- and four-byte fields a section boundary is
-    /// made of. Measured: **3,742 cuts on this fixture, 0.19 s**, against 234 cuts before. The
-    /// count is asserted below rather than left to this sentence.
+    /// made of. On this fixture that is **3,742 cuts against 234**, and the sweep took 0.19 s in
+    /// the dev container. Both figures are the fixture's size and move with it; what is asserted
+    /// below is that the number of cuts refused equals the number of cuts taken.
     #[test]
     fn every_truncation_of_a_finished_psp_is_refused_without_panicking() {
         let (_dir, path) = a_finished_psp();
         let whole = bytes_of(&path);
         let mut incomplete = 0;
         let mut damaged = 0;
+        let mut not_an_ng_psp = 0;
         for cut in 0..whole.len() {
             rewrite(&path, &whole[..cut]);
             match PspReader::open(&path) {
                 Err(PspReadError::Incomplete { .. }) => incomplete += 1,
                 Err(PspReadError::Damaged { .. }) => damaged += 1,
-                Err(PspReadError::NotAnNgPsp { .. }) => incomplete += 1,
+                // **Counted apart, not folded into `incomplete`.** A cut refused as *the wrong
+                // kind of file* means something else entirely, and
+                // `a_half_written_file_still_has_a_header_at_every_cut` requires that a
+                // truncated ng psp is never called one. Unreachable while `open` reads the
+                // footer first — which is exactly why it is pinned rather than tolerated.
+                Err(PspReadError::NotAnNgPsp { .. }) => not_an_ng_psp += 1,
                 Err(other) => panic!("a cut at {cut} gave {other}"),
                 Ok(_) => panic!("a cut at {cut} opened"),
             }
@@ -1081,6 +1088,10 @@ mod tests {
             incomplete > 0 && damaged == 0,
             "a truncated psp has lost its footer, so every cut is incomplete: \
              {incomplete} incomplete, {damaged} damaged"
+        );
+        assert_eq!(
+            not_an_ng_psp, 0,
+            "a truncated ng psp is never reported as the wrong kind of file"
         );
         assert_eq!(
             incomplete,

@@ -445,18 +445,26 @@ mod tests {
     // A read that fails, rather than a file that ends
     // -----------------------------------------------------------------
 
+    /// The kernel's *bad file descriptor* refusal, which is what a read on a write-only
+    /// descriptor gives. Named so the number is not one of two bare `9`s in this milestone — the
+    /// other is `SIGKILL`, in `writer.rs`.
+    const EBADF: i32 = 9;
+
     /// **A `read(2)` that fails part-way through a block reaches the caller as
     /// [`PspReadError::Io`], naming the file and what was being done to it.**
     ///
-    /// This is the one arm of [`refuse`] nothing reached until Milestone H2, and the reason is
-    /// that the obvious way to break a walk does not break it in this way: **truncating a file
-    /// under an open reader gives an end of file, not an error**, and a stream that runs out of
-    /// source is a *truncated file*, which is a different class with a different instruction.
+    /// This is the one branch of [`refuse`] — the function that puts a block-level failure in
+    /// the class whose instruction fits it — that no test reached before this step, and the
+    /// reason is that the obvious way to break a walk does not break it in this way:
+    /// **truncating a file under an open reader gives an end of file, not an error**, and a
+    /// stream that runs out of source is a *truncated file*, which is a different class with a
+    /// different instruction.
     ///
     /// The failure is produced here without `unsafe`, without closing a descriptor out from
     /// under a `File`, and without a platform trick: **the walk is handed a descriptor opened
     /// write-only on a real psp.** Seeking succeeds, and every `read(2)` on it fails with
-    /// `EBADF` — a genuine kernel refusal, deterministic, and the same on Linux and macOS.
+    /// `EBADF`, the kernel's *bad file descriptor* refusal — deterministic, and the same on
+    /// Linux and macOS.
     ///
     /// **What it holds is that the class survives the trip.** A read failure must not arrive as
     /// `CorruptBlock` — *rebuild the file* is the wrong instruction for a disk that went away,
@@ -466,27 +474,36 @@ mod tests {
         let (_dir, path) = a_finished_psp();
         let footer = footer_of(&bytes_of(&path));
         // The real reader, only to learn where the blocks are and to prove this file is sound.
-        let mut sound = PspReader::open(&path).expect("the fixture opens");
+        let mut sound_reader = PspReader::open(&path).expect("the fixture opens");
         assert!(
-            sound.records().expect("a walk").next().is_some(),
+            sound_reader.records().expect("a walk").next().is_some(),
             "the fixture has to hold a record, or a failing read has nothing to fail during"
         );
-        let first_block = sound.block_index().first().expect("a block").block_offset;
+        let first_block_starts_at = sound_reader
+            .block_index()
+            .first()
+            .expect("a block")
+            .block_offset;
 
         // **Write-only, and deliberately not truncating**: the bytes on disk stay a valid psp,
         // so the only thing wrong is that this descriptor cannot be read from.
-        let mut unreadable = std::fs::OpenOptions::new()
+        let mut write_only_handle = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .expect("a psp can be opened for writing");
-        let manifest = a_header(1_000).manifest;
+        // **The manifest comes from the file being walked**, not from a fixture builder that
+        // happens to agree with it: a walk configured from one file and pointed at another is a
+        // wrong test that still fails plausibly.
+        let manifest = crate::ng::psp::read_header(&path)
+            .expect("the fixture's header reads")
+            .manifest;
         let start = WalkStart {
             blocks_end: footer.index_offset,
-            block_offset: first_block,
+            block_offset: first_block_starts_at,
             first_block: 0,
             record_buffer_ceiling_bytes: DEFAULT_RECORD_BUFFER_CEILING_BYTES,
         };
-        let mut walk = walk_from(&path, &mut unreadable, &manifest, start)
+        let mut walk = walk_from(&path, &mut write_only_handle, &manifest, start)
             .expect("building a walk reads nothing, so it succeeds even here");
         let refused = walk
             .next()
@@ -494,19 +511,24 @@ mod tests {
             .expect_err("a descriptor that cannot be read from cannot yield a record");
         match refused {
             PspReadError::Io {
-                path: named,
+                path: named_path,
                 while_doing,
                 source,
             } => {
-                assert_eq!(named, path, "the refusal names the file it was reading");
-                assert!(
-                    !while_doing.is_empty(),
-                    "the refusal says what was being done to it"
+                assert_eq!(
+                    named_path, path,
+                    "the refusal names the file it was reading"
+                );
+                assert_eq!(
+                    while_doing, "reading a block's compressed bytes",
+                    "the refusal says what was being done to the file, in the words `block.rs` \
+                     sets when a source read fails — pinned, because an empty phrase would pass \
+                     a check that it is merely non-empty"
                 );
                 assert_eq!(
                     source.raw_os_error(),
-                    Some(9),
-                    "the cause is the kernel's own EBADF, not a manufactured error: {source}"
+                    Some(EBADF),
+                    "the cause is the kernel's own refusal, not a manufactured error: {source}"
                 );
             }
             other => panic!(
@@ -524,38 +546,42 @@ mod tests {
         let (_dir, path) = a_finished_psp();
         let whole = bytes_of(&path);
         let footer = footer_of(&whole);
-        let first_block = PspReader::open(&path)
+        let first_block_starts_at = PspReader::open(&path)
             .expect("the fixture opens")
             .block_index()
             .first()
             .expect("a block")
             .block_offset;
+        let manifest = crate::ng::psp::read_header(&path)
+            .expect("the fixture's header reads")
+            .manifest;
         // **One byte off the end of the last block**, so the cut is certainly *inside* a block.
         // A cut that happens to land on a block boundary ends the walk cleanly and correctly —
         // the stream read whole blocks and then ran out — which is not the case this contrast
         // is about, and is how the first version of this test failed.
-        let cut = usize::try_from(footer.index_offset - 1).expect("a small file");
+        let cut = usize::try_from(
+            footer
+                .index_offset
+                .checked_sub(1)
+                .expect("the blocks do not end at byte zero"),
+        )
+        .expect("the fixture is small enough to index");
         assert!(
-            cut > usize::try_from(first_block).expect("a small file"),
+            cut > usize::try_from(first_block_starts_at).expect("the first block starts early"),
             "the cut has to land after the first block begins"
         );
         rewrite(&path, &whole[..cut]);
         let mut file = std::fs::File::open(&path).expect("the cut file opens");
-        let manifest = a_header(1_000).manifest;
         let start = WalkStart {
             blocks_end: footer.index_offset,
-            block_offset: first_block,
+            block_offset: first_block_starts_at,
             first_block: 0,
             record_buffer_ceiling_bytes: DEFAULT_RECORD_BUFFER_CEILING_BYTES,
         };
-        let mut walk = walk_from(&path, &mut file, &manifest, start).expect("a walk");
-        let refused = loop {
-            match walk.next() {
-                Some(Ok(_)) => continue,
-                Some(Err(refused)) => break refused,
-                None => panic!("a walk over a file that ends inside a block must not end cleanly"),
-            }
-        };
+        let refused = walk_from(&path, &mut file, &manifest, start)
+            .expect("a walk")
+            .find_map(Result::err)
+            .expect("a walk over a file that ends inside a block must not end cleanly");
         assert!(
             matches!(refused, PspReadError::CorruptBlock { .. }),
             "a source that runs out is a truncated file, not a failed read; got {refused}"

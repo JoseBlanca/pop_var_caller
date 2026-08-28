@@ -704,8 +704,12 @@ mod tests {
     use super::*;
     use crate::ng::types::{ContigId, Position};
 
-    /// **A half-written file still has a header, at every cut** — spec §6.6's whole claim, made
-    /// exhaustive rather than sampled (Milestone H2).
+    /// **A half-written file still has a header, at every cut of a whole psp** — spec §6.6's
+    /// claim, which nothing held before this step.
+    ///
+    /// Its neighbour [`a_file_cut_short_inside_its_header_is_refused_at_every_cut`] sweeps a bare
+    /// encoded header and only requires *some* refusal; this sweeps a finished file and requires
+    /// the class and the boundary.
     ///
     /// [`read_header`] exists so that a tool can report what a killed run *was going to be*, on a
     /// file every reader correctly refuses. That is only worth anything if it holds wherever the
@@ -717,8 +721,8 @@ mod tests {
     /// - **below it, it refuses without panicking**, and always as
     ///   [`MalformedHeader`](PspReadError::MalformedHeader).
     ///
-    /// ⚠ **Never as [`NotAnNgPsp`](PspReadError::NotAnNgPsp), and the reason is worth knowing.**
-    /// The magic is compared only *after* a twelve-byte read of the magic and the declared body
+    /// ⚠ **Never as [`NotAnNgPsp`](PspReadError::NotAnNgPsp).** The magic is compared only
+    /// *after* a twelve-byte read of the magic and the declared body
     /// length has succeeded, so a file cut inside its own magic is refused for being too short
     /// before its first four bytes are ever looked at. **A truncated ng psp is therefore never
     /// reported as the wrong kind of file** — which is the right answer, since it is an ng psp,
@@ -737,7 +741,14 @@ mod tests {
         let (want, header_bytes) =
             read_header_and_its_length(&path).expect("the whole file's header reads");
 
-        let (mut read_it, mut malformed) = (0usize, 0usize);
+        assert!(
+            header_bytes > HEAD_MAGIC.len(),
+            "the fixture's header has to be longer than its magic, or the cuts inside the magic \
+             — the ones that would tempt a `NotAnNgPsp` — are never taken"
+        );
+
+        let mut cuts_that_read = 0usize;
+        let mut cuts_refused = 0usize;
         for cut in 0..whole.len() {
             rewrite(&path, &whole[..cut]);
             match read_header(&path) {
@@ -750,36 +761,26 @@ mod tests {
                         found, want,
                         "a cut at {cut} gave a different header from the whole file's"
                     );
-                    read_it += 1;
+                    cuts_that_read += 1;
                 }
                 Err(PspReadError::MalformedHeader { .. }) => {
                     assert!(
                         cut < header_bytes,
                         "a cut at {cut} holds a whole {header_bytes}-byte header and was refused"
                     );
-                    malformed += 1;
+                    cuts_refused += 1;
                 }
                 Err(other) => panic!("a cut at {cut} gave {other}"),
             }
         }
         assert_eq!(
-            read_it + malformed,
-            whole.len(),
-            "every cut has to be accounted for"
-        );
-        assert_eq!(
-            read_it,
+            cuts_that_read,
             whole.len() - header_bytes,
             "every cut at or past the header must read, and no other"
         );
         assert_eq!(
-            malformed, header_bytes,
+            cuts_refused, header_bytes,
             "and every cut below it must be refused as a malformed header"
-        );
-        assert!(
-            header_bytes > HEAD_MAGIC.len(),
-            "the fixture's header has to be longer than its magic, or the cuts inside the magic \
-             — the ones that would tempt a `NotAnNgPsp` — are never taken"
         );
     }
 
