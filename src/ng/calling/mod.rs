@@ -60,6 +60,7 @@ pub mod genotype_prior;
 pub mod genotype_table;
 pub mod inference;
 pub mod likelihood;
+pub mod parameters_file;
 pub mod quality;
 pub mod run_parameters;
 pub mod run_report;
