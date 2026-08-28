@@ -19,7 +19,23 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **G1 reviewed — asking for a coordinate two blocks
+> - **Last completed task (2026-08-28):** **a walk that hands over every record's head and
+> builds only the bodies a predicate asks for** (step G2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **It is not a filter, and the type's doc says so first**: every record of every
+> block still arrives, in order, and what the predicate decides is whether the body was built — a
+> caller reading it as a filter would take the walk's length for the number of records it kept,
+> so the fixture makes the two differ (40 heads, 20 bodies). **The predicate is a builder on the
+> walk rather than a fourth entry point**: `records_from(at)?.only_where(…)` is the shape a
+> cohort reading one region of every sample writes, and spec §6.2's `records_where` is the
+> whole-file case of it. **The live set is exact after a declined record too**, which is the
+> whole reason the chain-id changes ride in the head and not the body — the test declines the
+> record where one id departs and another arrives. Four defects injected, four caught. ⚠ **The
+> mutation harness misreported one as a survivor**, its "0 failed" check matching the `10 failed`
+> in the line it read; the line it printed showed the truth and the check is now `; 0 failed`.
+> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G1 reviewed — asking for a coordinate two blocks
 > begin on lost the records of the earlier one, silently** (step G1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Nine checklists across three agents, and **the Blocker was found twice

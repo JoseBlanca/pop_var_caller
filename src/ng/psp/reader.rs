@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use super::footer::{FOOTER_BYTES, Footer, decode_footer};
 use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
 use super::index::BlockIndexEntry;
-use super::walk::{self, RecordIter};
+use super::walk::{self, RecordHead, RecordIter, SelectiveIter};
 use super::{PspReadError, index, read_header_from};
 use crate::ng::types::GenomePosition;
 
@@ -241,6 +241,33 @@ impl PspReader {
             .first()
             .map_or(self.footer.index_offset, |first| first.block_offset);
         self.walk_from(0, at)
+    }
+
+    /// Every record in the file, building only the bodies `want` asks for.
+    ///
+    /// **This is the shape the cohort's first pass uses** (spec §6.2), and it is the whole-file
+    /// case of [`RecordIter::only_where`] — a walk from a coordinate takes a predicate the same
+    /// way. A record the predicate declines still arrives, in order, with its head; what it does
+    /// not carry is a body.
+    ///
+    /// ```no_run
+    /// # use pop_var_caller::ng::psp::PspReader;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let mut psp = PspReader::open(std::path::Path::new("a.psp"))?;
+    /// for found in psp.records_where(|head| head.non_reference_reads > 0)? {
+    ///     let found = found?;
+    ///     if let Some(record) = found.record {
+    ///         // only the records the predicate wanted were built
+    ///         let _ = record;
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn records_where<F>(&mut self, want: F) -> Result<SelectiveIter<'_, F>, PspReadError>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        Ok(self.records()?.only_where(want))
     }
 
     /// Every record from one block onwards, named by its ordinal in

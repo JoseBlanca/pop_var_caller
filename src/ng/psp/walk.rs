@@ -21,6 +21,10 @@ use super::PspReadError;
 use super::block::{BlockReadError, BlockStream, ROLLING_BYTES, StreamedRecord};
 use super::chain_ids::LiveSet;
 use super::header::Manifest;
+/// **Re-exported, so that `reader.rs` can name it in a signature without naming the record
+/// module** — which its own guard test forbids, and rightly: a file that may not decode a record
+/// has no business importing the decoder. The head is what a predicate is shown.
+pub(super) use super::record::RecordHead;
 
 /// The default ceiling on how much of a walk's rolling buffer **one record** may have.
 ///
@@ -167,7 +171,7 @@ pub struct RecordIter<'a> {
     first_block: u64,
 }
 
-impl RecordIter<'_> {
+impl<'a> RecordIter<'a> {
     /// Which reads are live at the record last handed back.
     ///
     /// **The chain ids the residual observation is derived from** (spec psp_chain_id_encoding
@@ -197,6 +201,40 @@ impl RecordIter<'_> {
     /// Before the first record it answers the ordinal the walk began at.
     pub fn current_block(&self) -> u64 {
         self.first_block + self.stream.blocks_begun().saturating_sub(1)
+    }
+
+    /// The same walk, building only the records `want` asks for.
+    ///
+    /// **Here rather than only on [`super::PspReader`]** so that every entry point gets the skip:
+    /// `records_from(at)?.only_where(…)` is what a cohort reading one region of every sample
+    /// writes, and spec §6.2's `records_where` is the whole-file case of it.
+    pub fn only_where<F>(self, want: F) -> SelectiveIter<'a, F>
+    where
+        F: FnMut(&RecordHead) -> bool,
+    {
+        SelectiveIter { walk: self, want }
+    }
+
+    /// One record out of the stream, with its failure put in the class whose instruction fits.
+    ///
+    /// **The one place a record is stepped**, so [`Iterator`] and [`SelectiveIter`] cannot drift:
+    /// the only difference between a full walk and a selective one is the predicate handed here.
+    fn step(
+        &mut self,
+        want: impl FnMut(&RecordHead) -> bool,
+    ) -> Option<Result<StreamedRecord, PspReadError>> {
+        match self.stream.next_record_where(want) {
+            Some(Ok(record)) => Some(Ok(record)),
+            // **Classified after the stream has been asked**, so the block count names the block
+            // the failure happened in rather than the one before it.
+            Some(Err(failed)) => Some(Err(refuse(
+                self.path,
+                self.first_block,
+                self.stream.blocks_begun(),
+                failed,
+            ))),
+            None => None,
+        }
     }
 }
 
@@ -292,18 +330,66 @@ impl Iterator for RecordIter<'_> {
     type Item = Result<StreamedRecord, PspReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.stream.next_record() {
-            Some(Ok(record)) => Some(Ok(record)),
-            // **Classified after the stream has been asked**, so the block count names the block
-            // the failure happened in rather than the one before it.
-            Some(Err(failed)) => Some(Err(refuse(
-                self.path,
-                self.first_block,
-                self.stream.blocks_begun(),
-                failed,
-            ))),
-            None => None,
-        }
+        self.step(|_| true)
+    }
+}
+
+/// A walk that builds only the records a predicate asks for.
+///
+/// **The skip is the reader's decision rather than a separate call** (spec §6.2). Every record
+/// opens with the head of spec §4.3, so a walk hands the caller the head and the caller says
+/// whether it wants the body: a record the predicate declines costs its head and a pointer
+/// advance, and comes back with [`StreamedRecord::record`] as `None`.
+///
+/// **⚠ It is not a filter, and reading it as one is the mistake to avoid.** Every record of every
+/// block still arrives, in order; what the predicate decides is whether the *body* was built. A
+/// caller that wants only the records it kept drops the rest, and the skip has already saved it
+/// the work of building them.
+///
+/// **The bytes still have to arrive either way.** Skipping saves building the record, not
+/// decompressing it: a block comes out of zstd sequentially and there is nothing to seek past.
+///
+/// **⚠ What that is worth was measured on the prototype's reader and not on this one**: over
+/// 7.69 M records of a tomato accession, a walk keeping one record in a hundred took 0.141 s
+/// against 0.29 s for one building every record. Milestone H5 times this reader, on the
+/// 279-reads-a-position sample as well as on tomato — and the chain-id changes ride in the head
+/// and grow with depth, so how much of that 2.06× survives at depth is an open question.
+#[derive(Debug)]
+#[must_use = "a walk that is not iterated reads nothing"]
+pub struct SelectiveIter<'a, F> {
+    walk: RecordIter<'a>,
+    want: F,
+}
+
+impl<F> SelectiveIter<'_, F> {
+    /// Which reads are live at the record last handed back — see [`RecordIter::live_reads`].
+    ///
+    /// **Exact after a declined record too**, which is the whole point of putting the chain-id
+    /// changes in the head rather than in the body: a caller walking with a predicate that
+    /// declines most records still knows which reads are live at the ones it takes.
+    pub fn live_reads(&self) -> &LiveSet {
+        self.walk.live_reads()
+    }
+
+    /// How many blocks this walk has opened — see [`RecordIter::blocks_begun`].
+    pub fn blocks_begun(&self) -> u64 {
+        self.walk.blocks_begun()
+    }
+
+    /// The ordinal of the block the record last handed back came from — see
+    /// [`RecordIter::current_block`].
+    pub fn current_block(&self) -> u64 {
+        self.walk.current_block()
+    }
+}
+
+impl<F: FnMut(&RecordHead) -> bool> Iterator for SelectiveIter<'_, F> {
+    type Item = Result<StreamedRecord, PspReadError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // `&mut F` is itself `FnMut`, so the predicate is borrowed for the step rather than
+        // moved: a walk keeps its own across every record.
+        self.walk.step(&mut self.want)
     }
 }
 
@@ -1371,5 +1457,230 @@ mod tests {
             .collect();
         assert_eq!(starts.len(), 5, "the last block's records, and no others");
         assert_eq!(starts[0], last.first_position.position);
+    }
+
+    // -----------------------------------------------------------------
+    // The head-driven skip (G2)
+    // -----------------------------------------------------------------
+
+    /// **A declined record still arrives; what it does not carry is a body.** `records_where`
+    /// is not a filter, and a caller reading it as one would take the walk's length for the
+    /// number of records it kept.
+    ///
+    /// The predicate keeps every other record, so the two halves are the same size and neither
+    /// count could stand in for the other: 40 records, 20 built.
+    #[test]
+    fn a_declined_record_arrives_with_its_head_and_no_body() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+
+        let mut seen = 0usize;
+        let mut built = 0usize;
+        let mut heads = Vec::new();
+        let walk = psp
+            .records_where(|_| {
+                seen += 1;
+                seen % 2 == 1
+            })
+            .expect("the walk starts");
+        for found in walk {
+            let found = found.expect("a finished psp walks");
+            heads.push(found.head.region);
+            if found.record.is_some() {
+                built += 1;
+            }
+        }
+        assert_eq!(heads.len(), 40, "every record's head arrives");
+        assert_eq!(built, 20, "and half of them were built");
+    }
+
+    /// **The records a predicate keeps are the records a full walk gives**, field for field.
+    ///
+    /// This is Milestone C3's property through the file: every difference a body carries
+    /// restarts at the record, so a skipped body strands nothing — and the failure it guards
+    /// against is silent, because the records after a skipped one decode plausibly and wrong.
+    #[test]
+    fn the_records_a_predicate_keeps_match_a_full_walk() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let whole: Vec<_> = psp
+            .records()
+            .expect("the walk starts")
+            .map(|found| found.expect("a finished psp walks").record.expect("a body"))
+            .collect();
+        assert_eq!(whole.len(), 40);
+
+        // Every third record, so the kept ones are spread across blocks rather than bunched.
+        let mut at = 0usize;
+        let kept: Vec<_> = psp
+            .records_where(|_| {
+                at += 1;
+                at.is_multiple_of(3)
+            })
+            .expect("the walk starts")
+            .filter_map(|found| found.expect("a finished psp walks").record)
+            .collect();
+        let expected: Vec<_> = whole
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (index + 1) % 3 == 0)
+            .map(|(_, record)| record.clone())
+            .collect();
+        assert_eq!(kept.len(), 13, "40 records, every third");
+        assert_eq!(kept, expected);
+    }
+
+    /// **The live set is exact after a declined record too**, which is why the chain-id changes
+    /// ride in the record's head and not in its body (spec psp_record_encoding §6).
+    ///
+    /// The fixture's middle record is declined, and the ids that arrive and depart at it still
+    /// move — so a caller keeping one record in a hundred can still derive the residual
+    /// observation at the ones it keeps.
+    #[test]
+    fn the_live_set_is_exact_after_a_declined_record() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+        for (at, ids) in [(1u64, vec![5u64, 9]), (101, vec![9, 12]), (201, vec![12])] {
+            let mut record = a_record(0, at, 1);
+            record.observations[0].chain_ids = ids;
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let mut at = 0usize;
+        // Decline the middle record, which is where 5 departs and 12 arrives.
+        let mut walk = psp
+            .records_where(|_| {
+                at += 1;
+                at != 2
+            })
+            .expect("the walk starts");
+        let expected: [(&[u64], bool); 3] = [(&[5, 9], true), (&[9, 12], false), (&[12], true)];
+        for (live, built) in expected {
+            let found = walk
+                .next()
+                .expect("a record")
+                .expect("a finished psp walks");
+            assert_eq!(found.record.is_some(), built);
+            assert_eq!(walk.live_reads().ids(), live);
+        }
+        assert!(walk.next().is_none());
+    }
+
+    /// **A predicate that declines everything still walks every block and every record.** The
+    /// bytes have to arrive either way: skipping saves building the record, not decompressing
+    /// it, because a block comes out of zstd sequentially and there is nothing to seek past.
+    #[test]
+    fn a_predicate_that_declines_everything_still_reads_every_block() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let blocks = psp.block_index().len() as u64;
+
+        let mut walk = psp.records_where(|_| false).expect("the walk starts");
+        let mut seen = 0;
+        for found in walk.by_ref() {
+            let found = found.expect("a finished psp walks");
+            assert!(found.record.is_none(), "nothing was wanted");
+            seen += 1;
+        }
+        assert_eq!(seen, 40);
+        assert_eq!(walk.blocks_begun(), blocks);
+    }
+
+    /// **The predicate spec §6.2 writes is the one that works.** A walk keeping only the records
+    /// where something varied is the cohort's first pass, and on this fixture — whose reads all
+    /// agreed with the reference — it keeps none of the 40 while still seeing all of them.
+    #[test]
+    fn the_first_passs_predicate_keeps_only_what_varies() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let mut kept = 0;
+        let mut seen = 0;
+        for found in psp
+            .records_where(|head| head.non_reference_reads > 0)
+            .expect("the walk starts")
+        {
+            let found = found.expect("a finished psp walks");
+            seen += 1;
+            if found.record.is_some() {
+                kept += 1;
+            }
+        }
+        assert_eq!(seen, 40, "every head was offered");
+        assert_eq!(
+            kept, 0,
+            "the fixture's reads all agree with the reference, so nothing varies"
+        );
+    }
+
+    /// **A walk from a coordinate takes a predicate too**, which is what a cohort reading one
+    /// region of every sample writes. `records_where` is the whole-file case of the same thing.
+    #[test]
+    fn a_walk_from_a_coordinate_takes_a_predicate() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let entries = psp.block_index().to_vec();
+        // Inside the last block, so the walk covers that block and no more.
+        let asked = GenomePosition {
+            contig: entries[7].first_position.contig,
+            position: Position(entries[7].first_position.position.get() + 50),
+        };
+        let mut at = 0usize;
+        let found: Vec<_> = psp
+            .records_from(asked)
+            .expect("the walk starts")
+            .only_where(|_| {
+                at += 1;
+                at == 1
+            })
+            .map(|found| {
+                let found = found.expect("a finished psp walks");
+                (found.head.region.start, found.record.is_some())
+            })
+            .collect();
+        assert_eq!(found.len(), 5, "the last block's five records");
+        assert!(found[0].1, "the first was wanted");
+        assert!(
+            found[1..].iter().all(|(_, built)| !built),
+            "and none of the rest was built"
+        );
+        assert_eq!(found[0].0, entries[7].first_position.position);
+    }
+
+    /// **A selective walk refuses the way a full one does**, in the same class and naming the
+    /// same block — the classification is one function, not one per walk shape.
+    #[test]
+    fn a_selective_walk_refuses_a_wrecked_block_the_same_way() {
+        let (_dir, path) = a_finished_psp();
+        let mut whole = bytes_of(&path);
+        let wrecked_block = 2usize;
+        let (at, ends) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            let entries = psp.block_index();
+            (
+                entries[wrecked_block].block_offset as usize,
+                entries[wrecked_block + 1].block_offset as usize,
+            )
+        };
+        whole[at + COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
+        rewrite(&path, &whole);
+
+        let mut psp = PspReader::open(&path).expect("the index and footer are untouched");
+        let mut walk = psp.records_where(|_| false).expect("the walk starts");
+        let mut good = 0;
+        let refused = loop {
+            match walk.next() {
+                Some(Ok(_)) => good += 1,
+                Some(Err(refused)) => break refused,
+                None => panic!("a wrecked block was walked past"),
+            }
+        };
+        assert_eq!(good, 10, "the heads of the two blocks before it");
+        match &refused {
+            PspReadError::CorruptBlock { block, .. } => assert_eq!(*block, wrecked_block as u64),
+            other => panic!("got {other}"),
+        }
+        assert!(walk.next().is_none(), "a refused walk is finished");
     }
 }
