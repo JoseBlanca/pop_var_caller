@@ -1,0 +1,81 @@
+format_version = 1
+ploidy = 2
+
+[fitted_from]
+reference_digest = "0123456789abcdef"
+samples = [
+    "TS-1",
+    "Ailsa ‘Craig’ \"×2\"",
+]
+read_groups = [
+    { read_group = 0, declared_id = "HWI.3", library = "lib3", sample = "TS-1" },
+    { read_group = 1, declared_id = "HWI.4", library = "lib4", sample = "TS-1" },
+    { read_group = 2, declared_id = "HWI.5", library = "lib5", sample = "Ailsa ‘Craig’ \"×2\"" },
+]
+
+[fitted_from.census]
+terms = [
+    { term = "the loci actually kept", digest = "fedcba9876543210" },
+]
+
+[base_quality_calibration]
+by_read_group = [
+    { read_group = 0, error_probability_multiplier = { value = 1.0324, warrant = "fitted_here", observations = { reads = 812344 } } },
+    { read_group = 1, error_probability_multiplier = { value = 1.0, warrant = "defaulted", observations = { reads = 4 } } },
+    { read_group = 2, error_probability_multiplier = { value = 0.87, warrant = "supplied", observations = { reads = 640918 } } },
+]
+
+[contamination]
+by_read_group = [
+    { read_group = 0, library = "lib3", measurement = { fraction = 0.031, markers_with_reads = 4211, reads_on_markers = 90233, fitted_from_reads_of = "this_read_groups_own_reads" } },
+    { read_group = 1, library = "lib4" },
+    { read_group = 2, library = "lib5", measurement = { fraction = 0.0, markers_with_reads = 2903, reads_on_markers = 64118, fitted_from_reads_of = "every_read_of_this_sample" } },
+]
+
+[sequencing_batches]
+was_declared_by_the_run = true
+by_read_group = [
+    { read_group = 0, batch = 0 },
+    { read_group = 1, batch = 1 },
+    { read_group = 2, batch = 1 },
+]
+by_sample = [
+    { sample = "TS-1", batch = 0 },
+    { sample = "Ailsa ‘Craig’ \"×2\"", batch = 1 },
+]
+
+[inbreeding]
+by_sample = [
+    { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } },
+    { sample = "Ailsa ‘Craig’ \"×2\"", inbreeding_coefficient = { value = 0.17, warrant = "borrowed", observations = { covered_positions = 9411027 } } },
+]
+
+[ordinary_site_prior]
+reference_concentration = 1.0
+alternative_concentration_total = 0.0006
+rung = "fitted_curve"
+
+[repeat_tracts]
+stated_length_spectrum_concentration = { value = 1.25, warrant = "defaulted" }
+slippage_group_by_read_group = [
+    { read_group = 0, slippage_group = 0 },
+    { read_group = 1, slippage_group = 0 },
+    { read_group = 2, slippage_group = 1 },
+]
+slippage_by_stratum_and_group = [
+    { period = 2, reference_repeats = 6, slippage_group = 0, level = 0.0421, shorter_share = 0.83, fall_off = 0.31, level_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "inside" } }, slipped_reads = 8000.5 }, shares_origin = { slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.167, strata = 12, rung = "this_period" }, reach = "above_fitted" } } } },
+    { period = 2, reference_repeats = 11, slippage_group = 1, level = 0.0913, shorter_share = 0.79, fall_off = 0.28, level_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "below_fitted" } } } },
+    { period = 1, reference_repeats = 30, slippage_group = 0, level = 0.19, shorter_share = 0.77, fall_off = 0.24, level_origin = { smoothing = "this_stratum", slipped_reads = 12040.25 }, shares_origin = { slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.167, strata = 12, rung = "this_period" }, reach = "inside" } }, fall_off_smoothing = "this_stratum" } },
+]
+length_spectrum_by_stratum = [
+    { period = 2, reference_repeats = 6, concentration = 3.5, shares_by_repeat_offset = [0.1, 0.8, 0.1] },
+]
+length_spectrum_by_period = [
+    { period = 2, concentration = 2.75, shares_by_repeat_offset = [0.15, 0.7, 0.15] },
+]
+substitution_rate_by_stratum = [
+    { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, warrant = "borrowed", observations = { bases_compared = 40122 } } },
+]
+
+[stated_constants]
+repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }

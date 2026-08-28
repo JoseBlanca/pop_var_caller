@@ -82,7 +82,7 @@
 //! by_read_group = [ { read_group = 0, batch = 0 } ]
 //! by_sample = [ { sample = "TS-1", batch = 0 } ]
 //!
-//! [inbreeding]                     # §3.5 — the file's only cohort-sized axis
+//! [inbreeding]                     # §3.5 — one of the file's two cohort-sized axes
 //! by_sample = [ { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } } ]
 //!
 //! [ordinary_site_prior]            # §3.6 — the seed itself, never the moments behind it
@@ -150,6 +150,7 @@
 //!   choose its own order and pin it with its own golden file.
 
 mod from_run_parameters;
+mod to_toml;
 
 use serde::{Deserialize, Serialize};
 
@@ -581,11 +582,15 @@ pub struct SampleBatchRow {
 // §3.5 — per sample, the inbreeding coefficient
 // ---------------------------------------------------------------------
 
-/// **How inbred each sample is** — one row a sample, and the file's only cohort-sized axis.
+/// **How inbred each sample is** — one row a sample, and **one of the file's two cohort-sized
+/// axes**.
 ///
-/// At the top of the committed range, 3,000 samples, this is 3,000 lines and the file is a few
-/// hundred kilobytes: negligible beside the VCF it sits next to, and still openable in an editor
-/// (spec §9).
+/// At the top of the committed range, 3,000 samples, this is 3,000 lines and a few hundred
+/// kilobytes: negligible beside the VCF it sits next to, and still openable in an editor. **The
+/// other cohort-sized axis is the larger by two orders of magnitude** — the repeat-tract
+/// substitution rate, keyed by (read group × stratum × ploidy), which spec §9's correction of
+/// 2026-08-28 prices at up to 62 MB where this one is 0.44 MB. This doc said *only* until step B2
+/// produced a file to count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inbreeding {
@@ -1078,7 +1083,7 @@ mod tests {
     ///   in slippage group 0, and read group 2 sits in slippage group 1, so the map is not the
     ///   identity;
     /// - **one string needs escaping and one float needs full precision** (above).
-    fn a_file_using_every_shape() -> ParametersFile {
+    pub(super) fn a_file_using_every_shape() -> ParametersFile {
         ParametersFile {
             format_version: FORMAT_VERSION,
             ploidy: 2,

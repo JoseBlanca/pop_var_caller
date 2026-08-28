@@ -114,7 +114,7 @@ in-band zeros.
 their indices.
 *Depends:* A3. *Source:* §3.
 
-☐ **B2. The file shape → TOML text.** Serialisation, with the layout choices §4 names: per-sample
+✅ **B2. The file shape → TOML text.** Serialisation, with the layout choices §4 names: per-sample
 rows as one inline table a line, the repeat-tract tables as arrays of arrays rather than arrays of
 tables.
 *Depends:* B1. *Source:* §4.

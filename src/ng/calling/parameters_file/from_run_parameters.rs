@@ -2016,6 +2016,34 @@ mod tests {
         assert_eq!(read, written);
     }
 
+    /// **A fitted run writes a file, and it reads back as the same file** — Checkpoint B's claim,
+    /// end to end from `RunParameters` through the hand-written writer.
+    ///
+    /// Not step C4's round trip, which comes back to a `RunParameters` and needs the reader; this
+    /// one stops at the shape. What it adds to the writer's own tests is that the text a *run*
+    /// produces parses — the every-shape fixture is hand-built, and a projection can emit a row
+    /// that fixture has no equivalent of.
+    #[test]
+    fn a_fitted_run_writes_a_file_that_reads_back() {
+        let written = the_projected_file();
+        let text = written.to_toml();
+        let read: ParametersFile =
+            toml::from_str(&text).unwrap_or_else(|error| panic!("{error}\n\n{text}"));
+        assert_eq!(read, written);
+
+        assert!(
+            text.contains("[contamination]"),
+            "this run had a read group identify a fraction:\n{text}"
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains("inbreeding_coefficient"))
+                .count(),
+            2,
+            "one line a sample, which is the form spec §9 prices the per-sample axis in"
+        );
+    }
+
     #[test]
     #[should_panic(expected = "libraries and its parameters cover")]
     fn a_read_group_table_with_another_runs_library_count_is_refused() {
