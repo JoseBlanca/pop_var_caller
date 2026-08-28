@@ -109,13 +109,13 @@ impl PspWriter {
         let builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
             PspWriteError::UnsupportedManifest {
                 path: path.to_path_buf(),
-                reason: source.to_string(),
+                source: source.into(),
             }
         })?;
         let compressor = BlockCompressor::from_manifest(&header.manifest).map_err(|source| {
             PspWriteError::UnsupportedManifest {
                 path: path.to_path_buf(),
-                reason: source.to_string(),
+                source: source.into(),
             }
         })?;
 
@@ -172,7 +172,7 @@ impl PspWriter {
                 },
                 other => PspWriteError::RecordRefused {
                     path: self.path.clone(),
-                    reason: other.to_string(),
+                    source: other,
                 },
             })?;
         self.records += 1;
@@ -190,7 +190,7 @@ impl PspWriter {
                 self.spent = Some("a block could not be compressed");
                 return Err(PspWriteError::BlockRefused {
                     path: self.path.clone(),
-                    reason: source.to_string(),
+                    source,
                 });
             }
         };
@@ -220,6 +220,8 @@ impl PspWriter {
             return Err(PspWriteError::WouldNotBeReadable {
                 path: self.path.clone(),
                 reason: format!("records were lost earlier in the walk: {why}"),
+                // The loss happened earlier and its own error went to the caller then.
+                source: None,
             });
         }
         let last_block = self
@@ -234,7 +236,7 @@ impl PspWriter {
                 .compress(&payload)
                 .map_err(|source| PspWriteError::BlockRefused {
                     path: self.path.clone(),
-                    reason: source.to_string(),
+                    source,
                 })?
                 .to_vec();
             self.put_block(&head, &block)?;
@@ -304,7 +306,8 @@ impl PspWriter {
         index::decode_index(index_bytes, footer.n_blocks).map_err(|source| {
             PspWriteError::WouldNotBeReadable {
                 path: self.path.clone(),
-                reason: format!("the block index it wrote reads back as: {source}"),
+                reason: "the block index it wrote does not decode".to_string(),
+                source: Some(source.into()),
             }
         })?;
         // **The checksum too**, because a reader checks it before it decodes: a footer carrying
@@ -319,12 +322,15 @@ impl PspWriter {
                      wrote checksums to {found:#010x}",
                     footer.index_checksum
                 ),
+                // A rule the writer checks itself: no decoder can see the two together.
+                source: None,
             });
         }
         footer::decode_footer(&encode_footer(footer)).map_err(|source| {
             PspWriteError::WouldNotBeReadable {
                 path: self.path.clone(),
-                reason: format!("the footer it wrote reads back as: {source}"),
+                reason: "the footer it wrote does not decode".to_string(),
+                source: Some(source.into()),
             }
         })?;
         Ok(())
@@ -339,7 +345,8 @@ impl PspWriter {
             .map(|decoded| decoded.head)
             .map_err(|source| PspWriteError::WouldNotBeReadable {
                 path: path.to_path_buf(),
-                reason: format!("a block it just built reads back as: {source}"),
+                reason: "a block it just built does not decode".to_string(),
+                source: Some(source.into()),
             })
     }
 

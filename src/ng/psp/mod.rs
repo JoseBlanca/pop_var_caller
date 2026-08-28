@@ -72,6 +72,7 @@ pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod reader;
 pub(crate) mod record;
+pub(crate) mod retrailer;
 pub(crate) mod walk;
 pub(crate) mod writer;
 
@@ -103,6 +104,7 @@ pub use record::{
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
     decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
+pub use retrailer::replace_trailer;
 pub use walk::{RecordIter, SelectiveRecordIter};
 pub use writer::{PspWriter, WriteStats};
 
@@ -499,6 +501,43 @@ pub enum DamageFound {
     BlockIndex(#[from] IndexDecodeError),
 }
 
+/// Which of a psp's own decoders refused a structure the **writer** read back before believing
+/// it, under [`PspWriteError::WouldNotBeReadable`].
+///
+/// **`finish` decodes the index and the footer it is about to write with the very functions a
+/// reader will use** (spec §6.3), so this is the read side's own account arriving on the write
+/// side. Transparent, so a chain reads *which structure* from the parent and *what was wrong with
+/// it* from here.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum NotReadable {
+    /// The block index the writer built does not decode.
+    #[error(transparent)]
+    BlockIndex(#[from] IndexDecodeError),
+    /// The footer the writer built does not decode.
+    #[error(transparent)]
+    Footer(#[from] FooterDecodeError),
+    /// A block's opening fields do not decode out of the block the writer just built.
+    #[error(transparent)]
+    BlockHead(#[from] BlockHeadDecodeError),
+}
+
+/// Why a writer cannot honour a file's manifest, under [`PspWriteError::UnsupportedManifest`].
+///
+/// **Two things are built from a manifest before a byte is written** — the rule that cuts a block
+/// and the compressor — and they fail for different reasons, which a caller reading only a
+/// sentence could not tell apart.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestRefusal {
+    /// The genomic block size or the byte ceiling is one no cut rule can be built from.
+    #[error(transparent)]
+    CutRule(#[from] BlockCutRuleError),
+    /// The look-back window or the compression level is one no compressor can be built from.
+    #[error(transparent)]
+    Compressor(#[from] BlockCompressError),
+}
+
 impl PspReadError {
     /// A rule this reader checks itself broke, and there is no error underneath it.
     ///
@@ -558,8 +597,14 @@ pub enum PspWriteError {
     /// An append was asked to extend a file whose manifest this writer cannot honour.
     /// **Appending does not rewrite the header**, so the added records must use the
     /// encodings the file already declares (spec §6.4).
-    #[error("{} declares a manifest this writer cannot honour: {reason}", path.display())]
-    UnsupportedManifest { path: PathBuf, reason: String },
+    #[error("{} declares a manifest this writer cannot honour", path.display())]
+    UnsupportedManifest {
+        path: PathBuf,
+        /// **Typed, so a caller can tell the cut rule from the compressor** without reading a
+        /// sentence — and so `Display` and the chain do not print the same words twice.
+        #[source]
+        source: ManifestRefusal,
+    },
 
     /// Reopening a finished file failed. **Append and trailer replacement read before they
     /// write** — the footer for the offsets, the header for the manifest — so both surface
@@ -577,13 +622,21 @@ pub enum PspWriteError {
     ///
     /// **Not [`OutOfOrder`](Self::OutOfOrder)**, which is the one refusal a caller can act on by
     /// reordering its input; these say the record itself cannot be written.
-    #[error("{}: a record could not be written: {reason}", path.display())]
-    RecordRefused { path: PathBuf, reason: String },
+    #[error("{}: a record could not be written", path.display())]
+    RecordRefused {
+        path: PathBuf,
+        #[source]
+        source: BlockWriteError,
+    },
 
     /// A block the compressor refused — its own configuration, or a frame longer than the
     /// four-byte length in front of it can describe.
-    #[error("{}: a block could not be compressed: {reason}", path.display())]
-    BlockRefused { path: PathBuf, reason: String },
+    #[error("{}: a block could not be compressed", path.display())]
+    BlockRefused {
+        path: PathBuf,
+        #[source]
+        source: BlockCompressError,
+    },
 
     /// **The writer was about to produce a file its own reader would refuse**, and stopped.
     ///
@@ -591,7 +644,16 @@ pub enum PspWriteError {
     /// very functions that will read them back. A file that reaches disk and is then rejected is
     /// a walk thrown away; this turns that into an error before the bytes land.
     #[error("{}: this writer would have produced a file it cannot read — {reason}", path.display())]
-    WouldNotBeReadable { path: PathBuf, reason: String },
+    WouldNotBeReadable {
+        path: PathBuf,
+        /// Which structure would not read back, in a sentence. The detail is the cause's.
+        reason: String,
+        /// The decoder's own account, when a decoder refused. `None` when the rule that broke is
+        /// one the writer checks itself — the index's checksum against the footer's copy of it,
+        /// which no decoder can see.
+        #[source]
+        source: Option<NotReadable>,
+    },
 
     /// Writing the file's bytes failed. Named and sourced the way
     /// [`PspReadError::Io`] is, and for the same reason.

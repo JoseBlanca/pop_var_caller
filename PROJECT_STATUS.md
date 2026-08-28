@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **G2 reviewed — nothing held the one claim the type
+> - **Last completed task (2026-08-28):** **a finished psp's trailer is replaced without a byte
+> of its blocks or its index moving** (step G3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). It is the cheap operation, and the reason the index sits *before* the trailer:
+> the trailer's offset is where the rewrite starts. **It reads the fixed tail and deliberately
+> neither the header nor the block index** — spec §6.7 names only two refusals for it, reading the
+> index would cost a decode per call, and every field written back except the trailer's length is
+> the file's own. **The file is trimmed afterwards, and a shorter trailer is why**: a reader takes
+> the last forty-eight bytes for its footer, so leaving the file at its old length would put the
+> tail of the old trailer past the new footer and the file would be refused. The blocks-untouched
+> claim is compared **as bytes**, not as a decode. **And the write-side errors carry their causes
+> now**, carried forward from F3 and F4: two variants take the error itself and drop their
+> sentence, one takes a typed two-way cause, and one keeps a sentence naming which structure with
+> the decoder's own account underneath. Six defects injected; ⚠ **one survived the first run** —
+> nothing covered the rule that stands between a footer with nonsense offsets and a fresh footer
+> blessing them — and the test that now catches it was written because of that.
+> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G2 reviewed — nothing held the one claim the type
 > exists for** (step G2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`, status `fixes-applied`). Nine checklists across two agents, no Blocker, five
 > Majors — **and every one of them was about what the tests do not hold rather than what the code
