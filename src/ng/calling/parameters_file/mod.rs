@@ -56,8 +56,10 @@
 //! terms = [ { term = "the loci actually kept", digest = "…" } ]
 //!
 //! [base_quality_calibration]       # §3.3
-//! by_read_group = [ { read_group = 0, error_probability_multiplier = 1.0324,
-//!                     warrant = "fitted_here" } ]
+//! by_read_group = [ { read_group = 0,
+//!                     error_probability_multiplier = { value = 1.0324,
+//!                                                      warrant = "fitted_here",
+//!                                                      observations = { reads = 812344 } } } ]
 //!
 //! [contamination]                  # §3.4 — the whole table absent means uncontaminated
 //! by_read_group = [ { read_group = 0, library = "lib3", fraction = 0.031,
@@ -70,7 +72,7 @@
 //! by_sample = [ { sample = "TS-1", batch = 0 } ]
 //!
 //! [inbreeding]                     # §3.5 — the file's only cohort-sized axis
-//! by_sample = [ { sample = "TS-1", inbreeding_coefficient = 0.42 } ]
+//! by_sample = [ { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } } ]
 //!
 //! [ordinary_site_prior]            # §3.6 — the seed itself, never the moments behind it
 //! reference_concentration = 1.0
@@ -78,8 +80,7 @@
 //! rung = "fitted_curve"
 //!
 //! [repeat_tracts]                  # §3.7
-//! stated_length_spectrum_concentration = 1.0
-//! stated_length_spectrum_warrant = "defaulted"
+//! stated_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 //! slippage_by_stratum_and_group = [ … one row a (stratum × slippage group) … ]
 //! length_spectrum_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
@@ -87,7 +88,7 @@
 //! substitution_rate_by_stratum = [ … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
-//! repeat_tract_outlier_weight = 0.01
+//! repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
 //! ```
 //!
 //! # Three conventions the whole tree keeps
@@ -123,6 +124,13 @@
 //! - **The reader can be**, in principle: `toml::from_str` reads an inline table into a struct
 //!   whatever shape wrote it. `the_documented_inline_form_parses` is what holds that, because it
 //!   is the claim steps B and C meet on and the derived serializer never produces the form.
+//! - **A section whose fields are all tables gets no header line of its own from `serde`.**
+//!   Every field of `[repeat_tracts]` and of `[stated_constants]` is now a table or an array, so
+//!   the golden file has neither header line and the largest section of the file opens unnamed.
+//!   That is
+//!   `serde`'s rendering and not the artefact's design: the writer of step B2 emits the section
+//!   headers itself. **Read `testdata/every_shape.toml` as a record of the key names, not as the
+//!   file a run will produce.**
 //! - **`serde` emits a struct's table-valued fields after its scalar ones**, whatever the
 //!   declared order. So `format_version` and `ploidy` open the file because they are the only
 //!   scalars at the top level, not because they are declared first; and in a `Blend` row
@@ -163,6 +171,82 @@ pub enum Warrant {
     Supplied,
     /// Nothing could be fitted and nothing was supplied, so a stated constant was used.
     Defaulted,
+}
+
+/// **A number, what entitles a score to claim it, and how much data stood behind it** — the
+/// file's spelling of [`Estimate<T>`](crate::ng::parameter_estimation::Estimate), and the one
+/// shape every four-state-warranted number in the file is written in.
+///
+/// **One shape rather than a value and a warrant side by side**, so that a reader who has
+/// understood one warranted number has understood all of them. The flat alternative —
+/// `error_probability_multiplier = 1.0324` beside `warrant = "fitted_here"` — reads better in a
+/// row that holds exactly one such number and worse everywhere else, because it needs a
+/// different suffixed key each time; and two spellings of one idea is what this shape exists to
+/// remove.
+///
+/// **The evidence count names its own unit, in the file** ([`EvidenceCount`]), because the unit
+/// differs by quantity and a reader cannot be sent to the source to find it. That is not a
+/// hypothetical: this comment said "reads for a per-read rate, windows for an inbreeding
+/// coefficient" and **both halves were wrong** — the inbreeding coefficient counts covered
+/// positions and the repeat-tract substitution rate counts bases compared, neither of which is a
+/// read, and a window is 100,000 bases. A count whose unit lives only here is a count nobody can
+/// compare.
+///
+/// **It is absent where no fit produced one**, never zero: the tract ladder's stated
+/// concentration is a median over strata rather than an estimate with a sample size, and the
+/// repeat-tract outlier weight is a stated constant.
+///
+/// # Five numbers in this file say where they came from some other way
+///
+/// The four-state ladder is not the only thing that can stand behind a number, and forcing it
+/// onto a quantity with a better answer would be inventing one. **None of these five carries a
+/// [`Warrant`]**, and each has its own settled word:
+///
+/// - **a contamination fraction** stands on its two evidence counts, because *measured and found
+///   clean* and *not measured* are both a fraction near zero and only the counts tell them apart
+///   (spec §5);
+/// - **the ordinary-site prior's two concentrations** carry [`OrdinarySitePrior::rung`], which
+///   says which rung of the ladder produced them;
+/// - **a slippage number** carries its *origin* — [`LevelOrigin`] and [`SharesOrigin`], how much
+///   of its period's curve went into it — because a level fitted from 8,000 slipped reads and a
+///   level interpolated off a curve through four cells are the same `f64`;
+/// - **a length spectrum** is placed rather than annotated: *which table it is in* says whether
+///   it is a stratum's own fit, its period's pool, or neither;
+/// - **a read group's slippage group** is the run's own declaration and is not estimated at all.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarrantedValue {
+    /// The number itself.
+    pub value: f64,
+    /// What entitles a score resting on it to claim what it claims.
+    pub warrant: Warrant,
+    /// How much data stood behind it, **naming the unit it counts in** — absent where no fit
+    /// produced a count, never zero.
+    pub observations: Option<EvidenceCount>,
+}
+
+/// **How much data stood behind a number, in the unit that number counts in.**
+///
+/// **A variant per unit rather than a bare integer**, so the unit reaches the person reading the
+/// file rather than living in a doc comment they will not open: `observations = { reads = 812344 }`
+/// against `observations = { covered_positions = 1806 }`. The three units differ by orders of
+/// magnitude on the same cohort, so a reader comparing two numbers' evidence without knowing
+/// which is which is not comparing anything.
+///
+/// **A new quantity with a new unit adds a variant here**, which is a deliberate act, rather than
+/// silently reusing a word that means something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceCount {
+    /// Reads — what a per-read rate is fitted over, as
+    /// `parameter_estimation::generic::fallback` counts them.
+    Reads(u64),
+    /// Reference positions the sample's reads covered — what an inbreeding coefficient is fitted
+    /// over (`parameter_estimation::generic::runs`, summed across windows of 100,000 bases).
+    CoveredPositions(u64),
+    /// Bases inside repeat tracts that were compared against the reference — what a repeat-tract
+    /// substitution rate is fitted over (`parameter_estimation::ssr`).
+    BasesCompared(u64),
 }
 
 /// **Every number calling runs on, as one file.**
@@ -313,9 +397,15 @@ pub struct BaseQualityCalibrationRow {
     /// one says the instrument was optimistic and the reads are worse than it claimed. **One**
     /// leaves the qualities exactly as reported. It is not a multiplier on the Phred score,
     /// which moves the other way.
-    pub error_probability_multiplier: f64,
-    /// Where the multiplier came from.
-    pub warrant: Warrant,
+    ///
+    /// **Its evidence count is in reads, and `RunParameters` is not where to get it.**
+    /// [`ReadGroupCalibration`](crate::ng::calling::likelihood::ReadGroupCalibration) is a
+    /// multiplier and a provenance and keeps no count, but spec §3.3 asks for one and the fit
+    /// produced one: it is on the `Estimate<ErrorRate>` that
+    /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)
+    /// reads and does not store. **So step B1's projection has to be handed that estimate**, the
+    /// same motion the inbreeding coefficient needs.
+    pub error_probability_multiplier: WarrantedValue,
 }
 
 // ---------------------------------------------------------------------
@@ -443,8 +533,19 @@ pub struct Inbreeding {
 pub struct InbreedingRow {
     /// The sample's name, as the run's read-group table spells it.
     pub sample: String,
-    /// The coefficient itself, a fraction in `[0, 1)`.
-    pub inbreeding_coefficient: f64,
+    /// The coefficient itself, a fraction in `[0, 1)`. Its evidence count is in **covered
+    /// reference positions** — `chain.covered_positions_total()`, summed across windows of
+    /// 100,000 bases (`parameter_estimation/generic/runs.rs`,
+    /// `parameter_estimation/generic/fallback.rs`). **Not a window count**, which the runs model
+    /// keeps separately and which is smaller by up to five orders of magnitude.
+    ///
+    /// **The warrant exists upstream and the seam into calling drops it.** The pre-pass produces
+    /// an `Estimate<InbreedingF>`; the seam is
+    /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble),
+    /// which takes a bare `Vec<InbreedingF>`. So **step B1's projection has to be handed the
+    /// estimates rather than that vector**, or every sample's coefficient reads as supplied when
+    /// it was fitted.
+    pub inbreeding_coefficient: WarrantedValue,
 }
 
 // ---------------------------------------------------------------------
@@ -503,15 +604,14 @@ pub enum SeedRung {
 pub struct RepeatTracts {
     /// The strength the tract ladder's **bottom** rung states — a flat shape over whatever
     /// lengths the locus offers, held with this many chromosomes' worth of belief.
-    pub stated_length_spectrum_concentration: f64,
-    /// Whether that number is the run's own median over the strata it fitted, or the stated
-    /// constant reached where it fitted none.
     ///
-    /// **The two are the same line without it.** The run's median can land on exactly 1.0, which
-    /// is also `STATED_FLAT_CONCENTRATION`, and spec §8 counts this among the three numbers with
-    /// an honest default that must be marked `defaulted` when it is one. It is the same reason
-    /// the calibration multiplier carries a warrant beside a value of one.
-    pub stated_length_spectrum_warrant: Warrant,
+    /// **Its warrant is what tells the run's own median from the stated constant**, and without
+    /// it the two are the same line: the median over the strata a run fitted can land on exactly
+    /// 1.0, which is also `STATED_FLAT_CONCENTRATION`, and spec §8 counts this among the three
+    /// numbers with an honest default that must be marked `defaulted` when it is one. It is the
+    /// same reason the calibration multiplier carries a warrant beside a value of one. Its
+    /// observation count is absent: a median over strata is not an estimate with a sample size.
+    pub stated_length_spectrum_concentration: WarrantedValue,
     /// Which set of slippage numbers each read group's reads are drawn under. **The run's own
     /// declaration, not something inferred.**
     pub slippage_group_by_read_group: Vec<SlippageGroupRow>,
@@ -815,14 +915,10 @@ pub struct SubstitutionRateRow {
     pub reference_repeats: u64,
     /// How many genome copies these loci sit on.
     pub ploidy: u8,
-    /// The rate itself, a probability.
-    pub rate: f64,
-    /// Where the rate came from.
-    pub warrant: Warrant,
-    /// How many reads stood behind it. **The one evidence count in the file that does not name
-    /// its unit in its key**, kept for now because step A2 gives every value+warrant+count row
-    /// one spelling and that is where the word is settled once rather than twice.
-    pub observations: u64,
+    /// The rate itself, a probability. Its evidence count is in **bases compared** inside the
+    /// tracts — `table.bases_compared()` (`parameter_estimation/ssr`) — and **not in reads**: a
+    /// read spanning a stratum contributes one read and as many bases as it crosses.
+    pub rate: WarrantedValue,
 }
 
 // ---------------------------------------------------------------------
@@ -839,7 +935,15 @@ pub struct SubstitutionRateRow {
 pub struct StatedConstants {
     /// The share of repeat-tract reads that came from nowhere the model can explain. Inherited
     /// from the existing caller and never measured here.
-    pub repeat_tract_outlier_weight: f64,
+    ///
+    /// **It carries a warrant because it has two reachable states and spec §8 requires them
+    /// apart.** The run's own value is `defaulted` — 0.01, from `likelihood/ssr.rs`. A value a
+    /// person typed into the file is `supplied`, and spec §3.8 says a person editing it is the
+    /// whole point of writing it down. Without the warrant a run reports an edited guess as the
+    /// project's own constant, and spec §2.1's wholesale demotion of a mismatched file has
+    /// nowhere to write itself for this one number. Its evidence count is absent: no fit
+    /// produced it.
+    pub repeat_tract_outlier_weight: WarrantedValue,
 }
 
 #[cfg(test)]
@@ -915,20 +1019,30 @@ mod tests {
                 by_read_group: vec![
                     BaseQualityCalibrationRow {
                         read_group: 0,
-                        error_probability_multiplier: 1.0324,
-                        warrant: Warrant::FittedHere,
+                        error_probability_multiplier: WarrantedValue {
+                            value: 1.0324,
+                            warrant: Warrant::FittedHere,
+                            observations: Some(EvidenceCount::Reads(812_344)),
+                        },
                     },
                     // A multiplier of exactly one that was *not* fitted — the state the warrant
-                    // exists to keep apart from a fitted one.
+                    // exists to keep apart from a fitted one, and the read count says why: four
+                    // reads is no rate to fit.
                     BaseQualityCalibrationRow {
                         read_group: 1,
-                        error_probability_multiplier: 1.0,
-                        warrant: Warrant::Defaulted,
+                        error_probability_multiplier: WarrantedValue {
+                            value: 1.0,
+                            warrant: Warrant::Defaulted,
+                            observations: Some(EvidenceCount::Reads(4)),
+                        },
                     },
                     BaseQualityCalibrationRow {
                         read_group: 2,
-                        error_probability_multiplier: 0.87,
-                        warrant: Warrant::Supplied,
+                        error_probability_multiplier: WarrantedValue {
+                            value: 0.87,
+                            warrant: Warrant::Supplied,
+                            observations: Some(EvidenceCount::Reads(640_918)),
+                        },
                     },
                 ],
             },
@@ -992,11 +1106,19 @@ mod tests {
                 by_sample: vec![
                     InbreedingRow {
                         sample: "TS-1".into(),
-                        inbreeding_coefficient: 0.42,
+                        inbreeding_coefficient: WarrantedValue {
+                            value: 0.42,
+                            warrant: Warrant::FittedHere,
+                            observations: Some(EvidenceCount::CoveredPositions(180_600_412)),
+                        },
                     },
                     InbreedingRow {
                         sample: AWKWARD_SAMPLE.into(),
-                        inbreeding_coefficient: 0.17,
+                        inbreeding_coefficient: WarrantedValue {
+                            value: 0.17,
+                            warrant: Warrant::Borrowed,
+                            observations: Some(EvidenceCount::CoveredPositions(9_411_027)),
+                        },
                     },
                 ],
             },
@@ -1006,8 +1128,11 @@ mod tests {
                 rung: SeedRung::FittedCurve,
             },
             repeat_tracts: RepeatTracts {
-                stated_length_spectrum_concentration: 1.25,
-                stated_length_spectrum_warrant: Warrant::Defaulted,
+                stated_length_spectrum_concentration: WarrantedValue {
+                    value: 1.25,
+                    warrant: Warrant::Defaulted,
+                    observations: None,
+                },
                 slippage_group_by_read_group: vec![
                     SlippageGroupRow {
                         read_group: 0,
@@ -1105,13 +1230,19 @@ mod tests {
                     period: 2,
                     reference_repeats: 6,
                     ploidy: 2,
-                    rate: 0.0012,
-                    warrant: Warrant::Borrowed,
-                    observations: 40_122,
+                    rate: WarrantedValue {
+                        value: 0.0012,
+                        warrant: Warrant::Borrowed,
+                        observations: Some(EvidenceCount::BasesCompared(40_122)),
+                    },
                 }],
             },
             stated_constants: StatedConstants {
-                repeat_tract_outlier_weight: 0.01,
+                repeat_tract_outlier_weight: WarrantedValue {
+                    value: 0.01,
+                    warrant: Warrant::Defaulted,
+                    observations: None,
+                },
             },
         }
     }
@@ -1265,6 +1396,9 @@ mod tests {
 
         assert_eq!(spelling(LevelSmoothing::ThisStratum), "this_stratum");
         assert_eq!(spelling(ShareSmoothing::ThisStratum), "this_stratum");
+        // `EvidenceCount`'s three variants carry a number, so they spell as a one-key table
+        // rather than a bare string; `an_evidence_count_names_its_unit_and_is_absent_where_there_is_none`
+        // is what pins them, and the fixture uses all three.
     }
 
     /// **A smoothing that used a curve carries the curve and the reach; one that did not carries
@@ -1350,6 +1484,146 @@ mod tests {
         );
     }
 
+    /// Every table anywhere in the document that carries a `warrant` key, with the path it was
+    /// found at.
+    fn tables_carrying_a_warrant(
+        value: &toml::Value,
+        path: &str,
+        found: &mut Vec<(String, toml::Table)>,
+    ) {
+        match value {
+            toml::Value::Table(table) => {
+                if table.contains_key("warrant") {
+                    found.push((path.to_owned(), table.clone()));
+                }
+                for (key, child) in table {
+                    tables_carrying_a_warrant(child, &format!("{path}.{key}"), found);
+                }
+            }
+            toml::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    tables_carrying_a_warrant(item, &format!("{path}[{index}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The same path with every `[n]` array index removed, so an assertion about *which fields*
+    /// are warranted does not move when the fixture gains a row.
+    fn without_array_indices(path: &str) -> String {
+        let mut stripped = path.to_owned();
+        while let Some(open) = stripped.find('[') {
+            let close = stripped[open..].find(']').expect("a path index is closed") + open;
+            stripped.replace_range(open..=close, "");
+        }
+        stripped
+    }
+
+    /// **Every warranted number in the file is written the same way, and these five are all of
+    /// them** — which is the whole of what this shape is for: a reader who has understood one has
+    /// understood all of them.
+    ///
+    /// It searches the emitted document for *every* table carrying a `warrant` key rather than
+    /// visiting the five by name, and **the two assertions catch different things**. A number
+    /// written flat with its key spelled exactly `warrant` lands in a table that has no `value`,
+    /// and the loop catches it. One written flat under a *suffixed* key —
+    /// `stated_length_spectrum_warrant`, the spelling this shape replaced — is invisible to the
+    /// walk, and only the list of paths catches it. A sixth warranted number, or a fifth that
+    /// lost its warrant, is caught by the list too.
+    #[test]
+    fn every_warranted_number_is_written_the_same_way() {
+        let document =
+            toml::Value::try_from(a_file_using_every_shape()).expect("a file is a TOML value");
+        let mut found = Vec::new();
+        tables_carrying_a_warrant(&document, "", &mut found);
+        assert!(!found.is_empty(), "the walk found nothing at all");
+
+        let mut fields: Vec<String> = found
+            .iter()
+            .map(|(path, _)| without_array_indices(path))
+            .collect();
+        fields.sort();
+        fields.dedup();
+        assert_eq!(
+            fields,
+            [
+                ".base_quality_calibration.by_read_group.error_probability_multiplier",
+                ".inbreeding.by_sample.inbreeding_coefficient",
+                ".repeat_tracts.stated_length_spectrum_concentration",
+                ".repeat_tracts.substitution_rate_by_stratum.rate",
+                ".stated_constants.repeat_tract_outlier_weight",
+            ],
+            "these five numbers carry a warrant and nothing else does"
+        );
+
+        for (path, table) in &found {
+            assert!(
+                table.get("value").and_then(toml::Value::as_float).is_some(),
+                "{path} carries a warrant and no float value, so it is written flat rather than \
+                 as a warranted number: {table:?}"
+            );
+            for key in table.keys() {
+                assert!(
+                    ["value", "warrant", "observations"].contains(&key.as_str()),
+                    "{path} carries the key {key}, which is not one of the three a warranted \
+                     number is written with"
+                );
+            }
+        }
+    }
+
+    /// **An evidence count names the unit it counts in, and is absent rather than zero where no
+    /// fit produced one.**
+    ///
+    /// The unit is what makes two counts comparable, and it is not recoverable from the number:
+    /// on one cohort the same sample's covered positions and its reads differ by orders of
+    /// magnitude. This module's own doc comment gave the wrong unit for two of the three
+    /// quantities before a review checked them against the code that produces them, which is why
+    /// the unit is in the file rather than in the comment.
+    #[test]
+    fn an_evidence_count_names_its_unit_and_is_absent_where_there_is_none() {
+        let document =
+            toml::Value::try_from(a_file_using_every_shape()).expect("a file is a TOML value");
+        let mut found = Vec::new();
+        tables_carrying_a_warrant(&document, "", &mut found);
+
+        let unit_of = |needle: &str| -> Option<String> {
+            let (_, table) = found
+                .iter()
+                .find(|(path, _)| path.contains(needle))
+                .unwrap_or_else(|| panic!("a {needle} row"));
+            table.get("observations").map(|count| {
+                count
+                    .as_table()
+                    .expect("an evidence count names its unit, so it is a table")
+                    .keys()
+                    .next()
+                    .expect("and the unit is its one key")
+                    .clone()
+            })
+        };
+
+        assert_eq!(
+            unit_of("base_quality_calibration").as_deref(),
+            Some("reads")
+        );
+        assert_eq!(
+            unit_of("inbreeding").as_deref(),
+            Some("covered_positions"),
+            "an inbreeding coefficient is fitted over covered positions, not over windows"
+        );
+        assert_eq!(
+            unit_of("substitution_rate").as_deref(),
+            Some("bases_compared"),
+            "a repeat-tract substitution rate is fitted over bases compared, not over reads"
+        );
+
+        // Absent, not zero: neither of these came from a fit with a sample size.
+        assert_eq!(unit_of("stated_length_spectrum_concentration"), None);
+        assert_eq!(unit_of("repeat_tract_outlier_weight"), None);
+    }
+
     /// **A run with nothing in any table still writes a file that parses.**
     ///
     /// The empty boundary, which no other fixture reaches: a single sample with no repeat tracts
@@ -1377,27 +1651,33 @@ mod tests {
         assert_eq!(read, empty);
     }
 
-    /// **A stated concentration of one says whether it was fitted.**
+    /// **A stated concentration of one reads back saying whether it was fitted.**
     ///
     /// The run's own median over the strata it fitted can land on exactly 1.0, which is also the
-    /// constant reached where it fitted none. Without the warrant beside it the two are the same
-    /// line in the file — the collapse spec §5 forbids one section above, for the calibration
-    /// multiplier, and spec §8 names this number among the three that must be marked
-    /// `defaulted` when they are.
+    /// constant reached where it fitted none, and spec §8 names this among the three numbers that
+    /// must be marked `defaulted` when they are. **The assertion is on what a reader recovers**,
+    /// not on the two documents differing: since `warrant` is a required field of
+    /// [`WarrantedValue`], two files whose warrants differ differ by construction, and a test
+    /// asserting only that would pass for any shape at all.
     #[test]
-    fn a_stated_concentration_of_one_says_whether_it_was_fitted() {
-        let mut fitted = a_file_using_every_shape();
-        fitted.repeat_tracts.stated_length_spectrum_concentration = 1.0;
-        fitted.repeat_tracts.stated_length_spectrum_warrant = Warrant::FittedHere;
-
-        let mut defaulted = fitted.clone();
-        defaulted.repeat_tracts.stated_length_spectrum_warrant = Warrant::Defaulted;
-
-        assert_ne!(
-            toml::to_string(&fitted).expect("serialises"),
-            toml::to_string(&defaulted).expect("serialises"),
-            "a fitted 1.0 and a stated 1.0 must not be the same file"
-        );
+    fn a_stated_concentration_of_one_reads_back_saying_whether_it_was_fitted() {
+        for warrant in [Warrant::FittedHere, Warrant::Defaulted] {
+            let mut file = a_file_using_every_shape();
+            file.repeat_tracts.stated_length_spectrum_concentration = WarrantedValue {
+                value: 1.0,
+                warrant,
+                observations: None,
+            };
+            let text = toml::to_string(&file).expect("serialises");
+            let read: ParametersFile = toml::from_str(&text).expect("parses");
+            assert_eq!(
+                read.repeat_tracts
+                    .stated_length_spectrum_concentration
+                    .warrant,
+                warrant,
+                "a concentration of exactly 1.0 must not lose which of the two it was"
+            );
+        }
     }
 
     /// **A mistyped key is refused rather than absorbed.**
@@ -1447,7 +1727,7 @@ read_groups = [ { read_group = 0, declared_id = "HWI.3", library = "lib3", sampl
 census = { terms = [ { term = "the loci actually kept", digest = "def" } ] }
 
 [base_quality_calibration]
-by_read_group = [ { read_group = 0, error_probability_multiplier = 1.0, warrant = "defaulted" } ]
+by_read_group = [ { read_group = 0, error_probability_multiplier = { value = 1.0, warrant = "defaulted", observations = { reads = 4 } } } ]
 
 [contamination]
 by_read_group = []
@@ -1458,7 +1738,7 @@ by_read_group = [ { read_group = 0, batch = 0 } ]
 by_sample = [ { sample = "TS-1", batch = 0 } ]
 
 [inbreeding]
-by_sample = [ { sample = "TS-1", inbreeding_coefficient = 0.42 } ]
+by_sample = [ { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } } ]
 
 [ordinary_site_prior]
 reference_concentration = 1.0
@@ -1466,8 +1746,7 @@ alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
 [repeat_tracts]
-stated_length_spectrum_concentration = 1.0
-stated_length_spectrum_warrant = "defaulted"
+stated_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, level = 0.04, shorter_share = 0.8, fall_off = 0.3, level_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, slipped_reads = 8000.5 } } ]
 length_spectrum_by_stratum = []
@@ -1475,7 +1754,7 @@ length_spectrum_by_period = []
 substitution_rate_by_stratum = []
 
 [stated_constants]
-repeat_tract_outlier_weight = 0.01
+repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
 "#;
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 

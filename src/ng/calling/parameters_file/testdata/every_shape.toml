@@ -29,18 +29,33 @@ digest = "fedcba9876543210"
 
 [[base_quality_calibration.by_read_group]]
 read_group = 0
-error_probability_multiplier = 1.0324
+
+[base_quality_calibration.by_read_group.error_probability_multiplier]
+value = 1.0324
 warrant = "fitted_here"
+
+[base_quality_calibration.by_read_group.error_probability_multiplier.observations]
+reads = 812344
 
 [[base_quality_calibration.by_read_group]]
 read_group = 1
-error_probability_multiplier = 1.0
+
+[base_quality_calibration.by_read_group.error_probability_multiplier]
+value = 1.0
 warrant = "defaulted"
+
+[base_quality_calibration.by_read_group.error_probability_multiplier.observations]
+reads = 4
 
 [[base_quality_calibration.by_read_group]]
 read_group = 2
-error_probability_multiplier = 0.87
+
+[base_quality_calibration.by_read_group.error_probability_multiplier]
+value = 0.87
 warrant = "supplied"
+
+[base_quality_calibration.by_read_group.error_probability_multiplier.observations]
+reads = 640918
 
 [[contamination.by_read_group]]
 read_group = 0
@@ -91,20 +106,32 @@ batch = 1
 
 [[inbreeding.by_sample]]
 sample = "TS-1"
-inbreeding_coefficient = 0.42
+
+[inbreeding.by_sample.inbreeding_coefficient]
+value = 0.42
+warrant = "fitted_here"
+
+[inbreeding.by_sample.inbreeding_coefficient.observations]
+covered_positions = 180600412
 
 [[inbreeding.by_sample]]
 sample = 'Ailsa ‘Craig’ "×2"'
-inbreeding_coefficient = 0.17
+
+[inbreeding.by_sample.inbreeding_coefficient]
+value = 0.17
+warrant = "borrowed"
+
+[inbreeding.by_sample.inbreeding_coefficient.observations]
+covered_positions = 9411027
 
 [ordinary_site_prior]
 reference_concentration = 1.0
 alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
-[repeat_tracts]
-stated_length_spectrum_concentration = 1.25
-stated_length_spectrum_warrant = "defaulted"
+[repeat_tracts.stated_length_spectrum_concentration]
+value = 1.25
+warrant = "defaulted"
 
 [[repeat_tracts.slippage_group_by_read_group]]
 read_group = 0
@@ -229,9 +256,14 @@ read_group = 0
 period = 2
 reference_repeats = 6
 ploidy = 2
-rate = 0.0012
-warrant = "borrowed"
-observations = 40122
 
-[stated_constants]
-repeat_tract_outlier_weight = 0.01
+[repeat_tracts.substitution_rate_by_stratum.rate]
+value = 0.0012
+warrant = "borrowed"
+
+[repeat_tracts.substitution_rate_by_stratum.rate.observations]
+bases_compared = 40122
+
+[stated_constants.repeat_tract_outlier_weight]
+value = 0.01
+warrant = "defaulted"

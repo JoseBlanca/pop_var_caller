@@ -93,7 +93,7 @@ the coder's proposal** (see the preconditions): choose them, and write down in t
 was chosen and what was rejected, so the later revision has a starting point.
 *Depends:* —. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §3.
 
-☐ **A2. A value and its warrant, as one serialised shape.** How `Estimate<T>` appears in the file:
+✅ **A2. A value and its warrant, as one serialised shape.** How `Estimate<T>` appears in the file:
 the value, the warrant, and the observation count behind it. One shape reused by every numeric row,
 so a reader cannot meet two spellings of the same idea.
 *Depends:* A1. *Source:* §2.
