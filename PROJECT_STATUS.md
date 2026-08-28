@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a finished psp's trailer is replaced without a byte
+> - **Last completed task (2026-08-28):** **G3 reviewed — a damaged footer made the trailer
+> replacement overwrite the whole file and report success** (step G3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine checklists across two agents, **two Blockers, and both were reproduced
+> here before anything was changed**. The first: the only lower bound on the byte the rewrite
+> seeks to was a four-byte magic, so a footer claiming the trailer starts at byte 4 passed every
+> check — and **a 3,742-byte psp that the reader already refuses became 56 bytes, returning
+> `Ok(())`**. It now reads the header for its length alone, which reverses the step's own decision
+> not to; that decision was defended by spec §6.7's table, and the table should gain a row for the
+> class the check earns. The second: **my ⚠ saying an interruption leaves a file every reader
+> refuses was false.** Overwriting in place and trimming afterwards left the old footer intact and
+> consistent until a write passed the old trailer's end — replacing `a per-sample summary` with
+> `short` and stopping gave a file that **opened**, with the trailer `short-sample summary`. Twenty
+> of the twenty-one torn states were accepted; truncating first makes it one. Five Majors,
+> including the F4 Blocker recurring in the rule this operation had copied from the reader — the
+> copy is now the reader's own function, shared. **Two of my numbers were wrong**: nine
+> construction sites is ten, and a defect table row described a mutation I had not run. ⚠ **One
+> agent's worktree was auto-cleaned before its findings could be lifted out and it could not be
+> resumed** — everything of its is recorded from its summary and was reproduced here first.
+> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g3_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a finished psp's trailer is replaced without a byte
 > of its blocks or its index moving** (step G3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). It is the cheap operation, and the reason the index sits *before* the trailer:

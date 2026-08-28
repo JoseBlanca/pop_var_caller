@@ -696,7 +696,10 @@ pub enum BlockCutRuleError {
 
     /// The file declares a record layout this build does not write, so its blocks cannot be
     /// extended with records this build produces.
-    #[error("the file declares a record layout this writer cannot honour: {source}")]
+    // **No `{source}` in the message, and `#[source]` below is why**: a chain that prints the
+    // same sentence twice reads as a fault in the printer, and `PspWriteError::UnsupportedManifest`
+    // is where that first showed (the G3 review).
+    #[error("the file declares a record layout this writer cannot honour")]
     UnsupportedRecordLayout {
         #[source]
         source: RecordLayoutError,
@@ -1884,21 +1887,21 @@ pub enum BlockReadError {
 
     /// The file declares a record layout this reader does not read. **Upgrade the reader**; the
     /// file is not damaged.
-    #[error("the file declares a record layout this reader cannot read: {source}")]
+    #[error("the file declares a record layout this reader cannot read")]
     UnsupportedRecordLayout {
         #[source]
         source: RecordLayoutError,
     },
 
     /// A record's bytes cannot mean what they say. The file is damaged.
-    #[error("a record in this block is unreadable: {source}")]
+    #[error("a record in this block is unreadable")]
     DamagedRecord {
         #[source]
         source: RecordDecodeError,
     },
 
     /// A record names something a later writer added. **Upgrade the reader**; the file is fine.
-    #[error("a record in this block names something this reader does not know: {source}")]
+    #[error("a record in this block names something this reader does not know")]
     UnsupportedRecord {
         #[source]
         source: RecordDecodeError,
@@ -1924,7 +1927,7 @@ pub enum BlockReadError {
     },
 
     /// A block's opening fields cannot mean what they say.
-    #[error("a block's head is unreadable: {source}")]
+    #[error("a block's head is unreadable")]
     DamagedBlockHead {
         #[source]
         source: BlockHeadDecodeError,

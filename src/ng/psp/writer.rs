@@ -557,6 +557,7 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{a_file, a_header, a_record, a_sample, bytes_of};
     use super::*;
+    use crate::ng::psp::NotReadable;
     use crate::ng::psp::footer::{FOOTER_BYTES, FOOTER_MAGIC, decode_footer};
     use crate::ng::psp::index::decode_index;
     use crate::ng::types::{ContigId, Position};
@@ -703,10 +704,16 @@ mod tests {
         let refused = writer
             .push(&a_record(0, 10, 1))
             .expect_err("contig 0 comes before contig 1");
-        assert!(
-            matches!(refused, PspWriteError::RecordRefused { .. }),
-            "got {refused}"
-        );
+        // **And it carries the block builder's own account.** The variant has no `reason` of
+        // its own: the cause *is* the detail, so a wiring that dropped it would leave a caller
+        // with "a record could not be written" and nothing more.
+        match refused {
+            PspWriteError::RecordRefused { source, .. } => assert!(
+                matches!(source, BlockWriteError::ContigOutOfOrder { .. }),
+                "got {source}"
+            ),
+            other => panic!("got {other}"),
+        }
     }
 
     /// **A header this writer cannot honour leaves no file behind at all.** An empty contig list
@@ -864,10 +871,16 @@ mod tests {
         let refused = writer
             .check_the_index_and_footer_read_back(&index_bytes, &footer)
             .expect_err("a reader would refuse that index");
-        assert!(
-            matches!(refused, PspWriteError::WouldNotBeReadable { .. }),
-            "got {refused}"
-        );
+        // **The index decoder's own account is kept.** Replacing the cause with `None` left the
+        // whole suite green until this looked at it (the G3 review).
+        match &refused {
+            PspWriteError::WouldNotBeReadable {
+                source: Some(NotReadable::BlockIndex(_)),
+                reason,
+                ..
+            } => assert_eq!(reason, "the block index it wrote does not decode"),
+            other => panic!("got {other}"),
+        }
 
         // **And through `finish`, which is what wires the guard in.** Called directly the guard
         // could be right while nothing called it: deleting the call from `finish` left the
@@ -936,8 +949,13 @@ mod tests {
         let refused = writer
             .finish(b"a per-sample summary")
             .expect_err("a walk that lost records must not report a finished file");
+        // **No cause here, and that is right**: nothing decoded, the loss happened earlier and
+        // its own error went to the caller then.
         assert!(
-            matches!(refused, PspWriteError::WouldNotBeReadable { .. }),
+            matches!(
+                refused,
+                PspWriteError::WouldNotBeReadable { source: None, .. }
+            ),
             "got {refused}"
         );
         assert!(

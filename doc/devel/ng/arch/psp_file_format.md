@@ -26,6 +26,7 @@ src/ng/psp/
 ├── walk.rs       – RecordIter and SelectiveRecordIter: seek to a block, stream to where
 │                  the blocks end, and build only the bodies a predicate asks for
 ├── writer.rs     – PspWriter: create, push, finish
+├── trailer.rs    – replace_trailer: a finished file's closing payload, rewritten in place
 └── chain_ids.rs  – the live set and its changes (spec psp_chain_id_encoding.md)
 ```
 

@@ -277,8 +277,17 @@ trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 > is a weaker reader of damage than a full one was correct and unwritten: **of 93 single-byte
 > corruptions a full walk refuses on one small file, a walk declining every body accepts 72**.
 
-☐ **G3 — `replace_trailer`**, rewriting from the trailer's offset and leaving blocks and index alone.
+✅ **G3 — `replace_trailer`**, rewriting from the trailer's offset and leaving blocks and index alone.
 ***Depends:*** F3. ***Source:*** [spec §6.5](../spec/psp_file_format.md).
+> **Reviewed** — nine checklists across two agents:
+> [the review](../../reports/reviews/ng_psp_g3_2026-08-28.md),
+> [the fixes](../../reports/reviews/fixes_applied_ng_psp_g3_2026-08-28.md). **Two Blockers.** A
+> footer claiming the trailer starts at byte 4 passed every check the footer can make about
+> itself, so the rewrite overwrote the header, the blocks and the index and returned `Ok(())`;
+> and an interruption left a file that *opened*, with a trailer that was neither the old one nor
+> the new one. **The first fix owes the spec a correction**: §6.7's table lists two refusal
+> classes for this operation, and reading the header — which is what bounds the trailer's offset
+> — earns it a third, `UnsupportedVersion`.
 
 ☐ **G4 — `append`**, truncating at the index offset and keeping the manifest. Enforces coordinate
 order across the seam and **fails on a manifest it cannot honour**.

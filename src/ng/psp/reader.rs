@@ -378,84 +378,111 @@ impl PspReader {
         )
     }
 
-    /// Read and check the fixed tail.
-    ///
-    /// **A file too short to hold a footer is incomplete, not damaged** — it is what a writer
-    /// killed before it finished leaves, which is the everyday case.
+    /// Read and check the fixed tail — [`read_and_check_the_footer`], with this reader's own
+    /// handle.
     fn read_footer(path: &Path, file: &mut File, file_bytes: u64) -> Result<Footer, PspReadError> {
-        let footer_bytes = FOOTER_BYTES as u64;
-        let Some(footer_at) = file_bytes.checked_sub(footer_bytes) else {
-            return Err(PspReadError::Incomplete {
-                path: path.to_path_buf(),
-            });
-        };
-        file.seek(SeekFrom::Start(footer_at))
-            .map_err(|source| PspReadError::Io {
-                path: path.to_path_buf(),
-                while_doing: "seeking to the footer",
-                source,
-            })?;
-        let mut tail = [0u8; FOOTER_BYTES];
-        file.read_exact(&mut tail)
-            .map_err(|source| PspReadError::Io {
-                path: path.to_path_buf(),
-                while_doing: "reading the footer",
-                source,
-            })?;
+        read_and_check_the_footer(path, file, file_bytes)
+    }
+}
 
-        let footer = decode_footer(&tail).map_err(|refused| match refused {
-            // **No tail magic has two readings and they need telling apart**: a psp whose writer
-            // never finished, and a file that was never a psp. The head magic is what separates
-            // them, and it is read only on this path — the everyday open pays nothing for it.
-            super::footer::FooterDecodeError::NotAFooter { .. } => {
-                match Self::read_the_head_magic(file) {
-                    Some(found) if found != HEAD_MAGIC => PspReadError::NotAnNgPsp {
-                        path: path.to_path_buf(),
-                        found,
-                        expected: HEAD_MAGIC,
-                    },
-                    _ => PspReadError::Incomplete {
-                        path: path.to_path_buf(),
-                    },
-                }
-            }
-            // **`reason` names the section and the cause says what was wrong with it.** An
-            // earlier version formatted the decoder's own sentence into `reason` as well, so a
-            // caller printing the chain saw it twice.
-            damaged => PspReadError::damaged_by(path, "the footer does not decode", damaged.into()),
+/// Read a psp's fixed tail and apply the checks 48 bytes cannot make about themselves.
+///
+/// **Shared between `open` and the trailer replacement**, which are the two operations that
+/// start from the footer. It was copied into the second and the copy carried the first's
+/// reasoning with it, which was already untrue of the copy — the G3 review's finding.
+///
+/// **A file too short to hold a footer is incomplete, not damaged** — it is what a writer killed
+/// before it finished leaves, which is the everyday case.
+///
+/// The two rules below are the ones that need the file's **length**, which the footer does not
+/// carry: that the sections end exactly where the footer begins, and that the index does not
+/// start inside the header's magic. Everything the 48 bytes can check about themselves —
+/// the index ending exactly where the trailer begins among it — is [`decode_footer`]'s.
+pub(super) fn read_and_check_the_footer(
+    path: &Path,
+    file: &mut File,
+    file_bytes: u64,
+) -> Result<Footer, PspReadError> {
+    let footer_bytes = FOOTER_BYTES as u64;
+    let Some(footer_at) = file_bytes.checked_sub(footer_bytes) else {
+        return Err(PspReadError::Incomplete {
+            path: path.to_path_buf(),
+        });
+    };
+    file.seek(SeekFrom::Start(footer_at))
+        .map_err(|source| PspReadError::Io {
+            path: path.to_path_buf(),
+            while_doing: "seeking to the footer",
+            source,
+        })?;
+    let mut tail = [0u8; FOOTER_BYTES];
+    file.read_exact(&mut tail)
+        .map_err(|source| PspReadError::Io {
+            path: path.to_path_buf(),
+            while_doing: "reading the footer",
+            source,
         })?;
 
-        // **What the footer could not check about itself, because it does not know the length.**
-        // The trailer must end exactly where the footer begins: a file whose sections stop short
-        // has bytes nothing accounts for, and one that runs past has sections overlapping the
-        // footer.
-        let sections_end = footer
-            .trailer_offset
-            .checked_add(footer.trailer_bytes)
-            .ok_or_else(|| {
-                PspReadError::damaged(path, "the trailer's end is past any address".to_string())
-            })?;
-        if sections_end != footer_at {
-            return Err(PspReadError::damaged(
-                path,
-                format!(
-                    "the footer says the file's sections end at byte {sections_end}, but the \
-                     footer itself begins at byte {footer_at}"
-                ),
-            ));
-        }
-        if footer.index_offset < HEAD_MAGIC.len() as u64 {
-            return Err(PspReadError::damaged(
-                path,
-                format!(
-                    "the footer puts the block index at byte {}, which is inside the header",
-                    footer.index_offset
-                ),
-            ));
-        }
-        Ok(footer)
-    }
+    let footer = decode_footer(&tail).map_err(|refused| match refused {
+        // **No tail magic has two readings and they need telling apart**: a psp whose writer
+        // never finished, and a file that was never a psp. The head magic is what separates
+        // them, and it is read only on this path — the everyday open pays nothing for it.
+        super::footer::FooterDecodeError::NotAFooter { .. } => match read_the_head_magic_of(file) {
+            Some(found) if found != HEAD_MAGIC => PspReadError::NotAnNgPsp {
+                path: path.to_path_buf(),
+                found,
+                expected: HEAD_MAGIC,
+            },
+            _ => PspReadError::Incomplete {
+                path: path.to_path_buf(),
+            },
+        },
+        // **`reason` names the section and the cause says what was wrong with it.** An
+        // earlier version formatted the decoder's own sentence into `reason` as well, so a
+        // caller printing the chain saw it twice.
+        damaged => PspReadError::damaged_by(path, "the footer does not decode", damaged.into()),
+    })?;
 
+    // **What the footer could not check about itself, because it does not know the length.**
+    // The trailer must end exactly where the footer begins: a file whose sections stop short
+    // has bytes nothing accounts for, and one that runs past has sections overlapping the
+    // footer.
+    let sections_end = footer
+        .trailer_offset
+        .checked_add(footer.trailer_bytes)
+        .ok_or_else(|| {
+            PspReadError::damaged(path, "the trailer's end is past any address".to_string())
+        })?;
+    if sections_end != footer_at {
+        return Err(PspReadError::damaged(
+            path,
+            format!(
+                "the footer says the file's sections end at byte {sections_end}, but the \
+                     footer itself begins at byte {footer_at}"
+            ),
+        ));
+    }
+    if footer.index_offset < HEAD_MAGIC.len() as u64 {
+        return Err(PspReadError::damaged(
+            path,
+            format!(
+                "the footer puts the block index at byte {}, which is inside the header",
+                footer.index_offset
+            ),
+        ));
+    }
+    Ok(footer)
+}
+
+/// The file's first four bytes, for [`read_and_check_the_footer`]'s one failure path.
+fn read_the_head_magic_of(file: &mut File) -> Option<[u8; 4]> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).ok()?;
+    Some(magic)
+}
+
+impl PspReader {
     /// Read the index, check it against the footer's checksum, and decode it.
     fn read_index(
         path: &Path,
@@ -529,20 +556,6 @@ impl PspReader {
         })?;
 
         Ok(blocks)
-    }
-
-    /// Seek to the front and read the file's first four bytes, or `None` if it is shorter than
-    /// that. **Only ever read to tell a killed writer from a foreign file**, so an ordinary open
-    /// never pays for it.
-    ///
-    /// **A verb, because it moves the cursor.** Named `head_magic` it read as an accessor for a
-    /// value the type already held, and it is neither: it seeks, it reads, and it leaves the
-    /// cursor at byte 4.
-    fn read_the_head_magic(file: &mut File) -> Option<[u8; 4]> {
-        file.seek(SeekFrom::Start(0)).ok()?;
-        let mut magic = [0u8; 4];
-        file.read_exact(&mut magic).ok()?;
-        Some(magic)
     }
 
     fn seek_to(&mut self, at: u64, while_doing: &'static str) -> Result<(), PspReadError> {

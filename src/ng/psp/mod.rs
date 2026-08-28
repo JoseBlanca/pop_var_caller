@@ -72,7 +72,7 @@ pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod reader;
 pub(crate) mod record;
-pub(crate) mod retrailer;
+pub(crate) mod trailer;
 pub(crate) mod walk;
 pub(crate) mod writer;
 
@@ -104,7 +104,7 @@ pub use record::{
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
     decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
-pub use retrailer::replace_trailer;
+pub use trailer::replace_trailer;
 pub use walk::{RecordIter, SelectiveRecordIter};
 pub use writer::{PspWriter, WriteStats};
 
@@ -534,6 +534,13 @@ pub enum ManifestRefusal {
     #[error(transparent)]
     CutRule(#[from] BlockCutRuleError),
     /// The look-back window or the compression level is one no compressor can be built from.
+    ///
+    /// **⚠ Nothing reaches this today, and it is kept anyway.** `PspWriter::create` encodes the
+    /// header first, and `header.rs`'s own validation already refuses an out-of-range window log
+    /// as [`PspWriteError::InvalidHeaderField`] — so the compressor never sees a manifest it
+    /// would reject. It stays because building a compressor is not the header's rule to own, and
+    /// the day that validation moves this is the class the failure belongs to (the G3 review
+    /// found it unreachable and asked for the note rather than the removal).
     #[error(transparent)]
     Compressor(#[from] BlockCompressError),
 }
