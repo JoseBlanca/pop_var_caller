@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **H1 reviewed — the oracle could not fail on eighteen
+> - **Last completed task (2026-08-28):** **a writer killed for real leaves a file every reader
+> refuses, and a failing read is not damage** (step H2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **Dropping a writer in-process was never the same test**, and the difference is
+> the point: `BufWriter` flushes on `Drop`, so an in-process drop puts everything on disk cut at a
+> record boundary, while `SIGKILL` runs no destructor and the buffer is simply lost — the file can
+> end part-way through a compressed block or part-way through the header, which is unreachable from
+> inside the process and is what a killed pileup actually leaves. The child is this test binary
+> re-executed; **its death by signal 9 is asserted**, because an ordinary exit would run the very
+> flush the test exists to prevent. **And `refuse`'s `Io` arm finally has a genuine `read(2)`
+> failure**: the walk is handed a descriptor opened *write-only* on a sound psp, so seeking works
+> and every read fails with `EBADF` — no `unsafe`, and not the closed-descriptor trick, which is a
+> flaky-test generator once the harness runs tests on parallel threads. A contrast test holds the
+> other half, because `Io` and `CorruptBlock` could otherwise be swapped and both would pass.
+> ⚠ **The header sweep asserted something false and failed on its first run**: a cut inside the
+> four-byte magic does *not* come back as `NotAnNgPsp`, on any of 3,136 cuts, because the magic is
+> compared only after a twelve-byte read succeeds — so a truncated ng psp is never reported as the
+> wrong kind of file, which is the better answer. Both sweeps are exhaustive now: **3,742 cuts in
+> 0.19 s**, against 234. Three mutations on the kill test, two killed and **one proved to be a
+> no-op** — the one a reader would reach for first.
+> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **H1 reviewed — the oracle could not fail on eighteen
 > of its twenty-six comparisons, and a store with every region a base too long passed it** (step H1
 > of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Ten checklists across five agents, **three Blockers, and the first two were

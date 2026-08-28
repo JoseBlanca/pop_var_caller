@@ -1055,14 +1055,19 @@ mod tests {
 
     /// **Every truncation of a finished psp is refused, and none panics.** A file cut anywhere
     /// is either incomplete or damaged — never quietly readable.
+    ///
+    /// **Every byte, not every sixteenth** (Milestone H2). A killed writer stops at whatever byte
+    /// the kernel had taken, and one cut in sixteen leaves fifteen of every sixteen stopping
+    /// points unvisited — including most of the two- and four-byte fields a section boundary is
+    /// made of. Measured: **3,742 cuts on this fixture, 0.19 s**, against 234 cuts before. The
+    /// count is asserted below rather than left to this sentence.
     #[test]
     fn every_truncation_of_a_finished_psp_is_refused_without_panicking() {
         let (_dir, path) = a_finished_psp();
         let whole = bytes_of(&path);
         let mut incomplete = 0;
         let mut damaged = 0;
-        // Every 16th cut, so the test stays quick while still crossing every section boundary.
-        for cut in (0..whole.len()).step_by(16) {
+        for cut in 0..whole.len() {
             rewrite(&path, &whole[..cut]);
             match PspReader::open(&path) {
                 Err(PspReadError::Incomplete { .. }) => incomplete += 1,
@@ -1076,6 +1081,11 @@ mod tests {
             incomplete > 0 && damaged == 0,
             "a truncated psp has lost its footer, so every cut is incomplete: \
              {incomplete} incomplete, {damaged} damaged"
+        );
+        assert_eq!(
+            incomplete,
+            whole.len(),
+            "every cut has to be accounted for, or the sweep is proving less than it counts"
         );
     }
 

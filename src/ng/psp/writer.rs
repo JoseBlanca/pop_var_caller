@@ -986,6 +986,116 @@ mod tests {
         assert_eq!(header.sample, "SRR7279481");
     }
 
+    /// The environment variable that turns this test binary into the writer the test kills.
+    ///
+    /// **Re-executing the test binary is how the child is got.** A killed writer has to be a real
+    /// process, and the only program in the tree that writes a psp is this test suite.
+    #[cfg(unix)]
+    const KILLED_WRITER_TARGET: &str = "NG_PSP_KILLED_WRITER_TARGET";
+
+    /// **A writer killed with `SIGKILL` before `finish` leaves a file every reader refuses**, and
+    /// its header still reads — which is Milestone H2's oracle and spec §6.3's goal 3.
+    ///
+    /// ⚠ **This is not the same test as
+    /// [`a_writer_dropped_without_finishing_leaves_a_file_with_no_footer`], and the difference is
+    /// the whole reason it exists.** Dropping a `PspWriter` in-process runs `BufWriter`'s own
+    /// `Drop`, which **flushes** — so the file on disk is everything the writer had produced, cut
+    /// at a record boundary. `SIGKILL` runs no destructor: whatever was still in the buffer is
+    /// gone, so the file can end anywhere at all, including part-way through a compressed block
+    /// or part-way through the header. That state is unreachable from inside the process, and it
+    /// is the state a killed pileup actually leaves.
+    ///
+    /// **What is asserted, and why each matters:**
+    ///
+    /// - the child really was killed by signal 9, so no destructor ran — without this the test
+    ///   could be passing on an ordinary exit and proving nothing about the buffer;
+    /// - blocks reached disk, so the file is not empty and reading it short would be *easy*;
+    /// - `PspReader::open` refuses it as [`PspReadError::Incomplete`], not as damage — the
+    ///   instruction is *the run was interrupted, rebuild it*;
+    /// - `read_header` still succeeds (spec §6.6), because a tool that reports what a
+    ///   half-written file was going to be needs it.
+    #[cfg(unix)]
+    #[test]
+    fn a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // The child arm. Reached only in the re-executed copy of this binary.
+        if let Ok(target) = std::env::var(KILLED_WRITER_TARGET) {
+            let mut writer =
+                PspWriter::create(Path::new(&target), a_header(1_000)).expect("a header");
+            // Enough records to cut many blocks, so the parent can catch it mid-write; then park
+            // rather than looping, so a parent that dies leaves no process filling the disk.
+            for contig in 0..2u32 {
+                for at in 0..40_000u64 {
+                    writer
+                        .push(&a_record(contig, 1 + at * 4, 1))
+                        .expect("in order");
+                }
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        let (_dir, path) = a_file();
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows its own path"),
+        )
+        .args([
+            "--exact",
+            "ng::psp::writer::tests::a_writer_killed_before_finishing_leaves_a_file_every_reader_refuses",
+            "--nocapture",
+        ])
+        .env(KILLED_WRITER_TARGET, &path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("re-executing this test binary");
+
+        // Wait until blocks have reached disk, so the kill lands on a file worth refusing rather
+        // than on an empty one. Bounded, so a child that never writes fails the test instead of
+        // hanging it.
+        let enough = u64::try_from(FOOTER_BYTES * 8).expect("a small number");
+        let mut on_disk = 0;
+        for _ in 0..600 {
+            on_disk = std::fs::metadata(&path).map(|it| it.len()).unwrap_or(0);
+            if on_disk > enough {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let killed = child.kill().and_then(|()| child.wait());
+        let status = killed.expect("the child is killed and reaped");
+
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "the child has to die by SIGKILL — an ordinary exit would run every destructor, \
+             including the flush this test exists to prevent"
+        );
+        assert!(
+            on_disk > enough,
+            "the child wrote {on_disk} bytes before the kill; with no blocks on disk this file \
+             is refused for being empty rather than for being unfinished"
+        );
+
+        let bytes = bytes_of(&path);
+        assert_ne!(
+            bytes.get(bytes.len().saturating_sub(4)..),
+            Some(&FOOTER_MAGIC[..]),
+            "a killed writer cannot have written a footer"
+        );
+        let refused = PspReader::open(&path).expect_err("a file with no footer is not readable");
+        assert!(
+            matches!(refused, crate::ng::psp::PspReadError::Incomplete { .. }),
+            "the instruction is `the run was interrupted, rebuild it` and not `the file is \
+             damaged`; got {refused}"
+        );
+        // Spec §6.6: the half-written file still has a header, and this is what reads it.
+        let header = crate::ng::psp::read_header(&path).expect("the header survives the kill");
+        assert_eq!(header.sample, "SRR7279481");
+    }
+
     /// A file with no records at all still finishes, and its index is empty rather than absent.
     #[test]
     fn a_sample_with_no_records_still_finishes() {

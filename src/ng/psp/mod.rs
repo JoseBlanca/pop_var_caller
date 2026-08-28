@@ -704,6 +704,85 @@ mod tests {
     use super::*;
     use crate::ng::types::{ContigId, Position};
 
+    /// **A half-written file still has a header, at every cut** — spec §6.6's whole claim, made
+    /// exhaustive rather than sampled (Milestone H2).
+    ///
+    /// [`read_header`] exists so that a tool can report what a killed run *was going to be*, on a
+    /// file every reader correctly refuses. That is only worth anything if it holds wherever the
+    /// kill landed, so this cuts a finished psp at every byte and requires exactly two outcomes,
+    /// with the boundary between them at the header's own length:
+    ///
+    /// - **at or past the header, it reads** — and gives back the same header the whole file
+    ///   does, not merely *a* header;
+    /// - **below it, it refuses without panicking**, and always as
+    ///   [`MalformedHeader`](PspReadError::MalformedHeader).
+    ///
+    /// ⚠ **Never as [`NotAnNgPsp`](PspReadError::NotAnNgPsp), and the reason is worth knowing.**
+    /// The magic is compared only *after* a twelve-byte read of the magic and the declared body
+    /// length has succeeded, so a file cut inside its own magic is refused for being too short
+    /// before its first four bytes are ever looked at. **A truncated ng psp is therefore never
+    /// reported as the wrong kind of file** — which is the right answer, since it is an ng psp,
+    /// and *you handed me the wrong file* would send its owner looking for a file that is not
+    /// missing. This test asserted the opposite when it was written, and the sweep is what said
+    /// so: 0 of 3,136 cuts below the header gave `NotAnNgPsp`.
+    ///
+    /// ⚠ **The boundary is asserted, not assumed.** A `read_header` that returned `Ok` on a file
+    /// cut one byte short of its header would pass a test that only checked *some* cut reads.
+    #[test]
+    fn a_half_written_file_still_has_a_header_at_every_cut() {
+        use crate::ng::psp::writer::tests_support::{a_finished_psp, bytes_of, rewrite};
+
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let (want, header_bytes) =
+            read_header_and_its_length(&path).expect("the whole file's header reads");
+
+        let (mut read_it, mut malformed) = (0usize, 0usize);
+        for cut in 0..whole.len() {
+            rewrite(&path, &whole[..cut]);
+            match read_header(&path) {
+                Ok(found) => {
+                    assert!(
+                        cut >= header_bytes,
+                        "a cut at {cut} is inside a {header_bytes}-byte header and read anyway"
+                    );
+                    assert_eq!(
+                        found, want,
+                        "a cut at {cut} gave a different header from the whole file's"
+                    );
+                    read_it += 1;
+                }
+                Err(PspReadError::MalformedHeader { .. }) => {
+                    assert!(
+                        cut < header_bytes,
+                        "a cut at {cut} holds a whole {header_bytes}-byte header and was refused"
+                    );
+                    malformed += 1;
+                }
+                Err(other) => panic!("a cut at {cut} gave {other}"),
+            }
+        }
+        assert_eq!(
+            read_it + malformed,
+            whole.len(),
+            "every cut has to be accounted for"
+        );
+        assert_eq!(
+            read_it,
+            whole.len() - header_bytes,
+            "every cut at or past the header must read, and no other"
+        );
+        assert_eq!(
+            malformed, header_bytes,
+            "and every cut below it must be refused as a malformed header"
+        );
+        assert!(
+            header_bytes > HEAD_MAGIC.len(),
+            "the fixture's header has to be longer than its magic, or the cuts inside the magic \
+             — the ones that would tempt a `NotAnNgPsp` — are never taken"
+        );
+    }
+
     /// The messages are the contract spec §6.7 tabulates, so they are pinned rather than
     /// left to whatever `thiserror` last rendered. Each has to say what happened *and*
     /// carry the number whoever sees it must act on.
