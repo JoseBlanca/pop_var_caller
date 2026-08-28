@@ -214,9 +214,20 @@ the merge's clock — so what was compared was "clone then free" against "refill
 the same. A real run pays neither: the generator fills the record either way, and leasing removes
 the merge's *free*, which §2.2 measures at 25.9% of the merge's CPU.
 
-**Owed:** time the merge with the record fill outside its clock, which is what a streaming run looks
-like. That is the one measurement this finding leaves open, and it is the one the recommendation
-turns on.
+**Two further attempts to settle it, and neither did.** Re-run on the current driver with the arms
+alternated four times, leasing and minting are indistinguishable — 181 / 232 ms against 191 / 234,
+a 2.6% mean difference inside a run whose own second pass was 20% slower than its first. And the
+profile cannot separate the fill from the rest, because the probe's `refill` is inlined and has no
+symbol left to attribute.
+
+**So this is what stands.** The merge's *freeing* of per-sample records is 25.9% of its CPU, by
+attribution from the minting profile (§2.2), and leasing removes 92% of those frees by count. What
+is **not** established is the wall-clock saving, because every arm this probe can run charges the
+merge for making the record as well as unmaking it.
+
+**Settling it needs a source that hands over records made before the clock starts** — which is a
+question about how the generator or the psp reader gives the merge its records, not about the merge.
+That is where the measurement belongs, and it is outside this module.
 
 ---
 
