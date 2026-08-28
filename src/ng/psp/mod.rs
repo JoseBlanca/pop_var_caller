@@ -76,8 +76,8 @@ pub use chain_ids::{LiveSet, LiveSetChanges, LiveSetReader, LiveSetWriter};
 pub use footer::{FOOTER_BYTES, FOOTER_MAGIC, Footer};
 pub use header::{
     ContigIdentity, DEFAULT_BLOCK_BYTE_CEILING, DEFAULT_GENOMIC_BLOCK_SIZE_BP,
-    DEFAULT_LOOK_BACK_WINDOW_LOG, FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldCardinality,
-    FieldEncoding, FieldName, FieldSpec, HEAD_MAGIC, HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header,
+    DEFAULT_LOOK_BACK_WINDOW_LOG, FIXED_INTEGER_WIDTHS_BYTES, FORMAT_VERSION, FieldEncoding,
+    FieldName, FieldShape, FieldSpec, HEAD_MAGIC, HEAD_SENTINEL, HEADER_FRAMING_BYTES, Header,
     IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES, MAX_LOOK_BACK_WINDOW_LOG,
     MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue, ReferenceIdentity, WriterProvenance,
 };
@@ -521,10 +521,10 @@ mod tests {
                 genomic_block_size_bp: DEFAULT_GENOMIC_BLOCK_SIZE_BP,
                 block_byte_ceiling: None,
                 look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
-                fields: vec![FieldSpec::new(
-                    FieldName("position-offset".to_string()),
-                    FieldEncoding::Varint,
-                )],
+                fields: vec![FieldSpec {
+                    name: FieldName("position-offset".to_string()),
+                    encoding: FieldEncoding::Varint,
+                }],
             },
         }
     }

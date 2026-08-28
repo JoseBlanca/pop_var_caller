@@ -187,91 +187,110 @@ impl Manifest {
     }
 }
 
-/// A field of a record: what it is called, how many values of it a record holds, and how
-/// each one is laid down.
+/// A field of a record, and how to read it: what it is called, what one appearance of it
+/// looks like, and how each one is laid down.
 ///
-/// **The three things spec §4.5 asks the manifest to carry for every field.** The middle
-/// one is the newest and the one with a rule attached: see [`FieldCardinality`] for what a
-/// reader does with it and why a file whose cardinality disagrees with its encoding is
-/// refused rather than believed.
+/// **The three things spec §4.5 asks the manifest to carry for every field.** The middle one
+/// is [`FieldShape`], and it is not a field of this struct: an encoding fixes it, so it is
+/// derived rather than stored beside the thing that decides it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSpec {
     pub name: FieldName,
-    /// One value per record, or a counted run of them.
-    ///
-    /// **What a file says, not what this build assumes** — which is the whole point of a
-    /// manifest. It is checked against `encoding` when a header is encoded or decoded, so a
-    /// `FieldSpec` that survived either of those has the two in agreement.
-    pub cardinality: FieldCardinality,
     pub encoding: FieldEncoding,
 }
 
 impl FieldSpec {
-    /// A field declared the way this build writes it: the cardinality comes from the
-    /// encoding, which is the only combination [`check_manifest`] admits.
+    /// What one appearance of this field looks like on the wire.
     ///
-    /// **Every field this build declares goes through here**, so an inconsistent pair cannot
-    /// be written by hand into the one table that describes the record.
-    pub fn new(name: FieldName, encoding: FieldEncoding) -> Self {
-        Self {
-            name,
-            cardinality: encoding.cardinality(),
-            encoding,
-        }
+    /// **Derived from the encoding rather than stored beside it**, which is what keeps the
+    /// manifest's two accounts of a field's shape from being able to disagree: in memory
+    /// there is one account, and a *file's* own `shape` key is checked against it as the file
+    /// is read ([`check_declared_shape`]). So a `FieldSpec` that came out of
+    /// [`Header::decode`] says what its file said, and one this build assembled cannot say
+    /// anything else.
+    pub fn shape(&self) -> FieldShape {
+        self.encoding.shape()
     }
 }
 
-/// How many values of one field a record holds.
+/// Generates [`FieldShape`], the list of every shape, and each one's spelling **from one
+/// source**, so a shape cannot be added to the type without reaching the list and the
+/// spelling too.
 ///
-/// **What it buys, and it is the reason spec §4.5 asks for it**: a reader meeting a field
-/// name it has never heard of can still say where the field ends and step over it, so a psp
-/// written by a later version of ng stays readable by an older one. A scalar ends after one
-/// value; a list ends after the count in front of it has been honoured.
-///
-/// **It is not free-standing: every encoding implies exactly one of these**, and
-/// [`FieldEncoding::cardinality`] is where that is written down. A header declaring the pair
-/// out of agreement is refused — by [`Header::encode`] as a field a writer may not write, and
-/// by [`Header::decode`] as a damaged file. Two accounts of one shape that are allowed to
-/// disagree are worse than one account, because a reader then has to pick.
-///
-/// **What it does not describe: how often a field repeats inside a record.** Ten of the
-/// body's twenty-two fields are written once per observation and two more once per witness run
-/// (see `BODY_FIELDS` in `record.rs`), and nothing in the manifest says so — a record's own
-/// counts do. So a later writer that appends a field repeating once per observation is a file
-/// this reader cannot step over, and it will refuse it rather than mis-measure it. The fields
-/// waiting to be added — a window's GC fraction and its mean coverage — are once per record.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FieldCardinality {
-    /// One value, whose bytes the encoding alone measures.
-    ///
-    /// **A byte string is one value**, not a list: its length prefix says how many *bytes* it
-    /// holds, not how many values of the field the record does. An allele's sequence is one
-    /// sequence however long it is.
-    OneValue,
-    /// A count, then that many values of the field's element type — an observation's read
-    /// identifiers, or the arrivals and departures of a record's live set.
-    AList,
+/// This is the drift `ALL_ENCODINGS`' own doc comment records having been paid for once
+/// already: when the writer's spellings and the reader's were two hand-maintained lists, a
+/// scheme added to one alone made [`Header::encode`] write a file [`Header::decode`] refused,
+/// and the whole suite stayed green. A hand-written array cannot prevent that, because its
+/// length is a number in the source — a new variant leaves it short and still compiling.
+macro_rules! field_shapes {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident => $spelling:literal ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[non_exhaustive]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant ),+
+        }
+
+        /// Every shape, listed once — **generated beside the enum**, so the writer spells from
+        /// the list the reader recognises from and neither can go short of the other.
+        const ALL_SHAPES: &[$name] = &[ $( $name::$variant ),+ ];
+
+        impl $name {
+            /// What this shape is called in the header.
+            fn spelled(self) -> &'static str {
+                match self {
+                    $( $name::$variant => $spelling ),+
+                }
+            }
+        }
+    };
 }
 
-/// Both cardinalities, listed once, so the reader recognises exactly what the writer spells.
-///
-/// The same two-sided rule [`ALL_ENCODINGS`] keeps, and for the same reason: when the writer's
-/// spellings and the reader's were two independent lists, a value added to one alone made
-/// [`Header::encode`] write a file [`Header::decode`] refused.
-const ALL_CARDINALITIES: [FieldCardinality; 2] =
-    [FieldCardinality::OneValue, FieldCardinality::AList];
-
-impl FieldCardinality {
-    /// What this cardinality is called in the header.
+field_shapes! {
+    /// What **one appearance of a field** looks like on the wire: a single value, or a count
+    /// followed by that many values.
     ///
-    /// **The only place a spelling is written**, exhaustive on purpose: a third cardinality is
-    /// a compile error here rather than a value the reader silently fails to name.
-    fn spelled(self) -> &'static str {
-        match self {
-            FieldCardinality::OneValue => "one-value",
-            FieldCardinality::AList => "a-list",
-        }
+    /// **What it buys, and it is why spec §4.5 asks the manifest to carry it**: a reader
+    /// meeting a field name it has never heard of can still say where that field ends and step
+    /// over it, so a psp written by a later version of ng stays readable by an older one. A
+    /// scalar ends after one value; a list ends once the count in front of it has been
+    /// honoured.
+    ///
+    /// **⚠ It does not say how often the field appears in a record**, which is the other half
+    /// of the idea and the half production's store calls *cardinality*
+    /// (`Cardinality { PerRecord, PerAllele }`, `src/psp/registry.rs`). The two must not be
+    /// confused, and the wire key here is `shape` rather than `cardinality` for exactly that
+    /// reason: both formats use the extension `.psp` and will sit on the same disks, so the
+    /// same key name meaning two different things is a trap for whoever reads one with `head`.
+    /// This type is production's `Shape`, and it is named and spelled to match it.
+    ///
+    /// Concretely: `mapq-sum` is a plain integer, so its shape is [`Scalar`](Self::Scalar) —
+    /// yet a record with five observations holds five of them, because
+    /// `encode_record_body` writes it once per observation. Ten of the body's twenty-two
+    /// fields repeat that way and two more repeat once per witness run; **nothing in the
+    /// manifest says so**, and a record's own counts are what a reader uses. So a later writer
+    /// that appends a field repeating per observation writes a file this reader cannot step
+    /// over, and must raise the format version instead. The two fields waiting to be
+    /// added — a window's GC fraction and its mean coverage — appear once per record.
+    ///
+    /// **Every encoding fixes exactly one of these**, and [`FieldEncoding::shape`] is where
+    /// that is written down; a file declaring anything else is refused
+    /// ([`check_declared_shape`]).
+    pub enum FieldShape {
+        /// One value, whose bytes the encoding alone measures.
+        ///
+        /// **A length-prefixed byte string is one value**, not a list: its prefix counts its
+        /// *bytes*, not how many appearances of the field there are. An allele's sequence is
+        /// one sequence however long it is.
+        Scalar => "scalar",
+        /// A count, then that many values of the field's element type — an observation's read
+        /// identifiers, or the arrivals and departures of a record's live set.
+        List => "list",
     }
 }
 
@@ -800,6 +819,29 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
         if field.name.0.trim().is_empty() {
             return Err(BrokenRule::new("manifest.field.name", "is empty"));
         }
+        // **A name carrying a newline rewrites what the header appears to say.** TOML writes
+        // such a name as a multi-line string, so its own bytes land in the body as further
+        // lines — and a name holding `\ncardinality = "..."` shows a reader running `head` a
+        // key that no field declared, while the file still parses and round-trips. Readability
+        // is the reason this header is text at all, so a name that can forge a line in it is
+        // refused. The contig-name rule a hundred lines above says the same thing for the same
+        // reason; field names had no such rule until a header was built that exploited it.
+        if field
+            .name
+            .0
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(BrokenRule::new(
+                "manifest.field.name",
+                format!(
+                    "{:?} holds whitespace or a control character; such a name is written as a \
+                     multi-line string and can make the header's text show a key no field \
+                     declares",
+                    field.name.0
+                ),
+            ));
+        }
         if !seen.insert(field.name.0.as_str()) {
             return Err(BrokenRule::new(
                 "manifest.field.name",
@@ -811,7 +853,6 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
             ));
         }
         check_encoding(&field.name, field.encoding)?;
-        check_cardinality(field)?;
     }
     Ok(())
 }
@@ -826,30 +867,6 @@ pub const FIXED_INTEGER_WIDTHS_BYTES: [u8; 4] = [1, 2, 4, 8];
 /// The widths a raw IEEE float field may declare — `f32` and `f64`. No other width has an
 /// IEEE meaning.
 pub const IEEE_FLOAT_WIDTHS_BYTES: [u8; 2] = [4, 8];
-
-/// A field's cardinality must be the one its encoding lays down.
-///
-/// **The rule that stops the manifest's two accounts of a field's shape from disagreeing.**
-/// A file saying `cardinality = "one-value"` beside `encoding = "chain-id-list"` was written
-/// by something that meant one of the two, and a reader that believed the cardinality would
-/// step over a count and stop inside a run of identifiers — which lands in the middle of the
-/// next field rather than failing.
-fn check_cardinality(spec: &FieldSpec) -> Result<(), BrokenRule> {
-    let implied = spec.encoding.cardinality();
-    if spec.cardinality != implied {
-        return Err(BrokenRule::new(
-            "manifest.field.cardinality",
-            format!(
-                "{:?} is {:?} and {:?}, which lays down {:?}",
-                spec.name.0,
-                spec.cardinality.spelled(),
-                spec.encoding.spelled().0,
-                implied.spelled(),
-            ),
-        ));
-    }
-    Ok(())
-}
 
 fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), BrokenRule> {
     let field = "manifest.field.encoding";
@@ -982,8 +999,8 @@ struct WireManifest {
     field: Vec<WireFieldSpec>,
 }
 
-/// One field's declaration, **flat rather than nested**: `cardinality` says whether a record
-/// holds one of these or a counted run of them, `encoding` names the scheme and
+/// One field's declaration, **flat rather than nested**: `shape` says whether one appearance
+/// of the field is a single value or a counted run of them, `encoding` names the scheme and
 /// `width-bytes` or `steps-per-unit` carries its one parameter. A nested table per field
 /// would read as `[manifest.field.encoding]` inside an array of tables, which is legal TOML
 /// and hard to read in `head` — and readability is the reason the header is text at all.
@@ -995,7 +1012,7 @@ struct WireManifest {
 #[serde(rename_all = "kebab-case")]
 struct WireFieldSpec {
     name: String,
-    cardinality: String,
+    shape: String,
     encoding: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     width_bytes: Option<u8>,
@@ -1043,7 +1060,7 @@ impl From<&Header> for WireHeader {
                         let (encoding, width_bytes, steps_per_unit) = field.encoding.spelled();
                         WireFieldSpec {
                             name: field.name.0.clone(),
-                            cardinality: field.cardinality.spelled().to_string(),
+                            shape: field.shape().spelled().to_string(),
                             encoding: encoding.to_string(),
                             width_bytes,
                             steps_per_unit,
@@ -1084,9 +1101,10 @@ impl WireHeader {
             .field
             .into_iter()
             .map(|field| {
+                let encoding = encoding_of(&field)?;
+                check_declared_shape(&field, encoding)?;
                 Ok(FieldSpec {
-                    encoding: encoding_of(&field)?,
-                    cardinality: cardinality_of(&field)?,
+                    encoding,
                     name: FieldName(field.name),
                 })
             })
@@ -1162,60 +1180,97 @@ impl FieldEncoding {
         }
     }
 
-    /// How many values of a field written this way one record holds.
+    /// What one appearance of a field written this way looks like.
     ///
     /// **The one place the pair is decided**, which is what keeps the manifest's two accounts
-    /// of a field's shape from being able to disagree: a header declaring anything else is
-    /// refused (see [`FieldCardinality`]).
+    /// of a field's shape from being able to disagree: a file declaring anything else is
+    /// refused (see [`FieldShape`]).
     ///
-    /// **Exhaustive with no wildcard**, so a scheme added to the closed set has to say here how
-    /// many values it lays down rather than inheriting *one* in silence — and inheriting *one*
-    /// for a run of identifiers is exactly the mistake that would let a reader measure the
-    /// wrong number of bytes.
-    pub fn cardinality(self) -> FieldCardinality {
+    /// **Exhaustive with no wildcard**, so a scheme added to the closed set has to say here
+    /// what its bytes look like rather than inheriting *one value* in silence — and inheriting
+    /// *one value* for a counted run of identifiers is exactly the mistake that would let a
+    /// reader measure the wrong number of bytes.
+    ///
+    /// **⚠ Nothing else in this module can tell you whether an answer here is right.** Every
+    /// round-trip test asks this function what a scheme's shape is and then checks the file
+    /// agrees, so a wrong answer applied consistently passes all of them;
+    /// `every_encoding_lays_down_the_shape_its_bytes_have` is the one test that states each
+    /// answer independently, and it exists because three of these eight schemes are used by no
+    /// record field today and nothing else reaches them.
+    pub fn shape(self) -> FieldShape {
         match self {
             // A number, a fixed-width integer, a float, a count of fixed-point steps: one value
             // each. **A length-prefixed byte string is one value too** — its prefix counts its
-            // bytes, not how many of the field a record carries.
+            // bytes, not how many appearances of the field there are.
             FieldEncoding::Varint
             | FieldEncoding::SignedVarint
             | FieldEncoding::FixedWidthInteger { .. }
             | FieldEncoding::IeeeFloat { .. }
             | FieldEncoding::FixedPoint { .. }
-            | FieldEncoding::LengthPrefixedBytes => FieldCardinality::OneValue,
+            | FieldEncoding::LengthPrefixedBytes => FieldShape::Scalar,
             // A count and then that many identifiers; the changes are two such runs, which is
-            // still a run of values rather than one value.
-            FieldEncoding::ChainIdChanges | FieldEncoding::ChainIdList => FieldCardinality::AList,
+            // still a counted run rather than one value.
+            FieldEncoding::ChainIdChanges | FieldEncoding::ChainIdList => FieldShape::List,
         }
     }
 }
 
-/// The declared cardinality, as a name from the closed set.
+/// The declared shape, as a name from the closed set.
 ///
-/// **An unrecognised spelling is refused rather than guessed at.** A reader that fell back on
-/// the encoding's own cardinality would accept `cardinality = "per-observation"` from a later
-/// writer — a field it cannot in fact step over — and read the record after it out of a
-/// position that is not a field boundary.
-fn cardinality_of(field: &WireFieldSpec) -> Result<FieldCardinality, BrokenRule> {
-    ALL_CARDINALITIES
+/// **An unrecognised spelling is refused rather than guessed at**, and the match is exact —
+/// no trimming, no case folding. A reader that fell back on the encoding's own shape would
+/// accept `shape = "per-observation"` from a later writer, which names a field it cannot in
+/// fact step over, and would then read the record after it from a position that is not a field
+/// boundary.
+fn shape_of(field: &WireFieldSpec) -> Result<FieldShape, BrokenRule> {
+    ALL_SHAPES
         .iter()
         .copied()
-        .find(|candidate| candidate.spelled() == field.cardinality)
+        .find(|candidate| candidate.spelled() == field.shape)
         .ok_or_else(|| {
-            let known: Vec<&str> = ALL_CARDINALITIES
+            let known: Vec<&str> = ALL_SHAPES
                 .iter()
                 .map(|candidate| candidate.spelled())
                 .collect();
             BrokenRule::new(
-                "manifest.field.cardinality",
+                "manifest.field.shape",
                 format!(
-                    "{:?} is {:?}, which is not one of {}",
+                    "field {:?} declares shape {:?}, which is not one of {}",
                     field.name,
-                    field.cardinality,
+                    field.shape,
                     known.join(", ")
                 ),
             )
         })
+}
+
+/// A file's declared shape must be the one its encoding lays down.
+///
+/// **The rule that stops the manifest's two accounts of a field's shape from disagreeing**,
+/// and it lives on the reading side because that is the only side where two accounts exist: in
+/// memory a [`FieldSpec`] derives its shape from its encoding, so this build cannot write a
+/// disagreement in the first place.
+///
+/// A file saying `shape = "scalar"` beside `encoding = "chain-id-list"` was written by
+/// something that meant one of the two, and a reader that believed the shape would step over a
+/// count and stop inside a run of identifiers — landing in the middle of the next field rather
+/// than failing.
+fn check_declared_shape(field: &WireFieldSpec, encoding: FieldEncoding) -> Result<(), BrokenRule> {
+    let declared = shape_of(field)?;
+    let laid_down = encoding.shape();
+    if declared != laid_down {
+        return Err(BrokenRule::new(
+            "manifest.field.shape",
+            format!(
+                "field {:?} declares shape {:?}, but its encoding {:?} lays down {:?}",
+                field.name,
+                declared.spelled(),
+                encoding.spelled().0,
+                laid_down.spelled(),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The declared scheme and its one parameter, together.
@@ -1345,44 +1400,57 @@ mod tests {
         }
     }
 
-    /// One field per encoding the format has, so anything that walks the manifest meets all
-    /// six rather than the two a minimal fixture would carry.
+    /// **One field per encoding the format has — all eight**, so anything that walks the
+    /// manifest meets every one rather than the handful a minimal fixture would carry.
+    ///
+    /// ⚠ It carried six for a while, and the two it omitted were exactly the two list-shaped
+    /// encodings — so `"list"` never once appeared in a header text any test read, and the
+    /// whole of that half of the wire vocabulary was pinned only as a side effect of an
+    /// error-message assertion. A fixture that omits a case cannot fail on it.
     fn a_manifest() -> Manifest {
         Manifest {
             genomic_block_size_bp: DEFAULT_GENOMIC_BLOCK_SIZE_BP,
             block_byte_ceiling: Some(1_048_576),
             look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
             fields: vec![
-                FieldSpec::new(
-                    FieldName("position-offset".to_string()),
-                    FieldEncoding::Varint,
-                ),
-                FieldSpec::new(
-                    FieldName("coverage-step".to_string()),
-                    FieldEncoding::SignedVarint,
-                ),
-                FieldSpec::new(
-                    FieldName("body-bytes".to_string()),
-                    FieldEncoding::FixedWidthInteger { width_bytes: 4 },
-                ),
-                FieldSpec::new(
-                    FieldName("allele-bases".to_string()),
-                    FieldEncoding::LengthPrefixedBytes,
-                ),
-                FieldSpec::new(
-                    FieldName("window-mean-coverage".to_string()),
-                    FieldEncoding::FixedPoint { steps_per_unit: 4 },
-                ),
-                FieldSpec::new(
-                    FieldName("summed-log-error".to_string()),
-                    FieldEncoding::FixedPoint {
+                FieldSpec {
+                    name: FieldName("position-offset".to_string()),
+                    encoding: FieldEncoding::Varint,
+                },
+                FieldSpec {
+                    name: FieldName("coverage-step".to_string()),
+                    encoding: FieldEncoding::SignedVarint,
+                },
+                FieldSpec {
+                    name: FieldName("body-bytes".to_string()),
+                    encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+                },
+                FieldSpec {
+                    name: FieldName("allele-bases".to_string()),
+                    encoding: FieldEncoding::LengthPrefixedBytes,
+                },
+                FieldSpec {
+                    name: FieldName("window-mean-coverage".to_string()),
+                    encoding: FieldEncoding::FixedPoint { steps_per_unit: 4 },
+                },
+                FieldSpec {
+                    name: FieldName("summed-log-error".to_string()),
+                    encoding: FieldEncoding::FixedPoint {
                         steps_per_unit: 4_096,
                     },
-                ),
-                FieldSpec::new(
-                    FieldName("raw-escape-hatch".to_string()),
-                    FieldEncoding::IeeeFloat { width_bytes: 8 },
-                ),
+                },
+                FieldSpec {
+                    name: FieldName("raw-escape-hatch".to_string()),
+                    encoding: FieldEncoding::IeeeFloat { width_bytes: 8 },
+                },
+                FieldSpec {
+                    name: FieldName("chain-id-changes".to_string()),
+                    encoding: FieldEncoding::ChainIdChanges,
+                },
+                FieldSpec {
+                    name: FieldName("observation-reads".to_string()),
+                    encoding: FieldEncoding::ChainIdList,
+                },
             ],
         }
     }
@@ -1534,34 +1602,40 @@ mod tests {
     #[test]
     fn every_encoding_at_every_legal_width_round_trips() {
         let mut fields = vec![
-            FieldSpec::new(FieldName("varint".to_string()), FieldEncoding::Varint),
-            FieldSpec::new(FieldName("signed".to_string()), FieldEncoding::SignedVarint),
-            FieldSpec::new(
-                FieldName("bytes".to_string()),
-                FieldEncoding::LengthPrefixedBytes,
-            ),
-            FieldSpec::new(
-                FieldName("finest-step".to_string()),
-                FieldEncoding::FixedPoint { steps_per_unit: 1 },
-            ),
-            FieldSpec::new(
-                FieldName("widest-step".to_string()),
-                FieldEncoding::FixedPoint {
+            FieldSpec {
+                name: FieldName("varint".to_string()),
+                encoding: FieldEncoding::Varint,
+            },
+            FieldSpec {
+                name: FieldName("signed".to_string()),
+                encoding: FieldEncoding::SignedVarint,
+            },
+            FieldSpec {
+                name: FieldName("bytes".to_string()),
+                encoding: FieldEncoding::LengthPrefixedBytes,
+            },
+            FieldSpec {
+                name: FieldName("finest-step".to_string()),
+                encoding: FieldEncoding::FixedPoint { steps_per_unit: 1 },
+            },
+            FieldSpec {
+                name: FieldName("widest-step".to_string()),
+                encoding: FieldEncoding::FixedPoint {
                     steps_per_unit: u32::MAX,
                 },
-            ),
+            },
         ];
         for width in FIXED_INTEGER_WIDTHS_BYTES {
-            fields.push(FieldSpec::new(
-                FieldName(format!("fixed-{width}")),
-                FieldEncoding::FixedWidthInteger { width_bytes: width },
-            ));
+            fields.push(FieldSpec {
+                name: FieldName(format!("fixed-{width}")),
+                encoding: FieldEncoding::FixedWidthInteger { width_bytes: width },
+            });
         }
         for width in IEEE_FLOAT_WIDTHS_BYTES {
-            fields.push(FieldSpec::new(
-                FieldName(format!("ieee-{width}")),
-                FieldEncoding::IeeeFloat { width_bytes: width },
-            ));
+            fields.push(FieldSpec {
+                name: FieldName(format!("ieee-{width}")),
+                encoding: FieldEncoding::IeeeFloat { width_bytes: width },
+            });
         }
 
         let mut written = a_written_header();
@@ -2065,19 +2139,19 @@ mod tests {
     fn an_encoding_carrying_the_wrong_parameter_is_refused() {
         for (declaration, what) in [
             (
-                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"varint\"\nsteps-per-unit = 4096\n",
+                "name = \"x\"\nshape = \"scalar\"\nencoding = \"varint\"\nsteps-per-unit = 4096\n",
                 "a varint with a step",
             ),
             (
-                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"varint\"\nwidth-bytes = 4\n",
+                "name = \"x\"\nshape = \"scalar\"\nencoding = \"varint\"\nwidth-bytes = 4\n",
                 "a varint with a width",
             ),
             (
-                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"fixed-width-integer\"\nwidth-bytes = 4\nsteps-per-unit = 4096\n",
+                "name = \"x\"\nshape = \"scalar\"\nencoding = \"fixed-width-integer\"\nwidth-bytes = 4\nsteps-per-unit = 4096\n",
                 "a fixed-width integer with a step",
             ),
             (
-                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"fixed-point\"\nsteps-per-unit = 4096\nwidth-bytes = 4\n",
+                "name = \"x\"\nshape = \"scalar\"\nencoding = \"fixed-point\"\nsteps-per-unit = 4096\nwidth-bytes = 4\n",
                 "a fixed-point field with a width",
             ),
         ] {
@@ -2098,15 +2172,15 @@ mod tests {
     fn a_scheme_without_its_parameter_is_refused() {
         for (declaration, wanted) in [
             (
-                "name = \"body-bytes\"\ncardinality = \"one-value\"\nencoding = \"fixed-width-integer\"\n",
+                "name = \"body-bytes\"\nshape = \"scalar\"\nencoding = \"fixed-width-integer\"\n",
                 "carries no width",
             ),
             (
-                "name = \"raw\"\ncardinality = \"one-value\"\nencoding = \"ieee-float\"\n",
+                "name = \"raw\"\nshape = \"scalar\"\nencoding = \"ieee-float\"\n",
                 "carries no width",
             ),
             (
-                "name = \"q-sum\"\ncardinality = \"one-value\"\nencoding = \"fixed-point\"\n",
+                "name = \"q-sum\"\nshape = \"scalar\"\nencoding = \"fixed-point\"\n",
                 "carries no step",
             ),
         ] {
@@ -2124,7 +2198,7 @@ mod tests {
     #[test]
     fn an_unknown_encoding_is_refused_and_the_message_lists_the_known_ones() {
         let refused = decoded(&one_field_declared_as(
-            "name = \"chain-ids\"\ncardinality = \"one-value\"\nencoding = \"roaring-bitmap\"\n",
+            "name = \"chain-ids\"\nshape = \"scalar\"\nencoding = \"roaring-bitmap\"\n",
         ))
         .expect_err("that is not one of the eight");
         let said = refused.to_string();
@@ -2145,10 +2219,10 @@ mod tests {
     fn every_scheme_the_writer_can_spell_is_one_the_reader_recognises() {
         for scheme in ALL_ENCODINGS {
             let mut header = a_written_header();
-            header.manifest.fields = vec![FieldSpec::new(
-                FieldName("the-one-field".to_string()),
-                scheme,
-            )];
+            header.manifest.fields = vec![FieldSpec {
+                name: FieldName("the-one-field".to_string()),
+                encoding: scheme,
+            }];
             let bytes = header
                 .encode()
                 .unwrap_or_else(|e| panic!("{scheme:?} must encode: {e}"));
@@ -2159,163 +2233,313 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // How many values of a field a record holds
+    // What one appearance of a field looks like
     // -----------------------------------------------------------------
 
-    /// **Every scheme, both ways round**: declared with the cardinality it lays down a file
-    /// round-trips, and declared with the other one it is refused.
+    /// **Each encoding's shape, named one at a time against a literal.**
     ///
-    /// This is the test that makes the rule cover all eight rather than the two a hand-written
-    /// pair would reach. Both halves are here because a check that only ever sees agreeing
-    /// files would pass while doing nothing.
+    /// ⚠ This is the only test that says what the answers *are*. Every other test of the shape
+    /// column asks [`FieldEncoding::shape`] what a scheme lays down and then checks the file
+    /// agrees, so a wrong answer applied consistently passes all of them — measured: moving
+    /// `SignedVarint`, `FixedWidthInteger` and `IeeeFloat` into the list arm left the suite
+    /// green while the header wrote `shape = "list"` beside a 4-byte integer and an 8-byte
+    /// float. Those three are reached by no record field today, and they are exactly what the
+    /// two queued fields — a window's GC fraction and its mean coverage — will use.
     #[test]
-    fn every_scheme_round_trips_with_its_own_cardinality_and_is_refused_with_the_other() {
+    fn every_encoding_lays_down_the_shape_its_bytes_have() {
+        for scheme in [
+            FieldEncoding::Varint,
+            FieldEncoding::SignedVarint,
+            FieldEncoding::LengthPrefixedBytes,
+            FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+            FieldEncoding::IeeeFloat { width_bytes: 8 },
+            FieldEncoding::FixedPoint { steps_per_unit: 4 },
+        ] {
+            assert_eq!(
+                scheme.shape(),
+                FieldShape::Scalar,
+                "{scheme:?} lays down one value"
+            );
+        }
+        for scheme in [FieldEncoding::ChainIdChanges, FieldEncoding::ChainIdList] {
+            assert_eq!(
+                scheme.shape(),
+                FieldShape::List,
+                "{scheme:?} lays down a counted run"
+            );
+        }
+    }
+
+    /// **Every scheme, both ways round**: a file declaring the shape its encoding lays down
+    /// round-trips, and one declaring the other shape is refused.
+    ///
+    /// The disagreeing half is built as **text**, because a `FieldSpec` can no longer hold a
+    /// disagreement — which is the point of deriving the shape rather than storing it.
+    #[test]
+    fn every_scheme_round_trips_with_its_own_shape_and_is_refused_with_the_other() {
         for scheme in ALL_ENCODINGS {
-            let implied = scheme.cardinality();
+            let laid_down = scheme.shape();
             let mut agreeing = a_written_header();
-            agreeing.manifest.fields = vec![FieldSpec::new(
-                FieldName("the-one-field".to_string()),
-                scheme,
-            )];
+            agreeing.manifest.fields = vec![FieldSpec {
+                name: FieldName("the-one-field".to_string()),
+                encoding: scheme,
+            }];
             let bytes = agreeing
                 .encode()
                 .unwrap_or_else(|e| panic!("{scheme:?} must encode: {e}"));
             let (read_back, _) =
                 decoded(&bytes).unwrap_or_else(|e| panic!("{scheme:?} must decode: {e}"));
-            assert_eq!(read_back.manifest.fields[0].cardinality, implied);
+            assert_eq!(read_back.manifest.fields[0].shape(), laid_down);
 
-            let other = match implied {
-                FieldCardinality::OneValue => FieldCardinality::AList,
-                FieldCardinality::AList => FieldCardinality::OneValue,
+            let other = match laid_down {
+                FieldShape::Scalar => FieldShape::List,
+                FieldShape::List => FieldShape::Scalar,
             };
-            let mut disagreeing = a_written_header();
-            disagreeing.manifest.fields = vec![FieldSpec {
-                name: FieldName("the-one-field".to_string()),
-                cardinality: other,
-                encoding: scheme,
-            }];
+            let (spelling, width_bytes, steps_per_unit) = scheme.spelled();
+            let mut declaration = format!(
+                "name = \"the-one-field\"\nshape = \"{}\"\nencoding = \"{spelling}\"\n",
+                other.spelled()
+            );
+            if let Some(width) = width_bytes {
+                declaration.push_str(&format!("width-bytes = {width}\n"));
+            }
+            if let Some(step) = steps_per_unit {
+                declaration.push_str(&format!("steps-per-unit = {step}\n"));
+            }
             let refused = refusal(
-                disagreeing.encode(),
+                decoded(&one_field_declared_as(&declaration)),
                 &format!("{scheme:?} declared {:?} must be refused", other.spelled()),
             );
-            let said = refused.to_string();
-            assert!(said.contains(other.spelled()), "got {said}");
-            assert!(said.contains(implied.spelled()), "got {said}");
-        }
-    }
-
-    /// The refusal reaches a **reader** too, and not only the writer that would have produced
-    /// the file. A psp is refused on what it says, not on who wrote it — and a hand-built
-    /// header never goes through `encode`.
-    #[test]
-    fn a_file_whose_cardinality_disagrees_with_its_encoding_is_refused_by_the_reader() {
-        let refused = refusal(
-            decoded(&one_field_declared_as(
-                "name = \"observation-reads\"\ncardinality = \"one-value\"\n\
-                 encoding = \"chain-id-list\"\n",
-            )),
-            "a list declared as one value must be refused",
-        );
-        let said = refused.to_string();
-        assert!(said.contains("observation-reads"), "got {said}");
-        assert!(said.contains("a-list"), "got {said}");
-    }
-
-    /// A cardinality this reader has never heard of is refused rather than fallen back from,
-    /// and the message lists the two it knows. **The fallback is the dangerous version**: a
-    /// later writer's `per-observation` field is one this reader cannot step over, and taking
-    /// the encoding's own answer instead would step over it once and resume in the middle of
-    /// the next field.
-    #[test]
-    fn an_unknown_cardinality_is_refused_and_the_message_lists_the_known_ones() {
-        let refused = refusal(
-            decoded(&one_field_declared_as(
-                "name = \"per-observation-thing\"\ncardinality = \"per-observation\"\n\
-                 encoding = \"varint\"\n",
-            )),
-            "that is not one of the two",
-        );
-        let said = refused.to_string();
-        assert!(said.contains("per-observation"), "got {said}");
-        for known in ALL_CARDINALITIES {
-            assert!(
-                said.contains(known.spelled()),
-                "the message must list {:?}; got {said}",
-                known.spelled()
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "SRR7279481.psp: manifest.field.shape: field \"the-one-field\" declares \
+                     shape {:?}, but its encoding {:?} lays down {:?}",
+                    other.spelled(),
+                    spelling,
+                    laid_down.spelled()
+                ),
+                "the message must say which declaration was which"
             );
         }
     }
 
-    /// A field entry that declares no cardinality at all is refused. **Not defaulted**: the
-    /// key is one of the three spec §4.5 requires, and a file that omits it was not written by
-    /// anything that agreed to this format.
+    /// A file whose shape disagrees with its encoding is refused, **and the message names both
+    /// declarations the right way round**.
+    ///
+    /// Asserted as the whole sentence rather than as `contains` of its ingredients: swapping
+    /// the two operands leaves every ingredient present, and produces a message claiming
+    /// `chain-id-list` lays down a scalar.
     #[test]
-    fn a_field_that_declares_no_cardinality_is_refused() {
+    fn a_file_whose_shape_disagrees_with_its_encoding_is_refused_by_the_reader() {
+        let refused = refusal(
+            decoded(&one_field_declared_as(
+                "name = \"observation-reads\"\nshape = \"scalar\"\n\
+                 encoding = \"chain-id-list\"\n",
+            )),
+            "a counted run declared as one value must be refused",
+        );
+        assert_eq!(
+            refused.to_string(),
+            "SRR7279481.psp: manifest.field.shape: field \"observation-reads\" declares shape \
+             \"scalar\", but its encoding \"chain-id-list\" lays down \"list\"",
+        );
+    }
+
+    /// A shape this reader has never heard of is refused rather than fallen back from, and the
+    /// message lists the two it knows.
+    ///
+    /// **The near-miss spellings are the point.** A reader that trimmed, folded case or
+    /// matched a prefix would accept `"Scalar"`, `" list "` or `"s"` and reach the very
+    /// fallback the exact match exists to forbid — and a fixture whose only bad value looks
+    /// like neither known spelling cannot tell an exact match from a sloppy one. The field is
+    /// deliberately **not** named after the bad value: a fixture named `per-observation-thing`
+    /// makes `contains("per-observation")` true even when the message has dropped the value.
+    #[test]
+    fn an_unknown_shape_is_refused_and_the_message_lists_the_known_ones() {
+        for bad in [
+            "per-observation",
+            "Scalar",
+            "LIST",
+            " list ",
+            "list ",
+            "s",
+            "scalars",
+            "",
+        ] {
+            let refused = refusal(
+                decoded(&one_field_declared_as(&format!(
+                    "name = \"a-field\"\nshape = \"{bad}\"\nencoding = \"varint\"\n"
+                ))),
+                &format!("{bad:?} is not one of the two"),
+            );
+            let said = refused.to_string();
+            assert_eq!(
+                said,
+                format!(
+                    "SRR7279481.psp: manifest.field.shape: field \"a-field\" declares shape \
+                     {bad:?}, which is not one of scalar, list"
+                ),
+                "the message must name the value it refused"
+            );
+            for known in ALL_SHAPES {
+                assert!(
+                    said.contains(known.spelled()),
+                    "the message must list {:?}; got {said}",
+                    known.spelled()
+                );
+            }
+        }
+    }
+
+    /// A field entry that declares no shape at all is refused. **Not defaulted**: the key is
+    /// one of the three spec §4.5 requires, and no psp exists that omits it.
+    ///
+    /// The refusal must come from the **parser**, naming the missing key and the line it was
+    /// missing from. Adding `#[serde(default)]` to the wire field would still refuse the file —
+    /// as an empty string that is not a known spelling — but the message would then claim the
+    /// file declared `""` and would lose the line number, so asserting merely that the word
+    /// `shape` appears does not hold this in place.
+    #[test]
+    fn a_field_that_declares_no_shape_is_refused_by_the_parser() {
         let refused = refusal(
             decoded(&one_field_declared_as(
                 "name = \"position-offset\"\nencoding = \"varint\"\n",
             )),
-            "a field entry with no cardinality must be refused",
+            "a field entry with no shape must be refused",
         );
-        assert!(refused.to_string().contains("cardinality"), "got {refused}");
+        let said = refused.to_string();
+        assert!(said.contains("missing field `shape`"), "got {said}");
+        assert!(
+            said.contains("[[manifest.field]]"),
+            "the message must point at the entry it faulted; got {said}"
+        );
     }
 
-    /// The header a reader sees says it in words. **Read off the file's own text**, because a
-    /// round-trip through this module's types would pass just as well if the key never reached
-    /// the bytes.
+    /// The header a reader sees says it in words, **for both spellings**.
     ///
-    /// **Anchored at the start of a line, which is not fussiness**: written as a bare substring
-    /// this test passed with the key renamed to `field-cardinality`, because that name ends in
-    /// the one being looked for.
+    /// Read off the file's own text, because a round-trip through this module's types would
+    /// pass just as well if the key never reached the bytes. Two traps this test has already
+    /// fallen into and now covers:
+    ///
+    /// - **Anchored at the start of a line.** As a bare substring it passed with the key
+    ///   renamed to `field-cardinality`, because that name ends in the one being looked for.
+    /// - **The fixture must carry a list.** `a_manifest()` declared six of the eight encodings
+    ///   and omitted exactly the two list-shaped ones, so `"list"` never appeared in any
+    ///   header text any test read.
     #[test]
-    fn the_header_text_names_each_fields_cardinality() {
+    fn the_header_text_names_each_fields_shape() {
         let written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let text = body_of(&bytes);
-        assert!(text.contains("\ncardinality = \"one-value\""), "got {text}");
+        assert!(text.contains("\nshape = \"scalar\""), "got {text}");
+        assert!(
+            text.contains("\nshape = \"list\""),
+            "the fixture must declare a list-shaped field, or this test cannot see half the \
+             vocabulary; got {text}"
+        );
         assert_eq!(
             text.lines()
-                .filter(|line| line.starts_with("cardinality = "))
-                .count(),
+                .filter(|line| *line == "shape = \"scalar\"")
+                .count()
+                + text
+                    .lines()
+                    .filter(|line| *line == "shape = \"list\"")
+                    .count(),
             written.manifest.fields.len(),
             "one line per declared field"
         );
     }
 
+    /// **A field name may not carry whitespace or a control character**, because TOML writes
+    /// such a name as a multi-line string and its own bytes then land in the header body as
+    /// further lines.
+    ///
+    /// Measured before the rule existed: a field named `evil"\nshape = "list"\nx = "` produced
+    /// a header whose text showed a `shape` line for a field that declared another, nine such
+    /// lines for eight fields — while the file still round-tripped, because the TOML parser is
+    /// not fooled. It is the person running `head` who is, and readability is the whole reason
+    /// this header is text.
+    #[test]
+    fn a_field_name_that_could_forge_a_line_in_the_header_is_refused() {
+        for forged in [
+            "evil\"\nshape = \"list\"\nx = \"",
+            "two words",
+            "trailing\t",
+            "null\u{0}byte",
+        ] {
+            let mut header = a_written_header();
+            header.manifest.fields = vec![FieldSpec {
+                name: FieldName(forged.to_string()),
+                encoding: FieldEncoding::Varint,
+            }];
+            let refused = refusal(
+                header.encode(),
+                &format!("{forged:?} must not be writable as a field name"),
+            );
+            let said = refused.to_string();
+            assert!(
+                said.contains("whitespace or a control character"),
+                "got {said}"
+            );
+        }
+    }
+
     /// **The record's own fields, and which two of the twenty-seven are lists.** A count and
-    /// the names, so that a field changing shape has to be changed here on purpose — the two
-    /// halves of the chain-id column are the only runs of values a record carries.
+    /// the names, so a field changing shape has to be changed here on purpose — the two halves
+    /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::ng::psp::record::record_fields();
         assert_eq!(fields.len(), 27);
         let lists: Vec<&str> = fields
             .iter()
-            .filter(|field| field.cardinality == FieldCardinality::AList)
+            .filter(|field| field.shape() == FieldShape::List)
             .map(|field| field.name.0.as_str())
             .collect();
         assert_eq!(lists, ["chain-id-changes", "observation-reads"]);
     }
 
-    /// `ALL_CARDINALITIES` has to be both of them, for the reason `ALL_ENCODINGS` has to be
-    /// all eight: the writer spells from one list and the reader recognises from it, so a
-    /// third value missing from the array is a file one side cannot read.
+    /// Every shape the type has is in [`ALL_SHAPES`], spelled exactly once.
+    ///
+    /// **The list is generated beside the enum**, so a variant cannot be added to one without
+    /// reaching the other — which is what this test can *not* establish on its own, and why the
+    /// generation exists. What it does hold is that no two shapes share a spelling: two
+    /// variants spelled alike would make `shape_of` return the first for both, and the
+    /// disagreement check would then pass on a file it should refuse.
     #[test]
-    fn the_cardinality_list_holds_every_value_the_type_has() {
-        let sample = FieldCardinality::OneValue;
-        let named = match sample {
-            FieldCardinality::OneValue | FieldCardinality::AList => 2,
-        };
-        assert_eq!(ALL_CARDINALITIES.len(), named);
-        for value in ALL_CARDINALITIES {
+    fn every_shape_is_spelled_once_and_differently() {
+        for shape in ALL_SHAPES {
             assert_eq!(
-                ALL_CARDINALITIES
+                ALL_SHAPES
                     .iter()
-                    .filter(|other| **other == value)
+                    .filter(|other| other.spelled() == shape.spelled())
                     .count(),
                 1,
-                "{value:?} appears more than once"
+                "{:?} shares its spelling with another shape",
+                shape
             );
+            assert!(!shape.spelled().is_empty());
+        }
+        // Round-tripping every spelling through the parser is what ties the list to the reader:
+        // a shape in the list that `shape_of` cannot find would be one the writer can spell and
+        // the reader cannot read.
+        for shape in ALL_SHAPES {
+            let field = WireFieldSpec {
+                name: "a-field".to_string(),
+                shape: shape.spelled().to_string(),
+                encoding: "varint".to_string(),
+                width_bytes: None,
+                steps_per_unit: None,
+            };
+            match shape_of(&field) {
+                Ok(parsed) => assert_eq!(parsed, *shape),
+                Err(broken) => panic!(
+                    "{:?} is in the list and the reader will not parse it: {}",
+                    shape.spelled(),
+                    broken.reason
+                ),
+            }
         }
     }
 
