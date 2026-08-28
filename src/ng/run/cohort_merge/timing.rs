@@ -179,20 +179,6 @@ pub static WINDOW_NANOS: Counter = Counter::new();
 /// Nanoseconds spent setting a region's walk up, before any locus is closed — inside builder
 /// time.
 pub static WALK_SETUP_NANOS: Counter = Counter::new();
-/// How many records a sample already held when a cover asked it to draw, summed over every
-/// such ask — against [`COVER_DRAWS`] this is the mean window a cover starts from.
-///
-/// **It is what decides whether the bisection in `draw_to` can matter.** That search replaces
-/// a walk over the already-held records, so it is worth what the window is long, and eviction
-/// is what keeps the window short.
-pub static HELD_WHEN_DRAWING: Counter = Counter::new();
-/// How many times a cover asked a sample to draw.
-pub static COVER_DRAWS: Counter = Counter::new();
-/// Nanoseconds spent giving the builders what a cover drew beside the last round.
-///
-/// **Zero in every driver but the overlapping one**, which is the only one that draws
-/// anywhere but straight into the windows builders read.
-pub static PROMOTE_NANOS: Counter = Counter::new();
 /// Nanoseconds the organiser spent releasing loci in region order — `submit` and `drain_ready`.
 pub static ORGANISE_NANOS: Counter = Counter::new();
 /// Nanoseconds of the whole merge, from the driver's first line to its last.
@@ -214,9 +200,6 @@ pub fn reset() {
         &SLOWEST_IN_THIS_ROUND_NANOS,
         &WINDOW_NANOS,
         &WALK_SETUP_NANOS,
-        &HELD_WHEN_DRAWING,
-        &COVER_DRAWS,
-        &PROMOTE_NANOS,
         &ORGANISE_NANOS,
         &MERGE_WALL_NANOS,
     ] {
@@ -240,8 +223,6 @@ pub struct Report {
     pub regions_with_no_locus: u64,
     /// Sweeps over the cohort the covers took, summed.
     pub cover_sweeps: u64,
-    /// The mean number of records a sample already held when a cover asked it to draw.
-    pub held_when_drawing: f64,
     /// The whole merge.
     pub merge_wall_ms: f64,
     /// Deciding what to evict and moving it out, on the organiser's thread.
@@ -260,8 +241,6 @@ pub struct Report {
     pub window_ms: f64,
     /// Setting the walks up, inside the builders' work.
     pub walk_setup_ms: f64,
-    /// Giving the builders what a cover drew beside the last round.
-    pub promote_ms: f64,
     /// Releasing loci in region order, on the organiser's thread.
     pub organise_ms: f64,
 }
@@ -275,7 +254,6 @@ pub fn report(threads: usize) -> Report {
         regions: REGIONS.get(),
         regions_with_no_locus: REGIONS_WITH_NO_LOCUS.get(),
         cover_sweeps: COVER_SWEEPS.get(),
-        held_when_drawing: HELD_WHEN_DRAWING.get() as f64 / COVER_DRAWS.get().max(1) as f64,
         merge_wall_ms: ms(&MERGE_WALL_NANOS),
         evict_ms: ms(&EVICT_NANOS),
         cover_ms: ms(&COVER_NANOS),
@@ -285,7 +263,6 @@ pub fn report(threads: usize) -> Report {
         slowest_builder_ms: ms(&SLOWEST_BUILDER_NANOS),
         window_ms: ms(&WINDOW_NANOS),
         walk_setup_ms: ms(&WALK_SETUP_NANOS),
-        promote_ms: ms(&PROMOTE_NANOS),
         organise_ms: ms(&ORGANISE_NANOS),
     }
 }
@@ -314,12 +291,7 @@ impl Report {
 
     /// The merge's time that no counter above accounts for.
     pub fn unaccounted_ms(&self) -> f64 {
-        self.merge_wall_ms
-            - self.evict_ms
-            - self.cover_ms
-            - self.round_wall_ms
-            - self.promote_ms
-            - self.organise_ms
+        self.merge_wall_ms - self.evict_ms - self.cover_ms - self.round_wall_ms - self.organise_ms
     }
 }
 
@@ -331,11 +303,6 @@ impl fmt::Display for Report {
             out,
             "# rounds: {}, building regions: {} ({} held no locus), cover sweeps: {}",
             self.rounds, self.regions, self.regions_with_no_locus, self.cover_sweeps,
-        )?;
-        writeln!(
-            out,
-            "# records a sample already held when a cover asked it to draw, on average: {:.1}",
-            self.held_when_drawing,
         )?;
         writeln!(out, "# threads while merging: {}", self.threads)?;
         writeln!(out, "part, ms, share_of_merge_%")?;
@@ -403,12 +370,6 @@ impl fmt::Display for Report {
             "    launching and collecting the builders, {:.1}, {:.1}",
             self.launching_builders_ms(),
             share(self.launching_builders_ms())
-        )?;
-        writeln!(
-            out,
-            "  releasing what the cover drew beside the round, {:.1}, {:.1}",
-            self.promote_ms,
-            share(self.promote_ms)
         )?;
         writeln!(
             out,

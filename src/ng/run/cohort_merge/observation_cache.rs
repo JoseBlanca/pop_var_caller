@@ -134,32 +134,9 @@ where
 /// failed and passes the error on without adding to it, so a source whose error does not name
 /// its own sample produces a failure an operator cannot act on at a cohort of thousands —
 /// arch §5's two variants both carry `sample` for exactly that reason.
-/// **The window and the reader are separate fields, and that is what lets a cover run beside
-/// the builders.** A builder reads [`released`](Self::released); a cover advances
-/// [`readers`](Self::readers). Held in one `Vec<SampleWindow>` as they used to be, the two
-/// could not be borrowed apart, so the organiser had to finish covering before any builder
-/// started — the round barrier that
-/// [`merge_cohort_in_parallel`](super::parallel::merge_cohort_in_parallel) pays. Split, they
-/// can be handed to the two halves of a `rayon::join`.
 pub struct ObservationCache<S> {
-    /// What builders may read, one window per sample in the run's sample order — the order
-    /// every consumer indexes by.
-    ///
-    /// **Immutable while a round is being built.** A cover running beside that round appends
-    /// to `readers[sample].drawn` instead, and [`promote`](Self::promote) moves those in when
-    /// the round is over.
-    released: Vec<Vec<SampleLocusObservations>>,
-    /// Drawn by a cover that ran beside a round, not yet released, one per sample.
-    ///
-    /// **Empty everywhere except between a [`cover_beside`](Self::cover_beside) and its
-    /// [`promote`](Self::promote).** The two covers that do not overlap a round draw straight
-    /// into `released`, so they never touch this and pay nothing for its existence.
-    ///
-    /// It is a field of the cache rather than of a reader so that a cover can hold it mutably
-    /// while the builders hold `released` — the whole point of the split.
-    drawn: Vec<Vec<SampleLocusObservations>>,
-    /// One forward reader per sample, in the same order.
-    readers: Vec<SampleReader<S>>,
+    /// One per sample, in the run's sample order — the order every consumer indexes by.
+    samples: Vec<SampleWindow<S>>,
     /// How far a **successful** [`cover`](Self::cover) has drawn, genome-wide.
     ///
     /// A cover that failed does not move it, which is what lets
@@ -167,17 +144,10 @@ pub struct ObservationCache<S> {
     /// than hand out a window that is short — and short is a locus closed over the wrong
     /// ground, which is a wrong answer rather than a failure.
     covered_to: Option<GenomePosition>,
-    /// How far the ground in `released` reaches — what a builder's window is checked against.
-    ///
-    /// Equal to `covered_to` except while a cover is running beside a round of builders, when
-    /// it is one round behind: what those builders may read is what the *previous* cover drew,
-    /// and reading against the newer mark would let one of them ask for ground whose records
-    /// are still in `drawn`.
-    released_to: Option<GenomePosition>,
 }
 
-/// One sample's forward reader, and what it has drawn that its window has not yet been given.
-struct SampleReader<S> {
+/// One sample's reader and the observations drawn from it that have not been evicted.
+struct SampleWindow<S> {
     /// The forward reader. Never seeks, never rewinds.
     source: S,
     /// Whether the source has already answered `None`.
@@ -195,6 +165,12 @@ struct SampleReader<S> {
     /// different shape from the one that section bounds. What does not fit is freed as
     /// before.
     spare: Vec<SampleLocusObservations>,
+    /// What has been drawn and not yet evicted, in coordinate order.
+    ///
+    /// **A `Vec` and not a `VecDeque`**, because a builder is handed a contiguous slice of it
+    /// ([`ObservationCache::with_observations`]) and a deque's two halves are not one.
+    /// Eviction pays a move of what survives, which is the window — short by construction.
+    held_observations: Vec<SampleLocusObservations>,
     /// Where the last observation drawn from `source` began — the ordering check's memory.
     last_drawn: Option<GenomePosition>,
 }
@@ -207,19 +183,17 @@ impl<S> ObservationCache<S> {
     /// nothing out.
     pub fn over(sources: Vec<S>) -> Self {
         Self {
-            released: sources.iter().map(|_| Vec::new()).collect(),
-            drawn: sources.iter().map(|_| Vec::new()).collect(),
-            readers: sources
+            samples: sources
                 .into_iter()
-                .map(|source| SampleReader {
+                .map(|source| SampleWindow {
                     source,
                     spent: false,
                     spare: Vec::new(),
+                    held_observations: Vec::new(),
                     last_drawn: None,
                 })
                 .collect(),
             covered_to: None,
-            released_to: None,
         }
     }
 }
@@ -246,52 +220,6 @@ impl<S> ObservationCache<S> {
     /// through an observation that reaches into `span` — which is kept, so the chain is seen
     /// and the locus still opens before `span`, and is still skipped by the ownership rule.
     pub fn with_observations<R>(
-        &self,
-        span: GenomeRegion,
-        f: impl FnOnce(&[&[SampleLocusObservations]]) -> R,
-    ) -> R {
-        self.released_windows().with_observations(span, f)
-    }
-
-    /// The windows builders may read, borrowed apart from the readers.
-    ///
-    /// **This is the whole of what a builder is allowed to see**, and giving it a name is what
-    /// lets [`cover_beside`](Self::cover_beside) hand it to one half of a `rayon::join` while
-    /// the other half advances the readers.
-    pub(super) fn released_windows(&self) -> ReleasedWindows<'_> {
-        ReleasedWindows {
-            per_sample: &self.released,
-            covered_to: self.released_to,
-        }
-    }
-
-    /// How many observations are held, summed across samples — including any a cover has drawn
-    /// but not yet released.
-    pub fn held_observations_len(&self) -> usize {
-        self.released.iter().map(Vec::len).sum::<usize>()
-            + self.drawn.iter().map(Vec::len).sum::<usize>()
-    }
-}
-
-/// Every sample's released observations — what a round's builders read, and nothing else.
-///
-/// **Borrowed for the length of a round and immutable while it runs**, which is what makes it
-/// safe to build one round while the next round's ground is being drawn: the drawing appends to
-/// the readers' own buffers and cannot move a record a builder is looking at.
-pub(super) struct ReleasedWindows<'a> {
-    /// One window per sample, in the run's sample order.
-    per_sample: &'a [Vec<SampleLocusObservations>],
-    /// How far these windows were covered — the mark a builder's span is checked against.
-    covered_to: Option<GenomePosition>,
-}
-
-impl ReleasedWindows<'_> {
-    /// Every sample's held observations from the first one that reaches into `span`, for the
-    /// length of the call — a builder's only way in, and read-only by construction.
-    ///
-    /// The rules are [`ObservationCache::with_observations`]'s, which is this method's only
-    /// other caller and where they are stated.
-    pub(super) fn with_observations<R>(
         &self,
         span: GenomeRegion,
         f: impl FnOnce(&[&[SampleLocusObservations]]) -> R,
@@ -327,16 +255,32 @@ impl ReleasedWindows<'_> {
         // mutability on a `&self` method that several builders will hold at once.
         let windowing = super::timing::Stopwatch::start();
         let observations_per_sample: Vec<&[SampleLocusObservations]> = self
-            .per_sample
+            .samples
             .iter()
-            .map(|held| &held[first_reaching_index(held, left_edge)..])
+            .map(|sample| {
+                let held = &sample.held_observations;
+                &held[first_reaching_index(held, left_edge)..]
+            })
             .collect();
         windowing.add_to(&super::timing::WINDOW_NANOS);
         f(&observations_per_sample)
     }
-}
 
-impl<S> ObservationCache<S> {
+    /// How many observations are held, summed across samples — the size of the window this
+    /// cache is the memory of (spec §8).
+    ///
+    /// **It exists so that "eviction keeps up" can be asserted rather than assumed.** Nothing
+    /// in a merge's output shows whether [`evict_before`](Self::evict_before) was ever called:
+    /// a driver that never evicted would produce exactly the right answer and hold the whole
+    /// stretch while doing it. This is what a test — and later the run's memory report — reads
+    /// to tell those two apart.
+    pub fn held_observations_len(&self) -> usize {
+        self.samples
+            .iter()
+            .map(|sample| sample.held_observations.len())
+            .sum()
+    }
+
     /// Drop everything that ends before `position`. Called once the organiser has released
     /// every locus that could have started there.
     ///
@@ -353,70 +297,45 @@ impl<S> ObservationCache<S> {
     /// could have been dropped. The prefix form is chosen for its cost, which is proportional
     /// to what it drops rather than to the window, and not for a difference in what it keeps.
     pub(super) fn evict_before(&mut self, position: GenomePosition) {
-        for (held, reader) in self.released.iter_mut().zip(&mut self.readers) {
-            let first_survivor = first_reaching_index(held, position);
-            let room = held.len();
-            for record in held.drain(..first_survivor) {
-                if reader.spare.len() < room {
-                    reader.spare.push(record);
+        for sample in &mut self.samples {
+            let first_survivor = first_reaching_index(&sample.held_observations, position);
+            // **Destructured so that the drain and the spare list are two borrows, not
+            // one.** Both live on the same `SampleWindow`, and a method call inside the
+            // drain would borrow the whole of it a second time.
+            let SampleWindow {
+                held_observations,
+                spare,
+                ..
+            } = sample;
+            let room = held_observations.len();
+            for record in held_observations.drain(..first_survivor) {
+                if spare.len() < room {
+                    spare.push(record);
                 }
             }
         }
     }
 
-    /// [`evict_before`](Self::evict_before), moving what it drops into `graveyard` instead of
-    /// freeing it here.
+    /// [`evict_before`](Self::evict_before) with the samples evicted at the same time as each
+    /// other, and what it drops moved out rather than freed here.
     ///
-    /// **Same records dropped, freed somewhere else.** What eviction costs is not deciding what
-    /// to drop — that is one walk of the window's prefix — but returning every record's
-    /// buffers to the allocator, and that runs on whichever thread calls it. Moving the records
-    /// out first makes the free a job of its own that a caller can put beside work rather than
-    /// in front of it; the caller owns `graveyard` and decides when it dies.
+    /// **Eviction is per sample and shares nothing between them**, so this is that walk on a pool:
+    /// each sample finds its own first survivor, drains its own prefix into its own spare list,
+    /// and pushes what will not fit into a list of its own. Those come back as one buffer, so the
+    /// caller still has a single thing to free beside the next round's builders.
     ///
-    /// **The records moved out are unreachable by construction**, which is what makes this safe
-    /// to hand to another thread: they are exactly the ones
-    /// [`evict_before`](Self::evict_before) would have dropped, so nothing the cache still
-    /// holds and no window a builder can be given refers to them.
-    ///
-    /// A caller that never empties `graveyard` holds every record the run ever evicted, which
-    /// is the whole cohort — so it is a buffer to drain each round, not one to accumulate.
-    pub(super) fn evict_before_into(
-        &mut self,
-        position: GenomePosition,
-        graveyard: &mut Vec<SampleLocusObservations>,
-    ) {
-        for (held, reader) in self.released.iter_mut().zip(&mut self.readers) {
-            let first_survivor = first_reaching_index(held, position);
-            let room = held.len();
-            for record in held.drain(..first_survivor) {
-                // **The source's offer comes first, the graveyard second.** A record the
-                // source will refill costs nothing to keep and saves the allocation the next
-                // draw would make; only what the sample cannot hold goes on to be freed, and
-                // that freeing is what the caller's partner thread is for.
-                if reader.spare.len() < room {
-                    reader.spare.push(record);
-                } else {
-                    graveyard.push(record);
-                }
-            }
-        }
-    }
-
-    /// [`evict_before_into`](Self::evict_before_into) with the samples evicted at the same time
-    /// as each other.
-    ///
-    /// **Eviction is per sample and shares nothing between them**, so this is the same walk on a
-    /// pool: each sample decides its own first survivor, drains its own prefix into its own
-    /// spare list, and pushes what will not fit into its own graveyard. The graveyards come back
-    /// as one so the caller still has a single buffer to free beside the next round's builders.
+    /// **What the graveyard is for.** What eviction costs is not deciding what to drop — that is
+    /// one search per sample — but returning every dropped record's buffers to the allocator.
+    /// Moving them out first makes that free a job of its own that the caller can put beside its
+    /// builders rather than in front of them; the caller owns the buffer and decides when it dies,
+    /// and one that never empties it holds every record the run ever evicted.
     ///
     /// **Why it is worth a method rather than left serial**: it runs between rounds, when every
-    /// worker but one is idle, and on the tomato benchmark's 63 accessions it was 13.6% of the
-    /// merge — the largest part that no thread but the organiser's ever ran.
-    ///
-    /// The evicted records are freed by whichever worker drained them, which is not the worker
-    /// that drew them; what that costs is the same cross-thread free the merge already pays
-    /// everywhere else.
+    /// worker but the organiser's is idle. Measured on 63 tomato accessions over 100 kb it was
+    /// 13.6% of the merge and the largest part no thread but one ever ran; putting it here halves
+    /// it — 225 ms to 105 over eight merges — and takes 4.4% off the merge. About a third of the
+    /// saving comes back as a slower cover, because a record is now freed by whichever worker
+    /// drained its sample and the recycled ones cross threads more often on the next draw.
     pub(super) fn evict_before_in_parallel(
         &mut self,
         position: GenomePosition,
@@ -426,44 +345,31 @@ impl<S> ObservationCache<S> {
     {
         use rayon::prelude::*;
 
-        let dead: Vec<Vec<SampleLocusObservations>> = self
-            .released
+        let dropped: Vec<Vec<SampleLocusObservations>> = self
+            .samples
             .par_iter_mut()
-            .zip(self.readers.par_iter_mut())
-            .map(|(held, reader)| {
-                let first_survivor = first_reaching_index(held, position);
-                let room = held.len();
-                let mut dropped = Vec::new();
-                for record in held.drain(..first_survivor) {
-                    if reader.spare.len() < room {
-                        reader.spare.push(record);
+            .map(|sample| {
+                let first_survivor = first_reaching_index(&sample.held_observations, position);
+                let SampleWindow {
+                    held_observations,
+                    spare,
+                    ..
+                } = sample;
+                let room = held_observations.len();
+                let mut dead = Vec::new();
+                for record in held_observations.drain(..first_survivor) {
+                    if spare.len() < room {
+                        spare.push(record);
                     } else {
-                        dropped.push(record);
+                        dead.push(record);
                     }
                 }
-                dropped
+                dead
             })
             .collect();
-        for mut sample in dead {
+        for mut sample in dropped {
             graveyard.append(&mut sample);
         }
-    }
-
-    /// Give the builders everything the last cover drew — the round boundary.
-    ///
-    /// **Called only by the driver that covers beside a round** ([`cover_beside`](Self::cover_beside));
-    /// the two covers that do not overlap a round draw straight into the released windows and
-    /// have nothing to promote.
-    ///
-    /// **What it costs is a move of each drawn record**, not of what they point at: the
-    /// records' own buffers stay where they are and only the `SampleLocusObservations` structs
-    /// are copied to the end of the window. That is the price of overlapping, and it is paid
-    /// once per record per merge.
-    pub(super) fn promote(&mut self) {
-        for (held, drawn) in self.released.iter_mut().zip(&mut self.drawn) {
-            held.append(drawn);
-        }
-        self.released_to = self.covered_to;
     }
 }
 
@@ -529,7 +435,6 @@ where
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
         );
-        self.released_to = self.covered_to;
         Ok(())
     }
 
@@ -549,89 +454,48 @@ where
         S: Send,
         E: Send,
     {
-        // **Straight into the released windows**, because no builder is running: this cover
-        // scans and appends to the same buffer, exactly as the serial sweep does, and so has
-        // nothing to promote afterwards.
-        let ObservationCache {
-            released, readers, ..
-        } = self;
-        let chain_reach = draw_every_sample(readers, None, released, region)?;
+        use rayon::prelude::*;
+
+        let mut chain_reach = GenomePosition {
+            contig: region.contig,
+            position: region.end.max(region.start),
+        };
+        loop {
+            let snapshot = chain_reach;
+            let widest = self
+                .samples
+                .par_iter_mut()
+                .map(|sample| {
+                    let drawing = super::timing::Stopwatch::start();
+                    let mut reach = snapshot;
+                    sample.draw_to(&mut reach)?;
+                    drawing.add_to(&super::timing::COVER_BUSY_NANOS);
+                    Ok(reach)
+                })
+                .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
+            super::timing::COVER_SWEEPS.add(1);
+            if widest == chain_reach {
+                break;
+            }
+            chain_reach = widest;
+        }
 
         self.covered_to = Some(
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
         );
-        self.released_to = self.covered_to;
         Ok(())
-    }
-
-    /// Build a round while the next round's ground is drawn — the two halves of the merge that
-    /// used to have to take turns.
-    ///
-    /// **The builders read what the last cover released and the cover writes somewhere else**,
-    /// so neither can move a record the other is looking at: `build` is handed
-    /// [`ReleasedWindows`], and the drawing appends to each reader's own buffer. Nothing the
-    /// cover draws becomes visible until [`promote`](Self::promote), which the caller runs when
-    /// the round is over.
-    ///
-    /// **Both halves run whatever the other does**, including when the cover fails: the round's
-    /// builders have everything they need already, so a source that dies part-way leaves a
-    /// finished round and an error, and the caller decides. That is the same contract
-    /// [`cover`](Self::cover) has — the window keeps what was drawn before the failure — with
-    /// the round's output added.
-    ///
-    /// **What it costs is a second round of observations resident**: the released windows hold
-    /// the round being built and the readers hold the round being drawn (spec §8's term,
-    /// doubled).
-    pub(super) fn cover_beside<R>(
-        &mut self,
-        region: GenomeRegion,
-        build: impl FnOnce(&ReleasedWindows<'_>) -> R + Send,
-    ) -> (R, Result<(), E>)
-    where
-        S: Send,
-        E: Send,
-        R: Send,
-    {
-        let ObservationCache {
-            released,
-            drawn,
-            readers,
-            covered_to,
-            released_to,
-        } = self;
-        let released = &*released;
-        let windows = ReleasedWindows {
-            per_sample: released,
-            covered_to: *released_to,
-        };
-        let (built, covered) = rayon::join(
-            move || build(&windows),
-            || draw_every_sample(readers, Some(released), drawn, region),
-        );
-        match covered {
-            Ok(chain_reach) => {
-                *covered_to =
-                    Some(covered_to.map_or(chain_reach, |reached| reached.max(chain_reach)));
-                (built, Ok(()))
-            }
-            Err(failed) => (built, Err(failed)),
-        }
     }
 
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
     fn sweep(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
         super::timing::COVER_SWEEPS.add(1);
-        for (held, reader) in self.released.iter_mut().zip(&mut self.readers) {
-            // Not `reach_grew |= reader.draw_to(…)?`: that reads as though the call could be
+        for sample in &mut self.samples {
+            // Not `reach_grew |= sample.draw_to(…)?`: that reads as though the call could be
             // skipped, and a later `||` in its place would skip it.
-            //
-            // **The serial cover draws straight into the released window**, which it can
-            // because no builder is running: it passes that window as both the ground to scan
-            // and the buffer to append to, and so has nothing to promote afterwards.
             let drawing = super::timing::Stopwatch::start();
-            let grew = reader.draw_to(&[], held, chain_reach)?;
+            let grew = sample.draw_to(chain_reach)?;
             drawing.add_to(&super::timing::COVER_BUSY_NANOS);
             if grew {
                 reach_grew = true;
@@ -641,85 +505,7 @@ where
     }
 }
 
-/// How many of a sample's held records begin at or before `reach` — the prefix a cover admits.
-///
-/// **A bisection over two slices that are one window.** `front` is what builders may read and
-/// `back` what a cover has drawn since; together they are the sample's records in coordinate
-/// order, so their starts ascend across the join and the answer is one `partition_point` on
-/// whichever half holds the boundary.
-fn starts_at_or_before(
-    front: &[SampleLocusObservations],
-    back: &[SampleLocusObservations],
-    reach: GenomePosition,
-) -> usize {
-    let in_front = front.partition_point(|observation| observation.start_position() <= reach);
-    if in_front < front.len() {
-        return in_front;
-    }
-    front.len() + back.partition_point(|observation| observation.start_position() <= reach)
-}
-
-/// The record at `at` in the window `front` then `back`.
-fn observation_at<'a>(
-    front: &'a [SampleLocusObservations],
-    back: &'a [SampleLocusObservations],
-    at: usize,
-) -> &'a SampleLocusObservations {
-    front.get(at).unwrap_or_else(|| &back[at - front.len()])
-}
-
-/// Draw every sample forward until `region` is covered and the chain from its last base closes,
-/// with the samples drawn at the same time as each other — [`ObservationCache::cover`]'s
-/// fixpoint on a pool.
-///
-/// **Jacobi, where the serial sweep is Gauss-Seidel**, and the argument that both reach the same
-/// least fixpoint is [`ObservationCache::cover_in_parallel`]'s.
-///
-/// Each sample scans its released window and then what it has already drawn, and appends what it
-/// draws to the second. **Whether the released window is also where the drawing lands is the
-/// caller's choice**, and it is what separates a cover that overlaps a round of builders from one
-/// that does not.
-fn draw_every_sample<S, E>(
-    readers: &mut [SampleReader<S>],
-    fronts: Option<&[Vec<SampleLocusObservations>]>,
-    backs: &mut [Vec<SampleLocusObservations>],
-    region: GenomeRegion,
-) -> Result<GenomePosition, E>
-where
-    S: ObservationSource<Error = E> + Send,
-    E: Send,
-{
-    use rayon::prelude::*;
-
-    let mut chain_reach = GenomePosition {
-        contig: region.contig,
-        position: region.end.max(region.start),
-    };
-    loop {
-        let snapshot = chain_reach;
-        let widest = readers
-            .par_iter_mut()
-            .zip(backs.par_iter_mut())
-            .enumerate()
-            .map(|(sample, (reader, back))| {
-                let front = fronts.map_or(&[][..], |per_sample| &per_sample[sample][..]);
-                let drawing = super::timing::Stopwatch::start();
-                let mut reach = snapshot;
-                reader.draw_to(front, back, &mut reach)?;
-                drawing.add_to(&super::timing::COVER_BUSY_NANOS);
-                Ok(reach)
-            })
-            .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
-        super::timing::COVER_SWEEPS.add(1);
-        if widest == chain_reach {
-            break;
-        }
-        chain_reach = widest;
-    }
-    Ok(chain_reach)
-}
-
-impl<S, E> SampleReader<S>
+impl<S, E> SampleWindow<S>
 where
     S: ObservationSource<Error = E>,
 {
@@ -734,58 +520,25 @@ where
     /// carried across covers is not merely stale but can point past the end of a window that
     /// lost two entries at once, which `a_survivor_of_an_eviction_still_widens_the_next_reach`
     /// and `two_evicted_at_once_leave_the_window_sound` exist to catch.
-    fn draw_to(
-        &mut self,
-        front: &[SampleLocusObservations],
-        back: &mut Vec<SampleLocusObservations>,
-        chain_reach: &mut GenomePosition,
-    ) -> Result<bool, E> {
+    fn draw_to(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
-        super::timing::HELD_WHEN_DRAWING.add((front.len() + back.len()) as u64);
-        super::timing::COVER_DRAWS.add(1);
-
-        // **The records already in the window are folded in by bisection, not by walking
-        // them.** A sample's records are disjoint and ascending, so their starts ascend and
-        // their reaches are monotone — the same two facts `first_reaching_index` rests on. So
-        // the ones a given reach admits are a prefix, and the furthest any of them reaches is
-        // the reach of the last one in it: finding that prefix is a search, and the whole
-        // prefix need never be touched.
-        //
-        // **Widening can admit more, so it repeats until the prefix stops growing**, and each
-        // turn strictly lengthens it. What the walk it replaces cost was one comparison per
-        // record in the window per cover, and the window is a whole round of ground.
         let mut considered = 0;
         loop {
-            let admitted = starts_at_or_before(front, back, *chain_reach);
-            if admitted == considered {
-                break;
+            if considered == self.held_observations.len() {
+                // Nothing left in this sample: it cannot widen the reach again.
+                let Some(observation) = self.draw_next()? else {
+                    break;
+                };
+                self.held_observations.push(observation);
             }
-            considered = admitted;
-            let furthest = observation_at(front, back, admitted - 1).reach_position();
-            if furthest <= *chain_reach {
-                break;
-            }
-            *chain_reach = furthest;
-            reach_grew = true;
-        }
-
-        // **Then the records that are not in the window yet, one at a time**, because where the
-        // next one begins is not known until it is drawn. This can only start once every held
-        // record has been admitted: a record still in the window that the reach does not admit
-        // begins after it, and everything drawn from here on begins later still.
-        while considered == front.len() + back.len() {
-            let Some(observation) = self.draw_next()? else {
-                break;
-            };
-            let starts_within = observation.start_position() <= *chain_reach;
-            let reach = observation.reach_position();
-            // Held either way. One beyond the reach stays in the window, and the next cover
-            // reconsiders it against a later reach.
-            back.push(observation);
-            if !starts_within {
+            let observation = &self.held_observations[considered];
+            if observation.start_position() > *chain_reach {
+                // Held, but beyond the reach of any locus this cover can see. It stays in the
+                // window, and the next cover reconsiders it against a later reach.
                 break;
             }
             considered += 1;
+            let reach = observation.reach_position();
             if reach > *chain_reach {
                 *chain_reach = reach;
                 reach_grew = true;

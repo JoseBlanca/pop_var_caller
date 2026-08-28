@@ -74,7 +74,6 @@ use pop_var_caller::ng::run::cohort_merge::parallel::merge_cohort_in_parallel;
 use pop_var_caller::ng::run::cohort_merge::serial::{
     merge_cohort_serially, merge_cohort_through_cache,
 };
-use pop_var_caller::ng::run::cohort_merge::timing as merge_timing;
 use pop_var_caller::ng::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
@@ -235,12 +234,6 @@ fn threads_sweep(
             .num_threads(threads)
             .build()
             .expect("a pool of the asked-for size");
-        // **The breakdown, at cohort sizes the real fixture cannot reach.** Which part of the
-        // merge grows with the cohort is a question about thousands of samples, and the tomato
-        // benchmark holds 63. Fabricated ground cannot say what the parts *are* on real data —
-        // `ng_cohort_merge_real_cost` is the probe for that — but it can say how each one
-        // scales. Printed only under `--features merge-timing`, where the counters are real.
-        merge_timing::reset();
         let regions =
             CohortLocusBuilderRegionsInFlight(NonZeroUsize::new(threads).expect("non-zero"));
         let (median, fastest, slowest) = pool.install(|| {
@@ -264,11 +257,6 @@ fn threads_sweep(
             "{name}, {samples}, pool of {threads}, {bases}, {median:.2}, {fastest:.2}, \
              {slowest:.2}"
         );
-        let breakdown = merge_timing::report(threads);
-        if breakdown.merge_wall_ms > 0.0 {
-            println!("# {name}, {samples} samples, pool of {threads}, {bases} bases");
-            println!("{breakdown}");
-        }
     }
 }
 
