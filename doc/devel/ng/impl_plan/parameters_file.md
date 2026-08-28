@@ -109,7 +109,7 @@ in-band zeros.
 
 ### Milestone B — writing
 
-☐ **B1. `RunParameters` → the file shape.** The projection, with no TOML yet: every field of
+✅ **B1. `RunParameters` → the file shape.** The projection, with no TOML yet: every field of
 `RunParameters` mapped to its row, the read-group and sample axes carrying their names as well as
 their indices.
 *Depends:* A3. *Source:* §3.

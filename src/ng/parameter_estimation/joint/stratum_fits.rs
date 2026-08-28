@@ -659,16 +659,8 @@ impl StratumFits {
         }
         // Indexed rather than `get`-ed from here on: `over` has checked that the three vectors
         // are the same length, and the bound above is that length.
-        let slippage = row.slippage[index].ok_or(NoSlippage::GroupPutNoReadHere {
+        fitted_at(row, stratum, index).ok_or(NoSlippage::GroupPutNoReadHere {
             slippage_group: group,
-        })?;
-        let level = row.level[index].expect(
-            "a slippage group with numbers at a stratum has a level provenance beside them",
-        );
-        Ok(FittedSlippage {
-            slippage,
-            level,
-            shares: row.shares[index],
         })
     }
 
@@ -677,6 +669,65 @@ impl StratumFits {
     #[must_use]
     pub fn slippage_group_of(&self, read_group: ReadGroupId) -> Option<u32> {
         self.slippage_group_of.get(&read_group).copied()
+    }
+
+    /// **Every `(stratum × slippage group)` that has numbers**, in stratum order and then in
+    /// slippage-group order.
+    ///
+    /// **The name says *with numbers* because this is not a dense walk.** A pair with no entry is
+    /// a slippage group that put no read in that stratum, and it is skipped rather than yielded
+    /// as an absence — the same claim [`Self::at`] makes through
+    /// [`NoSlippage::GroupPutNoReadHere`], said by omission instead of by a variant. A caller
+    /// that zipped this against a per-stratum table of its own would misalign it.
+    ///
+    /// **For a consumer that must walk every cell rather than look one up**, which is what
+    /// writing the run's parameters down is (`doc/devel/ng/spec/parameters_file.md` §3.7).
+    /// [`Self::at`] answers one `(read group, candidate length)` question and cannot enumerate.
+    ///
+    /// # Panics
+    ///
+    /// On a slippage group that has numbers at a stratum and no level provenance beside them,
+    /// naming the stratum and the group. [`Self::over`] checks that the three per-group vectors
+    /// are the same *length* and not that they agree cell by cell, and every field of the fit's
+    /// outcome types is public.
+    pub fn each_stratum_and_group_with_numbers(
+        &self,
+    ) -> impl Iterator<Item = (Stratum, u32, FittedSlippage)> {
+        self.by_stratum.iter().flat_map(|(stratum, row)| {
+            (0..row.slippage.len()).filter_map(move |group| {
+                let fitted = fitted_at(row, *stratum, group)?;
+                let group = u32::try_from(group).expect("a fit's slippage groups fit in a u32");
+                Some((*stratum, group, fitted))
+            })
+        })
+    }
+
+    /// **Every stratum that was fitted on its own tracts: its shares by whole-repeat offset, and
+    /// the strength they are held with** — the tract ladder's top rung.
+    ///
+    /// **A stratum absent here is data and not a hole**: one furnished from its period's
+    /// slippage curves was never estimated, which is what the middle rung exists to answer. The
+    /// name says *fitted* for that reason — this is not one item a stratum.
+    ///
+    /// **The shares are handed out borrowed rather than wrapped in a [`LengthSpectrum`]**, whose
+    /// `fitted_weights` is an `Option` this iterator can never leave empty — so a consumer would
+    /// carry an unwrap that cannot fire. A consumer that wants the wrapper builds one.
+    pub fn fitted_length_spectrum_of_each_stratum(
+        &self,
+    ) -> impl Iterator<Item = (Stratum, &[f64], f64)> {
+        self.length_spectrum_by_stratum
+            .iter()
+            .map(|(stratum, fitted)| (*stratum, fitted.weights.as_slice(), fitted.concentration))
+    }
+
+    /// **Every motif period the run pooled a length spectrum over** — the tract ladder's middle
+    /// rung, and empty unless the run called [`Self::with_period_length_spectra`].
+    ///
+    /// Same shape and same reason as [`Self::fitted_length_spectrum_of_each_stratum`].
+    pub fn pooled_length_spectrum_of_each_period(&self) -> impl Iterator<Item = (u8, &[f64], f64)> {
+        self.length_spectrum_by_period
+            .iter()
+            .map(|(period, pool)| (*period, pool.weights.as_slice(), pool.concentration))
     }
 
     /// How many strata carry an answer — what a run summary reports.
@@ -748,6 +799,37 @@ fn checked_length_spectrum(
         weights: weights.to_vec(),
         concentration,
     }
+}
+
+/// The numbers at one already-bounds-checked `(row, slippage group)`, or **nothing where that
+/// group put no read in the stratum**.
+///
+/// **One place rather than two**, because [`StratumFits::at`] and
+/// [`StratumFits::each_stratum_and_group_with_numbers`] build the same value from the same three
+/// vectors, and two copies would drift the first time [`FittedSlippage`] gains a field: the
+/// lookup would carry it and the enumeration would not, with nothing to fail.
+///
+/// # Panics
+///
+/// On a group with slippage numbers and no level provenance beside them, **naming the stratum
+/// and the group** — this is reached inside a walk over every stratum of a run, where a message
+/// that named neither would leave the reader bisecting.
+fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedSlippage> {
+    let slippage = row.slippage[index]?;
+    let level = row.level[index].unwrap_or_else(|| {
+        panic!(
+            "period {}, {} repeats, slippage group {index} has slippage numbers and no level \
+             provenance beside them; `over` checks the three vectors are the same length and not \
+             that they agree cell by cell, and every field of the fit's outcome types is public — \
+             so look at how this outcome was assembled",
+            stratum.period, stratum.reference_repeats
+        )
+    });
+    Some(FittedSlippage {
+        slippage,
+        level,
+        shares: row.shares[index],
+    })
 }
 
 /// The median of the concentrations the run's strata fitted, or [`STATED_FLAT_CONCENTRATION`]
@@ -1561,5 +1643,108 @@ mod tests {
     fn a_pooled_length_spectrum_that_is_not_a_distribution_is_refused_too() {
         let _ = StratumFits::over(&[], BTreeMap::new())
             .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![6.0, 3.0, 1.0], 4.0))]));
+    }
+
+    /// **Each length spectrum comes back naming the rung it came off**, and the two rungs are
+    /// different claims: a stratum's own tracts against every tract of its motif period pooled.
+    ///
+    /// Nothing else in the crate reads which rung these two iterators stamp — the parameters
+    /// file writes the spectrum's numbers and places it by which table it is in — so without
+    /// this, swapping the two rungs changes no test.
+    #[test]
+    fn each_length_spectrum_names_the_rung_it_came_off() {
+        let fits = StratumFits::over(
+            &[
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
+                derived(
+                    stratum(2, 14),
+                    vec![Some(slippage(0.09))],
+                    vec![Some(from_the_cell(40.0))],
+                ),
+            ],
+            one_group(),
+        )
+        .with_period_length_spectra(BTreeMap::from([(2, pool(2, vec![0.2, 0.5, 0.3], 2.5))]));
+
+        assert_eq!(
+            fits.fitted_length_spectrum_of_each_stratum()
+                .map(|(at, shares, concentration)| (at, shares.to_vec(), concentration))
+                .collect::<Vec<_>>(),
+            vec![(stratum(2, 10), leaning_short(), 4.0)],
+            "only the stratum fitted on its own tracts has a spectrum; the derived one carries \
+             none by construction"
+        );
+        assert_eq!(
+            fits.pooled_length_spectrum_of_each_period()
+                .map(|(period, shares, concentration)| (period, shares.to_vec(), concentration))
+                .collect::<Vec<_>>(),
+            vec![(2, vec![0.2, 0.5, 0.3], 2.5)]
+        );
+        assert_eq!(
+            fits.length_spectrum_at(2, 10).rung(),
+            LengthSpectrumRung::StratumsOwnFit
+        );
+        assert_eq!(
+            fits.length_spectrum_at(2, 14).rung(),
+            LengthSpectrumRung::PeriodsPooledTracts,
+            "the derived stratum falls to its period's pool, which is the middle rung"
+        );
+    }
+
+    /// **A slippage group that put no read in a stratum is skipped rather than yielded**, which
+    /// is the same claim [`StratumFits::at`] makes through `GroupPutNoReadHere` — and the reason
+    /// the iterator's name says *with numbers*.
+    #[test]
+    fn each_stratum_and_group_with_numbers_skips_a_pair_with_none() {
+        let two_groups = BTreeMap::from([(ReadGroupId(0), 0), (ReadGroupId(1), 1)]);
+        let fits = StratumFits::over(
+            &[
+                derived(
+                    stratum(2, 10),
+                    vec![Some(slippage(0.05)), None],
+                    vec![Some(from_the_cell(400.0)), None],
+                ),
+                derived(
+                    stratum(2, 14),
+                    vec![None, Some(slippage(0.09))],
+                    vec![None, Some(from_the_cell(40.0))],
+                ),
+            ],
+            two_groups,
+        );
+
+        assert_eq!(
+            fits.each_stratum_and_group_with_numbers()
+                .map(|(at, group, numbers)| (at, group, numbers.slippage.level))
+                .collect::<Vec<_>>(),
+            vec![(stratum(2, 10), 0, 0.05), (stratum(2, 14), 1, 0.09)],
+            "four cells, two of them with numbers, and each on the other slippage group"
+        );
+        assert_eq!(
+            fits.each_stratum_and_group_with_numbers()
+                .map(|(_, _, numbers)| numbers.level.slipped_reads)
+                .collect::<Vec<_>>(),
+            vec![Some(400.0), Some(40.0)],
+            "each pair carries its own group's provenance, not the first group's"
+        );
+    }
+
+    /// **A slippage group with numbers and no level provenance beside them is refused naming the
+    /// stratum**, because this fires inside a walk over every stratum of a run.
+    #[test]
+    #[should_panic(expected = "period 2, 10 repeats, slippage group 0 has slippage numbers")]
+    fn a_group_with_numbers_and_no_level_provenance_is_refused_by_name() {
+        let fits = StratumFits::over(
+            &[StratumOutcome::Derived(Box::new(DerivedStratum {
+                stratum: stratum(2, 10),
+                slippage: vec![Some(slippage(0.05))],
+                level_provenance: vec![None],
+                shares_provenance: vec![None],
+                tracts_of_its_own: 4,
+                reads_crossing: 40,
+            }))],
+            one_group(),
+        );
+        let _ = fits.each_stratum_and_group_with_numbers().count();
     }
 }

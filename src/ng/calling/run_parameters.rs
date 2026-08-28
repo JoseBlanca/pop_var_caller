@@ -311,6 +311,79 @@ impl RunParameters {
         self.calibration_by_read_group.len()
     }
 
+    // -----------------------------------------------------------------
+    // What the parameters file reads
+    // -----------------------------------------------------------------
+    //
+    // **Seven read-only accessors, added so the run can write down what it used**
+    // (`doc/devel/ng/spec/parameters_file.md` §3). [`Self::view`] hands calling a borrowed
+    // bundle and [`Self::report`] answers three questions; neither lets a writer walk every
+    // number, and the file is every number.
+    //
+    // **They give out exactly what is stored and compute nothing**, which is what keeps the
+    // file a record of this run rather than a second derivation of it. Two of the file's numbers
+    // are *not* here, because assembly never stored them — the base-quality calibration's
+    // observation count and the inbreeding coefficients' warrants — and the projection takes
+    // those from the pre-pass's own estimates.
+
+    /// How many copies of the genome the run called against.
+    #[must_use]
+    pub fn ploidy(&self) -> Ploidy {
+        self.ploidy
+    }
+
+    /// Each read group's base-quality calibration, indexed by the run's dense read-group id.
+    ///
+    /// **Its scale and its warrant, and no count.** The count of reads behind the fitted rate is
+    /// on the `Estimate<ErrorRate>` [`Self::assemble`] reads and does not keep.
+    #[must_use]
+    pub fn calibration_by_read_group(&self) -> &[ReadGroupCalibration] {
+        &self.calibration_by_read_group
+    }
+
+    /// What each read group was corrected for, indexed by the run's dense read-group id — and
+    /// **empty exactly where no read group identified a fraction**, which is the uncontaminated
+    /// run and not a run of zeros.
+    #[must_use]
+    pub fn contamination_by_read_group(&self) -> &[ContaminationView] {
+        &self.contamination_by_read_group
+    }
+
+    /// Each sample's inbreeding coefficient, in the run's sample order.
+    ///
+    /// **The value alone.** The pre-pass fitted an `Estimate<InbreedingF>` and this seam took
+    /// the bare coefficient, so nothing here says whether a sample's number was fitted or
+    /// supplied.
+    #[must_use]
+    pub fn inbreeding_coefficient_by_sample(&self) -> &[InbreedingF] {
+        &self.inbreeding_coefficient_by_sample
+    }
+
+    /// What the ordinary-site prior is seeded from.
+    #[must_use]
+    pub fn prior_seed(&self) -> SpectrumSeed {
+        self.prior_seed
+    }
+
+    /// Every stratum's slippage numbers and the length spectra beside them.
+    #[must_use]
+    pub fn ssr_slippage_fits(&self) -> &StratumFits {
+        &self.ssr_slippage_fits
+    }
+
+    /// How often a base reads wrong inside a tract, per `(read group × stratum × ploidy)`, in key
+    /// order.
+    ///
+    /// **An iterator rather than the map**, so that how these are stored stays this type's — at
+    /// the top of the committed cohort range the axis reaches a few hundred thousand rows, and a
+    /// `&BTreeMap` in a `pub` signature would make a change of container a change of API for a
+    /// shape no caller needs.
+    pub fn ssr_substitution_rate(
+        &self,
+    ) -> impl Iterator<Item = (&StratumKey, &Estimate<ErrorRate>)> {
+        self.ssr_substitution_rate.iter()
+    }
+
     /// **What this run scored its reads under, in a form an output can print** — the
     /// contamination fraction each read group was corrected for, the batching those fractions
     /// were drawn against, and the repeat-tract constant nothing measured.

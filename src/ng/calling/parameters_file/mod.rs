@@ -149,6 +149,8 @@
 //!   hand-written writer that means to match serde's bytes has to do the same — or, better,
 //!   choose its own order and pin it with its own golden file.
 
+mod from_run_parameters;
+
 use serde::{Deserialize, Serialize};
 
 /// **Which version of this format this build writes.**
@@ -647,7 +649,15 @@ pub struct OrdinarySitePrior {
 }
 
 /// Which rung produced the seed — the file's spelling of
-/// [`SeedRegime`](crate::ng::calling::genotype_prior::SeedRegime).
+/// [`SeedRegime`](crate::ng::calling::genotype_prior::SeedRegime), **and it has four states
+/// where an earlier draft of this enum had three**.
+///
+/// The missing one was [`Self::ZeroDiversity`], and it went missing because the upstream enum's
+/// own documentation buries it: the variant sits directly under a twenty-line comment block
+/// about a variant that was deleted, so it reads as part of that block's epitaph rather than as
+/// a state of its own. Nothing caught it until step B1 wrote the match that turns one into the
+/// other — which is why that match is exhaustive by construction and is now the guard against
+/// this whole class of drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedRung {
@@ -656,6 +666,15 @@ pub enum SeedRung {
     /// No population curve was fitted, so the pair is the neutral shape at the heterozygosity
     /// the pre-pass **did** fit.
     NeutralShape,
+    /// **The run's measured heterozygosity was exactly zero** — a cohort with no variation at
+    /// all, which is a real state and not a failure to fit one.
+    ///
+    /// The alternative concentration is floored on the way out of the seed builder, so the pair
+    /// a run gets here is a legal pair that says nothing about how it was arrived at: **only
+    /// this rung says the diversity was zero.** It is not [`Self::NeutralShape`], where a
+    /// heterozygosity was fitted and was not zero, and it is not
+    /// [`Self::StatedHeterozygosity`], where none was fitted at all.
+    ZeroDiversity,
     /// No heterozygosity was fitted either, so the pair rests on a stated species-range
     /// heterozygosity taken from human data. **The rung that must never be silent.**
     StatedHeterozygosity,
@@ -684,6 +703,13 @@ pub struct RepeatTracts {
     /// numbers with an honest default that must be marked `defaulted` when it is one. It is the
     /// same reason the calibration multiplier carries a warrant beside a value of one. Its
     /// observation count is absent: a median over strata is not an estimate with a sample size.
+    ///
+    /// **The warrant is about this number, not about the locus that ends up using it**, which is
+    /// why a run's own median is written `fitted_here` rather than `borrowed` even though every
+    /// tract that reads it is one the run fitted nothing for. Which rung a *tract* landed on is
+    /// [`LengthSpectrumRung`](crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung),
+    /// carried per locus; this warrant answers the different question of whether the number in
+    /// the file came out of this run's data or out of the binary.
     pub stated_length_spectrum_concentration: WarrantedValue,
     /// Which set of slippage numbers each read group's reads are drawn under. **The run's own
     /// declaration, not something inferred.**
@@ -1433,7 +1459,11 @@ mod tests {
     /// variant must not silently re-interpret a file on disk. Neither the round trip nor the
     /// golden file above can stand in for this one — the round trip moves both sides of a rename
     /// at once, and the golden file only sees the variants the fixture happens to use, which is
-    /// eleven of these twenty-one.
+    /// **fourteen of these twenty-two**. (Counted by grepping the golden file for each spelling
+    /// asserted below: the eight it never writes are the seed's other three rungs, three of the
+    /// share curve's four, and two of the share shape's three. The earlier **numerator** here —
+    /// eleven — was a guess and the true figure was fourteen; the denominator moved from
+    /// twenty-one to twenty-two because step B1 added a variant, not because it was miscounted.)
     #[test]
     fn every_enum_variant_spells_as_the_file_says() {
         assert_eq!(spelling(Warrant::FittedHere), "fitted_here");
@@ -1452,6 +1482,7 @@ mod tests {
 
         assert_eq!(spelling(SeedRung::FittedCurve), "fitted_curve");
         assert_eq!(spelling(SeedRung::NeutralShape), "neutral_shape");
+        assert_eq!(spelling(SeedRung::ZeroDiversity), "zero_diversity");
         assert_eq!(
             spelling(SeedRung::StatedHeterozygosity),
             "stated_heterozygosity"
