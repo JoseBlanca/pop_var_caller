@@ -60,6 +60,8 @@ reads = 640918
 [[contamination.by_read_group]]
 read_group = 0
 library = "lib3"
+
+[contamination.by_read_group.measurement]
 fraction = 0.031
 markers_with_reads = 4211
 reads_on_markers = 90233
@@ -68,15 +70,13 @@ fitted_from_reads_of = "this_read_groups_own_reads"
 [[contamination.by_read_group]]
 read_group = 1
 library = "lib4"
-fraction = 0.0
-markers_with_reads = 3117
-reads_on_markers = 71004
-fitted_from_reads_of = "this_read_groups_own_reads"
 
 [[contamination.by_read_group]]
 read_group = 2
 library = "lib5"
-fraction = 0.0072
+
+[contamination.by_read_group.measurement]
+fraction = 0.0
 markers_with_reads = 2903
 reads_on_markers = 64118
 fitted_from_reads_of = "every_read_of_this_sample"

@@ -13,11 +13,20 @@
 //!   a `Vec` in the run's sample order. A file carrying only an order would be silently wrong
 //!   against a re-ordered sample list, so every row here names its sample or its read group as
 //!   well as numbering it (spec §3.5).
-//! - **`RunParameters` cannot say *absent*; the file must.** The five states of spec §5 — an
-//!   absent contamination table, a read group measured and found clean, a defaulted calibration
-//!   multiplier of exactly one, a stratum with no length spectrum, a `(stratum, slippage group)`
-//!   with no row — are distinctions a reader that collapses them will get wrong, and the file's
-//!   shape is where they are made unmistakable.
+//! - **`RunParameters` cannot say *absent*; the file must.** The five states of spec §5 are
+//!   distinctions a reader that collapses them will get wrong, and every one of them is a
+//!   **missing key** here rather than a value standing in for one:
+//!
+//!   | what is true | how the file says it |
+//!   |---|---|
+//!   | no read group identified any contamination | no `[contamination]` section |
+//!   | a read group was measured and found clean | a row whose `measurement` has `fraction = 0` and non-zero evidence counts |
+//!   | a read group's error rate could not be fitted | a multiplier of 1.0 whose `warrant` is `defaulted` |
+//!   | a stratum was furnished from its period's curves | no row for it in `length_spectrum_by_stratum` |
+//!   | a slippage group put no read in a stratum | no row for that pair in `slippage_by_stratum_and_group` |
+//!
+//!   The rule underneath all five: **`Option<T>` is absence and never a sentinel**, and a warrant
+//!   is carried rather than inferred from the value.
 //!
 //! # Why it lives under `calling/`
 //!
@@ -61,10 +70,12 @@
 //!                                                      warrant = "fitted_here",
 //!                                                      observations = { reads = 812344 } } } ]
 //!
-//! [contamination]                  # §3.4 — the whole table absent means uncontaminated
-//! by_read_group = [ { read_group = 0, library = "lib3", fraction = 0.031,
-//!                     markers_with_reads = 4211, reads_on_markers = 90233,
-//!                     fitted_from_reads_of = "this_read_groups_own_reads" } ]
+//! [contamination]                  # §3.4 — the whole section absent means uncontaminated,
+//!                                  #        and a row with no `measurement` was not measured
+//! by_read_group = [ { read_group = 0, library = "lib3",
+//!                     measurement = { fraction = 0.031, markers_with_reads = 4211,
+//!                                     reads_on_markers = 90233,
+//!                                     fitted_from_reads_of = "this_read_groups_own_reads" } } ]
 //!
 //! [sequencing_batches]             # §3.4 — declared by the run, not fitted
 //! was_declared_by_the_run = false
@@ -277,7 +288,14 @@ pub struct ParametersFile {
     /// How far to trust each library's own base qualities (spec §3.3).
     pub base_quality_calibration: BaseQualityCalibration,
     /// How much of each library's DNA came from somebody else (spec §3.4).
-    pub contamination: Contamination,
+    ///
+    /// **Absent means the run is uncontaminated** — no read group identified any fraction, so the
+    /// read likelihood computes its plain formula, which is the *simple* case for that model and
+    /// not the weak one. **A table of zeros is a different claim** and a reader that writes one
+    /// for an uncontaminated run has said every library was measured and found clean, which
+    /// nothing measured (spec §5, first row). This is the first of §5's five states and the only
+    /// one expressed by a whole section going missing.
+    pub contamination: Option<Contamination>,
     /// Who was sequenced beside whom — the population a contaminating read is drawn from
     /// (spec §3.4).
     pub sequencing_batches: SequencingBatches,
@@ -421,16 +439,44 @@ pub struct BaseQualityCalibrationRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contamination {
-    /// One row a read group, in dense-index order. Where **some** read group identified a
-    /// fraction, **every** read group needs an entry.
+    /// One row a read group, in dense-index order. **Where some read group identified a
+    /// fraction, every read group needs a row** — one that identified nothing gets a row with no
+    /// `measurement`, which is how the file says *this library was not measured* inside a run
+    /// where others were. A run where nobody identified anything has no section at all rather
+    /// than a list of unmeasured rows.
+    ///
+    /// **Two shapes here are not states the file means to have, and both say §5's first state a
+    /// second way.** An empty list says "this run is contaminated, and here are none of its read
+    /// groups"; a list in which *no* row has a measurement says "contaminated, and nobody
+    /// measured anything", which is the uncontaminated run written out longhand. In memory the
+    /// second is collapsed on purpose —
+    /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)
+    /// turns all-absent views into an empty list and `view()` then takes the uncontaminated
+    /// path — so a file spelling it as unmeasured rows and read literally would take the mixture
+    /// path instead, with every fraction zero, where absence takes the plain formula.
+    ///
+    /// **Both are refused by step C2**, which is where the table meets the run's dense read-group
+    /// axis; no shape can say a `Vec` is non-empty, and none can say *not every row is absent*.
+    /// (Not step C1: that step is parsing, and both of these parse.)
     pub by_read_group: Vec<ContaminationRow>,
 }
 
-/// One read group's contamination fraction, and the evidence behind it.
+/// One read group, inside a run where **some** read group identified a fraction — and what this
+/// one was found to carry, if anything.
 ///
-/// **Only the counts tell *measured and found clean* from *not measured*** — a fraction near
-/// zero is what both produce, and a read group that touched no marker was not measured whatever
-/// its fraction says (spec §5).
+/// **The second of spec §5's five states lives here**, and it is the one a reader is most likely
+/// to collapse: *measured and found clean* and *not measured* both come back as a fraction near
+/// zero, and only the evidence tells them apart. In memory that distinction rides on the counts —
+/// *either* of them being zero means unmeasured, which
+/// [`ContaminationView::was_measured`](crate::ng::calling::likelihood::ContaminationView) has to
+/// be asked about; here the
+/// unmeasured row simply has no measurement, so there is no fraction to misread and no evidence
+/// count to compare against zero.
+///
+/// **It also removes a wart the in-memory type documents and cannot fix.** A read group that
+/// identified nothing still has to carry a `ContaminationSource` there, and neither variant is
+/// true of it — `run_parameters.rs` says so in as many words. Here it has none, because it has no
+/// measurement to have one on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContaminationRow {
@@ -440,6 +486,28 @@ pub struct ContaminationRow {
     /// preparation share it, and it is written here because the whole point of the read-group
     /// grain is that two lanes of one library may differ.
     pub library: String,
+    /// What the fit found for this read group. **Absent where it identified nothing**, which is
+    /// not the same as a fraction of zero.
+    pub measurement: Option<ContaminationMeasurement>,
+}
+
+/// What a contamination fit found for one read group: how much, and on what evidence.
+///
+/// **A fraction of zero here is a real answer** — this read group was measured and found clean —
+/// because the evidence counts beside it are what say it was measured at all.
+///
+/// **A measurement whose counts are both zero is writable and is refused by step C2**, not by the
+/// shape. It is exactly the in-memory `UNMEASURED_READ_GROUP`
+/// ([`run_parameters.rs`](crate::ng::calling::run_parameters)), so a projection written from the
+/// *view* rather than from the fit's estimate would produce one: a row saying *measured* while
+/// carrying the evidence of *not measured*, with a `fitted_from_reads_of` that is true of
+/// nothing. **`NonZeroU64` would make it unwritable and was not taken**, because a fit that
+/// returns an estimate with no evidence behind it would then have no file to be written to at
+/// all, and whether that can happen is a question about the contamination estimator rather than
+/// about this shape — step C4's round trip on a real fit is what will answer it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContaminationMeasurement {
     /// The share of this read group's reads that came from another individual.
     pub fraction: f64,
     /// How many of the panel's varying positions this read group put a read on.
@@ -519,7 +587,12 @@ pub struct SampleBatchRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inbreeding {
-    /// One row a sample, in the run's sample order. **At least one is required.**
+    /// One row a sample, in the run's sample order. **At least one is required** — a run has at
+    /// least one sample, so an empty list is a run whose sample order went missing rather than a
+    /// run with none, which is what
+    /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)
+    /// asserts in release. **Refused by step C2**, alongside the contamination table's two empty
+    /// shapes and for the same reason: no shape can say a `Vec` is non-empty.
     pub by_sample: Vec<InbreedingRow>,
 }
 
@@ -1046,35 +1119,41 @@ mod tests {
                     },
                 ],
             },
-            contamination: Contamination {
+            contamination: Some(Contamination {
                 by_read_group: vec![
                     ContaminationRow {
                         read_group: 0,
                         library: "lib3".into(),
-                        fraction: 0.031,
-                        markers_with_reads: 4211,
-                        reads_on_markers: 90233,
-                        fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                        measurement: Some(ContaminationMeasurement {
+                            fraction: 0.031,
+                            markers_with_reads: 4211,
+                            reads_on_markers: 90233,
+                            fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                        }),
                     },
-                    // Measured and found clean: a fraction of zero with evidence behind it.
+                    // **Not measured**, inside a run where the others were — the same plant's
+                    // second lane, which put too few reads on the panel's markers. It has no
+                    // fraction to be misread as clean, and no `fitted_from_reads_of`, which
+                    // would be untrue of it either way.
                     ContaminationRow {
                         read_group: 1,
                         library: "lib4".into(),
-                        fraction: 0.0,
-                        markers_with_reads: 3117,
-                        reads_on_markers: 71004,
-                        fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                        measurement: None,
                     },
+                    // **Measured and found clean**: a fraction of zero with evidence behind it —
+                    // spec §5's second row, and the state the row above is not.
                     ContaminationRow {
                         read_group: 2,
                         library: "lib5".into(),
-                        fraction: 0.0072,
-                        markers_with_reads: 2903,
-                        reads_on_markers: 64118,
-                        fitted_from_reads_of: ContaminationFittedFrom::EveryReadOfThisSample,
+                        measurement: Some(ContaminationMeasurement {
+                            fraction: 0.0,
+                            markers_with_reads: 2903,
+                            reads_on_markers: 64118,
+                            fitted_from_reads_of: ContaminationFittedFrom::EveryReadOfThisSample,
+                        }),
                     },
                 ],
-            },
+            }),
             sequencing_batches: SequencingBatches {
                 was_declared_by_the_run: true,
                 by_read_group: vec![
@@ -1624,6 +1703,205 @@ mod tests {
         assert_eq!(unit_of("repeat_tract_outlier_weight"), None);
     }
 
+    /// **Each of spec §5's five states is a missing key, and each is distinct from the value a
+    /// reader might otherwise collapse it into.**
+    ///
+    /// Distinctness in the *types* is what Milestone A owes; that collapsing two of them **changes
+    /// an answer** is step C5's, on fixtures built for it, and that they survive a round trip is
+    /// step C4's. What this holds is the shape: for every one of the five, the absent form writes
+    /// no key at all, and the form it is confusable with writes a different document.
+    #[test]
+    fn each_of_the_five_states_is_a_missing_key_and_not_a_value() {
+        let fitted = a_file_using_every_shape();
+        let document =
+            |file: &ParametersFile| toml::Value::try_from(file).expect("a file is a TOML value");
+
+        // 1. No read group identified any contamination: the section is gone, not zeroed.
+        let mut uncontaminated = fitted.clone();
+        uncontaminated.contamination = None;
+        assert!(
+            document(&uncontaminated).get("contamination").is_none(),
+            "an uncontaminated run writes no contamination section"
+        );
+        assert!(
+            document(&fitted).get("contamination").is_some(),
+            "and a run that measured one writes it"
+        );
+
+        // 2. Measured and found clean against not measured. Both are near-zero fractions in
+        //    memory; here one has a measurement and the other has none.
+        let rows = &fitted
+            .contamination
+            .as_ref()
+            .expect("a table")
+            .by_read_group;
+        let clean = rows
+            .iter()
+            .find(|row| {
+                row.measurement
+                    .as_ref()
+                    .is_some_and(|found| found.fraction == 0.0)
+            })
+            .expect("a read group measured and found clean");
+        let unmeasured = rows
+            .iter()
+            .find(|row| row.measurement.is_none())
+            .expect("a read group that identified nothing");
+        assert!(
+            toml::Value::try_from(unmeasured)
+                .expect("a row")
+                .get("measurement")
+                .is_none(),
+            "an unmeasured read group writes no measurement"
+        );
+        assert_ne!(
+            toml::Value::try_from(clean).expect("a row"),
+            toml::Value::try_from(unmeasured).expect("a row")
+        );
+
+        // 3. A multiplier of exactly one that was defaulted against one that was fitted.
+        let mut defaulted = fitted.clone();
+        let mut as_fitted = fitted.clone();
+        for (file, warrant) in [
+            (&mut defaulted, Warrant::Defaulted),
+            (&mut as_fitted, Warrant::FittedHere),
+        ] {
+            file.base_quality_calibration.by_read_group[0].error_probability_multiplier =
+                WarrantedValue {
+                    value: 1.0,
+                    warrant,
+                    observations: None,
+                };
+        }
+        assert_ne!(
+            document(&defaulted),
+            document(&as_fitted),
+            "a defaulted multiplier of 1.0 is not a fitted one"
+        );
+
+        // 4 and 5 are gaps the fixture already has, so both are asserted against the emitted
+        // document as it stands. **Emptying a table and checking it came out empty is a weaker
+        // claim** — it holds for a writer that fills in a row for every stratum it knows about,
+        // which is the collapse these two states forbid.
+        let table_of = |section: &str| -> Vec<toml::Value> {
+            document(&fitted)
+                .get("repeat_tracts")
+                .and_then(|tracts| tracts.get(section))
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| panic!("the {section} table"))
+                .clone()
+        };
+        let stratum_of = |row: &toml::Value| -> (i64, i64) {
+            (
+                row.get("period")
+                    .and_then(toml::Value::as_integer)
+                    .expect("a period"),
+                row.get("reference_repeats")
+                    .and_then(toml::Value::as_integer)
+                    .expect("a reference repeat count"),
+            )
+        };
+
+        // 4. A stratum furnished from its period's curves has no length spectrum of its own. The
+        //    fixture carries slippage for three strata and a spectrum for one of them.
+        let spectra = table_of("length_spectrum_by_stratum");
+        let with_a_spectrum: Vec<(i64, i64)> = spectra.iter().map(stratum_of).collect();
+        assert_eq!(
+            with_a_spectrum,
+            [(2, 6)],
+            "one stratum was fitted on its own tracts and writes a spectrum"
+        );
+        for furnished in [(2, 11), (1, 30)] {
+            assert!(
+                !with_a_spectrum.contains(&furnished),
+                "a stratum furnished from its period's curves has no row at all, rather than a \
+                 flat one: {furnished:?}"
+            );
+        }
+
+        // 5. A slippage group that put no read in a stratum has no row for that pair. Three
+        //    strata crossed with two slippage groups is six pairs; three of them were fitted.
+        let slippage = table_of("slippage_by_stratum_and_group");
+        let written: Vec<(i64, i64, i64)> = slippage
+            .iter()
+            .map(|row| {
+                let (period, repeats) = stratum_of(row);
+                (
+                    period,
+                    repeats,
+                    row.get("slippage_group")
+                        .and_then(toml::Value::as_integer)
+                        .expect("a slippage group"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            written.len(),
+            3,
+            "a row exists only where a group put reads"
+        );
+        assert!(
+            written.contains(&(1, 30, 0)),
+            "the pair that was fitted has its row"
+        );
+        assert!(
+            !written.contains(&(1, 30, 1)),
+            "the pair with no reads has no row at all, rather than a row of zeros"
+        );
+    }
+
+    /// **Two shapes the file can spell that no run should mean, recorded rather than endorsed.**
+    ///
+    /// Both say something spec §5 requires to be said another way, and **neither can be made
+    /// unspellable by a shape**: no type can say a `Vec` is non-empty, or that not every row of
+    /// one is absent, or that two counts are not both zero without refusing an estimate the fit
+    /// might legitimately produce. So they are step C2's to refuse — the step that takes the file
+    /// to `RunParameters` and meets the run's dense read-group axis.
+    ///
+    /// **This test exists so the gap is visible rather than implied.** When C2 lands, these
+    /// assertions invert: what round-trips today must then fail, naming the field.
+    #[test]
+    fn the_shape_accepts_two_things_step_c2_must_refuse() {
+        // A contamination table in which nobody was measured — the uncontaminated run, written
+        // longhand. Read literally it takes the mixture path with every fraction zero, where
+        // absence takes the read likelihood's plain formula.
+        let mut longhand = a_file_using_every_shape();
+        for row in &mut longhand
+            .contamination
+            .as_mut()
+            .expect("a table")
+            .by_read_group
+        {
+            row.measurement = None;
+        }
+        let text = toml::to_string(&longhand).expect("serialises");
+        assert!(
+            toml::from_str::<ParametersFile>(&text).is_ok(),
+            "if this now fails, step C2's refusal has landed — invert this half"
+        );
+
+        // A measurement carrying the evidence of not being measured: the in-memory
+        // `UNMEASURED_READ_GROUP` shape, which a projection written from the view rather than
+        // from the fit's estimate would produce.
+        let mut evidenceless = a_file_using_every_shape();
+        evidenceless
+            .contamination
+            .as_mut()
+            .expect("a table")
+            .by_read_group[0]
+            .measurement = Some(ContaminationMeasurement {
+            fraction: 0.0,
+            markers_with_reads: 0,
+            reads_on_markers: 0,
+            fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+        });
+        let text = toml::to_string(&evidenceless).expect("serialises");
+        assert!(
+            toml::from_str::<ParametersFile>(&text).is_ok(),
+            "if this now fails, step C2's refusal has landed — invert this half"
+        );
+    }
+
     /// **A run with nothing in any table still writes a file that parses.**
     ///
     /// The empty boundary, which no other fixture reaches: a single sample with no repeat tracts
@@ -1636,7 +1914,8 @@ mod tests {
         empty.fitted_from.read_groups.clear();
         empty.fitted_from.census.terms.clear();
         empty.base_quality_calibration.by_read_group.clear();
-        empty.contamination.by_read_group.clear();
+        // Absence, not an empty table: an uncontaminated run has no section at all.
+        empty.contamination = None;
         empty.sequencing_batches.by_read_group.clear();
         empty.sequencing_batches.by_sample.clear();
         empty.inbreeding.by_sample.clear();
@@ -1690,10 +1969,22 @@ mod tests {
     fn a_mistyped_key_is_refused_rather_than_absorbed() {
         let text = toml::to_string(&a_file_using_every_shape()).expect("serialises");
 
-        let extra = format!("{text}\n[stated_constants]\nrepeat_tract_outlier_wieght = 0.02\n");
+        // Inserted **into** an existing table rather than under a new header: re-opening a
+        // table TOML has already seen is a parse error whatever the keys are, so a test written
+        // that way would pass without `deny_unknown_fields` doing anything. `replacen` and not
+        // `replace`, because the fixture emits `ploidy = 2` twice — once at the top level and
+        // once on a substitution-rate row — and only the first is meant to be sat beside.
+        let extra = text.replacen("ploidy = 2", "ploidy = 2\nploidee = 3", 1);
         assert!(
-            toml::from_str::<ParametersFile>(&extra).is_err(),
-            "a misspelled key must not be absorbed"
+            extra != text,
+            "the fixture writes a ploidy for this test to sit beside"
+        );
+        let refusal = toml::from_str::<ParametersFile>(&extra)
+            .expect_err("a misspelled key must not be absorbed")
+            .to_string();
+        assert!(
+            refusal.contains("ploidee"),
+            "and the refusal names the key it did not know, got: {refusal}"
         );
 
         let typoed = text.replace("slipped_reads", "sliped_reads");
@@ -1729,8 +2020,8 @@ census = { terms = [ { term = "the loci actually kept", digest = "def" } ] }
 [base_quality_calibration]
 by_read_group = [ { read_group = 0, error_probability_multiplier = { value = 1.0, warrant = "defaulted", observations = { reads = 4 } } } ]
 
-[contamination]
-by_read_group = []
+# No [contamination] section at all: this run is uncontaminated, which is spec §5's first state
+# and a different claim from a table of zeros.
 
 [sequencing_batches]
 was_declared_by_the_run = false
@@ -1771,8 +2062,13 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
             ),
             "the four-deep inline nesting reaches the curve weight and the reach"
         );
-        // The omitted key is absence, not a default: this row has no shares origin at all.
+        // The omitted key is absence, not a default: this row has no shares origin at all, and
+        // the whole document has no contamination section.
         assert!(row.shares_origin.is_none());
+        assert!(
+            file.contamination.is_none(),
+            "an omitted contamination section reads as an uncontaminated run"
+        );
     }
 
     /// **What format version this build writes.**

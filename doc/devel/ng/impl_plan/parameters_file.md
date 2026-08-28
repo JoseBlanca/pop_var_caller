@@ -98,7 +98,7 @@ the value, the warrant, and the observation count behind it. One shape reused by
 so a reader cannot meet two spellings of the same idea.
 *Depends:* A1. *Source:* §2.
 
-☐ **A3. Absence is a missing key, never a sentinel.** The five states of §5 expressed in the types:
+✅ **A3. Absence is a missing key, never a sentinel.** The five states of §5 expressed in the types:
 an absent contamination table, a measured-and-clean row, a defaulted calibration scale, a stratum
 with no length spectrum, a missing `(stratum, slippage group)` row. `Option<T>` throughout; no
 in-band zeros.
