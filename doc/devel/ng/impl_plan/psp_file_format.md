@@ -217,6 +217,10 @@ at most the observation's read count and at least half of it, since at most two 
 question A1 left open was raised at the milestone that closes it. Spec §4.5 asks the manifest to
 carry each field's name, cardinality and encoding; it carried two of the three. **This is the last
 step where adding the third is free** — from F1 a manifest change costs a format version.
+The key is `shape`, not `cardinality`: production's store already uses that word for how often
+a field appears, and ng's manifest deliberately does not carry that — **the owner ruled against
+carrying it, 2026-08-28**, because the fields queued to be added appear once per record and a
+format-version bump is free until a psp file exists that someone keeps.
 ***Depends:*** nothing in F. ***Source:*** [spec §4.5](../spec/psp_file_format.md).
 
 ☐ **F1 — the block index**, built while writing and decoded whole at open.
