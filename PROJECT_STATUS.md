@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **G3 reviewed — a damaged footer made the trailer
+> - **Last completed task (2026-08-28):** **a finished psp is reopened and extended, and the
+> order runs across the seam** (step G4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). The footer says where the blocks end, so appending is truncating at the index
+> offset and carrying on: the header and every block stay where they are, and `finish` writes a
+> new index made of the entries already there and the ones this writer adds. **It opens the file
+> as a reader first** — an append writes a fresh footer onto whatever it finds, which is the
+> lesson G3's review taught the trailer replacement at the cost of a Blocker. **The last record
+> already in the file comes from the last block's heads**, which is what G2's selective walk is
+> for, and it seeds the order check; a builder that started blank would accept a record behind
+> the seam. **And the manifest is checked before the file is walked** — the other order made a
+> manifest this writer cannot honour arrive as a *reader's* refusal, which is the wrong class for
+> the thing spec §6.4 names. Milestone F's last two owed items land here: the byte counter is
+> checked against the footer, and the per-block copy in `push` is gone. **The third — splitting
+> the writer in two — is not done, and writing `append` is the reason**: it reuses `push` and
+> `finish` unchanged, so the split does not pay twice after all. ⚠ **One test's first fixture
+> could not fail**: it compared an appended block against a fresh block at the level the file
+> records, which is this build's own, so an append ignoring the record entirely passed. Eight
+> defects injected, eight caught.
+> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G3 reviewed — a damaged footer made the trailer
 > replacement overwrite the whole file and report success** (step G3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Nine checklists across two agents, **two Blockers, and both were reproduced

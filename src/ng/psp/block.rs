@@ -509,6 +509,22 @@ impl BlockBuilder {
         Self::new(*genomic_block_size_bp, *block_byte_ceiling)
     }
 
+    /// The same builder, told which record the file it is extending ends with.
+    ///
+    /// **Coordinate order runs across the seam** (spec §6.4): the first appended record must not
+    /// precede the last one already in the file, and a builder that started blank would accept
+    /// one that did — producing a file whose index no longer seeks. The region seeded here is
+    /// what [`check_order`](Self::check_order) compares the first appended record against.
+    ///
+    /// **It seeds the order and nothing else.** No block is open, so the appended records start a
+    /// new block at the seam even when they fall in the grid cell the old last block covered —
+    /// which is legal, and is one of the two ways two blocks come to share a first position
+    /// (`index.rs`).
+    pub fn continuing_after(mut self, last_accepted_region: GenomeRegion) -> Self {
+        self.last_accepted_region = Some(last_accepted_region);
+        self
+    }
+
     /// Lay `record` down, and hand back the block it closed if it closed one.
     ///
     /// The returned bytes are one whole block payload — its head, then its records — and they
