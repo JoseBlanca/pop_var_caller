@@ -58,8 +58,11 @@ Three things follow from having it, and the first is a mode:
 4. **It cannot be silently paired with the wrong inputs.** A parameters file fitted against a
    different reference, or against a different set of samples, must fail by name rather than
    produce a plausible VCF.
-5. **Degrade across the committed range.** One sample to several thousand (`CLAUDE.md`): the file's
-   only cohort-sized axis is one row per sample, and §9 prices it.
+5. **Degrade across the committed range.** One sample to several thousand (`CLAUDE.md`). **Two of
+   the file's axes grow with the cohort** — one row per sample, and one row per (read group ×
+   stratum × ploidy) for the repeat-tract substitution rate — and §9 prices both. The second is
+   the larger by two orders of magnitude at 3,000 samples, and §9 says what is and is not settled
+   about it.
 
 ### 1.3 Non-goals, and what this document does not do
 
@@ -405,12 +408,36 @@ scale of one is not. Two consequences:
 
 ## 9. Cross-cutting concerns
 
-**Size.** Three axes, and only one grows with the cohort: one row per read group (§3.3, §3.4), one
-row per sample (§3.5), and one row per (stratum × slippage group) (§3.7). Tomato SL4.00 has 141
-strata at the STR path's calling floors, and a run usually has one slippage group. At the top of
-the committed range — 3,000 samples — the per-sample axis dominates at 3,000 lines, which is a file
-of a few hundred kilobytes: negligible beside the VCF it sits next to, and still openable in an
-editor.
+**Size. Corrected 2026-08-28, on rows measured from the built shape** — an earlier version of this
+paragraph counted three axes and missed the largest one.
+
+**Four axes, and two of them grow with the cohort.** One row per read group (§3.3, §3.4), one row
+per sample (§3.5), one row per (stratum × slippage group) (§3.7) — and **one row per (read group ×
+stratum × ploidy)**, which is the grain the repeat-tract substitution rate is fitted and stored at
+(`StratumKey`, [`ssr/mod.rs`](../../../../src/ng/parameter_estimation/ssr/mod.rs)). §3.7's phrase
+"per stratum: the substitution rate" understates it: the rate is per read group as well, because
+how often a base misreads inside a tract is a property of the chemistry.
+
+Tomato SL4.00 has 141 strata at the STR path's calling floors, and a run usually has one slippage
+group. Measured on the one-row-a-line inline form: **146 bytes an inbreeding row, 146 a
+substitution-rate row.** At the top of the committed range — 3,000 samples, one library each:
+
+| axis | rows | size |
+|---|---|---|
+| per sample (§3.5) | 3,000 | **0.44 MB** |
+| per (read group × stratum × ploidy) (§3.7) | up to 3,000 × 141 | **up to 62 MB**, and 6 MB where one stratum in ten carries a fitted rate |
+
+So the per-sample axis is what the old paragraph said it was — a few hundred kilobytes, negligible
+beside the VCF, still openable in an editor. **The substitution rate is not**, and how large it
+gets is set by how many (read group × stratum) pairs a cohort actually fits a rate for, which
+nothing here has measured. A row exists only where one was fitted.
+
+**What follows for a design, and it is not settled here.** At a few dozen samples the file is a few
+megabytes and nothing needs doing. At a thousand it is the largest artefact a run writes that is
+not a VCF. Two ways out if it matters — pooling the rate across read groups, which throws away a
+chemistry distinction the fit makes, or writing this one table in a form that is not one line a
+row — both cost something §1.2's goals ask for, and neither should be chosen before somebody counts
+the fitted pairs on a real cohort.
 
 **Memory.** Read once at run start into `RunParameters`, which is "assembled once, before any locus
 is called, and never written afterwards"

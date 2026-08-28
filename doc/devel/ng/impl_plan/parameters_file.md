@@ -131,9 +131,23 @@ default came from — for the repeat-tract slippage numbers, which alignments an
 ☐ **C1. TOML text → the file shape.** Parsing, with a malformed file failing at a line number.
 *Depends:* B2. *Source:* §4, §9.
 
-☐ **C2. The file shape → `RunParameters`.** The reverse of B1, including the dense read-group axis
-over `0..n` that `RunParameters` requires.
-*Depends:* C1, B1. *Source:* §3, §6.
+☐ **C2. The file shape → `RunParameters`, and the reader's `validate`.** The reverse of B1,
+including the dense read-group axis over `0..n` that `RunParameters` requires.
+
+**C2 also owns refusing a file that parses and means nothing** — owner's decision, 2026-08-28,
+because no step owned it and §9 promises "a malformed file fails at read with a line number".
+`validate` runs after parsing and before the projection, and covers the constraints no shape can
+state: a value outside its documented range (an inbreeding coefficient outside `[0, 1)`, a curve
+weight outside `[0, 1]`, a substitution rate that is not a probability), a length spectrum whose
+share count is even or below three or does not sum to one, an empty sample list, a contamination
+table that is empty **or in which no row has a measurement** — the uncontaminated run written
+longhand — and a measurement whose two evidence counts are both zero.
+
+**Two of those already have a failing test waiting to be inverted**:
+`the_shape_accepts_two_things_step_c2_must_refuse` pins that the last two are accepted today
+(`parameters_file/mod.rs`), so landing the refusal flips an assertion rather than adding one
+nobody remembered to write.
+*Depends:* C1, B1. *Source:* §3, §6, §9.
 
 ☐ **C3. Float round-trip fidelity. Own commit, do not bundle.** Whether the `toml` crate emits
 enough digits to recover every `f64` **has not been checked** (§4). Establish it; if it does not,
