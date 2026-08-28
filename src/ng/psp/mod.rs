@@ -81,7 +81,7 @@ pub use header::{
     IEEE_FLOAT_WIDTHS_BYTES, MAX_HEADER_BODY_BYTES, MAX_LOOK_BACK_WINDOW_LOG,
     MIN_LOOK_BACK_WINDOW_LOG, Manifest, ParameterValue, ReferenceIdentity, WriterProvenance,
 };
-pub use index::BlockIndexEntry;
+pub use index::{BlockIndexEntry, IndexDecodeError, checksum_index, decode_index, encode_index};
 pub use record::{
     BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,

@@ -223,7 +223,7 @@ carrying it, 2026-08-28**, because the fields queued to be added appear once per
 format-version bump is free until a psp file exists that someone keeps.
 ***Depends:*** nothing in F. ***Source:*** [spec §4.5](../spec/psp_file_format.md).
 
-☐ **F1 — the block index**, built while writing and decoded whole at open.
+✅ **F1 — the block index**, built while writing and decoded whole at open.
 ***Depends:*** D5. ***Source:*** [arch §3.4](../arch/psp_file_format.md).
 
 ☐ **F2 — the footer**, magic last, with the index checksum.
