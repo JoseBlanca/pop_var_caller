@@ -213,6 +213,12 @@ at most the observation's read count and at least half of it, since at most two 
 
 ## Milestone F — the container
 
+✅ **F0 — a field's cardinality joins the manifest.** Added by the owner on 2026-08-28, when the
+question A1 left open was raised at the milestone that closes it. Spec §4.5 asks the manifest to
+carry each field's name, cardinality and encoding; it carried two of the three. **This is the last
+step where adding the third is free** — from F1 a manifest change costs a format version.
+***Depends:*** nothing in F. ***Source:*** [spec §4.5](../spec/psp_file_format.md).
+
 ☐ **F1 — the block index**, built while writing and decoded whole at open.
 ***Depends:*** D5. ***Source:*** [arch §3.4](../arch/psp_file_format.md).
 

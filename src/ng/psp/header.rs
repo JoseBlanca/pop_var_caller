@@ -187,11 +187,92 @@ impl Manifest {
     }
 }
 
-/// A field of a record, and how to read it.
+/// A field of a record: what it is called, how many values of it a record holds, and how
+/// each one is laid down.
+///
+/// **The three things spec §4.5 asks the manifest to carry for every field.** The middle
+/// one is the newest and the one with a rule attached: see [`FieldCardinality`] for what a
+/// reader does with it and why a file whose cardinality disagrees with its encoding is
+/// refused rather than believed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSpec {
     pub name: FieldName,
+    /// One value per record, or a counted run of them.
+    ///
+    /// **What a file says, not what this build assumes** — which is the whole point of a
+    /// manifest. It is checked against `encoding` when a header is encoded or decoded, so a
+    /// `FieldSpec` that survived either of those has the two in agreement.
+    pub cardinality: FieldCardinality,
     pub encoding: FieldEncoding,
+}
+
+impl FieldSpec {
+    /// A field declared the way this build writes it: the cardinality comes from the
+    /// encoding, which is the only combination [`check_manifest`] admits.
+    ///
+    /// **Every field this build declares goes through here**, so an inconsistent pair cannot
+    /// be written by hand into the one table that describes the record.
+    pub fn new(name: FieldName, encoding: FieldEncoding) -> Self {
+        Self {
+            name,
+            cardinality: encoding.cardinality(),
+            encoding,
+        }
+    }
+}
+
+/// How many values of one field a record holds.
+///
+/// **What it buys, and it is the reason spec §4.5 asks for it**: a reader meeting a field
+/// name it has never heard of can still say where the field ends and step over it, so a psp
+/// written by a later version of ng stays readable by an older one. A scalar ends after one
+/// value; a list ends after the count in front of it has been honoured.
+///
+/// **It is not free-standing: every encoding implies exactly one of these**, and
+/// [`FieldEncoding::cardinality`] is where that is written down. A header declaring the pair
+/// out of agreement is refused — by [`Header::encode`] as a field a writer may not write, and
+/// by [`Header::decode`] as a damaged file. Two accounts of one shape that are allowed to
+/// disagree are worse than one account, because a reader then has to pick.
+///
+/// **What it does not describe: how often a field repeats inside a record.** Ten of the
+/// body's twenty-two fields are written once per observation and two more once per witness run
+/// (see `BODY_FIELDS` in `record.rs`), and nothing in the manifest says so — a record's own
+/// counts do. So a later writer that appends a field repeating once per observation is a file
+/// this reader cannot step over, and it will refuse it rather than mis-measure it. The fields
+/// waiting to be added — a window's GC fraction and its mean coverage — are once per record.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldCardinality {
+    /// One value, whose bytes the encoding alone measures.
+    ///
+    /// **A byte string is one value**, not a list: its length prefix says how many *bytes* it
+    /// holds, not how many values of the field the record does. An allele's sequence is one
+    /// sequence however long it is.
+    OneValue,
+    /// A count, then that many values of the field's element type — an observation's read
+    /// identifiers, or the arrivals and departures of a record's live set.
+    AList,
+}
+
+/// Both cardinalities, listed once, so the reader recognises exactly what the writer spells.
+///
+/// The same two-sided rule [`ALL_ENCODINGS`] keeps, and for the same reason: when the writer's
+/// spellings and the reader's were two independent lists, a value added to one alone made
+/// [`Header::encode`] write a file [`Header::decode`] refused.
+const ALL_CARDINALITIES: [FieldCardinality; 2] =
+    [FieldCardinality::OneValue, FieldCardinality::AList];
+
+impl FieldCardinality {
+    /// What this cardinality is called in the header.
+    ///
+    /// **The only place a spelling is written**, exhaustive on purpose: a third cardinality is
+    /// a compile error here rather than a value the reader silently fails to name.
+    fn spelled(self) -> &'static str {
+        match self {
+            FieldCardinality::OneValue => "one-value",
+            FieldCardinality::AList => "a-list",
+        }
+    }
 }
 
 /// A record field's name, as the file spells it.
@@ -730,6 +811,7 @@ fn check_manifest(manifest: &Manifest) -> Result<(), BrokenRule> {
             ));
         }
         check_encoding(&field.name, field.encoding)?;
+        check_cardinality(field)?;
     }
     Ok(())
 }
@@ -744,6 +826,30 @@ pub const FIXED_INTEGER_WIDTHS_BYTES: [u8; 4] = [1, 2, 4, 8];
 /// The widths a raw IEEE float field may declare — `f32` and `f64`. No other width has an
 /// IEEE meaning.
 pub const IEEE_FLOAT_WIDTHS_BYTES: [u8; 2] = [4, 8];
+
+/// A field's cardinality must be the one its encoding lays down.
+///
+/// **The rule that stops the manifest's two accounts of a field's shape from disagreeing.**
+/// A file saying `cardinality = "one-value"` beside `encoding = "chain-id-list"` was written
+/// by something that meant one of the two, and a reader that believed the cardinality would
+/// step over a count and stop inside a run of identifiers — which lands in the middle of the
+/// next field rather than failing.
+fn check_cardinality(spec: &FieldSpec) -> Result<(), BrokenRule> {
+    let implied = spec.encoding.cardinality();
+    if spec.cardinality != implied {
+        return Err(BrokenRule::new(
+            "manifest.field.cardinality",
+            format!(
+                "{:?} is {:?} and {:?}, which lays down {:?}",
+                spec.name.0,
+                spec.cardinality.spelled(),
+                spec.encoding.spelled().0,
+                implied.spelled(),
+            ),
+        ));
+    }
+    Ok(())
+}
 
 fn check_encoding(name: &FieldName, encoding: FieldEncoding) -> Result<(), BrokenRule> {
     let field = "manifest.field.encoding";
@@ -876,7 +982,8 @@ struct WireManifest {
     field: Vec<WireFieldSpec>,
 }
 
-/// One field's declaration, **flat rather than nested**: `encoding` names the scheme and
+/// One field's declaration, **flat rather than nested**: `cardinality` says whether a record
+/// holds one of these or a counted run of them, `encoding` names the scheme and
 /// `width-bytes` or `steps-per-unit` carries its one parameter. A nested table per field
 /// would read as `[manifest.field.encoding]` inside an array of tables, which is legal TOML
 /// and hard to read in `head` — and readability is the reason the header is text at all.
@@ -888,6 +995,7 @@ struct WireManifest {
 #[serde(rename_all = "kebab-case")]
 struct WireFieldSpec {
     name: String,
+    cardinality: String,
     encoding: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     width_bytes: Option<u8>,
@@ -935,6 +1043,7 @@ impl From<&Header> for WireHeader {
                         let (encoding, width_bytes, steps_per_unit) = field.encoding.spelled();
                         WireFieldSpec {
                             name: field.name.0.clone(),
+                            cardinality: field.cardinality.spelled().to_string(),
                             encoding: encoding.to_string(),
                             width_bytes,
                             steps_per_unit,
@@ -977,6 +1086,7 @@ impl WireHeader {
             .map(|field| {
                 Ok(FieldSpec {
                     encoding: encoding_of(&field)?,
+                    cardinality: cardinality_of(&field)?,
                     name: FieldName(field.name),
                 })
             })
@@ -1051,6 +1161,61 @@ impl FieldEncoding {
             FieldEncoding::ChainIdList => ("chain-id-list", None, None),
         }
     }
+
+    /// How many values of a field written this way one record holds.
+    ///
+    /// **The one place the pair is decided**, which is what keeps the manifest's two accounts
+    /// of a field's shape from being able to disagree: a header declaring anything else is
+    /// refused (see [`FieldCardinality`]).
+    ///
+    /// **Exhaustive with no wildcard**, so a scheme added to the closed set has to say here how
+    /// many values it lays down rather than inheriting *one* in silence — and inheriting *one*
+    /// for a run of identifiers is exactly the mistake that would let a reader measure the
+    /// wrong number of bytes.
+    pub fn cardinality(self) -> FieldCardinality {
+        match self {
+            // A number, a fixed-width integer, a float, a count of fixed-point steps: one value
+            // each. **A length-prefixed byte string is one value too** — its prefix counts its
+            // bytes, not how many of the field a record carries.
+            FieldEncoding::Varint
+            | FieldEncoding::SignedVarint
+            | FieldEncoding::FixedWidthInteger { .. }
+            | FieldEncoding::IeeeFloat { .. }
+            | FieldEncoding::FixedPoint { .. }
+            | FieldEncoding::LengthPrefixedBytes => FieldCardinality::OneValue,
+            // A count and then that many identifiers; the changes are two such runs, which is
+            // still a run of values rather than one value.
+            FieldEncoding::ChainIdChanges | FieldEncoding::ChainIdList => FieldCardinality::AList,
+        }
+    }
+}
+
+/// The declared cardinality, as a name from the closed set.
+///
+/// **An unrecognised spelling is refused rather than guessed at.** A reader that fell back on
+/// the encoding's own cardinality would accept `cardinality = "per-observation"` from a later
+/// writer — a field it cannot in fact step over — and read the record after it out of a
+/// position that is not a field boundary.
+fn cardinality_of(field: &WireFieldSpec) -> Result<FieldCardinality, BrokenRule> {
+    ALL_CARDINALITIES
+        .iter()
+        .copied()
+        .find(|candidate| candidate.spelled() == field.cardinality)
+        .ok_or_else(|| {
+            let known: Vec<&str> = ALL_CARDINALITIES
+                .iter()
+                .map(|candidate| candidate.spelled())
+                .collect();
+            BrokenRule::new(
+                "manifest.field.cardinality",
+                format!(
+                    "{:?} is {:?}, which is not one of {}",
+                    field.name,
+                    field.cardinality,
+                    known.join(", ")
+                ),
+            )
+        })
 }
 
 /// The declared scheme and its one parameter, together.
@@ -1188,36 +1353,36 @@ mod tests {
             block_byte_ceiling: Some(1_048_576),
             look_back_window_log: DEFAULT_LOOK_BACK_WINDOW_LOG,
             fields: vec![
-                FieldSpec {
-                    name: FieldName("position-offset".to_string()),
-                    encoding: FieldEncoding::Varint,
-                },
-                FieldSpec {
-                    name: FieldName("coverage-step".to_string()),
-                    encoding: FieldEncoding::SignedVarint,
-                },
-                FieldSpec {
-                    name: FieldName("body-bytes".to_string()),
-                    encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
-                },
-                FieldSpec {
-                    name: FieldName("allele-bases".to_string()),
-                    encoding: FieldEncoding::LengthPrefixedBytes,
-                },
-                FieldSpec {
-                    name: FieldName("window-mean-coverage".to_string()),
-                    encoding: FieldEncoding::FixedPoint { steps_per_unit: 4 },
-                },
-                FieldSpec {
-                    name: FieldName("summed-log-error".to_string()),
-                    encoding: FieldEncoding::FixedPoint {
+                FieldSpec::new(
+                    FieldName("position-offset".to_string()),
+                    FieldEncoding::Varint,
+                ),
+                FieldSpec::new(
+                    FieldName("coverage-step".to_string()),
+                    FieldEncoding::SignedVarint,
+                ),
+                FieldSpec::new(
+                    FieldName("body-bytes".to_string()),
+                    FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+                ),
+                FieldSpec::new(
+                    FieldName("allele-bases".to_string()),
+                    FieldEncoding::LengthPrefixedBytes,
+                ),
+                FieldSpec::new(
+                    FieldName("window-mean-coverage".to_string()),
+                    FieldEncoding::FixedPoint { steps_per_unit: 4 },
+                ),
+                FieldSpec::new(
+                    FieldName("summed-log-error".to_string()),
+                    FieldEncoding::FixedPoint {
                         steps_per_unit: 4_096,
                     },
-                },
-                FieldSpec {
-                    name: FieldName("raw-escape-hatch".to_string()),
-                    encoding: FieldEncoding::IeeeFloat { width_bytes: 8 },
-                },
+                ),
+                FieldSpec::new(
+                    FieldName("raw-escape-hatch".to_string()),
+                    FieldEncoding::IeeeFloat { width_bytes: 8 },
+                ),
             ],
         }
     }
@@ -1369,40 +1534,34 @@ mod tests {
     #[test]
     fn every_encoding_at_every_legal_width_round_trips() {
         let mut fields = vec![
-            FieldSpec {
-                name: FieldName("varint".to_string()),
-                encoding: FieldEncoding::Varint,
-            },
-            FieldSpec {
-                name: FieldName("signed".to_string()),
-                encoding: FieldEncoding::SignedVarint,
-            },
-            FieldSpec {
-                name: FieldName("bytes".to_string()),
-                encoding: FieldEncoding::LengthPrefixedBytes,
-            },
-            FieldSpec {
-                name: FieldName("finest-step".to_string()),
-                encoding: FieldEncoding::FixedPoint { steps_per_unit: 1 },
-            },
-            FieldSpec {
-                name: FieldName("widest-step".to_string()),
-                encoding: FieldEncoding::FixedPoint {
+            FieldSpec::new(FieldName("varint".to_string()), FieldEncoding::Varint),
+            FieldSpec::new(FieldName("signed".to_string()), FieldEncoding::SignedVarint),
+            FieldSpec::new(
+                FieldName("bytes".to_string()),
+                FieldEncoding::LengthPrefixedBytes,
+            ),
+            FieldSpec::new(
+                FieldName("finest-step".to_string()),
+                FieldEncoding::FixedPoint { steps_per_unit: 1 },
+            ),
+            FieldSpec::new(
+                FieldName("widest-step".to_string()),
+                FieldEncoding::FixedPoint {
                     steps_per_unit: u32::MAX,
                 },
-            },
+            ),
         ];
         for width in FIXED_INTEGER_WIDTHS_BYTES {
-            fields.push(FieldSpec {
-                name: FieldName(format!("fixed-{width}")),
-                encoding: FieldEncoding::FixedWidthInteger { width_bytes: width },
-            });
+            fields.push(FieldSpec::new(
+                FieldName(format!("fixed-{width}")),
+                FieldEncoding::FixedWidthInteger { width_bytes: width },
+            ));
         }
         for width in IEEE_FLOAT_WIDTHS_BYTES {
-            fields.push(FieldSpec {
-                name: FieldName(format!("ieee-{width}")),
-                encoding: FieldEncoding::IeeeFloat { width_bytes: width },
-            });
+            fields.push(FieldSpec::new(
+                FieldName(format!("ieee-{width}")),
+                FieldEncoding::IeeeFloat { width_bytes: width },
+            ));
         }
 
         let mut written = a_written_header();
@@ -1906,19 +2065,19 @@ mod tests {
     fn an_encoding_carrying_the_wrong_parameter_is_refused() {
         for (declaration, what) in [
             (
-                "name = \"x\"\nencoding = \"varint\"\nsteps-per-unit = 4096\n",
+                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"varint\"\nsteps-per-unit = 4096\n",
                 "a varint with a step",
             ),
             (
-                "name = \"x\"\nencoding = \"varint\"\nwidth-bytes = 4\n",
+                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"varint\"\nwidth-bytes = 4\n",
                 "a varint with a width",
             ),
             (
-                "name = \"x\"\nencoding = \"fixed-width-integer\"\nwidth-bytes = 4\nsteps-per-unit = 4096\n",
+                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"fixed-width-integer\"\nwidth-bytes = 4\nsteps-per-unit = 4096\n",
                 "a fixed-width integer with a step",
             ),
             (
-                "name = \"x\"\nencoding = \"fixed-point\"\nsteps-per-unit = 4096\nwidth-bytes = 4\n",
+                "name = \"x\"\ncardinality = \"one-value\"\nencoding = \"fixed-point\"\nsteps-per-unit = 4096\nwidth-bytes = 4\n",
                 "a fixed-point field with a width",
             ),
         ] {
@@ -1939,15 +2098,15 @@ mod tests {
     fn a_scheme_without_its_parameter_is_refused() {
         for (declaration, wanted) in [
             (
-                "name = \"body-bytes\"\nencoding = \"fixed-width-integer\"\n",
+                "name = \"body-bytes\"\ncardinality = \"one-value\"\nencoding = \"fixed-width-integer\"\n",
                 "carries no width",
             ),
             (
-                "name = \"raw\"\nencoding = \"ieee-float\"\n",
+                "name = \"raw\"\ncardinality = \"one-value\"\nencoding = \"ieee-float\"\n",
                 "carries no width",
             ),
             (
-                "name = \"q-sum\"\nencoding = \"fixed-point\"\n",
+                "name = \"q-sum\"\ncardinality = \"one-value\"\nencoding = \"fixed-point\"\n",
                 "carries no step",
             ),
         ] {
@@ -1965,7 +2124,7 @@ mod tests {
     #[test]
     fn an_unknown_encoding_is_refused_and_the_message_lists_the_known_ones() {
         let refused = decoded(&one_field_declared_as(
-            "name = \"chain-ids\"\nencoding = \"roaring-bitmap\"\n",
+            "name = \"chain-ids\"\ncardinality = \"one-value\"\nencoding = \"roaring-bitmap\"\n",
         ))
         .expect_err("that is not one of the eight");
         let said = refused.to_string();
@@ -1986,16 +2145,177 @@ mod tests {
     fn every_scheme_the_writer_can_spell_is_one_the_reader_recognises() {
         for scheme in ALL_ENCODINGS {
             let mut header = a_written_header();
-            header.manifest.fields = vec![FieldSpec {
-                name: FieldName("the-one-field".to_string()),
-                encoding: scheme,
-            }];
+            header.manifest.fields = vec![FieldSpec::new(
+                FieldName("the-one-field".to_string()),
+                scheme,
+            )];
             let bytes = header
                 .encode()
                 .unwrap_or_else(|e| panic!("{scheme:?} must encode: {e}"));
             let (read_back, _) =
                 decoded(&bytes).unwrap_or_else(|e| panic!("{scheme:?} must decode: {e}"));
             assert_eq!(read_back.manifest.fields[0].encoding, scheme);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // How many values of a field a record holds
+    // -----------------------------------------------------------------
+
+    /// **Every scheme, both ways round**: declared with the cardinality it lays down a file
+    /// round-trips, and declared with the other one it is refused.
+    ///
+    /// This is the test that makes the rule cover all eight rather than the two a hand-written
+    /// pair would reach. Both halves are here because a check that only ever sees agreeing
+    /// files would pass while doing nothing.
+    #[test]
+    fn every_scheme_round_trips_with_its_own_cardinality_and_is_refused_with_the_other() {
+        for scheme in ALL_ENCODINGS {
+            let implied = scheme.cardinality();
+            let mut agreeing = a_written_header();
+            agreeing.manifest.fields = vec![FieldSpec::new(
+                FieldName("the-one-field".to_string()),
+                scheme,
+            )];
+            let bytes = agreeing
+                .encode()
+                .unwrap_or_else(|e| panic!("{scheme:?} must encode: {e}"));
+            let (read_back, _) =
+                decoded(&bytes).unwrap_or_else(|e| panic!("{scheme:?} must decode: {e}"));
+            assert_eq!(read_back.manifest.fields[0].cardinality, implied);
+
+            let other = match implied {
+                FieldCardinality::OneValue => FieldCardinality::AList,
+                FieldCardinality::AList => FieldCardinality::OneValue,
+            };
+            let mut disagreeing = a_written_header();
+            disagreeing.manifest.fields = vec![FieldSpec {
+                name: FieldName("the-one-field".to_string()),
+                cardinality: other,
+                encoding: scheme,
+            }];
+            let refused = refusal(
+                disagreeing.encode(),
+                &format!("{scheme:?} declared {:?} must be refused", other.spelled()),
+            );
+            let said = refused.to_string();
+            assert!(said.contains(other.spelled()), "got {said}");
+            assert!(said.contains(implied.spelled()), "got {said}");
+        }
+    }
+
+    /// The refusal reaches a **reader** too, and not only the writer that would have produced
+    /// the file. A psp is refused on what it says, not on who wrote it — and a hand-built
+    /// header never goes through `encode`.
+    #[test]
+    fn a_file_whose_cardinality_disagrees_with_its_encoding_is_refused_by_the_reader() {
+        let refused = refusal(
+            decoded(&one_field_declared_as(
+                "name = \"observation-reads\"\ncardinality = \"one-value\"\n\
+                 encoding = \"chain-id-list\"\n",
+            )),
+            "a list declared as one value must be refused",
+        );
+        let said = refused.to_string();
+        assert!(said.contains("observation-reads"), "got {said}");
+        assert!(said.contains("a-list"), "got {said}");
+    }
+
+    /// A cardinality this reader has never heard of is refused rather than fallen back from,
+    /// and the message lists the two it knows. **The fallback is the dangerous version**: a
+    /// later writer's `per-observation` field is one this reader cannot step over, and taking
+    /// the encoding's own answer instead would step over it once and resume in the middle of
+    /// the next field.
+    #[test]
+    fn an_unknown_cardinality_is_refused_and_the_message_lists_the_known_ones() {
+        let refused = refusal(
+            decoded(&one_field_declared_as(
+                "name = \"per-observation-thing\"\ncardinality = \"per-observation\"\n\
+                 encoding = \"varint\"\n",
+            )),
+            "that is not one of the two",
+        );
+        let said = refused.to_string();
+        assert!(said.contains("per-observation"), "got {said}");
+        for known in ALL_CARDINALITIES {
+            assert!(
+                said.contains(known.spelled()),
+                "the message must list {:?}; got {said}",
+                known.spelled()
+            );
+        }
+    }
+
+    /// A field entry that declares no cardinality at all is refused. **Not defaulted**: the
+    /// key is one of the three spec §4.5 requires, and a file that omits it was not written by
+    /// anything that agreed to this format.
+    #[test]
+    fn a_field_that_declares_no_cardinality_is_refused() {
+        let refused = refusal(
+            decoded(&one_field_declared_as(
+                "name = \"position-offset\"\nencoding = \"varint\"\n",
+            )),
+            "a field entry with no cardinality must be refused",
+        );
+        assert!(refused.to_string().contains("cardinality"), "got {refused}");
+    }
+
+    /// The header a reader sees says it in words. **Read off the file's own text**, because a
+    /// round-trip through this module's types would pass just as well if the key never reached
+    /// the bytes.
+    ///
+    /// **Anchored at the start of a line, which is not fussiness**: written as a bare substring
+    /// this test passed with the key renamed to `field-cardinality`, because that name ends in
+    /// the one being looked for.
+    #[test]
+    fn the_header_text_names_each_fields_cardinality() {
+        let written = a_written_header();
+        let bytes = written.encode().expect("a valid header encodes");
+        let text = body_of(&bytes);
+        assert!(text.contains("\ncardinality = \"one-value\""), "got {text}");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("cardinality = "))
+                .count(),
+            written.manifest.fields.len(),
+            "one line per declared field"
+        );
+    }
+
+    /// **The record's own fields, and which two of the twenty-seven are lists.** A count and
+    /// the names, so that a field changing shape has to be changed here on purpose — the two
+    /// halves of the chain-id column are the only runs of values a record carries.
+    #[test]
+    fn exactly_two_of_the_records_fields_are_lists() {
+        let fields = crate::ng::psp::record::record_fields();
+        assert_eq!(fields.len(), 27);
+        let lists: Vec<&str> = fields
+            .iter()
+            .filter(|field| field.cardinality == FieldCardinality::AList)
+            .map(|field| field.name.0.as_str())
+            .collect();
+        assert_eq!(lists, ["chain-id-changes", "observation-reads"]);
+    }
+
+    /// `ALL_CARDINALITIES` has to be both of them, for the reason `ALL_ENCODINGS` has to be
+    /// all eight: the writer spells from one list and the reader recognises from it, so a
+    /// third value missing from the array is a file one side cannot read.
+    #[test]
+    fn the_cardinality_list_holds_every_value_the_type_has() {
+        let sample = FieldCardinality::OneValue;
+        let named = match sample {
+            FieldCardinality::OneValue | FieldCardinality::AList => 2,
+        };
+        assert_eq!(ALL_CARDINALITIES.len(), named);
+        for value in ALL_CARDINALITIES {
+            assert_eq!(
+                ALL_CARDINALITIES
+                    .iter()
+                    .filter(|other| **other == value)
+                    .count(),
+                1,
+                "{value:?} appears more than once"
+            );
         }
     }
 

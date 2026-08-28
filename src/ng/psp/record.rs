@@ -158,12 +158,16 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(3);
 
 /// Every field a record's **body** carries, in encoding order.
 ///
-/// **A field list, not a count of values per record.** Nine of these nineteen are written once
-/// per *observation*, two of those nine once per *witness run* inside it, and the last three
-/// only when the locus kind is a repeat tract. The manifest carries no cardinality
-/// ([the A1+A2 report](../../../doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md)
-/// §2.8), so what this list gives a reader is the order and the encodings; how many of each a
-/// body holds is read from the counts the body itself carries.
+/// **A field list, not a count of values per record.** Twelve of these twenty-two are written
+/// more than once: ten once per *observation* — one of those ten for every observation but the
+/// residual — and two more once per *witness run* inside an observation. The last three are
+/// written only when the locus kind is a repeat tract. The manifest says
+/// whether one of a field's values is a single value or a counted run of them
+/// ([`FieldCardinality`]); it does not say how often the field repeats. So what this list gives
+/// a reader is the order, the encodings and each field's own shape; how many of each a body
+/// holds is read from the counts the body itself carries.
+///
+/// [`FieldCardinality`]: crate::ng::psp::header::FieldCardinality
 ///
 /// **What it is for: a file's fingerprint of its own layout, and a reader's check against it.**
 /// A writer declares this array after [`RECORD_HEAD_FIELDS`] ([`record_fields`]) and a reader refuses any
@@ -345,10 +349,7 @@ fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
     RECORD_HEAD_FIELDS
         .iter()
         .chain(BODY_FIELDS.iter())
-        .map(|(name, encoding)| FieldSpec {
-            name: FieldName((*name).to_string()),
-            encoding: *encoding,
-        })
+        .map(|(name, encoding)| FieldSpec::new(FieldName((*name).to_string()), *encoding))
 }
 
 /// How many fields this build knows, before anything a later writer added: the head's four and
@@ -371,11 +372,15 @@ const KNOWN_FIELD_COUNT: usize = RECORD_HEAD_FIELDS.len() + BODY_FIELDS.len();
 /// string carries its length in front.
 ///
 /// **⚠ That works for a field written once per record, and this reader cannot tell such a field
-/// from one written once per observation.** The manifest carries no cardinality, so a file
-/// whose extra field repeats per observation is *accepted* and decoded into plausible nonsense
-/// from the second observation onwards — it is not refused, and nothing here can refuse it. A
-/// later writer adding a per-observation field must raise the format version, which a reader
-/// does refuse (`header.rs`, `UnsupportedVersion`).
+/// from one written once per observation.** The manifest says whether a field is one value or a
+/// counted run of them ([`FieldCardinality`]) and it does *not* say how often the field repeats
+/// inside a record — a record's own counts do. So a file whose extra field repeats per
+/// observation is *accepted* and decoded into plausible nonsense from the second observation
+/// onwards; it is not refused, and nothing here can refuse it. A later writer adding a
+/// per-observation field must raise the format version, which a reader does refuse
+/// (`header.rs`, `UnsupportedVersion`).
+///
+/// [`FieldCardinality`]: crate::ng::psp::header::FieldCardinality
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordLayout {
     /// The encodings of the fields this reader does not recognise, in the order they appear at
@@ -2723,10 +2728,10 @@ mod tests {
 
         for (encoding, written) in later_versions {
             let mut fields = record_fields();
-            fields.push(FieldSpec {
-                name: FieldName("a-field-from-a-later-writer".to_string()),
+            fields.push(FieldSpec::new(
+                FieldName("a-field-from-a-later-writer".to_string()),
                 encoding,
-            });
+            ));
             let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
                 .expect("an unknown field at the end is not a reason to refuse the file");
             assert_eq!(layout.unknown_field_count(), 1);
@@ -2761,14 +2766,14 @@ mod tests {
         encode_record_body(&record, &mut body);
 
         let mut fields = record_fields();
-        fields.push(FieldSpec {
-            name: FieldName("window-gc-percent".to_string()),
-            encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
-        });
-        fields.push(FieldSpec {
-            name: FieldName("window-mean-coverage".to_string()),
-            encoding: FieldEncoding::LengthPrefixedBytes,
-        });
+        fields.push(FieldSpec::new(
+            FieldName("window-gc-percent".to_string()),
+            FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+        ));
+        fields.push(FieldSpec::new(
+            FieldName("window-mean-coverage".to_string()),
+            FieldEncoding::LengthPrefixedBytes,
+        ));
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("two unknown fields at the end are fine");
         assert_eq!(layout.unknown_field_count(), 2);
@@ -2789,10 +2794,10 @@ mod tests {
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
         let mut fields = record_fields();
-        fields.push(FieldSpec {
-            name: FieldName("window-mean-coverage".to_string()),
-            encoding: FieldEncoding::IeeeFloat { width_bytes: 8 },
-        });
+        fields.push(FieldSpec::new(
+            FieldName("window-mean-coverage".to_string()),
+            FieldEncoding::IeeeFloat { width_bytes: 8 },
+        ));
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("an unknown field at the end is fine");
 
@@ -4045,10 +4050,10 @@ mod tests {
     fn a_later_writers_chain_id_changes_field_is_measured_and_stepped_over() {
         let record = a_rich_record();
         let mut fields = record_fields();
-        fields.push(FieldSpec {
-            name: FieldName("some-later-live-set".to_string()),
-            encoding: FieldEncoding::ChainIdChanges,
-        });
+        fields.push(FieldSpec::new(
+            FieldName("some-later-live-set".to_string()),
+            FieldEncoding::ChainIdChanges,
+        ));
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("one unknown field at the end is not a reason to refuse the file");
 
@@ -4284,10 +4289,10 @@ mod tests {
     fn a_later_writers_chain_id_list_is_measured_as_a_list() {
         let record = a_rich_record();
         let mut fields = record_fields();
-        fields.push(FieldSpec {
-            name: FieldName("some-later-read-list".to_string()),
-            encoding: FieldEncoding::ChainIdList,
-        });
+        fields.push(FieldSpec::new(
+            FieldName("some-later-read-list".to_string()),
+            FieldEncoding::ChainIdList,
+        ));
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("one unknown field at the end is not a reason to refuse the file");
 
@@ -5355,14 +5360,14 @@ mod tests {
     fn a_walk_under_a_layout_with_unknown_trailing_fields_still_skips_cleanly() {
         let records = twelve_records_in_order();
         let mut fields = record_fields();
-        fields.push(FieldSpec {
-            name: FieldName("window-gc-percent".to_string()),
-            encoding: FieldEncoding::FixedWidthInteger { width_bytes: 4 },
-        });
-        fields.push(FieldSpec {
-            name: FieldName("window-mean-coverage".to_string()),
-            encoding: FieldEncoding::LengthPrefixedBytes,
-        });
+        fields.push(FieldSpec::new(
+            FieldName("window-gc-percent".to_string()),
+            FieldEncoding::FixedWidthInteger { width_bytes: 4 },
+        ));
+        fields.push(FieldSpec::new(
+            FieldName("window-mean-coverage".to_string()),
+            FieldEncoding::LengthPrefixedBytes,
+        ));
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("two unknown fields at the end are not a reason to refuse the file");
         assert_eq!(layout.unknown_field_count(), 2);
