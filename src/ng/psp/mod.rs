@@ -72,6 +72,7 @@ pub(crate) mod header;
 pub(crate) mod index;
 pub(crate) mod reader;
 pub(crate) mod record;
+pub(crate) mod walk;
 pub(crate) mod writer;
 
 pub use block::{
@@ -102,6 +103,7 @@ pub use record::{
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
     decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
+pub use walk::RecordIter;
 pub use writer::{PspWriter, WriteStats};
 
 // ---------------------------------------------------------------------
@@ -227,9 +229,11 @@ pub(crate) fn read_header_from(
 
 /// Everything that can go wrong reading a psp.
 ///
-/// **Every variant is an input problem, not a bug.** A corrupt or truncated file is data a
-/// run was handed, so none of these is a panic and none of them may reach a caller as a
-/// half-built record (spec §6.7).
+/// **Every variant but one is an input problem, not a bug.** A corrupt or truncated file is
+/// data a run was handed, so none of these is a panic and none of them may reach a caller as a
+/// half-built record (spec §6.7). The exception is [`NoSuchBlock`](Self::NoSuchBlock), which
+/// reports a caller asking for a block the file does not have, and its own doc says why that is
+/// an error here rather than the panic a slice index would give.
 ///
 /// The variants are separate because **the instruction to whoever sees them differs**:
 /// rebuild the file, upgrade the reader, raise a limit, the data is damaged. Collapsing
@@ -328,27 +332,95 @@ pub enum PspReadError {
     /// can be rebuilt by re-running, where this one means the bytes on disk disagree with each
     /// other.
     #[error("{}: {reason}", path.display())]
-    Damaged { path: PathBuf, reason: String },
+    Damaged {
+        path: PathBuf,
+        reason: String,
+        /// The codec's own account underneath, when one refused — the footer's, the block
+        /// index's. `None` when the rule that broke is one this reader checks itself, having
+        /// the file's length, which no codec can (spec §6.2's three checks at `open`).
+        ///
+        /// **Kept as a cause rather than flattened into `reason`**, so that a caller walking
+        /// the chain reaches which field of which entry the index stopped at. Four different
+        /// causes reached this variant as one string until Milestone G.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A block failed to decompress, or a record ran past the end of its block. The file
     /// is damaged.
     ///
-    /// **⚠ Do not fold a [`RecordDecodeError`] or a [`BlockHeadDecodeError`] through this
-    /// variant.** A record's [`Truncated`](RecordDecodeError::Truncated) means *the body
-    /// stopped early*, which the streaming reader of Milestone D reads more bytes for, and its
-    /// [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the reader*;
-    /// [`BlockHeadDecodeError::Truncated`] carries the first of those instructions about a
-    /// block's opening fields. This variant says *the file is damaged*, which is the wrong
-    /// instruction for all three. It also takes a `std::io::Error` as its cause, so either
-    /// error could only reach it as a string. **Milestone D3 adds the variants that carry the
-    /// class**; this note is here because that is the point at which it would be lost (the C1
-    /// review, M13; the D1 review).
+    /// **The cause is the walk's own error, not a string.** A record's
+    /// [`Truncated`](RecordDecodeError::Truncated) means *the body stopped early*, which the
+    /// streaming reader answers by decompressing more and only turns into damage once the block
+    /// has no more to give; its [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade
+    /// the reader*, which is [`UnsupportedRecordEncoding`](Self::UnsupportedRecordEncoding)
+    /// here and must not arrive as damage. [`BlockReadError`] is where those distinctions are
+    /// already drawn, so this variant carries one rather than restating it (the C1 review, M13;
+    /// the D1 review, which asked that they not be flattened).
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,
+        /// Which block, counted from the file's first — the ordinal into
+        /// [`PspReader::block_index`]. **It is the block the walk was inside**, so a fault in
+        /// the four bytes that introduce the *next* block names that next block, and every
+        /// fault inside a block names the block itself.
         block: u64,
         #[source]
-        source: std::io::Error,
+        source: BlockReadError,
+    },
+
+    /// One record needs more of the reader's rolling buffer than it allows a single record to
+    /// hold.
+    ///
+    /// **A class of its own because the fix is a knob, not a rebuild** (spec §7): a genuine
+    /// record can be larger than any fixed budget — §8 refuses to fix a maximum record size in
+    /// the format — while a corrupt block that never parses grows the buffer until the frame
+    /// runs out, and the two arrive at the same line. The refusal names the ceiling, which is
+    /// what spec §7 asks of it.
+    ///
+    /// **⚠ It does not yet say *raise the ceiling*, because a [`PspReader`]'s walk cannot.**
+    /// The ceiling is [`ROLLING_BUFFER_CEILING_BYTES`] and only a [`BlockStream`] built by hand
+    /// can be given another; putting the knob on the reader is a follow-up G1 records rather
+    /// than a message this error may make.
+    #[error(
+        "{}: a record in block {block} needs more than the {allowed_bytes} bytes this reader \
+         allows one record to hold",
+        path.display()
+    )]
+    RecordLargerThanTheReaderAllows {
+        path: PathBuf,
+        /// Which block, counted as [`CorruptBlock`](Self::CorruptBlock) counts it.
+        block: u64,
+        allowed_bytes: usize,
+        #[source]
+        source: BlockReadError,
+    },
+
+    /// A record, or the record layout the file's manifest declares, names something this reader
+    /// does not know. **Upgrade the reader**; the file is not damaged.
+    ///
+    /// **Not [`UnsupportedVersion`](Self::UnsupportedVersion)**, which is the whole file's
+    /// format number and is answered before a block is touched. This one is a field encoding
+    /// inside a record, and it is the same instruction about a smaller subject.
+    #[error("{}: this reader cannot read the records in this file", path.display())]
+    UnsupportedRecordEncoding {
+        path: PathBuf,
+        #[source]
+        source: BlockReadError,
+    },
+
+    /// A block was asked for by an ordinal the file does not have.
+    ///
+    /// **The one variant here that reports the caller's mistake rather than the file's**, and
+    /// it is an error rather than a panic because the caller is a cohort holding thousands of
+    /// these open: an ordinal computed wrongly must fail one sample, not abort the run.
+    /// [`PspReader::records_from`] cannot raise it — it derives the ordinal from the index —
+    /// so it reaches only a caller that indexed [`PspReader::block_index`] itself.
+    #[error("{} has {blocks} blocks; block {asked_for} was asked for", path.display())]
+    NoSuchBlock {
+        path: PathBuf,
+        asked_for: u64,
+        blocks: u64,
     },
 
     /// Reading the file's bytes failed.
@@ -366,6 +438,36 @@ pub enum PspReadError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl PspReadError {
+    /// A rule this reader checks itself broke, and there is no error underneath it.
+    ///
+    /// **The rules with no cause are the ones that need the file's length** — that the sections
+    /// end where the footer begins, that the index starts after the header, that every block
+    /// offset lands in the blocks. No codec in the file knows how long the file is, so none of
+    /// them can have refused first.
+    pub(crate) fn damaged(path: &Path, reason: String) -> Self {
+        Self::Damaged {
+            path: path.to_path_buf(),
+            reason,
+            source: None,
+        }
+    }
+
+    /// A codec underneath refused, and **its own account is kept as the cause** rather than
+    /// pressed into `reason`.
+    pub(crate) fn damaged_by(
+        path: &Path,
+        reason: String,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Damaged {
+            path: path.to_path_buf(),
+            reason,
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// Everything that can go wrong writing a psp.

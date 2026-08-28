@@ -1212,6 +1212,16 @@ pub struct BlockStream<R> {
     /// is the one place this reader is to be timed.
     parses_restarted: u64,
 
+    /// How many blocks this reader has opened — counted the moment a block's declared length
+    /// has been read and its cursor built, so the block being parsed right now is included.
+    ///
+    /// **It exists to name a block in an error.** A walk started at block 12 of a file and
+    /// refused four blocks later has to say *block 15*, and nothing else it holds can: the
+    /// [`BlockHead`] of a block whose head never parsed does not exist, and two blocks may
+    /// share a first position (`index.rs`), so counting distinct heads would not separate them
+    /// either. A caller adds this to the ordinal it started at.
+    blocks_begun: u64,
+
     /// How many times a *block head*'s parse has been restarted after asking for more bytes.
     ///
     /// Counted separately because it answers a different question, and the answer is
@@ -1342,6 +1352,7 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             rolling,
             cursor,
             live_reads,
+            blocks_begun,
             parses_restarted,
             block_heads_restarted,
             buffer_ceiling,
@@ -1355,6 +1366,7 @@ impl<R> std::fmt::Debug for BlockStream<R> {
             .field("rolling_capacity", &rolling.capacity())
             .field("cursor", cursor)
             .field("live_reads", &live_reads.live().len())
+            .field("blocks_begun", blocks_begun)
             .field("parses_restarted", parses_restarted)
             .field("block_heads_restarted", block_heads_restarted)
             .field("buffer_ceiling", buffer_ceiling)
@@ -1409,6 +1421,7 @@ impl<R: std::io::Read> BlockStream<R> {
             rolling: Vec::with_capacity(ROLLING_BYTES),
             cursor: BlockCursor::between_blocks(),
             live_reads: LiveSetReader::new(),
+            blocks_begun: 0,
             parses_restarted: 0,
             block_heads_restarted: 0,
             buffer_ceiling: ROLLING_BUFFER_CEILING_BYTES,
@@ -1430,6 +1443,14 @@ impl<R: std::io::Read> BlockStream<R> {
 
     pub fn parses_restarted(&self) -> u64 {
         self.parses_restarted
+    }
+
+    /// How many blocks this reader has opened, the one it is inside included.
+    ///
+    /// **Zero until the first block's length has been read**, so a walk that fails before any
+    /// block began reports zero rather than one — see the field.
+    pub fn blocks_begun(&self) -> u64 {
+        self.blocks_begun
     }
 
     /// How many times a block head's parse has been restarted after asking for more bytes.
@@ -1598,6 +1619,9 @@ impl<R: std::io::Read> BlockStream<R> {
         // from here (spec §3.2); a block that carried state in from the one before it would read
         // back wrong from its first record, plausibly, because coverage is smooth.
         self.cursor = BlockCursor::opening(u32::from_le_bytes(declared) as usize);
+        // Counted here and not at the end of this function: everything below can fail, and a
+        // failure inside a block's head is a fault *of this block*, which an error has to name.
+        self.blocks_begun += 1;
         // **The second running difference, and it lives inside its own type.** The set of reads
         // live restarts here too, which is what lets this reader begin at an arbitrary block:
         // with nothing live, the block's first record restates its whole set as arrivals.

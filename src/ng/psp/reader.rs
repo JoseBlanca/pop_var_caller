@@ -8,6 +8,12 @@
 //! is the only thing distinguishing a run that was killed from a sample that genuinely covers
 //! less of the genome, and reading one short would hand a caller a chromosome that stops in the
 //! middle with nothing said.
+//!
+//! **The record walks a caller asks for start here and are built in [`super::walk`]**, which is
+//! where everything that can inflate a frame lives. This file's part of a walk is the index
+//! lookup, the seek, and the bound that says where the blocks end; that it names no block-
+//! decoding code at all is what `the_opener_cannot_reach_any_block_decoding_code` reads its
+//! imports to check.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -16,7 +22,9 @@ use std::path::{Path, PathBuf};
 use super::footer::{FOOTER_BYTES, Footer, decode_footer};
 use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
 use super::index::BlockIndexEntry;
+use super::walk::{self, RecordIter};
 use super::{PspReadError, index, read_header_from};
+use crate::ng::types::GenomePosition;
 
 /// How large a compressor look-back window this reader will hold, unless told otherwise.
 ///
@@ -46,8 +54,9 @@ pub const DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES: u64 = 1 << 18;
 /// A finished psp, open: its header, its block index, and where everything in it is.
 ///
 /// **No block has been touched** — that is the property spec §6.2 fixes and the reason a cohort
-/// can hold thousands of these open. Reading records is [`super::BlockStream`]'s, from a source
-/// this reader's index tells the caller where to seek.
+/// can hold thousands of these open. Records come from [`records`](Self::records) and its two
+/// siblings, each of which turns a starting point into a [`RecordIter`] over the file bounded at
+/// the end of its blocks; the decoding itself is [`super::BlockStream`]'s.
 #[derive(Debug)]
 pub struct PspReader {
     path: PathBuf,
@@ -115,14 +124,14 @@ impl PspReader {
         for entry in &blocks {
             let inside = (header_bytes as u64..footer.index_offset).contains(&entry.block_offset);
             if !inside {
-                return Err(PspReadError::Damaged {
-                    path: path.to_path_buf(),
-                    reason: format!(
+                return Err(PspReadError::damaged(
+                    path,
+                    format!(
                         "the index puts a block at byte {}; the blocks run from byte \
                          {header_bytes} to byte {}",
                         entry.block_offset, footer.index_offset
                     ),
-                });
+                ));
             }
         }
 
@@ -151,7 +160,11 @@ impl PspReader {
     }
 
     /// One entry per block, in genomic order — the cheap survey, with no block decompressed.
-    pub fn blocks(&self) -> &[BlockIndexEntry] {
+    ///
+    /// **`block_index` and not `blocks`**: every other document about this format calls this
+    /// section the *block index* (spec §3.3), and a caller reading `psp.blocks()` beside
+    /// `psp.records()` reasonably expects the blocks themselves.
+    pub fn block_index(&self) -> &[BlockIndexEntry] {
         &self.blocks
     }
 
@@ -185,6 +198,103 @@ impl PspReader {
         Ok(payload)
     }
 
+    /// Every record in the file, from its first block.
+    ///
+    /// **This is where a psp starts costing more than an open file**: until now nothing has
+    /// been decompressed, and the walk this returns holds two buffers and a decoder's state
+    /// (spec §5.1). Nothing it holds is a function of the block size, the depth, or the length
+    /// of the genome.
+    pub fn records(&mut self) -> Result<RecordIter<'_>, PspReadError> {
+        // **A sample with no records has no blocks**, and the walk over it is empty rather than
+        // refused: `finish` writes such a file and `open` accepts it. Starting at the index puts
+        // the bound below at zero bytes, which ends the walk before it reads anything.
+        let at = self
+            .blocks
+            .first()
+            .map_or(self.footer.index_offset, |first| first.block_offset);
+        self.walk_from(0, at)
+    }
+
+    /// Every record from one block onwards, named by its ordinal in
+    /// [`block_index`](Self::block_index).
+    ///
+    /// **The block-level entry point [`records_from`](Self::records_from) is built on**
+    /// (spec §6.2), and the one a caller that has already searched the index itself wants.
+    pub fn records_from_block(&mut self, block: usize) -> Result<RecordIter<'_>, PspReadError> {
+        let Some(entry) = self.blocks.get(block).copied() else {
+            return Err(PspReadError::NoSuchBlock {
+                path: self.path.clone(),
+                asked_for: block as u64,
+                blocks: self.blocks.len() as u64,
+            });
+        };
+        self.walk_from(block as u64, entry.block_offset)
+    }
+
+    /// Every record from the block holding `at` onwards.
+    ///
+    /// **`records_from` exists because callers think in coordinates** (spec §6.2). The index
+    /// turns one into a block with a single binary search over the entries `open` already
+    /// holds; no block is searched, because the entries carry only where each block *starts*.
+    ///
+    /// **⚠ The walk starts at that block's first record, not at `at`.** A reader cannot start
+    /// mid-block (spec §1.2), so the records that come back begin at or before the coordinate
+    /// asked for — usually well before it, since a block spans 100 kb by default. A caller that
+    /// wants only records from `at` onwards drops the ones in front itself, which costs a head
+    /// each and no body.
+    ///
+    /// **⚠ And it selects on where records *start*, not on what they span.** A record that
+    /// begins in the block before the one chosen and reaches past `at` — a deletion is the case
+    /// that does this — is not in the walk. **This is not an overlap query and the format
+    /// cannot make it one**: an index entry carries a block's first position and nothing else,
+    /// and spec §3.3 removed the only field that could have said how far a block's records
+    /// reach. Production's index keeps a `last_pos` for exactly this and ng's dropped it
+    /// deliberately. A caller that needs the records covering a coordinate starts a block
+    /// earlier and looks at their spans.
+    pub fn records_from(&mut self, at: GenomePosition) -> Result<RecordIter<'_>, PspReadError> {
+        if self.blocks.is_empty() {
+            return self.records();
+        }
+        // The entries are non-decreasing in `first_position` (`index.rs` refuses an index that
+        // is not, at open), so the block holding `at` is the last one starting at or before it.
+        let after = self
+            .blocks
+            .partition_point(|entry| entry.first_position <= at);
+        // **A coordinate in front of every block starts at the first**, rather than being
+        // refused: it is what a caller asking for a whole contig's records from position 1
+        // writes, and the first block of that contig may well start further in.
+        self.records_from_block(after.saturating_sub(1))
+    }
+
+    /// The walk itself: hand the file, bounded at the end of its blocks, to `walk.rs`.
+    ///
+    /// **The seek and the bound are all this reader contributes.** Everything that inflates a
+    /// frame lives in `walk.rs` and is deliberately not reachable from here — see this module's
+    /// own `the_opener_cannot_reach_any_block_decoding_code`.
+    fn walk_from(
+        &mut self,
+        first_block: u64,
+        block_offset: u64,
+    ) -> Result<RecordIter<'_>, PspReadError> {
+        // Destructured with no `..`: a field added to the reader has to be considered here.
+        let Self {
+            path,
+            file,
+            header,
+            footer,
+            blocks: _,
+            window_budget_bytes: _,
+        } = self;
+        walk::walk_from(
+            path,
+            file,
+            &header.manifest,
+            footer.index_offset,
+            block_offset,
+            first_block,
+        )
+    }
+
     /// Read and check the fixed tail.
     ///
     /// **A file too short to hold a footer is incomplete, not damaged** — it is what a writer
@@ -215,7 +325,7 @@ impl PspReader {
             // never finished, and a file that was never a psp. The head magic is what separates
             // them, and it is read only on this path — the everyday open pays nothing for it.
             super::footer::FooterDecodeError::NotAFooter { .. } => {
-                match Self::head_magic(path, file) {
+                match Self::read_the_head_magic(file) {
                     Some(found) if found != HEAD_MAGIC => PspReadError::NotAnNgPsp {
                         path: path.to_path_buf(),
                         found,
@@ -226,10 +336,13 @@ impl PspReader {
                     },
                 }
             }
-            damaged => PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: damaged.to_string(),
-            },
+            // **The decoder's own account is kept twice, and on purpose**: in `reason`, because
+            // most callers print only the error's `Display` and the chain is invisible there,
+            // and as the cause, because a caller that does walk it reaches the typed
+            // [`FooterDecodeError`] rather than a sentence it would have to parse.
+            damaged => {
+                PspReadError::damaged_by(path, format!("the footer reads as: {damaged}"), damaged)
+            }
         })?;
 
         // **What the footer could not check about itself, because it does not know the length.**
@@ -239,27 +352,26 @@ impl PspReader {
         let sections_end = footer
             .trailer_offset
             .checked_add(footer.trailer_bytes)
-            .ok_or_else(|| PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: "the trailer's end is past any address".to_string(),
+            .ok_or_else(|| {
+                PspReadError::damaged(path, "the trailer's end is past any address".to_string())
             })?;
         if sections_end != footer_at {
-            return Err(PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: format!(
+            return Err(PspReadError::damaged(
+                path,
+                format!(
                     "the footer says the file's sections end at byte {sections_end}, but the \
                      footer itself begins at byte {footer_at}"
                 ),
-            });
+            ));
         }
         if footer.index_offset < HEAD_MAGIC.len() as u64 {
-            return Err(PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: format!(
+            return Err(PspReadError::damaged(
+                path,
+                format!(
                     "the footer puts the block index at byte {}, which is inside the header",
                     footer.index_offset
                 ),
-            });
+            ));
         }
         Ok(footer)
     }
@@ -288,18 +400,20 @@ impl PspReader {
         let index_end = footer
             .index_offset
             .checked_add(footer.index_bytes)
-            .ok_or_else(|| PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: "the block index's end is past any address".to_string(),
+            .ok_or_else(|| {
+                PspReadError::damaged(
+                    path,
+                    "the block index's end is past any address".to_string(),
+                )
             })?;
         if index_end > file_bytes {
-            return Err(PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: format!(
+            return Err(PspReadError::damaged(
+                path,
+                format!(
                     "the footer puts a {}-byte block index at byte {} of a {file_bytes}-byte file",
                     footer.index_bytes, footer.index_offset
                 ),
-            });
+            ));
         }
         file.seek(SeekFrom::Start(footer.index_offset))
             .map_err(|source| PspReadError::Io {
@@ -321,28 +435,34 @@ impl PspReader {
         // would seek a reader to the wrong block without failing.
         let found = index::checksum_index(&bytes);
         if found != footer.index_checksum {
-            return Err(PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: format!(
+            return Err(PspReadError::damaged(
+                path,
+                format!(
                     "the block index checksums to {found:#010x}; the footer says {:#010x}",
                     footer.index_checksum
                 ),
-            });
+            ));
         }
 
         let blocks = index::decode_index(&bytes, footer.n_blocks).map_err(|refused| {
-            PspReadError::Damaged {
-                path: path.to_path_buf(),
-                reason: format!("the block index reads as: {refused}"),
-            }
+            PspReadError::damaged_by(
+                path,
+                format!("the block index reads as: {refused}"),
+                refused,
+            )
         })?;
 
         Ok(blocks)
     }
 
-    /// The file's first four bytes, or `None` if it is shorter than that. **Only ever read to
-    /// tell a killed writer from a foreign file**, so an ordinary open never pays for it.
-    fn head_magic(_path: &Path, file: &mut File) -> Option<[u8; 4]> {
+    /// Seek to the front and read the file's first four bytes, or `None` if it is shorter than
+    /// that. **Only ever read to tell a killed writer from a foreign file**, so an ordinary open
+    /// never pays for it.
+    ///
+    /// **A verb, because it moves the cursor.** Named `head_magic` it read as an accessor for a
+    /// value the type already held, and it is neither: it seeks, it reads, and it leaves the
+    /// cursor at byte 4.
+    fn read_the_head_magic(file: &mut File) -> Option<[u8; 4]> {
         file.seek(SeekFrom::Start(0)).ok()?;
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic).ok()?;
@@ -372,24 +492,9 @@ mod tests {
     use crate::ng::psp::footer::{FOOTER_MAGIC, encode_footer};
     use crate::ng::psp::header::DEFAULT_LOOK_BACK_WINDOW_LOG;
     use crate::ng::psp::writer::PspWriter;
-    use crate::ng::psp::writer::tests_support::{a_file, a_header, a_record, a_sample, bytes_of};
-    use std::io::Write;
-
-    /// Write a finished psp holding a sample, and hand back where it is.
-    fn a_finished_psp() -> (tempfile::TempDir, PathBuf) {
-        let (dir, path) = a_file();
-        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
-        for record in a_sample() {
-            writer.push(&record).expect("in order");
-        }
-        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
-        (dir, path)
-    }
-
-    fn rewrite(path: &Path, bytes: &[u8]) {
-        let mut file = File::create(path).expect("the file is writable");
-        file.write_all(bytes).expect("it writes");
-    }
+    use crate::ng::psp::writer::tests_support::{
+        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, rewrite,
+    };
 
     // -----------------------------------------------------------------
     // What opening gives
@@ -404,17 +509,20 @@ mod tests {
 
         assert_eq!(psp.header().sample, "SRR7279481");
         assert_eq!(psp.header().contigs.len(), 2);
-        assert_eq!(psp.blocks().len() as u64, psp.footer().n_blocks);
-        assert!(psp.blocks().len() >= 8, "two contigs of four grid cells");
+        assert_eq!(psp.block_index().len() as u64, psp.footer().n_blocks);
+        assert!(
+            psp.block_index().len() >= 8,
+            "two contigs of four grid cells"
+        );
         assert_eq!(
             psp.trailer().expect("the trailer reads"),
             b"a per-sample summary"
         );
 
         // The blocks come back in genomic order, which is what a seek searches on.
-        let mut sorted = psp.blocks().to_vec();
+        let mut sorted = psp.block_index().to_vec();
         sorted.sort();
-        assert_eq!(sorted, psp.blocks());
+        assert_eq!(sorted, psp.block_index());
     }
 
     /// **Opening decompresses no block**, shown rather than asserted: every byte of the blocks
@@ -433,10 +541,10 @@ mod tests {
         let (_dir, path) = a_finished_psp();
         let intact = PspReader::open(&path).expect("it opens");
         let (blocks_start, blocks_end) = (
-            intact.blocks()[0].block_offset,
+            intact.block_index()[0].block_offset,
             intact.footer().index_offset,
         );
-        let expected_blocks = intact.blocks().to_vec();
+        let expected_blocks = intact.block_index().to_vec();
         drop(intact);
 
         let mut bytes = bytes_of(&path);
@@ -447,7 +555,7 @@ mod tests {
         rewrite(&path, &bytes);
 
         let mut wrecked = PspReader::open(&path).expect("open must not read a block");
-        assert_eq!(wrecked.blocks(), expected_blocks);
+        assert_eq!(wrecked.block_index(), expected_blocks);
         assert_eq!(wrecked.header().sample, "SRR7279481");
         assert_eq!(
             wrecked.trailer().expect("still reads"),
@@ -722,6 +830,11 @@ mod tests {
     /// Read off the module's own imports: `reader.rs` names neither the block module nor the
     /// record module, so nothing that inflates a frame is callable from here. A future edit that
     /// reached for one has to add the import, and this test is what that trips.
+    ///
+    /// **It is why the record walk is a file of its own.** Milestone G put `records` and its
+    /// siblings on this type, and the walk they hand back needs a `BlockStream` — so building it
+    /// here would have added the very import this test forbids. `walk.rs` takes the seeked,
+    /// bounded file instead, and the property survives the feature that would have ended it.
     #[test]
     fn the_opener_cannot_reach_any_block_decoding_code() {
         let source = include_str!("reader.rs");
@@ -788,7 +901,7 @@ mod tests {
         let _ = writer.finish(b"nothing was found").expect("it finishes");
 
         let mut psp = PspReader::open(&path).expect("an empty psp is a psp");
-        assert!(psp.blocks().is_empty());
+        assert!(psp.block_index().is_empty());
         assert_eq!(psp.footer().n_blocks, 0);
         assert_eq!(psp.trailer().expect("it reads"), b"nothing was found");
     }

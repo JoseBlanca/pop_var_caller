@@ -472,6 +472,28 @@ pub(crate) mod tests_support {
         records
     }
 
+    /// A finished psp holding [`a_sample`], cut on a 1 kb grid, and where it is.
+    ///
+    /// **One fixture for the writer's tests, the reader's and the walk's.** Three copies of
+    /// "what a finished file looks like" drift, and the one thing worse than a fixture that
+    /// cannot fail is two that disagree about what a sample is.
+    pub(crate) fn a_finished_psp() -> (tempfile::TempDir, PathBuf) {
+        let (dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        for record in a_sample() {
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+        (dir, path)
+    }
+
+    /// Replace a file's contents wholesale — how a test lays down a psp it has damaged.
+    pub(crate) fn rewrite(path: &Path, bytes: &[u8]) {
+        use std::io::Write as _;
+        let mut file = File::create(path).expect("the file is writable");
+        file.write_all(bytes).expect("it writes");
+    }
+
     pub(crate) fn a_file() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("SRR7279481.psp");

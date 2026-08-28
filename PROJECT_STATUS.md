@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **F4 reviewed, and Milestone F is complete — the
+> - **Last completed task (2026-08-28):** **a coordinate becomes a block with one binary search,
+> and the walk that follows it stops where the blocks stop** (step G1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). `records`, `records_from_block` and `records_from` each hand back a lazy
+> `RecordIter` that borrows the reader and holds nothing that grows with the file. **The design
+> question the step was handed is settled by the documents, and in the same direction twice**:
+> spec §6.2 says the coordinate is matched against where records *start*, and arch §4.1 says
+> reading begins at the chosen block's first record — so `records_from` is block selection, not an
+> overlap query, and **a deletion that begins in the block before and covers the coordinate asked
+> for is not in the walk**. The container cannot offer more: an index entry carries a block's
+> first position and nothing else, §3.3 having removed the only field that could say how far a
+> block's records reach. A test pins both halves — that the file really holds a record starting at
+> 900 and covering 1,100, and that asking for 1,100 does not return it. **The walk is a new file
+> rather than more of `reader.rs`, and F4's own guard test is why**: it reads `reader.rs`'s imports
+> to say opening cannot reach any block-decoding code, and building the walk there would have added
+> exactly that import. **A psp does not end with its blocks**, so the walk gets the file bounded at
+> the index offset and the blocks' end arrives as an end of file; unbounded, it takes the index's
+> first four bytes for a block length. Three read-error classes rather than one, because *rebuild
+> the file*, *raise the ceiling* and *upgrade the reader* are different instructions — each tested
+> through a real file, including a genuine 400,000-base record refused by name. Twelve defects
+> injected, twelve caught.
+> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F4 reviewed, and Milestone F is complete — the
 > sections rule was tested on one side only, and relaxing it opened 62 of 384 single-bit footer
 > corruptions** (step F4 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`, status `fixes-applied`). **This is Checkpoint F: a psp can be written,
