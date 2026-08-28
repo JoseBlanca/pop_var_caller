@@ -16,12 +16,15 @@ touched.*
 
 ```
 src/ng/psp/
-├── mod.rs        – PspReader, PspWriter, the free functions, the error enums, re-exports
+├── mod.rs        – the free functions, the error enums, re-exports
 ├── header.rs     – Header, Manifest, FieldEncoding: build, encode, parse, validate
 ├── block.rs      – the psp block: cutting it, compressing it, streaming it back
 ├── record.rs     – one SampleLocusObservations to bytes and back; the RecordHead
 ├── index.rs      – BlockIndex, BlockIndexEntry
 ├── footer.rs     – the fixed tail: offsets, checksum, magic
+├── reader.rs     – PspReader: open a finished file, and find the block a coordinate is in
+├── walk.rs       – RecordIter: seek to a block and stream to where the blocks end
+├── writer.rs     – PspWriter: create, push, finish
 └── chain_ids.rs  – the live set and its changes (spec psp_chain_id_encoding.md)
 ```
 
@@ -35,6 +38,11 @@ have hidden.*
 **A folder, not a file**, because the container splits along seams a reader crosses one at a time:
 opening touches `footer` then `index` then `header` and no block; a walk touches `block` and
 `record` and neither of the others. Those are different concerns with different tests.
+
+**`walk.rs` is separate from `reader.rs` for that reason and no other** (2026-08-28, Milestone G1).
+It is the only file in the reading half that may name `block`, so opening cannot reach anything that
+inflates a frame — a property `reader.rs` holds by a test that reads its own imports. Building the
+record walk inside `reader.rs` would have added the import that test forbids.
 
 **It is not a pipeline step**, so there is no `LocusGenerator`-style trait and no bake-off shape. It
 is infrastructure beside `ref_seq.rs`, used by the locus generator (writing) and by the cohort merge
@@ -222,13 +230,30 @@ impl PspReader {
     pub fn header(&self) -> &Header;
     /// The writer's closing payload. Opaque here; the caller interprets it.
     pub fn trailer(&mut self) -> Result<&[u8], PspReadError>;
-    pub fn blocks(&self) -> &[BlockIndexEntry];
+    /// **`block_index`, not `blocks`** (2026-08-28): spec §3.3 calls this section the block
+    /// index, and `psp.blocks()` beside `psp.records()` reads as the blocks themselves.
+    pub fn block_index(&self) -> &[BlockIndexEntry];
 
     /// Every record, from the first block.
-    pub fn records(&mut self) -> RecordIter<'_>;
-    /// From the block holding `position`. **Reading starts at that block's first
-    /// record**, not at `position` — a reader cannot start mid-block.
-    pub fn records_from(&mut self, contig: ContigId, position: GenomePosition)
+    ///
+    /// **A `Result`, unlike the sketch this replaced** (2026-08-28): the manifest's record
+    /// layout is checked when the first walk is built, not at `open`, so that a file whose
+    /// record encoding this build cannot read still opens for its header, index and trailer.
+    pub fn records(&mut self) -> Result<RecordIter<'_>, PspReadError>;
+    /// From the block holding `at`. **Reading starts at a block's first record**, not at
+    /// `at` — a reader cannot start mid-block.
+    ///
+    /// **One `GenomePosition`, not a contig beside a position** (2026-08-28): that type is
+    /// the pair, and its ordering is the key the index is searched on.
+    ///
+    /// **⚠ It enters the block *before* the first block starting at or after `at`.** The index
+    /// says where blocks start and nothing about where their records end, and a block's last
+    /// record may begin on the base the next block begins on — so the block whose first
+    /// position equals `at` is not necessarily the first one holding a record at `at`.
+    pub fn records_from(&mut self, at: GenomePosition)
+        -> Result<RecordIter<'_>, PspReadError>;
+    /// The block-level entry point the above is built on, by ordinal into `block_index()`.
+    pub fn records_from_block(&mut self, block: usize)
         -> Result<RecordIter<'_>, PspReadError>;
 
     /// The cohort's first pass: `want` sees each record's head and says whether to

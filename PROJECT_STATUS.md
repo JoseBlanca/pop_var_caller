@@ -19,7 +19,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a coordinate becomes a block with one binary search,
+> - **Last completed task (2026-08-28):** **G1 reviewed — asking for a coordinate two blocks
+> begin on lost the records of the earlier one, silently** (step G1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine checklists across three agents, and **the Blocker was found twice
+> independently**. The index search read *the last block starting at or before the coordinate*,
+> which enters a run of blocks sharing one first position at its **end** — and `index.rs`
+> documents that run as a shape the index exists to accept, produced whenever a byte ceiling
+> closes a block. On a three-record file `records()` gives three records and `records_from` at
+> the shared position gave two, with no error. **Neither agent's proposed fix was taken**,
+> because both left a second hole: even with no run at all, a block's last record may begin on
+> the base the next block begins on, so a block starting strictly *below* the coordinate can
+> still hold a record at it. The rule that misses nothing is *the block before the first block
+> starting at or after the coordinate*, and it costs one extra block only when the coordinate
+> falls exactly on a block's first position. **A second finding was a message that told an
+> operator to raise a ceiling no reader had**: the error's own doc said it withheld that
+> instruction, and the cause underneath said it anyway — the knob now exists. **And one of my
+> own tests was the failure the review names**: `live_reads` tested against a fixture whose every
+> chain-id list is empty, where an accessor answering about the wrong record passes exactly as
+> the right one does. Eight Majors, ten Minors; eleven tests added, four of them the agents' own
+> bodies. `ng::psp` is 348 tests against 324 before the step.
+> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a coordinate becomes a block with one binary search,
 > and the walk that follows it stops where the blocks stop** (step G1 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). `records`, `records_from_block` and `records_from` each hand back a lazy

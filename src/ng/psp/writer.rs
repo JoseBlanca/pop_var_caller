@@ -487,6 +487,19 @@ pub(crate) mod tests_support {
         (dir, path)
     }
 
+    /// The footer of a psp read whole into memory.
+    ///
+    /// **The three-line preamble every test that damages a file writes**: slice the fixed tail,
+    /// widen it to an array, decode it. Here rather than in each of them, for the reason
+    /// [`a_finished_psp`] is.
+    pub(crate) fn footer_of(bytes: &[u8]) -> crate::ng::psp::footer::Footer {
+        let tail: [u8; crate::ng::psp::footer::FOOTER_BYTES] = bytes
+            [bytes.len() - crate::ng::psp::footer::FOOTER_BYTES..]
+            .try_into()
+            .expect("the file is at least a footer long");
+        crate::ng::psp::footer::decode_footer(&tail).expect("a finished file's footer reads")
+    }
+
     /// Replace a file's contents wholesale — how a test lays down a psp it has damaged.
     pub(crate) fn rewrite(path: &Path, bytes: &[u8]) {
         use std::io::Write as _;

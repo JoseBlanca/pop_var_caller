@@ -334,16 +334,22 @@ pub enum PspReadError {
     #[error("{}: {reason}", path.display())]
     Damaged {
         path: PathBuf,
+        /// Which section refused, in a sentence — *the footer does not decode*. The detail is
+        /// the cause's.
         reason: String,
-        /// The codec's own account underneath, when one refused — the footer's, the block
-        /// index's. `None` when the rule that broke is one this reader checks itself, having
-        /// the file's length, which no codec can (spec §6.2's three checks at `open`).
+        /// The codec's own account underneath, when one refused. `None` when the rule that
+        /// broke is one this reader checks itself, having the file's length, which no codec can
+        /// (spec §6.2's three checks at `open`).
         ///
         /// **Kept as a cause rather than flattened into `reason`**, so that a caller walking
         /// the chain reaches which field of which entry the index stopped at. Four different
         /// causes reached this variant as one string until Milestone G.
+        ///
+        /// **Typed rather than `Box<dyn Error>`**, so that a caller deciding whether a re-run
+        /// would help can tell the footer from the block index by matching rather than by
+        /// downcasting or by reading `reason`.
         #[source]
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+        source: Option<DamageFound>,
     },
 
     /// A block failed to decompress, or a record ran past the end of its block. The file
@@ -360,10 +366,13 @@ pub enum PspReadError {
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,
-        /// Which block, counted from the file's first — the ordinal into
-        /// [`PspReader::block_index`]. **It is the block the walk was inside**, so a fault in
-        /// the four bytes that introduce the *next* block names that next block, and every
-        /// fault inside a block names the block itself.
+        /// Which block, counted from the file's first. Every fault *inside* a block names the
+        /// block itself, and is an ordinal into [`PspReader::block_index`].
+        ///
+        /// **⚠ One case is one past the last entry the index has, and so is not an index into
+        /// it**: the four bytes that introduce a block are read before the block is counted, so
+        /// a fault in them names a block that never began. Look it up with
+        /// `block_index().get(block)`, never `block_index()[block]`.
         block: u64,
         #[source]
         source: BlockReadError,
@@ -375,16 +384,15 @@ pub enum PspReadError {
     /// **A class of its own because the fix is a knob, not a rebuild** (spec §7): a genuine
     /// record can be larger than any fixed budget — §8 refuses to fix a maximum record size in
     /// the format — while a corrupt block that never parses grows the buffer until the frame
-    /// runs out, and the two arrive at the same line. The refusal names the ceiling, which is
-    /// what spec §7 asks of it.
+    /// runs out, and the two arrive at the same line. The refusal names the ceiling and the
+    /// knob that raises it, which is what spec §7 asks of it.
     ///
-    /// **⚠ It does not yet say *raise the ceiling*, because a [`PspReader`]'s walk cannot.**
-    /// The ceiling is [`ROLLING_BUFFER_CEILING_BYTES`] and only a [`BlockStream`] built by hand
-    /// can be given another; putting the knob on the reader is a follow-up G1 records rather
-    /// than a message this error may make.
+    /// ⚠ **The message named the ceiling without naming a way to raise it** until the G1
+    /// review pointed out that the sentence underneath said *raise the ceiling to read it*
+    /// while no `PspReader` had one. [`PspReader::with_a_record_buffer_ceiling`] is that knob.
     #[error(
         "{}: a record in block {block} needs more than the {allowed_bytes} bytes this reader \
-         allows one record to hold",
+         allows one record to hold; raise it with PspReader::with_a_record_buffer_ceiling",
         path.display()
     )]
     RecordLargerThanTheReaderAllows {
@@ -402,25 +410,56 @@ pub enum PspReadError {
     /// **Not [`UnsupportedVersion`](Self::UnsupportedVersion)**, which is the whole file's
     /// format number and is answered before a block is touched. This one is a field encoding
     /// inside a record, and it is the same instruction about a smaller subject.
-    #[error("{}: this reader cannot read the records in this file", path.display())]
+    ///
+    /// **The instruction is in the message and not only in this doc**, because the everyday
+    /// caller prints `Display` and never walks the chain — which is where the field that
+    /// disagrees is named.
+    #[error(
+        "{}: this reader cannot read the records in this file — upgrade the reader",
+        path.display()
+    )]
     UnsupportedRecordEncoding {
         path: PathBuf,
         #[source]
         source: BlockReadError,
     },
 
+    /// A record-buffer ceiling at or under the buffer it is a ceiling on, which would turn away
+    /// records the buffer already holds without growing at all.
+    ///
+    /// **The second of the two variants here that report the caller's mistake rather than the
+    /// file's** — see [`NoSuchBlock`](Self::NoSuchBlock) — and it is refused at
+    /// [`PspReader::with_a_record_buffer_ceiling`] rather than at the record that would have
+    /// tripped it, so a setting that could never work fails where it was made.
+    #[error(
+        "{}: a record-buffer ceiling of {ceiling} bytes, which is not above the \
+         {buffer_bytes}-byte buffer it is a ceiling on",
+        path.display()
+    )]
+    RecordBufferCeilingTooSmall {
+        path: PathBuf,
+        ceiling: usize,
+        buffer_bytes: usize,
+    },
+
     /// A block was asked for by an ordinal the file does not have.
     ///
-    /// **The one variant here that reports the caller's mistake rather than the file's**, and
+    /// **One of the two variants here that report the caller's mistake rather than the file's**
+    /// — the other is [`RecordBufferCeilingTooSmall`](Self::RecordBufferCeilingTooSmall) — and
     /// it is an error rather than a panic because the caller is a cohort holding thousands of
     /// these open: an ordinal computed wrongly must fail one sample, not abort the run.
     /// [`PspReader::records_from`] cannot raise it — it derives the ordinal from the index —
     /// so it reaches only a caller that indexed [`PspReader::block_index`] itself.
-    #[error("{} has {blocks} blocks; block {asked_for} was asked for", path.display())]
+    #[error(
+        "{} has {blocks_in_the_file} blocks; block {ordinal_asked_for} was asked for",
+        path.display()
+    )]
     NoSuchBlock {
         path: PathBuf,
-        asked_for: u64,
-        blocks: u64,
+        /// **An ordinal, not a coordinate**: the index into [`PspReader::block_index`].
+        ordinal_asked_for: u64,
+        /// A count, not the blocks themselves.
+        blocks_in_the_file: u64,
     },
 
     /// Reading the file's bytes failed.
@@ -440,6 +479,26 @@ pub enum PspReadError {
     },
 }
 
+/// Which of a psp's own decoders refused, under a [`PspReadError::Damaged`].
+///
+/// **Two inhabitants, and they are the two sections a reader decodes before it touches a
+/// block**: the fixed tail and the block index. A caller deciding whether re-running the
+/// pileup would help can tell them apart by matching on this rather than by downcasting a
+/// `Box<dyn Error>` or by reading a sentence.
+///
+/// **Transparent**, so a chain reads *the footer does not decode* from the parent's `reason`
+/// and then the decoder's own account — rather than the same sentence twice.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum DamageFound {
+    /// The fixed 48-byte tail did not decode.
+    #[error(transparent)]
+    Footer(#[from] FooterDecodeError),
+    /// The block index did not decode, though its bytes matched the footer's checksum.
+    #[error(transparent)]
+    BlockIndex(#[from] IndexDecodeError),
+}
+
 impl PspReadError {
     /// A rule this reader checks itself broke, and there is no error underneath it.
     ///
@@ -455,17 +514,16 @@ impl PspReadError {
         }
     }
 
-    /// A codec underneath refused, and **its own account is kept as the cause** rather than
+    /// A decoder underneath refused, and **its own account is kept as the cause** rather than
     /// pressed into `reason`.
-    pub(crate) fn damaged_by(
-        path: &Path,
-        reason: String,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
+    ///
+    /// `reason` names the section; the cause says what was wrong with it. **Neither repeats the
+    /// other**: a chain that prints the same sentence twice reads as a fault in the printer.
+    pub(crate) fn damaged_by(path: &Path, reason: &str, source: DamageFound) -> Self {
         Self::Damaged {
             path: path.to_path_buf(),
-            reason,
-            source: Some(Box::new(source)),
+            reason: reason.to_string(),
+            source: Some(source),
         }
     }
 }

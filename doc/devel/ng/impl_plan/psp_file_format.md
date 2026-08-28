@@ -256,8 +256,16 @@ trailer, footer, then flushes, surfaces the buffered writer's errors, and syncs.
 
 ## Milestone G — the rest of the surface
 
-☐ **G1 — `records_from`**, turning a coordinate into a block with one index lookup.
+✅ **G1 — `records_from`**, turning a coordinate into a block with one index lookup.
 ***Depends:*** F4. ***Source:*** [spec §6.2](../spec/psp_file_format.md).
+> **Reviewed** — nine checklists across three agents:
+> [the review](../../reports/reviews/ng_psp_g1_2026-08-28.md),
+> [the fixes](../../reports/reviews/fixes_applied_ng_psp_g1_2026-08-28.md). **The design question
+> the step was handed is settled by the documents**: spec §6.2 matches the coordinate against
+> where records *start* and arch §4.1 starts reading at a block's first record, so `records_from`
+> is block selection and not an overlap query. **The Blocker was the index search**: two blocks
+> may share a first position, and *the last block starting at or before the coordinate* entered
+> that run at its end and lost the earlier block's records with no error.
 
 ☐ **G2 — `records_where`**, the head-driven skip as a public iterator.
 ***Depends:*** F4, C2. ***Source:*** [spec §6.2](../spec/psp_file_format.md).

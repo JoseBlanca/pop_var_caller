@@ -63,11 +63,14 @@ pub struct PspReader {
     file: File,
     header: Header,
     footer: Footer,
-    blocks: Vec<BlockIndexEntry>,
+    block_index: Vec<BlockIndexEntry>,
     /// The ceiling this reader was opened under. **Kept because an open reader should be able to
     /// say what it holds**: at several thousand open samples the budget is the number that
     /// multiplies, and a caller tuning it needs to read back what it actually got.
     window_budget_bytes: u64,
+    /// How far a walk's rolling buffer may grow for **one record**, which is a different
+    /// ceiling from the window above and is spent only while a walk is running.
+    record_buffer_ceiling_bytes: usize,
 }
 
 impl PspReader {
@@ -149,9 +152,34 @@ impl PspReader {
             file,
             header,
             footer,
-            blocks,
+            block_index: blocks,
             window_budget_bytes,
+            record_buffer_ceiling_bytes: walk::DEFAULT_RECORD_BUFFER_CEILING_BYTES,
         })
+    }
+
+    /// The same reader, with a different ceiling on how much of a walk's rolling buffer **one
+    /// record** may have.
+    ///
+    /// **This is the knob [`PspReadError::RecordLargerThanTheReaderAllows`] names**, and spec
+    /// §7 is why it exists: a genuine record can be larger than any fixed budget — §8 refuses
+    /// to fix a maximum record size in the format — so that refusal's instruction is *raise the
+    /// ceiling*, and an instruction with nothing to turn is not an instruction. It is the
+    /// record-shaped sibling of [`open_with_a_look_back_window_budget`](Self::open_with_a_look_back_window_budget).
+    ///
+    /// A ceiling at or under the rolling buffer itself is refused **here, where the setting is
+    /// made**, rather than at the record that would have tripped over it.
+    /// **The rule is the walk's, not this file's**: the buffer the ceiling is a ceiling on
+    /// belongs to the walk, and `reader.rs` may not name the module that owns it.
+    pub fn with_a_record_buffer_ceiling(mut self, ceiling: usize) -> Result<Self, PspReadError> {
+        walk::check_a_record_buffer_ceiling(&self.path, ceiling)?;
+        self.record_buffer_ceiling_bytes = ceiling;
+        Ok(self)
+    }
+
+    /// How much of a walk's rolling buffer one record may have, under this reader.
+    pub fn record_buffer_ceiling_bytes(&self) -> usize {
+        self.record_buffer_ceiling_bytes
     }
 
     /// The file's own account of how it was written, the manifest included.
@@ -165,7 +193,7 @@ impl PspReader {
     /// section the *block index* (spec §3.3), and a caller reading `psp.blocks()` beside
     /// `psp.records()` reasonably expects the blocks themselves.
     pub fn block_index(&self) -> &[BlockIndexEntry] {
-        &self.blocks
+        &self.block_index
     }
 
     /// Where each section of the file is.
@@ -209,7 +237,7 @@ impl PspReader {
         // refused: `finish` writes such a file and `open` accepts it. Starting at the index puts
         // the bound below at zero bytes, which ends the walk before it reads anything.
         let at = self
-            .blocks
+            .block_index
             .first()
             .map_or(self.footer.index_offset, |first| first.block_offset);
         self.walk_from(0, at)
@@ -221,11 +249,11 @@ impl PspReader {
     /// **The block-level entry point [`records_from`](Self::records_from) is built on**
     /// (spec §6.2), and the one a caller that has already searched the index itself wants.
     pub fn records_from_block(&mut self, block: usize) -> Result<RecordIter<'_>, PspReadError> {
-        let Some(entry) = self.blocks.get(block).copied() else {
+        let Some(entry) = self.block_index.get(block).copied() else {
             return Err(PspReadError::NoSuchBlock {
                 path: self.path.clone(),
-                asked_for: block as u64,
-                blocks: self.blocks.len() as u64,
+                ordinal_asked_for: block as u64,
+                blocks_in_the_file: self.block_index.len() as u64,
             });
         };
         self.walk_from(block as u64, entry.block_offset)
@@ -237,11 +265,20 @@ impl PspReader {
     /// turns one into a block with a single binary search over the entries `open` already
     /// holds; no block is searched, because the entries carry only where each block *starts*.
     ///
-    /// **⚠ The walk starts at that block's first record, not at `at`.** A reader cannot start
+    /// **⚠ The walk starts at a block's first record, not at `at`.** A reader cannot start
     /// mid-block (spec §1.2), so the records that come back begin at or before the coordinate
     /// asked for — usually well before it, since a block spans 100 kb by default. A caller that
     /// wants only records from `at` onwards drops the ones in front itself, which costs a head
     /// each and no body.
+    ///
+    /// **⚠ Which block, and it is one earlier than it looks.** The index says where each block
+    /// *starts* and nothing about where its records end, and a block's last record may begin on
+    /// the very base the next block begins on — a byte ceiling closes a block after a record and
+    /// the record after it may start on the same base (`index.rs`). So the block whose first
+    /// position equals `at` is **not** necessarily the first one holding a record at `at`, and
+    /// the walk enters the block *before* the first block that starts at or after `at`. The cost
+    /// is one extra block, and only when `at` falls exactly on a block's first position; the
+    /// alternative loses records silently.
     ///
     /// **⚠ And it selects on where records *start*, not on what they span.** A record that
     /// begins in the block before the one chosen and reaches past `at` — a deletion is the case
@@ -252,18 +289,29 @@ impl PspReader {
     /// deliberately. A caller that needs the records covering a coordinate starts a block
     /// earlier and looks at their spans.
     pub fn records_from(&mut self, at: GenomePosition) -> Result<RecordIter<'_>, PspReadError> {
-        if self.blocks.is_empty() {
+        if self.block_index.is_empty() {
             return self.records();
         }
         // The entries are non-decreasing in `first_position` (`index.rs` refuses an index that
-        // is not, at open), so the block holding `at` is the last one starting at or before it.
-        let after = self
-            .blocks
-            .partition_point(|entry| entry.first_position <= at);
+        // is not, at open), so this is the first block that starts at or after `at`.
+        let at_or_after = self
+            .block_index
+            .partition_point(|entry| entry.first_position < at);
+        // **And the walk enters the one before it**, because that block's records run up to and
+        // including the next block's first position — so it is the earliest block that can hold
+        // a record starting at `at`, and the index cannot say whether it does.
+        //
+        // ⚠ This was `<=` and then one back, which reads as *the last block starting at or
+        // before `at`* and is wrong twice over: on a run of blocks sharing one first position it
+        // enters the run at its **end**, and even without a run it skips a previous block whose
+        // last record starts exactly at `at`. Both lose records with no error — the shape spec
+        // §3.3 goal 3 exists against — and the fixture that found it is
+        // `a_walk_from_a_position_two_blocks_share_starts_at_the_first_of_them`.
+        //
         // **A coordinate in front of every block starts at the first**, rather than being
         // refused: it is what a caller asking for a whole contig's records from position 1
         // writes, and the first block of that contig may well start further in.
-        self.records_from_block(after.saturating_sub(1))
+        self.records_from_block(at_or_after.saturating_sub(1))
     }
 
     /// The walk itself: hand the file, bounded at the end of its blocks, to `walk.rs`.
@@ -282,16 +330,20 @@ impl PspReader {
             file,
             header,
             footer,
-            blocks: _,
+            block_index: _,
             window_budget_bytes: _,
+            record_buffer_ceiling_bytes,
         } = self;
         walk::walk_from(
             path,
             file,
             &header.manifest,
-            footer.index_offset,
-            block_offset,
-            first_block,
+            walk::WalkStart {
+                blocks_end: footer.index_offset,
+                block_offset,
+                first_block,
+                record_buffer_ceiling_bytes: *record_buffer_ceiling_bytes,
+            },
         )
     }
 
@@ -336,13 +388,10 @@ impl PspReader {
                     },
                 }
             }
-            // **The decoder's own account is kept twice, and on purpose**: in `reason`, because
-            // most callers print only the error's `Display` and the chain is invisible there,
-            // and as the cause, because a caller that does walk it reaches the typed
-            // [`FooterDecodeError`] rather than a sentence it would have to parse.
-            damaged => {
-                PspReadError::damaged_by(path, format!("the footer reads as: {damaged}"), damaged)
-            }
+            // **`reason` names the section and the cause says what was wrong with it.** An
+            // earlier version formatted the decoder's own sentence into `reason` as well, so a
+            // caller printing the chain saw it twice.
+            damaged => PspReadError::damaged_by(path, "the footer does not decode", damaged.into()),
         })?;
 
         // **What the footer could not check about itself, because it does not know the length.**
@@ -445,11 +494,7 @@ impl PspReader {
         }
 
         let blocks = index::decode_index(&bytes, footer.n_blocks).map_err(|refused| {
-            PspReadError::damaged_by(
-                path,
-                format!("the block index reads as: {refused}"),
-                refused,
-            )
+            PspReadError::damaged_by(path, "the block index does not decode", refused.into())
         })?;
 
         Ok(blocks)
@@ -828,13 +873,20 @@ mod tests {
     /// rubbish-bytes test, which shows only that opening does not *decode* a block.
     ///
     /// Read off the module's own imports: `reader.rs` names neither the block module nor the
-    /// record module, so nothing that inflates a frame is callable from here. A future edit that
-    /// reached for one has to add the import, and this test is what that trips.
+    /// record module, so anything that inflates a frame has to be reached through `walk`, which
+    /// is one named seam a reviewer can hold in view — rather than from anywhere in this file.
     ///
     /// **It is why the record walk is a file of its own.** Milestone G put `records` and its
     /// siblings on this type, and the walk they hand back needs a `BlockStream` — so building it
-    /// here would have added the very import this test forbids. `walk.rs` takes the seeked,
-    /// bounded file instead, and the property survives the feature that would have ended it.
+    /// here would have added the very import this test forbids.
+    ///
+    /// ⚠ **What survives G1 is the seam, not "no block code is reachable from here"**, which is
+    /// what an earlier version of this comment claimed: `walk::walk_from` builds a `BlockStream`,
+    /// and this file calls it. The weaker statement is the true one and is the one worth having.
+    ///
+    /// ⚠ **The braced import forms are on the list too.** `use super::{block::BlockStream, …}`
+    /// contains neither `super::block` nor `psp::block`, compiles, and passed this test verbatim
+    /// until `block::` and `record::` were added — a form `rustfmt` produces on its own.
     #[test]
     fn the_opener_cannot_reach_any_block_decoding_code() {
         let source = include_str!("reader.rs");
@@ -842,7 +894,15 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("the file has a non-test half");
-        for forbidden in ["psp::block", "psp::record", "super::block", "super::record"] {
+        for forbidden in [
+            "psp::block",
+            "psp::record",
+            "super::block",
+            "super::record",
+            // The braced forms, which none of the four above contain.
+            "block::",
+            "record::",
+        ] {
             assert!(
                 !before_tests.contains(forbidden),
                 "opening must not be able to reach {forbidden}: a block is decompressed only \

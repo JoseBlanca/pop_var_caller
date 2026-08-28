@@ -18,15 +18,56 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::PspReadError;
-use super::block::{BlockReadError, BlockStream, StreamedRecord};
+use super::block::{BlockReadError, BlockStream, ROLLING_BYTES, StreamedRecord};
 use super::chain_ids::LiveSet;
 use super::header::Manifest;
 
-/// Seek to a block and hand back a walk that ends where the blocks end.
+/// The default ceiling on how much of a walk's rolling buffer **one record** may have.
 ///
-/// `blocks_end` is the file's index offset: the first byte that is no longer a block.
-/// `first_block` is the ordinal of the block at `block_offset`, carried only so that a failure
-/// can name the block it happened in.
+/// **Named here rather than taken from `block.rs` by the reader**, because `reader.rs` may not
+/// name the module that owns the buffer — see this file's own header.
+pub(super) const DEFAULT_RECORD_BUFFER_CEILING_BYTES: usize =
+    super::block::ROLLING_BUFFER_CEILING_BYTES;
+
+/// Whether a walk could honour this ceiling on one record's share of its rolling buffer.
+///
+/// **The rule lives beside the buffer it is about.** A ceiling at or under the buffer itself
+/// would turn away records the buffer already holds without growing at all, so it is refused —
+/// and refused where the setting is made rather than at the record that would have tripped it.
+pub(super) fn check_a_record_buffer_ceiling(
+    path: &Path,
+    ceiling: usize,
+) -> Result<(), PspReadError> {
+    if ceiling <= ROLLING_BYTES {
+        return Err(PspReadError::RecordBufferCeilingTooSmall {
+            path: path.to_path_buf(),
+            ceiling,
+            buffer_bytes: ROLLING_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// Where a walk begins, where it ends, and which block it begins at.
+///
+/// **Named fields rather than three `u64` parameters.** `blocks_end` and `block_offset` are both
+/// byte offsets into the same file, and swapping them bounds the walk at zero bytes — a walk
+/// that yields nothing, which no error and no failed seek would report. A psp read as covering
+/// nothing is the failure spec §3.3 goal 3 is written against, and an argument order is no way
+/// to arrive at it.
+pub(super) struct WalkStart {
+    /// The file's index offset: the first byte that is no longer a block.
+    pub blocks_end: u64,
+    /// Where the block to start at begins.
+    pub block_offset: u64,
+    /// The ordinal of the block at `block_offset`, carried only so that a failure can name the
+    /// block it happened in.
+    pub first_block: u64,
+    /// How much of the rolling buffer one record may have.
+    pub record_buffer_ceiling_bytes: usize,
+}
+
+/// Seek to a block and hand back a walk that ends where the blocks end.
 ///
 /// **The bound is what stops the reader walking into the index.** A [`BlockStream`] reads
 /// blocks until its source runs out, and a psp does not end with its blocks. Handed the whole
@@ -37,10 +78,14 @@ pub(super) fn walk_from<'a>(
     path: &'a Path,
     file: &'a mut File,
     manifest: &Manifest,
-    blocks_end: u64,
-    block_offset: u64,
-    first_block: u64,
+    start: WalkStart,
 ) -> Result<RecordIter<'a>, PspReadError> {
+    let WalkStart {
+        blocks_end,
+        block_offset,
+        first_block,
+        record_buffer_ceiling_bytes,
+    } = start;
     // `open` proved every block offset lies in the blocks, and the empty-file case is given the
     // index's own offset, so this never saturates; it is written this way because an underflow
     // here would be a sixteen-exabyte read rather than an error.
@@ -52,6 +97,8 @@ pub(super) fn walk_from<'a>(
             source,
         })?;
     let stream = BlockStream::new(file.take(blocks_bytes), manifest).map_err(|refused| {
+        // **The two variants `BlockStream::new` can return, named rather than caught by `_`.**
+        // Everything else `BlockReadError` holds comes out of a walk, not out of building one.
         match refused {
             // **Upgrade the reader, not rebuild the file**: the manifest declares a field
             // encoding this build does not know.
@@ -61,18 +108,33 @@ pub(super) fn walk_from<'a>(
                     source: refused,
                 }
             }
-            // The only other way `new` fails is a look-back window outside the format's range,
-            // which `open` has already refused by parsing the header — so this arm is
-            // unreachable through a `PspReader`. It is written out rather than left to
+            // A look-back window outside the format's range, which `open` has already refused by
+            // parsing the header (`header.rs` bounds it against `MIN..=MAX` at parse) — so this
+            // arm is unreachable through a `PspReader`. It is written out rather than left to
             // `unreachable!` because the day the header stops checking is not the day to learn
             // that a reader panics on a bad manifest.
-            other => PspReadError::damaged_by(
+            BlockReadError::WindowLogOutOfRange {
+                look_back_window_log,
+            } => PspReadError::damaged(
+                path,
+                format!(
+                    "the file declares a look-back window of 2^{look_back_window_log}, which \
+                     is outside the format's range"
+                ),
+            ),
+            other => PspReadError::damaged(
                 path,
                 format!("the file's manifest cannot drive a reader: {other}"),
-                other,
             ),
         }
     })?;
+    let stream = stream
+        .with_a_buffer_ceiling(record_buffer_ceiling_bytes)
+        .map_err(|_| PspReadError::RecordBufferCeilingTooSmall {
+            path: path.to_path_buf(),
+            ceiling: record_buffer_ceiling_bytes,
+            buffer_bytes: ROLLING_BYTES,
+        })?;
     Ok(RecordIter {
         path,
         stream,
@@ -118,59 +180,111 @@ impl RecordIter<'_> {
     /// How many blocks this walk has opened, the one it is inside included.
     ///
     /// **Not how many it has finished**, so a walk that has handed back one record of the first
-    /// block already answers 1. Added to the ordinal the walk started at, it names the block a
-    /// record came from — which nothing else can, since two blocks may share a first position
-    /// (`index.rs`).
-    pub fn blocks_read(&self) -> u64 {
+    /// block already answers 1. The same name as [`BlockStream::blocks_begun`], which is what it
+    /// forwards: one number, one name.
+    pub fn blocks_begun(&self) -> u64 {
         self.stream.blocks_begun()
     }
 
-    /// Put a walk's refusal in the class whose instruction fits it, and name the block.
+    /// The ordinal of the block the record last handed back came from, into
+    /// [`super::PspReader::block_index`].
     ///
-    /// **Three instructions, not one** (spec §7): the file is damaged, the reader is too old,
-    /// or a limit needs raising. Folding them together is what [`PspReadError::CorruptBlock`]'s
-    /// own doc warns against, because *rebuild the file* is wrong advice for two of the three.
-    fn refuse(&self, refused: BlockReadError) -> PspReadError {
-        let path = self.path.to_path_buf();
-        let begun = self.stream.blocks_begun();
-        let block = match refused {
-            // The four bytes that introduce a block are read before the block is counted, so a
-            // fault in them is about a block that never began — one past the last that did.
-            BlockReadError::FileEndsInsideABlockLength { .. } => self.first_block + begun,
-            _ => self.first_block + begun.saturating_sub(1),
-        };
-        match refused {
-            BlockReadError::RecordLargerThanTheReaderAllows { allowed_bytes, .. } => {
-                PspReadError::RecordLargerThanTheReaderAllows {
-                    path,
-                    block,
-                    allowed_bytes,
-                    source: refused,
-                }
-            }
-            BlockReadError::UnsupportedRecord { .. }
-            | BlockReadError::UnsupportedRecordLayout { .. } => {
-                PspReadError::UnsupportedRecordEncoding {
-                    path,
-                    source: refused,
-                }
-            }
-            BlockReadError::Io {
-                while_doing,
-                source,
-            } => PspReadError::Io {
+    /// **Nothing else names it.** Two blocks may share a first position (`index.rs`), so the
+    /// coordinate a record carries does not identify the block it was in; and a walk started by
+    /// [`super::PspReader::records_from`] never learns which block the search chose. This is
+    /// that ordinal, and it is why the walk carries the one it began at.
+    ///
+    /// Before the first record it answers the ordinal the walk began at.
+    pub fn current_block(&self) -> u64 {
+        self.first_block + self.stream.blocks_begun().saturating_sub(1)
+    }
+}
+
+/// Put a walk's refusal in the class whose instruction fits it, and name the block.
+///
+/// **Three instructions, not one** (spec §7): the file is damaged, the reader is too old, or a
+/// limit needs raising. Folding them together is what [`PspReadError::CorruptBlock`]'s own doc
+/// warns against, because *rebuild the file* is wrong advice for two of the three.
+///
+/// **Exhaustive, with no `_` arm, and that is the point.** A variant added to [`BlockReadError`]
+/// tomorrow would otherwise become *the file is corrupt* silently, with no compile error at the
+/// place that has to choose. It is a free function rather than a method so that G2's selective
+/// walk can share it whatever shape it takes.
+///
+/// `first_block` is the ordinal the walk began at and `blocks_begun` how many it has opened
+/// since, the one it is inside included.
+fn refuse(
+    path: &Path,
+    first_block: u64,
+    blocks_begun: u64,
+    refused: BlockReadError,
+) -> PspReadError {
+    let path = path.to_path_buf();
+    // The block the walk was inside: one per block begun, less the one not yet finished.
+    let inside = first_block + blocks_begun.saturating_sub(1);
+    // The four bytes that introduce a block are read before the block is counted, so a fault in
+    // them is about a block that never began — one past the last that did, and therefore one
+    // past the last entry the index has.
+    let never_began = first_block + blocks_begun;
+    match refused {
+        BlockReadError::RecordLargerThanTheReaderAllows { allowed_bytes, .. } => {
+            PspReadError::RecordLargerThanTheReaderAllows {
                 path,
-                while_doing,
-                source,
-            },
-            // Everything else is the file disagreeing with itself: a frame that will not
-            // inflate, a record running past its block, a block holding more than it declared.
-            damage => PspReadError::CorruptBlock {
-                path,
-                block,
-                source: damage,
-            },
+                block: inside,
+                allowed_bytes,
+                source: refused,
+            }
         }
+        BlockReadError::UnsupportedRecord { .. }
+        | BlockReadError::UnsupportedRecordLayout { .. } => {
+            PspReadError::UnsupportedRecordEncoding {
+                path,
+                source: refused,
+            }
+        }
+        // A ceiling under the buffer is the caller's mistake, not the file's, and it has the
+        // same instruction as `NoSuchBlock`. Unreachable from a `PspReader`, which refuses such
+        // a ceiling where it is set — but *rebuild the file* would be the wrong answer here.
+        BlockReadError::BufferCeilingUnderTheBuffer {
+            ceiling,
+            buffer_bytes,
+        } => PspReadError::RecordBufferCeilingTooSmall {
+            path,
+            ceiling,
+            buffer_bytes,
+        },
+        BlockReadError::Io {
+            while_doing,
+            source,
+        } => PspReadError::Io {
+            path,
+            while_doing,
+            source,
+        },
+        // The file ended inside the length in front of a block, so the block it names is the one
+        // that never began.
+        BlockReadError::FileEndsInsideABlockLength { .. } => PspReadError::CorruptBlock {
+            path,
+            block: never_began,
+            source: refused,
+        },
+        // Everything else is the file disagreeing with itself *inside* a block: a frame that
+        // will not inflate, a record running past its block, a block holding more than it
+        // declared.
+        BlockReadError::WindowLogOutOfRange { .. }
+        | BlockReadError::DamagedRecord { .. }
+        | BlockReadError::RecordRunsPastItsBlock { .. }
+        | BlockReadError::BlockHeadRunsPastItsBlock { .. }
+        | BlockReadError::DamagedBlockHead { .. }
+        | BlockReadError::BlockHoldsMoreThanItDeclared { .. }
+        | BlockReadError::BlockDeclaresMoreBytesThanItsFrame { .. }
+        | BlockReadError::BlockFrameDidNotEndWithItsRecords
+        | BlockReadError::FileEndsInsideABlock { .. }
+        | BlockReadError::Zstd { .. } => PspReadError::CorruptBlock {
+            path,
+            block: inside,
+            source: refused,
+        },
     }
 }
 
@@ -182,7 +296,12 @@ impl Iterator for RecordIter<'_> {
             Some(Ok(record)) => Some(Ok(record)),
             // **Classified after the stream has been asked**, so the block count names the block
             // the failure happened in rather than the one before it.
-            Some(Err(refused)) => Some(Err(self.refuse(refused))),
+            Some(Err(failed)) => Some(Err(refuse(
+                self.path,
+                self.first_block,
+                self.stream.blocks_begun(),
+                failed,
+            ))),
             None => None,
         }
     }
@@ -191,13 +310,15 @@ impl Iterator for RecordIter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::psp::block::{COMPRESSED_BLOCK_LENGTH_BYTES, ROLLING_BUFFER_CEILING_BYTES};
-    use crate::ng::psp::footer::{FOOTER_BYTES, decode_footer, encode_footer};
+    use crate::ng::psp::block::{
+        COMPRESSED_BLOCK_LENGTH_BYTES, ROLLING_BUFFER_CEILING_BYTES, ROLLING_BYTES,
+    };
+    use crate::ng::psp::footer::{FOOTER_BYTES, encode_footer};
     use crate::ng::psp::writer::PspWriter;
     use crate::ng::psp::writer::tests_support::{
-        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, rewrite,
+        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, footer_of, rewrite,
     };
-    use crate::ng::psp::{PspReadError, PspReader};
+    use crate::ng::psp::{DamageFound, PspReadError, PspReader};
     use crate::ng::types::{ContigId, GenomePosition, Position};
     // -----------------------------------------------------------------
 
@@ -256,36 +377,175 @@ mod tests {
         }
         assert_eq!(records, 40);
         assert_eq!(
-            walk.blocks_read(),
+            walk.blocks_begun(),
             blocks,
             "the walk opened every block the index names, and nothing else"
         );
     }
 
-    /// **`records_from` on a block's own first position starts that block.** Checked for every
-    /// block in the file, not for one.
+    /// **`records_from` on a block's own first position enters the block *before* it**, and
+    /// holds every record of the block asked about.
+    ///
+    /// The block before it is entered because the index says where blocks start and nothing
+    /// about where their records end: that block's last record may begin on the very base this
+    /// one begins on (`index.rs`), and no entry can say whether it does. Checked for every block
+    /// in the file, not for one.
     #[test]
-    fn records_from_a_blocks_first_position_starts_that_block() {
+    fn records_from_a_blocks_first_position_enters_the_block_before_it() {
         let (_dir, path) = a_finished_psp();
         let mut psp = PspReader::open(&path).expect("a finished psp opens");
         let entries = psp.block_index().to_vec();
-        assert!(entries.len() >= 8);
+        assert_eq!(entries.len(), 8);
 
-        for entry in &entries {
-            let first = psp
-                .records_from(entry.first_position)
-                .expect("the walk starts")
+        for (ordinal, entry) in entries.iter().enumerate() {
+            let expected = ordinal.saturating_sub(1);
+            let mut walk = psp.records_from(entry.first_position).expect("it starts");
+            let first = walk
                 .next()
                 .expect("a block holds at least one record")
                 .expect("a finished psp walks");
+            assert_eq!(
+                walk.current_block(),
+                expected as u64,
+                "the walk from block {ordinal}'s first position began in block {}",
+                walk.current_block()
+            );
             let region = first.record.expect("the body was built").region;
             assert_eq!(
                 (region.contig, region.start),
-                (entry.first_position.contig, entry.first_position.position),
-                "the walk from {:?} began at {region:?}",
-                entry.first_position
+                (
+                    entries[expected].first_position.contig,
+                    entries[expected].first_position.position
+                ),
+                "and at that block's first record"
             );
         }
+    }
+
+    /// **Two blocks may share a first position, and a walk from it must enter the first of
+    /// them.** A byte ceiling closes a block after a record, and the record after it may begin
+    /// on the same base (`index.rs` §"Two blocks may share a first position"); asking for that
+    /// base must not skip the earlier block.
+    ///
+    /// ⚠ This is the fixture that found the G1 review's Blocker. The search was *the last block
+    /// starting at or before `at`*, which enters a run of equal positions at its **end**: the
+    /// walk came back with two records where the file holds three, with no error.
+    #[test]
+    fn a_walk_from_a_position_two_blocks_share_starts_at_the_first_of_them() {
+        let (_dir, path) = a_file();
+        let mut header = a_header(1_000_000);
+        // One block a record, which is what puts two entries on one base.
+        header.manifest.block_byte_ceiling = Some(1);
+        let mut writer = PspWriter::create(&path, header).expect("a header");
+        for record in [
+            a_record(0, 500, 1),
+            a_record(0, 500, 10),
+            a_record(0, 700, 1),
+        ] {
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let entries = psp.block_index().to_vec();
+        assert_eq!(entries.len(), 3, "one block a record");
+        assert_eq!(
+            entries[0].first_position, entries[1].first_position,
+            "the fixture must put two blocks on the same base"
+        );
+
+        let asked = GenomePosition {
+            contig: ContigId(0),
+            position: Position(500),
+        };
+        let starts: Vec<_> = psp
+            .records_from(asked)
+            .expect("the walk starts")
+            .map(|found| {
+                found
+                    .expect("a finished psp walks")
+                    .record
+                    .expect("a body")
+                    .region
+                    .start
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![Position(500), Position(500), Position(700)],
+            "both records at 500 are in a walk from 500"
+        );
+    }
+
+    /// **A coordinate past every block gives the last block's records, not an empty walk.** It
+    /// follows from the contract — the walk starts at a block's first record, not at the
+    /// coordinate — and a caller scanning forward from beyond a sample's coverage gets records
+    /// in front of it rather than nothing.
+    #[test]
+    fn a_coordinate_past_every_block_gives_the_last_blocks_records() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let entries = psp.block_index().to_vec();
+        let last = entries.last().expect("the fixture has blocks");
+
+        let beyond = GenomePosition {
+            contig: last.first_position.contig,
+            position: Position(last.first_position.position.get() + 1_000_000),
+        };
+        let mut walk = psp.records_from(beyond).expect("the walk starts");
+        let first = walk
+            .next()
+            .expect("the last block's records")
+            .expect("a finished psp walks");
+        assert_eq!(
+            walk.current_block(),
+            entries.len() as u64 - 1,
+            "the walk began in the last block"
+        );
+        assert_eq!(
+            first.record.expect("a body").region.start,
+            last.first_position.position
+        );
+        assert_eq!(
+            walk.count() + 1,
+            5,
+            "five records in the fixture's last block"
+        );
+    }
+
+    /// **`live_reads` answers about the record just handed back**, and the answer moves as reads
+    /// arrive and leave. It is what the residual observation's chain ids are derived from (spec
+    /// psp_chain_id_encoding §5).
+    ///
+    /// ⚠ **This needs a fixture of its own, and the first version of it did not have one.**
+    /// Written against `a_finished_psp`, whose every observation carries an empty `chain_ids`,
+    /// the live set is empty at all 40 records — so an accessor answering about the wrong
+    /// record, or about the block's opening set, passes exactly as the right one does. That is
+    /// the second of Milestone F's four shapes: a fixture where several wrong implementations
+    /// agree.
+    #[test]
+    fn live_reads_names_the_reads_live_at_the_record_just_yielded() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+        for (at, ids) in [(1u64, vec![5u64, 9]), (101, vec![9, 12]), (201, vec![12])] {
+            let mut record = a_record(0, at, 1);
+            record.observations[0].chain_ids = ids;
+            writer.push(&record).expect("in order");
+        }
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        assert_eq!(psp.block_index().len(), 1, "one block, so one live set");
+        let mut walk = psp.records().expect("the walk starts");
+        let expected: [&[u64]; 3] = [&[5, 9], &[9, 12], &[12]];
+        for want in expected {
+            let _ = walk
+                .next()
+                .expect("a record")
+                .expect("a finished psp walks");
+            assert_eq!(walk.live_reads().ids(), want);
+        }
+        assert!(walk.next().is_none());
     }
 
     /// **A coordinate inside a block starts at that block's first record, not at the
@@ -370,7 +630,7 @@ mod tests {
             let mut walk = psp.records().expect("the walk starts");
             while let Some(found) = walk.next() {
                 let found = found.expect("a finished psp walks");
-                whole.push((walk.blocks_read() - 1, found.record.expect("a body")));
+                whole.push((walk.blocks_begun() - 1, found.record.expect("a body")));
             }
         }
         assert_eq!(whole.len(), 40);
@@ -478,12 +738,12 @@ mod tests {
             .expect_err("one past the last block is not a block");
         match refused {
             PspReadError::NoSuchBlock {
-                asked_for,
-                blocks: n,
+                ordinal_asked_for,
+                blocks_in_the_file,
                 ..
             } => {
-                assert_eq!(asked_for, blocks as u64);
-                assert_eq!(n, blocks as u64);
+                assert_eq!(ordinal_asked_for, blocks as u64);
+                assert_eq!(blocks_in_the_file, blocks as u64);
             }
             other => panic!("got {other}"),
         }
@@ -510,6 +770,15 @@ mod tests {
             psp.records_from(anywhere).expect("the walk starts").count(),
             0
         );
+        // **And by ordinal it is a refusal, not an empty walk**: block 0 of a file with no
+        // blocks is a block the file does not have, which is the caller's mistake.
+        assert!(matches!(
+            psp.records_from_block(0),
+            Err(PspReadError::NoSuchBlock {
+                blocks_in_the_file: 0,
+                ..
+            })
+        ));
     }
 
     /// **A block that will not inflate is named, and the walk ends there.** The records of the
@@ -571,12 +840,7 @@ mod tests {
         let (_dir, path) = a_finished_psp();
         let mut whole = bytes_of(&path);
         let footer_at = whole.len() - FOOTER_BYTES;
-        let mut footer = decode_footer(
-            &whole[footer_at..]
-                .try_into()
-                .expect("the file ends with a footer"),
-        )
-        .expect("a finished file's footer reads");
+        let mut footer = footer_of(&whole);
         footer.trailer_bytes += 1;
         whole[footer_at..].copy_from_slice(&encode_footer(&footer));
         rewrite(&path, &whole);
@@ -594,12 +858,7 @@ mod tests {
         let (_dir, path) = a_finished_psp();
         let mut whole = bytes_of(&path);
         let footer_at = whole.len() - FOOTER_BYTES;
-        let mut footer = decode_footer(
-            &whole[footer_at..]
-                .try_into()
-                .expect("the file ends with a footer"),
-        )
-        .expect("a finished file's footer reads");
+        let mut footer = footer_of(&whole);
         let index_at = footer.index_offset as usize;
         let index_ends = index_at + footer.index_bytes as usize;
         // A varint whose continuation bit never clears: the first entry's contig runs off the
@@ -610,16 +869,25 @@ mod tests {
         rewrite(&path, &whole);
 
         let refused = PspReader::open(&path).expect_err("the index does not decode");
-        assert!(
-            matches!(refused, PspReadError::Damaged { .. }),
-            "got {refused}"
-        );
+        // **The cause is matched, not downcast.** Telling the footer from the block index is
+        // what a caller deciding whether a re-run would help has to do, and a typed cause is
+        // what lets it.
+        match &refused {
+            PspReadError::Damaged {
+                reason,
+                source: Some(DamageFound::BlockIndex(_)),
+                ..
+            } => {
+                assert_eq!(reason, "the block index does not decode");
+            }
+            other => panic!("got {other}"),
+        }
+        // And `reason` does not repeat what the cause says, so a chain reads once.
         let cause = std::error::Error::source(&refused).expect("the index decoder's own error");
-        assert!(
-            cause
-                .downcast_ref::<crate::ng::psp::index::IndexDecodeError>()
-                .is_some(),
-            "got {cause}"
+        assert_ne!(
+            cause.to_string(),
+            refused.to_string(),
+            "a chain that prints the same sentence twice reads as a broken printer"
         );
     }
 
@@ -703,5 +971,405 @@ mod tests {
             cause.downcast_ref::<BlockReadError>().is_some(),
             "got {cause}"
         );
+    }
+
+    /// **A fault in the four bytes that introduce a block names the block that never began**,
+    /// which is one past the last entry the index has — and so is *not* an ordinal into
+    /// `block_index()`.
+    ///
+    /// Two junk bytes between the last block and the index put the walk's bound two bytes into
+    /// what the stream reads as the next block's length. The footer's own offsets are moved with
+    /// them, so the file still opens and the fault is genuinely in the blocks.
+    #[test]
+    fn a_fault_in_the_bytes_introducing_a_block_names_one_past_the_last() {
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let footer_at = whole.len() - FOOTER_BYTES;
+        let mut footer = footer_of(&whole);
+        let blocks = footer.n_blocks;
+        let index_at = footer.index_offset as usize;
+
+        let mut patched = whole[..index_at].to_vec();
+        patched.extend_from_slice(&[0x00, 0x00]);
+        patched.extend_from_slice(&whole[index_at..footer_at]);
+        footer.index_offset += 2;
+        footer.trailer_offset += 2;
+        patched.extend_from_slice(&encode_footer(&footer));
+        rewrite(&path, &patched);
+
+        let mut psp = PspReader::open(&path).expect("the sections still add up");
+        let mut walk = psp.records().expect("the walk starts");
+        let mut good = 0;
+        let refused = loop {
+            match walk.next() {
+                Some(Ok(_)) => good += 1,
+                Some(Err(refused)) => break refused,
+                None => panic!("the two junk bytes were walked past"),
+            }
+        };
+        assert_eq!(good, 40, "every real record is handed over first");
+        match &refused {
+            PspReadError::CorruptBlock { block, .. } => {
+                assert_eq!(*block, blocks, "one past the last block the index names");
+                assert!(
+                    psp.block_index().get(*block as usize).is_none(),
+                    "and therefore not an ordinal into `block_index`"
+                );
+            }
+            other => panic!("got {other}"),
+        }
+    }
+
+    /// **The record-buffer ceiling is a knob, and the refusal names it.** A record this reader
+    /// will not hold at the default ceiling is read once the ceiling is raised — which is what
+    /// makes *raise the ceiling* an instruction rather than a sentence (spec §7).
+    #[test]
+    fn a_record_over_the_ceiling_is_read_once_the_ceiling_is_raised() {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+        writer
+            .push(&a_record(0, 1, 400_000))
+            .expect("a long record is legal");
+        let _ = writer.finish(b"").expect("it finishes");
+
+        let mut raised = PspReader::open(&path)
+            .expect("a finished psp opens")
+            .with_a_record_buffer_ceiling(4 * 1024 * 1024)
+            .expect("a ceiling above the buffer");
+        assert_eq!(raised.record_buffer_ceiling_bytes(), 4 * 1024 * 1024);
+        let record = raised
+            .records()
+            .expect("the walk starts")
+            .next()
+            .expect("the record")
+            .expect("and it is read")
+            .record
+            .expect("a body");
+        assert_eq!(record.region.start, Position(1));
+        assert_eq!(record.reference_bases.len(), 400_000);
+    }
+
+    /// **A ceiling at or under the buffer it is a ceiling on is refused where it is set**, not
+    /// at the record that would have tripped over it — it would turn away records the buffer
+    /// already holds without growing at all.
+    #[test]
+    fn a_record_buffer_ceiling_under_the_buffer_is_refused_at_the_setting() {
+        let (_dir, path) = a_finished_psp();
+        let refused = PspReader::open(&path)
+            .expect("a finished psp opens")
+            .with_a_record_buffer_ceiling(ROLLING_BYTES)
+            .expect_err("a ceiling at the buffer is no ceiling");
+        match refused {
+            PspReadError::RecordBufferCeilingTooSmall {
+                ceiling,
+                buffer_bytes,
+                ..
+            } => {
+                assert_eq!(ceiling, ROLLING_BYTES);
+                assert_eq!(buffer_bytes, ROLLING_BYTES);
+            }
+            other => panic!("got {other}"),
+        }
+    }
+
+    /// **A walk that started at block 4 and fails in block 5 says 5.** Every other failing-walk
+    /// test starts at block 0, where the walk's own count and the file's ordinal are the same
+    /// number — so nothing there separates the two, and deleting the `first_block` addend left
+    /// the whole suite green.
+    #[test]
+    fn a_walk_from_a_later_block_names_the_failing_block_by_its_own_ordinal() {
+        let (_dir, path) = a_finished_psp();
+        let mut whole = bytes_of(&path);
+        let wrecked_block = 5usize;
+        let (at, ends) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            let entries = psp.block_index();
+            assert!(entries.len() > wrecked_block + 1);
+            (
+                entries[wrecked_block].block_offset as usize,
+                entries[wrecked_block + 1].block_offset as usize,
+            )
+        };
+        whole[at + COMPRESSED_BLOCK_LENGTH_BYTES..ends].fill(0xff);
+        rewrite(&path, &whole);
+
+        let mut psp = PspReader::open(&path).expect("the index and footer are untouched");
+        let mut walk = psp.records_from_block(4).expect("the walk starts");
+        let mut good = 0;
+        let refused = loop {
+            match walk.next() {
+                Some(Ok(_)) => good += 1,
+                Some(Err(refused)) => break refused,
+                None => panic!("a wrecked block was walked past"),
+            }
+        };
+        assert_eq!(good, 5, "the five records of block 4");
+        match &refused {
+            PspReadError::CorruptBlock { block, .. } => {
+                assert_eq!(*block, wrecked_block as u64, "the block's absolute ordinal");
+            }
+            other => panic!("got {other}"),
+        }
+    }
+
+    /// **A record naming a locus kind this build does not know is *upgrade the reader*, not
+    /// *rebuild the file*.** The file is another build's, not a damaged one — and re-running a
+    /// pileup would produce the very same bytes.
+    ///
+    /// **Built by re-compressing one block with a single byte changed**, and the byte is located
+    /// rather than hard-coded: the same record is written twice, once `Generic` and once
+    /// `SsrBundle`, and the two decompressed payloads differ in exactly the kind tag.
+    ///
+    /// It is the record-level arm of the *upgrade the reader* class.
+    /// `a_manifest_this_build_cannot_read_asks_for_a_newer_reader` reaches the same class
+    /// through the manifest, which is a different arm a hundred lines earlier.
+    #[test]
+    fn a_record_naming_a_locus_kind_this_build_does_not_know_asks_for_a_newer_reader() {
+        use crate::ng::locus_generation::LocusKind;
+        use crate::ng::psp::block::BlockCompressor;
+        use std::path::PathBuf;
+
+        fn a_one_block_psp(kind: LocusKind) -> (tempfile::TempDir, PathBuf) {
+            let (dir, path) = a_file();
+            let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
+            let mut record = a_record(0, 1, 1);
+            record.kind = kind;
+            writer.push(&record).expect("in order");
+            let _ = writer.finish(b"").expect("it finishes");
+            (dir, path)
+        }
+
+        fn the_only_block(path: &Path) -> (usize, Vec<u8>) {
+            let whole = bytes_of(path);
+            let psp = PspReader::open(path).expect("a finished psp opens");
+            assert_eq!(psp.block_index().len(), 1, "one block");
+            let at = psp.block_index()[0].block_offset as usize;
+            let ends = psp.footer().index_offset as usize;
+            let declared = u32::from_le_bytes(
+                whole[at..at + COMPRESSED_BLOCK_LENGTH_BYTES]
+                    .try_into()
+                    .expect("four bytes"),
+            ) as usize;
+            let frame_at = at + COMPRESSED_BLOCK_LENGTH_BYTES;
+            assert_eq!(frame_at + declared, ends, "the block runs up to the index");
+            let payload = zstd::decode_all(&whole[frame_at..frame_at + declared])
+                .expect("the block's own frame inflates");
+            (at, payload)
+        }
+
+        let (_dir_a, path_a) = a_one_block_psp(LocusKind::Generic);
+        let (_dir_b, path_b) = a_one_block_psp(LocusKind::SsrBundle);
+        let (block_at, mut generic) = the_only_block(&path_a);
+        let (_, bundle) = the_only_block(&path_b);
+        assert_eq!(generic.len(), bundle.len(), "each kind tag is one byte");
+        let differ: Vec<usize> = (0..generic.len())
+            .filter(|&index| generic[index] != bundle[index])
+            .collect();
+        assert_eq!(differ.len(), 1, "exactly one byte differs");
+        let kind_at = differ[0];
+        assert_eq!((generic[kind_at], bundle[kind_at]), (0, 2), "the kind tags");
+
+        // A tag no kind uses.
+        generic[kind_at] = 7;
+        let header = PspReader::open(&path_a)
+            .expect("a finished psp opens")
+            .header()
+            .clone();
+        let mut compressor =
+            BlockCompressor::from_manifest(&header.manifest).expect("the file's own compressor");
+        // `compress` hands back the whole on-disk block: its four-byte length, then its frame.
+        let reframed = compressor
+            .compress(&generic)
+            .expect("it compresses")
+            .to_vec();
+
+        let whole = bytes_of(&path_a);
+        let footer_at = whole.len() - FOOTER_BYTES;
+        let mut footer = footer_of(&whole);
+        let mut patched = Vec::new();
+        patched.extend_from_slice(&whole[..block_at]);
+        patched.extend_from_slice(&reframed);
+        let index_at = footer.index_offset as usize;
+        let new_index_at = patched.len() as u64;
+        let shift = new_index_at as i64 - footer.index_offset as i64;
+        patched.extend_from_slice(&whole[index_at..footer_at]);
+        footer.index_offset = new_index_at;
+        footer.trailer_offset = (footer.trailer_offset as i64 + shift) as u64;
+        patched.extend_from_slice(&encode_footer(&footer));
+        rewrite(&path_a, &patched);
+
+        let mut psp = PspReader::open(&path_a).expect("the header and index are untouched");
+        let mut walk = psp.records().expect("the walk starts");
+        let refused = walk
+            .next()
+            .expect("the walk reaches the record")
+            .expect_err("and cannot read its kind");
+        assert!(
+            matches!(refused, PspReadError::UnsupportedRecordEncoding { .. }),
+            "got {refused}"
+        );
+    }
+
+    /// **A corrupt psp is an input, not a bug** (spec §6.7): bytes flipped inside the blocks are
+    /// refused, never panicked on, and never followed by another record.
+    #[test]
+    fn a_psp_with_damaged_blocks_walks_without_panicking() {
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let (blocks_start, blocks_end) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            (
+                psp.block_index()[0].block_offset as usize,
+                psp.footer().index_offset as usize,
+            )
+        };
+        assert!(blocks_end - blocks_start > 64, "there are blocks to damage");
+
+        // A seeded xorshift, so a failure is reproducible from the source alone.
+        let mut state: u64 = 0x5eed_1234_9abc_def0;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let (mut refused, mut opened) = (0u32, 0u32);
+        for _ in 0..400 {
+            let mut bytes = whole.clone();
+            let flips = 1 + (next() % 4) as usize;
+            for _ in 0..flips {
+                let at = blocks_start + (next() as usize % (blocks_end - blocks_start));
+                bytes[at] = (next() % 256) as u8;
+            }
+            rewrite(&path, &bytes);
+            let Ok(mut psp) = PspReader::open(&path) else {
+                continue;
+            };
+            opened += 1;
+            let mut walk = psp.records().expect("the walk starts");
+            let mut broke = false;
+            while let Some(found) = walk.next() {
+                match found {
+                    Ok(_) => assert!(!broke, "a record arrived after a refusal"),
+                    Err(_) => {
+                        broke = true;
+                        assert!(walk.next().is_none(), "a refused walk is finished");
+                        break;
+                    }
+                }
+            }
+            if broke {
+                refused += 1;
+            }
+        }
+        assert!(opened > 0);
+        assert!(refused > 0, "the damage must reach the walk");
+    }
+
+    /// **A block index a reader cannot trust.** Its checksum is a CRC, so anyone who edits a psp
+    /// can restore it; `open` then accepts offsets that point at the middle of a block, and the
+    /// walk reads four arbitrary bytes as a block length. Every entry point, no panic, no hang.
+    #[test]
+    fn a_hostile_block_index_walks_without_panicking() {
+        use crate::ng::psp::index::{checksum_index, encode_index};
+
+        let (_dir, path) = a_finished_psp();
+        let whole = bytes_of(&path);
+        let (entries, blocks_start, blocks_end) = {
+            let psp = PspReader::open(&path).expect("a finished psp opens");
+            (
+                psp.block_index().to_vec(),
+                psp.block_index()[0].block_offset,
+                psp.footer().index_offset,
+            )
+        };
+
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut opened = 0u32;
+        for _ in 0..300 {
+            // Offsets scattered inside the blocks, kept strictly increasing so the index
+            // decoder accepts them: this is what a hand-edited psp looks like.
+            let mut moved = entries.clone();
+            let span = blocks_end - blocks_start;
+            let mut offsets: Vec<u64> = (0..moved.len())
+                .map(|_| blocks_start + next() % span)
+                .collect();
+            offsets.sort_unstable();
+            offsets.dedup();
+            while offsets.len() < moved.len() {
+                offsets.push(offsets.last().copied().unwrap_or(blocks_start) + 1);
+            }
+            for (entry, at) in moved.iter_mut().zip(&offsets) {
+                entry.block_offset = *at;
+            }
+
+            let index_bytes = encode_index(&moved);
+            let footer_at = whole.len() - FOOTER_BYTES;
+            let mut footer = footer_of(&whole);
+            let old_index_at = footer.index_offset as usize;
+            let old_index_ends = old_index_at + footer.index_bytes as usize;
+
+            let mut patched = Vec::new();
+            patched.extend_from_slice(&whole[..old_index_at]);
+            patched.extend_from_slice(&index_bytes);
+            patched.extend_from_slice(&whole[old_index_ends..footer_at]);
+            let shift = index_bytes.len() as i64 - footer.index_bytes as i64;
+            footer.index_bytes = index_bytes.len() as u64;
+            footer.trailer_offset = (footer.trailer_offset as i64 + shift) as u64;
+            footer.index_checksum = checksum_index(&index_bytes);
+            patched.extend_from_slice(&encode_footer(&footer));
+            rewrite(&path, &patched);
+
+            let Ok(mut psp) = PspReader::open(&path) else {
+                continue;
+            };
+            opened += 1;
+            for ordinal in 0..psp.block_index().len() {
+                let mut walk = psp
+                    .records_from_block(ordinal)
+                    .expect("an ordinal the index has");
+                while let Some(found) = walk.next() {
+                    if found.is_err() {
+                        assert!(walk.next().is_none(), "a refused walk is finished");
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(opened > 0, "some hostile index must reach a walk");
+    }
+
+    /// **A coordinate on a contig the file does not carry starts at the last block**, which is
+    /// the far end of the same rule: nothing starts at or after it, so the walk enters the block
+    /// before — the last one there is. Pinned so that changing it is a deliberate act.
+    #[test]
+    fn a_coordinate_on_a_contig_the_file_does_not_have_starts_at_the_last_block() {
+        let (_dir, path) = a_finished_psp();
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let last = *psp.block_index().last().expect("blocks");
+        assert!(
+            psp.header().contigs.len() < 9,
+            "contig 9 must be one the file does not carry"
+        );
+
+        let beyond = GenomePosition {
+            contig: ContigId(9),
+            position: Position(1),
+        };
+        let starts: Vec<_> = psp
+            .records_from(beyond)
+            .expect("the walk starts")
+            .map(|found| found.expect("a finished psp walks").head.region.start)
+            .collect();
+        assert_eq!(starts.len(), 5, "the last block's records, and no others");
+        assert_eq!(starts[0], last.first_position.position);
     }
 }
