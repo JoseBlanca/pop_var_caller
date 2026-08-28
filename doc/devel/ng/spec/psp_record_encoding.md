@@ -775,54 +775,20 @@ saves much less.** The chain-id saving and the skip saving therefore pull in opp
 across the committed range, and **how much of the 2.06× survives at depth is unmeasured** — it is
 the first thing to measure once a writer exists.
 
-Four things this settles that
-[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §10 listed as open:
+**⚠ A stale paragraph stood here and has been cut, 2026-08-28.** It repeated the four settled
+questions above verbatim and then argued *"Distances ship. Changes-only is now in doubt"* — that
+the two forms are alternatives at depth, and that putting the changes in the head and the rest in
+the skippable body was *"a third shape nobody has priced"*. That third shape **is** what §13
+question 2 settles, what this section's own resolution above describes, and what the architecture's
+decisions list records; it was built as Milestone E of
+[`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md) on 2026-08-27. The paragraph
+was the only text in three documents saying otherwise, and it survived long enough to be read as an
+open question by someone implementing from it.
 
-- **The saving survives zstd** (its question 1). zstd is already very good at the repeated
-  lists — 679 MB of raw identifiers on tomato became 7.4 MB, ninety-two fold — which is why
-  the field looks cheap at low depth. At three hundred reads a position the same collapse
-  only reaches thirty-six fold, and that is where the gap opens.
-- **Delta-varints alone are worth having and may be enough** (its question 2). They capture
-  **60 % of the available saving at eleven reads a position and 86 % at three hundred**, with
-  no reader state, no residual arithmetic and no new error class.
-- **An identifier goes live more than once for most reads** (its question 4), and not
-  marginally: **83 % of identifiers on HG002 and 91 % on tomato** cover two stretches with a
-  gap between them, because a pair's mates rarely overlap. An arrivals-and-departures stream
-  that assumes one stretch per read loses the second mate of nine reads in ten — silently,
-  because the merge would simply see a read that was not there. **A re-entry form is part of
-  the first version, not a later fix.**
-- **Restating the live set at every block is affordable.** Cutting blocks every 1,500
-  positions rather than by byte count — which is what §2.4 does — costs the differential form
-  12 % of its own bytes on tomato (0.385 → 0.432) and leaves it far ahead of both
-  alternatives.
-
-**Distances ship. Changes-only is now in doubt, and §2.3 is why.**
-
-Storing each identifier as its distance from the one before is a few lines inside the record
-encoder, and it takes the deep corner from 43.8 to 11.7 bytes a position. **It survives the record
-head** because a record's list can be made self-contained: the first identifier absolute, the rest
-distances within that record.
-
-**Changes-only cannot be made self-contained, and self-contained is what skipping requires.** The
-form works by carrying a set forward: a reader knows which pairs are live only because it applied
-every arrival and departure since the block began. **A reader that skips a record's body never sees
-that record's changes, so its set goes stale and every later record it does want is wrong.** That is
-the same failure that made the coverage and the identifier distances restart at each record (§2.3),
-but here it cannot be fixed by restarting — restating the live set at every record *is* writing the
-whole list at every position, which is the form we started from.
-
-**So the two are alternatives at depth, not a first and second version**, and which wins is
-unmeasured:
-
-- **the record head with distances** — records skippable, a walk 2.06× faster, chain ids 11.72 bytes
-  a position at 293 reads;
-- **changes-only** — chain ids 6.42 bytes a position, about 45 % less, but a reader must decode every
-  record's changes, so the head can only skip what is left. At 293 reads a position the chain ids are
-  most of a record, so that is most of the skip gone.
-
-*A third shape nobody has priced: the changes in the head and the rest of the record in the
-skippable body. It keeps both properties in form, but at depth the head then carries most of the
-bytes, and how much of the 2.06× survives that is exactly the unmeasured part.*
+**The one thing it was right about is the paragraph above**, which stands: how much of §2.3's
+2.06× survives at depth is unmeasured, and **nothing can measure it until Milestone F opens a
+file**. Every figure in this section is from a prototype over alignments, not from the writer that
+now exists.
 
 ---
 
@@ -1026,13 +992,15 @@ will pass while a chain-id list is being corrupted.
    the point: approximating in the psp alone would have broken the oracle
    ([`run_streaming.md`](run_streaming.md) §1.2) that the whole psp path is checked against.
 2. **Does the changes-only chain-id encoding ship, or only
-   distances only?** — **SETTLED 2026-08-25: changes-only, and distances are not built.** The two
-   do collide with the skippable records of §2.3, because a set carried forward cannot survive a
-   skipped record — and §6 resolves it by putting the live-set changes in the head and leaving the
-   exception lists in the body. **What is not settled is what that costs at depth**: the changes are
-   0.432 bytes a position at 11.4 reads and 6.42 at 293, so the head grows with depth and the skip's
-   value shrinks. **Settled by:** measuring the skipping walk on a head that carries the changes,
-   once a writer exists.
+   distances only?** — **SETTLED 2026-08-25: changes-only, and distances are not built**, and
+   **BUILT 2026-08-27** as Milestone E of
+   [`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md). The two do collide with the
+   skippable records of §2.3, because a set carried forward cannot survive a skipped record — and
+   §6 resolves it by putting the live-set changes in the head and leaving the exception lists in
+   the body, which is what was built. **What is not settled is what that costs at depth**: the
+   changes are 0.432 bytes a position at 11.4 reads and 6.42 at 293, so the head grows with depth
+   and the skip's value shrinks. **Settled by:** measuring the skipping walk on a head that carries
+   the changes — which needs a file, so Milestone F.
 3. **Are a block's parts interleaved or separated into two regions of the file?** — **MOOT**: a psp
    block is one stream (§2.3), so there is nothing to interleave. *Kept because the reasoning applies
    again if the head's live-set changes are ever split off into a part of their own: interleaving
