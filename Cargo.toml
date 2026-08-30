@@ -375,3 +375,11 @@ test = true
 [[example]]
 name = "ng_ssr_thin_stratum_gate"
 required-features = ["bench-fixtures"]
+
+# The site quality's cost across the cohort sizes the caller commits to —
+# `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
+# settle it. It draws its own likelihood table, so it needs no fixture feature and
+# `cargo bench --no-run` keeps it from going stale.
+[[bench]]
+name = "ng_site_quality_perf"
+harness = false
