@@ -107,7 +107,7 @@ when the record is a tract record. Names are the coder's; the content list is th
 and dropping an item is a stop-and-ask.
 *Depends:* —. *Source:* spec §3, §5–§8.
 
-☐ **A2. The per-sample tally, pinned.** The one place `DP` and `AD`'s exact composition is
+✅ **A2. The per-sample tally, pinned.** The one place `DP` and `AD`'s exact composition is
 decided, in types and doc comments before any number is summed: `AD[allele]` = complete
 observations whose sequence matched that allele, summed over read groups; `DP` = the sample's
 complete observations over the merge's **whole** allele table — written alleles or not — plus its
@@ -116,7 +116,7 @@ the step's report what was included and what was left out (the silent-read tally
 reads produced no observation at all, and its own doc says it double-counts across records).
 *Depends:* A1. *Source:* spec §7; [`build.rs`](../../../../src/ng/run/cohort_merge/build.rs).
 
-☐ **A3. The header's metadata type and its refusals.** Contigs (name, length, md5 when known),
+✅ **A3. The header's metadata type and its refusals.** Contigs (name, length, md5 when known),
 the sample names in the run's sample order, source, command line, reference path, the parameters
 file's name. Ported refusals: duplicate sample names, duplicate contigs, a contig longer than
 `i32::MAX` (spec §4; production [`header.rs:296-321`](../../../../src/vcf/header.rs)).

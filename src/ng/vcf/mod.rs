@@ -36,6 +36,10 @@
 //! (`doc/devel/ng/spec/typed_regions.md` §2.3), so no two records ever describe the same
 //! position.
 
+pub mod header;
+
+pub use header::{HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata};
+
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::types::{GenomeRegion, Genotype, Motif, Phred, Position};
 
