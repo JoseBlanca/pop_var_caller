@@ -49,7 +49,12 @@ use md5::{Digest, Md5};
 
 use std::collections::BTreeMap;
 
-use super::{CensusIdentity, CensusTerm, ParametersFile, ParametersFileError, ReadGroupRow};
+use super::{
+    BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, ParametersFile,
+    ParametersFileError, ReadGroupRow, RepeatTracts, RunParametersFromFile, StatedConstants,
+    SubstitutionRateRow, Warrant,
+};
+use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::joint::census::RecordingTerms;
 use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::ng::read::input::read_groups::{ReadGroup, ReadGroups};
@@ -365,6 +370,245 @@ impl ParametersFile {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------
+// The fourth binding, which demotes (spec §2.1, §6, §13 test 5)
+// ---------------------------------------------------------------------
+
+impl ParametersFile {
+    /// **Read this file into the parameters *this run* scores with.**
+    ///
+    /// The whole of spec §6 in one door, in the order that gives the better message:
+    ///
+    /// 1. [`Self::validate`] — is this a parameters file that means anything at all? A file whose
+    ///    own sample list disagrees with its own read-group table is the file's fault, and
+    ///    running the bindings first would report it as the *run's*.
+    /// 2. [`Self::refuse_if_not_this_runs_inputs`] — the three bindings that refuse.
+    /// 3. the census, which **demotes rather than refusing**: the numbers are still numbers, and
+    ///    a file fitted from another census of this same cohort is interpretable, merely less
+    ///    warranted.
+    /// 4. [`Self::to_run_parameters`], on the file as demotion left it.
+    ///
+    /// # Why the demotion happens to the *file* and not to the parameters
+    ///
+    /// Spec §2.1's trap for the coder is that **demotion is per-file, not per-number** — there is
+    /// no state in which the binding leaves some of a file's numbers fitted and others not. The
+    /// shortest way to be that is to demote the file, whose warrants are five public fields, and
+    /// then project it once. Demoting afterwards would mean reaching into `RunParameters`,
+    /// `StratumFits` and `Estimate` separately and getting all five right, which is five chances
+    /// to leave one behind.
+    ///
+    /// **⚑ Validating first is load-bearing for more than the message.**
+    /// [`Self::demoted_to_no_better_than_supplied`] is public and moves warrants, and one of the
+    /// warrants it moves is one `validate` has an opinion about: a `fitted_here` outlier weight
+    /// is a state no run can mean and `validate` refuses it, but demotion turns it into a
+    /// `supplied` one, which is legal. So demoting an unvalidated file *launders* it —
+    /// `file.demoted_to_no_better_than_supplied().to_run_parameters()` accepts what
+    /// `file.to_run_parameters()` turns down. This door cannot, because nothing is demoted until
+    /// `validate` has passed.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `validate`, the bindings or the projection refuse — in that order.
+    pub fn to_run_parameters_for(
+        &self,
+        reference: &ReferenceDigest,
+        read_groups: &ReadGroups,
+        census: &CensusIdentity,
+    ) -> Result<ParametersForThisRun, ParametersFileError> {
+        self.validate()?;
+        self.refuse_if_not_this_runs_inputs(reference, read_groups)?;
+
+        let fitted_under_another_census = self.census_disagreement(census);
+        // **Two costs here, both once per run and both deliberate.** `validate` runs a second
+        // time inside the projection, on a file that has already passed it — both are public
+        // entry points and neither may assume the other ran. And the demotion copies the file,
+        // whose largest axis spec §9 prices at up to 62 MB at 3,000 samples; the copy is
+        // transient and dropped as soon as the projection is done, and demoting the file rather
+        // than the assembled parameters is what makes the demotion provably per-file.
+        let from_file = match &fitted_under_another_census {
+            None => self.to_run_parameters()?,
+            Some(_) => self
+                .demoted_to_no_better_than_supplied()
+                .to_run_parameters()?,
+        };
+        Ok(ParametersForThisRun {
+            from_file,
+            fitted_under_another_census,
+        })
+    }
+
+    /// **Which recording term the file's census and this run's first differ on** — `None` where
+    /// they are the same census.
+    ///
+    /// The same question, and the same answer, as
+    /// [`RecordingTerms::first_disagreement`](crate::ng::parameter_estimation::joint::census::RecordingTerms::first_disagreement)
+    /// asks of two samples one level down, which is why [`CensusIdentity::of`] mints its terms in
+    /// that function's own words and order.
+    ///
+    /// **A term one identity has and the other does not is a disagreement too**, and it is the
+    /// shape a file written by another build produces: the census can grow a thirteenth value,
+    /// and a file that names twelve was fitted under terms this build cannot even compare.
+    /// Whichever list is longer names it, since only that one has a name to give.
+    #[must_use]
+    pub fn census_disagreement(&self, census: &CensusIdentity) -> Option<String> {
+        for (mine, theirs) in self.fitted_from.census.terms.iter().zip(&census.terms) {
+            if mine.term != theirs.term || mine.digest != theirs.digest {
+                return Some(mine.term.clone());
+            }
+        }
+        // **The shorter list runs out first**, so whichever identity is longer names the term.
+        // The file's own is preferred where it has one, because that is the value a reader can
+        // look at.
+        self.fitted_from
+            .census
+            .terms
+            .get(census.terms.len())
+            .or_else(|| census.terms.get(self.fitted_from.census.terms.len()))
+            .map(|extra| extra.term.clone())
+    }
+
+    /// **Every number in the file, no better warranted than `supplied`** — spec §2.1's demotion.
+    ///
+    /// **Named for what it does and not for what §2.1 says**, because the two differ by exactly
+    /// the thing below: *demoted to supplied* would assert the sentence this doc exists to
+    /// correct, at every call site, to a reader who never opens it.
+    ///
+    /// A number the fit called `fitted_here` was fitted from *some* cohort's data; read into a
+    /// run over a different one it is a number somebody handed over. §2.1 keeps the warrant
+    /// where the file's binding matches and demotes the whole file where it does not.
+    ///
+    /// # It is `weaker_of` and not an assignment, and for one number that matters
+    ///
+    /// `Provenance` ranks `Supplied` **above** `Defaulted` — a number the run was handed says
+    /// nothing about this data, and a stated constant says less than nothing. So assigning
+    /// `Supplied` would *promote* every defaulted number — every one of them a claim that
+    /// somebody chose a value nobody chose. **The repeat-tract outlier weight is the strongest
+    /// case rather than the only one**: it has no fitted state at all and its two legal warrants
+    /// are `supplied` and `defaulted`-at-the-project's-own-0.01, so the promotion there is one
+    /// `validate` would accept and no reader could see. A defaulted calibration multiplier of
+    /// exactly 1.0 promoted to `supplied` says the same false thing more quietly.
+    /// [`Provenance::weaker_of`] is a no-op for every already-weaker number and the right answer
+    /// for the rest.
+    ///
+    /// **So *every warrant is `Supplied`* is not true of a demoted file, and cannot be** — spec
+    /// §13's fifth test says it and the ladder says otherwise. What is true is that no warrant is
+    /// stronger than `Supplied` and none was promoted.
+    ///
+    /// # What is not demoted, because it is not a warrant
+    ///
+    /// Five numbers in this file carry a `Warrant` and the demotion moves all five. **The rest
+    /// carry other vocabularies, and none of those has a *handed over* state**: a slippage
+    /// number says it came off the stratum's own fit, its period's curve, or a blend; the prior
+    /// seed says which rung it came from; a contamination fraction says which reads it was
+    /// fitted from.
+    ///
+    /// **⚑ So a demoted file still says *this run's own* about numbers that are not this run's,
+    /// and that is a defect rather than a nicety.** `SeedRung::FittedCurve` reads "both moments
+    /// came off **the run's own** fitted population curve", and after a demotion the run that
+    /// fitted it is a different run. Nothing in the file says otherwise.
+    ///
+    /// **This is open and it is the owner's**, recorded in `PROJECT_STATUS.md`, which offers
+    /// three ways out and recommends the one D3 did *not* take — refusing such a file like the
+    /// other three bindings. D3 builds what the plan and §2.1 describe; if the owner takes that
+    /// recommendation, this method and the door above it go.
+    #[must_use]
+    pub fn demoted_to_no_better_than_supplied(&self) -> Self {
+        let mut demoted = self.clone();
+        // **Destructured without `..` on purpose**, which is this module's convention where a
+        // walk has to reach everything ([`CensusIdentity::of`] does it over `RecordingTerms`).
+        // A section added to the file, or a key added to either section that holds a warranted
+        // number outside a row, stops this compiling rather than quietly keeping its warrant —
+        // and a number the demotion forgets is exactly the per-number exemption spec §2.1 says
+        // does not exist.
+        //
+        // **The rows are destructured too**, for the same reason and because nothing else would
+        // notice: `every_warrant_in`, in this module's tests, pushes one warrant a row, so a
+        // second warranted key on a row type would leave its count unmoved.
+        let Self {
+            format_version: _,
+            ploidy: _,
+            fitted_from: _,
+            base_quality_calibration,
+            contamination: _,
+            sequencing_batches: _,
+            inbreeding,
+            ordinary_site_prior: _,
+            repeat_tracts,
+            stated_constants,
+        } = &mut demoted;
+        for BaseQualityCalibrationRow {
+            read_group: _,
+            error_probability_multiplier,
+        } in &mut base_quality_calibration.by_read_group
+        {
+            error_probability_multiplier.warrant =
+                no_better_than_supplied(error_probability_multiplier.warrant);
+        }
+        for InbreedingRow {
+            sample: _,
+            inbreeding_coefficient,
+        } in &mut inbreeding.by_sample
+        {
+            inbreeding_coefficient.warrant =
+                no_better_than_supplied(inbreeding_coefficient.warrant);
+        }
+        let RepeatTracts {
+            fallback_length_spectrum_concentration,
+            slippage_group_by_read_group: _,
+            slippage_by_stratum_and_group: _,
+            length_spectrum_by_stratum: _,
+            length_spectrum_by_period: _,
+            substitution_rate_by_stratum,
+        } = repeat_tracts;
+        fallback_length_spectrum_concentration.warrant =
+            no_better_than_supplied(fallback_length_spectrum_concentration.warrant);
+        for SubstitutionRateRow {
+            read_group: _,
+            period: _,
+            reference_repeats: _,
+            ploidy: _,
+            rate,
+        } in substitution_rate_by_stratum
+        {
+            rate.warrant = no_better_than_supplied(rate.warrant);
+        }
+        let StatedConstants {
+            repeat_tract_outlier_weight,
+        } = stated_constants;
+        repeat_tract_outlier_weight.warrant =
+            no_better_than_supplied(repeat_tract_outlier_weight.warrant);
+        demoted
+    }
+}
+
+/// **What a run got when it read a parameters file for itself** — the numbers, and whether it had
+/// to demote them.
+#[derive(Debug)]
+pub struct ParametersForThisRun {
+    /// What calling scores with, and the two things `RunParameters` does not keep.
+    ///
+    /// **Named `from_file` rather than `parameters`** so that reaching the run's own parameters
+    /// through it reads as `from_file.parameters` rather than as one word twice.
+    pub from_file: RunParametersFromFile,
+    /// **Which term of the census the file and this run disagree on**, and `None` where they
+    /// agree.
+    ///
+    /// Where it is `Some`, every warrant in `parameters` has been demoted (spec §2.1) and this
+    /// is the term to name when a run says why — in the census's own words, so that the sentence
+    /// is the one the fit already prints.
+    pub fitted_under_another_census: Option<String>,
+}
+
+/// One warrant, no better founded than *somebody handed this over*.
+///
+/// **Through [`Provenance`] rather than by matching on [`Warrant`]**, so the ladder that decides
+/// which of two warrants is weaker stays in the one place that documents it.
+fn no_better_than_supplied(warrant: Warrant) -> Warrant {
+    Provenance::from(warrant)
+        .weaker_of(Provenance::Supplied)
+        .into()
 }
 
 /// How many names a refusal spells out before it says how many more there are.
@@ -815,7 +1059,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// The run the module's shared file fixture was fitted by: its reference, and its lanes.
-    fn the_run_the_fixture_was_fitted_by() -> (ReferenceDigest, ReadGroups) {
+    pub(super) fn the_run_the_fixture_was_fitted_by() -> (ReferenceDigest, ReadGroups) {
         (
             super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST,
             ReadGroups::of_lanes(&[
@@ -1226,5 +1470,427 @@ mod tests {
             ]),
             "000fa0ff0102030405060708090a0b0c"
         );
+    }
+}
+
+#[cfg(test)]
+mod the_fourth_binding_demotes {
+    //! **Step D3: a file fitted from another census of this cohort is used, and every number in
+    //! it says so.**
+    //!
+    //! Spec §6's fourth binding is the one that does not refuse. The numbers are still numbers —
+    //! a census is a store of *evidence*, and two censuses of one cohort differ in which loci
+    //! were kept or at what depth, not in what a plant's genome is — so §2.1 keeps the file and
+    //! demotes it wholesale.
+    //!
+    //! **Its failure is silent, which is why the test is two assertions and not one.** Warrants
+    //! change what a run *reports* and never what it *computes* (spec §2), so a demotion that
+    //! did not happen gives identical genotypes and a run that overstates every one of them, and
+    //! a demotion that reached too far gives identical genotypes and a run that understates
+    //! them. Only the pair — **the same answers, and no warrant left above `supplied`** — can
+    //! tell those apart.
+
+    use super::super::WarrantedValue;
+    use super::super::tests::a_file_using_every_shape;
+    use super::*;
+    use crate::ng::types::ReadGroupId;
+
+    /// The run the fixture was fitted by: its reference and lanes, from the sibling module that
+    /// already builds them, plus the census the file itself names.
+    fn this_run() -> (ReferenceDigest, ReadGroups, CensusIdentity) {
+        let (reference, read_groups) = super::tests::the_run_the_fixture_was_fitted_by();
+        (
+            reference,
+            read_groups,
+            a_file_using_every_shape().fitted_from.census,
+        )
+    }
+
+    /// The same census with one term's digest moved — a second census of the same cohort.
+    fn a_census_of_the_same_cohort_recorded_otherwise(term: &str) -> CensusIdentity {
+        let (.., mut census) = this_run();
+        let moved = census
+            .terms
+            .iter_mut()
+            .find(|carried| carried.term == term)
+            .unwrap_or_else(|| panic!("the census names {term:?}"));
+        moved.digest = "ff".repeat(16);
+        census
+    }
+
+    fn read_for(file: &ParametersFile, census: &CensusIdentity) -> ParametersForThisRun {
+        let (reference, read_groups, _) = this_run();
+        file.to_run_parameters_for(&reference, &read_groups, census)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// **A file fitted under this run's own census keeps every warrant it was written with.**
+    ///
+    /// This is what spec §2.1 protects and the reason demotion is not unconditional: the same
+    /// cohort called in psp mode from the fit in memory and in direct mode from the file that
+    /// fit wrote must report the same warrants, or the two-mode oracle has to be told to ignore
+    /// a difference that is real.
+    #[test]
+    fn a_file_fitted_under_this_runs_own_census_is_not_demoted() {
+        let file = a_file_using_every_shape();
+        let (_, _, census) = this_run();
+        let read = read_for(&file, &census);
+
+        assert_eq!(read.fitted_under_another_census, None);
+        assert_eq!(
+            read.from_file.parameters.calibration_by_read_group()[0].provenance,
+            Provenance::FittedHere,
+            "the file says this multiplier was fitted, and this run's census is the one it was \
+             fitted under"
+        );
+        assert_eq!(
+            read.from_file.inbreeding_by_sample[0].provenance,
+            Provenance::FittedHere
+        );
+    }
+
+    /// **A file fitted under another census of this cohort is used, and the run can say which
+    /// term differed** — in the census's own words, which is why `CensusIdentity::of` mints them
+    /// in `first_disagreement`'s vocabulary.
+    #[test]
+    fn a_file_fitted_under_another_census_is_used_and_names_the_term() {
+        let file = a_file_using_every_shape();
+        for term in [
+            "the loci actually kept",
+            "per-position depth cap",
+            "selection seed",
+        ] {
+            let read = read_for(&file, &a_census_of_the_same_cohort_recorded_otherwise(term));
+            assert_eq!(read.fitted_under_another_census.as_deref(), Some(term));
+        }
+    }
+
+    /// **A term renamed while its digest stands still is a disagreement**, which comparing
+    /// digests alone would miss.
+    ///
+    /// The twelve terms are named in the census's own words and compared in its own order
+    /// (`CensusIdentity::of`), and a build that renames one while its value is unchanged has
+    /// recorded its evidence under terms this build cannot line up against its own. Dropping the
+    /// name half of the comparison left all 168 tests green.
+    #[test]
+    fn a_term_renamed_with_its_digest_unmoved_disagrees() {
+        let mut file = a_file_using_every_shape();
+        let (_, _, census) = this_run();
+        let renamed = &mut file.fitted_from.census.terms[3];
+        let digest = renamed.digest.clone();
+        renamed.term = "what the catalog was built at".to_owned();
+
+        assert_eq!(
+            file.fitted_from.census.terms[3].digest, digest,
+            "only the name moved"
+        );
+        assert_eq!(
+            file.census_disagreement(&census).as_deref(),
+            Some("what the catalog was built at"),
+            "and the file's own name for it is what the run is told"
+        );
+    }
+
+    /// **A census this build cannot even compare is a disagreement**, and it is the shape a file
+    /// written by another build produces — one that recorded a thirteenth term, or twelve where
+    /// this build knows thirteen.
+    #[test]
+    fn a_census_naming_a_different_number_of_terms_disagrees() {
+        let mut file = a_file_using_every_shape();
+        let (_, _, census) = this_run();
+
+        let dropped = file.fitted_from.census.terms.pop().expect("twelve terms");
+        assert_eq!(
+            file.census_disagreement(&census).as_deref(),
+            Some(dropped.term.as_str()),
+            "the run's census names a term the file does not"
+        );
+
+        file.fitted_from.census.terms.push(dropped);
+        file.fitted_from.census.terms.push(CensusTerm {
+            term: "something a later build records".to_owned(),
+            digest: "0e".repeat(16),
+        });
+        assert_eq!(
+            file.census_disagreement(&census).as_deref(),
+            Some("something a later build records")
+        );
+    }
+
+    /// **⚑ The door applies the demotion**, which is the whole of what D3 composes and the one
+    /// thing every other test here can be green without.
+    ///
+    /// The warrant assertions below and in `no_warrant_survives_the_demotion_stronger_than_
+    /// supplied` are made against `demoted_to_no_better_than_supplied` *called directly*, and
+    /// the one that goes through the door looks at the **agreeing** case. So a door that noticed
+    /// the disagreement, reported it, and then projected the file undemoted left all 168 tests
+    /// green — which is exactly this step's own silent failure: identical genotypes and a run
+    /// that overstates every warrant it prints.
+    #[test]
+    fn the_door_demotes_and_not_only_the_method() {
+        let read = read_for(
+            &a_file_using_every_shape(),
+            &a_census_of_the_same_cohort_recorded_otherwise("depth ladder edges"),
+        );
+        assert!(read.fitted_under_another_census.is_some());
+        assert_eq!(
+            read.from_file.parameters.calibration_by_read_group()[0].provenance,
+            Provenance::Supplied,
+            "the file says this multiplier was fitted here, and this run's evidence is not what \
+             it was fitted from"
+        );
+        assert_eq!(
+            read.from_file.inbreeding_by_sample[0].provenance,
+            Provenance::Supplied
+        );
+        assert_eq!(
+            read.from_file
+                .parameters
+                .ssr_slippage_fits()
+                .stated_concentration_warrant(),
+            Provenance::Supplied,
+            "the bottom rung too, which is the number the base commit made carriable"
+        );
+        assert_eq!(
+            read.from_file
+                .parameters
+                .repeat_tract_outlier_weight()
+                .provenance(),
+            Provenance::Defaulted,
+            "and the one the demotion must not promote"
+        );
+    }
+
+    /// **The demotion changes no number a locus is scored against.** Half of §13's fifth test,
+    /// and the half that would pass on a demotion that did nothing — which is why the other half
+    /// is above and below.
+    #[test]
+    fn the_demotion_changes_no_number_a_locus_is_scored_against() {
+        let file = a_file_using_every_shape();
+        let (_, _, census) = this_run();
+        let kept = read_for(&file, &census).from_file.parameters;
+        let demoted = read_for(
+            &file,
+            &a_census_of_the_same_cohort_recorded_otherwise("depth ladder edges"),
+        )
+        .from_file
+        .parameters;
+
+        assert_eq!(demoted.ploidy(), kept.ploidy());
+        assert_eq!(demoted.read_group_count(), kept.read_group_count());
+        assert_eq!(demoted.prior_seed(), kept.prior_seed());
+        assert_eq!(
+            demoted.contamination_by_read_group(),
+            kept.contamination_by_read_group()
+        );
+        assert_eq!(
+            demoted.inbreeding_coefficient_by_sample(),
+            kept.inbreeding_coefficient_by_sample()
+        );
+        // **The batching is a number a locus is scored against**, not bookkeeping: it is the
+        // population a contaminating read is drawn from.
+        assert_eq!(demoted.sequencing_batches(), kept.sequencing_batches());
+        assert_eq!(
+            demoted.repeat_tract_outlier_weight().value(),
+            kept.repeat_tract_outlier_weight().value()
+        );
+        for (was, is) in kept
+            .calibration_by_read_group()
+            .iter()
+            .zip(demoted.calibration_by_read_group())
+        {
+            assert_eq!(is.scale, was.scale, "the multiplier a read is charged");
+        }
+        for ((key, was), (also, is)) in kept
+            .ssr_substitution_rate()
+            .zip(demoted.ssr_substitution_rate())
+        {
+            assert_eq!(key, also);
+            assert_eq!(is.value, was.value, "the substitution rate inside a tract");
+        }
+
+        // **The slippage numbers and the length spectra are untouched by the demotion**, so they
+        // compare whole rather than field by field: neither carries a `Provenance`, and what
+        // they carry instead — which curve a number came off — is not a warrant and has no
+        // *handed over* state to move to.
+        for row in &file.repeat_tracts.slippage_by_stratum_and_group {
+            for group in 0..file.fitted_from.read_groups.len() {
+                let id = ReadGroupId(u32::try_from(group).expect("three lanes"));
+                assert_eq!(
+                    demoted
+                        .ssr_slippage_fits()
+                        .at(id, row.period, row.reference_repeats),
+                    kept.ssr_slippage_fits()
+                        .at(id, row.period, row.reference_repeats),
+                );
+            }
+            let was = kept
+                .ssr_slippage_fits()
+                .length_spectrum_at(row.period, row.reference_repeats);
+            let is = demoted
+                .ssr_slippage_fits()
+                .length_spectrum_at(row.period, row.reference_repeats);
+            assert_eq!(is.rung(), was.rung());
+            assert_eq!(is.concentration(), was.concentration());
+            assert_eq!(is.fitted_weights(), was.fitted_weights());
+        }
+    }
+
+    /// **⚑ No warrant is left above `supplied`, and none was promoted — which is *not* "every
+    /// warrant `Supplied`", and cannot be.**
+    ///
+    /// Spec §13's fifth test says *same calls, every warrant `Supplied`*. The ladder says
+    /// otherwise: `Provenance` ranks `Supplied` **above** `Defaulted`, so assigning `Supplied`
+    /// would *promote* every defaulted number. The owner's ruling of 2026-08-30 is that the
+    /// demotion is `weaker_of(file's warrant, Supplied)`, which is a no-op below `Supplied` and
+    /// the right answer above it. So the property that holds is this one.
+    #[test]
+    fn no_warrant_survives_the_demotion_stronger_than_supplied() {
+        let file = a_file_using_every_shape();
+        let demoted = file.demoted_to_no_better_than_supplied();
+
+        let before: Vec<(&str, Warrant)> = every_warrant_in(&file);
+        let after: Vec<(&str, Warrant)> = every_warrant_in(&demoted);
+        assert_eq!(before.len(), after.len());
+        assert!(
+            before
+                .iter()
+                .any(|(_, warrant)| *warrant == Warrant::FittedHere),
+            "the fixture has something to demote"
+        );
+        assert!(
+            before
+                .iter()
+                .any(|(_, warrant)| *warrant == Warrant::Defaulted),
+            "and something that must not be promoted"
+        );
+
+        for ((what, was), (also, is)) in before.iter().zip(&after) {
+            assert_eq!(what, also);
+            let (was, is) = (Provenance::from(*was), Provenance::from(*is));
+            assert_eq!(
+                is,
+                was.weaker_of(Provenance::Supplied),
+                "{what} went from {was:?} to {is:?}"
+            );
+            assert!(
+                is == Provenance::Supplied || is == Provenance::Defaulted,
+                "{what} came out of the demotion as {is:?}"
+            );
+        }
+    }
+
+    /// **The one number where assigning `Supplied` rather than taking the weaker would be
+    /// visible**: the repeat-tract outlier weight has no fitted state at all, and its two legal
+    /// warrants are `supplied` and `defaulted` at the project's own 0.01. A demoted file that
+    /// called it `supplied` would claim somebody chose that number when nobody did — and
+    /// `validate` refuses `supplied`'s opposite, so the wrongness would be silent.
+    #[test]
+    fn the_outlier_weight_the_project_guessed_is_not_promoted_to_one_somebody_chose() {
+        let file = a_file_using_every_shape();
+        assert_eq!(
+            file.stated_constants.repeat_tract_outlier_weight.warrant,
+            Warrant::Defaulted
+        );
+        assert_eq!(
+            file.demoted_to_no_better_than_supplied()
+                .stated_constants
+                .repeat_tract_outlier_weight
+                .warrant,
+            Warrant::Defaulted,
+            "the demotion takes the weaker of the two, and defaulted is already weaker"
+        );
+
+        // And one a person did choose stays chosen.
+        let mut chosen = file;
+        chosen.stated_constants.repeat_tract_outlier_weight = WarrantedValue {
+            value: 0.02,
+            warrant: Warrant::Supplied,
+            observations: None,
+        };
+        assert_eq!(
+            chosen
+                .demoted_to_no_better_than_supplied()
+                .stated_constants
+                .repeat_tract_outlier_weight
+                .warrant,
+            Warrant::Supplied
+        );
+    }
+
+    /// **A demoted file is still a file this caller accepts**, which is not free: `validate`
+    /// keys two of its rules on the bottom rung's warrant, and the demotion moves that warrant.
+    ///
+    /// Only one of the two rules is one the demotion can reach — `fitted_here` becomes
+    /// `supplied`, and `defaulted` the demotion leaves alone, which is the whole of the
+    /// `weaker_of` ruling. **The rule that had to change was the one this test is a guard on**:
+    /// until the base commit, `validate` required `fitted_here` exactly where any stratum was
+    /// fitted, and so refused every file the demotion produces.
+    #[test]
+    fn a_demoted_file_still_validates_and_still_projects() {
+        let file = a_file_using_every_shape().demoted_to_no_better_than_supplied();
+        file.validate()
+            .expect("a demoted file still means something");
+        file.to_run_parameters()
+            .expect("and still projects to a run");
+    }
+
+    /// **The three refusals still refuse through this door**, and a file that means nothing is
+    /// named by `validate` rather than blamed on the run.
+    #[test]
+    fn the_door_runs_validate_first_and_then_the_three_refusals() {
+        let (reference, read_groups, census) = this_run();
+
+        // A file at odds with itself: `validate`'s message, not a binding's.
+        let mut at_odds = a_file_using_every_shape();
+        at_odds.fitted_from.samples.reverse();
+        let error = at_odds
+            .to_run_parameters_for(&reference, &read_groups, &census)
+            .expect_err("a file whose sample list is not its own table's");
+        assert!(
+            matches!(error, ParametersFileError::Meaningless { .. }),
+            "the file is what is wrong, and validate names it: {error}"
+        );
+
+        // And a good file against another run: a binding's message.
+        let error = a_file_using_every_shape()
+            .to_run_parameters_for(&ReferenceDigest([0xab; 16]), &read_groups, &census)
+            .expect_err("another reference");
+        assert!(
+            matches!(error, ParametersFileError::FittedFromOtherInputs { .. }),
+            "{error}"
+        );
+    }
+
+    /// Every warranted number in the file, named, in one order.
+    fn every_warrant_in(file: &ParametersFile) -> Vec<(&str, Warrant)> {
+        let mut warrants = vec![];
+        for row in &file.base_quality_calibration.by_read_group {
+            warrants.push(("a calibration", row.error_probability_multiplier.warrant));
+        }
+        for row in &file.inbreeding.by_sample {
+            warrants.push((
+                "an inbreeding coefficient",
+                row.inbreeding_coefficient.warrant,
+            ));
+        }
+        warrants.push((
+            "the bottom rung",
+            file.repeat_tracts
+                .fallback_length_spectrum_concentration
+                .warrant,
+        ));
+        for row in &file.repeat_tracts.substitution_rate_by_stratum {
+            warrants.push(("a substitution rate", row.rate.warrant));
+        }
+        warrants.push((
+            "the outlier weight",
+            file.stated_constants.repeat_tract_outlier_weight.warrant,
+        ));
+        // **Five kinds, and the count is asserted so a sixth cannot be added upstream without
+        // this walk being extended.** A warranted number the demotion forgets is exactly the
+        // per-number exemption spec §2.1 says does not exist.
+        assert_eq!(warrants.len(), 3 + 2 + 1 + 1 + 1);
+        warrants
     }
 }

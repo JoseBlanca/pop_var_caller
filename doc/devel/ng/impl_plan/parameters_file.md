@@ -274,11 +274,26 @@ found only by printing every message this code can produce and reading them: nam
 vocabulary `Meaningless` already uses.
 *Depends:* D1. *Source:* §6, §13 test 4.
 
-☐ **D3. The fourth binding demotes rather than refuses. Own commit, do not bundle.** A file fitted
+✅ **D3. The fourth binding demotes rather than refuses. Own commit, do not bundle.** A file fitted
 from a different census of the same cohort is still interpretable, so every number in it is marked
 `Supplied` and the run carries on. **Demotion is per-file, not per-number.** Its failure is silent:
 the genotypes are identical and only the warrants move, so the test asserts both — same calls, every
 warrant `Supplied`.
+
+**Landed 2026-08-31**, with the tract ladder's bottom-rung warrant made carriable in its own commit
+first, on the owner's ruling. `to_run_parameters_for` is the whole of §6 in one door: `validate`,
+the three refusals, the census, the projection. **The demotion happens to the file** — five public
+warrants, then one projection — which is the shortest way to be *per-file and not per-number*, and
+the walk destructures without `..` so a sixth warranted number stops it compiling.
+
+**⚑ "Every warrant `Supplied`" is the one clause of this step that cannot hold**, and the reason is
+the owner's own ruling: the demotion is `weaker_of(file's warrant, Supplied)`, and `Provenance`
+ranks `Supplied` above `Defaulted`, so assigning would *promote* every defaulted number into a
+claim that somebody chose a value nobody chose. What the test asserts is **no warrant stronger than
+`Supplied`, and none promoted**. Recorded in `PROJECT_STATUS.md`; §13 is the owner's to correct.
+
+**⚑ And the door cannot be called by direct mode**, which has no census — the largest of three
+questions this milestone hands back.
 *Depends:* D2. *Source:* §2.1, §6, §13 test 5.
 
 > **Checkpoint D:** a mismatched file is refused or demoted, and which one is never a surprise.

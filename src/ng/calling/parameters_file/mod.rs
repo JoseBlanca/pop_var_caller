@@ -122,11 +122,19 @@
 //! sample list, which is the failure the previous convention exists to prevent; the sequencing
 //! batching is written as named rows for that reason rather than as two bare integer arrays.
 //!
-//! # Four files, and which of them does what
+//! # The files, and which of them does what
 //!
-//! The shape is here. The text a run writes is `to_toml`, the projection from a run's assembled
-//! parameters onto this shape is `from_run_parameters`, and reading that text back is
-//! `from_toml`.
+//! The shape is here. The text a run writes is `to_toml` and reading it back is `from_toml`; the
+//! projection from a run's assembled parameters onto this shape is `from_run_parameters` and the
+//! projection back is `to_run_parameters`; `validate` refuses a file that parses and means
+//! nothing; and `bindings` is what the file is bound to — the two derived values of §3.1, the
+//! three refusals of §6 and the fourth binding's demotion.
+//!
+//! **Three ways in, and they answer three different questions.** [`ParametersFile::from_toml`] asks
+//! whether the text is this shape. [`ParametersFile::to_run_parameters`] asks whether it means
+//! something, and gives the parameters it means.
+//! [`ParametersFile::to_run_parameters_for`] asks whether it means something **about this run**,
+//! and is the one a run calls.
 //!
 //! # Four things the shape settled before either the writer or the reader existed
 //!
@@ -162,6 +170,7 @@ mod to_run_parameters;
 mod to_toml;
 mod validate;
 
+pub use bindings::ParametersForThisRun;
 pub use to_run_parameters::RunParametersFromFile;
 
 use serde::{Deserialize, Serialize};
