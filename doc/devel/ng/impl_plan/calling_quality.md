@@ -221,7 +221,7 @@ bind** while the deficit rule and the 0.9 guard stand — the first puts the sha
 `1 / total_reads` wherever the tail is reached, the second returns before the ceiling. Both are
 kept as production has them, as the net under two constants somebody may move.
 
-**C2. The strand and read-position penalty, with its ramp.**  ☐
+**C2. The strand and read-position penalty, with its ramp.**  ✅
 The larger of two tails — the alternative reads' forward-strand fraction, and their placed-left
 fraction — each taken against **the reference reads' own fraction at the same site**, clamped to
 `[0.01, 0.99]`, falling back to one half where there are no reference reads. Using the reference

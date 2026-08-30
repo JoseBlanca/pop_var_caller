@@ -442,6 +442,94 @@ fn as_penalty(phred: f64) -> Phred {
     )
 }
 
+// ---------------------------------------------------------------------------------------
+// The second test: are the alternative reads a fair sample of the site's reads?
+// ---------------------------------------------------------------------------------------
+
+/// **How much of the site quality the alternative reads' *provenance* does not support.**
+///
+/// A real variant's reads come off both strands and sit at varied places within the read; an
+/// artifact's often pile on one strand or at one end. This charges the improbability of the
+/// alternative reads' forward-strand share, and of their placed-left share — **the larger of the
+/// two**, since either alone is evidence the site is an artifact.
+///
+/// **The expectation is the reference reads' own share at the same site, not one half.** A locus
+/// whose coverage is one-sided for innocent reasons — the edge of a capture target, a repeat that
+/// only one orientation maps into — has reference reads that are one-sided too, and comparing the
+/// alternative reads against them rather than against a fixed half is what keeps the test from
+/// charging the whole locus for its neighbourhood (§6.2).
+///
+/// **And it is ramped in, because at two or three alternative reads it has no power.** See
+/// [`BIAS_RAMP_NO_POWER_BELOW`], which carries what removing the ramp cost and what restoring it
+/// bought.
+///
+/// Production's, inline in [`refine_qual`](../../../../src/vcf/qual_refine.rs).
+pub fn strand_and_read_position_penalty(counts: &ArtifactTestCounts) -> Phred {
+    if counts.alternative_reads < 1.0 {
+        return NO_PENALTY;
+    }
+    let expected_forward_share =
+        reference_share(counts.reference_forward_reads, counts.reference_reads);
+    let expected_placed_left_share =
+        reference_share(counts.reference_placed_left_reads, counts.reference_reads);
+    let unramped = two_sided_binomial_tail_phred(
+        counts.alternative_forward_reads,
+        counts.alternative_reads,
+        expected_forward_share,
+    )
+    .max(two_sided_binomial_tail_phred(
+        counts.alternative_placed_left_reads,
+        counts.alternative_reads,
+        expected_placed_left_share,
+    ));
+    as_penalty(unramped * bias_test_power(counts.alternative_reads))
+}
+
+/// **What share of the reference reads did the thing** — the expectation the alternative reads
+/// are weighed against.
+///
+/// `0.5` where there are no reference reads at all: with nothing to compare against, an even
+/// split is the assumption that charges least. Clamped away from both ends because the binomial
+/// tail takes a logarithm there, and because a site where *every* reference read is on one strand
+/// would otherwise make a single opposite-strand alternative read infinitely surprising.
+fn reference_share(reference_reads_that_did_it: f64, reference_reads: f64) -> f64 {
+    if reference_reads > 0.0 {
+        (reference_reads_that_did_it / reference_reads)
+            .clamp(REFERENCE_SHARE_FLOOR, REFERENCE_SHARE_CEILING)
+    } else {
+        0.5
+    }
+}
+
+/// **How much of the raw strand and read-position penalty is charged**, from nothing at
+/// [`BIAS_RAMP_NO_POWER_BELOW`] alternative reads or fewer to all of it at
+/// [`BIAS_RAMP_FULL_POWER_AT`] or more, linear between.
+///
+/// This is not a correction for multiple testing or a confidence adjustment; it is a statement
+/// that **the test cannot tell a real heterozygote's chance pile-up from an artifact's** until
+/// there are enough alternative reads for the pile-up to mean something. Production's
+/// `bias_power_factor`.
+fn bias_test_power(alternative_reads: f64) -> f64 {
+    if alternative_reads <= BIAS_RAMP_NO_POWER_BELOW {
+        0.0
+    } else if alternative_reads >= BIAS_RAMP_FULL_POWER_AT {
+        1.0
+    } else {
+        (alternative_reads - BIAS_RAMP_NO_POWER_BELOW)
+            / (BIAS_RAMP_FULL_POWER_AT - BIAS_RAMP_NO_POWER_BELOW)
+    }
+}
+
+/// **The reference reads' share is held inside `[0.01, 0.99]`**, which is a wider clamp than the
+/// allele-balance test's and, unlike that one, **binds on real data**: a locus every one of whose
+/// reference reads is on the forward strand is an ordinary thing to meet, and without the clamp a
+/// single reverse-strand alternative read there is charged the tail's whole 3,000-Phred floor.
+/// Production's, at the same value.
+const REFERENCE_SHARE_FLOOR: f64 = 0.01;
+
+/// The other end of [`REFERENCE_SHARE_FLOOR`]'s clamp.
+const REFERENCE_SHARE_CEILING: f64 = 0.99;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +800,184 @@ mod tests {
         );
         assert_eq!(
             allele_balance_penalty(&balanced_counts(10.0, 0.0, 5.0)).get(),
+            0.0
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The strand and read-position test
+    // -----------------------------------------------------------------------------------
+
+    /// A locus whose reference reads split evenly on both axes, with the alternative reads'
+    /// two counts given, so a fixture says only what it is about.
+    fn strand_counts(
+        reference_reads: f64,
+        alternative_reads: f64,
+        alternative_forward_reads: f64,
+        alternative_placed_left_reads: f64,
+    ) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads,
+            reference_forward_reads: reference_reads / 2.0,
+            reference_placed_left_reads: reference_reads / 2.0,
+            alternative_reads,
+            alternative_forward_reads,
+            alternative_placed_left_reads,
+            total_reads: reference_reads + alternative_reads,
+            // Whatever the called genotypes expect is the other test's business; a value that
+            // matches the split keeps this fixture from being about two things at once.
+            genotype_expected_alternative_reads: alternative_reads,
+        }
+    }
+
+    /// **Alternative reads drawn as evenly as the reference reads cost nothing.** Twenty of
+    /// forty on each axis, against reference reads split down the middle — the ordinary case.
+    #[test]
+    fn alternative_reads_as_evenly_drawn_as_the_reference_cost_nothing() {
+        let counts = strand_counts(60.0, 40.0, 20.0, 20.0);
+        assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
+    }
+
+    /// **Forty alternative reads all on one strand are charged 111.6 Phred**, where the
+    /// reference reads at the same site split evenly. This is the artifact shape the test is
+    /// named for.
+    #[test]
+    fn a_one_strand_pile_up_at_depth_is_charged() {
+        let counts = strand_counts(60.0, 40.0, 40.0, 20.0);
+        let penalty = f64::from(strand_and_read_position_penalty(&counts).get());
+        assert!(
+            (penalty - 117.40).abs() < 0.01,
+            "forty of forty on the forward strand: {penalty}"
+        );
+    }
+
+    /// **The larger of the two axes is what is charged.** The same forty reads, this time split
+    /// evenly by strand but every one placed left, cost the same 117.4 — so a site whose
+    /// artifact shows in only one of the two is caught by that one.
+    #[test]
+    fn either_axis_alone_is_enough_to_charge_a_site() {
+        let by_strand = strand_and_read_position_penalty(&strand_counts(60.0, 40.0, 40.0, 20.0));
+        let by_position = strand_and_read_position_penalty(&strand_counts(60.0, 40.0, 20.0, 40.0));
+        assert_eq!(by_strand, by_position);
+        assert!(by_strand.get() > 100.0);
+    }
+
+    /// **Three alternative reads on one strand are charged exactly nothing, and five are
+    /// charged half.**
+    ///
+    /// This is the ramp, and it is the reason the test can be kept at all. Without it, three
+    /// reads landing on one strand by chance — which happens one time in four at an even split —
+    /// took genuine low-coverage heterozygotes for artifacts and charged them 10 to 17 Phred,
+    /// which is harmless where the baseline is in the hundreds and fatal at 5×.
+    ///
+    /// **Measured: the unramped penalty at five reads is 12.04 Phred and what is charged is
+    /// 6.02**, exactly half, because five sits halfway between the ramp's three and seven.
+    #[test]
+    fn the_ramp_charges_nothing_at_three_reads_and_half_at_five() {
+        let three = strand_and_read_position_penalty(&strand_counts(60.0, 3.0, 3.0, 1.5));
+        assert_eq!(
+            three.get(),
+            0.0,
+            "three alternative reads have no power, so the test says nothing about them"
+        );
+
+        let five =
+            f64::from(strand_and_read_position_penalty(&strand_counts(60.0, 5.0, 5.0, 2.5)).get());
+        let unramped = two_sided_binomial_tail_phred(5.0, 5.0, 0.5);
+        assert!(
+            (unramped - 12.041).abs() < 0.01,
+            "five of five on one strand against an even expectation: {unramped}"
+        );
+        assert!(
+            (five - unramped / 2.0).abs() < 0.01,
+            "five reads sit halfway along the ramp from three to seven, so half the penalty is \
+             charged: {five} against {unramped}"
+        );
+
+        let seven =
+            f64::from(strand_and_read_position_penalty(&strand_counts(60.0, 7.0, 7.0, 3.5)).get());
+        assert!(
+            (seven - two_sided_binomial_tail_phred(7.0, 7.0, 0.5)).abs() < 0.01,
+            "seven reads are the top of the ramp and pay in full: {seven}"
+        );
+    }
+
+    /// **A site whose reference reads are one-sided does not charge its alternative reads for
+    /// it.** Every reference read on the forward strand and every alternative read too: the
+    /// expectation is read from the reference, so the alternative reads look exactly as expected
+    /// and cost nothing on that axis.
+    ///
+    /// Comparing against a fixed one half instead would charge this site 117.4 Phred — the
+    /// number a caller would take off every locus at the edge of a capture target.
+    #[test]
+    fn a_one_sided_site_charges_nothing_when_both_alleles_lean_the_same_way() {
+        let counts = ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: 60.0,
+            reference_forward_reads: 60.0,
+            reference_placed_left_reads: 30.0,
+            alternative_reads: 40.0,
+            alternative_forward_reads: 40.0,
+            alternative_placed_left_reads: 20.0,
+            total_reads: 100.0,
+            genotype_expected_alternative_reads: 40.0,
+        };
+        assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
+
+        let against_a_fixed_half = two_sided_binomial_tail_phred(40.0, 40.0, 0.5);
+        assert!(
+            (against_a_fixed_half - 117.40).abs() < 0.01,
+            "what a fixed expectation of one half would have charged: {against_a_fixed_half}"
+        );
+    }
+
+    /// **A locus with no reference reads falls back to an even expectation.** Nothing to compare
+    /// against, so the assumption that charges least is the one taken — and the clamp keeps the
+    /// fall-back from ever being zero or one.
+    #[test]
+    fn no_reference_reads_falls_back_to_an_even_expectation() {
+        assert_eq!(reference_share(0.0, 0.0), 0.5);
+        let counts = strand_counts(0.0, 40.0, 20.0, 20.0);
+        assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
+    }
+
+    /// **The reference share is clamped, and unlike the other test's clamp this one binds on
+    /// ordinary data.** Every reference read on one strand is a real thing to meet; without the
+    /// clamp a single opposite-strand alternative read there is weighed against a probability of
+    /// zero and charged the tail's floor.
+    #[test]
+    fn a_wholly_one_sided_reference_is_clamped_off_the_endpoint() {
+        assert_eq!(reference_share(60.0, 60.0), REFERENCE_SHARE_CEILING);
+        assert_eq!(reference_share(0.0, 60.0), REFERENCE_SHARE_FLOOR);
+
+        // What the clamp is worth: one alternative read of forty on the other strand, at a site
+        // whose every reference read leans one way.
+        let counts = ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: 60.0,
+            reference_forward_reads: 60.0,
+            reference_placed_left_reads: 30.0,
+            alternative_reads: 40.0,
+            alternative_forward_reads: 39.0,
+            alternative_placed_left_reads: 20.0,
+            total_reads: 100.0,
+            genotype_expected_alternative_reads: 40.0,
+        };
+        let penalty = f64::from(strand_and_read_position_penalty(&counts).get());
+        assert!(
+            penalty.is_finite() && penalty < 10.0,
+            "one read of forty against the site's own lean is a small charge, not the tail's \
+             floor: {penalty}"
+        );
+    }
+
+    /// **A locus with no alternative reads is charged nothing.** As with the other test, no such
+    /// summary reaches here from a run; this is where the division by zero would be.
+    #[test]
+    fn a_locus_with_no_alternative_reads_is_charged_nothing_by_the_strand_test() {
+        assert_eq!(
+            strand_and_read_position_penalty(&strand_counts(60.0, 0.0, 0.0, 0.0)).get(),
             0.0
         );
     }
