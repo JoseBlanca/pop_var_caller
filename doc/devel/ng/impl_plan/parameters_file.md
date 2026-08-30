@@ -204,11 +204,22 @@ nearer 79 MB — and both are floors, since a real cohort's read-group ids and b
 are wider than this fixture's.
 *Depends:* C3. *Source:* §1.2 goal 1, §13 test 1.
 
-☐ **C5. The five states survive the round trip. Own commit, do not bundle.** One fixture per row of
+✅ **C5. The five states survive the round trip. Own commit, do not bundle.** One fixture per row of
 §5, each built so that collapsing the two states it separates *changes an answer* — not merely so
 they differ. An absent contamination table gives an uncontaminated run; a zero fraction with
 non-zero counts gives a measured-and-clean read group; a defaulted scale of 1.0 does not read back
 as fitted.
+
+**Landed 2026-08-30, and the answer is not the same kind of thing for all five rows.** Two change
+a number a locus is scored against — a stratum's length spectrum is the prior every tract of it is
+seeded from, and a `(stratum × slippage group)` with no row sends the caller to the shipped stutter
+model, which expects one read in twenty to come back a repeat short where a slip rate of zero
+expects none. **Three change only what the run says about itself**, and that is the finding rather
+than a weakness: a defaulted multiplier of 1.0 and a fitted one multiply by the same number, and
+the three-term read likelihood at a fraction of zero equals the two-term one bit for bit. So the
+warrant a call folds and the report an output prints are the only things that separate those
+states — which is exactly what §5's own sentence says. Five mutations against the projection, one
+a row, each failed its own row's test.
 *Depends:* C4. *Source:* §5, §13 test 3.
 
 > **Checkpoint C:** the round trip holds on a real fit and the five states are distinct through it.

@@ -696,7 +696,7 @@ mod tests {
     /// **Step D2's job is to compare this against the run's own**, and this is not that: it is
     /// the table the file *says* the numbers were fitted from, which is the only one a round
     /// trip through the file can use.
-    fn the_files_read_groups(file: &ParametersFile) -> ReadGroups {
+    pub(super) fn the_files_read_groups(file: &ParametersFile) -> ReadGroups {
         let lanes: Vec<(&str, &str, &str)> = file
             .fitted_from
             .read_groups
@@ -1976,6 +1976,436 @@ mod the_north_star_round_trip {
             back.parameters.ssr_slippage_fits().at(ReadGroupId(0), 2, 6),
             Err(NoSlippage::UnknownReadGroup),
             "a run that declared no slippage group says so, rather than answering under one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_five_states_survive_the_round_trip {
+    //! **Step C5: absent, zero and default are three different claims, and collapsing any two of
+    //! them changes an answer.**
+    //!
+    //! Spec §5 is a table of five rows and one sentence — *`Option<T>` is absence, never a
+    //! sentinel, and a warrant is carried rather than inferred from the value*. The plan asks for
+    //! a fixture per row **built so that collapsing the two states it separates changes an
+    //! answer, not merely so they differ**, because a test that only shows two values are unequal
+    //! passes for a reader who has collapsed them into a third thing.
+    //!
+    //! # The answer is not the same kind of thing for all five rows, and saying which is the
+    //! point
+    //!
+    //! **Two of the five change a number a locus is scored against**, and those are the expensive
+    //! ones: a stratum's length spectrum is the prior every tract of it is seeded from, and a
+    //! `(stratum × slippage group)` with no row sends the caller to a shipped stutter model where
+    //! a zero slip rate would tell it no read of that stratum can ever report a neighbouring
+    //! length.
+    //!
+    //! **Three change what the run says about itself** — the report an output prints, and the
+    //! warrant every call resting on that number carries — and change no number it computes. That
+    //! is not a weaker finding; it is the finding. A defaulted multiplier of 1.0 and a fitted one
+    //! of 1.0 multiply every read's error probability by exactly the same number, and a
+    //! contamination fraction of zero gives the three-term read likelihood bit-for-bit what the
+    //! two-term one gives (`likelihood::ssr`'s own
+    //! `a_contamination_fraction_of_zero_is_the_two_term_form`). So **the warrant and the report
+    //! are the only things that tell those states apart, and a reader that inferred either from
+    //! the value would have lost the distinction with nothing to notice**. Spec §5's own sentence
+    //! says so; these tests are what make it true of the code.
+    //!
+    //! **What is new here, and what restates a neighbour.** The five tests overlap the module's
+    //! other two: the round trips already carry the *shapes* through. What only these have is the
+    //! **answer** each collapse changes — the run's report for rows 1 and 2, the warrant a call
+    //! folds for row 3, the prior's own numbers for row 4, and the stutter model a read is scored
+    //! against for row 5 — and, in row 1, the one file nothing else in the tree builds: a
+    //! contamination table of *measured* zeros, which is legal, projects to a mixture, and is the
+    //! collapse §5's first row is actually about.
+
+    use super::super::tests::a_file_using_every_shape;
+    use super::super::{
+        ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, ParametersFile,
+        StratumLengthSpectrumRow, Warrant,
+    };
+    use super::*;
+    // **The one helper both test modules need**, rather than a second copy of it.
+    use super::tests::the_files_read_groups;
+    use crate::ng::alignment::StutterModel;
+    use crate::ng::calling::likelihood::stutter_rates::stutter_model_for;
+    use crate::ng::calling::run_report::ContaminationUsed;
+    use crate::ng::parameter_estimation::joint::ssr_fit::Slippage;
+    use crate::ng::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, NoSlippage};
+
+    fn a_run_from(file: &ParametersFile) -> RunParameters {
+        file.to_run_parameters()
+            .unwrap_or_else(|error| panic!("{error}"))
+            .parameters
+    }
+
+    /// **Row 1. No contamination table at all is an uncontaminated run**, and a table of zeros is
+    /// not the same claim.
+    ///
+    /// **The answer that changes is which formula the read likelihood runs.** An uncontaminated
+    /// run computes its plain form; a run carrying a mixture computes the three-term one at every
+    /// locus, against a contaminant population drawn from the batching — so a reader that wrote
+    /// zeros for the absent table would have every locus of the run scored through a term that
+    /// says a share of every read came from somebody else and that share is nothing.
+    ///
+    /// **And the longhand form is refused outright**, which is the second half: a table in which
+    /// no row was measured is the uncontaminated run written out, and `validate` says so rather
+    /// than letting it become a run.
+    #[test]
+    fn an_absent_contamination_table_is_not_a_table_of_zeros() {
+        let read_groups = the_files_read_groups(&a_file_using_every_shape());
+
+        let mut absent = a_file_using_every_shape();
+        absent.contamination = None;
+        let uncontaminated = a_run_from(&absent);
+        assert!(uncontaminated.view().contamination_is_absent());
+        assert_eq!(
+            uncontaminated.report(&read_groups).contamination(),
+            &ContaminationUsed::NoneFitted,
+            "and the run says so, which is what an output prints beside the calls"
+        );
+
+        // The same run with the table written out in full, every fraction zero and every count
+        // real — the collapse spec §5's first row forbids.
+        let mut longhand = a_file_using_every_shape();
+        longhand.contamination = Some(super::super::Contamination {
+            by_read_group: absent
+                .fitted_from
+                .read_groups
+                .iter()
+                .map(|row| ContaminationRow {
+                    read_group: row.read_group,
+                    library: row.library.clone(),
+                    measurement: Some(ContaminationMeasurement {
+                        share_of_reads_from_another_sample: 0.0,
+                        markers_with_reads: 4_211,
+                        reads_on_markers: 90_233,
+                        fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                    }),
+                })
+                .collect(),
+        });
+        let collapsed = a_run_from(&longhand);
+        assert!(
+            !collapsed.view().contamination_is_absent(),
+            "a table of measured zeros is a mixture, and every locus is scored through it"
+        );
+        assert!(
+            matches!(
+                collapsed.report(&read_groups).contamination(),
+                ContaminationUsed::PerReadGroup(_)
+            ),
+            "and the run reports it as one"
+        );
+
+        // **And the same table with no row measured is refused**, rather than becoming a run:
+        // that is the uncontaminated state written longhand, and it is the file a reader who
+        // collapsed the two would produce.
+        let mut every_row_unmeasured = longhand;
+        for row in &mut every_row_unmeasured
+            .contamination
+            .as_mut()
+            .expect("a table")
+            .by_read_group
+        {
+            row.measurement = None;
+        }
+        let error = every_row_unmeasured
+            .to_run_parameters()
+            .expect_err("an uncontaminated run written longhand is not a run");
+        assert!(
+            format!("{error}").contains("leave the section out instead"),
+            "{error}"
+        );
+    }
+
+    /// **Row 2. Measured and found clean is not the same as never measured**, and only the
+    /// evidence counts tell them apart.
+    ///
+    /// **The answer that changes is what the run reports for that library.** Both are a fraction
+    /// of zero, so both correct nothing; what differs is whether the run may say the library was
+    /// looked at. A cohort where one lane was measured and found clean and another could not be
+    /// measured at all is a cohort where one number is a result and the other is a gap, and an
+    /// output that printed both as "0" would be reporting a gap as a finding.
+    #[test]
+    fn a_zero_fraction_with_evidence_is_not_an_unmeasured_one() {
+        let read_groups = the_files_read_groups(&a_file_using_every_shape());
+        // **The read group, found by its own row rather than by a position.** The fixture's
+        // rows happen to be in read-group order, so an index would agree today and would stop
+        // agreeing the first time a row moved — which has happened once already in this file.
+        let clean_at = a_file_using_every_shape()
+            .contamination
+            .expect("the fixture has a table")
+            .by_read_group
+            .iter()
+            .find(|row| {
+                row.measurement
+                    .as_ref()
+                    .is_some_and(|found| found.share_of_reads_from_another_sample == 0.0)
+            })
+            .expect("one lane was measured and found clean")
+            .read_group as usize;
+
+        let file = a_file_using_every_shape();
+        let measured = a_run_from(&file);
+        let view = measured.view().contamination_by_read_group()[clean_at];
+        assert_eq!(view.fraction, 0.0);
+        assert!(
+            view.was_measured(),
+            "a zero fraction with evidence behind it is a measurement"
+        );
+
+        let mut collapsed = a_file_using_every_shape();
+        collapsed
+            .contamination
+            .as_mut()
+            .expect("a table")
+            .by_read_group[clean_at]
+            .measurement = None;
+        let unmeasured = a_run_from(&collapsed);
+        let view = unmeasured.view().contamination_by_read_group()[clean_at];
+        assert_eq!(
+            view.fraction, 0.0,
+            "the fraction is the same number in both, which is the whole difficulty"
+        );
+        assert!(!view.was_measured());
+
+        // **What the run says about that library differs**, and it is the only thing that does.
+        let of_the_clean_lane = |run: &RunParameters| {
+            let report = run.report(&read_groups);
+            let ContaminationUsed::PerReadGroup(rows) = report.contamination() else {
+                panic!("this run fitted contamination somewhere")
+            };
+            rows.iter()
+                .find(|row| row.read_group.get() as usize == clean_at)
+                .expect("the lane has a row")
+                .was_measured()
+        };
+        assert_eq!(
+            (of_the_clean_lane(&measured), of_the_clean_lane(&unmeasured)),
+            (true, false)
+        );
+    }
+
+    /// **Row 3. A defaulted multiplier of 1.0 is not a fitted one**, and nothing a run computes
+    /// can tell them apart.
+    ///
+    /// **That is why this row is in spec §5 at all.** The two multiply every read's reported error
+    /// probability by exactly the same number, so no score, no genotype and no quality differs —
+    /// the *only* thing that differs is the warrant, which is why §5's rule is that a warrant is
+    /// carried and never inferred from the value. **The answer that changes is what the run
+    /// writes down**: a run that read a defaulted scale and wrote `fitted_here` would tell its
+    /// next reader that a library nothing could be fitted for was calibrated against a
+    /// measurement.
+    #[test]
+    fn a_defaulted_multiplier_of_one_is_not_a_fitted_one() {
+        // Likewise found by its own row: the one multiplier the fixture marks `defaulted`.
+        let defaulted_at = a_file_using_every_shape()
+            .base_quality_calibration
+            .by_read_group
+            .iter()
+            .find(|row| row.error_probability_multiplier.warrant == Warrant::Defaulted)
+            .expect("one library's rate could not be fitted")
+            .read_group as usize;
+
+        let file = a_file_using_every_shape();
+        let run = a_run_from(&file);
+        let calibration = run.view().calibration_by_read_group()[defaulted_at];
+        assert_eq!(calibration.scale, 1.0);
+        assert_eq!(calibration.provenance, Provenance::Defaulted);
+
+        let mut collapsed = a_file_using_every_shape();
+        collapsed.base_quality_calibration.by_read_group[defaulted_at]
+            .error_probability_multiplier
+            .warrant = Warrant::FittedHere;
+        let collapsed_run = a_run_from(&collapsed);
+        let collapsed_calibration = collapsed_run.view().calibration_by_read_group()[defaulted_at];
+
+        assert_eq!(
+            collapsed_calibration.scale, calibration.scale,
+            "the number is the same in both — a scale of one is a legitimate fitted answer as \
+             well as the default, which is the whole of why the warrant travels with it"
+        );
+        assert_ne!(collapsed_calibration.provenance, calibration.provenance);
+
+        // **And a score that rests on this library says so, or does not.** Spec §2's rule is
+        // that consumers *combine* warrants rather than branching on them: a call resting on one
+        // fitted parameter and one defaulted one is a defaulted call. So the answer that changes
+        // is the warrant every SNP or indel call touching this library reports — which
+        // `summarise_condition`'s fold reads off exactly this field, and which is the only place
+        // in calling that reads it at all.
+        let as_a_call_would_report_it = |calibration: ReadGroupCalibration| {
+            Provenance::FittedHere.weaker_of(calibration.provenance)
+        };
+        assert_eq!(
+            (
+                as_a_call_would_report_it(calibration),
+                as_a_call_would_report_it(collapsed_calibration)
+            ),
+            (Provenance::Defaulted, Provenance::FittedHere),
+            "a call whose every other parameter was fitted is a defaulted call where this \
+             library's calibration was defaulted, and a fitted one where it was not"
+        );
+    }
+
+    /// **Row 4. A stratum with no length spectrum of its own was furnished from its period's
+    /// curves**, and giving it one changes the prior every tract of it is seeded from.
+    ///
+    /// **This row changes a number.** The length spectrum is the shape a repeat tract's genotype
+    /// prior starts from, and the concentration is how many chromosomes' worth of belief it is
+    /// held with — so a reader that invented a spectrum for a stratum that has none would seed
+    /// every tract of that class from a distribution the fit never produced, at a strength it
+    /// never chose.
+    #[test]
+    fn a_stratum_with_no_spectrum_of_its_own_falls_to_its_periods_and_the_numbers_differ() {
+        let file = a_file_using_every_shape();
+        // The fixture fits period 2 at 6 repeats and pools period 2; period 2 at 11 repeats has
+        // no spectrum of its own and falls to that pool.
+        let (period, furnished, fitted) = (2_u8, 11_u64, 6_u64);
+
+        let run = a_run_from(&file);
+        let fell_back = run
+            .ssr_slippage_fits()
+            .length_spectrum_at(period, furnished);
+        assert_eq!(fell_back.rung(), LengthSpectrumRung::PeriodsPooledTracts);
+
+        let mut collapsed = a_file_using_every_shape();
+        let its_own = StratumLengthSpectrumRow {
+            period,
+            reference_repeats: furnished,
+            concentration: 9.5,
+            shares_by_repeat_offset: vec![0.25, 0.5, 0.25],
+        };
+        collapsed
+            .repeat_tracts
+            .length_spectrum_by_stratum
+            .push(its_own);
+        collapsed
+            .repeat_tracts
+            .length_spectrum_by_stratum
+            .sort_by_key(|row| (row.period, row.reference_repeats));
+        // **The fallback concentration is left where it was**, and with two fitted strata beside
+        // it the median it claims is no longer theirs. Nothing here reads the bottom rung, and
+        // `validate` checks that key's warrant rather than its value — but a file with an
+        // invented spectrum is a file no run wrote, and this is the one number in it that says
+        // so.
+        let collapsed_run = a_run_from(&collapsed);
+        let invented = collapsed_run
+            .ssr_slippage_fits()
+            .length_spectrum_at(period, furnished);
+
+        assert_eq!(invented.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_ne!(
+            invented.concentration(),
+            fell_back.concentration(),
+            "the strength the prior is held with is a different number: 9.5 chromosomes against \
+             the {} its period pooled",
+            fell_back.concentration()
+        );
+        assert_ne!(invented.fitted_weights(), fell_back.fitted_weights());
+        // **And the stratum that was fitted is untouched**, so this is a difference at the
+        // stratum the row is about rather than a change to the whole period.
+        assert_eq!(
+            collapsed_run
+                .ssr_slippage_fits()
+                .length_spectrum_at(period, fitted)
+                .concentration(),
+            run.ssr_slippage_fits()
+                .length_spectrum_at(period, fitted)
+                .concentration()
+        );
+    }
+
+    /// **Row 5. A `(stratum × slippage group)` with no row put no read there**, and a slip rate of
+    /// zero says something a fit never found.
+    ///
+    /// **This row changes a number too, and the number is the one a read is scored against.**
+    /// `TractScoringFits::gather_for_locus` takes the two answers to different places: a lookup
+    /// that fails takes `StutterModel::hipstr_shipped`, and one that succeeds takes
+    /// `stutter_model_for` on the numbers it found. So the share of reads the model expects to
+    /// come back one repeat short is **0.05 under the shipped model and exactly 0 under a slip
+    /// rate of zero**. At zero the emission for such a read collapses to exactly nothing, and the
+    /// only term left to explain it is the row's outlier weight — one read in a hundred by
+    /// default. **The genotype is not ruled out**: it is charged the junk rate for every read
+    /// that slipped, which at a stratum where reads do slip is every read of one allele.
+    #[test]
+    fn a_pair_with_no_row_is_not_a_slip_rate_of_zero() {
+        let file = a_file_using_every_shape();
+        // The fixture's read group 2 is the only one in slippage group 1, and period 1 at 30
+        // repeats has a row for group 0 alone.
+        let (silent, period, repeats) = (ReadGroupId(2), 1_u8, 30_u64);
+
+        let run = a_run_from(&file);
+        assert_eq!(
+            run.ssr_slippage_fits().at(silent, period, repeats),
+            Err(NoSlippage::GroupPutNoReadHere { slippage_group: 1 }),
+            "the lookup names the group it looked under, and says it put no read here"
+        );
+
+        // **What the caller does with each answer**, which is where the number a read is scored
+        // against comes from: a failed lookup takes the shipped model, a successful one takes the
+        // numbers it found (`TractScoringFits::gather_for_locus`).
+        let shipped = StutterModel::hipstr_shipped();
+        assert_eq!(
+            shipped.whole_repeat_shorter_share(),
+            0.05,
+            "the model a cell with no numbers falls to expects one read in twenty to come back a \
+             repeat short"
+        );
+        let never_slips = stutter_model_for(&Slippage {
+            level: 0.0,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        });
+        assert_eq!(
+            never_slips.whole_repeat_shorter_share(),
+            0.0,
+            "a slip rate of zero expects none: every direction share is that rate times a share \
+             of it, so a zero rate is a model that says this stratum's reads never slip"
+        );
+
+        // And what the stratum's own fitted numbers give, which is the answer this file carries
+        // for the group that *did* put reads there.
+        let fitted = run
+            .ssr_slippage_fits()
+            .at(ReadGroupId(0), period, repeats)
+            .expect("slippage group 0 has numbers at this stratum");
+        assert!(
+            stutter_model_for(&fitted.slippage).whole_repeat_shorter_share() > 0.0,
+            "a fitted stratum expects a real share of its reads to come back short"
+        );
+
+        // **The collapse is a row of zeros**, and the lookup then answers where it answered
+        // nothing — which is the whole difference.
+        let mut collapsed = a_file_using_every_shape();
+        let mut zeroed = collapsed.repeat_tracts.slippage_by_stratum_and_group
+            [super::super::tests::THE_ROW_WHOSE_SHARES_BLEND]
+            .clone();
+        zeroed.slippage_group = 1;
+        zeroed.share_of_reads_that_slip = 0.0;
+        // **And no slipped-read count beside it**, so the invented row models only the collapse
+        // this test is about rather than also claiming twelve thousand slipped reads at a
+        // stratum where none slips.
+        zeroed
+            .share_of_reads_that_slip_origin
+            .expected_slipped_reads = None;
+        if let Some(shares) = &mut zeroed.shorter_share_and_fall_off_origin {
+            shares.expected_slipped_reads = None;
+        }
+        collapsed
+            .repeat_tracts
+            .slippage_by_stratum_and_group
+            .push(zeroed);
+        let answered = a_run_from(&collapsed)
+            .ssr_slippage_fits()
+            .at(silent, period, repeats)
+            .expect("the invented row answers");
+        assert_eq!(answered.slippage.level, 0.0);
+        assert_eq!(
+            stutter_model_for(&answered.slippage).whole_repeat_shorter_share(),
+            0.0,
+            "and the model that library's reads are scored against at this stratum then expects \
+             none of them to slip, where the absent row would have taken the shipped 0.05"
         );
     }
 }
