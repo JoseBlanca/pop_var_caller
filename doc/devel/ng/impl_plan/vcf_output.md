@@ -163,7 +163,7 @@ order while sorting `GT`, so the two fields need not correspond; the fixture tha
 het whose sorted order differs from candidate order.
 *Depends:* B2. *Source:* spec §7; [`vcf_out.rs:372-505`](../../../../src/ssr/cohort/vcf_out.rs).
 
-☐ **B4. Number formatting, pinned as a table. Own commit, do not bundle.** QUAL to one decimal;
+✅ **B4. Number formatting, pinned as a table. Own commit, do not bundle.** QUAL to one decimal;
 the stated precision for `AF`, the penalties and the MQ family; integer fields as integers. One
 formatting function per type, one test table of adversarial values — the spec makes the rendering
 part of the format (§11), so a formatting choice is a format change from here on.

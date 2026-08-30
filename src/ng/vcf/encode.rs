@@ -48,6 +48,46 @@ pub const MAPPING_QUALITY_DECIMALS: usize = 2;
 /// recovering the uncorrected quality the way spec §6 says it does.
 pub const PENALTY_DECIMALS: usize = 1;
 
+/// **A site or genotype quality, as the file writes it** — [`QUALITY_DECIMALS`] places.
+///
+/// **Negative zero cannot reach here**, and that is upstream's doing rather than this
+/// function's: [`Phred::try_new`] normalises the sign at its only door, because `from_log_prob`
+/// produces exactly `-0.0` at a log-probability of zero and a `QUAL` column cannot carry a minus
+/// sign on a certainty. Production's repeat-tract writer adds `0.0` at write time for the same
+/// reason; ng does not need to, and the test table pins that it does not need to.
+#[must_use]
+pub fn quality_text(quality: Phred) -> String {
+    format!("{:.*}", QUALITY_DECIMALS, quality.get())
+}
+
+/// An allele frequency, as the file writes it — [`FREQUENCY_DECIMALS`] places.
+///
+/// **A frequency below the precision renders as zero**, which is a real limit rather than a
+/// defect: at six places the smallest distinguishable value is one in a million, and a cohort
+/// would need 500,000 diploid samples for a singleton to fall under it.
+#[must_use]
+pub fn frequency_text(frequency: f64) -> String {
+    format!("{frequency:.*}", FREQUENCY_DECIMALS)
+}
+
+/// A pooled mapping quality or a difference of two, as the file writes it —
+/// [`MAPPING_QUALITY_DECIMALS`] places.
+///
+/// Signed: `MQDIFF` is negative exactly when an alternative's reads map worse than the
+/// reference's, which is the multi-mapper signal the field exists to publish.
+#[must_use]
+pub fn mapping_quality_text(mapping_quality: f64) -> String {
+    format!("{mapping_quality:.*}", MAPPING_QUALITY_DECIMALS)
+}
+
+/// An artifact penalty, as the file writes it — [`PENALTY_DECIMALS`] places, the same as a
+/// quality's, so that `QUAL` plus the two penalties recovers the uncorrected quality in the
+/// file's own digits.
+#[must_use]
+pub fn penalty_text(penalty: Phred) -> String {
+    format!("{:.*}", PENALTY_DECIMALS, penalty.get())
+}
+
 /// **The seven fixed columns**, `CHROM` through `FILTER`, tab-separated and with no trailing
 /// separator — `INFO`, `FORMAT` and the sample columns follow in later steps.
 ///
@@ -75,14 +115,13 @@ pub fn fixed_columns(record: &VcfRecord, contigs: &[HeaderContig]) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        "{}\t{}\t{}\t{}\t{}\t{:.*}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         contig.name,
         written_position(record),
         MISSING_FIELD,
         padded(record.reference(), record.padding_base()),
         alternatives_column(record),
-        QUALITY_DECIMALS,
-        record.site_quality.get(),
+        quality_text(record.site_quality),
         record.filter().as_str(),
     );
     out
@@ -163,21 +202,16 @@ pub fn info_column(record: &VcfRecord) -> String {
     fields.push(format!("DP={}", total_depth(record)));
 
     if let Some(penalties) = record.artifact_penalties {
+        fields.push(format!("ABPEN={}", penalty_text(penalties.allele_balance)));
         fields.push(format!(
-            "ABPEN={:.*}",
-            PENALTY_DECIMALS,
-            penalties.allele_balance.get()
-        ));
-        fields.push(format!(
-            "SPPEN={:.*}",
-            PENALTY_DECIMALS,
-            penalties.strand_and_read_position.get()
+            "SPPEN={}",
+            penalty_text(penalties.strand_and_read_position)
         ));
     }
 
     let reference_mapq = record.allele_mapq()[0].mean();
     if let Some(mean) = reference_mapq {
-        fields.push(format!("MQREF={mean:.*}", MAPPING_QUALITY_DECIMALS));
+        fields.push(format!("MQREF={}", mapping_quality_text(mean)));
     }
     if !record.alternatives().is_empty() {
         let alternative_means: Vec<Option<f64>> = record.allele_mapq()[1..]
@@ -226,7 +260,7 @@ fn allele_frequencies(record: &VcfRecord) -> String {
         // A locus every sample was set aside at cannot reach here — the record type refuses an
         // empty cohort — but a cohort whose copies are all zero is arithmetic, not data.
         let frequency = if total > 0.0 { copies / total } else { 0.0 };
-        format!("{frequency:.*}", FREQUENCY_DECIMALS)
+        frequency_text(frequency)
     }))
 }
 
@@ -276,10 +310,7 @@ fn total_depth(record: &VcfRecord) -> u64 {
 /// One `Number=A` entry that may be undefined — a mean over no reads, or a difference against
 /// one.
 fn optional_mapping_quality(value: &Option<f64>) -> String {
-    value.map_or_else(
-        || MISSING_FIELD.to_string(),
-        |mean| format!("{mean:.*}", MAPPING_QUALITY_DECIMALS),
-    )
+    value.map_or_else(|| MISSING_FIELD.to_string(), mapping_quality_text)
 }
 
 fn join_with_commas(values: impl Iterator<Item = String>) -> String {

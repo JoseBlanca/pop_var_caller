@@ -958,3 +958,131 @@ fn every_sample_of_the_run_gets_a_column_in_the_run_s_order() {
     assert_eq!(columns.split('\t').count(), 3);
     assert_eq!(columns, "0/0:60:9:9,0\t./.:.:0:0,0\t1/1:70:8:0,8");
 }
+
+// ---------------------------------------------------------------------------
+// Number formatting — the table
+//
+// **Spec §11 makes rendering part of the format**, so these are not display choices: a value
+// written two ways is two different files, and the same run must produce the same bytes. The
+// cases below are the ones where a formatter can be quietly wrong — ties, values under the
+// precision, negative zero, and the sign that carries meaning.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_quality_renders_at_one_decimal_and_breaks_ties_to_even() {
+    let cases = [
+        (0.0_f32, "0.0"),
+        (0.5, "0.5"),
+        (2.5, "2.5"),
+        // Exact in binary, so these are genuine ties and pin the rounding rule.
+        (0.25, "0.2"),
+        (0.75, "0.8"),
+        (31.25, "31.2"),
+        (99.0, "99.0"),
+        (9999.0, "9999.0"),
+    ];
+    for (phred, expected) in cases {
+        assert_eq!(quality_text(quality(phred)), expected, "Phred {phred}");
+    }
+}
+
+#[test]
+fn a_zero_quality_never_carries_a_minus_sign() {
+    // `Phred::try_new` normalises `-0.0` at its only door, because `from_log_prob` produces
+    // exactly that at a log-probability of zero. Production's repeat-tract writer adds `0.0` at
+    // write time to fix the same thing; this asserts ng does not need to.
+    let negative_zero = Phred::try_new(-0.0).expect("negative zero is zero");
+    assert_eq!(quality_text(negative_zero), "0.0");
+    assert_eq!(penalty_text(negative_zero), "0.0");
+    assert!(!quality_text(negative_zero).starts_with('-'));
+}
+
+#[test]
+fn a_frequency_renders_at_six_decimals() {
+    let cases = [
+        (0.0_f64, "0.000000"),
+        (1.0, "1.000000"),
+        (0.5, "0.500000"),
+        // A singleton in 3,000 diploid samples — the case the precision was chosen for.
+        (1.0 / 6_000.0, "0.000167"),
+        // Below the precision: renders as zero, which needs a cohort of 500,000 to reach.
+        (1e-7, "0.000000"),
+    ];
+    for (frequency, expected) in cases {
+        assert_eq!(frequency_text(frequency), expected, "frequency {frequency}");
+    }
+}
+
+#[test]
+fn two_singleton_frequencies_a_cohort_apart_do_not_render_alike() {
+    // The reason six decimals rather than four: at four, both of these are "0.0002".
+    let in_3000_samples = 1.0 / 6_000.0;
+    let in_2000_samples = 1.0 / 4_000.0;
+    assert_ne!(
+        frequency_text(in_3000_samples),
+        frequency_text(in_2000_samples)
+    );
+}
+
+#[test]
+fn a_mapping_quality_renders_at_two_decimals_and_keeps_its_sign() {
+    let cases = [
+        (60.0_f64, "60.00"),
+        (0.0, "0.00"),
+        (33.333_333_333, "33.33"),
+        // MQDIFF is negative exactly when an alternative's reads map worse than the
+        // reference's, which is the whole signal the field publishes.
+        (-10.0, "-10.00"),
+        (-0.5, "-0.50"),
+    ];
+    for (mapping_quality, expected) in cases {
+        assert_eq!(
+            mapping_quality_text(mapping_quality),
+            expected,
+            "mapping quality {mapping_quality}"
+        );
+    }
+}
+
+#[test]
+fn the_integer_fields_are_written_as_integers() {
+    // DP, AD, AN, AC, GQ, PERIOD and REPCN are counts. None of them may acquire a decimal
+    // point: a `.0` would parse as a float in a field a reader expects to be integral.
+    let record = VcfRecord::new(
+        region_on(0, 2_000, 2_015),
+        vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
+        vec![1.0, 1.0],
+        one_sample(vec![12, 11], 7, &[0, 1]),
+        pools(&[12, 11]),
+        None,
+        quality(150.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"CA").expect("a two-base motif"),
+        )),
+    );
+
+    let info = info_column(&record);
+    for field in ["AC=1", "AN=2", "DP=30", "PERIOD=2"] {
+        assert!(info.contains(field), "{field} in {info}");
+    }
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:8,6");
+}
+
+#[test]
+fn the_same_record_renders_identically_every_time() {
+    // The determinism rule at its smallest: formatting reads only the record, so two calls on
+    // one value cannot differ. A formatter that consulted anything else would break here first.
+    let record = a_biallelic_snp();
+    let contigs = contigs();
+    assert_eq!(
+        fixed_columns(&record, &contigs),
+        fixed_columns(&record, &contigs)
+    );
+    assert_eq!(info_column(&record), info_column(&record));
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        sample_columns(&record, diploid())
+    );
+}
