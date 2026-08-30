@@ -334,6 +334,36 @@ harness = false
 name = "ng_generic_walk_probe"
 test = true
 
+# The head-encoding harness carries its own tests for the same reason: it produced the
+# measurement that closed arch §7's open question about the record head's encoding, and the
+# fixed-width arm it compares against has no other oracle. `test = true` puts them in a plain
+# `cargo test`, which is the command a developer types.
+[[example]]
+name = "ng_psp_head_encoding"
+test = true
+
+# The parity harness carries its own tests because the one thing it cannot show by passing is
+# that it is able to fail: it reports a clean run over millions of records, and a comparison that
+# had quietly stopped looking at a field would report exactly the same thing. Its tests change one
+# field at a time and require the refusal. `test = true` puts them in a plain `cargo test`.
+[[example]]
+name = "ng_psp_parity"
+test = true
+
+# The open-cost harness carries a test on the one piece of logic it has: which field of
+# `/proc/self/status` the peak is read from. `VmHWM` and `VmRSS` differ by three characters and
+# by everything that matters, and reading the wrong one turns the measurement into noise.
+[[example]]
+name = "ng_psp_open_cost"
+test = true
+
+# The skip-value harness carries a test on its one piece of logic: that a reading is the cheapest
+# of its rounds rather than the first or the mean. A noisy round would otherwise move the ratio
+# the whole step turns on.
+[[example]]
+name = "ng_psp_skip_value"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.

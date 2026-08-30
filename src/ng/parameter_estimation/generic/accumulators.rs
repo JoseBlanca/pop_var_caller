@@ -645,7 +645,9 @@ mod tests {
             // there was nothing for a wrong sum to lose: a fold routed through `f64` passed the
             // six-order merge test, which is the one test whose whole subject is that merging is
             // order-independent. These decimals do not add associatively as floats.
-            q_sum: -0.1 * f64::from(num_obs) - 0.07 * f64::from(read_group.get() + 1),
+            q_sum: crate::ng::types::SummedLogError::from_nats(
+                -0.1 * f64::from(num_obs) - 0.07 * f64::from(read_group.get() + 1),
+            ),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,

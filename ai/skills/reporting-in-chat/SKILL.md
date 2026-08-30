@@ -154,6 +154,19 @@ confirms you knew it was opaque and sent it anyway.
 
 Either the sentence carries its own meaning, or it does not go in.
 
+## Never tell the reader something is interesting — show it
+
+`clear-technical-writing` **Rule 6**, and it lands in chat at least as often as in a
+document, because a reply is where signposting feels most helpful. *"The finding I was
+not looking for"*, *"and the third is the one that matters"*, *"read this even if you
+skip the rest"* — each describes the reader's reaction instead of adding a fact.
+
+**Ordering is the signposting.** A reply already ranks its paragraphs by consequence
+(*When several things are true, lead with the one that changes what they do*); a
+sentence announcing that something is surprising duplicates that job and carries no
+information while doing it. Delete the clause: if nothing checkable is lost, it was
+decoration.
+
 ## Never assert a property without its size and its measure
 
 Carried from `CLAUDE.md`, repeated because it is the most common quiet failure:

@@ -1330,7 +1330,7 @@ impl AlleleSupportTally {
         self.sums.add_counts_of(sequence);
         // The quality is added whole here, where a read's share takes the weakest sighting's
         // mean instead — the one place the two paths differ, stated at both of them.
-        self.sums.q_sum += sequence.q_sum;
+        self.sums.q_sum += sequence.q_sum.nats();
     }
 
     /// One read's share, divided out of the sequences it showed across the locus.
@@ -1467,7 +1467,7 @@ fn share_of_one_read(
             sample,
         );
         let reads = f64::from(sequence.num_obs);
-        let mean_quality = sequence.q_sum / reads;
+        let mean_quality = sequence.q_sum.nats() / reads;
         weakest_mean_quality = Some(match weakest_mean_quality {
             Some(weakest) => weakest.max(mean_quality),
             None => mean_quality,
@@ -1641,7 +1641,7 @@ fn partials_of_sample(
                 read_group: sequence.read_group,
                 bases: sequence.bases.clone(),
                 num_reads: sequence.num_obs,
-                q_sum: sequence.q_sum,
+                q_sum: sequence.q_sum.nats(),
             });
         }
     }
@@ -2047,7 +2047,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: 3,
             num_fwd: 0,
-            q_sum: 0.0,
+            q_sum: crate::ng::types::SummedLogError::from_nats(0.0),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
@@ -3194,7 +3194,7 @@ mod tests {
         SequenceObservation {
             num_obs: reads.len() as u32,
             chain_ids: reads.to_vec(),
-            q_sum,
+            q_sum: crate::ng::types::SummedLogError::from_nats(q_sum),
             num_fwd,
             mapq_sum,
             mapq_sum_sq,
@@ -4031,7 +4031,7 @@ mod tests {
                 SequenceObservation {
                     num_obs: 0,
                     chain_ids: Vec::new(),
-                    q_sum: -4.0,
+                    q_sum: crate::ng::types::SummedLogError::from_nats(-4.0),
                     ..sequence(b"A")
                 },
             ],
@@ -4045,7 +4045,7 @@ mod tests {
                     SequenceObservation {
                         num_obs: 0,
                         chain_ids: Vec::new(),
-                        q_sum: -4.0,
+                        q_sum: crate::ng::types::SummedLogError::from_nats(-4.0),
                         ..sequence(b"T")
                     },
                 ],
@@ -4587,7 +4587,7 @@ mod tests {
             // **Not the helper's zero**, so that the assertion below reads the row rather than
             // the fixture: with `q_sum` left at `0.0` a build writing a constant zero into
             // every row would satisfy it just as well.
-            q_sum: -18.5,
+            q_sum: crate::ng::types::SummedLogError::from_nats(-18.5),
             ..sequence(b"A")
         });
         let members = [with_a_partial];

@@ -143,10 +143,12 @@ gives each in-flight segment its own source per sample over the sample's one sha
   whose drop order is load-bearing
   ([`locus_generation/mod.rs:707-737`](../../../../src/ng/locus_generation/mod.rs)). Spec §8 is
   the trap list this ownership shape honours.
-- **The psp reader** (with the encoding, spec §10): a cursor over one open psp that decodes
-  whichever blocks overlap the segment and keeps the one it is in. Its resident state is the
-  file's coarse index plus one decoded block; the per-open-file share is bounded at tens of
-  kilobytes (spec §7.2). No block is visible in its interface.
+- **The psp reader** (`src/ng/psp/`, built): a cursor over one open psp that decodes whichever
+  blocks overlap the segment and keeps the one it is in. Its resident state is the file's coarse
+  index plus one decoded block; measured, that is **123 kB a cursor**, on top of **357 kB** for
+  the open file itself on a human reference — almost all of the second being the reference's
+  contig list (spec §7.2). No block is visible in its interface. `records_from(at)` is the seek and
+  `building_only_where(…)` the predicate walk this trait's contract needs.
 
 ---
 

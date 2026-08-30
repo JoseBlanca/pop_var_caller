@@ -96,7 +96,7 @@ pub(super) mod fixtures {
                 read_group: ReadGroupId(0),
                 num_obs: 3,
                 num_fwd: 3,
-                q_sum: -6.0,
+                q_sum: crate::ng::types::SummedLogError::from_nats(-6.0),
                 mapq_sum: 180,
                 mapq_sum_sq: 10_800,
                 placed_left: 0,
@@ -164,7 +164,7 @@ pub(super) mod fixtures {
         ran_out.bases = Box::from(&b"AAAAAT"[..]);
         ran_out.num_obs = 2;
         ran_out.chain_ids = vec![4, 5];
-        ran_out.q_sum = -4.5;
+        ran_out.q_sum = crate::ng::types::SummedLogError::from_nats(-4.5);
         ran_out.read_witness = ReadWitness::from_left(6, deletion.locus_len())
             .expect("six positions inside a twenty-six-base record");
         deletion.observations.push(ran_out);

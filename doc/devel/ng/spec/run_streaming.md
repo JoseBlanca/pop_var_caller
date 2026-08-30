@@ -487,9 +487,10 @@ ground they cover. **Yields:** variants, in genome order.
 
 **How it parallelises:** the segment loop of §3.5, one source per sample per in-flight segment.
 Each source is a psp reader's cursor over the sample's one open file; the open file's resident
-state — required to be tens of kilobytes (§7.2) — is paid once per sample, and each cursor holds
-its own current decoded block. Successive segments in one worker land in the block its cursor
-already holds far more often than not, which is what makes segment-grained segments cheap here;
+state — measured at 357 kB on a human reference and 7 kB on tomato, almost all of it the
+reference's contig list (§7.2) — is paid once per sample, and each cursor holds its own current
+decoded block. Successive segments in one worker land in the block its cursor already holds far
+more often than not, which is what makes segment-grained segments cheap here;
 two workers whose segments share a block each decode it, a duplication bounded by the look-ahead
 and paid in time, not correctness.
 
@@ -616,14 +617,25 @@ equality, and this design has none.
 Only the first is independent of the cohort size, which is the reason psp mode exists.
 
 Pricing the `PspVariantCaller` row at the far end of the committed range — three thousand
-samples, look-ahead 8, and per sample a 16 kB read buffer plus roughly 10 kB of decoded
-observations per block (both estimates, not measurements): `8 × 3,000 × 26 kB ≈ 620 MB`.
-Workable — but only because a sample costs 26 kB. At a megabyte per sample the same run needs
-24 GB. That arithmetic is what turns "keep per-sample state small" from a preference into the
-requirement below, and re-running it on real files once the encoding exists is part of open
-question 2 (§11).
+samples on a human reference — with the two costs now measured on files ng writes (§7.2). One
+open file with one cursor walking it is **480 kB**, so at look-ahead 1 the cohort's floor is
+**1.44 GB**, which is the whole of the 500 kB-a-sample budget the encoding spec sets. Every
+further unit of look-ahead adds one cursor per sample at **123 kB**, so **0.37 GB a unit**:
+look-ahead 8 comes to **4.0 GB**.
 
-### 7.2 Requirement: an open psp costs tens of kilobytes, not megabytes
+This replaces the estimate this paragraph used to carry — a 16 kB read buffer plus roughly 10 kB
+of decoded observations, 26 kB a sample, pricing that run at 620 MB. The run is 4.0 GB. **The
+look-ahead is the term that decides whether psp mode fits at three thousand samples**, which is
+what open question 2 (§11) asks to be settled and the arithmetic to settle it against. The other
+lever is not the look-ahead's: three quarters of the 480 kB is a copy of the reference's contig
+list, one per open sample, and §7.2 says what to do about it.
+
+### 7.2 Requirement: an open psp costs a few hundred kilobytes, not megabytes
+
+**The number is 500 kB per open file**, set by the encoding spec's first goal
+([`psp_file_format.md`](psp_file_format.md) §1.1) against the owner's working budget of 1.5 GB
+across three thousand samples. It supersedes the *tens of kilobytes* this section required
+before, which was written before any of it had been measured.
 
 Everything in the calling stage multiplies by the sample count, and the per-open-file state is
 the easiest cost to get wrong because it looks like bookkeeping. Production's psp index is the
@@ -638,6 +650,38 @@ carrying enough to reach the next — so a reader seeks once and then streams. A
 few thousand index entries per file is kilobytes. This constrains the psp encoding without
 specifying it; the encoding spec (§10) inherits the requirement, together with the reader
 contract of §3.3.
+
+#### What it actually costs, measured
+
+**480 kB an open sample on a human reference, and 108 kB on tomato.** One store was opened 1, 2,
+4, 8, 16, 32, 62, 125, 250, 500, 1,000 and 5,000 times over, every reader walked a record a round
+in lockstep, and peak resident taken against the sample count — least squares, R² = 0.99999
+([the measurement](../../reports/implementations/ng_psp_h4_2026-08-30.md)). The budget is met
+with 19.7 kB, or 4 %, to spare. It is two parts, and only one of them is the reader:
+
+| | human, 2,580 contigs | tomato, 13 contigs |
+|---|---:|---:|
+| the open file, before a block is touched — header, block index, footer | 357 kB | 7 kB |
+| the cursor walking it — two 16 kB buffers, the decoder, the record being built | 123 kB | 101 kB |
+| **per open sample** | **480 kB** | **108 kB** |
+
+**The cursor costs near enough the same on both** — 123 kB against 101 kB — on corpora whose read
+depth differs by a factor of 27 (280.0 reads a record against 10.3) and whose contig count differs
+by a factor of 200. That is the *does not grow with the depth* half of the requirement, measured
+rather than assumed.
+
+**The header is the whole of the difference, and almost all of the header is the reference's
+contig list**: about 138 bytes a contig, so 2,580 contigs cost 357 kB where 13 cost 7 kB. **Three
+quarters of the human figure is a list that is identical in every sample of the cohort**, kept
+once per open sample. A reference of about 3,700 contigs would spend the entire 500 kB on the
+header before a record was read.
+
+Giving a run's readers one copy of that list instead of one each takes the human figure from
+480 kB to 123 kB, and it is the largest memory lever the store has. **The owner ruled on
+2026-08-30 that it is not a question for the psp format**: the header goes on carrying the list,
+because a psp has to be interpretable on its own, and the copy a reader works from can come from
+the code that already handles the fasta reference. It is this document's to arrange — §10 carries
+it — because this document owns the run objects.
 
 ---
 
@@ -726,6 +770,13 @@ constant that appears in the implementation is a defect, not a lever.
   rule: whatever target the writer cuts toward must count the segments' own bases, not the
   chromosome span — under a BED the gaps belong to no segment, and a span-counted target would
   make blocks over sparse ground nearly empty payloads that cost their framing and carry little.
+- **One contig list for the run, not one per open sample** — on a human reference 357 kB of an
+  open sample's 480 kB is a copy of the reference's contigs, identical in every sample (§7.2), and
+  at three thousand samples that is 1.07 GB of the same list. Its home is here, in the object that
+  opens the files: `PspVariantCaller` construction already reads every header, so it can check the
+  lists agree and then hand every reader one shared list — sourced from the code that handles the
+  fasta reference, which the run holds anyway. The psp format does not change: a psp still carries
+  its own contig list, or it stops being interpretable on its own (owner's ruling, 2026-08-30).
 - **The cohort merge's reconciliation** — how per-sample observations whose spans differ become
   one cohort observation, and the confirmation that the merge frontier stays bounded while doing
   it (§3.2). Its own spec; production's cohort variant grouping and genotype joining are the

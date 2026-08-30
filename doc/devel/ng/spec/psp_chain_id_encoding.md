@@ -1,12 +1,29 @@
 # ng — storing the chain ids in a psp file, and the experiment that decides how
 
-*Status: design spec, 2026-08-18. **No code, and none until the psp encoding spec lands** — this
-document defines one experiment to run on a branch afterwards, and what it must measure. It is a
+*Status: design spec, 2026-08-18; **the experiment it defined is no longer needed — the owner
+settled it on 2026-08-25: the changes-only form (§4) ships and the intermediate distances form is
+not built.** **Built 2026-08-27/28** as Milestone E of
+[`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md); §4 and §5 carry the two
+corrections that building it forced.*
+
+*What survives here is §4's design, §5's traps and §8's rejected alternatives. §3's three
+arms and §7's experiment are kept as the record of what the decision was taken against, not as work
+to do. **One thing §4 did not anticipate**: the records are skippable now
+([`psp_record_encoding.md`](psp_record_encoding.md) §2.3), so the live-set changes go in a record's
+head and only the exception lists stay in its body — that document's §6 has it. It is a
 piece of the psp encoding, whose spec is still owed
 ([`run_streaming.md`](run_streaming.md) §10); that document owns the byte layout, blocks,
-compression, the index and versioning, and this one owns a single column inside it. Reads on
+compression, the index and versioning, and this one owns a single column inside it.
+**⚠ §7's experiment is still owed and cannot be run yet**: it wants the column's compressed bytes,
+the reader's peak resident live set, and a full scan against a seek, and none of those can be taken
+until Milestone F opens a file. Every figure quoted through Milestone E is this document's own,
+from a prototype over alignments rather than from the writer that now exists. Reads on
 [`cohort_merge.md`](cohort_merge.md) §14 Q2 (the ruling that made the column big) and
 [`run_streaming.md`](run_streaming.md) §12.1 (the file must not depend on worker count).*
+
+*Downstream: [`../arch/psp_file_format.md`](../arch/psp_file_format.md) §3 and
+[`../impl_plan/psp_file_format.md`](../impl_plan/psp_file_format.md) Milestone E, which is where this
+document's silent-failure traps are built and guarded.*
 
 ---
 
@@ -62,8 +79,9 @@ touches no calling code.
   trailer and versioning are [`run_streaming.md`](run_streaming.md) §10's spec, not this one.
 - **Changing what the merge consumes.** The in-memory `SequenceObservation::chain_ids` stays as it
   is; this is about the file. If the experiment ships, the reader reconstructs the same lists.
-- **Deciding the outcome.** This spec does not claim the differential encoding wins. It says how to
-  find out.
+- ~~**Deciding the outcome.**~~ **Decided 2026-08-25 by the owner, without the experiment: the
+  changes-only form ships.** This document's job is now to say what it is and what will bite the
+  coder, not how to choose it.
 
 **It does not** re-open the ruling, touch the in-memory shape, or propose a read-major file.
 
@@ -93,7 +111,7 @@ that a much simpler change also delivers.
 
 ## 4. The differential encoding
 
-**The idea in one paragraph.** A read of length L is named at every one of the L positions it
+**The idea.** A read of length L is named at every one of the L positions it
 covers, so the column stores each read about L times. What changes between adjacent positions is
 only which reads arrived and which left. Store *that* stream instead, and a read costs about two
 entries for its whole length rather than L. Everything else about the column then follows from a
@@ -114,6 +132,33 @@ So the column becomes two things:
 carries the residual; the reader computes its ids as the live set minus every other observation's.
 Naming it costs one small integer per record and removes any guessing about which "the reference
 one" is when observations split by witness and by read group.
+
+**Being named also frees the choice, so it is the largest list** (built 2026-08-27): the saving is
+whatever the residual would have cost, so the observation naming the most reads is the one worth
+deriving. Ties go to the lowest index, which keeps the choice a function of the record alone and so
+the file the same at any worker count ([`run_streaming.md`](run_streaming.md) §12.1).
+
+#### ⚠ The subtraction is not always exact, and the writer checks rather than assuming
+
+**A chain id names a read *pair*.** If both mates cover one record and show *different* sequences,
+the same identifier is in two observations — and "the live set minus the others" then drops it from
+the residual, which is a read silently missing from the reference allele. The paragraph above
+assumes that away; it happens whenever an insert is short enough for the mates to overlap and one
+of them carries an error there.
+
+**So the writer derives, compares against the list it holds, and stores every list when the two
+differ.** The cost is one record's residual list; the alternative is the §5 failure with no way to
+see it. Built 2026-08-27, and the reason is the plan's own checkpoint wording: *chain ids
+round-trip **exactly***.
+
+**Two conditions, not one.** The writer also refuses to derive when the derived length would fail
+the §5 guard, because otherwise it would produce a file its own reader rejects. Real evidence
+always satisfies that guard, so the second condition fires only on a record whose read counts do
+not describe reads.
+
+*Unmeasured: how often the first condition fires — how often a pair's two mates disagree where they
+overlap. It is the difference between the saving as designed and the saving as built, and it needs
+alignments rather than a fixture.*
 
 **Random access is preserved by restating, not by chaining across blocks.** Each block begins with
 the full live set; the differential stream runs only inside the block. A reader that seeks to a
@@ -156,9 +201,22 @@ exactly what is unknown.
 - **The residual arithmetic fails silently.** If the reader derives one id too many, the reference
   observation gains a read that does not exist, and the merge will happily compose an allele for
   it. Give the reader something to check against: an observation's derived id count must be at most
-  its `num_obs` and at least half of it, since at most two mates share an id — the same inequality
-  the walk's own differential against production already asserts
-  (`src/ng/locus_generation/pileup/parity.rs:2245`).
+  its `num_obs` and at least half of it, since at most two mates share an id.
+
+  **⚠ That inequality is not enough on its own, measured 2026-08-28.** The window
+  `[⌈num_obs/2⌉, num_obs]` is `num_obs/2` wide, and its slack is *exactly* the number of read pairs
+  whose two mates both cover this record — which is the ordinary shape of paired-end data, not a
+  corner. A residual naming two reads with `num_obs = 4`, read against a live set carrying two
+  identifiers no observation named, derives a list of four: `4 ≤ 4` and `8 ≥ 4` both hold, and the
+  reference allele gains two reads that do not exist. The check is loose precisely where the lower
+  bound's justification applies.
+
+  **So the record carries the residual's own id count** — one varint, against the several bytes the
+  list itself would cost — and the check is an **equality**. The inequality stays beside it as a
+  second and independent statement: that the declared count could describe those reads at all.
+
+  *⚠ And the citation was half right.* `parity.rs` asserts the **lower** bound only; the upper is
+  the psp reader's own.
 - **Compare after compression, never before.** The column's cost on disk is post-zstd. A raw-byte
   comparison will make arm B look better than it is, and it is the disk and decode numbers the
   decision turns on.

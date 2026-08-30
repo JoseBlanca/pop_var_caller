@@ -181,7 +181,7 @@ quality. **The other three read fields that only the conversion produces.**"
   reader has not been told there are nine X and where they are defined. Introduce the set in the
   same breath or point at where it lives.
 
-**Skill gap.** `clear-technical-writing` Rule 7 asks for short active sentences and one idea per
+**Skill gap.** `clear-technical-writing` Rule 8 asks for short active sentences and one idea per
 sentence. It does not say that **a sentence must survive being read on its own** — which is the
 property both faults here break, and the property most easily destroyed by an edit somewhere
 else. Nothing in either skill covers *damage caused by a correct deletion*.
@@ -290,7 +290,7 @@ you're talking about? What's a "free fucntion"?'"*
 diagram and "the first / the other three" in the section that divides them. Then this question
 calls them "the verdicts" — a word the document had used only for what a filter *returns*. One
 concept, three names, and the third appears for the first time in the question the owner is being
-asked to answer. `clear-technical-writing` Rule 7 says one term per concept and one concept per
+asked to answer. `clear-technical-writing` Rule 8 says one term per concept and one concept per
 term; this broke both halves in one sentence.
 
 **Rust vocabulary in the one place that has to be plain.** "Free function" means a function that

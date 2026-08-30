@@ -3395,7 +3395,7 @@ mod tests {
             read_group: ReadGroupId(group),
             num_obs: reads,
             num_fwd: reads,
-            q_sum: 0.0,
+            q_sum: crate::ng::types::SummedLogError::from_nats(0.0),
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,

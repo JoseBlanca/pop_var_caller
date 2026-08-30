@@ -2745,7 +2745,7 @@ mod tests {
             read_group: ReadGroupId(group),
             num_obs,
             num_fwd: num_obs / 2,
-            q_sum: -10.0,
+            q_sum: crate::ng::types::SummedLogError::from_nats(-10.0),
             mapq_sum: 60 * num_obs,
             mapq_sum_sq: 3_600 * u64::from(num_obs),
             placed_left: 0,

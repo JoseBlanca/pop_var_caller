@@ -61,6 +61,7 @@ pub mod alignment;
 pub mod calling;
 pub mod locus_generation;
 pub mod parameter_estimation;
+pub mod psp;
 pub mod raw_chrom_reader;
 pub mod read;
 pub mod ref_seq;

@@ -116,7 +116,7 @@ use std::sync::Arc;
 use super::tests::MockFasta;
 use super::{PreparedRead, WalkerConfig};
 use crate::ng::read::PLACEHOLDER_READ_GROUP;
-use crate::ng::types::{ContigId, GenomeRegion, Position};
+use crate::ng::types::{ContigId, GenomeRegion, Position, SummedLogError};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
 use crate::ng::locus_generation::{
@@ -1390,7 +1390,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
             read_group: PROJECTED_READ_GROUP,
             num_obs,
             num_fwd: fwd,
-            q_sum,
+            q_sum: SummedLogError::from_nats(q_sum),
             mapq_sum,
             mapq_sum_sq,
             placed_left,
@@ -1438,11 +1438,13 @@ fn sort_observations(observations: &mut [SequenceObservation]) {
 /// The surface the two sides are compared on — **three named projections, applied to both**
 /// (spec §3).
 ///
-/// 1. `q_sum` compared within [`Q_SUM_TOLERANCE`] — a **relative** tolerance, applied by
-///    [`ComparableLocus`]'s `PartialEq` rather than by normalising the value — because ng
-///    changed the **order** the sum accumulates in and nothing else. It was a fixed 1e-9
-///    rounding until D3; the two constants it named, `Q_SUM_GRAIN` and `round_q_sum`, no
-///    longer exist, and the reason the grain had to go is on [`Q_SUM_TOLERANCE`].
+/// 1. `q_sum` compared within [`Q_SUM_STEPS_PER_ROUNDING`] — an allowance of whole steps of
+///    the field's own grain, applied by [`ComparableLocus`]'s `PartialEq` rather than by
+///    normalising the value. ng changed the **order** the sum accumulates in and nothing else,
+///    and since B3 both sides are rounded onto the same grid, where a value near a step
+///    boundary can fall either way. It was a fixed 1e-9 rounding until D3 and a relative
+///    tolerance until B3; the reasoning for each move, and why neither shape fits now, is on
+///    [`Q_SUM_STEPS_PER_ROUNDING`].
 /// 2. Rows sorted into ng's emission order (class 5). ng's are already; production's are in
 ///    bucket-creation order.
 /// 3. The two per-record counters zeroed (class 3). Production has no counterpart, so an ng
@@ -1456,62 +1458,85 @@ fn comparable(locus: &SampleLocusObservations) -> ComparableLocus {
     ComparableLocus(comparable_exact_q_sum(locus))
 }
 
-/// **The relative tolerance `q_sum` is compared at, and the reason it is relative.**
+/// **How far two `q_sum`s may differ and still be the same evidence**, in whole steps of
+/// [`SummedLogError`]'s grain — one step per rounding that went into either side.
 ///
-/// `q_sum` is an `f64` running sum and `f64` addition is not associative. Two changes reorder
-/// it, and neither moves any evidence:
+/// # Why an allowance is needed at all, now that the field is an integer
+///
+/// Since step B3 ng's `q_sum` is an integer count of steps of 1/4,096 of a natural log, and
+/// **this differential rounds production's value onto the same grid**: production's records are
+/// projected into ng's own observation type before anything is compared, so both sides arrive
+/// as step counts. Two `f64` sums that differ only in accumulation order therefore round to the
+/// *same* step almost always — and to **adjacent** steps when the underlying value happens to
+/// sit within an ulp of a step boundary. One step is the whole width of that effect.
+///
+/// **The smallest difference that is not this effect is a whole read's contribution — order 1,
+/// which is about 4,000 steps.** So the allowance keeps three to four orders of magnitude of
+/// headroom at any depth, and it does not grow with depth the way a fixed decimal grain's
+/// headroom shrank.
+///
+/// # What reorders the sum, and why neither side is wrong
+///
+/// `f64` addition is not associative, and two of ng's changes reorder it without moving any
+/// evidence:
 ///
 /// - **A3's eviction.** Production keeps a bucket alive at `num_obs == 0` and keeps
 ///   accumulating into it, so a read that leaves and returns leaves `+q -q +q` behind; ng
 ///   evicts the empty bucket and recreates it, so the same read's sum starts from `0.0` and is
 ///   *exactly* `q`. Production's `-2.999999999999999` against ng's `-3.0` is this.
 /// - **B1's per-read re-derivation.** Production's bucket total is accumulated during the walk
-///   with a subtract-then-add on every re-fold; ng's observation sums each read's contribution **once**,
-///   in `read_id` order. Same addends, different order — and ng's is the more accurate of the
-///   two, since nothing cancels.
+///   with a subtract-then-add on every re-fold; ng's observation sums each read's contribution
+///   **once**, in `read_id` order. Same addends, different order — and ng's is the more
+///   accurate of the two, since nothing cancels.
 ///
-/// # It was a fixed 1e-9 grain, and real data at 300× broke it
+/// # The history this constant replaces, because it is the reason it is not a decimal grain
 ///
-/// The original comparison rounded both sides to nine decimal places, on the argument that
+/// The original comparison rounded both sides to **nine decimal places**, on the argument that
 /// "the grain is nine decimal places on values of order −3 to −50, where the smallest *real*
-/// difference is a whole read's `ln` contribution — order 1". The premise is a statement about
+/// difference is a whole read's `ln` contribution — order 1". That premise is a statement about
 /// **depth**: a locus's `q_sum` is order −3 only when a handful of reads support it. D3's first
 /// real-data run — HG002 at **300×**, chr1 — hit a locus with 414 observations and
-/// `q_sum ≈ −3360.39`, where 1e-9 *absolute* is 3.4 × 10¹² grains and one reordered
-/// accumulation lands a single grain apart:
+/// `q_sum ≈ −3360.39`, where a fixed 1e-9 grain is 3.4 × 10¹² grains wide and one reordered
+/// accumulation landed a single grain apart:
 ///
 /// ```text
 /// ng   … q_sum_rounded: -3360392684715
 /// prod … q_sum_rounded: -3360392684716
 /// ```
 ///
-/// The census reported it as an **unlisted divergence**, which is exactly what it is supposed
-/// to do with a difference it cannot name — and the thing that could not be named was the
-/// tolerance, not the walk.
-///
-/// So the comparison is a **relative** one, and it is a tolerance rather than a rounding.
-/// Rounding decides equality by which side of a grain boundary each value falls, so two values
-/// one ulp apart can round apart however fine the grain — at millions of loci that happens.
-/// A tolerance cannot: `|a − b| ≤ ε · max(1, |a|, |b|)` is true for every pair that close.
-///
-/// At `ε = 1e-9` the allowance at that locus is 3.4 × 10⁻⁶, and the smallest *real* difference
-/// is still a whole read's contribution — order 1. Six orders of magnitude of headroom, at any
-/// depth, which is what the fixed grain only had at low ones.
-const Q_SUM_TOLERANCE: f64 = 1e-9;
+/// It was replaced by a **relative** tolerance, `|a − b| ≤ 1e-9 · max(1, |a|, |b|)`, which held
+/// until B3 made the field an integer. **A relative tolerance is now the wrong shape**: the
+/// difference this comparison has to admit is one step, a fixed absolute quantity, and it does
+/// not scale with the value. A relative tolerance at `q_sum ≈ −3` would allow 3 × 10⁻⁹ where a
+/// boundary can separate the two sides by 2.4 × 10⁻⁴, and at `q_sum ≈ −3360` it would allow
+/// 3.4 × 10⁻⁶, still fourteen times too little. Both were measured by trying it: the whole
+/// synthetic differential failed at seed `0x5eed0001`, case 3, locus 13, on ng's `−14.900146`
+/// against production's `−14.899902` — exactly one step apart.
+const Q_SUM_STEPS_PER_ROUNDING: i64 = 1;
 
-/// Whether two `q_sum`s differ by no more than accumulation order can explain — see
-/// [`Q_SUM_TOLERANCE`].
-fn q_sum_close(ours: f64, theirs: f64) -> bool {
-    let scale = ours.abs().max(theirs.abs()).max(1.0);
-    (ours - theirs).abs() <= Q_SUM_TOLERANCE * scale
+/// Whether two `q_sum`s differ by no more than the roundings that went into them can explain.
+///
+/// `roundings` is how many values were rounded onto the grid on the busier side — one per
+/// observation folded in, since each observation's own `f64` sum is rounded once when it is
+/// built. Summing `n` of them can therefore be `n` steps out.
+fn q_sums_agree(ours: SummedLogError, theirs: SummedLogError, roundings: u32) -> bool {
+    let allowance = Q_SUM_STEPS_PER_ROUNDING * i64::from(roundings.max(1));
+    (ours.steps() - theirs.steps()).abs() <= allowance
 }
 
 /// A locus compared the way this differential means to compare loci: **every field exactly,
-/// except `q_sum`, which is compared within [`Q_SUM_TOLERANCE`]**.
+/// `q_sum` included**.
 ///
-/// A newtype because `SampleLocusObservations`' own `PartialEq` is derived and compares `f64`s
-/// exactly — which is right for the shared type, and wrong for a differential whose whole
-/// subject is two implementations accumulating the same addends in different orders.
+/// **`q_sum` used to need a tolerance here and no longer does.** It was an `f64` sum, and this
+/// differential's whole subject is two implementations adding the same terms in different
+/// orders, which lands them an ulp apart. Since step B3 it is a
+/// [`SummedLogError`](crate::ng::types::SummedLogError) — an integer count of steps — and
+/// integer addition does not care about order, so the two paths now agree exactly and the
+/// comparison says so. **The tolerance still exists for the ng-against-production comparison**,
+/// where one side rounds and the other does not.
+///
+/// The newtype remains because `SampleLocusObservations`' own `PartialEq` is derived, and a
+/// differential wants to say for itself which fields it compares and how.
 struct ComparableLocus(SampleLocusObservations);
 
 impl PartialEq for ComparableLocus {
@@ -1567,7 +1592,7 @@ impl PartialEq for ComparableLocus {
                         && our_mapq_sq == &theirs.mapq_sum_sq
                         && our_placed_left == &theirs.placed_left
                         && our_ids == &theirs.chain_ids
-                        && q_sum_close(*our_q_sum, theirs.q_sum)
+                        && our_q_sum == &theirs.q_sum
                 })
     }
 }
@@ -1817,7 +1842,7 @@ struct DivergenceCensus {
     /// apart from the class flag because the flag fires on any non-projected group, which is
     /// a weaker event and would let this one go to zero unnoticed.
     group_split_observations: usize,
-    /// Loci that agree only once `q_sum` is compared within [`Q_SUM_TOLERANCE`] — the
+    /// Loci that agree only once `q_sum` is compared within [`Q_SUM_STEPS_PER_ROUNDING`] — the
     /// accumulation-order class. A subset of the **exact** count, since `classify_locus`
     /// decides `exact` with [`comparable`], which applies the tolerance. Bounded above as
     /// well as below: see the ceiling at the census's assertions.
@@ -2009,9 +2034,10 @@ impl DivergenceCensus {
 /// (`AlleleSupportStats` is still destructured exhaustively, in [`project`], which is the
 /// one place production's type is now read.)
 ///
-/// `q_sum` is summed as `f64` and compared **once, at the end**, within
-/// [`Q_SUM_TOLERANCE`] — never per bucket. The reason survives D3's move from a rounding to a
-/// tolerance unchanged, and is why the sum is taken here rather than compared bucket by
+/// `q_sum` is summed as step counts and compared **once, at the end**, within
+/// [`Q_SUM_STEPS_PER_ROUNDING`] — never per bucket. The reason survives D3's move from a
+/// rounding to a tolerance, and B3's move from a tolerance to a step allowance, unchanged: it
+/// is why the sum is taken here rather than compared bucket by
 /// bucket: a per-bucket comparison makes the verdict depend on how the reads were distributed
 /// across buckets, and A3 moves reads between buckets by design. (Under the old grain the same
 /// hazard was arithmetic rather than a verdict: two reads at `-4.835428695` in one bucket
@@ -2039,10 +2065,15 @@ struct LocusEvidence {
     placed_left: u32,
     mapq_sum: u32,
     mapq_sum_sq: u64,
-    q_sum: f64,
+    q_sum: SummedLogError,
+    /// **How many observations were folded in** — each was rounded onto the grid once when it
+    /// was built, so this is how many steps the sum may legitimately be out by. Not evidence
+    /// about the reads; it is the allowance's own denominator.
+    observations: u32,
 }
 
-/// Every integer field exactly; `q_sum` within [`Q_SUM_TOLERANCE`], for the reason given there
+/// Every integer field exactly; `q_sum` within [`Q_SUM_STEPS_PER_ROUNDING`] per observation
+/// folded, for the reason given there
 /// — and it is the reason this is a hand-written impl rather than a derive over a scaled
 /// integer. A grain decides equality by which side of a boundary each value falls on, so two
 /// sums one ulp apart can land in different grains; at 300× depth and millions of loci, they
@@ -2058,22 +2089,19 @@ impl PartialEq for LocusEvidence {
             mapq_sum,
             mapq_sum_sq,
             q_sum,
+            observations,
         } = self;
         num_obs == &other.num_obs
             && fwd == &other.fwd
             && placed_left == &other.placed_left
             && mapq_sum == &other.mapq_sum
             && mapq_sum_sq == &other.mapq_sum_sq
-            && q_sum_close(*q_sum, other.q_sum)
+            && q_sums_agree(*q_sum, other.q_sum, (*observations).max(other.observations))
     }
 }
 
 /// The evidence on one observation, so a caller can sum over whichever grouping it is reconciling.
-fn observation_evidence(
-    observation: &SequenceObservation,
-    totals: &mut LocusEvidence,
-    q_sum: &mut f64,
-) {
+fn observation_evidence(observation: &SequenceObservation, totals: &mut LocusEvidence) {
     // The exhaustive destructure is the point — see the doc above.
     let SequenceObservation {
         // **Not summed, and each for its own reason.** `bases` is *what* the evidence says
@@ -2100,16 +2128,18 @@ fn observation_evidence(
     totals.placed_left += placed_left;
     totals.mapq_sum += mapq_sum;
     totals.mapq_sum_sq += mapq_sum_sq;
-    *q_sum += observation_q_sum;
+    // **Added as step counts, so the fold is exact and order-independent.** Before B3 this was
+    // an `f64` running sum threaded through the call as a separate `&mut`, because the sum had
+    // to be finished before it could be compared; integers need neither.
+    totals.q_sum += *observation_q_sum;
+    totals.observations += 1;
 }
 
 fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
     let mut totals = LocusEvidence::default();
-    let mut q_sum = 0.0_f64;
     for observation in &locus.observations {
-        observation_evidence(observation, &mut totals, &mut q_sum);
+        observation_evidence(observation, &mut totals);
     }
-    totals.q_sum = q_sum;
     totals
 }
 
@@ -2123,18 +2153,12 @@ fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
 /// What this reconciles is the split — several observations where production has one allele — and
 /// the split is invisible to `bases`.
 fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, LocusEvidence> {
-    let mut per_bases: BTreeMap<Vec<u8>, (LocusEvidence, f64)> = BTreeMap::new();
+    let mut per_bases: BTreeMap<Vec<u8>, LocusEvidence> = BTreeMap::new();
     for observation in &locus.observations {
         let entry = per_bases.entry(observation.bases.to_vec()).or_default();
-        observation_evidence(observation, &mut entry.0, &mut entry.1);
+        observation_evidence(observation, entry);
     }
     per_bases
-        .into_iter()
-        .map(|(bases, (mut totals, q_sum))| {
-            totals.q_sum = q_sum;
-            (bases, totals)
-        })
-        .collect()
 }
 
 /// Every chain id a locus carries, sorted and deduplicated — the *other* half of "no
@@ -2861,7 +2885,7 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
     );
     // **A ceiling on `float_only` — the quantity that *explains* the headline is the one that
     // could move silently.** `float_only` counts the loci the `q_sum` tolerance rescued: the
-    // two sides differ on an exact comparison and agree within `Q_SUM_TOLERANCE`. Its stated
+    // two sides differ on an exact comparison and agree within `Q_SUM_STEPS_PER_ROUNDING`. Its stated
     // purpose is that the tolerance "is shown to be doing work rather than quietly matching
     // nothing", and until now it was printed and never asserted — so an arithmetic change
     // could take the walk from "agrees" to "agrees only because the tolerance is wide" while
@@ -2873,10 +2897,21 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
     // the window where the anchor holds and the explanation is nonsense is real, and this
     // assertion closes it.
     //
-    // One in ten, against a measured **103 of 216,203 (0.05 %)** at the default case count and
-    // **1,014 of 1,620,856 (0.06 %)** at `PVC_PARITY_CASES=3000` — a ratio stable across a 7.5×
-    // fixture, so the bound is a statement about the property and not about the case count.
-    // That leaves two orders of headroom below the 99.7 % the injection produces.
+    // One in ten. **Measured after B3 made `q_sum` an integer: `float_only` is 0 — of 145,108
+    // loci in this anchor and of 163,091 in the census — so the allowance currently rescues
+    // nothing at all.** Before B3 it was 103 of 216,203 (0.05 %). That is the effect the step
+    // was chosen for: rounding to 1/4,096 absorbs an ordering difference in the last bits of an
+    // `f64`, so the two walks land on the same integer instead of needing to be forgiven.
+    //
+    // **The ceiling stays a ceiling rather than becoming `== 0`**, because a value sitting
+    // within an ulp of a step boundary would legitimately put a locus here and nothing says the
+    // fixture must never contain one. What it now guards is the reverse of what it used to: not
+    // that the tolerance is narrow enough, but that it has not started doing work again.
+    //
+    // *The pre-B3 figures were also quoted at `PVC_PARITY_CASES=3000`. That variable does not
+    // reach the container — `scripts/dev.sh` forwards only `CARGO_*` and `RUST*` — so a run
+    // that sets it silently gets the default fixture, which is why only the default count is
+    // quoted here.*
     assert!(
         float_only * 10 < compared,
         "{float_only} of {compared} loci agree only within the `q_sum` tolerance — the \
@@ -2888,10 +2923,11 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
         "the anchor: {anchored} of {compared} loci ({:.1}%) had every read witness the whole \
          footprint, {anchored_multi_base} of them spanning more than one base, across \
          {widens} widened records; all identical to the projection, field for field. \
-         {float_only} of them agree on `q_sum` only within the 1e-9 relative tolerance — the \
-         order the sum accumulates in, from two causes: A3's eviction recreating a bucket the \
-         reads return to, and B1 summing each read's contribution once where production \
-         accumulates into the bucket with a subtract-then-add per re-fold.",
+         {float_only} of them agree on `q_sum` only within the step allowance — the order the \
+         sum accumulates in, from two causes: A3's eviction recreating a bucket the reads \
+         return to, and B1 summing each read's contribution once where production accumulates \
+         into the bucket with a subtract-then-add per re-fold. Since B3 rounded the field onto \
+         a grid this is expected to be zero: the rounding absorbs both.",
         100.0 * anchored as f64 / compared as f64,
     );
 }
@@ -3361,7 +3397,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     eprintln!(
         "the divergence census over {} loci (one read group): {} identical to the \
          projection, {diverged} differing, {} of the identical ones agreeing on `q_sum` only \
-         within the 1e-9 relative tolerance.\n  \
+         within the step allowance — zero since B3 rounded the field onto a grid.\n  \
          class 1 partial witness {}   class 3 counters {}   class 4 unsupported bucket {}   \
          class 5 observation order {}   class 6 stale widen {}\n  \
          at two read groups: class 2 on {} loci, of which {} carry one allele in two observations.\n  \
@@ -3427,7 +3463,7 @@ fn the_census_counts_a_hole_and_the_positions_inside_it() {
             read_group: PLACEHOLDER_READ_GROUP,
             num_obs,
             num_fwd: num_obs,
-            q_sum: 0.0,
+            q_sum: SummedLogError::from_nats(0.0),
             mapq_sum: 60 * num_obs,
             mapq_sum_sq: 3600 * u64::from(num_obs),
             placed_left: 0,
@@ -3630,7 +3666,7 @@ fn the_projection_says_everything_a_record_says() {
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 2,
                 num_fwd: 1,
-                q_sum: -4.0,
+                q_sum: SummedLogError::from_nats(-4.0),
                 mapq_sum: 100,
                 mapq_sum_sq: 5_000,
                 placed_left: 1,
@@ -3642,7 +3678,7 @@ fn the_projection_says_everything_a_record_says() {
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 7,
                 num_fwd: 3,
-                q_sum: -12.5,
+                q_sum: SummedLogError::from_nats(-12.5),
                 mapq_sum: 210,
                 mapq_sum_sq: 6_300,
                 placed_left: 2,

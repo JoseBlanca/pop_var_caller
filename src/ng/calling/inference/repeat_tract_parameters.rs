@@ -876,7 +876,7 @@ mod tests {
     };
     use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
     use crate::ng::parameter_estimation::ssr::{Stratum as SsrStratum, StratumKey};
-    use crate::ng::types::{InbreedingF, LogProb, Ploidy, SsrPeriod};
+    use crate::ng::types::{InbreedingF, LogProb, Ploidy, SsrPeriod, SummedLogError};
 
     use std::collections::BTreeMap;
 
@@ -1666,7 +1666,7 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_obs: reads,
             num_fwd: reads,
-            q_sum: -10.0 * f64::from(reads),
+            q_sum: SummedLogError::from_nats(-10.0 * f64::from(reads)),
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: 0,

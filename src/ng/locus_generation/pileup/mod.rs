@@ -254,7 +254,7 @@ mod chain_renaming_tests {
                 read_group: ReadGroupId(0),
                 num_obs: 1,
                 num_fwd: 1,
-                q_sum: 0.0,
+                q_sum: crate::ng::types::SummedLogError::from_nats(0.0),
                 mapq_sum: 60,
                 mapq_sum_sq: 3600,
                 placed_left: 0,

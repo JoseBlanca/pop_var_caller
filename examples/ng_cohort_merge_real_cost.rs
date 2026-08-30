@@ -505,6 +505,14 @@ fn refill(into: &mut SampleLocusObservations, from: &SampleLocusObservations) {
 /// **The choice is the caller's rather than the environment's**, so that one process can run
 /// both and the two are compared on the same machine in the same minute. `NG_REAL_LEASE` is
 /// what sets it, and in the one-driver arm it takes a list — `0,1` runs both.
+// **`to_vec().into_iter()` is deliberate in two arms below, and clippy's `iter().cloned()` would
+// break what they measure.** That rewrite makes each record's copy happen *inside* the merge's
+// clock, one per draw, which is the cost these arms exist to keep out of it — see the comment on
+// the arms themselves.
+#[allow(
+    clippy::unnecessary_to_owned,
+    reason = "the copy is made up front on purpose; cloning per draw is the thing being measured"
+)]
 fn sources_over(cohort: &[Vec<SampleLocusObservations>], supply: Supply) -> Vec<ProbeSource<'_>> {
     cohort
         .iter()
