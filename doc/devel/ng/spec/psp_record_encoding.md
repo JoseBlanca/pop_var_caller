@@ -62,16 +62,18 @@ block is therefore **both** the furthest back the compressor may look for a repe
 pattern **and** the amount a reader must decode before it can hand out its first record.
 Shrinking it to save memory also costs bytes, which is the trade ng inherits if it ports
 the shape — and ng cannot afford it, because
-[`run_streaming.md`](run_streaming.md) §7.2 requires an open psp to cost *tens of
+[`run_streaming.md`](run_streaming.md) §7.2 requires an open psp to cost *a few hundred
 kilobytes, not megabytes*, at three thousand open samples.
 
 ### 1.2 Goals
 
 1. **An open psp costs a few hundred kilobytes at most.** The owner set the working budget
-   at **500 kB resident per open sample** on 2026-08-25 — 1.5 GB across three thousand — which
-   is looser than the "tens of kilobytes" [`run_streaming.md`](run_streaming.md) §7.2 asks
-   for; that document's §7.2 should be corrected when it is next touched. **Measured, the
-   shape in §2 costs 346 kB**, so the goal is met rather than argued.
+   at **500 kB resident per open sample** on 2026-08-25 — 1.5 GB across three thousand — and
+   [`run_streaming.md`](run_streaming.md) §7.2 was corrected to it on 2026-08-30. **Measured,
+   the shape in §2 costs 346 kB** in the prototype, and **ng's own store costs 480 kB an open
+   sample on a human reference**, of which 123 kB is the reader and the rest the header's copy
+   of the reference's contig list ([`psp_file_format.md`](psp_file_format.md) §5.2). The goal is
+   met rather than argued, with 4 % to spare.
 2. **The file is smaller than production's at a comparable reader memory**, not only where
    production is allowed to spend more.
 3. **A reader can start part-way through**, without reading what comes before, at the grain the
@@ -173,7 +175,8 @@ psp file
 numbers.** In production's `.psp` they are the same one — a block is both how far back the
 compressor may look for a repeat and how much must be inflated before the first record
 exists — so every setting is a trade. Capping the window separates them: the block can be a
-megabyte, for its ratio and for a small index, while a reader holds tens of kilobytes.
+megabyte, for its ratio and for a small index, while a reader holds about a hundred kilobytes
+— measured at 123 kB in ng ([`psp_file_format.md`](psp_file_format.md) §5.2).
 
 **Two conditions have to hold together, and only the first is the compressor's doing:**
 
@@ -943,8 +946,10 @@ ng stores all of them, and §7 measures that field separately.
    step. Already demonstrated on 7.59 M tomato records and 0.60 M HG002 records with the
    probe of §14.
 2. **The per-open-file budget, measured rather than argued.** N samples open and walked in
-   lockstep, peak resident reported, against [`run_streaming.md`](run_streaming.md) §7.2's
-   "tens of kilobytes". The probe does this at 8, 32 and 63 samples today.
+   lockstep, peak resident reported, against the 500 kB budget of
+   [`run_streaming.md`](run_streaming.md) §7.2. The probe does this at 8, 32 and 63 samples
+   today; ng's own store was measured this way at 1 to 5,000 samples on 2026-08-30
+   ([`psp_file_format.md`](psp_file_format.md) §5.2).
 3. **Worker-count invariance**, inherited from [`run_streaming.md`](run_streaming.md) §12.1:
    one sample gathered at 1, 2, 4, 8, 16 workers gives byte-identical files apart from the
    header's timestamp. This is what §8's block-cut rule exists to preserve.

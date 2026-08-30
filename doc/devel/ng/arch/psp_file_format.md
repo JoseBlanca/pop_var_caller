@@ -418,11 +418,18 @@ Every row read before it was written down.
 - **Impl-time: whether `reference_bases` is stored.** Spec
   [`psp_record_encoding.md`](../spec/psp_record_encoding.md) §4 leans to dropping and re-fetching;
   nobody has timed the re-fetch.
-- **`OPEN:` how much of the record head's speed-up survives at 300 reads a position.** The chain
-  ids' live-set changes ride in the head, and they grow with depth — 0.432 bytes a position at 11.4
-  reads, 6.42 at 293 — so the head grows while the skip's value shrinks. Spec
-  [`psp_record_encoding.md`](../spec/psp_record_encoding.md) §6. **A measurement, not a design
-  question**, and the first one to take once a writer exists.
+- **`NARROWED 2026-08-30:` how much of the record head's speed-up survives at 300 reads a
+  position.** The chain ids' live-set changes ride in the head, and they grow with depth — 0.432
+  bytes a position at 11.4 reads, 6.42 at 293 — so the head grows while the skip's value shrinks.
+  Spec [`psp_record_encoding.md`](../spec/psp_record_encoding.md) §6. **Measured: the skip is worth
+  2.40× to 3.11×, and a 27× rise in depth costs about 5 % of that**, on corpora of 10.3 and 280.0
+  reads a record — every reading above the prototype's 2.06×
+  ([the measurement](../../reports/implementations/ng_psp_h5_2026-08-30.md)). ⚠ **Every figure is
+  an upper bound, not an answer.** The stores are ng's writer over a production `.psp`, which names
+  about 3.4 % of the reads ng will name, so their heads carry a fraction of ng's chain-id changes;
+  a bigger head makes the skip worth less, never more. What is left is one quantity — what the full
+  read column does to the head — and closing it needs a store written from ng's own locus
+  generation, which is [`run_streaming.md`](../spec/run_streaming.md)'s to arrange.
 
 ---
 

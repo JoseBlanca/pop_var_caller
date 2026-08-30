@@ -95,10 +95,10 @@ So **Milestone Z below runs before anything else in this plan**, and takes half 
 **Working budget: 500 kB resident per open sample** — 1.5 GB across three thousand samples — set by
 the owner on 2026-08-25, who priced 450 MB across a thousand samples as comfortable. This is much
 looser than the "tens of kilobytes, not megabytes" that
-[`run_streaming.md`](../spec/run_streaming.md) §7.2 asks for, and **the difference reopens a design
-choice that document treated as settled** (§B0 below). It is a working figure, not a ruling: every
-sweep reports the whole curve of bytes against memory, so the point on it can be moved without
-re-running anything.
+[`run_streaming.md`](../spec/run_streaming.md) §7.2 asked for until it was corrected to this budget
+on 2026-08-30, and **the difference reopens a design choice that document treated as settled**
+(§B0 below). It is a working figure, not a ruling: every sweep reports the whole curve of bytes
+against memory, so the point on it can be moved without re-running anything.
 
 ### One thing that is settled and must not be reopened
 

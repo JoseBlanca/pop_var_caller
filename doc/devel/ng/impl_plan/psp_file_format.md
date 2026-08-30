@@ -412,6 +412,9 @@ survives is an open question the arch doc records** (arch §7).
 - **The trailer's contents** — follows the statistical work
   ([spec §3.4](../spec/psp_file_format.md)).
 - **A `ChainId` newtype** — arch §7, to whoever owns ng's chain-id minting.
-- **Correcting [`../spec/run_streaming.md`](../spec/run_streaming.md) §7.2**, whose "tens of
+- ~~**Correcting [`../spec/run_streaming.md`](../spec/run_streaming.md) §7.2**, whose "tens of
   kilobytes" the 500 kB budget supersedes, and
-  **[`../arch/module_layout.md`](../arch/module_layout.md)'s** note that ng has no `.psp` yet.
+  **[`../arch/module_layout.md`](../arch/module_layout.md)'s** note that ng has no `.psp` yet.~~
+  **Done 2026-08-30.** §7.2 now requires *a few hundred kilobytes* and carries what the 480 kB is
+  made of; the contig-list lever the owner routed to the run is `run_streaming.md` §10's; and
+  `module_layout.md` has `psp/` in its tree and a section on the artifact between the two stages.

@@ -48,8 +48,8 @@ any point on the curve above.
 1. **An open file costs no more than 500 kB of resident memory**, and does not grow with the block
    size, the depth or the length of the genome. *(The owner's working budget, 2026-08-25: 1.5 GB
    across three thousand samples. It supersedes the "tens of kilobytes" of
-   [`run_streaming.md`](run_streaming.md) §7.2, which should be corrected when that document is next
-   touched.)* **The independence from depth is measured, not assumed — §5.2.** The one thing that
+   [`run_streaming.md`](run_streaming.md) §7.2, corrected there on 2026-08-30.)* **The independence
+   from depth is measured, not assumed — §5.2.** The one thing that
    *can* push a reader past this is a single record larger than its buffer, which §8 forbids fixing
    a limit on in the format; §4.4 gives the reader its own ceiling instead, set so that three
    thousand readers at it come to the budget rather than a multiple of it.
@@ -504,8 +504,10 @@ little time and saves a little memory.
 **So 16 kB, and there is no trade to weigh.** *Why the curve turns is not established. Buffers
 falling out of cache is the obvious guess and it is a guess; nothing here measured it.*
 
-**Against the 500 kB budget an open sample is 257 kB**, which leaves room to spend later if something
-justifies it.
+**Against the 500 kB budget the prototype's open sample is 257 kB**, which left room to spend later
+if something justified it. **ng's is 480 kB** — the reader is cheaper, at 123 kB, and the header
+carries the reference's contig list, which the prototype's store had none of (§5.2). The headroom
+is 4 %, and it is not headroom in the buffers.
 
 #### The rolling buffer's ceiling — the third number, and the only one a corrupt file can move
 
@@ -644,6 +646,31 @@ Three things follow:
 stream is priced the way §4.3 prices it. A stream's buffers are
 the same size whatever it carries, so this measures the multiplier without needing the streams to
 differ — which is the quantity in question.*
+
+#### What ng's own code costs — 2026-08-30
+
+**Every figure above is the measuring prototype's, over production's records.** ng's store was
+measured the same way on 2026-08-30, at 1 to 5,000 open samples
+([the measurement](../../reports/implementations/ng_psp_h4_2026-08-30.md)), and it is two numbers
+rather than one:
+
+| | human, 2,580 contigs | tomato, 13 contigs |
+|---|---:|---:|
+| the open file, before a block is touched | 357 kB | 7 kB |
+| the reader itself — two 16 kB buffers, the decoder, the record being built | 123 kB | 101 kB |
+| **per open sample** | **480 kB** | **108 kB** |
+
+**The reader is cheaper than the prototype's 257 kB, at 123 kB**, and it is near enough the same
+at 10.3 and at 280.0 reads a record — which is the depth independence this section asserts,
+measured on ng's code. What the prototype had no equivalent of is the header: ng's carries the
+reference's whole contig list, about 138 bytes a contig, so on a human reference **three quarters
+of an open sample is a list identical in every sample of the cohort**. The budget is met with 4 %
+to spare, and it would not be met on a reference of about 3,700 contigs. Sharing that list is the
+run's to arrange, not this format's (§11).
+
+⚠ **§5.3's 190 kB zstd floor is not visible in a reader measured at 123 kB.** Either the floor
+moved with the decoder's configuration or the figure did not survive the port; it is recorded
+rather than explained.
 
 ### 5.3 Where the 190 kB floor comes from, and why it is not currently reachable
 
@@ -859,8 +886,11 @@ format is now refused rather than rewritten, which is the safe answer and is thi
 
 ## 7. Cross-cutting concerns
 
-**Memory.** The subject of the document; §5 measures it. One number to carry: **an open file is 227
-to 346 kB depending on the reader's buffer choices, and the budget is 500 kB.**
+**Memory.** The subject of the document; §5 measures it. One number to carry: **an open file is
+480 kB on a human reference and 108 kB on tomato, and the budget is 500 kB** (§5.2, measured on
+ng's own code 2026-08-30). The reader's share is 123 kB and near enough flat in depth; the rest is
+the header's copy of the reference's contig list, which is the run's to share and not this
+format's (§11).
 
 **Errors.** Five classes, and they want to be distinguishable because they mean different things to
 whoever sees them:
@@ -992,6 +1022,11 @@ corrupted.
 - **Which fields a record has and how each is encoded** —
   [`psp_record_encoding.md`](psp_record_encoding.md), which this document's manifest carries the
   declarations for.
+- **One contig list for a run, rather than one per open sample** — 357 kB of an open sample's
+  480 kB on a human reference is a copy of the reference's contigs, identical in every sample
+  (§5.2). **Nothing changes in this format**: a psp goes on carrying its own contig list, or it
+  stops being interpretable on its own (owner's ruling, 2026-08-30). What a *reader* works from is
+  the run's to decide, and [`run_streaming.md`](run_streaming.md) §10 carries it.
 - **The chain ids' encoding** — [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md).
 - **The cohort reader's scheduling** — which blocks to fetch, in what order, with how much
   look-ahead — [`run_streaming.md`](run_streaming.md).
@@ -1000,10 +1035,6 @@ corrupted.
   [`cohort_merge.md`](cohort_merge.md) §13 routed it there and it is not yet written. Needed only so
   a reader can size its observation cache up front; a forward reader learns each record's span from
   the position summary and never needs it.
-- **Correcting [`run_streaming.md`](run_streaming.md) §7.2**, whose "tens of kilobytes" is
-  superseded by the 500 kB budget. That document's owner should make the change; it is the sentence
-  that made a columnar shape look impossible, and leaving it will send the next reader down that
-  path.
 - **Whether a record carries its own reference bases.** Today it does, so every sample carries a copy
   of the reference over its footprint. The leaning is to drop it and re-fetch; nobody has timed the
   re-fetch. [`run_streaming.md`](run_streaming.md) §11 question 4.
