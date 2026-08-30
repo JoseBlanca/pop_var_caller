@@ -1737,11 +1737,19 @@ pub struct LocatedRecord<'a> {
 /// position — it is all that runs at roughly ninety-nine positions in a hundred
 /// (`cohort_merge.md`, "roughly one position in a hundred is variable at the measured corner").
 ///
-/// **⚠ This moves `live_reads`, so call it exactly once a record.** The head carries the chain
-/// ids' arrivals and departures, and reading it applies them; a caller that has read a head
-/// reaches the body through [`decode_the_body_of`], never by parsing the same bytes again.
+/// **⚠ This parses the chain ids' changes and leaves them waiting; the caller applies them.**
+/// The head carries the arrivals and departures, and the live set moves only when the caller
+/// calls [`LiveSetReader::apply_the_changes_just_parsed`] — which it must do for **every** record
+/// it advances past, wanted or not, or every record after this one is built against a stale set.
 /// `live_reads` is the walk's own reader — one per block, emptied by
 /// [`LiveSetReader::start_block`] at every boundary — not a fresh one per record.
+///
+/// **Why the caller and not this function**: between reading a head and committing to the record
+/// there is one thing that can still fail or refuse — the walk's predicate, which is a caller's
+/// closure and may panic. Applying here would move the set for a record the walk then re-parses
+/// from its first byte, and the second parse meets an arrival for a read already live: a sound
+/// file refused as damaged. A caller that has read a head reaches the body through
+/// [`decode_the_body_of`], never by parsing the same bytes again.
 ///
 /// # Errors
 ///
@@ -1810,16 +1818,18 @@ pub fn read_record_head<'a>(
     // record 149 with *"id 150, which is already live"*, and a record that only departs reads
     // retried to `Ok` with a read silently gone from the set for the rest of the block.
     //
-    // ⚠ **And this function must still be called exactly once a record**, because applying twice
-    // would move the set twice. [`decode_record`] reaches the body through the head this returns
-    // rather than parsing the head again, which is what keeps that true.
+    // ⚠ **And the applying is the caller's, one call per record advanced past.** It is deferred
+    // that far because the walk's predicate runs in between and is a caller's closure: a set moved
+    // before a closure that panics is a set moved for a record the walk then re-parses, and the
+    // second parse refuses a sound file. [`decode_record`] and the block walk both apply the
+    // moment they commit to the record, and both reach the body through the head this returns
+    // rather than parsing the head again — which is what keeps it exactly once.
     let changes_bytes = live_reads
         .parse_changes(&bytes[reader.bytes_read()..])
         .map_err(|fault| fault.further_in(reader.bytes_read()))?;
     reader.skip(changes_bytes);
 
     let body = reader.take(body_bytes as usize, RECORD_BODY_BYTE_COUNT)?;
-    live_reads.apply_the_changes_just_parsed();
 
     Ok(LocatedRecord {
         head: RecordHead {
@@ -1881,6 +1891,9 @@ pub fn decode_record(
     layout: &RecordLayout,
 ) -> Result<DecodedRecord, RecordDecodeError> {
     let found = read_record_head(bytes, contig, measured_from, live_reads)?;
+    // **The head is committed to here**: nothing between this and the body can refuse the record,
+    // so this is where the live set moves. `decode_the_body_of` reads the set below.
+    live_reads.apply_the_changes_just_parsed();
     decode_the_body_of(&found, live_reads.live(), layout)
 }
 
@@ -1959,14 +1972,21 @@ mod tests {
         decode_record(bytes, contig, measured_from, live_reads, layout)
     }
 
-    /// [`read_record_head`], with the walk's reader carried in.
+    /// [`read_record_head`] and the apply that goes with it, with the walk's reader carried in.
+    ///
+    /// **The apply is here because these tests read a head and then ask what the live set holds**,
+    /// which is the state a committed record leaves. A test about the *deferral* — that a head
+    /// read and not committed to leaves the set where it was — calls the two separately and says
+    /// so.
     fn read_a_record_head<'a>(
         live_reads: &mut LiveSetReader,
         bytes: &'a [u8],
         contig: ContigId,
         measured_from: OffsetBase,
     ) -> Result<LocatedRecord<'a>, RecordDecodeError> {
-        read_record_head(bytes, contig, measured_from, live_reads)
+        let found = read_record_head(bytes, contig, measured_from, live_reads)?;
+        live_reads.apply_the_changes_just_parsed();
+        Ok(found)
     }
 
     /// A head is read once per record on a path that runs at about twenty million records

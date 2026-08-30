@@ -1573,9 +1573,20 @@ impl<R: std::io::Read> BlockStream<R> {
                     let head = found.head;
                     let record_bytes = found.record_bytes;
                     // **The head is read once, and the body is built from what it located.**
-                    // Reading it applied this record's chain-id changes, so parsing it a second
-                    // time to reach the body would apply them twice.
-                    let record = if want(&head) {
+                    // Parsing it a second time to reach the body would parse this record's
+                    // chain-id changes a second time as well.
+                    //
+                    // ⚠ **The predicate runs before the live set moves, and that order is the
+                    // whole of a soundness property.** `want` is the caller's closure and may
+                    // panic; a caller that catches the unwind and walks on re-enters here with
+                    // the cursor exactly where it was, so this record is parsed again. Had the
+                    // set already moved, that second parse would meet an arrival for a read
+                    // already live and refuse a sound file as damaged. Nothing between the
+                    // predicate and the apply can fail, so the apply below is the point the
+                    // record is committed to.
+                    let wanted = want(&head);
+                    self.live_reads.apply_the_changes_just_parsed();
+                    let record = if wanted {
                         match decode_the_body_of(&found, self.live_reads.live(), &self.layout) {
                             Ok(decoded) => Some(decoded.record),
                             Err(refused) => {
@@ -5146,6 +5157,85 @@ mod tests {
         assert!(
             built * 6 < met,
             "the walk has to skip most of the file to say anything: it built {built} of {met}"
+        );
+    }
+
+    /// **A predicate that panics leaves the walk exactly where it was, so a caller that catches
+    /// the unwind and reads on gets the file it has rather than a corruption report.**
+    ///
+    /// The predicate is the caller's own closure and this module cannot stop it panicking. What
+    /// it can do is not move the live set until the record is committed to: a set moved for a
+    /// record the walk then parses a second time meets an arrival for a read already live, and
+    /// **a sound file is refused as damaged** — the failure this test exists to forbid.
+    ///
+    /// The record it panics on has to carry chain-id changes or the test says nothing, so the
+    /// one it picks is a record where the live set both gains and loses an identifier, and that
+    /// is asserted before anything is proved.
+    #[test]
+    fn a_walk_resumed_after_its_predicate_panicked_reads_the_records_that_are_there() {
+        let records = records_naming_paired_reads(120);
+        let on_disk = blocks_on_disk(&records, Bp(90), None);
+        let manifest = a_manifest();
+
+        // What an uninterrupted walk has live at each record — the oracle.
+        let mut whole = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        let mut live_at_each = Vec::new();
+        while let Some(next) = whole.next_record() {
+            let _ = next.expect("it reads");
+            live_at_each.push(whole.live_reads().ids().to_vec());
+        }
+        assert_eq!(live_at_each.len(), records.len());
+
+        // The record to fail on: one whose head both retires an identifier and brings one in.
+        let gains_and_loses = (1..live_at_each.len())
+            .find(|at| {
+                let before = &live_at_each[at - 1];
+                let now = &live_at_each[*at];
+                now.iter().any(|id| !before.contains(id))
+                    && before.iter().any(|id| !now.contains(id))
+            })
+            .expect(
+                "the fixture must hold a record whose head both departs and arrives an id, or a \
+                 walk that re-applies a head cannot be told from one that does not",
+            );
+
+        let mut stream = BlockStream::new(on_disk.bytes.as_slice(), &manifest).expect("a manifest");
+        for at in 0..gains_and_loses {
+            let _ = stream
+                .next_record()
+                .expect("a record")
+                .unwrap_or_else(|why| panic!("record {at} reads: {why}"));
+        }
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stream.next_record_where(|_| panic!("the caller's predicate fails"))
+        }));
+        assert!(
+            unwound.is_err(),
+            "the predicate's panic has to reach the caller for this to be the case under test"
+        );
+
+        // And the walk carries on. Every record from the one it failed on, with the live set the
+        // uninterrupted walk had there.
+        let mut resumed = Vec::new();
+        while let Some(next) = stream.next_record() {
+            let _ = next.unwrap_or_else(|why| {
+                panic!(
+                    "a resumed walk refused a sound file at record {}: {why}",
+                    gains_and_loses + resumed.len()
+                )
+            });
+            resumed.push(stream.live_reads().ids().to_vec());
+        }
+        assert_eq!(
+            resumed.len(),
+            records.len() - gains_and_loses,
+            "the resumed walk reads the record the predicate failed on and every one after it"
+        );
+        assert_eq!(
+            resumed.as_slice(),
+            &live_at_each[gains_and_loses..],
+            "a resumed walk must have the reads an uninterrupted walk has"
         );
     }
 
