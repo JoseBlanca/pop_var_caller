@@ -36,10 +36,12 @@
 //! (`doc/devel/ng/spec/typed_regions.md` §2.3), so no two records ever describe the same
 //! position.
 
+pub mod assemble;
 pub mod encode;
 pub mod header;
 pub mod writer;
 
+pub use assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput, assemble_record};
 pub use encode::{
     FREQUENCY_DECIMALS, MAPPING_QUALITY_DECIMALS, MISSING_FIELD, PENALTY_DECIMALS,
     QUALITY_DECIMALS, fixed_columns, format_keys, frequency_text, info_column,

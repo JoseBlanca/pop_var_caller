@@ -154,6 +154,32 @@ impl VcfWriter {
         Ok(())
     }
 
+    /// **Write a whole stream of records, in the order it yields them.**
+    ///
+    /// This is the shape the run is built around: variants come off the caller, pass through
+    /// filters and through the mappers that attach genotypes and annotations
+    /// ([`assemble_record`](super::assemble::assemble_record) being the last of them), and end
+    /// here. Ordering is still checked per record, so a filter or mapper that reorders the
+    /// stream is refused rather than silently written.
+    ///
+    /// **Takes the records by value and one at a time**, so the stream can be lazy: nothing
+    /// requires the whole cohort's records to exist at once, which is what keeps the writer off
+    /// the memory budget at three thousand samples.
+    ///
+    /// # Errors
+    ///
+    /// The first record that runs backwards, forms an illegal tie, or cannot be written stops
+    /// the stream and returns.
+    pub fn write_stream(
+        &mut self,
+        records: impl IntoIterator<Item = VcfRecord>,
+    ) -> Result<(), VcfWriteError> {
+        for record in records {
+            self.write_record(&record)?;
+        }
+        Ok(())
+    }
+
     /// How many records have been written.
     #[must_use]
     pub fn records_written(&self) -> u64 {

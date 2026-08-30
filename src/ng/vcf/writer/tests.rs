@@ -347,3 +347,45 @@ fn a_run_that_called_nothing_still_writes_a_header() {
         0
     );
 }
+
+#[test]
+fn a_stream_of_records_is_written_in_the_order_it_yields_them() {
+    // The shape the run is built around: records come off the caller, through filters and
+    // mappers, and end here. The writer takes them one at a time so the stream can be lazy —
+    // nothing requires the whole cohort's records to exist at once.
+    let path = scratch("stream").join("out.vcf");
+    let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
+
+    let stream = [100u64, 200, 300]
+        .into_iter()
+        .map(|position| snp_at(0, position))
+        // A filter in the middle, as the run will have.
+        .filter(|record| record.region().start != Position(200));
+
+    writer.write_stream(stream).expect("the stream writes");
+    assert_eq!(writer.records_written(), 2);
+    writer.finish().expect("the file finishes");
+
+    let written = fs::read_to_string(&path).expect("the finished file");
+    let positions: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t').nth(1).expect("a POS column"))
+        .collect();
+    assert_eq!(positions, ["100", "300"]);
+}
+
+#[test]
+fn a_stream_that_reorders_its_records_is_refused_rather_than_written() {
+    // A filter or mapper that reorders is a defect in the stream, and the writer is where it
+    // surfaces — not in whatever later tries to index the file.
+    let path = scratch("stream_reordered").join("out.vcf");
+    let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
+    let stream = [300u64, 100]
+        .into_iter()
+        .map(|position| snp_at(0, position));
+    assert!(matches!(
+        writer.write_stream(stream),
+        Err(VcfWriteError::OutOfOrder { .. })
+    ));
+}

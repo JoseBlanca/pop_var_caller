@@ -205,6 +205,27 @@ derives nothing the loop already decided.
 *Depends:* Checkpoint B, A2. *Source:* spec §3;
 [`../spec/calling_quality.md`](../spec/calling_quality.md) §3.3.
 
+> **Half-landed, deliberately, against an interface that does not exist (owner, 2026-08-30).**
+> The run's streaming assembly is being built elsewhere and will take a while, so this module was
+> asked to assume an API, code against it, and be fixed when the real one arrives. What is built
+> is the **mapper**: `src/ng/vcf/assemble.rs`, reading the real [`LocusInference`] for the calls,
+> the fitted copies, the allele table and convergence, and taking everything else through
+> `LocusEvidenceForOutput` — its guess at what the stream will hand over.
+>
+> **What is settled and will not move when the interface does:** the no-call rule of spec §7.1,
+> the `AF` denominator, the padding rule, the field set, and the two refusals (evidence gathered
+> over a different cohort; a filter that disagrees with the loop about convergence).
+>
+> **What is provisional:** the shape of `LocusEvidenceForOutput` and `SampleEvidenceForOutput`,
+> and above all **where `reads_were_uninformative` is computed**. It is the one input that cannot
+> be recovered downstream — the genotype likelihoods live in per-sample scratch the loop
+> overwrites, exactly as the genotype quality does — so whoever scores a sample has to answer it
+> while it still knows. Everything else in that struct is a count the worker can sum.
+>
+> The writer gained `write_stream` for the same reason: the run is filters and mappers over an
+> iterator, and the ordering check stays per record so a stage that reorders is refused rather
+> than written.
+
 ☐ **D2. The quality join, and the invariant.** The record's QUAL is the corrected value the
 artifact stage wrote, the penalties ride beside it, and **the writer contains no arithmetic on
 any of the three** — assert it structurally (the encoder takes them as opaque finished values).
