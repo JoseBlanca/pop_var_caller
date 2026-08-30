@@ -25,6 +25,27 @@ pub const MISSING_FIELD: &str = ".";
 /// rendered two ways is two different files.
 pub const QUALITY_DECIMALS: usize = 1;
 
+/// How many decimal places an allele frequency is written to.
+///
+/// **Six, because the smallest frequency the caller can state is smaller than four would
+/// show.** One copy in a cohort of 3,000 diploid samples is 1 in 6,000, or 0.000167; at four
+/// decimals two different singleton frequencies render identically, and at three they render as
+/// zero.
+pub const FREQUENCY_DECIMALS: usize = 6;
+
+/// How many decimal places a pooled mapping quality is written to.
+///
+/// Two. Mapping qualities are integers 0..=60 and these are means over reads, so the fraction
+/// carries the pooling and nothing finer is meaningful.
+pub const MAPPING_QUALITY_DECIMALS: usize = 2;
+
+/// How many decimal places an artifact penalty is written to.
+///
+/// One, the same as [`QUALITY_DECIMALS`] — the penalties are Phreds subtracted from the site
+/// quality, so writing them at a different precision would stop `QUAL + ABPEN + SPPEN` from
+/// recovering the uncorrected quality the way spec §6 says it does.
+pub const PENALTY_DECIMALS: usize = 1;
+
 /// **The seven fixed columns**, `CHROM` through `FILTER`, tab-separated and with no trailing
 /// separator — `INFO`, `FORMAT` and the sample columns follow in later steps.
 ///
@@ -112,6 +133,155 @@ fn padded(allele: &[u8], padding: Option<PaddingBase>) -> String {
         Some(PaddingBase::Left(base)) => format!("{}{}", base as char, bases),
         Some(PaddingBase::Right(base)) => format!("{}{}", bases, base as char),
     }
+}
+
+/// **The `INFO` column**: the site's own annotations, `;`-separated, in the order spec §6
+/// declares them.
+///
+/// **A key whose value is undefined for this record is omitted; a defined key whose *entry* is
+/// undefined writes `.` in that slot.** The two mean different things to a parser and production
+/// keeps them apart, so this does too: `MQREF` disappears when no read reached the reference,
+/// while `MQALT` stays and writes `.` for the one alternative nobody's reads reached.
+///
+/// The per-alternative keys — `AF`, `AC`, `MQALT`, `MQDIFF`, all `Number=A` — are omitted
+/// entirely at a record with no alternative, which is what a locus the caller refused comes to.
+#[must_use]
+pub fn info_column(record: &VcfRecord) -> String {
+    let mut fields: Vec<String> = Vec::new();
+    let counts = called_allele_counts(record);
+
+    if !record.alternatives().is_empty() {
+        fields.push(format!("AF={}", allele_frequencies(record)));
+        fields.push(format!(
+            "AC={}",
+            join_with_commas(counts.per_alternative.iter().map(u64::to_string))
+        ));
+    }
+    fields.push(format!("AN={}", counts.total));
+    fields.push(format!("DP={}", total_depth(record)));
+
+    if let Some(penalties) = record.artifact_penalties {
+        fields.push(format!(
+            "ABPEN={:.*}",
+            PENALTY_DECIMALS,
+            penalties.allele_balance.get()
+        ));
+        fields.push(format!(
+            "SPPEN={:.*}",
+            PENALTY_DECIMALS,
+            penalties.strand_and_read_position.get()
+        ));
+    }
+
+    let reference_mapq = record.allele_mapq()[0].mean();
+    if let Some(mean) = reference_mapq {
+        fields.push(format!("MQREF={mean:.*}", MAPPING_QUALITY_DECIMALS));
+    }
+    if !record.alternatives().is_empty() {
+        let alternative_means: Vec<Option<f64>> = record.allele_mapq()[1..]
+            .iter()
+            .map(|pool| pool.mean())
+            .collect();
+        fields.push(format!(
+            "MQALT={}",
+            join_with_commas(alternative_means.iter().map(optional_mapping_quality))
+        ));
+        fields.push(format!(
+            "MQDIFF={}",
+            join_with_commas(alternative_means.iter().map(|alternative| {
+                optional_mapping_quality(
+                    &alternative
+                        .zip(reference_mapq)
+                        .map(|(alternative, reference)| alternative - reference),
+                )
+            }))
+        ));
+    }
+
+    if let Some(tract) = record.repeat_tract() {
+        let motif = std::str::from_utf8(tract.motif())
+            .expect("motif bases are A/C/G/T/N-validated at the catalog boundary");
+        fields.push("STR".to_string());
+        fields.push(format!("RU={motif}"));
+        fields.push(format!("PERIOD={}", tract.period()));
+    }
+
+    fields.join(";")
+}
+
+/// The `AF` values: each alternative's share of the cohort's expected allele copies.
+///
+/// **Normalised over the copies' own total, not over `AN`, and the difference is real.** The
+/// copies are the calling loop's converged fit and they sum to `ploidy ×` the samples the *loop*
+/// scored; `AN` counts the samples the *file* writes a genotype for, which is fewer whenever a
+/// sample the loop scored is written `./.` — the ordinary case for a sample whose reads said
+/// nothing (spec §7.1). Dividing by `AN` would therefore make the frequencies sum to more than
+/// one. `AF` is an estimate and `AC`/`AN` are counts of called genotypes; they are different
+/// quantities and are allowed different denominators.
+fn allele_frequencies(record: &VcfRecord) -> String {
+    let total: f64 = record.expected_copies().iter().sum();
+    join_with_commas(record.expected_copies()[1..].iter().map(|copies| {
+        // A locus every sample was set aside at cannot reach here — the record type refuses an
+        // empty cohort — but a cohort whose copies are all zero is arithmetic, not data.
+        let frequency = if total > 0.0 { copies / total } else { 0.0 };
+        format!("{frequency:.*}", FREQUENCY_DECIMALS)
+    }))
+}
+
+/// `AC` per alternative and `AN`, counted from the genotypes the file actually writes.
+struct CalledAlleleCounts {
+    per_alternative: Vec<u64>,
+    total: u64,
+}
+
+/// Count the called genotypes' alleles.
+///
+/// **A no-called sample is in neither number.** `AN` is "total called allele copies", so a
+/// sample the file writes as `./.` contributes nothing to it — which is what makes `AN` differ
+/// from `ploidy × samples` and is the whole reason it is written at all.
+fn called_allele_counts(record: &VcfRecord) -> CalledAlleleCounts {
+    let mut per_alternative = vec![0u64; record.alternatives().len()];
+    let mut total = 0u64;
+    for column in record.sample_columns() {
+        let Some(genotype) = column.call.genotype() else {
+            continue;
+        };
+        for allele in genotype.alleles() {
+            total += 1;
+            let index = usize::from(allele.get());
+            if index > 0 {
+                // PANIC-FREE: `VcfRecord::new` refused a genotype naming an allele past the
+                // table, so `index - 1` is in range for the alternatives.
+                per_alternative[index - 1] += 1;
+            }
+        }
+    }
+    CalledAlleleCounts {
+        per_alternative,
+        total,
+    }
+}
+
+/// The record's `INFO/DP`: the sum of the samples' own depths.
+fn total_depth(record: &VcfRecord) -> u64 {
+    record
+        .sample_columns()
+        .iter()
+        .map(|column| u64::from(column.read_counts.depth()))
+        .sum()
+}
+
+/// One `Number=A` entry that may be undefined — a mean over no reads, or a difference against
+/// one.
+fn optional_mapping_quality(value: &Option<f64>) -> String {
+    value.map_or_else(
+        || MISSING_FIELD.to_string(),
+        |mean| format!("{mean:.*}", MAPPING_QUALITY_DECIMALS),
+    )
+}
+
+fn join_with_commas(values: impl Iterator<Item = String>) -> String {
+    values.collect::<Vec<_>>().join(",")
 }
 
 #[cfg(test)]

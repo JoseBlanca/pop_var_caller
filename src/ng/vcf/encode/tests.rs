@@ -380,3 +380,319 @@ fn a_contig_the_header_does_not_hold_is_refused() {
     // an encoding is a defect everywhere except here, where the panic is the subject.
     let _ = fixed_columns(&record, &contigs());
 }
+
+// ---------------------------------------------------------------------------
+// INFO
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_snp_writes_every_site_annotation_in_order() {
+    let record = VcfRecord::new(
+        region_on(0, 1_000, 1_000),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.4, 0.6],
+        one_sample(vec![10, 9], 0, &[0, 1]),
+        pools(&[10, 9]),
+        None,
+        quality(300.0),
+        Some(ArtifactPenalties {
+            allele_balance: Phred::ZERO,
+            strand_and_read_position: quality(2.5),
+        }),
+        FilterVerdict::Pass,
+        None,
+    );
+
+    // One sample, called 0/1: AN 2, AC 1. Copies 1.4 and 0.6 of a total 2.0, so AF 0.3.
+    // Both pools mean 60, so MQDIFF is 0.
+    assert_eq!(
+        info_column(&record),
+        "AF=0.300000;AC=1;AN=2;DP=19;ABPEN=0.0;SPPEN=2.5;MQREF=60.00;MQALT=60.00;MQDIFF=0.00"
+    );
+}
+
+#[test]
+fn a_tract_record_carries_the_str_flag_beside_its_motif_and_period() {
+    let record = VcfRecord::new(
+        region_on(0, 2_000, 2_015),
+        vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
+        vec![1.0, 1.0],
+        one_sample(vec![12, 11], 7, &[0, 1]),
+        pools(&[12, 11]),
+        None,
+        quality(150.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"CA").expect("a two-base motif"),
+        )),
+    );
+
+    let info = info_column(&record);
+    assert!(info.ends_with(";STR;RU=CA;PERIOD=2"), "got {info}");
+    // The three travel together or not at all — there is no record with one and not the others.
+    assert_eq!(info.matches("STR").count(), 1);
+}
+
+#[test]
+fn a_snp_record_carries_no_tract_annotation() {
+    let info = info_column(&a_biallelic_snp());
+    assert!(!info.contains("STR"));
+    assert!(!info.contains("RU="));
+    assert!(!info.contains("PERIOD="));
+}
+
+/// A plain two-allele SNP with one heterozygous sample.
+fn a_biallelic_snp() -> VcfRecord {
+    VcfRecord::new(
+        region_on(0, 30, 30),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        one_sample(vec![5, 5], 0, &[0, 1]),
+        pools(&[5, 5]),
+        None,
+        quality(50.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    )
+}
+
+#[test]
+fn the_frequencies_are_normalised_over_the_copies_and_not_over_an() {
+    // **The distinction this test exists for.** Two samples take part: one is called 0/1, the
+    // other is written as a no-call because its reads said nothing (spec §7.1) — but the loop
+    // scored it, so its copies are in the fit. AN counts only the called sample's two alleles,
+    // while the copies total 4. Normalising over AN would give frequencies summing to 2.
+    let record = VcfRecord::new(
+        region_on(0, 90, 90),
+        vec![allele(b"A"), allele(b"T")],
+        vec![3.0, 1.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
+                    genotype_quality: quality(30.0),
+                },
+                read_counts: SampleReadCounts::new(vec![6, 6], 0),
+            },
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![0, 0], 0),
+            },
+        ],
+        pools(&[6, 6]),
+        None,
+        quality(80.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    // 1.0 of 4.0 copies is 0.25 — not 1.0/2 = 0.5, which normalising over AN would give.
+    assert!(info.starts_with("AF=0.250000;AC=1;AN=2;"), "got {info}");
+}
+
+#[test]
+fn a_no_called_sample_is_in_neither_ac_nor_an_but_its_reads_are_in_dp() {
+    let record = VcfRecord::new(
+        region_on(0, 90, 90),
+        vec![allele(b"A"), allele(b"T")],
+        vec![2.0, 0.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
+                    genotype_quality: quality(30.0),
+                },
+                read_counts: SampleReadCounts::new(vec![8, 0], 0),
+            },
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![2, 1], 4),
+            },
+        ],
+        pools(&[10, 1]),
+        None,
+        quality(20.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    // AN is 2, not 4: the no-called sample contributes no called alleles. Its seven reads are
+    // still in DP — the evidence exists even where the call does not.
+    assert!(info.contains(";AC=0;AN=2;DP=15;"), "got {info}");
+}
+
+#[test]
+fn an_allele_no_read_reached_writes_a_missing_entry_rather_than_a_zero() {
+    // A mean over no reads is absent, not zero — zero would claim every read mapped as badly
+    // as possible. `MQALT` keeps its slot and writes `.`; `MQDIFF` follows it.
+    let record = VcfRecord::new(
+        region_on(0, 12, 12),
+        vec![allele(b"A"), allele(b"T"), allele(b"G")],
+        vec![1.5, 0.5, 0.0],
+        one_sample(vec![7, 3, 0], 0, &[0, 1]),
+        vec![
+            MapqPool {
+                reads: 7,
+                mapq_sum: 420,
+            },
+            MapqPool {
+                reads: 3,
+                mapq_sum: 150,
+            },
+            MapqPool::default(),
+        ],
+        None,
+        quality(45.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    // REF mean 60, first ALT mean 50 (difference -10), second ALT unreached.
+    assert!(
+        info.contains("MQREF=60.00;MQALT=50.00,.;MQDIFF=-10.00,."),
+        "got {info}"
+    );
+}
+
+#[test]
+fn a_reference_no_read_reached_omits_the_key_rather_than_writing_a_missing_value() {
+    // The other half of the rule: an undefined *key* disappears, an undefined *entry* stays
+    // and writes `.`. A parser distinguishes the two.
+    let record = VcfRecord::new(
+        region_on(0, 12, 12),
+        vec![allele(b"A"), allele(b"T")],
+        vec![0.0, 2.0],
+        one_sample(vec![0, 9], 0, &[1, 1]),
+        pools(&[0, 9]),
+        None,
+        quality(45.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    assert!(!info.contains("MQREF"), "got {info}");
+    // MQALT still has a value; MQDIFF cannot be computed without the reference, so it is `.`.
+    assert!(info.contains("MQALT=60.00;MQDIFF=."), "got {info}");
+}
+
+#[test]
+fn a_record_with_no_alternative_omits_every_per_alternative_key() {
+    let record = VcfRecord::new(
+        region_on(0, 500, 511),
+        vec![allele(b"ATATATATATAT")],
+        vec![0.0],
+        vec![SampleColumn {
+            call: SampleCall::NoCall,
+            read_counts: SampleReadCounts::new(vec![0], 2),
+        }],
+        pools(&[0]),
+        None,
+        quality(0.0),
+        None,
+        FilterVerdict::LowDepth,
+        Some(TractAnnotation::new(
+            Motif::new(b"AT").expect("a two-base motif"),
+        )),
+    );
+
+    let info = info_column(&record);
+    for key in ["AF=", "AC=", "MQALT=", "MQDIFF="] {
+        assert!(!info.contains(key), "{key} should be absent, got {info}");
+    }
+    // What remains is the site's own counts and the tract annotation.
+    assert_eq!(info, "AN=0;DP=2;STR;RU=AT;PERIOD=2");
+}
+
+#[test]
+fn the_penalties_are_absent_where_the_correction_did_not_run() {
+    let info = info_column(&a_biallelic_snp());
+    assert!(!info.contains("ABPEN"), "got {info}");
+    assert!(!info.contains("SPPEN"), "got {info}");
+}
+
+#[test]
+fn the_uncorrected_quality_is_the_written_one_plus_its_two_penalties() {
+    // Spec §6's reason for publishing them: the correction stays recoverable. Both are written
+    // at the quality's own precision so the addition is exact in the file's own digits.
+    let record = VcfRecord::new(
+        region_on(0, 60, 60),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        one_sample(vec![5, 5], 0, &[0, 1]),
+        pools(&[5, 5]),
+        None,
+        quality(112.5),
+        Some(ArtifactPenalties {
+            allele_balance: quality(3.5),
+            strand_and_read_position: quality(4.0),
+        }),
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    assert!(info.contains("ABPEN=3.5;SPPEN=4.0"), "got {info}");
+    let written = fixed_columns(&record, &contigs());
+    let quality: f64 = written
+        .split('\t')
+        .nth(5)
+        .expect("a QUAL column")
+        .parse()
+        .expect("a numeric quality");
+    assert!((quality + 3.5 + 4.0 - 120.0).abs() < 1e-9);
+}
+
+#[test]
+fn several_alternatives_give_one_entry_per_alternative_in_every_per_alternative_key() {
+    let record = VcfRecord::new(
+        region_on(0, 77, 77),
+        vec![allele(b"A"), allele(b"C"), allele(b"G")],
+        vec![2.0, 1.0, 1.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
+                    genotype_quality: quality(30.0),
+                },
+                read_counts: SampleReadCounts::new(vec![4, 4, 0], 0),
+            },
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(2)]),
+                    genotype_quality: quality(30.0),
+                },
+                read_counts: SampleReadCounts::new(vec![4, 0, 4], 0),
+            },
+        ],
+        pools(&[8, 4, 4]),
+        None,
+        quality(60.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let info = info_column(&record);
+    // Copies 1.0 and 1.0 of a total 4.0; one copy of each ALT called; AN 4.
+    assert!(
+        info.starts_with("AF=0.250000,0.250000;AC=1,1;AN=4;DP=16;"),
+        "got {info}"
+    );
+    for key in ["MQALT=", "MQDIFF="] {
+        let field = info
+            .split(';')
+            .find(|field| field.starts_with(key))
+            .unwrap_or_else(|| panic!("{key} present"));
+        assert_eq!(field.split(',').count(), 2, "{key} has one entry per ALT");
+    }
+}

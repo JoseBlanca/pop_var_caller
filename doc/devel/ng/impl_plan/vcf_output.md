@@ -137,12 +137,22 @@ byte-for-byte, including the tract-deletion fixture mirroring production's `N` c
 ([`vcf_out.rs:405-435`](../../../../src/ssr/cohort/vcf_out.rs)) with the corrected output.
 *Depends:* A1. *Source:* spec §5.
 
-☐ **B2. INFO.** `AF` from the expected allele copies normalised over `AN` — **and the step
+✅ **B2. INFO.** `AF` from the expected allele copies normalised over `AN` — **and the step
 checks, against the loop, that this equals the converged pass's fitted frequency**; if it does
 not, stop for a ruling rather than write either. `AC`/`AN` decoded from the calls with `Missing`
 samples excluded and the `AC ≤ AN` assertion kept; `DP`; `ABPEN`/`SPPEN`; the MQ family with
 production's omission rules (absent key vs `.` entry, spec §11); `STR`+`RU`+`PERIOD` together or
 not at all.
+
+> **Correction, made at implementation time — "normalised over `AN`" above is wrong, and the
+> check this step demanded is what found it.** The loop's cohort copies sum to `ploidy ×` the
+> samples the *loop scored*; `AN` counts the samples the *file writes a genotype for*, and since
+> §7.1 a sample whose reads said nothing is scored by the loop and written `./.`. The two
+> denominators therefore differ, and dividing by `AN` makes the frequencies sum to more than one.
+> **`AF` is normalised over the copies' own total**, which is the loop's fitted frequency and what
+> spec §6 asks for; `AF` being an estimate and `AC`/`AN` counts of called genotypes, different
+> denominators are correct rather than a discrepancy. No design changed — the spec already said
+> this and the plan's parenthetical contradicted it.
 *Depends:* B1. *Source:* spec §6; [`record_encode.rs:280-474`](../../../../src/vcf/record_encode.rs).
 
 ☐ **B3. FORMAT and the sample columns.** `GT` through the genotype-order table, sorted,
