@@ -104,7 +104,7 @@ pub use record::{
     RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
     decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
 };
-pub use trailer::replace_trailer;
+pub use trailer::{FileAfterAFailedReplacement, TrailerReplacementFailure, replace_trailer};
 pub use walk::{RecordIter, SelectiveRecordIter};
 pub use writer::{PspWriter, WriteStats};
 
@@ -522,14 +522,21 @@ pub enum NotReadable {
     BlockHead(#[from] BlockHeadDecodeError),
 }
 
-/// Why a writer cannot honour a file's manifest, under [`PspWriteError::UnsupportedManifest`].
+/// Why a writer cannot honour what a file's header declares, under
+/// [`PspWriteError::UnsupportedHeader`].
 ///
-/// **Two things are built from a manifest before a byte is written** — the rule that cuts a block
+/// **Two things are built from the header before a byte is written** — the rule that cuts a block
 /// and the compressor — and they fail for different reasons, which a caller reading only a
 /// sentence could not tell apart.
+///
+/// **They also come from two different halves of the header**, which is why neither this type nor
+/// the error above says *manifest* any more: the cut rule comes from the manifest, and the
+/// compression level from the writer's own recorded parameters. *This type was `ManifestRefusal`
+/// and the error `UnsupportedManifest` until 2026-08-30, when the second of those was found being
+/// reported as a fault in the first.*
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub enum ManifestRefusal {
+pub enum HeaderRefusal {
     /// The genomic block size or the byte ceiling is one no cut rule can be built from.
     #[error(transparent)]
     CutRule(#[from] BlockCutRuleError),
@@ -625,16 +632,21 @@ pub enum PspWriteError {
     #[error("header field {field} is not writable: {reason}")]
     InvalidHeaderField { field: String, reason: String },
 
-    /// An append was asked to extend a file whose manifest this writer cannot honour.
-    /// **Appending does not rewrite the header**, so the added records must use the
+    /// An append was asked to extend a file whose header declares something this writer cannot
+    /// honour. **Appending does not rewrite the header**, so the added records must use the
     /// encodings the file already declares (spec §6.4).
-    #[error("{} declares a manifest this writer cannot honour", path.display())]
-    UnsupportedManifest {
+    ///
+    /// **The sentence says *header* rather than *manifest*, and the difference is where an
+    /// operator looks.** The cut rule is built from the manifest, but the compression level is
+    /// read from the writer's recorded parameters — the header's provenance half — so a level
+    /// this build cannot read was arriving under a sentence pointing at the wrong section.
+    #[error("{} declares something in its header this writer cannot honour", path.display())]
+    UnsupportedHeader {
         path: PathBuf,
         /// **Typed, so a caller can tell the cut rule from the compressor** without reading a
         /// sentence — and so `Display` and the chain do not print the same words twice.
         #[source]
-        source: ManifestRefusal,
+        source: HeaderRefusal,
     },
 
     /// Reopening a finished file failed. **Append and trailer replacement read before they

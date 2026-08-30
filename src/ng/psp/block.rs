@@ -713,7 +713,7 @@ pub enum BlockCutRuleError {
     /// The file declares a record layout this build does not write, so its blocks cannot be
     /// extended with records this build produces.
     // **No `{source}` in the message, and `#[source]` below is why**: a chain that prints the
-    // same sentence twice reads as a fault in the printer, and `PspWriteError::UnsupportedManifest`
+    // same sentence twice reads as a fault in the printer, and `PspWriteError::UnsupportedHeader`
     // is where that first showed (the G3 review).
     #[error("the file declares a record layout this writer cannot honour")]
     UnsupportedRecordLayout {

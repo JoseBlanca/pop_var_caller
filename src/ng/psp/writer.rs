@@ -107,13 +107,13 @@ impl PspWriter {
         );
         let header_bytes = header.encode()?;
         let builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
-            PspWriteError::UnsupportedManifest {
+            PspWriteError::UnsupportedHeader {
                 path: path.to_path_buf(),
                 source: source.into(),
             }
         })?;
         let compressor = BlockCompressor::from_manifest(&header.manifest).map_err(|source| {
-            PspWriteError::UnsupportedManifest {
+            PspWriteError::UnsupportedHeader {
                 path: path.to_path_buf(),
                 source: source.into(),
             }
@@ -148,7 +148,7 @@ impl PspWriter {
     /// **The header is not rewritten, so the manifest is the file's.** A field's encoding, the
     /// grid the blocks cut on and the look-back window are all already declared, and appended
     /// records must use them — so a manifest this build cannot honour is
-    /// [`UnsupportedManifest`](PspWriteError::UnsupportedManifest) here rather than a file whose
+    /// [`UnsupportedHeader`](PspWriteError::UnsupportedHeader) here rather than a file whose
     /// added records no reader can interpret under the header it keeps.
     ///
     /// **Coordinate order runs across the seam.** The last record already in the file is found by
@@ -178,7 +178,7 @@ impl PspWriter {
         // cannot honour arrive as a *reader's* refusal wrapped in `Reopen`, which is the wrong
         // class for what spec §6.4 calls out by name.
         let mut builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
-            PspWriteError::UnsupportedManifest {
+            PspWriteError::UnsupportedHeader {
                 path: path.to_path_buf(),
                 source: source.into(),
             }
@@ -193,7 +193,7 @@ impl PspWriter {
         // put blocks in one file compressed two ways, with nothing saying so.
         let compressor =
             Self::build_the_compressor_the_header_records(&header).map_err(|source| {
-                PspWriteError::UnsupportedManifest {
+                PspWriteError::UnsupportedHeader {
                     path: path.to_path_buf(),
                     source,
                 }
@@ -270,12 +270,12 @@ impl PspWriter {
     /// the file §2.4 says must not exist.
     fn build_the_compressor_the_header_records(
         header: &Header,
-    ) -> Result<BlockCompressor, super::ManifestRefusal> {
+    ) -> Result<BlockCompressor, super::HeaderRefusal> {
         use crate::ng::psp::header::ParameterValue;
 
         let level = match header.writer.parameters.get("zstd-compression-level") {
             Some(ParameterValue::Integer(recorded)) => {
-                i32::try_from(*recorded).map_err(|_| super::ManifestRefusal::LevelPastAnyLevel {
+                i32::try_from(*recorded).map_err(|_| super::HeaderRefusal::LevelPastAnyLevel {
                     recorded: *recorded,
                 })?
             }
@@ -283,7 +283,7 @@ impl PspWriter {
             // written before this parameter existed looks like. Any other shape is a level
             // recorded and then ignored, which is the file §2.4 says must not exist.
             Some(other) => {
-                return Err(super::ManifestRefusal::UnreadableLevel {
+                return Err(super::HeaderRefusal::UnreadableLevel {
                     recorded: format!("{other:?}"),
                 });
             }
@@ -364,31 +364,11 @@ impl PspWriter {
                 });
             }
         };
-        let entry = BlockIndexEntry {
-            first_position: GenomePosition {
-                contig: head.contig,
-                position: head.first_position,
-            },
-            block_offset: *written,
-        };
-        let put = out
-            .write_all(block)
-            .map(|()| *written += block.len() as u64)
-            .map_err(|source| PspWriteError::Io {
-                path: path.clone(),
-                while_doing: "writing a block",
-                source,
-            });
-        match put {
-            Ok(()) => {
-                index.push(entry);
-                Ok(())
-            }
-            Err(refused) => {
-                self.spent = Some("a block could not be written");
-                Err(refused)
-            }
+        let put = Self::put_block(path, out, written, index, &head, block);
+        if put.is_err() {
+            self.spent = Some("a block could not be written");
         }
+        put
     }
 
     /// Write the last block, the index, the trailer and the footer, then make the file durable.
@@ -424,15 +404,25 @@ impl PspWriter {
             .finish();
         if let Some(payload) = last_block {
             let head = Self::decode_the_head_of(&payload, &self.path)?;
-            let block = self
-                .compressor
-                .compress(&payload)
-                .map_err(|source| PspWriteError::BlockRefused {
-                    path: self.path.clone(),
-                    source,
-                })?
-                .to_vec();
-            self.put_block(&head, &block)?;
+            // **Destructured for the reason `push` destructures**: the compressed block is a
+            // borrow of the compressor's own buffer, and naming the disjoint fields writes it
+            // where it lies instead of copying it out.
+            let Self {
+                path,
+                out,
+                written,
+                compressor,
+                index,
+                ..
+            } = &mut self;
+            let block =
+                compressor
+                    .compress(&payload)
+                    .map_err(|source| PspWriteError::BlockRefused {
+                        path: path.clone(),
+                        source,
+                    })?;
+            Self::put_block(path, out, written, index, &head, block)?;
         }
 
         let index_offset = self.written;
@@ -566,16 +556,38 @@ impl PspWriter {
     }
 
     /// Write one compressed block and give it its index entry.
-    fn put_block(&mut self, head: &BlockHead, block: &[u8]) -> Result<(), PspWriteError> {
+    ///
+    /// **The entry is pushed only if the write returned**, so the index never claims a block the
+    /// file does not hold — and its offset is where the block went, taken before the write moves
+    /// the counter.
+    ///
+    /// **The fields are named rather than reached through `self`**, and that is not a style
+    /// choice: both callers hold `block` as a borrow of the compressor's own buffer, so a method
+    /// taking `&mut self` could not be given it without copying the block out first — one
+    /// allocation the size of a compressed block, per block, for nothing. Naming the disjoint
+    /// fields says to the borrow checker that the compressor is not among them.
+    fn put_block(
+        path: &Path,
+        out: &mut BufWriter<File>,
+        written: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+        head: &BlockHead,
+        block: &[u8],
+    ) -> Result<(), PspWriteError> {
         let entry = BlockIndexEntry {
             first_position: GenomePosition {
                 contig: head.contig,
                 position: head.first_position,
             },
-            block_offset: self.written,
+            block_offset: *written,
         };
-        self.put(block, "writing a block")?;
-        self.index.push(entry);
+        out.write_all(block).map_err(|source| PspWriteError::Io {
+            path: path.to_path_buf(),
+            while_doing: "writing a block",
+            source,
+        })?;
+        *written += block.len() as u64;
+        index.push(entry);
         Ok(())
     }
 
@@ -2096,9 +2108,9 @@ mod tests {
 
         let refused = PspWriter::append(&path).expect_err("this build cannot write that layout");
         match refused {
-            PspWriteError::UnsupportedManifest { source, .. } => {
+            PspWriteError::UnsupportedHeader { source, .. } => {
                 assert!(
-                    matches!(source, crate::ng::psp::ManifestRefusal::CutRule(_)),
+                    matches!(source, crate::ng::psp::HeaderRefusal::CutRule(_)),
                     "got {source}"
                 )
             }
@@ -2337,8 +2349,8 @@ mod tests {
             assert!(
                 matches!(
                     refused,
-                    crate::ng::psp::ManifestRefusal::Compressor(_)
-                        | crate::ng::psp::ManifestRefusal::LevelPastAnyLevel { .. }
+                    crate::ng::psp::HeaderRefusal::Compressor(_)
+                        | crate::ng::psp::HeaderRefusal::LevelPastAnyLevel { .. }
                 ),
                 "got {refused}"
             );
@@ -2350,6 +2362,56 @@ mod tests {
                 "the refusal must name the level the file records; got {refused}"
             );
         }
+    }
+
+    /// **The sentence a refused append prints sends an operator to the header, not the
+    /// manifest.**
+    ///
+    /// The two things built before a byte is written come from different halves of the header:
+    /// the block cut rule from the manifest, and the compression level from the writer's own
+    /// recorded parameters. One sentence covers both, so it names the header — the G4 review
+    /// found it naming the manifest for a failure that is not in one, which sends whoever reads
+    /// it to the wrong section of a file they are already unsure about.
+    ///
+    /// **The error is constructed rather than provoked, and that is a limit worth stating.** The
+    /// only way to a wrongly-typed level in a real file is editing the header's bytes, and no
+    /// length-preserving edit of `zstd-compression-level = 3` is valid TOML — while re-encoding
+    /// the header moves every offset in the file after it, which is refused first and for
+    /// another reason. What this pins is the sentence; that `append` raises this variant with
+    /// this cause is held by
+    /// [`an_append_is_refused_on_a_manifest_this_writer_cannot_honour`] and by
+    /// [`a_level_recorded_in_a_shape_this_writer_cannot_read_is_refused`].
+    #[test]
+    fn a_header_this_writer_cannot_honour_is_reported_against_the_header() {
+        let refused = PspWriteError::UnsupportedHeader {
+            path: PathBuf::from("/somewhere/sample.ngpsp"),
+            source: crate::ng::psp::HeaderRefusal::UnreadableLevel {
+                recorded: "String(\"1\")".to_string(),
+            },
+        };
+        let sentence = refused.to_string();
+        assert!(
+            sentence.contains("header"),
+            "the refusal has to name the part of the file to look at; got {sentence}"
+        );
+        assert!(
+            !sentence.contains("manifest"),
+            "a compression level is not in the manifest, and this sentence covers both halves; \
+             got {sentence}"
+        );
+        assert!(
+            sentence.contains("/somewhere/sample.ngpsp"),
+            "and the file, because a cohort raises these from thousands of writers at once; got \
+             {sentence}"
+        );
+
+        // The cause underneath is what says *which* setting, and it is a separate sentence so
+        // the two do not print the same words twice.
+        let cause = std::error::Error::source(&refused).expect("the refusal carries its cause");
+        assert!(
+            cause.to_string().contains("compression level"),
+            "got {cause}"
+        );
     }
 
     /// **A level recorded in a shape this writer cannot read is refused, not ignored.**
@@ -2376,7 +2438,7 @@ mod tests {
             assert!(
                 matches!(
                     refused,
-                    crate::ng::psp::ManifestRefusal::UnreadableLevel { .. }
+                    crate::ng::psp::HeaderRefusal::UnreadableLevel { .. }
                 ),
                 "for {shape:?}, got {refused}"
             );

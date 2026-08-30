@@ -17,6 +17,46 @@ use super::footer::{Footer, decode_footer, encode_footer};
 use super::reader::read_and_check_the_footer;
 use super::{PspReadError, PspWriteError, read_header_from};
 
+/// What a failed [`replace_trailer`] left on disk.
+///
+/// **The two need opposite actions from the caller**, which is the whole reason this exists: one
+/// says *try again*, the other says *this sample has to be written from its reads again*. Before
+/// this type they differed only by a phrase inside an [`PspWriteError::Io`] variant, which a
+/// caller cannot branch on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FileAfterAFailedReplacement {
+    /// **Nothing was written.** The file is byte for byte what it was — the failure happened
+    /// while reading it, or while checking what would be written back — so calling again is a
+    /// retry and not a repair.
+    #[error("the file is exactly as it was, and the call can be made again")]
+    Unchanged,
+    /// **The file was cut back to its trailer and the replacement did not land.** It has no
+    /// footer, so every reader refuses it, and the trailer it used to hold is gone: there is
+    /// nothing to retry from. The sample has to be written again.
+    ///
+    /// ⚠ **A failed *truncation* is reported here too, and that is the conservative side of a
+    /// judgement.** `ftruncate` does not cut a file half-way, so in that one case the file is
+    /// very likely untouched — but the failure that actually reaches it is a disk error, and a
+    /// caller told *retry* about a file that a failing disk has cut goes on to trust it. The
+    /// mistake this way costs one sample rewritten; the other way costs a sample silently short.
+    #[error("the file is cut short and has no footer; the sample has to be written again")]
+    Torn,
+}
+
+/// A [`replace_trailer`] that failed, and what it left behind.
+///
+/// **The state comes first because it is what the caller acts on**; the cause underneath says
+/// what went wrong, and the two print as separate sentences so neither repeats the other.
+#[derive(Debug, thiserror::Error)]
+#[error("the trailer was not replaced: {file}")]
+pub struct TrailerReplacementFailure {
+    /// What the file is now — *the* thing to branch on.
+    pub file: FileAfterAFailedReplacement,
+    /// Why it failed.
+    #[source]
+    pub source: PspWriteError,
+}
+
 /// Replace a finished psp's trailer with `trailer`, leaving its blocks and its index untouched.
 ///
 /// **The file must be finished.** A psp with no valid footer is one a run was killed part-way
@@ -53,24 +93,48 @@ use super::{PspReadError, PspWriteError, read_header_from};
 /// **It does not read the block index**, and that is still right: reading it would cost a decode
 /// per call, and every field written back except the trailer's length is the file's own.
 ///
-/// **Which failures left the file alone, and which left it unreadable.** Everything up to and
-/// including the footer read-back leaves the file byte-identical, so the call can be retried:
-/// those are `Reopen`, `WouldNotBeReadable`, and the `Io` failures named *reopening the file to
-/// replace its trailer* and *measuring the file*. From *cutting the file back to its trailer*
-/// onwards the old trailer is gone and the file has no footer until the last write lands, so
-/// the sample has to be rebuilt. ⚠ **The two groups differ only in a phrase today**, which a
-/// caller cannot match on; the G3 review asked for a field it could, and that is not built
-/// because the caller — the cohort driver of `run_streaming.md` — does not exist yet.
-pub fn replace_trailer(path: &Path, trailer: &[u8]) -> Result<(), PspWriteError> {
-    let reopen = |source: PspReadError| PspWriteError::Reopen {
-        path: path.to_path_buf(),
+/// **Which failures left the file alone, and which left it torn** — and the caller is told which
+/// rather than having to infer it. Everything up to and including the footer read-back leaves the
+/// file byte-identical, so the call can simply be made again; from the truncation onwards the old
+/// trailer is gone and the file has no footer until the last write lands, so the sample has to be
+/// written again. **The two halves are two functions and each labels its own failures**, so the
+/// verdict is decided where the file's state is known rather than at the join, and a line moving
+/// from one half to the other takes its verdict with it. See [`FileAfterAFailedReplacement`].
+pub fn replace_trailer(path: &Path, trailer: &[u8]) -> Result<(), TrailerReplacementFailure> {
+    let (mut file, replaced, trailer_offset) = read_what_the_replacement_needs(path, trailer)?;
+    write_the_replacement(path, &mut file, &replaced, trailer_offset, trailer)
+}
+
+/// Open the file, check it, and work out the footer that will replace its own.
+///
+/// **Nothing here writes**, which is the property the caller's `Unchanged` verdict rests on: the
+/// handle is opened without `truncate`, and every other step reads or computes. A failure leaves
+/// the file byte for byte what it was.
+fn read_what_the_replacement_needs(
+    path: &Path,
+    trailer: &[u8],
+) -> Result<(File, Footer, u64), TrailerReplacementFailure> {
+    // **Each half puts its own verdict on its own failures**, rather than the caller deciding
+    // from which of the two returned. A verdict chosen at the join is a judgement made where
+    // nothing knows the file's state; here it is made where everything does, and there is one
+    // place per half to get it wrong.
+    let unchanged = |source: PspWriteError| TrailerReplacementFailure {
+        file: FileAfterAFailedReplacement::Unchanged,
         source,
     };
-    let io = |while_doing: &'static str| {
-        move |source: std::io::Error| PspWriteError::Io {
+    let reopen = move |source: PspReadError| {
+        unchanged(PspWriteError::Reopen {
             path: path.to_path_buf(),
-            while_doing,
             source,
+        })
+    };
+    let io = move |while_doing: &'static str| {
+        move |source: std::io::Error| {
+            unchanged(PspWriteError::Io {
+                path: path.to_path_buf(),
+                while_doing,
+                source,
+            })
         }
     };
     let mut file = OpenOptions::new()
@@ -93,23 +157,50 @@ pub fn replace_trailer(path: &Path, trailer: &[u8]) -> Result<(), PspWriteError>
     // Nothing here can make it fail — the fields come from a footer that already decoded and the
     // only one that moves is a length — and it is kept because that is an argument about today's
     // fields rather than about the encoding.
+    //
+    // **And it belongs on this side of the split**: a footer that would not decode is caught
+    // before the file is cut, so it costs a refusal rather than a file.
     decode_footer(&encode_footer(&replaced)).map_err(|source| {
-        PspWriteError::WouldNotBeReadable {
+        unchanged(PspWriteError::WouldNotBeReadable {
             path: path.to_path_buf(),
             reason: "the footer it would write does not decode".to_string(),
             source: Some(source.into()),
-        }
+        })
     })?;
+    Ok((file, replaced, trailer_offset))
+}
 
-    // **The file is cut back to the trailer's offset before anything is written**, and the ⚠
-    // above is why: from here until the footer lands the file has none, so an interruption
-    // leaves something every reader refuses instead of something that opens and lies.
+/// Cut the file back to its trailer and write the new trailer and footer.
+///
+/// **Every failure in here leaves a file no reader accepts**, which is what makes this the whole
+/// of the `Torn` half. The first statement is the truncation, deliberately: from that instant
+/// until the footer lands the file has none, so an interruption leaves something every reader
+/// refuses instead of something that opens and lies.
+fn write_the_replacement(
+    path: &Path,
+    file: &mut File,
+    replaced: &Footer,
+    trailer_offset: u64,
+    trailer: &[u8],
+) -> Result<(), TrailerReplacementFailure> {
+    // **Every failure below is `Torn`, including the truncation's**, and there is one place that
+    // says so — see [`FileAfterAFailedReplacement::Torn`] for why the truncation counts.
+    let io = |while_doing: &'static str| {
+        move |source: std::io::Error| TrailerReplacementFailure {
+            file: FileAfterAFailedReplacement::Torn,
+            source: PspWriteError::Io {
+                path: path.to_path_buf(),
+                while_doing,
+                source,
+            },
+        }
+    };
     file.set_len(trailer_offset)
         .map_err(io("cutting the file back to its trailer"))?;
     file.seek(SeekFrom::Start(trailer_offset))
         .map_err(io("seeking to the trailer"))?;
     file.write_all(trailer).map_err(io("writing the trailer"))?;
-    file.write_all(&encode_footer(&replaced))
+    file.write_all(&encode_footer(replaced))
         .map_err(io("writing the footer"))?;
 
     // **Durable, for the reason `finish` is** (spec §6.3): a caller that is told the trailer was
@@ -251,6 +342,68 @@ mod tests {
         );
     }
 
+    /// **A failure once the file has been cut is reported as torn, and the two halves are told
+    /// apart by which function failed rather than by how far a single one got.**
+    ///
+    /// The two verdicts ask the caller for opposite things — call again, or write the sample
+    /// again — so the one thing worth testing is that a failure on the writing side is never
+    /// reported as *unchanged*. Every other test here covers the reading side, and asserts
+    /// `Unchanged` beside the file's own bytes.
+    ///
+    /// **The write is made to fail with a handle opened read-only**, which is the same trick the
+    /// walk uses in reverse to make a `read(2)` fail on a sound file: no `unsafe`, a real refusal
+    /// from the kernel, and the psp underneath is a good one. **What it cannot do is reach
+    /// `replace_trailer` itself**, which opens the file for writing — so it drives the writing
+    /// half directly. That is enough because each half now puts the verdict on its own failures:
+    /// the value asserted below is the one a caller would receive, not one built here.
+    #[test]
+    fn a_failure_after_the_file_is_cut_is_reported_as_torn() {
+        let (_dir, path) = a_finished_psp();
+        let before = bytes_of(&path);
+
+        // A sound psp, read for everything the replacement needs — this half must succeed, or
+        // the test would be proving something about the reading side.
+        let (_writable, replaced, trailer_offset) =
+            read_what_the_replacement_needs(&path, b"a different summary")
+                .expect("the fixture is a psp this operation accepts");
+
+        let mut read_only = File::open(&path).expect("the file opens for reading");
+        let refused = write_the_replacement(
+            &path,
+            &mut read_only,
+            &replaced,
+            trailer_offset,
+            b"a different summary",
+        )
+        .expect_err("a handle with no write permission cannot cut or write the file");
+
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Torn,
+            "a failure on the writing side is never *unchanged*, whatever the caller does next"
+        );
+        assert!(
+            matches!(refused.source, PspWriteError::Io { .. }),
+            "a refused syscall, not a decode: {}",
+            refused.source
+        );
+        assert!(
+            refused.to_string().contains("written again"),
+            "the sentence has to tell the caller what to do; got {refused}"
+        );
+        assert!(
+            !refused.to_string().contains("call can be made again"),
+            "and must not tell it the opposite; got {refused}"
+        );
+
+        assert_eq!(
+            bytes_of(&path),
+            before,
+            "nothing wrote here — the file is the fixture's, and the verdict is about what a \
+             failure on this side means, not about this particular failure"
+        );
+    }
+
     /// **A file with no footer has no trailer to replace**, and is refused as incomplete — the
     /// class spec §6.7 names for this operation. It is what a killed run leaves.
     #[test]
@@ -263,7 +416,12 @@ mod tests {
         drop(writer); // killed before `finish`: header and blocks, no footer
 
         let refused = replace_trailer(&path, b"anything").expect_err("there is no trailer");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Reopen {
                 source: PspReadError::Incomplete { .. },
                 ..
@@ -293,7 +451,12 @@ mod tests {
 
             let refused = replace_trailer(&path, b"anything")
                 .expect_err("the sections must account for the file");
-            match refused {
+            assert_eq!(
+                refused.file,
+                FileAfterAFailedReplacement::Unchanged,
+                "nothing was written, so the caller may simply call again"
+            );
+            match refused.source {
                 PspWriteError::Reopen {
                     source: PspReadError::Damaged { reason, .. },
                     ..
@@ -316,7 +479,12 @@ mod tests {
         rewrite(&path, &too_short);
 
         let refused = replace_trailer(&path, b"anything").expect_err("there is no footer");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Reopen {
                 source: PspReadError::Incomplete { .. },
                 ..
@@ -352,7 +520,12 @@ mod tests {
         rewrite(&path, &not_a_psp);
 
         let refused = replace_trailer(&path, b"anything").expect_err("that is not a psp");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Reopen {
                 source: PspReadError::NotAnNgPsp { found, .. },
                 ..
@@ -368,7 +541,12 @@ mod tests {
     fn a_missing_file_names_itself() {
         let (_dir, path) = a_file();
         let refused = replace_trailer(&path, b"anything").expect_err("there is no file");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Io {
                 while_doing,
                 path: named,
@@ -417,7 +595,12 @@ mod tests {
         rewrite(&path, &whole);
 
         let refused = replace_trailer(&path, b"anything").expect_err("byte 0 is the head magic");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Reopen {
                 source: PspReadError::Damaged { reason, .. },
                 ..
@@ -459,7 +642,12 @@ mod tests {
 
         let refused = replace_trailer(&path, b"tiny")
             .expect_err("byte 4 is inside the header, not a trailer");
-        match refused {
+        assert_eq!(
+            refused.file,
+            FileAfterAFailedReplacement::Unchanged,
+            "nothing was written, so the caller may simply call again"
+        );
+        match refused.source {
             PspWriteError::Reopen {
                 source: PspReadError::Damaged { reason, .. },
                 ..
