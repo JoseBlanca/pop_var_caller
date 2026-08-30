@@ -41,7 +41,7 @@ pub mod header;
 
 pub use encode::{
     FREQUENCY_DECIMALS, MAPPING_QUALITY_DECIMALS, MISSING_FIELD, PENALTY_DECIMALS,
-    QUALITY_DECIMALS, fixed_columns, info_column,
+    QUALITY_DECIMALS, fixed_columns, format_keys, info_column, sample_columns,
 };
 pub use header::{HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata};
 

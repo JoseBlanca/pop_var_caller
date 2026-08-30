@@ -11,7 +11,9 @@
 
 use std::fmt::Write as _;
 
-use super::{PaddingBase, VcfRecord};
+use super::{PaddingBase, SampleCall, SampleColumn, VcfRecord};
+use crate::ng::calling::quality::MAX_GENOTYPE_QUALITY;
+use crate::ng::types::{Phred, Ploidy};
 use crate::ng::vcf::header::HeaderContig;
 
 /// What a VCF writes where it has no value: the `ID` column of every record ng emits, and the
@@ -282,6 +284,112 @@ fn optional_mapping_quality(value: &Option<f64>) -> String {
 
 fn join_with_commas(values: impl Iterator<Item = String>) -> String {
     values.collect::<Vec<_>>().join(",")
+}
+
+/// **The `FORMAT` column**: which per-sample fields this record carries, in the order the
+/// sample columns write them.
+///
+/// A repeat-tract record carries one more than a SNP or indel — `REPCN`, each called allele's
+/// length in whole repeat units — and that is the only difference between the two.
+#[must_use]
+pub fn format_keys(record: &VcfRecord) -> &'static str {
+    if record.is_repeat_tract() {
+        "GT:GQ:DP:AD:REPCN"
+    } else {
+        "GT:GQ:DP:AD"
+    }
+}
+
+/// **The sample columns**, tab-separated, one per sample of the run in the run's sample order.
+///
+/// `ploidy` is the run's, and it is a parameter rather than a field on the record because a
+/// no-call has to be spelled `./.` at a ploidy the sample itself no longer states: a called
+/// sample's ploidy is the length of its genotype, but a **refused locus writes every sample as
+/// a no-call** (spec §8), so there is no sibling to read it from. One ploidy per run is what
+/// the run's frozen parameters hold.
+#[must_use]
+pub fn sample_columns(record: &VcfRecord, ploidy: Ploidy) -> String {
+    let mut out = String::new();
+    for (index, column) in record.sample_columns().iter().enumerate() {
+        if index > 0 {
+            out.push('\t');
+        }
+        out.push_str(&one_sample_column(record, column, ploidy));
+    }
+    out
+}
+
+/// One sample's fields, `:`-separated, matching [`format_keys`].
+fn one_sample_column(record: &VcfRecord, column: &SampleColumn, ploidy: Ploidy) -> String {
+    let genotype = genotype_field(&column.call, ploidy);
+    let quality = column.call.genotype_quality().map_or_else(
+        || MISSING_FIELD.to_string(),
+        |phred| written_genotype_quality(phred).to_string(),
+    );
+    let depth = column.read_counts.depth().to_string();
+    let allele_depths =
+        join_with_commas(column.read_counts.allele_reads().iter().map(u32::to_string));
+
+    let mut fields = format!("{genotype}:{quality}:{depth}:{allele_depths}");
+    if let Some(tract) = record.repeat_tract() {
+        let repeat_counts = column.call.genotype().map_or_else(
+            || MISSING_FIELD.to_string(),
+            |genotype| {
+                join_with_commas(genotype.alleles().iter().map(|allele| {
+                    // PANIC-FREE: `VcfRecord::new` refused a genotype naming an allele past the
+                    // table, so every id indexes the allele table.
+                    let bases = &record.alleles()[usize::from(allele.get())];
+                    tract.repeat_copies_of(bases).to_string()
+                }))
+            },
+        );
+        fields.push(':');
+        fields.push_str(&repeat_counts);
+    }
+    fields
+}
+
+/// The `GT` field: the called alleles, `/`-joined and never phased — or the no-call, which is
+/// one `.` per copy of the genome.
+///
+/// **The alleles are already ascending**, because [`Genotype`](crate::ng::types::Genotype)
+/// sorts at construction and has no other way in. That is what makes `REPCN` line up with `GT`
+/// for free: both walk the same slice. Production's repeat-tract writer sorts its `GT` while
+/// building `REPCN` from the unsorted candidate order, so the two fields' entries need not
+/// correspond — a mismatch that is invisible unless the two alleles have different repeat
+/// counts.
+///
+/// **Unphased always.** ng computes no phasing, so a `|` would claim something no step
+/// established.
+fn genotype_field(call: &SampleCall, ploidy: Ploidy) -> String {
+    match call.genotype() {
+        Some(genotype) => join_with_separator(
+            genotype
+                .alleles()
+                .iter()
+                .map(|allele| allele.get().to_string()),
+            '/',
+        ),
+        None => join_with_separator(
+            std::iter::repeat_n(MISSING_FIELD.to_string(), usize::from(ploidy.get())),
+            '/',
+        ),
+    }
+}
+
+/// The `GQ` field's integer value.
+///
+/// Rounded to the nearest whole Phred and held to [`MAX_GENOTYPE_QUALITY`], the cap GATK and
+/// bcftools use and the one this project's quality module already applies — restated here
+/// because the file's own field is what downstream tools read, and production clamps at write
+/// time for the same reason.
+fn written_genotype_quality(quality: Phred) -> u32 {
+    let capped = quality.get().clamp(0.0, MAX_GENOTYPE_QUALITY);
+    capped.round() as u32
+}
+
+fn join_with_separator(values: impl Iterator<Item = String>, separator: char) -> String {
+    values.collect::<Vec<_>>().join(&separator.to_string())
 }
 
 #[cfg(test)]

@@ -155,7 +155,7 @@ not at all.
 > this and the plan's parenthetical contradicted it.
 *Depends:* B1. *Source:* spec §6; [`record_encode.rs:280-474`](../../../../src/vcf/record_encode.rs).
 
-☐ **B3. FORMAT and the sample columns.** `GT` through the genotype-order table, sorted,
+✅ **B3. FORMAT and the sample columns.** `GT` through the genotype-order table, sorted,
 `/`-joined; `GQ` rounded and capped; `DP`/`AD` from A2's tally; the no-call spelling — `./.` with
 `GQ` missing but `DP`/`AD` written when the sample had reads (spec §7, and its Q3 note). **Own
 commit inside this step: `REPCN` in `GT`'s sorted order** — production computes it in candidate

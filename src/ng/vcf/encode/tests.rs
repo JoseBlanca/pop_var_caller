@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
-use crate::ng::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position};
+use crate::ng::types::{
+    AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position,
+};
 use crate::ng::vcf::{
     FilterVerdict, MapqPool, SampleCall, SampleColumn, SampleReadCounts, TractAnnotation,
 };
@@ -695,4 +697,264 @@ fn several_alternatives_give_one_entry_per_alternative_in_every_per_alternative_
             .unwrap_or_else(|| panic!("{key} present"));
         assert_eq!(field.split(',').count(), 2, "{key} has one entry per ALT");
     }
+}
+
+// ---------------------------------------------------------------------------
+// FORMAT and the sample columns
+// ---------------------------------------------------------------------------
+
+fn diploid() -> Ploidy {
+    Ploidy::try_new(2).expect("two copies is a genome")
+}
+
+#[test]
+fn a_snp_record_carries_four_per_sample_fields() {
+    let record = a_biallelic_snp();
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD");
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:10:5,5");
+}
+
+#[test]
+fn a_tract_record_carries_repeat_counts_as_a_fifth_field() {
+    let record = VcfRecord::new(
+        region_on(0, 2_000, 2_015),
+        vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
+        vec![1.0, 1.0],
+        one_sample(vec![12, 11], 7, &[0, 1]),
+        pools(&[12, 11]),
+        None,
+        quality(150.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"CA").expect("a two-base motif"),
+        )),
+    );
+
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:REPCN");
+    // Sixteen bases of a two-base unit is eight copies; twelve is six. DP is 23 + 7.
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:8,6");
+}
+
+#[test]
+fn the_repeat_counts_follow_the_genotype_allele_for_allele() {
+    // **Production's own mismatch, made impossible.** Its repeat-tract writer sorts `GT` while
+    // building `REPCN` from the unsorted candidate order, so the two fields' entries need not
+    // correspond. Here both walk the same sorted slice. The fixture is a het over two
+    // *different* alternatives whose repeat counts differ, so a swap changes the output.
+    let record = VcfRecord::new(
+        region_on(0, 100, 115),
+        vec![
+            allele(b"CACACACACACACACA"),     // 8 copies, reference
+            allele(b"CACACACACACA"),         // 6 copies
+            allele(b"CACACACACACACACACACA"), // 10 copies
+        ],
+        vec![1.0, 0.5, 0.5],
+        vec![SampleColumn {
+            call: SampleCall::Called {
+                genotype: Genotype::new(vec![AlleleId(1), AlleleId(2)]),
+                genotype_quality: quality(55.0),
+            },
+            read_counts: SampleReadCounts::new(vec![0, 9, 7], 0),
+        }],
+        pools(&[0, 9, 7]),
+        None,
+        quality(120.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"CA").expect("a two-base motif"),
+        )),
+    );
+
+    // GT names alleles 1 then 2; REPCN must be their counts in that order — 6 then 10, not
+    // 10 then 6.
+    assert_eq!(sample_columns(&record, diploid()), "1/2:55:16:0,9,7:6,10");
+}
+
+#[test]
+fn a_genotype_is_written_in_ascending_allele_order_whatever_order_it_was_built_in() {
+    // `Genotype` sorts at construction and has no other way in, so `2/1` cannot be spelled.
+    // This is what makes the `REPCN` alignment above free rather than maintained.
+    let built_descending = Genotype::new(vec![AlleleId(2), AlleleId(1)]);
+    assert_eq!(built_descending.alleles(), [AlleleId(1), AlleleId(2)]);
+}
+
+#[test]
+fn a_homozygote_states_a_count_for_each_copy_of_the_genome() {
+    let record = VcfRecord::new(
+        region_on(0, 300, 311),
+        vec![allele(b"ATATATATATAT"), allele(b"ATATATAT")],
+        vec![0.0, 2.0],
+        one_sample(vec![0, 18], 0, &[1, 1]),
+        pools(&[0, 18]),
+        None,
+        quality(200.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"AT").expect("a two-base motif"),
+        )),
+    );
+
+    // Both copies carry the four-repeat allele, so REPCN states it twice.
+    assert_eq!(sample_columns(&record, diploid()), "1/1:40:18:0,18:4,4");
+}
+
+#[test]
+fn a_no_called_sample_writes_one_dot_per_copy_and_keeps_its_evidence() {
+    // Spec §7: `GT` and `GQ` go missing, `DP` and `AD` do not — a sample no-called on seven
+    // reads and one no-called on none are different facts.
+    let record = VcfRecord::new(
+        region_on(0, 90, 90),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![4, 3], 0),
+            },
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![0, 0], 0),
+            },
+        ],
+        pools(&[4, 3]),
+        None,
+        quality(0.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "./.:.:7:4,3\t./.:.:0:0,0"
+    );
+}
+
+#[test]
+fn a_no_call_at_a_tract_leaves_its_repeat_counts_missing_too() {
+    let record = VcfRecord::new(
+        region_on(0, 500, 511),
+        vec![allele(b"ATATATATATAT")],
+        vec![0.0],
+        vec![SampleColumn {
+            call: SampleCall::NoCall,
+            read_counts: SampleReadCounts::new(vec![0], 2),
+        }],
+        pools(&[0]),
+        None,
+        quality(0.0),
+        None,
+        FilterVerdict::LowDepth,
+        Some(TractAnnotation::new(
+            Motif::new(b"AT").expect("a two-base motif"),
+        )),
+    );
+
+    assert_eq!(sample_columns(&record, diploid()), "./.:.:2:0:.");
+}
+
+#[test]
+fn the_no_call_spelling_follows_the_run_s_ploidy() {
+    // The reason ploidy is a parameter: a refused locus writes every sample as a no-call, so
+    // there is no called sibling whose genotype length could supply it.
+    let record = VcfRecord::new(
+        region_on(0, 90, 90),
+        vec![allele(b"A")],
+        vec![0.0],
+        vec![SampleColumn {
+            call: SampleCall::NoCall,
+            read_counts: SampleReadCounts::new(vec![0], 0),
+        }],
+        pools(&[0]),
+        None,
+        quality(0.0),
+        None,
+        FilterVerdict::LowDepth,
+        None,
+    );
+
+    let haploid = Ploidy::try_new(1).expect("one copy is a genome");
+    let tetraploid = Ploidy::try_new(4).expect("four copies is a genome");
+    assert!(sample_columns(&record, haploid).starts_with(".:"));
+    assert!(sample_columns(&record, diploid()).starts_with("./.:"));
+    // Four copies is four dots and three separators.
+    assert!(sample_columns(&record, tetraploid).starts_with("./././.:"));
+}
+
+#[test]
+fn a_genotype_quality_is_rounded_and_held_to_the_cap() {
+    let cases = [(0.0_f32, "0"), (12.4, "12"), (12.6, "13"), (150.0, "99")];
+    for (phred, expected) in cases {
+        let record = VcfRecord::new(
+            region_on(0, 5, 5),
+            vec![allele(b"A"), allele(b"T")],
+            vec![1.0, 1.0],
+            vec![SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
+                    genotype_quality: quality(phred),
+                },
+                read_counts: SampleReadCounts::new(vec![2, 2], 0),
+            }],
+            pools(&[2, 2]),
+            None,
+            quality(1.0),
+            None,
+            FilterVerdict::Pass,
+            None,
+        );
+        let column = sample_columns(&record, diploid());
+        let written = column.split(':').nth(1).expect("a GQ field");
+        assert_eq!(written, expected, "for a Phred of {phred}");
+    }
+}
+
+#[test]
+fn a_genotype_is_never_phased() {
+    // ng computes no phasing, so a `|` would claim something no step established.
+    let column = sample_columns(&a_biallelic_snp(), diploid());
+    assert!(column.contains('/'));
+    assert!(!column.contains('|'));
+}
+
+#[test]
+fn every_sample_of_the_run_gets_a_column_in_the_run_s_order() {
+    let record = VcfRecord::new(
+        region_on(0, 90, 90),
+        vec![allele(b"A"), allele(b"T")],
+        vec![2.0, 2.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
+                    genotype_quality: quality(60.0),
+                },
+                read_counts: SampleReadCounts::new(vec![9, 0], 0),
+            },
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![0, 0], 0),
+            },
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(1), AlleleId(1)]),
+                    genotype_quality: quality(70.0),
+                },
+                read_counts: SampleReadCounts::new(vec![0, 8], 0),
+            },
+        ],
+        pools(&[9, 8]),
+        None,
+        quality(300.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    let columns = sample_columns(&record, diploid());
+    assert_eq!(columns.split('\t').count(), 3);
+    assert_eq!(columns, "0/0:60:9:9,0\t./.:.:0:0,0\t1/1:70:8:0,8");
 }
