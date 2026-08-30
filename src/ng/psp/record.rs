@@ -698,8 +698,30 @@ fn check_a_derived_read_list(
 /// chain ids that "round-trip **exactly**". So the writer checks, and falls back to naming
 /// everything when the two disagree. The cost is one record's residual list; the alternative is a
 /// read silently missing from the reference allele, which is exactly the failure §5 names.
-fn residual_observation_of(record: &SampleLocusObservations) -> usize {
+fn residual_observation_of(
+    record: &SampleLocusObservations,
+    scratch: &mut ResidualScratch,
+) -> usize {
     let none = record.observations.len();
+    // **The one-observation record, which is about ninety-nine positions in a hundred at the
+    // tomato panel's depth.** Its only observation names every read the record names, so
+    // `named_elsewhere` below is empty, `every_read` is that observation's own list sorted and
+    // deduplicated, and the derivation reproduces the list exactly precisely when the list was
+    // already a strictly ascending set. That is one pass over the identifiers, where the general
+    // path builds two lists, sorts both, derives, and compares.
+    if none == 1 {
+        let only = &record.observations[0];
+        if only.chain_ids.is_empty() {
+            return none;
+        }
+        let already_a_set = only.chain_ids.windows(2).all(|pair| pair[0] < pair[1]);
+        if already_a_set
+            && check_a_read_list_against_its_read_count(only.chain_ids.len(), only.num_obs)
+        {
+            return 0;
+        }
+        return none;
+    }
     let Some(at) = (0..none).max_by_key(|at| {
         (
             record.observations[*at].chain_ids.len(),
@@ -712,31 +734,37 @@ fn residual_observation_of(record: &SampleLocusObservations) -> usize {
         return none;
     }
 
-    let mut named_elsewhere: Vec<ChainId> = record
-        .observations
-        .iter()
-        .enumerate()
-        .filter(|(other, _)| *other != at)
-        .flat_map(|(_, observation)| observation.chain_ids.iter().copied())
-        .collect();
-    as_a_read_set(&mut named_elsewhere);
+    // **Three lists a record, and none of them allocates after the first record.** They were
+    // three `collect()`s and a `Vec::new` when this was written — three allocations a record at
+    // any depth, plus the growth chain on each.
+    let ResidualScratch {
+        named_elsewhere,
+        every_read,
+        derived,
+    } = scratch;
 
-    let mut every_read: Vec<ChainId> = record
-        .observations
-        .iter()
-        .flat_map(|observation| observation.chain_ids.iter().copied())
-        .collect();
-    as_a_read_set(&mut every_read);
+    named_elsewhere.clear();
+    for (other, observation) in record.observations.iter().enumerate() {
+        if other != at {
+            named_elsewhere.extend_from_slice(&observation.chain_ids);
+        }
+    }
+    as_a_read_set(named_elsewhere);
 
-    let mut derived = Vec::new();
-    residual_reads(&every_read, &named_elsewhere, &mut derived);
+    every_read.clear();
+    for observation in &record.observations {
+        every_read.extend_from_slice(&observation.chain_ids);
+    }
+    as_a_read_set(every_read);
+
+    residual_reads(every_read, named_elsewhere, derived);
     // **Two conditions, and the second is what keeps the reader's guard a guard.** The derivation
     // has to reproduce the list exactly, and it has to satisfy the inequality the reader checks it
     // against — otherwise this writer would produce a file its own reader refuses. Real evidence
     // always satisfies it (an identifier names one read or two), so the second condition only
     // fires on a record whose counts do not describe reads; storing that record's lists costs its
     // residual's bytes and nothing else.
-    let exact = derived == record.observations[at].chain_ids;
+    let exact = derived.as_slice() == record.observations[at].chain_ids.as_slice();
     let within_the_inequality =
         check_a_read_list_against_its_read_count(derived.len(), record.observations[at].num_obs);
     if exact && within_the_inequality {
@@ -797,6 +825,37 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
 /// cannot underflow because [`WitnessedLocusPositions`] keeps its runs private and its
 /// constructors reject a run that covers no position.
 pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
+    encode_record_body_reusing(record, out, &mut ResidualScratch::default());
+}
+
+/// The lists the residual derivation needs, kept by whoever encodes more than one record.
+///
+/// **Every one of them is cleared and refilled a record**, so what a writer holds is the widest
+/// record it has met — three lists of one identifier a read, about 7.2 kB at three hundred reads
+/// a position. **A writer is one per sample being written, not one per sample held open for a
+/// run**, so this is not spent against spec §1.1's 500 kB an open sample. A reader has no
+/// equivalent: it derives its residual straight into the record it hands over.
+#[derive(Debug, Default)]
+pub struct ResidualScratch {
+    /// The identifiers every observation but the residual one names, as a set.
+    named_elsewhere: Vec<ChainId>,
+    /// Every identifier the record names, as a set — the live set the residual is derived
+    /// against.
+    every_read: Vec<ChainId>,
+    /// What the derivation produced, to be compared against the list it would replace.
+    derived: Vec<ChainId>,
+}
+
+/// Append `record`'s body to `out`, reusing `scratch` rather than allocating the residual
+/// derivation's three lists afresh.
+///
+/// See [`encode_record_body`], which is this with a scratch of its own and is the whole of the
+/// difference between them.
+pub fn encode_record_body_reusing(
+    record: &SampleLocusObservations,
+    out: &mut Vec<u8>,
+    scratch: &mut ResidualScratch,
+) {
     // Destructured with no `..`: **a field added to either type is a compile error here**, not
     // a field silently left out of every psp written from that day. The compiler already stops
     // at `decode_record_body`'s struct literals, but naming a field there is not encoding it.
@@ -811,7 +870,7 @@ pub fn encode_record_body(record: &SampleLocusObservations, out: &mut Vec<u8>) {
 
     put_bytes(out, reference_bases);
     put_varint(out, observations.len() as u64);
-    let residual_at = residual_observation_of(record);
+    let residual_at = residual_observation_of(record, scratch);
     put_varint(out, residual_at as u64);
     if let Some(residual) = observations.get(residual_at) {
         put_varint(out, residual.chain_ids.len() as u64);
@@ -1487,6 +1546,8 @@ impl OffsetBase {
 pub struct RecordEncoder {
     /// Kept across blocks: reused so a writer does not allocate one per record.
     body_scratch: Vec<u8>,
+    /// The residual derivation's three lists, kept for the same reason and cleared a record.
+    residual_scratch: ResidualScratch,
     /// Which reads are live, and the changes it writes to move between records.
     ///
     /// **Its own per-block state is inside it**, reset by
@@ -1555,6 +1616,7 @@ impl RecordEncoder {
     pub fn for_block(first_position: Position) -> Self {
         Self {
             body_scratch: Vec::new(),
+            residual_scratch: ResidualScratch::default(),
             live_reads: LiveSetWriter::new(),
             block: PerBlockState::at_block_start(first_position),
         }
@@ -1580,7 +1642,7 @@ impl RecordEncoder {
     ) -> Result<RecordHead, RecordEncodeError> {
         let span = record_span(record.region)?;
         self.body_scratch.clear();
-        encode_record_body(record, &mut self.body_scratch);
+        encode_record_body_reusing(record, &mut self.body_scratch, &mut self.residual_scratch);
         let body_bytes = declared_body_bytes(self.body_scratch.len())?;
 
         self.block = PerBlockState::at_block_start(record.region.start);
@@ -1626,7 +1688,7 @@ impl RecordEncoder {
             })?;
 
         self.body_scratch.clear();
-        encode_record_body(record, &mut self.body_scratch);
+        encode_record_body_reusing(record, &mut self.body_scratch, &mut self.residual_scratch);
         let body_bytes = declared_body_bytes(self.body_scratch.len())?;
 
         self.write_a_record(record, offset, span, body_bytes, out)
@@ -2369,7 +2431,7 @@ mod tests {
         // just as well: one compared two direct `encode_read_list` calls and never touched the
         // writer's choice, the other only said a record with fewer identifiers is shorter.
         assert_eq!(
-            residual_observation_of(&written),
+            residual_observation_of(&written, &mut ResidualScratch::default()),
             0,
             "the largest list is the one derived"
         );
@@ -2380,7 +2442,7 @@ mod tests {
         nothing_derived.observations[1].chain_ids.sort_unstable();
         nothing_derived.observations[1].num_obs += 1;
         assert_eq!(
-            residual_observation_of(&nothing_derived),
+            residual_observation_of(&nothing_derived, &mut ResidualScratch::default()),
             nothing_derived.observations.len(),
             "no observation can be derived from this one"
         );
@@ -4143,7 +4205,7 @@ mod tests {
     fn the_largest_list_is_derived_and_the_record_reads_back_exactly() {
         let record = a_record_naming_reads(&[&[3, 9], &[1, 4, 40, 41, 900], &[7]]);
         assert_eq!(
-            residual_observation_of(&record),
+            residual_observation_of(&record, &mut ResidualScratch::default()),
             1,
             "the largest list, and ties would go to the lowest index"
         );
@@ -4163,7 +4225,7 @@ mod tests {
         // Identifier 4 is in both: a pair whose two mates showed different sequences here.
         let record = a_record_naming_reads(&[&[4, 8], &[4, 30, 31]]);
         assert_eq!(
-            residual_observation_of(&record),
+            residual_observation_of(&record, &mut ResidualScratch::default()),
             record.observations.len(),
             "no observation can be derived, so none is"
         );
@@ -4372,7 +4434,7 @@ mod tests {
         // build writes.
         let names_nothing = a_record_naming_reads(&[&[]]);
         assert_eq!(
-            residual_observation_of(&names_nothing),
+            residual_observation_of(&names_nothing, &mut ResidualScratch::default()),
             names_nothing.observations.len(),
             "an observation naming no reads is not worth deriving, so nothing is"
         );
@@ -4448,10 +4510,16 @@ mod tests {
     #[test]
     fn a_tie_for_the_largest_list_goes_to_the_lower_index() {
         let record = a_record_naming_reads(&[&[3, 4], &[10, 11], &[20]]);
-        assert_eq!(residual_observation_of(&record), 0);
+        assert_eq!(
+            residual_observation_of(&record, &mut ResidualScratch::default()),
+            0
+        );
 
         let the_other_way = a_record_naming_reads(&[&[20], &[10, 11], &[3, 4]]);
-        assert_eq!(residual_observation_of(&the_other_way), 1);
+        assert_eq!(
+            residual_observation_of(&the_other_way, &mut ResidualScratch::default()),
+            1
+        );
     }
 
     /// **The reads a record names are the union over all of its observations**, not the first
