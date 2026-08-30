@@ -122,19 +122,25 @@
 //! sample list, which is the failure the previous convention exists to prevent; the sequencing
 //! batching is written as named rows for that reason rather than as two bare integer arrays.
 //!
-//! # What this module is not, yet
+//! # Four files, and which of them does what
 //!
-//! No reading and no writing: this step is the shape alone. Three things about the eventual
-//! writer and reader are already visible from here and are recorded so the next step does not
-//! rediscover them:
+//! The shape is here. The text a run writes is `to_toml`, the projection from a run's assembled
+//! parameters onto this shape is `from_run_parameters`, and reading that text back is
+//! `from_toml`.
+//!
+//! # Four things the shape settled before either the writer or the reader existed
+//!
+//! Each is recorded because it decided how its step was built:
 //!
 //! - **The writer cannot be `serde`'s.** Spec §4 makes the format TOML *for the comments* — each
 //!   defaulted value carries where its default came from — and no serde serializer can emit a
 //!   comment. The `Serialize` derives here are for tests and for a round-trip cross-check, not
 //!   for the artefact a run writes.
-//! - **The reader can be**, in principle: `toml::from_str` reads an inline table into a struct
-//!   whatever shape wrote it. `the_documented_inline_form_parses` is what holds that, because it
-//!   is the claim steps B and C meet on and the derived serializer never produces the form.
+//! - **The reader can be.** `toml::from_str` reads an inline table into a struct whatever shape
+//!   wrote it, and `the_documented_inline_form_parses` is what pins that: the derived
+//!   *serializer* never produces the one-row-a-line form the hand-written writer emits, so a
+//!   round trip through serde alone cannot see whether the reader accepts it. (It does, and
+//!   [`ParametersFile::from_toml`] is that call plus the line a failure sits on.)
 //! - **A section whose fields are all tables gets no header line of its own from `serde`.**
 //!   Every field of `[repeat_tracts]` and of `[stated_constants]` is now a table or an array, so
 //!   the golden file has neither header line and the largest section of the file opens unnamed.
@@ -150,6 +156,7 @@
 //!   choose its own order and pin it with its own golden file.
 
 mod from_run_parameters;
+mod from_toml;
 mod to_toml;
 
 use serde::{Deserialize, Serialize};
@@ -159,6 +166,76 @@ use serde::{Deserialize, Serialize};
 /// Carried from the start so that a reader has something to branch on if there is ever an older
 /// file; what it *does* with one is deferred until there is one (spec §11).
 pub const FORMAT_VERSION: u32 = 1;
+
+/// **Why a parameters file could not be used.**
+///
+/// **It lives here rather than in the reader**, because it is the module's answer and not one
+/// file's: reading the text is only the first of the three ways a file is refused. Step C2's
+/// `validate` refuses a file that parses and means nothing — an inbreeding coefficient outside
+/// its range, a length spectrum that does not sum to one — and step D2's bindings refuse one
+/// fitted against a different reference, a different sample list, or a read-group axis with a
+/// gap in it (spec §6). Both add variants, and neither belongs to `from_toml`.
+///
+/// `#[non_exhaustive]` for that reason: this is the house pattern for an error enum a later
+/// stage extends ([`ReferenceInfoError`](crate::ng::reference_info::ReferenceInfoError) and
+/// [`ParameterEstimationError`](crate::ng::parameter_estimation::ParameterEstimationError) both
+/// say so in their own words).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ParametersFileError {
+    /// The text is not a parameters file: it is not TOML, or it is TOML this shape does not
+    /// accept.
+    #[error("the parameters file could not be read")]
+    Malformed {
+        /// The 1-based line the failure is on, where the failure has a position.
+        ///
+        /// **`None` where the error carries no byte span.** Nothing measured on this reader has
+        /// produced one — every failure over a swept family of truncated files named a line
+        /// (`however_the_file_is_truncated_the_failure_still_names_a_line`) — but the crate's
+        /// span is an `Option` and some of its constructors take none, so this cannot be a bare
+        /// `usize` without inventing a line for a failure that has no place.
+        line: Option<usize>,
+        /// What the parser said, kept as the source rather than folded into the message above.
+        ///
+        /// **Not interpolated into this error's own `Display`.** `thiserror` treats a field
+        /// named `source` as the chain's next link, so a message that also printed it would
+        /// render the parser's whole diagnostic twice under any chain-walking reporter — and
+        /// this crate has one ([`format_error_chain`](crate::error_render::format_error_chain)).
+        /// The house pattern for exactly this type is
+        /// [`SampleSummaryError::ParseToml`](crate::sample_summary::SampleSummaryError), which
+        /// names the failure and leaves the detail to the source.
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+impl ParametersFileError {
+    /// **The line the failure is on, where it has one** — the one question every variant can
+    /// answer, so that a caller reporting a bad file need not match on which kind of bad it is.
+    ///
+    /// The field is public too, for a caller that is already matching; this is the shorthand for
+    /// the many that are not.
+    #[must_use]
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::Malformed { line, .. } => *line,
+        }
+    }
+
+    /// What the parser itself said, rendered — the line, the column, the offending line of the
+    /// file and a caret under it.
+    ///
+    /// **A reporter that walks the source chain gets this for free** and does not need it; it is
+    /// here for a caller that wants the parser's own diagnostic without walking, and for this
+    /// module's tests, which check the line this type reports against the line that rendering
+    /// names.
+    #[must_use]
+    pub fn rendered_by_the_parser(&self) -> String {
+        match self {
+            Self::Malformed { source, .. } => source.to_string(),
+        }
+    }
+}
 
 /// What a number entitles a score to claim, as the file spells it.
 ///
@@ -818,8 +895,20 @@ pub struct SharesOrigin {
 /// **Two enums rather than one shared with [`ShareSmoothing`]**, because the two carry different
 /// curves. The earlier one-enum-for-both shape read better and could not hold the curve, and
 /// holding the curve is what removes the illegal states.
+///
+/// **`deny_unknown_fields` is on the enum because its variants carry fields**, which is true of
+/// no other shape here except [`ShareSmoothing`]; `serde` reads the attribute from the container
+/// when it builds a struct-variant's visitor.
+///
+/// **It changes no behaviour today, and it is here so that the guarantee is this module's rather
+/// than one crate's.** Measured on both layouts, with the attribute and without: a key added
+/// inside a `blend` or `this_periods_curve` table is refused either way, because the `toml`
+/// crate's own table deserialiser rejects leftover keys first ("unexpected keys in table: note,
+/// available keys: curve_weight, curve, reach"). The attribute is what keeps the module's
+/// opening claim — that every shape here refuses a key it does not know — true of the shape
+/// rather than true by grace of the parser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LevelSmoothing {
     /// The stratum's own fit, with no curve in it.
     ThisStratum,
@@ -843,9 +932,10 @@ pub enum LevelSmoothing {
 }
 
 /// How much of a period's curve went into one of a stratum's two slippage **shares**, and which
-/// curve. The share counterpart of [`LevelSmoothing`], and it holds the same three states.
+/// curve. The share counterpart of [`LevelSmoothing`], and it holds the same three states —
+/// including its `deny_unknown_fields`, and for the same reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShareSmoothing {
     /// The stratum's own fit, with no curve in it.
     ThisStratum,
@@ -2031,6 +2121,29 @@ mod tests {
         assert!(
             toml::from_str::<ParametersFile>(&typoed).is_err(),
             "a misspelled optional key must not read back as absence"
+        );
+
+        // **And inside a struct variant of an enum**, which is a separate `serde` code path and
+        // the one shape the two assertions above do not reach: everything else in this file is a
+        // struct. The refusal here comes from the `toml` crate's own leftover-key check rather
+        // than from `deny_unknown_fields` — measured, it fires with the attribute and without —
+        // so what this pins is the *behaviour a hand-edited file meets*, not the attribute. It
+        // would catch a move to a parser that is laxer than this one.
+        let inside_a_variant = text.replacen(
+            "curve_weight = 0.37",
+            "curve_weight = 0.37\nnote = \"hand-tuned\"",
+            1,
+        );
+        assert!(
+            inside_a_variant != text,
+            "the fixture writes a blended level for this test to add a key to"
+        );
+        let refusal = toml::from_str::<ParametersFile>(&inside_a_variant)
+            .expect_err("a key inside a blend must not be absorbed either")
+            .to_string();
+        assert!(
+            refusal.contains("note"),
+            "and that refusal names the key it did not know, got: {refusal}"
         );
     }
 

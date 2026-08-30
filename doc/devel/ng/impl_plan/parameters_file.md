@@ -128,7 +128,7 @@ default came from — for the repeat-tract slippage numbers, which alignments an
 
 ### Milestone C — reading, and the round trip that is the whole point
 
-☐ **C1. TOML text → the file shape.** Parsing, with a malformed file failing at a line number.
+✅ **C1. TOML text → the file shape.** Parsing, with a malformed file failing at a line number.
 *Depends:* B2. *Source:* §4, §9.
 
 ☐ **C2. The file shape → `RunParameters`, and the reader's `validate`.** The reverse of B1,
