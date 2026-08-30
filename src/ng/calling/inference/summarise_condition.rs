@@ -2387,7 +2387,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: reads,
             num_fwd: reads / 2,
-            q_sum: -10.0 * f64::from(reads),
+            q_sum: SummedLogError::from_nats(-10.0 * f64::from(reads)),
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
@@ -2415,7 +2415,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: reads,
             num_fwd: reads / 2,
-            q_sum: -10.0 * f64::from(reads),
+            q_sum: SummedLogError::from_nats(-10.0 * f64::from(reads)),
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
@@ -2643,6 +2643,7 @@ mod tests {
     use crate::ng::run::cohort_merge::build::PartialObservation;
     use crate::ng::types::{
         AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position, ReadGroupId,
+        SummedLogError,
     };
     use std::num::NonZeroU32;
     use std::sync::Arc;
