@@ -91,6 +91,12 @@ by document kind:
     reference.
     Companions: [`arch/repeat_catalog.md`](arch/repeat_catalog.md) (types & interfaces) and
     [`impl_plan/repeat_catalog.md`](impl_plan/repeat_catalog.md) (the build order).
+  - [`vcf_output.md`](spec/vcf_output.md) — **the VCF a run writes**: one file for SNPs, indels
+    and repeat tracts, where production writes two. One record shape — sequence alleles over a
+    span — with tract records marked by an `STR` flag beside `RU`/`PERIOD`; every disagreement
+    between the two production formats resolved by a stated rule (no-calls, what `DP` counts,
+    the anchor rule, filtered loci, provenance). The format only; what is dropped is steps
+    11a/11b's. **Settled, no code yet.**
   - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling
     steps are graded against.
 - **`research/`** — measurements, kept apart from the designs they settled so a spec can point at
@@ -197,6 +203,13 @@ by document kind:
     milestone is proven against the two research harnesses in `examples/` or against an
     identity. The STR half's plan follows its architecture doc settling; the two censuses and
     the cohort gather still need one.
+  - [`vcf_output.md`](impl_plan/vcf_output.md) — the `src/ng/vcf/` module: the written record's
+    carrier type (the one join nothing holds today — per-sample depths, allele counts and mapq
+    pools summed in the worker before the evidence is released), encoding on golden files, the
+    header, the ordered writer with the one legal POS tie, a `bcftools` strict-parse gate before
+    any real data, then the differential against production's generic file with every divergence
+    in a named class. Tract *encoding* built on fixtures; real tract records wait on the merge's
+    motif and the tract quality spec.
 
 This mirrors the repo-wide `doc/devel/{specs,architecture,implementation_plans}`
 convention but scoped to ng, so the growing set of ng docs stays together.

@@ -35,7 +35,12 @@ use std::path::PathBuf;
 
 mod errors;
 mod header;
-mod qual_refine;
+/// **`pub(crate)` for one reader outside this module, and it changes nothing here.**
+/// `src/ng/calling/quality_parity.rs` runs ng's ported artifact correction against
+/// [`qual_refine::refine_qual`] on the same inputs — the differential
+/// `doc/devel/ng/spec/calling_quality.md` §11 asks for. Visibility only; no logic, constant or
+/// signature in this module moves, and nothing in it names `ng`.
+pub(crate) mod qual_refine;
 mod record_encode;
 mod sink;
 mod writable;
