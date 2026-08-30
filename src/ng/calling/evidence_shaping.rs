@@ -468,7 +468,7 @@ mod tests {
     use crate::ng::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
     use crate::ng::locus_generation::LocusKind;
     use crate::ng::run::cohort_merge::build::{AlleleSupport, SampleSupport, SupportedAllele};
-    use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+    use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
     /// Two candidates' repeat counts, different from each other — the shape a tract's evidence
     /// carries beside its samples until repeat-tract selection produces them.
@@ -1002,7 +1002,7 @@ mod tests {
             read_group: ReadGroupId(0),
             num_obs: 5,
             num_fwd: 3,
-            q_sum: -5.0,
+            q_sum: SummedLogError::from_nats(-5.0),
             mapq_sum: 300,
             mapq_sum_sq: 18_000,
             placed_left: 2,

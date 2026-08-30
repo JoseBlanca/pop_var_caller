@@ -53,6 +53,8 @@
 mod genotype_table_parity;
 #[cfg(test)]
 mod loop_parity;
+#[cfg(test)]
+mod quality_parity;
 
 pub mod allele_candidates;
 pub mod evidence_shaping;
@@ -2371,7 +2373,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// On an unprepared scratch.
     #[inline]
     #[must_use]
-    pub(crate) fn site_quality_buffers_mut(&mut self) -> SiteQualityBuffers<'_> {
+    pub fn site_quality_buffers_mut(&mut self) -> SiteQualityBuffers<'_> {
         self.assert_prepared();
         SiteQualityBuffers {
             sample_count: self.row_count,

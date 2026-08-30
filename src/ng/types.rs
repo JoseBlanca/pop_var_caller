@@ -320,6 +320,124 @@ impl LogProb {
     }
 }
 
+/// **How much error the reads behind one observation carry, added up** — the sum over those
+/// reads of the natural logarithm of the probability that each is wrong. Always zero or
+/// negative, since it sums logarithms of probabilities; production calls it `q_sum`.
+///
+/// **Held as a count of steps of 1/4,096 of a natural log, not as a float** (the owner,
+/// 2026-08-25; `spec/psp_record_encoding.md` §5.1.1). The step is a property of this type,
+/// and every route that carries the quantity inherits it — a psp stores the integer it was
+/// handed and records the step so a reader can interpret it, and cannot write a file with a
+/// step the type did not produce.
+///
+/// **Why an integer, when the quantity is continuous.** The caller has two routes to the same
+/// answer: reading a sample's observations straight from memory, and reading them back from a
+/// psp. Those two must produce the same VCF, and that identity is the oracle everything else
+/// is checked against. A float stored to full precision breaks it in a way no tolerance
+/// repairs, because two routes that add the same terms **in a different order** differ in the
+/// last bits — so the check would degrade from *identical* to *within a tolerance*, which is a
+/// far weaker test and one that can pass while a chain-id list is being corrupted. Rounding to
+/// a step **absorbs** that difference instead: both routes land on the same integer.
+///
+/// **The precision is not the thing being traded away.** This term goes straight into a
+/// genotype likelihood, and the error a step introduces there is the whole risk: a step of
+/// 1/16 of a natural log is a 6 % error in that term, 1/256 is 0.4 %, and 1/4,096 is
+/// **0.024 %**. The owner took the precision because it costs about 5 % of the file and being
+/// wrong about a likelihood costs a genotype.
+///
+/// **It also deletes a state that used to be reachable.** A not-a-number error sum once came
+/// back through `f64::max` as the most confident read the model can express — a confident
+/// wrong answer with nothing failing. An integer has no such value.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct SummedLogError(i64);
+
+impl SummedLogError {
+    /// Steps to one natural log — the step is `1 / STEPS_PER_NAT`.
+    ///
+    /// A power of two so that the conversion is exact in both directions for any value a
+    /// float can hold exactly at this scale.
+    pub const STEPS_PER_NAT: i64 = 4_096;
+
+    /// No error mass at all: the identity for adding these together, and what an observation
+    /// with no reads carries.
+    pub const NONE: Self = Self(0);
+
+    /// The nearest whole step to `nats`.
+    ///
+    /// **Round once, at the end of a sum, not once per read.** Rounding each read's own term
+    /// and adding the integers would be exactly order-independent, but it accumulates up to
+    /// half a step per read — about 0.0012 natural logs at 300 reads a position, ten times the
+    /// error of rounding the finished sum. The ordering difference this type exists to absorb
+    /// is in the last bits of an `f64`, far below one step, so summing in floating point and
+    /// rounding once is both more accurate and enough.
+    ///
+    /// A value too large for the step count saturates rather than wrapping, and a
+    /// not-a-number sum becomes [`NONE`](Self::NONE) — neither is reachable from reads whose
+    /// error probabilities are probabilities, and both are stated so that no input produces a
+    /// silently wrong number.
+    #[inline]
+    pub fn from_nats(nats: f64) -> Self {
+        if nats.is_nan() {
+            return Self::NONE;
+        }
+        let steps = (nats * Self::STEPS_PER_NAT as f64).round();
+        // `as` saturates at the integer's bounds for floats, including infinities.
+        Self(steps as i64)
+    }
+
+    /// The value in natural logs, for the arithmetic that needs a float.
+    #[inline]
+    pub fn nats(self) -> f64 {
+        self.0 as f64 / Self::STEPS_PER_NAT as f64
+    }
+
+    /// The raw step count — what a psp stores and what a header's step interprets.
+    #[inline]
+    pub fn steps(self) -> i64 {
+        self.0
+    }
+
+    /// A step count read back from a file, unchanged.
+    #[inline]
+    pub fn from_steps(steps: i64) -> Self {
+        Self(steps)
+    }
+}
+
+/// Adding two of these is **exact and order-independent**, which is the property the whole
+/// type exists for: a cohort merge folding one read's evidence from several records, or a
+/// selection pooling the alleles it cut into a leftover, gets the same answer whatever order
+/// it works in. Saturating rather than wrapping, for the reason [`Self::from_nats`] gives.
+impl std::ops::Add for SummedLogError {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+}
+
+impl std::ops::AddAssign for SummedLogError {
+    #[inline]
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl std::iter::Sum for SummedLogError {
+    #[inline]
+    fn sum<I: Iterator<Item = Self>>(terms: I) -> Self {
+        terms.fold(Self::NONE, |running, term| running + term)
+    }
+}
+
+/// `-3.5 ln` — the unit is in the rendering, because a bare number here reads as a
+/// probability, a Phred score or a step count depending on who is looking.
+impl fmt::Display for SummedLogError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ln", self.nats())
+    }
+}
 /// A fraction of mismatched bases, constrained to `[0, 1]`. Unlike the
 /// unconstrained newtypes above, an out-of-range value is *unrepresentable*:
 /// the field is private and construction goes through the checked
@@ -429,6 +547,14 @@ impl AlleleId {
 pub struct Phred(f32);
 
 impl Phred {
+    /// **Certainty on this scale, and the one value that needs no check.**
+    ///
+    /// Zero Phred is a probability of one — nothing charged, nothing ruled out. It is
+    /// [`try_new`](Self::try_new)'s answer for `0.0` written as a constant, so a caller
+    /// with nothing to say does not have to `expect` its way past a `Result` that
+    /// cannot fail.
+    pub const ZERO: Self = Self(0.0);
+
     /// The one check, and every constructor goes through it. A quality below
     /// zero or a `NaN` says the caller's arithmetic went wrong; an infinite one
     /// says the scored probability is exactly zero, which is a different event
@@ -2353,5 +2479,97 @@ mod tests {
             assert_eq!(once, twice, "canonical form must be a fixed point");
             assert_eq!(once.alleles(), twice.alleles());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // SummedLogError
+    // -----------------------------------------------------------------
+
+    /// The step is what a psp's header records so a reader can interpret the integer, so the
+    /// two directions have to be each other's inverse on the grid.
+    #[test]
+    fn a_summed_log_error_round_trips_through_its_own_step() {
+        for steps in [0i64, 1, -1, -61_030, 4_096, -8_388_608] {
+            let value = SummedLogError::from_steps(steps);
+            assert_eq!(value.steps(), steps);
+            assert_eq!(SummedLogError::from_nats(value.nats()), value);
+        }
+    }
+
+    /// **The error a step introduces is the whole risk of the type**, since this term goes
+    /// straight into a genotype likelihood. Half a step is 1.22 × 10⁻⁴ natural logs, which the
+    /// spec prices at 0.024 % of the likelihood term.
+    #[test]
+    fn rounding_never_moves_a_value_by_more_than_half_a_step() {
+        let half_a_step = 0.5 / SummedLogError::STEPS_PER_NAT as f64;
+        // Values chosen to land at, just under and just over a step boundary, and at the
+        // depths the caller actually sees: −3 at three reads a position, −3360 at three
+        // hundred (the locus D3's real-data run found).
+        for nats in [
+            0.0,
+            -1e-9,
+            -0.5,
+            -2.999_999_999_999_999,
+            -3.0,
+            -14.9,
+            -3_360.392_684_715,
+        ] {
+            let rounded = SummedLogError::from_nats(nats).nats();
+            assert!(
+                (rounded - nats).abs() <= half_a_step,
+                "{nats} rounded to {rounded}, which is more than half a step away"
+            );
+        }
+    }
+
+    /// **The property the type exists for.** Two routes that add the same reads' error in
+    /// different orders must reach the same value — which `f64` addition does not guarantee and
+    /// integer addition does.
+    #[test]
+    fn adding_is_exact_and_does_not_care_about_order() {
+        let terms: Vec<SummedLogError> = [-0.1, -7.6, -0.000_3, -12.5, -3.0]
+            .iter()
+            .map(|&nats| SummedLogError::from_nats(nats))
+            .collect();
+
+        let forwards: SummedLogError = terms.iter().copied().sum();
+        let backwards: SummedLogError = terms.iter().rev().copied().sum();
+        assert_eq!(forwards, backwards);
+
+        // The same addends in `f64` do not have that property, which is why this type is not
+        // an `f64`. One large term and two that fall below its last bit: added large-first the
+        // small ones vanish, added small-first they survive to move the total. If this
+        // assertion ever fails, the fixture stopped exercising the point.
+        const UNEVEN: [f64; 3] = [-1.0, -1e-16, -1e-16];
+        let sum_forwards: f64 = UNEVEN.iter().sum();
+        let sum_backwards: f64 = UNEVEN.iter().rev().sum();
+        assert_ne!(
+            sum_forwards, sum_backwards,
+            "the fixture must contain addends that `f64` adds differently in each order"
+        );
+    }
+
+    /// A not-a-number error sum once came back through `f64::max` as the most confident read
+    /// the model can express — a confident wrong answer with nothing failing. The type has no
+    /// such value, and the conversion says what it does instead of leaving it to `as`.
+    #[test]
+    fn a_value_no_read_can_produce_becomes_a_stated_one_rather_than_a_silent_one() {
+        assert_eq!(SummedLogError::from_nats(f64::NAN), SummedLogError::NONE);
+        assert_eq!(
+            SummedLogError::from_nats(f64::NEG_INFINITY).steps(),
+            i64::MIN
+        );
+        assert_eq!(SummedLogError::from_nats(f64::INFINITY).steps(), i64::MAX);
+        // And saturating rather than wrapping, so an extreme value stays extreme.
+        let most = SummedLogError::from_steps(i64::MAX);
+        assert_eq!((most + most).steps(), i64::MAX);
+    }
+
+    /// The unit is in the rendering, because a bare number here reads as a probability, a
+    /// Phred score or a step count depending on who is looking.
+    #[test]
+    fn a_summed_log_error_renders_with_its_unit() {
+        assert_eq!(SummedLogError::from_nats(-3.0).to_string(), "-3 ln");
+        assert_eq!(SummedLogError::NONE.to_string(), "0 ln");
     }
 }

@@ -1083,7 +1083,7 @@ impl OpenPileupRecord {
                     read_group: observation.key.read_group,
                     num_obs,
                     num_fwd: fwd,
-                    q_sum,
+                    q_sum: crate::ng::types::SummedLogError::from_nats(q_sum),
                     mapq_sum,
                     mapq_sum_sq,
                     placed_left,
@@ -2977,7 +2977,11 @@ mod tests {
         // `snp_read`'s mapping-quality log-error, which is worse than Phred 33's
         // −7.598 — so a path that dropped the floor would come back with the base term.
         const MQ_LOG_ERR: f64 = -3.0;
-        let expected = minted_ln_read_error(BQ, MQ_LOG_ERR);
+        // Both paths now round to the type's step, so the comparison is between the two
+        // rounded values — which is the whole point: it is exact, where comparing two `f64`
+        // sums needed a tolerance.
+        let expected =
+            crate::ng::types::SummedLogError::from_nats(minted_ln_read_error(BQ, MQ_LOG_ERR));
 
         // An ordinary column: one read, matching the reference, nothing to reconcile.
         let clean = drive_walker(

@@ -151,14 +151,85 @@ nothing to a fresh reader. Describe the thing, not its label.
 If a label is load-bearing (a real cross-reference), spell out what it is
 the first time, then it may be used.
 
-## Rule 6 — Relocate precision, don't delete it
+## Rule 6 — Never tell the reader that something is interesting; show it and stop
+
+**State the fact. Do not announce that the fact is surprising, important, or
+counter-intuitive.** The owner's words, 2026-08-25, on the first example below:
+
+> "This is slop. We don't need to beg for attention by saying 'not what anybody
+> would guess'. I truly hate this kind of writting."
+
+The tell is a clause that **describes the reader's reaction** instead of adding
+information. Delete it and check what is lost: if the answer is nothing, it was
+begging for attention.
+
+| ❌ | ✅ |
+|---|---|
+| "the fields are not equal, and the two largest are not the ones anybody would guess. Per record…" | "Per record, compressed…" |
+| "**That last sentence is the whole design problem.** Anything a psp costs to have open is multiplied by the cohort size…" | "Anything a psp costs to have open is multiplied by the cohort size…" |
+| "**Read this section even if you skip others.** Production's code and this document use the word *trailer* for two different things…" | "Production's code and this document use the word *trailer* for two different things…" |
+| "Three things follow, **and the third is a constraint on the design rather than a tuning note**:" | "Three things follow:" |
+| "Three things came back, **and the third was not being looked for**." | "Three things came back." |
+
+Every one is from the same afternoon's documents, which is how easily it
+accumulates: each felt like helpful signposting while writing it.
+
+**Why it is worse than merely wasteful.** A reader who is told a finding is
+surprising has been given a claim they cannot check, ahead of the evidence they
+could have checked. It also inverts the ranking work: the sentence asserts what
+matters instead of arranging the material so the reader sees what matters.
+*Ordering is signposting.* If a fact deserves attention, put it first, give it
+its own paragraph, or put it in bold — all of which carry information about
+where it sits. A sentence about how remarkable it is carries none.
+
+**The forms to strike on sight:**
+
+- *"not what you would expect"*, *"surprisingly"*, *"counter-intuitively"*,
+  *"the interesting thing is"*, *"notably"*, *"it turns out that"*
+- *"read this even if you skip the rest"*, *"this section matters"*, *"note that"*
+- *"and the third is the one that matters"* — a list whose items are ranked by an
+  aside instead of by their order
+- *"this is the whole point"*, *"that sentence is the whole problem"*
+- **Fake suspense of any kind**: withholding the finding for one sentence to
+  announce that a finding is coming.
+
+### The same failure in a heading: describing your own writing instead of the subject
+
+**A heading names what the section is about. It does not report how long the section
+is.** The owner, 2026-08-25, on "The problem, in one paragraph" and "The proposal, in
+one page":
+
+> "I also hate this kind of writting. What does 'in one paragraph' add? If you're
+> stating the problem, just do it."
+
+| ❌ | ✅ |
+|---|---|
+| `### 1.1 The problem, in one paragraph` | `### 1.1 The problem` |
+| `## 2. The proposal, in one page` | `## 2. The proposal` |
+| `## 1. What this is, in one page` | `## 1. What this is` |
+| **"The design, in one sentence."** | **"The design."** |
+| **"The idea in one paragraph."** | **"The idea."** |
+
+The promise is empty in both directions. If the section *is* short the reader can see
+that; if it grows past a page — and these do — the heading is now false, and nobody
+ever goes back to fix it. The same applies to *"briefly"*, *"in short"*, *"at a high
+level"* and *"a quick note on"*.
+
+**Two things this rule does not forbid.** Saying a result *corrects* something —
+"this contradicts the expectation recorded in §4" — is information, because it
+tells the reader a specific belief is now wrong. And marking a number as soft
+— "inherited, never measured" — is information about the evidence. The test is
+always the same: **delete the clause; if nothing checkable is lost, it was
+decoration.**
+
+## Rule 7 — Relocate precision, don't delete it
 
 When precision threatens clarity, **move** it, don't drop it: plain lead in
 the body, exact detail in a following sentence, a code block, or a
 footnoted formula. The reader gets the idea first and the rigour second.
 Both survive. (This is progressive disclosure applied at paragraph scale.)
 
-## Rule 7 — Sentence-level mechanics
+## Rule 8 — Sentence-level mechanics
 
 The standard plain-language mechanics, because they compound with the rules
 above:
@@ -206,11 +277,15 @@ explained). Two sample entries set the depth:
 4. Scan for **internal labels** (step codes, "the X tool"), **borrowed
    jargon** ("kernel"), and **symbol-only summaries**. (Rules 4, 5)
 5. Where precision crowded out clarity, **restructure** rather than cut.
-   (Rule 6)
-6. Check **mechanics**: short active-voice sentences, plain words, one term
+   (Rule 7)
+6. Strike every clause that **describes the reader's reaction** rather than
+   adding a fact — "surprisingly", "the interesting thing is", "read this
+   section even if you skip others". Delete it and see whether anything
+   checkable is lost. (Rule 6)
+7. Check **mechanics**: short active-voice sentences, plain words, one term
    per concept, lists for sets, explanation kept distinct from reference.
-   (Rule 7, modes)
-7. Final pass: apply the **reader test** to the whole piece.
+   (Rule 8, modes)
+8. Final pass: apply the **reader test** to the whole piece.
 
 The goal is writing the owner never has to send back with "what the hell is
 that?" — clear on the first read, precise on the second.

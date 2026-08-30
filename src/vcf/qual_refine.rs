@@ -49,7 +49,7 @@ const PHRED: f64 = -10.0;
 
 /// Refine the engine QUAL for one record. Returns `baseline_qual` unchanged
 /// when there is no ALT support to reason about.
-pub(super) fn refine_qual<R: VcfWritable>(
+pub(crate) fn refine_qual<R: VcfWritable>(
     record: &R,
     table: &[Vec<u8>],
     baseline_qual: f64,

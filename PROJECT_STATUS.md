@@ -19,7 +19,980 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-26):** **the SNP/indel prior's two numbers stop being one
+> - **Last completed task (2026-08-30):** **the psp store is on `main`** — 116 commits, and
+> `main`'s own 71 merged into it first. The store is what one sample's reads showed at every
+> position a run analysed, written once and read back by the cohort gather; nothing in the run
+> writes or reads one yet, and that wiring waits for the caller to work end to end from BAM to
+> VCF. **One rename did not merge on its own**: this branch made the summed per-read log-error a
+> whole number of 1/4,096ths of a nat rather than an `f64`, so a run reading observations from
+> memory and one reading them back from a file agree on a number rather than on a tolerance — and
+> six fixtures in code `main` wrote meanwhile still built one from a float. All six are test
+> fixtures; no production code on either side needed changing. ⚠ **The merge commit itself does
+> not compile**: the resolved files were never staged, and the commit after it is the other half.
+> Before the merge, the four defects the milestone reviews had recorded and left were fixed — a
+> walk whose predicate panicked could report a sound file corrupt, "write a block and give it its
+> index entry" existed twice, a refusal said *manifest* for a failure in the header's writer
+> parameters, and a failed trailer replacement could not tell *nothing happened* from *the file is
+> torn*. `ng::psp` is **402 tests**, the library 4,936, and `clippy --all-targets --all-features
+> -D warnings` is clean.
+>
+> - **Previously (2026-08-30):** **the documents said an open psp costs tens of kilobytes;
+> it costs 480 kB, and three quarters of that is the reference's contig list** (branch
+> `ng-psp-encoding`, status `implemented`). [`run_streaming.md`](doc/devel/ng/spec/run_streaming.md)
+> §7.2 was headed *an open psp costs tens of kilobytes, not megabytes* and cited again in §5.3; it
+> was written before anything had been measured. It now carries the 500 kB budget and the measured
+> split — **357 kB for the open file before a block is touched, 123 kB for the cursor walking it**
+> — on a human reference, against **7 kB and 101 kB** on tomato. The cursor costs near enough the
+> same on corpora **27× apart in depth**, which is the *does not grow with the depth* half of the
+> requirement; the header is the whole of the difference, at about **138 bytes a contig**, so 2,580
+> contigs cost 357 kB where 13 cost 7 kB. **§7.1's arithmetic moved with it**: it estimated 26 kB a
+> sample and priced three thousand samples at look-ahead 8 as 620 MB, and that run is **4.0 GB** —
+> the look-ahead is the term that decides whether psp mode fits, at **0.37 GB a unit**. §10 gains
+> the lever the owner routed to the run: one contig list per run rather than one per open sample,
+> worth 357 kB of the 480. **The psp format does not change.**
+> [`module_layout.md`](doc/devel/ng/arch/module_layout.md) said ng had no `.psp`; its tree now has
+> `psp/` and a section says what the store does, what it costs, and that nothing in `pipeline.rs`
+> writes or reads one yet. **Four further documents quoted the old sentence and now follow it** —
+> the psp format spec (goal 1, §4.4, §5.2, §7 and its deferred list), the record-encoding spec in
+> three places, the encoding-experiments plan and the psp store's own plan. Separately, the psp
+> architecture doc's question on what the record head is worth at depth is marked **narrowed**
+> rather than open — 2.40× to 3.11×, every figure an upper bound until a store written from ng's
+> own locus generation exists.
+>
+> - **Previously (2026-08-30):** **the head-driven skip is worth about 3×, and depth costs
+> it 5 %, not the collapse the architecture feared** (step H5 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). arch §7 asked how much of the prototype's 2.06× survives at depth, because the
+> chain-id changes ride in the head — 0.432 bytes a position at 11.4 reads, **6.42 at 293** — so
+> the head grows while the body the skip avoids does not. Confirmed in the encoder: the changes sit
+> **after** `body_bytes`, so a skipping reader never avoids them. Measured on the spec's own two
+> corners, checked rather than taken from a filename — **10.3 and 280.0 reads a record**, against
+> the spec's 11.4 and 293:
+>
+> | keeping one record in | tomato, 10.3 reads | HG002, 280.0 reads | depth costs |
+> |---|---:|---:|---:|
+> | 10 | 2.513× | 2.399× | −4.5 % |
+> | 100 | 3.038× | 2.869× | −5.6 % |
+> | 1,000 | 3.111× | 2.927× | −5.9 % |
+>
+> Every reading is above the prototype's 2.06×, and the flat end says **decoding heads is about a
+> third of a full walk** at both depths. ⚠ **These corpora cannot close arch §7, and the reason is
+> exact**: they are built from a production `.psp`, which names about **3.4 %** of the reads ng
+> will name, so these heads are far lighter than ng's. The bias is one-directional — a bigger head
+> makes the skip worth *less*, never more — so **every figure above is an upper bound**, and the
+> question stays open until an ng-written store exists. **No projection is offered**, because
+> turning the spec's 6.42 bytes into a predicted ratio would need the head's decode *time*, and an
+> arithmetic guess would read like a measurement. ⚠ **The number moved under me twice before it
+> settled**: three timing rounds gave an 8 % spread where seven give 3 %, and running the two arms
+> in separate phases rather than interleaved shifted the centre from 2.84 to 3.25 under a
+> background build. Both are designed out of the harness and written into its own doc.
+> [H5](doc/devel/reports/implementations/ng_psp_h5_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **H3 reviewed — the precondition that says the sweep can
+> tell a coordinate cut from a shard cut was itself the thing that broke quietly** (step H3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine mutations across three checklists and the numbers pass; **one survived**.
+> The mid-block precondition divided by a literal `1_000` while the grid was supplied separately as
+> `a_header(1_000)`, and nothing made the two agree: writing the fixture on a **40 bp** grid gives
+> every record its own block — 1,000 instead of 40 — so **every** shard boundary lands on a grid
+> line, the exact condition the assertion exists to refuse, **and the test still passed**.
+> Reproduced here first; one named constant now drives both ends. **The second Major is a
+> format-level finding, and it is raised rather than taken**: spec §7's byte-identity holds only
+> while every timestamp renders to the same width, and nothing enforces that. `created` is a
+> `toml::value::Datetime`, so `…T11:22:33.5Z` is two characters wider than `…T00:00:00Z`; measured,
+> the file grows by exactly two bytes and **every offset past the header moves**. ng has no
+> production header writer yet, and a future `pileup` using `to_rfc3339` — which prints sub-second
+> digits only when non-zero — would give stamps of varying width run to run. A test pins that limit
+> now; **normalising the stamp, refusing it, or amending §7 are all the owner's call**. ⚠ **Two of
+> my own claims were wrong**: "three mutations, three killed" over a table holding two, and "no
+> mutation kills the file comparison and not one of the others" — disproved by a writer
+> nondeterminism gated at sixteen blocks, which F3's eight-block fixture passes and this one's forty
+> catches.
+> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md);
+> [the review](tmp/review_2026-08-30_ng-psp-h3/findings.md).
+>
+> - **Previously (2026-08-30):** **an open sample costs 480 kB against a 500 kB budget,
+> and three quarters of it is not the reader** (step H4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Measured at 1, 2, 4, 8, 16, 32, 62, 125, 250, 500, 1,000 and **5,000** open
+> samples, one process each because `VmHWM` is a high-water mark and two counts in one process
+> would both report the larger — the slope would come back zero and the claim would pass by
+> construction. Least squares, **R² = 0.99999**. **The reader's own cost is 123 kB on the human
+> corpus and 101 kB on tomato** — near enough the same on two corpora whose depth and contig count
+> differ by two orders of magnitude, which is what spec §1.1 claims and the evidence for it.
+> **What is not the same is the header: 357 kB a sample against 7 kB, and the difference is 2,580
+> contigs against 13.** So **74 % of the human per-sample cost is a contig list identical in every
+> sample of the cohort**, at about 138 bytes a contig, retained N times over. The budget is met
+> with 19.7 kB — 4 % — to spare, and on a reference with about 3,700 contigs it would not be met at
+> all. **Sharing that list would take 480 kB to 123 kB**; it is the largest memory lever the store
+> has, it is not in any plan, and it belongs with `run_streaming.md`, which owns the run objects.
+> ⚠ **Two spec figures do not survive the port and are recorded rather than explained**: §5.2's
+> 257 kB and §5.4's 338 kB are prototype numbers with no contig list in them, so they do not
+> predict 480 kB; and §5.3's 190 kB zstd floor is not visible in a reader measured at 123 kB.
+> At 5,000 samples: **2.40 GB, measured rather than extrapolated.**
+> [H4](doc/devel/reports/implementations/ng_psp_h4_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **the same sample gathered at any worker count gives the
+> same file, and the timestamp is the only thing allowed to differ** (step H3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). ⚠ **What this can prove is narrower than the plan's sentence, and the report says
+> so first**: ng's writer is serial, so byte-identity across worker counts rests on the writer being
+> a function of the record sequence alone — already held by an F3 test — and on the *sharding*
+> giving back the same sequence, which is the run's job and is what this reproduces. The file
+> comparison itself is close to a tautology given those two. ⚠ **The first version's shards split
+> exactly on the grid and the test refused itself**: two equal contigs split evenly put the
+> two-worker boundary on the second contig's first record, and 250 records at 40 bases is 10,000 —
+> a whole number of 1 kb cells — so every four-worker boundary was a grid line too. A sweep whose
+> boundaries all sit on grid lines cannot tell a cut that follows the coordinate from one that
+> follows the shards, which is the only thing it is for; the split is skewed now and the count of
+> boundaries falling *inside* a block is asserted per worker count. **The second half of spec §7
+> had nothing holding it at all** — that a timestamp may differ *and only inside the header*. It is
+> a claim about width: the stamp goes into the header's TOML, so one character more moves the
+> header's length and with it every offset in the footer, the index and the blocks. Three
+> mutations, three killed.
+> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **H2 reviewed — the killed writer was not writing when
+> it was killed** (step H2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Seven checklists and a numbers pass across three
+> agents. **The test did not do what its own doc said, and the doc's claim was the reason it
+> existed.** Measured independently by two agents: the child's 80,000 pushes take about **5 ms**
+> while the parent kills at about **12 ms**, so in **25 runs out of 25** the child had finished and
+> was asleep when the signal arrived; the file it leaves ends **on a block boundary**, never inside
+> one, because each block reaches the `BufWriter` in one `write_all` and the blocks here average 57
+> bytes against an 8 kB buffer; and a writer given 58,251 pushes and then simply **dropped** leaves
+> a **byte-identical** file. So *the state is unreachable from inside the process* was false in
+> both halves. ⚠ **And the mutation I had recorded as a no-op is not one** — it fails 40 of 40
+> standalone runs. I ran it once, saw it pass, and wrote that down as a property; that is what a
+> flaky test looks like from inside. The child now **pushes until it is killed** and touches a
+> marker only if it stops on its own, which the parent requires to be absent — so *the writer was
+> still writing* is asserted rather than assumed. **A second Major**: the truncation sweep folded
+> *wrong kind of file* into its *unfinished* counter, so a defect flipping **3,694 of 3,742** cuts
+> still passed, while the sibling test added in the same commit exists to forbid that
+> misdiagnosis. **A third**: every way the child can fail reached the parent as an ordinary exit,
+> so a stale test-name filter fired the signal assertion with a message about destructors.
+> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_h2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a writer killed for real leaves a file every reader
+> refuses, and a failing read is not damage** (step H2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **Dropping a writer in-process was never the same test**, and the difference is
+> the point: `BufWriter` flushes on `Drop`, so an in-process drop puts everything on disk cut at a
+> record boundary, while `SIGKILL` runs no destructor and the buffer is simply lost — the file can
+> end part-way through a compressed block or part-way through the header, which is unreachable from
+> inside the process and is what a killed pileup actually leaves. The child is this test binary
+> re-executed; **its death by signal 9 is asserted**, because an ordinary exit would run the very
+> flush the test exists to prevent. **And `refuse`'s `Io` arm finally has a genuine `read(2)`
+> failure**: the walk is handed a descriptor opened *write-only* on a sound psp, so seeking works
+> and every read fails with `EBADF` — no `unsafe`, and not the closed-descriptor trick, which is a
+> flaky-test generator once the harness runs tests on parallel threads. A contrast test holds the
+> other half, because `Io` and `CorruptBlock` could otherwise be swapped and both would pass.
+> ⚠ **The header sweep asserted something false and failed on its first run**: a cut inside the
+> four-byte magic does *not* come back as `NotAnNgPsp`, on any of 3,136 cuts, because the magic is
+> compared only after a twelve-byte read succeeds — so a truncated ng psp is never reported as the
+> wrong kind of file, which is the better answer. Both sweeps are exhaustive now: **3,742 cuts in
+> 0.19 s**, against 234. Three mutations on the kill test, two killed and **one proved to be a
+> no-op** — the one a reader would reach for first.
+> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **H1 reviewed — the oracle could not fail on eighteen
+> of its twenty-six comparisons, and a store with every region a base too long passed it** (step H1
+> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Ten checklists across five agents, **three Blockers, and the first two were
+> reproduced here before anything was changed**. The cross-encoder arm — the whole reason this step
+> is not a round-trip test — never compared `placed_left`, the reference bases or the record's
+> extent, and its doc said the opposite: a store written with `placed_left` one too high **and**
+> every region a base too long **passed all 74,623 hg002 records with a clean report**. Both
+> defects are in the harness's own mapping, which the round-trip arm carries on both sides and
+> cannot see. **And eighteen of the twenty-six field comparisons had no test that they could
+> fail** — neutered one at a time, they left all 23 tests green. The fix for both is structural:
+> **both arms destructure with no `..`**, so a field added to the record is a compile error rather
+> than a field the oracle stops comparing, and two table-driven tests hold every comparison by
+> name. **The third Blocker is not H1's doing and is worth knowing**: CI runs `clippy
+> --all-targets` under `-D warnings`, and the measuring prototype has failed it since `b0e1a54a` —
+> four milestones — because the local gate is `--lib --tests`. Moving two lints onto the
+> prototype's own items makes CI's command clean. **Everything the store holds that is not a record
+> was written and never read back**: a contig length one too long, an index whose every first
+> position was a base too far, and a truncated trailer all passed a 100,000-record run. All three
+> are caught now — and ⚠ **the index check had to be strengthened twice**, because entering blocks
+> by *ordinal* never reads the coordinate `records_from` searches on. **Three of my numbers were
+> wrong again**, against forty-nine right: seven declarations is eight, two allowed lints is three
+> suppressing twenty-four findings, and a module doc saying two synthesised fields where four are —
+> the last inverting the very point the step exists to make.
+> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_h1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_h1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **the store gives back what it was handed, and an
+> encoder that is not it agrees** (step H1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Milestone H is the milestone of numbers, and H1 is the first of them measured on
+> this code rather than on the prototype the specs quote. One production `.psp` is the source;
+> every record in it becomes an ng record, **both** stores are written from that same sequence, and
+> all three streams are walked in lockstep. **7,687,686 records on tomato and 74,623 on hg002,
+> every field of every observation compared, and both pass.** The second arm is the point: a
+> round-trip through one codec proves self-consistency, and a defect planted in the harness's own
+> mapping — reading `mapq_sum` one too high out of the source — leaves the round-trip passing and
+> fails against the prototype. **The prototype is asked for ng's own 1/4,096-of-a-nat step**, so
+> the summed log-error is compared as an *equality* across the two stores rather than inside a
+> tolerance wide enough for both; the step appears once, against the source, where the worst
+> distance is 0.000122064 against a half-step of 0.000122070. ⚠ **The corpus synthesises the four
+> fields production has no equivalent of** — the read witness, the read group and the two counts of
+> reads that showed nothing — and that is not tidiness: with the two counts left at zero, an
+> encoder writing a constant 0 for `reads_discarded_by_cap` **passed** a 3,000-record run, the only
+> one of six injected defects that did. Seven defects now, seven caught — **but two of them never
+> reach the comparison**: rewriting every witness as `Complete` and dropping a chain id are both
+> refused by the reader's own guards, because the head's non-reference read count is derived
+> through the witness and the residual list is derived from the live set. No file under `src/`
+> changed.
+> [H1](doc/devel/reports/implementations/ng_psp_h1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G4 reviewed, and Milestone G is complete — a footer
+> with an empty block index let `append` truncate the header away and report success** (step G4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). **This is Checkpoint G: all five operations exist** — open, walk, walk from a
+> coordinate, replace the trailer, append. Nine checklists across two agents, one Blocker,
+> reproduced here first. **It is G3's Blocker one operation over, and the reason it survived is
+> exact**: the rule tying the block index to the header is written per *entry*, and **on an empty
+> index there are no entries to check**. A footer saying the index sits at byte 4 and holds
+> nothing passed every check the reader makes — so `append`, which truncates at that offset, cut a
+> 3,742-byte psp down to 109 bytes and returned `Ok`. The fix is in the reader, as a rule about the
+> file, so every operation that starts from `open` gets it. **Five Majors**, of which two are the
+> same shape: a level recorded as a *string* fell into the same arm as *absent* and the append
+> wrote level-9 blocks into a file claiming level 1 — the file §2.4 says must not exist, produced
+> without a word — and a level outside an `i32` was refused for a number that is not in the file.
+> **And the seam test could not tell the last record from the last block's first**: an
+> implementation keeping the wrong one passed all 381 tests. **Three of my numbers were wrong
+> again**, all about my own work: a defect table claiming eight rows with seven, an assertion I
+> said was worth nothing that is worth sixteen failing tests, and a stale figure from Milestone F
+> still standing in the code. A 7,484-mutant hostile sweep found no panic and left every refused
+> file byte-identical.
+> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g4_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a finished psp is reopened and extended, and the
+> order runs across the seam** (step G4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). The footer says where the blocks end, so appending is truncating at the index
+> offset and carrying on: the header and every block stay where they are, and `finish` writes a
+> new index made of the entries already there and the ones this writer adds. **It opens the file
+> as a reader first** — an append writes a fresh footer onto whatever it finds, which is the
+> lesson G3's review taught the trailer replacement at the cost of a Blocker. **The last record
+> already in the file comes from the last block's heads**, which is what G2's selective walk is
+> for, and it seeds the order check; a builder that started blank would accept a record behind
+> the seam. **And the manifest is checked before the file is walked** — the other order made a
+> manifest this writer cannot honour arrive as a *reader's* refusal, which is the wrong class for
+> the thing spec §6.4 names. Milestone F's last two owed items land here: the byte counter is
+> checked against the footer, and the per-block copy in `push` is gone. **The third — splitting
+> the writer in two — is not done, and writing `append` is the reason**: it reuses `push` and
+> `finish` unchanged, so the split does not pay twice after all. ⚠ **One test's first fixture
+> could not fail**: it compared an appended block against a fresh block at the level the file
+> records, which is this build's own, so an append ignoring the record entirely passed. Eight
+> defects injected, eight caught.
+> [G4](doc/devel/reports/implementations/ng_psp_g4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G3 reviewed — a damaged footer made the trailer
+> replacement overwrite the whole file and report success** (step G3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine checklists across two agents, **two Blockers, and both were reproduced
+> here before anything was changed**. The first: the only lower bound on the byte the rewrite
+> seeks to was a four-byte magic, so a footer claiming the trailer starts at byte 4 passed every
+> check — and **a 3,742-byte psp that the reader already refuses became 56 bytes, returning
+> `Ok(())`**. It now reads the header for its length alone, which reverses the step's own decision
+> not to; that decision was defended by spec §6.7's table, and the table should gain a row for the
+> class the check earns. The second: **my ⚠ saying an interruption leaves a file every reader
+> refuses was false.** Overwriting in place and trimming afterwards left the old footer intact and
+> consistent until a write passed the old trailer's end — replacing `a per-sample summary` with
+> `short` and stopping gave a file that **opened**, with the trailer `short-sample summary`. Twenty
+> of the twenty-one torn states were accepted; truncating first makes it one. Five Majors,
+> including the F4 Blocker recurring in the rule this operation had copied from the reader — the
+> copy is now the reader's own function, shared. **Two of my numbers were wrong**: nine
+> construction sites is ten, and a defect table row described a mutation I had not run. ⚠ **One
+> agent's worktree was auto-cleaned before its findings could be lifted out and it could not be
+> resumed** — everything of its is recorded from its summary and was reproduced here first.
+> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g3_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a finished psp's trailer is replaced without a byte
+> of its blocks or its index moving** (step G3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). It is the cheap operation, and the reason the index sits *before* the trailer:
+> the trailer's offset is where the rewrite starts. **It reads the fixed tail and deliberately
+> neither the header nor the block index** — spec §6.7 names only two refusals for it, reading the
+> index would cost a decode per call, and every field written back except the trailer's length is
+> the file's own. **The file is trimmed afterwards, and a shorter trailer is why**: a reader takes
+> the last forty-eight bytes for its footer, so leaving the file at its old length would put the
+> tail of the old trailer past the new footer and the file would be refused. The blocks-untouched
+> claim is compared **as bytes**, not as a decode. **And the write-side errors carry their causes
+> now**, carried forward from F3 and F4: two variants take the error itself and drop their
+> sentence, one takes a typed two-way cause, and one keeps a sentence naming which structure with
+> the decoder's own account underneath. Six defects injected; ⚠ **one survived the first run** —
+> nothing covered the rule that stands between a footer with nonsense offsets and a fresh footer
+> blessing them — and the test that now catches it was written because of that.
+> [G3](doc/devel/reports/implementations/ng_psp_g3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G2 reviewed — nothing held the one claim the type
+> exists for** (step G2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Nine checklists across two agents, no Blocker, five
+> Majors — **and every one of them was about what the tests do not hold rather than what the code
+> does**. All seven new tests checked only that a declined record's body came back empty, which an
+> implementation that decodes the body and then throws it away satisfies exactly as well; the
+> mutant left all 355 tests green. **A second finding is a property that is correct and was
+> unwritten**: a walk that declines bodies is a materially weaker reader of damage than a full
+> one, because the two agreements between a record's head and its body are checked while the body
+> is decoded. Measured here rather than quoted: on a three-record block of 102 payload bytes, every
+> byte flipped in turn, a full walk refuses 93 and a walk declining every body accepts **72 of
+> those 93**. The cohort's first pass is exactly a walk that declines most bodies, so *it walked
+> without an error* does not mean the sample read back sound. **And one of my tests could not fail
+> on the half it names**: the fixture's records all read zero for the field the predicate reads,
+> so the predicate was constant-false. Six tests added, four of them the agents' own bodies; two
+> renames — `only_where` and `SelectiveIter` were named for the filter the doc spends two
+> paragraphs denying. ⚠ **One suggested fix did not compile as written and was reported green**:
+> its replacement comment contained a path the guard test forbids, comments included.
+> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g2_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a walk that hands over every record's head and
+> builds only the bodies a predicate asks for** (step G2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **It is not a filter, and the type's doc says so first**: every record of every
+> block still arrives, in order, and what the predicate decides is whether the body was built — a
+> caller reading it as a filter would take the walk's length for the number of records it kept,
+> so the fixture makes the two differ (40 heads, 20 bodies). **The predicate is a builder on the
+> walk rather than a fourth entry point**: `records_from(at)?.only_where(…)` is the shape a
+> cohort reading one region of every sample writes, and spec §6.2's `records_where` is the
+> whole-file case of it. **The live set is exact after a declined record too**, which is the
+> whole reason the chain-id changes ride in the head and not the body — the test declines the
+> record where one id departs and another arrives. Four defects injected, four caught. ⚠ **The
+> mutation harness misreported one as a survivor**, its "0 failed" check matching the `10 failed`
+> in the line it read; the line it printed showed the truth and the check is now `; 0 failed`.
+> [G2](doc/devel/reports/implementations/ng_psp_g2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **G1 reviewed — asking for a coordinate two blocks
+> begin on lost the records of the earlier one, silently** (step G1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine checklists across three agents, and **the Blocker was found twice
+> independently**. The index search read *the last block starting at or before the coordinate*,
+> which enters a run of blocks sharing one first position at its **end** — and `index.rs`
+> documents that run as a shape the index exists to accept, produced whenever a byte ceiling
+> closes a block. On a three-record file `records()` gives three records and `records_from` at
+> the shared position gave two, with no error. **Neither agent's proposed fix was taken**,
+> because both left a second hole: even with no run at all, a block's last record may begin on
+> the base the next block begins on, so a block starting strictly *below* the coordinate can
+> still hold a record at it. The rule that misses nothing is *the block before the first block
+> starting at or after the coordinate*, and it costs one extra block only when the coordinate
+> falls exactly on a block's first position. **A second finding was a message that told an
+> operator to raise a ceiling no reader had**: the error's own doc said it withheld that
+> instruction, and the cause underneath said it anyway — the knob now exists. **And one of my
+> own tests was the failure the review names**: `live_reads` tested against a fixture whose every
+> chain-id list is empty, where an accessor answering about the wrong record passes exactly as
+> the right one does. Eight Majors, ten Minors; eleven tests added, four of them the agents' own
+> bodies. `ng::psp` is 348 tests against 324 before the step.
+> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_g1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_g1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a coordinate becomes a block with one binary search,
+> and the walk that follows it stops where the blocks stop** (step G1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). `records`, `records_from_block` and `records_from` each hand back a lazy
+> `RecordIter` that borrows the reader and holds nothing that grows with the file. **The design
+> question the step was handed is settled by the documents, and in the same direction twice**:
+> spec §6.2 says the coordinate is matched against where records *start*, and arch §4.1 says
+> reading begins at the chosen block's first record — so `records_from` is block selection, not an
+> overlap query, and **a deletion that begins in the block before and covers the coordinate asked
+> for is not in the walk**. The container cannot offer more: an index entry carries a block's
+> first position and nothing else, §3.3 having removed the only field that could say how far a
+> block's records reach. A test pins both halves — that the file really holds a record starting at
+> 900 and covering 1,100, and that asking for 1,100 does not return it. **The walk is a new file
+> rather than more of `reader.rs`, and F4's own guard test is why**: it reads `reader.rs`'s imports
+> to say opening cannot reach any block-decoding code, and building the walk there would have added
+> exactly that import. **A psp does not end with its blocks**, so the walk gets the file bounded at
+> the index offset and the blocks' end arrives as an end of file; unbounded, it takes the index's
+> first four bytes for a block length. Three read-error classes rather than one, because *rebuild
+> the file*, *raise the ceiling* and *upgrade the reader* are different instructions — each tested
+> through a real file, including a genuine 400,000-base record refused by name. Twelve defects
+> injected, twelve caught.
+> [G1](doc/devel/reports/implementations/ng_psp_g1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F4 reviewed, and Milestone F is complete — the
+> sections rule was tested on one side only, and relaxing it opened 62 of 384 single-bit footer
+> corruptions** (step F4 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). **This is Checkpoint F: a psp can be written,
+> closed, reopened and read end to end.** Eight checklists across three agents, 14 mutations and a
+> **1,004-file hostile-input sweep that produced no panic**. **The Blocker was mine and it was a
+> fixture**: the test for "the file's sections end exactly where the footer begins" only ever
+> claimed a trailer *shorter* than it was, so weakening the rule from an equality to a
+> less-than kept all fifteen tests green while 62 corrupted footers in 384 started opening
+> instead of being refused. **A block offset pointing into the header also opened**, because the
+> range was bounded above and not below — the refusal then arrived as a corrupt block at read
+> time, after a cohort had committed to the sample. **And a number I shipped a refusal threshold
+> on was derived wrongly twice**: the reader refuses a compression window over 256 kB, and the
+> arithmetic behind it cited the wrong spec section for one figure and double-charged the window
+> in another. The corrected arithmetic gives 310 kB where I wrote 278, and 2^18 is the largest
+> power of two under both — **a wrong derivation for a right number**, which is the kind that
+> survives by looking finished. Three of my own counts were wrong too. **The ten-defect table was
+> right**, the first in this milestone to survive re-scoring intact.
+> [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f4_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F3 reviewed — a write that failed and then recovered
+> produced a file every reader accepts, with a thousand bases missing from the middle** (step F3
+> of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Eight checklists across three agents, 17 mutations, **two Blockers**. **The
+> first is the worst defect this milestone has produced.** The block builder hands a closed block
+> over and reopens in the same call, so once the writer holds it nothing can offer it again — and
+> everything after that point can still fail. Nothing marked the writer unusable, so `finish`
+> stayed callable: with one write failure injected, `finish` returned **success** and wrote a file
+> with a valid footer, a matching index checksum, entries in ascending order, and contig 0
+> jumping from position 1,001 to 3,001. **That is worse than the unreadable stump a killed run
+> leaves, because every reader takes it.** My own comment argued the opposite — that an I/O
+> failure is terminal — which holds only while the failure holds. **The second: the test named for
+> checking that each index entry points at the block it names never decoded a block.** Shifting
+> every entry 100 bases past its block survived all twelve tests. **And the gap I had recorded as
+> untestable was testable**: `/dev/full` fails every write, and the fixture is small enough that
+> nothing reaches the device until `finish` flushes — so the durability contract is pinned here
+> rather than deferred. Also: the compression level never reached the file, though the block
+> module's own doc assigns that to this step by name. Seven defects re-injected, seven caught.
+> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a psp is opened without touching a block, and a
+> killed run is refused rather than read short** (step F4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **This closes Milestone F: a file can be written, closed, reopened and read end
+> to end.** Opening reads the footer, the index it points at, and the plain-text header — three
+> reads at fixed places, which is what a cohort pays per sample before it reads anything. **That
+> no block is touched is shown rather than asserted**: a test overwrites every byte of the blocks
+> region with rubbish and the file still opens and still reports the same header, blocks and
+> trailer. **A writer killed before it finished is refused as incomplete** — the file holds a
+> header and blocks, which is exactly why reading it short would be so easy and so wrong — **and
+> a file that was never an ng psp is told apart from it by the head magic**, read only on the
+> failure path, because only one of the two can be fixed by re-running the pileup. `open` adds
+> the three checks the footer could not make about itself, having the file's length: the sections
+> must end where the footer begins, the index must not start inside the header, and every block
+> offset must land in the blocks. ⚠ **One number is derived, not measured**: the reader refuses a
+> compression window wider than 256 kB, which is arithmetic on the spec's own figures — an open
+> file at 227–346 kB against a 500 kB budget, less zstd's 190 kB context and two 16 kB buffers —
+> and eight times what this build writes. H4 is where it is confirmed or moved, and that is
+> written on the constant. Ten defects injected, ten caught.
+> [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a psp is written to a real file, and a writer that
+> is dropped leaves one no reader will touch** (step F3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). `create` writes the header, `push` writes each block as the cut rule closes it,
+> and `finish` writes the last block, the index, the trailer and the footer and makes the file
+> durable. **`finish` reads back what it is about to write** — the index and the footer, decoded
+> by the very functions a reader will use — which is the obligation F1 and F2 both raised and
+> both routed here, because each of those modules' own tests must be able to *write* the bytes
+> that prove the reader refuses them. **Nothing touches the filesystem until the header is
+> accepted**, so a header this writer cannot honour leaves no file at all rather than an empty one
+> refused for a different reason. **And the durability step turned out to be one call, not
+> three**: the spec asks for flush, surface, sync, and the first draft wrote flush-then-surface —
+> where a successful flush empties the buffer, so the surfacing step could not fail and deleting
+> its error arm changed nothing. Twelve defects injected, eleven caught; **the twelfth is a real
+> gap and is recorded rather than papered over** — no test here can make a real file's flush
+> fail, so a swallowed flush error survives, and H2 is where a writer is killed for real.
+> [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F2 reviewed — every footer the tests accepted had an
+> empty trailer, which is the one shape a finished psp never has** (step F2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Eight checklists across three agents, **51 mutations** and a 200,000-draw
+> hostile-input sweep that found nothing. **The Major: the trailer is the writer's closing
+> payload, so every real finished file has one — and every fixture that reached an accepted
+> footer had `trailer_bytes: 0`**, the round-trip shapes, the widest-value shape and the three
+> refusal cases that spread the same helper. Two wrong rules for where the index ends passed the
+> whole suite because of it. **The second: the guard the commit advertised does not hold.**
+> Adding a seventh field to the footer gives six compile errors, but rustc's own suggested repair
+> — ignore the field — leaves clippy clean and every test green, with a field that reaches no
+> file and decodes as zero from every file; nothing tied the 48-byte constant to the field *set*
+> until one test started destructuring. **And a wrong mechanism of mine, not just a wrong
+> number**: the claim that moving the magic check later is caught by three tests came from a
+> mutation that *deleted* the check instead of moving it, so a ten-row defect table described
+> nine defects. It is caught by one. **That is the third mutation in this milestone that was not
+> the defect I labelled it**, and two more silent no-ops turned up during the fix pass itself,
+> where a replacement string had never matched and both the fix and its verification were
+> nothing. Anchors are asserted before every run now. Seven defects re-injected, seven caught.
+> [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F1 reviewed — the ordering check was only ever
+> exercised on its first pair, and a refusal panicked while printing itself** (step F1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Eight checklists across six agents in their own worktrees, **41 mutations**,
+> two Blockers and six Majors. **The first Blocker: every fixture that could fail was two entries
+> long**, so the scan over consecutive pairs ran exactly one iteration — cutting it to one pair
+> deliberately left all thirteen tests green while the decoder accepted an index whose third
+> entry went backwards, which on a 154-entry index is 152 of 153 pairs unchecked. **The second:
+> two refusals worked out the earlier entry's number as `entry - 1` inside the message template**,
+> so rendering one whose entry is zero panicked — a panic inside `Display`, on the path that
+> reports a damaged file, from the one type whose contract is that a damaged file is never a
+> panic. **A third of the numbers in my own comments were wrong**: the widest entry is 23 bytes
+> and I wrote 18, because a position is a 64-bit number and I carried the arithmetic across from
+> production where every index field is 32-bit. Nothing was corrupt — a buffer grows — but
+> nothing could have caught it either, since no test can see a reservation, so the constants are
+> now asserted against the bytes the encoder actually produces. **Eighteen of the nineteen
+> numbers the review re-derived were right**, and no test took its expectation from the function
+> it tested — the previous step's Blocker shape did not recur. Seven defects re-injected, seven
+> caught. [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **F0 reviewed — the key went in under production's word
+> for a different thing, and the tests proved the code agreed with itself rather than that it was
+> right** (step F0 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). The owner ruled on 2026-08-28 that a psp header
+> should say, for every field of a record, whether the file holds one value of it or a counted run
+> of them — the one thing spec §4.5 asks for that the manifest did not carry, taken now because
+> **from F1 a manifest change costs a format version**. Eight checklists, eight agents in their own
+> worktrees, **46 mutations**, one Blocker and three Majors. **The Blocker: nothing said what any
+> encoding's answer *is*.** Every test asked the code what a scheme lays down and then checked the
+> file agreed, so a wrong answer applied consistently passed all of them — measured, moving the
+> signed varint, the fixed-width integer and the float into the *list* arm left the suite green at
+> 255 while the header wrote `list` beside a 4-byte integer and an 8-byte float, and those three
+> are exactly what the two queued fields will use. **The largest Major was the word itself**:
+> production's frozen store already splits this idea into `Cardinality` (how often a field
+> appears) and `Shape` (what one appearance looks like) and writes both keys; ng had built `Shape`
+> and called it `Cardinality`, in a format sharing the `.psp` extension — so `head` on two files
+> would show one key meaning two things. Renamed to `shape`, with production's `scalar`/`list`
+> tokens. That word had also produced a doc comment contradicting the code: `mapq-sum` is one
+> value, yet a record with five observations holds five of them. **And the key is no longer stored
+> on the type** — three checklists reached that independently and one proved it, so a `FieldSpec`
+> cannot hold a contradiction and the check lives where two accounts genuinely exist, on the read
+> side. Six defects re-injected, six caught. **Every one of the twenty numbers the review
+> re-derived from the report and commit message was correct**, which against this project's
+> history is the exception worth naming.
+> [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **E4 reviewed — a change made in that very step removed
+> a guard rather than adding one, and the fixtures never reached the step at all**
+> (the eight-checklist review of step E4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). **Milestone E is complete and this is Checkpoint E.** Three agents, 29
+> mutations, **14,720,000 fuzzed inputs**, two Blockers. **The first was mine, made an hour
+> earlier.** A read list goes on the wire as ascending gaps; a list that is not ascending used to
+> produce bytes the reader *refused by name*, and I made that arithmetic saturate instead — after
+> which the same list is accepted and names **different reads**: `[3, 3]` reads back as `[3, 4]`.
+> An observation gains a read nothing folded, silently, which is exactly the failure the spec
+> names. All three agents found it. Fixed by removing the precondition rather than documenting it:
+> the codec makes the list a set itself. **The second: the residual index bound had no test** —
+> deleting it left all 241 tests green while a body claiming observation 200 of a one-observation
+> record flipped from refused to accepted. **And the fixtures never derived anything.** The
+> multi-record fixture gave reads to two observations but left the read count at 137, so two
+> identifiers against 137 reads failed the writer's own check and not one of twelve records ever
+> derived a residual — a probe that panics on that path fired in 8 tests of 241, and in 20 after
+> the fix. **One design change came out of it**: the guard was an inequality whose slack is
+> exactly the number of read pairs whose two mates both cover a record — the shape paired-end data
+> has — so a live set carrying two reads nobody named passed it. The record carries the residual's
+> *length* now, one varint, and the check is an equality. Ten defects re-injected, nine caught and
+> the tenth reported as unreachable.
+> [the review](doc/devel/reports/reviews/ng_psp_e4_2026-08-28.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e4_2026-08-28.md).
+>
+> - **Previously (2026-08-27):** **one observation's reads are not stored — they are the
+> live set minus every other observation's** (step E4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). **Milestone E is complete and this is Checkpoint E.** The changes in a record's
+> head already carry the union of the reads that record names, so storing every observation's own
+> list beside them writes that union twice; the largest list is left out and derived instead.
+> That is where this column's saving is, and where it fails silently — derive one read too many
+> and the reference allele gains a read that does not exist, which the cohort merge composes an
+> allele for without complaint. **The guard is an inequality against a number the record already
+> carries**: a list of identifiers is at most the observation's read count and at least half of
+> it, because an identifier names one read or two. **Two things the spec assumed away and the
+> code does not.** A chain id names a read *pair*, so if both mates cover one record and show
+> different sequences the same identifier is in two observations — and the subtraction would drop
+> it from the residual. The writer derives, compares, and **falls back to storing every list when
+> the two differ**, because Checkpoint E asks for chain ids that round-trip *exactly*. And the
+> writer checks the reader's own inequality before it derives, so it can never produce a record
+> its own reader refuses. Eight defects injected, eight caught. **The format changed** — two body
+> fields — and the golden-bytes fixture with it; the version did not rise, because no psp file
+> exists yet to be incompatible with.
+> [E4](doc/devel/reports/implementations/ng_psp_e4_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E3 reviewed — the live set moved before the record
+> could still be refused, which is E1's defect one level up** (the eight-checklist review of step
+> E3 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`,
+> status `fixes-applied`). Three agents, 35 mutations, **12,000,000 fuzzed inputs**, two Blockers.
+> **The first: the head applied a record's chain-id changes and only then checked the body was
+> there.** A body that stops early means *fetch more bytes and read this record again from its
+> first byte* — and the reader does exactly that, under a comment saying the restart resumes
+> against state it has not touched. It had. Measured two ways: a well-formed file of 1,999 records
+> in blocks larger than the reader's buffer is **rejected as damaged at record 149**, because the
+> second attempt meets a read the first already added; and a record that only *loses* reads
+> retries to success with the wrong set, `[1, 2]` where the truth is `[1, 2, 4]`, silently, for
+> the rest of the block. All three agents found it. **The second Blocker is why the suite was
+> silent about both: every fixture on that path named no reads at all**, so each record's changes
+> were two zero bytes and applying them twice is applying them never — and a writer that named
+> only the *first* observation's reads passed all 4,770 tests, because no fixture had ever put
+> reads on two observations. A record's observations split by allele, by witness and by read
+> group, so a locus with two alleles from two lanes is four of them. Both fixed, with fixtures
+> that name reads on the retry path; six defects re-injected, five caught and the sixth reported
+> as a defensive guard rather than counted.
+> [the review](doc/devel/reports/reviews/ng_psp_e3_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **the chain ids' changes move into the record head,
+> because a reader that skips a record's body must still see them** (step E3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Two things the format wants pull against each other: a reader may skip a
+> record's body without decoding it, which is what makes a walk 2.06× faster; and the chain ids
+> are stored as *changes* a reader carries forward, which is what takes them from 43.78 bytes a
+> position to 6.42 at three hundred reads. **A reader that skipped a body would never see that
+> record's changes**, so its set would go stale and every later record it did want would be
+> wrong — silently, because a stale set is still a plausible set. The column is split across the
+> skip: the changes go in the head, where every reader decodes them, and the exception lists stay
+> in the skippable body, which is E4's. **Two things fell out of the wiring.** Starting a block is
+> now a *different method* rather than a call to remember beside the ordinary one — so the
+> failure E2's report named, a writer forgetting to reset at a boundary, has no way to happen.
+> And the writer's cut path lost its rollback: it used to reset to the new block, try the record,
+> and put the coordinate base back if the codec refused it — **a coordinate base can be put back,
+> a live set cannot**, and the open block still needed it, so every refusal is now made before
+> anything is reset. Five defects injected, five caught, including the one the head placement
+> exists to prevent.
+> [E3](doc/devel/reports/implementations/ng_psp_e3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E2 reviewed — the test named for the block boundary
+> could not see a block boundary** (the eight-checklist review of step E2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Three agents, 33 mutations, **3,000,000 fuzzed inputs** across two independent
+> harnesses, no Blocker, four Majors — and three of them are one test, which **all three agents
+> reached independently**. Its fixture was a read pair whose two mates fell either side of the
+> cut, so nothing was live *at* the cut — the test asserted so itself — and it read the second
+> block with a fresh reader, which has no state to carry. Neither half of what its docstring
+> claimed could show up: not a read still covering being restated, not a reader that failed to
+> reset. Measured: of 22 mutations it caught exactly one, and fourteen other tests caught that one
+> too. It now has a read spanning the cut and carries the *same* reader across, and kills three
+> cross-block defects where it killed none. **The fixture generator could not tell two of its four
+> arguments apart** — transposing the mate length with the gap between mates gives the same 800
+> reads, the same 660 covering two stretches and the same 1,460 stretches, because a mate starts
+> at the sum either way, so "30-base mates, a 40-base hole" was a claim nothing checked. And the
+> **adversarial sortedness test asserted an invariant in a regime where it cannot break**: the set
+> can only stop being sorted when an arrival sorts below a live read, and uniform random bytes
+> never build a set for one to sort under — zero such cases in 600. It feeds damaged real streams
+> now, of which 113 in 600 get past the first count. **⚠ And one of my own edits silently deleted
+> three tests** by cutting a slice of the file between two markers; the suite stayed green, and
+> what caught it was the test *count* falling from 29 to 26.
+> [the review](doc/devel/reports/reviews/ng_psp_e2_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a read goes live, stops, and goes live again — and
+> most of them do** (step E2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `implemented`). A chain id names a read *pair* with its mates
+> collapsed onto one identifier, and a pair's mates rarely overlap, so the identifier covers two
+> stretches of reference with an unsequenced hole between them. On real alignments that is **83 %
+> of identifiers on the human sample and 91 % on tomato**, and a stream that assumed one stretch
+> per identifier would lose the second mate of nine reads in ten — silently, because the merge
+> would simply see a read that was not there. **E1's encoding already handles it**: an identifier
+> that departed at one record and arrives at a later one is an ordinary arrival, since nothing in
+> the codec remembers what has been named. So this step adds no bytes; what it owes is the
+> oracle, and the oracle is not "the walk came out right" — a walk agrees with itself under a
+> writer that loses every second mate. It asserts three things: that the fixture **contains**
+> re-entry, counted (660 of 800 identifiers cover two stretches, 82.5 %); that the writer emitted
+> **one arrival per stretch and not one per identifier** (1,460 stretches against 800 identifiers,
+> so a one-stretch stream would lose 660 second mates); and that every record's set reads back.
+> Four defects injected, four caught — including one in the oracle's own measuring instrument,
+> which is the way an oracle passes for the same reason the code would.
+> [E2](doc/devel/reports/implementations/ng_psp_e2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **E1 reviewed — a short read left the live set
+> half-advanced, and the retry it instructs silently dropped a read** (the eight-checklist review
+> of step E1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Three agents, 19 mutations, **1,500,000 fuzzed
+> inputs**, one Blocker and four Majors. **The Blocker is a decision E1's own report calls
+> deliberate.** The reader applied a record's departures before it read the arrivals, so a buffer
+> that stopped in the arrival half returned *this record stopped early* — whose whole contract is
+> *fetch more bytes and re-parse it from its first byte* — with the set already moved. Measured
+> over a record that departs one read and gains one, **five of its six cut points retried to
+> success with a read silently gone from the live set for the rest of the block**; on another
+> fixture seven of nine cuts turned a good record into damage. Two of the three agents found it
+> independently, one with a generated-input test that failed on its first case. The rationale in
+> the code was not even true of the code: the departure loop had already finished, and both sides
+> resolve a position against the same earlier set anyway. **The test that should have caught it
+> structurally could not** — it built a fresh reader for each cut, so it checked the fault's class
+> and never the state the fault left behind, which is the only thing the class split protects.
+> **A second gap of the same shape: no fixture ever made an arriving read sort below one already
+> live**, so both interleaving arms of the module's two merges were dead code under test — and
+> that shape is precisely a read coming back, which is 83 % of reads on the human sample and 91 %
+> on tomato. **Two figures of mine were wrong**, both in prose: the raw-identifier baseline quoted
+> for both depths is the deep one's alone (the real savings are 2.4× and 6.8×, not a hundredfold),
+> and the block restatement's 12 % was measured at blocks sixty-seven times smaller than the one
+> that ships. Fifteen defects re-injected, fifteen caught.
+> [the review](doc/devel/reports/reviews/ng_psp_e1_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e1_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **which reads are live at a record, written as what
+> changed since the last one** (step E1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A chain id names the read that produced a piece of evidence, and since the
+> owner's ruling of 2026-08-17 ng names every read it folds rather than only the ones that
+> disagreed — which is what lets the cohort merge tell a read that covered a position and agreed
+> from one that never reached it. **That makes this the field that decides the file's size at
+> depth**: measured on real alignments, the ids are 16 % of the file at eleven reads a position
+> and **89 % of it at three hundred**. A read of length L is named at every one of the L positions
+> it covers, so this step stores only what changed — which reads started covering a record and
+> which stopped — and lets a reader carry the set forward. **A block restates the whole set, and
+> that is the reset rather than a field**: `start_block` empties it, so a block's first record has
+> nothing to depart and its arrivals are the entire set, which is what lets a reader begin at any
+> block. **A departure is written as its position in the live set, not as its identifier** — one
+> byte against four — and identifiers and positions never meet outside the codec, which is the
+> transposition the architecture names as this field's hazard. On a fixture at the top of the
+> committed depth range the changes are **3,257 bytes against 106,166**, 32.6 times smaller than
+> writing each record's list as ascending gaps — and that is the *cheapest* alternative, not the
+> naive one. Ten defects injected, ten caught, and the count-bound test had to cover both counts
+> rather than one. **Re-entry is E2's and nothing here assumes one stretch per id**; the wiring
+> into the record head — and the silent failure of a writer that forgets to restart at a block —
+> is E3's.
+> [E1](doc/devel/reports/implementations/ng_psp_e1_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **Milestone D reviewed and hardened — the reader's
+> record ceiling was measured against the wrong thing, and the type that makes a per-block reset
+> unforgettable could not hold the field it was built for** (the eight-checklist review of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md)'s steps D4 and D5, branch
+> `ng-psp-encoding`). Three agents, 21 mutations, **1,523,400 fuzzed inputs**, no Blocker, nine
+> Majors, and **one mutation that survived the whole suite**: the ceiling written against the
+> rolling buffer's *capacity* instead of what it *holds* passes all 81 tests and refuses a
+> well-formed 2 MB block. Nothing caught it because **no reader test decoded a block past the
+> ceiling at all**, though at the shipped 100 kb block size a fully covered block is about 1.76 MB
+> decompressed — the ordinary case, untested. Two tests now come at it from both sides, and the
+> killer is three records that each grow the buffer to the ceiling without reaching it. **The
+> ceiling also moved from 1 MiB to 512 KiB**: at three thousand samples — the top of the range
+> this caller is committed to — 1 MiB each is 3.07 GB against spec §1.1's 1.5 GB, and 512 KiB is
+> 1,572,864,000 bytes, the budget to within 5 %. It is a settable field now rather than a
+> constant, because two documents called it a knob and there was no knob. **And `Copy` is gone
+> from both per-block state types**: Milestone E's chain-id difference is a live *set*, and a
+> `Copy` derive turns adding it into `error[E0204]` whose cheapest answer is to put the field
+> where nothing resets it — measured, it compiles there and 197 tests pass. **Seven numbers of
+> mine were wrong**, including a fixture described as "blocks" that was one block; all corrected
+> forward.
+> [the review](doc/devel/reports/reviews/ng_psp_d4d5_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d4d5_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **every running difference resets at a block boundary,
+> and the property turned out to be held already** (step D5 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`) —
+> **Milestone D is complete.** The defect the step exists to catch is a
+> difference that survives a block boundary *on both sides at once*, so a sequential read stays
+> self-consistent and only a reader starting mid-file sees anything wrong: the silent, plausible
+> failure the spec names. Injected exactly that — the writer keeping the previous block's
+> coordinate and the reader carrying its own forward to match — and **eleven tests failed, eight
+> of them already there**, because the module anchors every check to a block's own declared first
+> position. So the step closes no hole; it states the property in its strongest form for the
+> difference that arrives next. **There is exactly one running difference today** — the position
+> offset. The coverage difference is computed nowhere in ng, and the chain-id difference is
+> Milestone E, which is what the new tests are there to meet: a block read *alone*, with no
+> history at all, must give what it gives in the middle of a file.
+> [D5](doc/devel/reports/implementations/ng_psp_d5_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a record cut in half by the reader's buffer is
+> retried from its first byte, and the oracle for that caught itself being useless** (step D4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). The
+> retry loop was already there — a reader cannot work without one — so what this step owes is the
+> proof, and the plan names it: a decode forced to refill at every possible boundary. The obvious
+> reading is to hand the reader one byte at a time, then two, and so on to the whole file, and
+> require the same records every time. That sweep passes at all 837 schedules **and retried a
+> record exactly zero times**: zstd decodes in internal blocks and emits one whole, so a block
+> that fits a single emission arrives in one piece however slowly its input did. Slowing the
+> input moves *when* the data arrives, not whether a record is cut in half. What cuts one is the
+> buffer running out — so the real sweep uses blocks larger than the buffer, which is what data at
+> depth looks like, and **counts the retries as part of the test**: 58,778 of them at one byte a
+> read over 1,999 records, and sixteen even when the whole file arrives at once. Spec §8's exact
+> defect — advancing the coordinate before asking for more bytes — failed one test before this
+> step and fails four now.
+> [D4](doc/devel/reports/implementations/ng_psp_d4_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a run of blocks streams back a record at a time,
+> holding two 16 kB buffers and nothing that grows with them** (step D3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That is
+> the half of the design that gets lost: a reader can decompress a block perfectly and then gather
+> every record into an array before returning, at which point the memory is exactly where it was —
+> and in production's cohort run those assembled per-sample columns are the largest single mass of
+> the heap, larger than the decompression buffers they came from. **The line that makes the buffer
+> roll was asserted by nothing**: removing it left all sixteen other tests green while the buffer
+> grew to the whole block. It now has a test that reads a file whose blocks are several times the
+> buffer and asserts the reader never holds more than it budgeted for, and the number it asks is
+> public, because it is the one Milestone H measures against the 500 kB per-open-sample budget.
+> **A reader can already start at any block and gets exactly the tail of a full read** — the
+> property the next step but one owes, available early because the reader takes any byte source
+> and knows nothing about files. Thirteen deliberate defects were injected: seven died, three
+> changed no behaviour and are reported as that rather than as survivors, and **three were real
+> survivors that now have tests** — a refused stream that kept going, a decoder fed past its
+> block's declared end, and the buffer that never rolled.
+> **⛦ Eight review checklists then found 1 Blocker, 7 Majors and three more of my numbers wrong —
+> and the Blocker is the defect this step's own commit message said it had fixed.** A refused
+> stream did not end: nothing marked the reader as having refused, so what stopped one was its
+> next read hitting the end of the file, which holds only while the whole file fits in a single
+> 16 kB read. Past that it read on from wherever it stood, took four arbitrary bytes for a block
+> length, and carried on — measured on a 69,769-byte file with one bit flipped, it **reported the
+> file damaged and then handed back 3,585 more records**; on a smaller one it handed back 5,681
+> and ended cleanly. Four of the five agents found it independently. Every test that claimed to
+> hold the property used a fixture two orders of magnitude too small to reach it.
+> **The reader itself came out sound under 1,473,500 fuzzed inputs** — no hang, no panic, and
+> nothing ever sized from a length a file declares, which is the property the whole error design
+> exists for.
+> **⛦ Two owner rulings, both taken 2026-08-27, both now in the code.**
+> **A reader's buffer has a ceiling of 1 MiB for one record, and it is raisable.** Spec §8 says a
+> record larger than the buffer must make it grow and that a maximum record size is not safe to
+> assume; spec §1.1 puts an open sample at 500 kB. On a *corrupt* file those cannot both hold —
+> measured, a 4,132-byte block drove the reader to hold 67 MB, because a block's decompressed
+> size is not bounded by its size on disk and the buffer doubles until the frame runs out. The
+> ceiling is the **reader's** budget rather than a maximum record size the format fixes, with its
+> own refusal naming the number to raise — the pattern spec §4.2 already uses for a look-back
+> window wider than a reader budgeted for. *⚠ Corrected by the D4/D5 review: a real record at
+> three hundred reads a position measures **18,292 bytes** over a 50-base span and 48,693 over
+> 150, not "about 30 kB"; and the ceiling itself has since moved from 1 MiB to **512 KiB**,
+> because 1 MiB × three thousand samples is 3.07 GB against spec §1.1's 1.5 GB budget.*
+> **And near-empty blocks are not merged.** Spec §4.1 offers a second cut rule — accumulate
+> across empty stretches so a patchy sample gets one large block instead of several thin ones —
+> and spec §12 question 3 says it ships. The ruling is against it: **merging would complicate the
+> alignment between samples**, which is the one thing the coordinate grid exists to give. Merge,
+> and one sample's block may begin ninety cells before its neighbour's, so which block holds a
+> position differs from sample to sample. *⚠ Corrected by the D4/D5 review: what merging would
+> have saved was never measured. The "about 7 %" quoted here compares two **block sizes** on the
+> same non-merging writer, which prices a different change; no merging writer has been built.*
+> *Separately, and already true: a grid cell holding no
+> records has never produced a block — the cut decides where a block ends, not that one is owed
+> per 100 kb — and that now has a test rather than being implied.* **✅ The spec now records this:
+> §4.1 and §12 question 3 carry the ruling instead of the withdrawn rule, §6.7 and §7 have the
+> record-ceiling row that Milestone F4's `PspReadError` mapping reads them for, §4.4 has the
+> ceiling's two measured numbers, and §8's trap says where the bound belongs.**
+> [D3](doc/devel/reports/implementations/ng_psp_d3_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d3_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d3_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **a block is compressed with its look-back window
+> capped at what the file declares** (step D2 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). That cap
+> is the format's whole design in one parameter: without it zstd sizes its window from the data,
+> so a reader would have to hold a whole block to resolve a back-reference — which is what ties
+> production's block size to its memory. **The step also settles the measurement the architecture
+> document had been asking for since the design was written**: are the four fields at the front of
+> every record cheaper as variable-length integers or as fixed-width ones, compared *after*
+> compression rather than in the abstract. **Variable-length wins on both samples and at every
+> width tried** — on the tomato accession at three reads a position, 4.676 compressed bytes a
+> record against 4.913 with sixteen-byte fixed heads, and on the 279-reads-a-position human sample
+> 15.669 against 16.257. The spec's intuition was right and the conclusion still goes the other
+> way: compression removes 98 % of what a fixed-width head adds, and the 2 % that survives is 5 %
+> of a file that is only 4.7 bytes a record to begin with. **And the narrow widths that would have
+> made fixed width competitive cannot encode the human sample at all** — 15 of its records have a
+> within-block position offset over 65,535, the largest 90,467. So the head stays as it was
+> written, and switching it is no longer an open question. **⚠ What the two corpora cover is 10
+> to 280 reads a position, not 3 to 279** — the tomato accession measures 10.25, and the "three
+> reads a position" label the specs give it is not a fact about the file. The 3× end of this
+> caller's committed range is covered by neither, so the conclusion holds at 10× and at 280× and
+> thinner data has not been tried.
+> Two defects this step made were caught by its own tests rather than by review: zstd writes into
+> a buffer from its *start*, so the four bytes reserved for a block's length were being overwritten
+> with the frame's own magic; and nothing tested that a frame declines to say how large it inflates
+> to — the mutation turning that back on passed every other test in the module, and it is the trap
+> the spec names by name.
+> **⛦ Eight review checklists then found 1 Blocker, 8 Majors and five numbers of mine measured
+> wrong, and the Blocker is the same shape D1's was**: the compressor's four settings each had one
+> test, and none of those tests used the configuration a writer ships with. The window cap — the
+> format's central decision — was proved only at a 1 kB window and level 1, and every shipped-path
+> test compressed a payload *under* the 32 kB window, where zstd narrows the frame's own
+> declaration to fit and the cap is inert. Guarding it with `if level < 9` passed all 42 tests
+> while making every file need a wider window than its own manifest declares. Four agents
+> independently found that the compression level reached zstd untested, and four that a block's
+> declared length was believed without being checked against the bytes actually present.
+> [D2](doc/devel/reports/implementations/ng_psp_d2_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d2_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d2_2026-08-27.md).
+>
+> - **Previously (2026-08-27):** **blocks are cut on the genomic grid** (step D1 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`). A block
+> ends when a record's *start* crosses into the next multiple of the genomic block size, never
+> crosses a contig, and closes early once it has reached the declared byte ceiling. `src/ng/psp/block.rs`
+> holds the cut, the three fields a block opens with, and the payload a compressor will be handed;
+> nothing compresses and nothing writes a file yet.
+> **⛦ Eight review checklists found 2 Blockers and 9 Majors, and neither Blocker was a defect in
+> the cut** — both were properties the code has that no test held. *Nothing held the cut to a
+> record's start*: changing one identifier to `region.end` passed all 21 tests, because no fixture
+> had a record whose span crossed a grid multiple. That matters because a span is
+> sample-dependent — a deletion widens a locus in one sample and not another — so a cut taken from
+> the end makes a block boundary depend on which sample is being written, which is the one thing
+> the grid exists to prevent, and every file still reads back self-consistently. The second: a
+> caller holding a whole block was told *fetch more bytes* about a head that stopped early, which
+> is a retry that never ends. **The parsers themselves came out sound under 1.4 million fuzzed
+> inputs and half a million builder pushes** — no panic, no overflow, and nothing ever sized from a
+> declared length. Two of my own claims failed on their first run and are corrected: a fixture
+> asserted to reach three grid cells reached two, and a 200-byte ceiling asserted to fire never
+> did. **And a fixture property the review asked me to make true turned out to be unachievable** —
+> over a four-letter alphabet two one-base records must sometimes carry the same base — so the
+> claim is withdrawn rather than repaired.
+> **⛦ One departure is waiting at Checkpoint D:** spec §12 question 3 says the rule that
+> accumulates blocks across empty spans **ships**, leaving only its threshold open. It is not
+> built — `Manifest` has no field for it and the plan's D1 does not list it — and what omitting it
+> costs is measured in the spec: about 10 % of the file on a patchy sample at a 5 kb grid, and
+> most of that recovered at the 100 kb default.
+> [D1](doc/devel/reports/implementations/ng_psp_d1_2026-08-27.md);
+> [the review](doc/devel/reports/reviews/ng_psp_d1_2026-08-27.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_d1_2026-08-27.md).
+>
+> - **Previously (2026-08-26):** **a psp record's body now goes to bytes and back
+> exactly** (step C1 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`), on top of a psp module, a header that round-trips, and a summed log-error
+> that is an integer where it is computed (A1–A3, B3). **The open question C1 had to close is
+> whether a record carries its own reference bases**: the spec leans to dropping them and
+> re-fetching, on a measurement that needs a writer and a reader in one walk and so cannot be
+> taken before Milestone F. They are stored and declared in the manifest, which keeps C1's round
+> trip exact with no reference on hand and leaves dropping them a manifest change rather than a
+> format break. **A file that renames, reorders or drops a field is refused instead of decoding
+> into plausible values** — 56 such files, one per way. And **a field a later writer adds after the
+> ones this reader knows is walked past**, which is how the owner's ruling on the two window
+> statistics is honoured without a version bump: every encoding in the closed set measures its own
+> length.
+> **⛦ Eight review checklists then found 1 Blocker and 13 Majors, and the Blocker was found
+> independently by five of the eight.** *The manifest and the codec are one list* — the sentence the
+> commit led with — **was not true**: the array is what a writer declares and what a reader checks a
+> file against, and the encoder is a second, hand-written list that agreed with it by inspection.
+> Six mutations proved it: renaming a declared field, swapping two entries, declaring one field an
+> 8-byte float while the codec writes a variable-length integer, adding a twentieth entry nothing
+> writes, and swapping two fields in *both* halves of the codec — every one of them passed all 22
+> tests. It is closed by the two assertions in the module that do not come from the code they test:
+> the fixture's exact bytes and the nineteen names longhand. **The first of those failed on its
+> first run, on a byte I had worked out by hand** — which is the argument for having it. Two more
+> claims of the commit's were measured wrong and are corrected rather than dropped: a repeated field
+> added by a later writer is **accepted and misparsed**, not refused, and cannot be refused while
+> the manifest carries no cardinality; and "dropping the reference bases later is a manifest change"
+> holds for a writer and not for a reader. **The parse itself came out sound under 600,492 fuzzed
+> decodes** — no panic, no overflow, no allocation sized by a declared length — so every finding was
+> about what the tests and the prose claimed. [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md);
+> [the review](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md);
+> [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).
+>
+> *What came before, on the same branch.* The store exists because an open file's cost is multiplied by the cohort
+> size: **2.6 MB per open sample on production's `.psp` is 7.7 GB at three thousand samples**,
+> and the measuring prototype's shape gets that to 0.34 MB with the file 35 % smaller and the
+> read 1.8× faster. A1 is declarations only — the plan's own "pure-scaffold step" — so it was
+> committed with A2 rather than reviewed alone. **The validation rules are written once and run
+> from both sides**, so the writer cannot produce a header its own reader would refuse; fourteen
+> broken headers are checked twice each. **The format version is read from a bare TOML table
+> before the body is deserialised**, which is what lets a file from a newer major come back as
+> *upgrade the reader* instead of as unparseable TOML.
+> **⛦ Four departures from the architecture document are waiting at Checkpoint A**, and the first
+> is the one to look at: the arch gives the header a `ReferenceInfo`, and the real type carries
+> each contig's `.fai` byte offsets and the FASTA's absolute path — so a parsed header would have
+> to invent geometry it never stored, and a written one would carry the producer's directory
+> layout to everyone the file reaches. It is a name and a whole-assembly digest instead. The other
+> three: the manifest carries no cardinality (arch against spec §4.5, and the cost is that an
+> unrecognised *list* field cannot be skipped); a fifth read-error class the spec's table of four
+> does not list; and a head magic of `NGP\n` rather than production's `PSP\n`, because both
+> formats use the extension `.psp`.
+> **⛦ Eight review checklists then found 1 Blocker and 14 Majors, all now fixed, and three of them were found by two or three agents each.** The two that matter most both falsified the property the work led with — *the writer cannot produce a header its own reader would refuse*. It could, twice: a contig length above what a TOML integer can hold is written and then rejected by the same parser, and the writer's list of encoding names and the reader's were two separate lists. The Blocker was a number nothing could tell was wrong: the offset that says where the first block begins was only ever checked against buffers that held nothing after the header, so returning the buffer's length instead passed all 26 tests. **The parser itself came out clean under about 341,000 adversarial inputs across two agents** — no panic, no overflow, no unbounded allocation — but nothing in the suite protected that, and now something does.
+> **Milestone B then hit a wall the plan did not anticipate, and one of its three steps carried real weight.** **B3** made the summed per-read log-error — production's `q_sum` — an integer count of steps of 1/4,096 of a natural log, rounded once where the sum is finished. That is what lets a run reading observations from memory and a run reading them back from a file agree on a number rather than on a tolerance. **It deleted more fragility than it added:** the differential that checks ng's walk against production's had already been redesigned twice because `f64` addition is not associative, and after this change the count of loci that agree *only* because of a tolerance went from 103 in 216,203 to **0 in 145,108**. **B1 and B2 could not be built at all: the two quantities they name — a window's GC fraction and its mean coverage — are computed nowhere in ng.** They exist only in the frozen production tree, as the per-window statistic step 4's spec *proposes* and has not built. My recommendation is to record the rounding rule against that future accumulator rather than mint two types nothing constructs. **And B3's own oracle — the same records called before and after, counting changed genotypes — cannot be run, because ng cannot call a genotype yet.**
+> [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md); [the review](doc/devel/reports/reviews/ng_psp_a1_a2_2026-08-26.md); [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_a1_a2_2026-08-26.md); [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md); [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md).
+> - **Previously (2026-08-26):** **the SNP/indel prior's two numbers stop being one
 > fitted pair** (branch `ng-seed-shrinkage`, spec
 > [ordinary_site_seed.md](doc/devel/ng/spec/ordinary_site_seed.md) §3 and §4). They are an expected
 > allele frequency and a total conviction in other clothes, and the total is now solved from the
@@ -799,6 +1772,43 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - **⛦ Three smaller design-document defects:** arch §1 declares `DEFAULT_MAX_COHORT_LOCUS_SPAN` twice; the arch calls the module crate-private while the code is `pub` (recorded in the module doc, with the reason); and two names fixed verbatim by spec/arch/plan would read better (`CohortLocusBuilderRegionsLen` is plural for one region's width; `MinAltObs` abbreviates *observation* for a count of *reads*).
   - **Owed by the design:** `max_cohort_locus_span`'s effective value must reach the run's output beside the failed-locus count, or two runs over the same records under different bounds are indistinguishable. The doc comment carries the obligation; the emission step owns the surface.
   - **⚠ `cargo clippy --all-targets --all-features -- -D warnings` is red on this branch and was red identically before the first commit** — 49 errors across 20 files in `examples/`, `benches/` and other modules' test code, two of them in `src/ssr/`, which ng may not edit. `cargo clippy --lib --all-features` is clean. The same standing item the census and STR-path blocks record.
+
+#### The psp store — one sample's evidence on disk, and what an open one costs
+- **Status:** `implemented` — ✅ **MILESTONE A COMPLETE**, **Milestone B's one buildable step done**, and **Milestone C in flight** on branch `ng-psp-encoding`. The vocabulary is fixed, a header round-trips, a header reads off a file that has no footer, the summed log-error is an integer where it is computed, and **a record's body goes to bytes and back exactly** (C1). **No record head, no block and no whole file yet**: those are C2, D and F.
+- **C1 done — one `SampleLocusObservations` to bytes and back, in memory, with nothing read from outside the bytes.** **The open question it had to close was the reference bases**: the record spec leans to dropping them and re-fetching, on a measurement that needs a writer and a reader walking together and so cannot be taken before Milestone F. They are stored and declared, which keeps the round trip exact with no reference on hand; the invariant that would have made them free — a record's reference always covering exactly its region — does not hold, since the crate's own fixtures build records with an empty one. **A file that renames, reorders or drops one of the nineteen declared fields is refused** rather than decoding into plausible values (56 such files, one per way), and **a field a later writer adds after them is walked past** on the encoding's own self-measurement, which is how the owner's ruling on the two window statistics is honoured without a version bump. [What was built, and the three choices the design documents left open](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md); [the review](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md); [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).
+- **⚠ Two of C1's own claims were wrong and are corrected in place, not dropped.** *The manifest and the codec are one list*: they were two, and six mutations that drifted them apart passed all 22 tests — closed now by a golden byte-for-byte fixture and the nineteen names written longhand, the only two assertions in the module that do not derive from the code they test. And *a repeated field added by a later writer is refused*: it is **accepted and decoded into plausible nonsense from the second observation onwards**, and nothing can refuse it while the manifest carries no cardinality — so the doc says that, and says the only real protection is a version bump. **The parse itself came out sound under 600,492 fuzzed decodes** with overflow checks live: no panic, no overflow, no allocation sized by a declared length.
+- **C2 done — the record head, and the skip it exists for.** A record is `position-offset | reference-span | non-reference-reads | body-bytes | body`, and a reader that does not want it advances past it having touched no byte of its body. The head's four fields join the manifest **ahead of** the body's nineteen, so there is one field list over the whole record; the body is handed a slice of exactly the length the head declared, so a damaged body cannot read into the record after it; and `decode_record` makes the head-against-body length check in one place, because split across two calls it is a comparison a caller can forget and forgetting it is silent. **The head's non-reference read count is derived rather than supplied**, and it counts only observations that spanned the whole locus — a partial one's bases stop where its read's witness stopped, so there is nothing to compare them against. [What was built, and the measurement owed to D2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md).
+- **C3 done — a skipped body strands nothing, and the oracle that says so was falsified before it was trusted.** No field of a record's body is coded as a difference from another record, and none ever was, so this step found no bug — what it adds is the test that would find one, over twelve records of every shape the codec handles. **The strongest form overwrites every skipped record's body with `0xff` and requires every kept record to come back exact**; a walk still consumes the block exactly, because the head is what says how far to advance. **The check that the oracle can fail: one body field was coded as a step from the previous record, on both sides so a full walk still round-trips — six tests failed and sixty-four passed, and the sixty-four include every plain round-trip test and the byte-for-byte golden one.** That is the shape of the failure the head exists to avoid: invisible to a reader that builds everything. [What was built, and why it is worth a commit when nothing threatens the property yet](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md).
+- **⛦ C3's review found 2 Blockers and 9 Majors, all fixed, and both Blockers were the same thing: the oracle could not fail.** The harness never checked that it built what it was told to build, so one that returned nothing left every C3 test green. And **the fixture carried no chain ids, so a correct Milestone E and an incorrect one were indistinguishable to it** — measured by building both: each gave the same three failures and left all five C3 tests passing, which is exactly the future defect the step exists to guard against. Both are closed and **the oracle was re-falsified afterwards three ways**, because a fix to a test is worth nothing until the test can still fail. The fixture's whole variety was unguarded too: twelve varied records collapsed to twelve identical one-base ones with the suite green and the run down from 16,477 bytes to 396. **The sampled property test claiming "all 4,096 skip patterns" ran about 250 of them**; it is exhaustive now, which also retired a proptest seed the commit had checked in from my own injected defect — it would have replayed for ever, describing a failure that never happened. [The review](doc/devel/reports/reviews/ng_psp_c3_2026-08-26.md); [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_c3_2026-08-26.md).
+- **⛦ Eight review checklists on C2 found 2 Blockers and 13 Majors, all fixed.** **Both Blockers were the same defect from two directions: a value the reader hands out that detonates in whoever asks it a question.** A fault inside a body the head had already bounded came back as *read more bytes and try again* — and more bytes cannot help, because the body is re-bounded to the same declared length however large the buffer grows, so one damaged record was an unbounded retry. And a corrupt head could put a record's end on the last coordinate a `u64` can name, where `GenomeRegion::len()` is documented as wrong: the module's own test suite makes that call, and in a release build the region reports itself empty instead. **The writer had the mirror hole and would have written an unreadable record while returning `Ok`.** Both are refused on both sides now. **The offset base became a type the encoder owns and advances itself** — measured, a writer handing each record its own start collapsed a whole block onto one coordinate with no error anywhere, and that no longer compiles. **And C1's Blocker turned out to be half closed**: its fix pinned the declared field *names* and the body's *bytes*, and three categories found independently that the declared *encodings* were pinned by neither. [The review](doc/devel/reports/reviews/ng_psp_c2_2026-08-26.md); [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_c2_2026-08-26.md).
+- **⚠ A number of mine was wrong again, the same way as before.** C1's golden fixture is **77 bytes, not 75**: the C1 fixes widened it and I restated the old figure into three documents rather than re-running it. Corrected in all three. The assertion that would have caught it — the golden byte list — was in the same commit.
+- **⛦ Owed to Milestone D2, from C2:** **whether the head's four fields are fixed-width or variable-length is unmeasured**, and the spec asks for it to be pinned by measurement rather than argument. In place means after compression and nothing compresses until D2, so they are variable-length for now. **Switching them then is a format change, not just a manifest one** — this reader refuses a file declaring anything but what it knows — so it is free only while no psp exists, which is until Milestone F.
+- **⛦ Owed to Milestone D, from the C1 review:** a `RecordDecodeError` must **not** be folded into `PspReadError::CorruptBlock` — that variant means *the file is damaged*, where `Truncated` means *read more bytes and try again* and `Unsupported` means *upgrade the reader*, and its `#[source]` is a `std::io::Error` so a record's error could only reach it as a string. D adds the variants that carry the class; the hazard is recorded at `CorruptBlock` itself. Also owed: a `benches/` entry for the decode path, which measures **12.46 M records/s** on the tomato-corner shape against the 20 M/s the specs quote for the measuring prototype, hot in cache with no decompression and no I/O — the first number anyone has for it.
+- **B3 done — `q_sum` is a `SummedLogError`, an integer count of steps of 1/4,096 of a natural log**, rounded once where the sum is finished so that a run reading observations from memory and a run reading them back from a psp see the same number instead of two floats that agree to a tolerance. **It deleted a whole class of fragility rather than adding one:** `q_sum` was an `f64` running sum, and the ng-against-production differential had already been through two designs because `f64` addition is not associative — a nine-decimal grain, abandoned when HG002 at 300× produced two accumulations one grain apart, then a relative tolerance. **Measured after the change: the count of loci that agree only because of the tolerance is 0, of 145,108 in the anchor and 163,091 in the census, where it was 103 of 216,203.** The rounding absorbs the ordering difference outright. It also deletes a reachable state: a not-a-number error sum used to come back through `f64::max` as the most confident read the model can express. [What was built, what it deleted, and why B1 and B2 could not be built](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md).
+- **⛦ OWNER CALL — B1 and B2 have no subject in ng, and the plan cannot be followed as written.** They ask the window's GC fraction and mean coverage to "become an integer type"; **neither quantity is computed anywhere in ng**. Both exist only in the frozen production tree (`src/sample_summary/coverage.rs:283`). They are the per-window statistic [parameter_prepass_joint_fit.md](doc/devel/ng/spec/parameter_prepass_joint_fit.md) §2.2 *proposes* — "the first new accumulator step 4 would add" — and that accumulator is not built. **Recommendation: record the rounding requirement against that accumulator and mint the types with it, rather than minting two types nothing constructs**; the property Milestone B protects is vacuous while there is no producer, no consumer and no psp field.
+- **⛦ B3's own oracle could not be run**, and the plan names it precisely: *the same records called before and after, with the count of changed genotypes and the movement in quality scores*. **ng cannot call a genotype yet** — no subcommand, no example that closes the loop. What was measured instead bounds the perturbation rather than its effect on a call: at most half a step, 1.22 × 10⁻⁴ natural logs, which the spec prices at 0.024 % of the likelihood term it enters. **The genotype comparison is owed when the calling loop closes.**
+- **Plan:** [psp_file_format.md](doc/devel/ng/impl_plan/psp_file_format.md); **Specs:** [the container](doc/devel/ng/spec/psp_file_format.md), [the record](doc/devel/ng/spec/psp_record_encoding.md), [the chain ids](doc/devel/ng/spec/psp_chain_id_encoding.md); **Arch:** [psp_file_format.md](doc/devel/ng/arch/psp_file_format.md).
+- **Why it exists:** a caller opens one file per sample and holds them all open, so what one open file costs is multiplied by the cohort size — measured at **2.6 MB per open sample on production's `.psp`**, which is 7.7 GB at three thousand. Production ties the compressor's look-back distance to the amount a reader must inflate before its first record, so every block size is a payment. Capping the window separately unties them: measured on the same records, **0.34 MB per open sample, the file 35 % smaller, the index 11× smaller and the read 1.8× faster** ([the memory review](doc/devel/reports/reviews/psp_memory_milestone_z_2026-08-25.md)).
+- **Code:** [src/ng/psp/mod.rs](src/ng/psp/mod.rs) (`PspReadError`, `PspWriteError`), [header.rs](src/ng/psp/header.rs) (`Header` and everything in it; `encode`/`decode`; the validation rules), [record.rs](src/ng/psp/record.rs) (`RecordHead`; `BODY_FIELDS` and `record_body_fields`; `RecordBodyLayout`; `encode_body`/`decode_body`), [index.rs](src/ng/psp/index.rs) (`BlockIndexEntry`), [footer.rs](src/ng/psp/footer.rs) (`Footer`). `block.rs` and `chain_ids.rs` arrive with Milestones D and E.
+- **Impl reports:** [A1+A2](doc/devel/reports/implementations/ng_psp_a1_a2_2026-08-26.md) (two of its own claims corrected by the review, marked inline), [A3](doc/devel/reports/implementations/ng_psp_a3_2026-08-26.md), [B3](doc/devel/reports/implementations/ng_psp_b3_2026-08-26.md), [C1](doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md), [C2](doc/devel/reports/implementations/ng_psp_c2_2026-08-26.md), [C3](doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md), [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [F1](doc/devel/reports/implementations/ng_psp_f1_2026-08-28.md), [F2](doc/devel/reports/implementations/ng_psp_f2_2026-08-28.md), [F3](doc/devel/reports/implementations/ng_psp_f3_2026-08-28.md), [F4](doc/devel/reports/implementations/ng_psp_f4_2026-08-28.md).
+- **⚠ A claim in the A3 commit message is wrong and is corrected in the B3 report, not amended.** It says `cargo test --lib --bins --tests --examples` was green; `examples/ng_generic_loci_dump.rs` was already failing 11 of its 12 tests there, on a repeat catalog missing from its temporary directory. **The cause is how I read the log**, not the run: the filter matched `^test result: ok.`, which hides every failing target. Verified pre-existing by setting the B3 diff aside and re-running at the A3 commit. Not fixed — that example is a probe over real data and its fixture is its own to chase.
+- **A3 done — `read_header`:** the file's header and nothing else, for the file `PspReader::open` correctly refuses. **The declared body length is bounded before a buffer for it exists**, so a corrupt length field cannot size an allocation on its own say-so — the seam the A1+A2 review flagged in advance. Eight tests on real files; four mutations, three killed at once and the fourth after a test was added. **The survivor is the shape this project keeps finding**: dropping the zero-length check passed all 45 tests, because a zero-length body is still caught — but *further in*, where the file is refused for ending early rather than for the length it declared, which is a different thing to tell whoever is holding it.
+- **Latest review:** [F4](doc/devel/reports/reviews/ng_psp_f4_2026-08-28.md) — eight checklists across three agents, Request-changes: **1 Blocker, 4 Majors, 3 wrong numbers, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f4_2026-08-28.md)). A one-sided fixture let 62 of 384 corrupted footers open.
+- **Previous review:** [F3](doc/devel/reports/reviews/ng_psp_f3_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Blockers, 4 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f3_2026-08-28.md)). A recovered write failure produced a file every reader accepts with records missing from the middle.
+- **Previous review:** [F2](doc/devel/reports/reviews/ng_psp_f2_2026-08-28.md) — eight checklists across three agents, Request-changes: **2 Majors and three wrong numbers of mine, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f2_2026-08-28.md)). 51 mutations. Every accepted footer had an empty trailer; and a defect table's ten rows described nine defects.
+- **Previous review:** [F1](doc/devel/reports/reviews/ng_psp_f1_2026-08-28.md) — eight checklists across six agents, Request-changes: **2 Blockers, 6 Majors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f1_2026-08-28.md)). 41 mutations. A two-entry fixture that could only ever check one pair, and an error that panicked while rendering itself.
+- **Previous review:** [F0](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md) — eight checklists, eight agents each in its own worktree, Request-changes: **1 Blocker, 3 Majors, 10 Minors, all applied** ([fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_f0_2026-08-28.md)). 46 mutations. The Blocker was a self-referential test suite; the largest Major was a key name colliding with production's word for a different concept in a format sharing the `.psp` extension.
+- **Previous review:** [C3](doc/devel/reports/reviews/ng_psp_c3_2026-08-26.md) — eight checklists across five agents, each in its own worktree, Request-changes: **2 Blockers and 9 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c3_2026-08-26.md).** 63 mutations, and every agent reproduced the step's own falsification independently. **The pairing of checklists is because a test-only commit gives three of them almost no surface** — each was told a small surface is not no surface, and each found something.
+- **Previous review:** [C2](doc/devel/reports/reviews/ng_psp_c2_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **2 Blockers and 13 Majors, all applied**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c2_2026-08-26.md).** Between them the agents ran **106 mutations** and **811,520 fuzzed inputs**, and took the first timing anyone has of a head-only walk against a full decode — 13.5× on 30,000 uncompressed records, which is **not** the spec's 2.06× and should be read against the 5.3× that figure becomes once its decompression is stripped out. H5 still owes the real number.
+- **Previous review:** [C1](doc/devel/reports/reviews/ng_psp_c1_2026-08-26.md) — eight checklists, each agent in its own worktree, Request-changes: **1 Blocker and 13 Majors, twelve of the Majors applied and one deferred to Milestone D with its hazard recorded at the code**. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_c1_2026-08-26.md).** Between them the agents ran **91 mutations** (36 survived, 10 of those proved to change nothing) and **600,492 fuzzed decodes**. `cargo clippy --lib --tests --all-features -- -D warnings` was red on this branch for three errors in A1–A3 test code, which is why C1's test code had never been linted; it is green now and joins the gate.
+- **Previous review:** [A1+A2](doc/devel/reports/reviews/ng_psp_a1_a2_2026-08-26.md) — eight checklists, each agent in its own worktree, Approve-with-changes: **1 Blocker, 14 Majors, all applied**, five deferred to Checkpoint A. **[Fixes applied](doc/devel/reports/reviews/fixes_applied_ng_psp_a1_a2_2026-08-26.md).** **The three findings that matter were each found by two or three agents independently, and none was reachable by reading.** (1) The wire types were `deny_unknown_fields`, so a **same-major file that added a key came back as damaged** — *rebuild the file* where the right instruction is *this reader is older and can still read it*. The key one agent probed with is the observation reach ceiling spec §3.1 already says the header will gain; the test that appeared to pin the minor-version split passed only because its fixture added nothing. (2) **`encode` wrote headers its own reader refused**, twice over: a contig length or block size above `i64::MAX` is serialised by the `toml` crate and rejected by its own parser, and separately the writer's table of encoding names and the reader's were two independent lists — adding a scheme to one alone produced exactly that failure with the suite green. Both falsified the property the commit message led with. (3) **The Blocker was a number nothing could tell was wrong**: `decode` returns where the first psp block begins, every one of the 26 tests handed it a buffer that was exactly the header, and returning the buffer's length instead passed all 26 — Milestone D seeks to that offset. **The parser itself came out clean under ~341,000 adversarial inputs across two agents** — no panic, no overflow, no unbounded allocation — but nothing in the suite protected that, and now something does. **The file format's TOML keys changed while it is still free to change them:** `fixed`/`ieee`/`bytes`/`scale`/`window-log` became `fixed-width-integer`/`ieee-float`/`width-bytes`/`steps-per-unit`/`look-back-window-log`, because `encoding = "fixed"` sat four lines from `encoding = "fixed-point"` meaning something else. No psp has ever been written.
+- **A1+A2 done (one loop iteration, deliberately):** A1 is declarations with no function bodies — the plan's own "pure-scaffold step" — so it was committed with A2, the first code its types exist for. **The validation rules are written once and run from both sides**: the writer refuses to produce a header its own reader would refuse, over fourteen broken headers checked twice each. **The version is read from a bare TOML table before the body is deserialised**, so a file from a newer major comes back as *upgrade the reader* rather than as unparseable TOML — which is the whole reason the header is plain text.
+- **Open — for Checkpoint A, four departures from the arch doc a reader would not expect** (all argued in the impl report §2):
+  - **`Header.reference` is a name and a digest, not `ReferenceInfo`.** The real `ReferenceInfo` carries `.fai` geometry and the FASTA's absolute path; a parsed header would have to invent geometry it never stored, and a stored path would carry the producer's directory layout to everyone the file reaches.
+  - ~~**The manifest carries no cardinality**, following arch §3.2 against spec §4.5's list.~~ **Closed by the owner on 2026-08-28 and built as F0**: every field now declares its **shape** — whether one appearance of it is a single value or a counted run — and a file whose shape disagrees with its encoding is refused. The key is `shape` and not `cardinality`, which is production's word for how often a field appears; ng's manifest does not carry that. [F0](doc/devel/reports/implementations/ng_psp_f0_2026-08-28.md), [review](doc/devel/reports/reviews/ng_psp_f0_2026-08-28.md).
+  - **A fifth read-error class, `MalformedHeader`**, which spec §6.7's table of four does not list. Production distinguishes about a dozen header faults; they are one variant here because they share an instruction — *the file is damaged, rebuild it*.
+  - **The head magic is `NGP\n`, not production's `PSP\n`.** Both formats use the extension `.psp` and both will sit on the same disks, so the first four bytes are what tells them apart.
+- **Open — deferred with a home:** the observation reach ceiling [cohort_merge.md](doc/devel/ng/spec/cohort_merge.md) asks the header for is [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §6.1's, not this module's; `FieldEncoding::Fixed`/`Ieee` widths are validated but nothing yet **chooses** them, which arch §7 asks be settled by a measurement once a writer exists.
 
 #### The alignment module — best-path aligners (plan 1 of 3)
 - **Status:** ✅ **MILESTONES A AND B COMPLETE, at Checkpoint B.** **⛦ THE ng STR LOCUS GENERATOR IS UNBLOCKED** — `align_read` exists, and [locus_generation_ssr.md](doc/devel/ng/impl_plan/locus_generation_ssr.md) Milestone D can proceed against `BestPathAligner`. Next in this plan: Milestone C (banding), then D (the two-penalty comparison); E is gated.

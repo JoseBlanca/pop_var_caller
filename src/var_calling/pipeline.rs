@@ -296,10 +296,10 @@ pub fn run_var_calling(
     //     A sample whose `.psp` predates the summary section (or fails to parse)
     //     is `None`. ---
     let summaries: Vec<Option<SampleSummary>> = psp_readers
-        .iter()
+        .iter_mut()
         .map(|r| {
-            r.metadata()
-                .and_then(|bytes| SampleSummary::from_toml_bytes(bytes).ok())
+            r.take_metadata()
+                .and_then(|bytes| SampleSummary::from_toml_bytes(&bytes).ok())
         })
         .collect();
 

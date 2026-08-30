@@ -1365,7 +1365,7 @@ mod tally {
                     read_group,
                     num_obs: support.num_obs,
                     num_fwd: support.num_fwd,
-                    q_sum: support.q_sum,
+                    q_sum: crate::ng::types::SummedLogError::from_nats(support.q_sum),
                     mapq_sum: support.mapq_sum,
                     mapq_sum_sq: support.mapq_sum_sq,
                     placed_left: support.placed_left,
@@ -1665,7 +1665,7 @@ mod tally {
             let obs = &result.observations[0];
             assert_eq!(obs.num_obs, 2);
             assert_eq!(obs.num_fwd, 1, "one forward, one reverse");
-            assert_eq!(obs.q_sum, -5.0, "the BQ masses sum");
+            assert_eq!(obs.q_sum.nats(), -5.0, "the BQ masses sum");
             assert_eq!(obs.mapq_sum, 90, "60 + 30");
             assert_eq!(obs.mapq_sum_sq, 60 * 60 + 30 * 30);
             assert!(obs.chain_ids.is_empty(), "the STR path does not phase");

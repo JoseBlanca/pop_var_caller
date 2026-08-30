@@ -1739,7 +1739,7 @@ mod tests {
                 read_group: ReadGroupId(0),
                 num_obs: 1,
                 num_fwd: 1,
-                q_sum: 0.0,
+                q_sum: pop_var_caller::ng::types::SummedLogError::NONE,
                 mapq_sum: 60,
                 mapq_sum_sq: 3600,
                 placed_left: 0,

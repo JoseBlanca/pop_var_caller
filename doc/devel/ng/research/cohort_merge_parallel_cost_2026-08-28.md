@@ -86,21 +86,40 @@ entered from making a per-sample record. The reason is arithmetic on the counts 
 records in for 12,029 loci out, 506 to 1, because the keep rule discards 87.6% of the positions
 it closes.
 
-**A caveat that changes what may be concluded.** The measuring probe *creates* each record inside
-the merge's clock, by cloning a template, standing in for a generator that mints one from reads.
-So the 25.5% row above is charged to the merge in every wall-clock figure in this document and
-should not be: a real run pays it once, upstream. The 25.9% row is genuinely the merge's, because
-nothing owns those records afterwards.
+**A caveat that changes what may be concluded, and it has now been measured.** The probe *creates*
+each record inside the merge's clock, by cloning a template, standing in for a generator that mints
+one from reads. So the 25.5% row above is charged to the merge in every other wall-clock figure in
+this document and should not be. Giving the probe a source that hands over records made **before**
+the clock starts prices it — 500-base regions, 8 threads, 10 merges an arm, alternated in one
+process:
+
+| records | pass 1 | pass 2 |
+|---|---|---|
+| made inside the merge's clock | 203.5 ms | 202.9 ms |
+| made before it, handed over | 114.0 ms | 114.2 ms |
+
+**So 44% of what this document calls "the merge" is making the records, and the merge's own work at
+63 accessions is 114 ms rather than 203.** Every other merge figure here is therefore about 1.8
+times what the merge itself costs; the *shares* in the tables are unaffected, because they divide
+one measured merge by another part of the same one.
+
+The 25.9% row — the freeing — is genuinely the merge's, because nothing owns those records
+afterwards. **It could not be isolated in wall clock, and §5.5 says why.**
 
 ---
 
 ## 3. Is the merge worth optimising at all?
 
 Nobody had ever timed it against another stage. Producing these observations took **7.81 s** for
-the 63 samples one after another on one thread; the merge in the same configuration is **0.21 s**.
+the 63 samples one after another on one thread; the merge's own work, with the records made before
+its clock starts, is **0.114 s** (§2.2).
 
-- With the walk as it stands, serial: the merge is **2.6%** of walk-plus-merge.
-- With the walk given all eight threads: **18%**.
+- With the walk as it stands, serial: the merge is **1.4%** of walk-plus-merge.
+- With the walk given all eight threads: **10%**.
+
+**Those replace the 2.6% and 18% this section carried before the record-making was measured**, and
+they are the honest pair: a run's generator makes each record once, and the merge should not be
+charged for it twice.
 
 That bracket is the ceiling on everything in this document, and it does not cover the rest of a
 run — the parameters fit, the calling loop and the VCF writing have never been timed either.
@@ -113,7 +132,7 @@ run — the parameters fit, the calling loop and the VCF writing have never been
 |---|---|
 | widen the building region, 200 → 500 bases | **adopt** — faster in every sitting, +3% peak resident |
 | eviction on the pool instead of one thread | **adopt, small** — 4–5%, and less at larger cohorts |
-| give evicted records back to the producer | **the largest lever, not built** — 25.9% of the merge's CPU; see §5.5 |
+| give evicted records back to the producer | **the largest lever, not built** — 25.9% of the merge's CPU; needs a producer that leases, so it is milestone G of the run driver's plan (§5.5) |
 | overlap the reader advance with the building | **refuted** — 2–4% slower, +52% peak resident |
 | fold the held window in by bisection | **refuted** — no change; the window is 0.9 records |
 | drop the rounds for a sliding window | **not built** — the owner dropped it once the barrier priced at 3.9% |
@@ -214,20 +233,30 @@ the merge's clock — so what was compared was "clone then free" against "refill
 the same. A real run pays neither: the generator fills the record either way, and leasing removes
 the merge's *free*, which §2.2 measures at 25.9% of the merge's CPU.
 
-**Two further attempts to settle it, and neither did.** Re-run on the current driver with the arms
+**Three attempts to settle it, and none did.** Re-run on the current driver with the arms
 alternated four times, leasing and minting are indistinguishable — 181 / 232 ms against 191 / 234,
 a 2.6% mean difference inside a run whose own second pass was 20% slower than its first. And the
 profile cannot separate the fill from the rest, because the probe's `refill` is inlined and has no
 symbol left to attribute.
 
+And the third: a source that hands over records made before the clock and **keeps** the ones the
+merge gives back, against one that lets the merge drop them — the two differing in the freeing and
+nothing else. That fails for a reason worth recording: **the device that stops the merge freeing must
+hoard**, which grows the process from 5.2 GB to 6.4 GB, and the memory pressure costs more than the
+free saves. Hoarding measured 109.2 and 134.4 ms against handing's 114.8 and 112.3 — one arm either
+side, on a spread of 94 to 165.
+
 **So this is what stands.** The merge's *freeing* of per-sample records is 25.9% of its CPU, by
 attribution from the minting profile (§2.2), and leasing removes 92% of those frees by count. What
-is **not** established is the wall-clock saving, because every arm this probe can run charges the
-merge for making the record as well as unmaking it.
+is **not** established is the wall-clock saving: it cannot be had by removing the free from this
+probe, because nothing here can accept a returned record without either refilling it — which is the
+generator's work, charged to the merge — or holding it, which costs more than it saves.
 
-**Settling it needs a source that hands over records made before the clock starts** — which is a
-question about how the generator or the psp reader gives the merge its records, not about the merge.
-That is where the measurement belongs, and it is outside this module.
+**Settling it needs a real leasing producer**, one that fills a returned record instead of
+allocating a new one — which is a change to how the generator or the psp reader gives the merge its
+records, not to the merge. That is where the measurement belongs, and it is now written down as the
+last milestone of the run driver's plan
+([`../impl_plan/run_driver_direct_mode.md`](../impl_plan/run_driver_direct_mode.md), milestone G).
 
 ---
 

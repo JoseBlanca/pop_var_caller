@@ -62,6 +62,14 @@ src/ng/
 │                        · pileup/  – the generic generator: walks a non-STR stretch, splits
 │                          it into loci from the data. Reuse target: production pileup/walker/.
 │                       Spec ../spec/locus_generation.md. See *The locus stream*.
+├── psp/              – the per-sample store: what one sample's reads showed at every position
+│                       a run analysed, written once by the locus generation stage and read back
+│                       by the cohort gather. NOT a pipeline step — it is the seam between the
+│                       two stages, made durable. Eleven files: the writer, the reader and its
+│                       walks, and one per part of the file (header, block, block index, trailer,
+│                       footer, chain ids, record). Spec ../spec/psp_file_format.md; the store is
+│                       built and measured, and nothing in pipeline.rs writes or reads one yet —
+│                       see *The artifact between the two stages*.
 ├── parameter_estimation/ – step 4  the parameters the caller runs on — noise rates and
 │                       rates of variation — estimated from the data before calling, and
 │                       emitted as ModelParams. Named for what it owns, not for when it
@@ -110,7 +118,8 @@ src/ng/
 ├── quality/          – step 13 QualityModel
 │
 ├── pipeline.rs       – the CallerRecipe + the driver that runs it end-to-end (per-sample
-│                       stage, then the cohort gather; the artifact between them is in memory)
+│                       stage, then the cohort gather; the artifact between them is still passed
+│                       in memory — psp/ exists but is not wired in)
 └── bench/            – the standards harness: gold / silver / synthetic scoring
 ```
 
@@ -249,9 +258,31 @@ tree here is the *research* home; the production modules remain the *scaling* ho
 **On the per-sample/cohort split — revised.** This doc originally said "no `.psp` split,
 single-phase". ng does adopt production's two-level *shape* — per-sample stage → artifact →
 cohort gather — because a `SampleLocusObservations` is one sample's and cohort loci are built by merging
-many (`../spec/locus_generation.md` §3). What it does **not** adopt yet is the `.psp` file:
-the seam is the load-bearing thing, so the artifact starts in memory and gains a
-serialization when memory forces it or when the evidence types stop churning.
+many (`../spec/locus_generation.md` §3).
+
+### The artifact between the two stages
+
+**ng has its own on-disk store for that artifact, and it is written: `src/ng/psp/`.** This doc
+said until 2026-08-30 that the artifact "starts in memory and gains a serialization when memory
+forces it". Memory forced it: everything the calling stage holds is multiplied by the cohort size,
+and the committed range runs to three thousand samples (`../spec/run_streaming.md` §7.1), so the
+artifact has to be something each sample's reader streams from rather than something the run
+holds. Production's `.psp` is the shape not to copy — its block index alone is 3.8 MB per open
+file, 11.5 GB across three thousand samples (§7.2 there). ng's store is a different file
+from production's `src/psp/` and shares no code with it; the two use the words *trailer* and
+*block* for different things, which `src/ng/psp/mod.rs` spells out for anyone moving between
+them.
+
+What exists: a store can be created, pushed to, finished, opened, walked from the start or from a
+coordinate, walked with a per-record predicate deciding which bodies get built, re-trailered and
+appended to. It is measured — **480 kB an open sample on a human reference against a 500 kB
+budget** — and checked field by field against a codec that is not ours over 7.7 million records.
+Spec: `../spec/psp_file_format.md`.
+
+**What does not exist yet is the wiring.** `pipeline.rs` still passes the artifact in memory;
+nothing in the run writes a store or reads one, and only the measuring examples use the module.
+Which run object writes and which opens is `../spec/run_streaming.md`'s to say — it owns the
+three run objects — and that is the next step.
 
 ## Naming to confirm
 

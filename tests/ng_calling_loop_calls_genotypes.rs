@@ -82,7 +82,7 @@ use pop_var_caller::ng::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::ng::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
 use pop_var_caller::ng::types::{
     AlleleId, ContigId, ErrorRate, GenomeRegion, InbreedingF, Motif, Ploidy, Position, ReadGroupId,
-    SsrPeriod,
+    SsrPeriod, SummedLogError,
 };
 
 use pop_var_caller::ng::parameter_estimation::Estimate;
@@ -121,7 +121,7 @@ fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObs
         read_group,
         num_obs: reads,
         num_fwd: reads / 2,
-        q_sum: -3.0 * f64::from(reads),
+        q_sum: SummedLogError::from_nats(-3.0 * f64::from(reads)),
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,
@@ -807,7 +807,7 @@ fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         read_group: ReadGroupId(0),
         num_obs: reads,
         num_fwd: reads / 2,
-        q_sum: -10.0 * f64::from(reads),
+        q_sum: SummedLogError::from_nats(-10.0 * f64::from(reads)),
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,

@@ -75,11 +75,21 @@ fn rechunk(input: &Path, output: &Path, window: u32) -> Result<(), Box<dyn std::
         },
     };
 
+    // Carry the metadata section across. Without this the rewritten file loses
+    // the per-sample summary, and the hidden-paralog filter then refuses the
+    // whole cohort rather than silently emitting an unfiltered callset — which
+    // is how this omission was found: every block-window sweep run through this
+    // tool failed at the first call with "50 of 50 .psp lack a usable one".
+    let metadata = reader.metadata().map(<[u8]>::to_vec);
+
     let out_file = File::create(output)?;
     let sink = BufWriter::with_capacity(64 * 1024, out_file);
     // Window is the primary cut; cap generous so it never interferes.
     let mut writer =
         PspWriter::new_with_block_layout(sink, header, MAX_BLOCK_TARGET_BYTES, window)?;
+    if let Some(payload) = metadata {
+        writer.attach_metadata(payload)?;
+    }
     for item in reader.records() {
         writer.write_record(&item?)?;
     }
