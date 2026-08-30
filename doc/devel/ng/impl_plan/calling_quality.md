@@ -60,7 +60,7 @@ differential against production's `refine_qual` over the same nine numbers.
   each rest on it; a baseline nobody has checked against production would let a disagreement in D
   be blamed on either half. This is spec §14's test 2, owed by C3b and unpaid.
 - **Reuse over rewrite.** This is a port. It calls ng's existing `crate::genetics::lgamma` rather
-  than transcribing production's second copy of the same Lanczos approximation (spec §11), and it
+  than transcribing production's hand-written Lanczos approximation (spec §11), and it
   reproduces production's guards, clamps and ramp rather than re-deriving them. No test's threshold
   is re-argued here — spec §6.2 records where each came from.
 - **The algorithmic heart before the plumbing.** The binomial tail (B2) is built and tested against
@@ -89,8 +89,11 @@ differential against production's `refine_qual` over the same nine numbers.
   declares it, and `LocusInference` carries both — the quality behind
   `uncorrected_site_quality()`, the counts behind `artifact_test_counts()`, the second already
   returning `None` for the two cases production returns its baseline unchanged for.
-- **`crate::genetics::lgamma`** — ng's one Lanczos approximation, already used by
-  `score_uncorrected_site_quality`. The tail needs no second one.
+- **`crate::genetics::lgamma`** — already used by `score_uncorrected_site_quality`, so the tail
+  needs no second one. **It is `libm`'s, where production's is a hand-written Lanczos
+  approximation**, so a port that reads it is not bit-identical to its source by construction; the
+  two agree to about one part in `1e-13`. Spec §11 expected ng to write the Lanczos; it has
+  something better, and D1 measures what the difference costs.
 - **`Phred`** ([`types.rs:429`](../../../../src/ng/types.rs)) refuses negatives, `NaN` and
   infinities at its one constructor, and normalises `-0.0`. Every penalty and the corrected quality
   cross into it.
