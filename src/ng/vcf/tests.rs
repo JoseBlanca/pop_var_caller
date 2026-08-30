@@ -337,7 +337,73 @@ fn the_expected_copies_run_parallel_to_the_alleles() {
 
 // ---------------------------------------------------------------------------
 // The shapes the format forbids
+//
+// **Each of the three per-allele widths is tested from both sides.** A mutation review found
+// two assertions where only one side was covered: with a single too-wide fixture, weakening
+// `assert_eq!(a, b)` to a one-sided comparison survives the suite, and the vector that is one
+// entry *short* — the likelier defect, since it is what a loop that stops early produces —
+// reaches the encoder to be indexed past its end.
 // ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "AD is written one entry per allele")]
+fn a_read_count_vector_narrower_than_the_allele_table_is_refused() {
+    VcfRecord::new(
+        region(1_000, 1_000),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        vec![SampleColumn {
+            call: called(&[0, 1], 20.0),
+            read_counts: SampleReadCounts::new(vec![5], 0),
+        }],
+        vec![pool(5, 60), MapqPool::default()],
+        None,
+        quality(10.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "one entry per allele, reference first")]
+fn a_mapping_quality_pool_wider_than_the_allele_table_is_refused() {
+    VcfRecord::new(
+        region(1_000, 1_000),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        vec![SampleColumn {
+            call: called(&[0, 1], 20.0),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
+        }],
+        vec![pool(5, 60), pool(5, 60), MapqPool::default()],
+        None,
+        quality(10.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "so that AF names the alleles this record holds")]
+fn expected_copies_wider_than_the_allele_table_are_refused() {
+    VcfRecord::new(
+        region(1_000, 1_000),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0, 1.0],
+        vec![SampleColumn {
+            call: called(&[0, 1], 20.0),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
+        }],
+        vec![pool(5, 60), pool(5, 60)],
+        None,
+        quality(10.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+}
 
 #[test]
 #[should_panic(expected = "AD is written one entry per allele")]
