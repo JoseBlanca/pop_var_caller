@@ -127,6 +127,13 @@ const _: () = assert!(
 /// call a *balanced* split at a lopsided expectation unsurprising, which is the opposite of what
 /// the test is for.
 ///
+/// **The floor at zero cannot fire, and that is recorded rather than removed.** The tail below
+/// is clamped into `[1e-300, 1]`, so its base-ten logarithm is in `[−300, 0]` and this is in
+/// `[0, 3000]` before the `max`; at a tail of exactly one it is `−0.0`, which [`Phred`] already
+/// normalises. A mutation battery over this module found deleting it changes no test, and this
+/// is why: it is production's line, kept as the net under the clamp rather than as live
+/// arithmetic.
+///
 /// Production's [`tail_phred`](../../../../src/vcf/qual_refine.rs).
 pub fn two_sided_binomial_tail_phred(observed: f64, total: f64, expected_share: f64) -> f64 {
     (-10.0 * two_sided_binomial_tail(observed, total, expected_share).log10()).max(0.0)
@@ -176,6 +183,13 @@ fn two_sided_binomial_tail(observed: f64, total: f64, expected_share: f64) -> f6
     let mode = (((total_f + 1.0) * expected_share).floor()).clamp(0.0, total_f) as u64;
 
     // Observed at the peak: every outcome is "no more likely", so nothing is surprising.
+    //
+    // **This is a short cut, not a guard, and a mutation battery over this module proved it.**
+    // Disabling it changes no test: an observation at the mode falls into the second branch
+    // below, where the near flank is `P(X >= mode)`, every outcome left of the peak qualifies
+    // for the far flank so that is `P(X <= mode)`, and the two sum to `1 + P(X = mode)` — which
+    // the clamp at the end takes back to 1. So the answer survives, and it survives *because of
+    // the clamp*: anyone who tightens that clamp has to keep this branch.
     if observed_reads == mode {
         return 1.0;
     }
@@ -529,6 +543,11 @@ fn reference_share(reference_reads_that_did_it: f64, reference_reads: f64) -> f6
 /// that **the test cannot tell a real heterozygote's chance pile-up from an artifact's** until
 /// there are enough alternative reads for the pile-up to mean something. Production's
 /// `bias_power_factor`.
+/// **The `<=` on the first branch could be `<` and nothing would change**, which a mutation
+/// battery over this module confirmed: at exactly [`BIAS_RAMP_NO_POWER_BELOW`] alternative reads
+/// the linear branch evaluates to zero anyway. Kept as production writes it — the equality is
+/// where the constant's name says the charge stops, and a reader should not have to derive that
+/// from the arithmetic.
 fn bias_test_power(alternative_reads: f64) -> f64 {
     if alternative_reads <= BIAS_RAMP_NO_POWER_BELOW {
         0.0

@@ -367,12 +367,32 @@ loop's own per-locus cost on the same axis first — it is the same shape of ben
 this table into a share. Until then, 20.6 ms a locus at 3,000 samples is **5.7 CPU-hours per
 million loci**, against 4.6 CPU-seconds per million at 63.
 
-**E2. A mutation battery over the correction.**  ☐
-`cargo mutants` over `src/ng/calling/quality/`, per the repository's review convention: every
-surviving mutant is either killed by a new test or written down as semantically equivalent.
-D1 already produced one instance of the failure this catches — a grid test that compared tail
-probabilities to an absolute tolerance and passed while the far flank was computed the wrong way.
-*Depends:* C3, D1. *Source:* `ai/skills/rust-code-review/code_review/extras.md`.
+**E2. A mutation battery over the correction.**  ✅
+Per the repository's review convention: every surviving mutant is either killed by a new test or
+written down as semantically equivalent. D1 already produced one instance of the failure this
+catches — a grid test that compared tail probabilities to an absolute tolerance and passed while
+the far flank was computed the wrong way. *Depends:* C3, D1. *Source:*
+`ai/skills/rust-code-review/code_review/extras.md`.
+
+**Run by hand, not by `cargo mutants`, which is not in the container image.** Twenty deliberate
+slips, one at a time, each with the module's 64 tests re-run — the shape the other steps of this
+project used. **16 killed, 3 survived, and all three are equivalent mutants whose equivalence is
+now a comment beside the code**, so nobody deletes the line later on the strength of "no test
+covers it":
+
+| survivor | why no test can tell the difference |
+|---|---|
+| the tail's Phred is not floored at zero | the tail is clamped into `[1e-300, 1]`, so the Phred is in `[0, 3000]` before the `max`; at a tail of exactly one it is `−0.0`, which `Phred` normalises |
+| an observation at the peak is not short-circuited | it falls into the general branch, whose two flanks then sum to `1 + P(X = mode)`, which the final clamp takes back to 1 — **so the equivalence rests on the clamp**, and that is the comment |
+| the ramp charges in full at its lower endpoint (`<=` → `<`) | at exactly three alternative reads the linear branch evaluates to zero anyway |
+
+**The fifteen that were killed** cover every place a transcription slip would have been silent:
+the Phred factor, the mode's `(n+1)p`, both flank choices, both incomplete-beta argument pairs,
+the homozygous-variant guard, deficit-versus-excess, **reading the expectation off the reads
+instead of the called genotypes** (spec §6.2's central rule), the strand test's `max` over its two
+axes, scoring the read-position axis on the strand counts, the fall-back for a site with no
+reference reads, the reference-share clamp's endpoints, the ramp as a step, the sign of the
+subtraction, and dropping either penalty from the sum.
 
 > **Checkpoint E:** the site quality's cost across the committed range is written down, and the
 > correction's tests have been attacked rather than trusted. Pause for review.
