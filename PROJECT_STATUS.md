@@ -19,9 +19,33 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **what one line of ng's VCF carries** (step A1 of
-> [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), branch `ng-vcf-output`; the
-> format is settled in [vcf_output.md](doc/devel/ng/spec/vcf_output.md), written the same day).
+> - **Last completed task (2026-08-30):** **ng writes a VCF, and bcftools reads it** (Milestones
+> A, B and C of [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), merged to `main`;
+> the format is settled in [vcf_output.md](doc/devel/ng/spec/vcf_output.md), written the same
+> day). `src/ng/vcf/` turns a called locus into a record, a record into a line, and a stream of
+> them into a file that appears whole or not at all. **The gate is an outside tool rather than
+> our own tests**: `bcftools 1.16` reads a fixture holding every shape the format can write —
+> both locus kinds interleaved, a multi-allelic site, both padding cases, a refused locus, an
+> unconverged one, no-calls beside calls — plain and bgzf, exit zero and nothing on stderr;
+> `view -i 'STR=1'` and `-e` partition it exactly; and **the file indexes, with a region query
+> returning both records of the one legal position tie**, which is the only way that rule could
+> be checked at all. Reproduce with `scripts/ng_vcf_parser_gate.sh`.
+> **⛦ The plan told the implementation to compute `AF` wrongly and the check it demanded caught
+> it**: normalising expected copies over `AN` makes frequencies sum to more than one, because the
+> loop's copies span every sample it scored while `AN` counts only samples the file calls — and
+> since the no-call ruling those differ. **⛦ And the no-call ruling itself is settled and
+> recorded** ([spec §7.1](doc/devel/ng/spec/vcf_output.md)): a sample is no-called when its own
+> **likelihood** is flat, never on its posterior, because a read-less sample is scored from the
+> prior alone and at a low-frequency locus that posterior is sharply peaked. A survey of
+> freebayes, bcftools, GATK, HipSTR, GangSTR and dumpSTR found **nobody gates a genotype on the
+> best-versus-next-best margin** — HipSTR publishes exactly that margin as `GLDIFF` and nothing
+> thresholds it — and whether ng should add a `GQ` floor is left open as §14 Q4, leaning no.
+> **Milestone D is half-landed against an assumed interface** (owner's call, while the streaming
+> work runs): the mapper is built and the one input it cannot recover downstream — whether a
+> sample's reads said anything — is named at its field. 132 tests in the module.
+>
+> - **Previously (2026-08-30):** **what one line of ng's VCF carries** (step A1 of
+> [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), branch `ng-vcf-output`).
 > ng writes **one** file where production writes two — SNP/indel loci and repeat tracts
 > interleaved, a tract record marked by an `STR` flag beside `RU` and `PERIOD` — and this step
 > builds the type a record becomes once its locus and its reads have been released. **The
