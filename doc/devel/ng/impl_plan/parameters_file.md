@@ -161,11 +161,22 @@ longhand — and a measurement whose two evidence counts are both zero.
 nobody remembered to write.
 *Depends:* C1, B1. *Source:* §3, §6, §9.
 
-☐ **C3. Float round-trip fidelity. Own commit, do not bundle.** Whether the `toml` crate emits
+✅ **C3. Float round-trip fidelity. Own commit, do not bundle.** Whether the `toml` crate emits
 enough digits to recover every `f64` **has not been checked** (§4). Establish it; if it does not,
 the fix is a serialiser that formats floats for round-trip, not a different format. **Oracle:** a
 table of adversarial values — subnormals, values near the precision limit, the exact concentrations
 a real fit produces — written and read back bit-identical.
+
+**Landed 2026-08-30, and it found nothing.** Both formatters recover every double: twenty-two
+adversarial values at four structural positions each, plus ten thousand pseudo-random bit patterns,
+compared on `to_bits` rather than `==`. **Two of the brief's three adversarial categories are
+covered and the third is not** — no value in the table comes from a real fit, which is C4's, and
+the table carries four at a fit's *magnitudes* instead. **The spec's proposed fix turned out not to
+fit either writer**: the one that writes the artefact already formats for round-trip by
+construction, and the one that had genuinely not been checked writes a golden test file. **§4's
+sentence saying this "has not been checked here" is now false and is the owner's to retire** —
+recorded in `PROJECT_STATUS.md` rather than edited here. Mutating the writer's formatter to
+`{value:.5?}` fails all four tests.
 *Depends:* C1, C2. *Source:* §4, §13 test 1.
 
 ☐ **C4. The north-star round trip.** A `RunParameters` assembled from the joint fit on real tomato

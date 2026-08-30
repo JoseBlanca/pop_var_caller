@@ -1793,3 +1793,269 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod every_float_comes_back_bit_identical {
+    //! **Step C3: whether a float this caller writes reads back as the same double.**
+    //!
+    //! Spec §4 says plainly that this "has not been checked here", and spec §1.2 goal 1 is what
+    //! rests on it: the two-mode oracle compares VCFs, so a parameter that survives a write to
+    //! five decimal places shows up there as a changed call, at some locus, with nothing to say
+    //! why. **The fix if it failed would have been a serialiser that formats floats for
+    //! round-trip, not a different file format** — so what is measured here is the formatting, in
+    //! both writers, against the one reader.
+    //!
+    //! # What "the same" means here, and why it is not `==`
+    //!
+    //! Every assertion below compares `to_bits()`. **`==` cannot see two of the three things that
+    //! can go wrong**: `-0.0 == 0.0` is true, so a lost sign passes; and `NaN != NaN`, so a value
+    //! that became a `NaN` fails for the wrong reason. Only the bit pattern says the double that
+    //! came back is the double that went out.
+    //!
+    //! # The two writers, and the one that is not this module's
+    //!
+    //! The artefact a run writes goes through [`a_toml_float`], which is this file's. The golden
+    //! `testdata/every_shape.toml` goes through `serde`'s own serialiser, which is the `toml`
+    //! crate's. **Both are checked**, because the module's round-trip tests read files written by
+    //! each, and a defect in either would show up as a changed number rather than as a failure to
+    //! parse.
+
+    use super::super::ParametersFile;
+    use super::super::tests::a_file_using_every_shape;
+    use super::a_toml_float;
+
+    /// **The doubles most likely to break a formatter, each with the reason it is here.**
+    ///
+    /// A table rather than a sweep, because a sweep says *nothing broke* and a table says *this
+    /// did not break*. The sweep is below, and it is the wider net.
+    /// **The two subnormals come from their bit patterns rather than from decimal literals**,
+    /// which is why this is a function and not a `const`: a literal for the largest subnormal is
+    /// a seventeen-digit number that has to be right, and `from_bits` says what it means.
+    fn the_hard_ones() -> Vec<(f64, &'static str)> {
+        let mut hard = vec![
+            (
+                f64::from_bits(1),
+                "the smallest subnormal there is, one bit set",
+            ),
+            (
+                f64::from_bits(0x000f_ffff_ffff_ffff),
+                "the largest subnormal, one bit below the smallest normal",
+            ),
+            (
+                -f64::from_bits(1),
+                "and a negative subnormal — one class the sweep is a poor net for, since a \
+                 subnormal is one draw in 2,048",
+            ),
+        ];
+        hard.extend_from_slice(THE_HARD_LITERALS);
+        hard
+    }
+
+    const THE_HARD_LITERALS: &[(f64, &str)] = &[
+        (0.0, "zero"),
+        (-0.0, "negative zero, whose sign no comparison sees"),
+        (
+            1.0,
+            "one, which a formatter may write without its decimal point",
+        ),
+        (-1.0, "minus one"),
+        (0.1, "a tenth, which is not a tenth"),
+        (0.1 + 0.2, "0.1 + 0.2, the classic"),
+        (
+            1.0 / 3.0,
+            "a third, which needs all seventeen significant digits",
+        ),
+        (
+            f64::MIN_POSITIVE,
+            "the smallest normal double, 2.2250738585072014e-308",
+        ),
+        (f64::MAX, "the largest finite double"),
+        (-f64::MAX, "and the most negative"),
+        (
+            9_007_199_254_740_992.0,
+            "2^53, above which not every whole number is a double",
+        ),
+        (
+            1e16,
+            "a whole number a formatter may write in exponent form",
+        ),
+        (1e-5, "and a small one"),
+        (std::f64::consts::PI, "pi"),
+        (
+            1.000_000_000_000_000_2,
+            "the smallest double above one, one unit in the last place away",
+        ),
+        // **At the magnitudes the fit works in**, so the table is not only torture: a slip share,
+        // a Dirichlet concentration, a held-out error and a per-base substitution rate. **These
+        // are the shape of a fitted number, not a fitted number** — the plan's third adversarial
+        // category is C4's, and the module header says so.
+        (
+            0.042_1,
+            "a slip share, at the size a stratum's fit gives one",
+        ),
+        (3.5, "a concentration, in chromosomes"),
+        (
+            0.333_333_333_333_333_3,
+            "a held-out error that needs every digit",
+        ),
+        (0.001_2, "a per-base substitution rate inside a tract"),
+    ];
+
+    /// **Every hard value, written by this module's formatter and read back by the crate.**
+    #[test]
+    fn this_writers_floats_read_back_as_the_same_double() {
+        for (value, why) in &the_hard_ones() {
+            let written = a_toml_float(*value);
+            let read: toml::Value = toml::from_str(&format!("value = {written}"))
+                .unwrap_or_else(|error| panic!("{why}: {written} is not TOML: {error}"));
+            let read = read["value"]
+                .as_float()
+                .unwrap_or_else(|| panic!("{why}: {written} did not read back as a float"));
+            assert_eq!(
+                read.to_bits(),
+                value.to_bits(),
+                "{why}: {value:e} was written as {written} and came back as {read:e}"
+            );
+        }
+    }
+
+    /// **And a sweep over pseudo-random bit patterns**, which is what says the table above is
+    /// examples rather than the whole of it.
+    ///
+    /// **Ten thousand doubles drawn from the whole 64-bit space**, so most are enormous, tiny or
+    /// subnormal — the region a decimal formatter is least often exercised over. Non-finite
+    /// patterns are skipped: `validate` refuses those, and what this measures is the formatter
+    /// rather than the range check.
+    ///
+    /// The generator is a fixed-seed xorshift rather than a crate: a failure has to be
+    /// reproducible from this file alone, and the value is printed with its bits when it fails.
+    #[test]
+    fn ten_thousand_arbitrary_doubles_read_back_as_themselves() {
+        let mut bits: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut checked = 0_u32;
+        for _ in 0..40_000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            let value = f64::from_bits(bits);
+            if !value.is_finite() {
+                continue;
+            }
+            let written = a_toml_float(value);
+            let read: toml::Value = toml::from_str(&format!("value = {written}"))
+                .unwrap_or_else(|error| panic!("{written} (bits {bits:#x}) is not TOML: {error}"));
+            assert_eq!(
+                read["value"].as_float().map(f64::to_bits),
+                Some(value.to_bits()),
+                "{value:e} (bits {bits:#x}) was written as {written}"
+            );
+            checked += 1;
+            if checked == 10_000 {
+                return;
+            }
+        }
+        panic!("the sweep ran out of draws before it had checked ten thousand finite doubles");
+    }
+
+    /// **The same values inside a whole file, through both writers and the one reader.**
+    ///
+    /// The test above formats one number in isolation; this one puts it where a run would — a
+    /// bare scalar at the top of a section, a field of a one-line inline table, an entry of an
+    /// array, and a field of a table nested three deep — and reads the whole file back.
+    ///
+    /// **It goes through `from_toml` and not `validate`**, deliberately: most of these values are
+    /// not shares, concentrations or probabilities, and what is being measured is the text rather
+    /// than the meaning.
+    #[test]
+    fn a_hard_float_survives_a_whole_file_through_either_writer() {
+        for (value, why) in &the_hard_ones() {
+            let mut file = a_file_using_every_shape();
+            // A bare scalar under a section header.
+            file.ordinary_site_prior.reference_concentration = *value;
+            // A field of a one-line inline table.
+            file.repeat_tracts.length_spectrum_by_stratum[0].concentration = *value;
+            // An entry of an array of floats.
+            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1] = *value;
+            // A field of a table three deep inside a row.
+            file.repeat_tracts.slippage_by_stratum_and_group[1]
+                .share_of_reads_that_slip_origin
+                .expected_slipped_reads = Some(*value);
+
+            for (writer, text) in [
+                ("this module's writer", file.to_toml()),
+                (
+                    "serde's own serialiser",
+                    toml::to_string(&file).expect("the shape serialises"),
+                ),
+            ] {
+                let read = ParametersFile::from_toml(&text)
+                    .unwrap_or_else(|error| panic!("{why}, {writer}: {error}\n{text}"));
+                for (at, back) in [
+                    (
+                        "ordinary_site_prior.reference_concentration",
+                        read.ordinary_site_prior.reference_concentration,
+                    ),
+                    (
+                        "length_spectrum_by_stratum[0].concentration",
+                        read.repeat_tracts.length_spectrum_by_stratum[0].concentration,
+                    ),
+                    (
+                        "length_spectrum_by_stratum[0].shares_by_repeat_offset[1]",
+                        read.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1],
+                    ),
+                    (
+                        "slippage_by_stratum_and_group[1]…expected_slipped_reads",
+                        read.repeat_tracts.slippage_by_stratum_and_group[1]
+                            .share_of_reads_that_slip_origin
+                            .expected_slipped_reads
+                            .expect("it was written"),
+                    ),
+                ] {
+                    assert_eq!(
+                        back.to_bits(),
+                        value.to_bits(),
+                        "{why}, through {writer}, at {at}: {value:e} came back as {back:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A whole file of hard floats round-trips as one object**, which is the claim spec §1.2
+    /// goal 1 makes rather than the per-field one above.
+    #[test]
+    fn a_file_whose_every_float_is_hard_is_equal_to_itself_after_a_trip() {
+        let mut file = a_file_using_every_shape();
+        // Enough of the file's floats to reach each shape the writer has: the seed's two scalars,
+        // a warranted value, a spectrum's entries, a curve's coefficients and a slippage number.
+        file.ordinary_site_prior.reference_concentration = 1.0 / 3.0;
+        file.ordinary_site_prior.alternative_concentration_total = 5e-324;
+        file.repeat_tracts
+            .fallback_length_spectrum_concentration
+            .value = f64::MIN_POSITIVE;
+        file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+            vec![0.1 + 0.2, -0.0, 1.000_000_000_000_000_2];
+        file.repeat_tracts.slippage_by_stratum_and_group[1].share_of_reads_that_slip = f64::MAX;
+        file.stated_constants.repeat_tract_outlier_weight.value = 1e-5;
+
+        for (writer, text) in [
+            ("this module's writer", file.to_toml()),
+            (
+                "serde's own serialiser",
+                toml::to_string(&file).expect("the shape serialises"),
+            ),
+        ] {
+            let read = ParametersFile::from_toml(&text)
+                .unwrap_or_else(|error| panic!("{writer}: {error}\n{text}"));
+            assert_eq!(read, file, "through {writer}:\n{text}");
+            // **And bit-identically**, which `PartialEq` on the shape cannot say: it compares
+            // `f64`s with `==`, so a sign lost off a zero would pass the line above.
+            assert_eq!(
+                read.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1]
+                    .to_bits(),
+                (-0.0_f64).to_bits(),
+                "a negative zero keeps its sign through {writer}, which `==` cannot see"
+            );
+        }
+    }
+}
