@@ -1086,3 +1086,211 @@ fn the_same_record_renders_identically_every_time() {
         sample_columns(&record, diploid())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Whole lines
+//
+// Checkpoint B asks for a golden line per shape the format has to write, not a golden field.
+// A line is where the column count, the tab structure and the FORMAT-to-sample agreement can
+// go wrong together.
+// ---------------------------------------------------------------------------
+
+/// Every VCF line has this many columns before the samples: the seven fixed ones, INFO, FORMAT.
+const COLUMNS_BEFORE_THE_SAMPLES: usize = 9;
+
+#[test]
+fn a_snp_line() {
+    let record = VcfRecord::new(
+        region_on(0, 1_000, 1_000),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.4, 0.6],
+        one_sample(vec![10, 9], 0, &[0, 1]),
+        pools(&[10, 9]),
+        None,
+        quality(300.0),
+        Some(ArtifactPenalties {
+            allele_balance: Phred::ZERO,
+            strand_and_read_position: quality(2.5),
+        }),
+        FilterVerdict::Pass,
+        None,
+    );
+
+    assert_eq!(
+        record_line(&record, &contigs(), diploid()),
+        "chr1\t1000\t.\tA\tT\t300.0\tPASS\t\
+         AF=0.300000;AC=1;AN=2;DP=19;ABPEN=0.0;SPPEN=2.5;MQREF=60.00;MQALT=60.00;MQDIFF=0.00\t\
+         GT:GQ:DP:AD\t0/1:40:19:10,9"
+    );
+}
+
+#[test]
+fn a_repeat_tract_line() {
+    let record = VcfRecord::new(
+        region_on(0, 2_000, 2_015),
+        vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
+        vec![1.0, 1.0],
+        one_sample(vec![12, 11], 7, &[0, 1]),
+        // Deliberately different means per allele, so `MQDIFF` is non-zero and a swap of the
+        // two pools would change the line.
+        vec![
+            MapqPool {
+                reads: 12,
+                mapq_sum: 12 * 58,
+            },
+            MapqPool {
+                reads: 11,
+                mapq_sum: 11 * 55,
+            },
+        ],
+        None,
+        quality(150.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"CA").expect("a two-base motif"),
+        )),
+    );
+
+    assert_eq!(
+        record_line(&record, &contigs(), diploid()),
+        "chr1\t2000\t.\tCACACACACACACACA\tCACACACACACA\t150.0\tPASS\t\
+         AF=0.500000;AC=1;AN=2;DP=30;MQREF=58.00;MQALT=55.00;MQDIFF=-3.00;STR;RU=CA;PERIOD=2\t\
+         GT:GQ:DP:AD:REPCN\t0/1:40:30:12,11:8,6"
+    );
+}
+
+#[test]
+fn a_multi_allelic_line() {
+    let record = VcfRecord::new(
+        region_on(0, 20, 20),
+        vec![allele(b"A"), allele(b"C"), allele(b"G")],
+        vec![2.0, 1.0, 1.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
+                    genotype_quality: quality(35.0),
+                },
+                read_counts: SampleReadCounts::new(vec![4, 4, 0], 0),
+            },
+            SampleColumn {
+                call: SampleCall::Called {
+                    genotype: Genotype::new(vec![AlleleId(0), AlleleId(2)]),
+                    genotype_quality: quality(45.0),
+                },
+                read_counts: SampleReadCounts::new(vec![4, 0, 4], 0),
+            },
+        ],
+        pools(&[8, 4, 4]),
+        None,
+        quality(99.5),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+
+    assert_eq!(
+        record_line(&record, &contigs(), diploid()),
+        "chr1\t20\t.\tA\tC,G\t99.5\tPASS\t\
+         AF=0.250000,0.250000;AC=1,1;AN=4;DP=16;MQREF=60.00;MQALT=60.00,60.00;MQDIFF=0.00,0.00\t\
+         GT:GQ:DP:AD\t0/1:35:8:4,4,0\t0/2:45:8:4,0,4"
+    );
+}
+
+#[test]
+fn a_deletion_line_carries_its_padding_base_into_every_allele() {
+    let record = a_full_tract_deletion();
+    assert_eq!(
+        record_line(&record, &contigs(), diploid()),
+        "chr1\t699\t.\tCATATAT\tC\t90.0\tPASS\t\
+         AF=0.800000;AC=2;AN=2;DP=14;MQALT=57.00;MQDIFF=.;STR;RU=AT;PERIOD=2\t\
+         GT:GQ:DP:AD:REPCN\t1/1:30:14:0,14:0,0"
+    );
+}
+
+#[test]
+fn a_refused_tract_locus_line() {
+    // Spec §8's shape, whole: the reference alone, `ALT .`, quality zero, every sample a
+    // no-call, and the filter saying why.
+    let record = VcfRecord::new(
+        region_on(0, 500, 511),
+        vec![allele(b"ATATATATATAT")],
+        vec![0.0],
+        vec![
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![0], 2),
+            },
+            SampleColumn {
+                call: SampleCall::NoCall,
+                read_counts: SampleReadCounts::new(vec![0], 0),
+            },
+        ],
+        pools(&[0]),
+        None,
+        quality(0.0),
+        None,
+        FilterVerdict::LowDepth,
+        Some(TractAnnotation::new(
+            Motif::new(b"AT").expect("a two-base motif"),
+        )),
+    );
+
+    assert_eq!(
+        record_line(&record, &contigs(), diploid()),
+        "chr1\t500\t.\tATATATATATAT\t.\t0.0\tlowDepth\t\
+         AN=0;DP=2;STR;RU=AT;PERIOD=2\t\
+         GT:GQ:DP:AD:REPCN\t./.:.:2:0:.\t./.:.:0:0:."
+    );
+}
+
+#[test]
+fn every_line_has_nine_columns_before_its_samples() {
+    let contigs = contigs();
+    let lines = [
+        record_line(&a_biallelic_snp(), &contigs, diploid()),
+        record_line(&a_full_tract_deletion(), &contigs, diploid()),
+    ];
+    for line in lines {
+        let columns: Vec<&str> = line.split('\t').collect();
+        assert!(columns.len() > COLUMNS_BEFORE_THE_SAMPLES, "line: {line}");
+        // The FORMAT column and each sample column must agree on how many fields there are.
+        let keys = columns[COLUMNS_BEFORE_THE_SAMPLES - 1].split(':').count();
+        for sample in &columns[COLUMNS_BEFORE_THE_SAMPLES..] {
+            assert_eq!(sample.split(':').count(), keys, "line: {line}");
+        }
+        assert!(!line.contains('\n'), "a line carries no newline of its own");
+    }
+}
+
+/// A full-tract deletion away from the contig's start: padded from the left, and the reference
+/// allele reached by no read at all.
+fn a_full_tract_deletion() -> VcfRecord {
+    VcfRecord::new(
+        region_on(0, 700, 705),
+        vec![allele(b"ATATAT"), allele(b"")],
+        vec![0.4, 1.6],
+        vec![SampleColumn {
+            call: SampleCall::Called {
+                genotype: Genotype::new(vec![AlleleId(1), AlleleId(1)]),
+                genotype_quality: quality(30.0),
+            },
+            read_counts: SampleReadCounts::new(vec![0, 14], 0),
+        }],
+        vec![
+            MapqPool::default(),
+            MapqPool {
+                reads: 14,
+                mapq_sum: 14 * 57,
+            },
+        ],
+        Some(PaddingBase::Left(b'C')),
+        quality(90.0),
+        None,
+        FilterVerdict::Pass,
+        Some(TractAnnotation::new(
+            Motif::new(b"AT").expect("a two-base motif"),
+        )),
+    )
+}

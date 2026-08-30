@@ -41,7 +41,8 @@ pub mod header;
 
 pub use encode::{
     FREQUENCY_DECIMALS, MAPPING_QUALITY_DECIMALS, MISSING_FIELD, PENALTY_DECIMALS,
-    QUALITY_DECIMALS, fixed_columns, format_keys, info_column, sample_columns,
+    QUALITY_DECIMALS, fixed_columns, format_keys, frequency_text, info_column,
+    mapping_quality_text, penalty_text, quality_text, record_line, sample_columns,
 };
 pub use header::{HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata};
 
@@ -105,7 +106,14 @@ pub struct VcfRecord {
     /// gate.
     alleles: Vec<Box<[u8]>>,
     /// **The cohort's expected copies of each allele**, parallel to [`Self::alleles`] — what
-    /// `AF` is written from, after normalising over the called allele count.
+    /// `AF` is written from, after normalising over **their own total**.
+    ///
+    /// **Not over `AN`**, and the difference is real: these sum to `ploidy ×` the samples the
+    /// calling *loop* scored, while `AN` counts the samples the *file* writes a genotype for,
+    /// which is fewer whenever a sample the loop scored is written `./.` — the ordinary case for
+    /// a sample whose reads said nothing (spec §7.1). Dividing by `AN` would make the
+    /// frequencies sum to more than one. `AF` is an estimate and `AC`/`AN` are counts of called
+    /// genotypes; they are different quantities and are allowed different denominators.
     ///
     /// **Carried rather than recomputed downstream, and that is a rule with a reason.** This
     /// is the calling loop's converged fit; `AF` derived instead from the *called genotypes*

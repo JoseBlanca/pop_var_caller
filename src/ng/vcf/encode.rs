@@ -127,6 +127,23 @@ pub fn fixed_columns(record: &VcfRecord, contigs: &[HeaderContig]) -> String {
     out
 }
 
+/// **One whole record, as the file's line** — the seven fixed columns, `INFO`, `FORMAT`, and one
+/// column per sample, tab-separated, with no trailing separator and no newline.
+///
+/// The newline is the writer's, not this function's: a line and the bytes that separate it from
+/// the next are different concerns, and keeping them apart is what lets a test compare a record
+/// against an exact string.
+#[must_use]
+pub fn record_line(record: &VcfRecord, contigs: &[HeaderContig], ploidy: Ploidy) -> String {
+    format!(
+        "{}\t{}\t{}\t{}",
+        fixed_columns(record, contigs),
+        info_column(record),
+        format_keys(record),
+        sample_columns(record, ploidy),
+    )
+}
+
 /// **The `POS` column**, after the padding rule has been applied.
 ///
 /// A left-hand padding base is the reference base *before* the span, so it becomes the record's
