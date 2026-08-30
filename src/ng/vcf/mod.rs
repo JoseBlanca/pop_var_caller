@@ -36,8 +36,10 @@
 //! (`doc/devel/ng/spec/typed_regions.md` §2.3), so no two records ever describe the same
 //! position.
 
+pub mod encode;
 pub mod header;
 
+pub use encode::{MISSING_FIELD, QUALITY_DECIMALS, fixed_columns};
 pub use header::{HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata};
 
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;

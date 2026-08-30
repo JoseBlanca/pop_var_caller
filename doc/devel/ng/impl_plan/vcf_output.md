@@ -128,7 +128,7 @@ file's name. Ported refusals: duplicate sample names, duplicate contigs, a conti
 
 ### Milestone B — one record to bytes
 
-☐ **B1. Fixed columns and the anchor rule. Own commit, do not bundle.** CHROM through FILTER for
+✅ **B1. Fixed columns and the anchor rule. Own commit, do not bundle.** CHROM through FILTER for
 a record with no empty allele; then the anchor: any empty allele ⇒ every allele prefixed with the
 left reference base and POS shifted one left, and at contig position 1 the right base appended
 with no shift — the rule that replaces production's invented `N`
