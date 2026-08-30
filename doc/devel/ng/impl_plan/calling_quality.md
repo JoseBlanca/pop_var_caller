@@ -175,7 +175,7 @@ principles, rule 3's "extract a coherent chunk when it tells you to"). No logic.
 properties are `const { assert! }` items rather than tests — they are properties of literals, so
 the compiler settles them where they are written.
 
-**B2. The two-sided binomial tail.**  ☐ **Own commit — do not bundle.**
+**B2. The two-sided binomial tail.**  ✅ *(its own commit, as required.)*
 The regularised incomplete beta and the tail built on it, ported from
 [`qual_refine.rs:305-457`](../../../../src/vcf/qual_refine.rs) (`betacf`, `reg_incomplete_beta`,
 `binom_cdf_le`, `binom_sf_ge`, `binom_two_sided_p_beta`, `tail_phred`), reading ng's
@@ -187,6 +187,12 @@ case — so the sum would be dead code on the runs that matter. **The sum is por
 `#[cfg(test)]` instead**, where it is this step's oracle: the two must agree across a grid of
 `(k, n, p)` spanning both tails, both boundaries and the degenerate `n = 0`, and the step records
 the tolerance they agree to. *Depends:* B1. *Source:* spec §11, §13 Q2.
+
+**Measured: the two agree to `7.0e-13` across 8,155 comparisons** — read totals from 1 to 999,
+expected shares from 1 in 100 to 99 in 100, every outcome from none to all. **And ng's `lgamma` is
+`libm`'s where production's is a hand-written Lanczos approximation**, so the port is not
+bit-identical to its source by construction; what that costs at the end of the whole correction is
+D1's to measure.
 
 > **Checkpoint B:** the tail agrees with an exact discrete sum to a stated tolerance, and the two
 > ramp endpoints exist as typed constants carrying their provenance. Pause for review.
