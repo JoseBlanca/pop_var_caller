@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **H2 reviewed — the killed writer was not writing when
+> - **Last completed task (2026-08-30):** **the same sample gathered at any worker count gives the
+> same file, and the timestamp is the only thing allowed to differ** (step H3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). ⚠ **What this can prove is narrower than the plan's sentence, and the report says
+> so first**: ng's writer is serial, so byte-identity across worker counts rests on the writer being
+> a function of the record sequence alone — already held by an F3 test — and on the *sharding*
+> giving back the same sequence, which is the run's job and is what this reproduces. The file
+> comparison itself is close to a tautology given those two. ⚠ **The first version's shards split
+> exactly on the grid and the test refused itself**: two equal contigs split evenly put the
+> two-worker boundary on the second contig's first record, and 250 records at 40 bases is 10,000 —
+> a whole number of 1 kb cells — so every four-worker boundary was a grid line too. A sweep whose
+> boundaries all sit on grid lines cannot tell a cut that follows the coordinate from one that
+> follows the shards, which is the only thing it is for; the split is skewed now and the count of
+> boundaries falling *inside* a block is asserted per worker count. **The second half of spec §7
+> had nothing holding it at all** — that a timestamp may differ *and only inside the header*. It is
+> a claim about width: the stamp goes into the header's TOML, so one character more moves the
+> header's length and with it every offset in the footer, the index and the blocks. Three
+> mutations, three killed.
+> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **H2 reviewed — the killed writer was not writing when
 > it was killed** (step H2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
 > `ng-psp-encoding`, status `fixes-applied`). Seven checklists and a numbers pass across three
 > agents. **The test did not do what its own doc said, and the doc's claim was the reason it

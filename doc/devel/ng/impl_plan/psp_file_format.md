@@ -325,11 +325,11 @@ field requires: integers, sequences, witnesses and chain-id lists **exactly**; t
 inside their own step. **A blanket tolerance would pass while a chain-id list was being corrupted.**
 ***Depends:*** G4. ***Source:*** [arch §8](../arch/psp_file_format.md).
 
-☐ **H2 — an interrupted write is refused.** Kill a writer before `finish`; the reader rejects the
+✅ **H2 — an interrupted write is refused.** Kill a writer before `finish`; the reader rejects the
 file rather than reading the blocks that reached disk.
 ***Depends:*** F4. ***Source:*** [spec §6.3](../spec/psp_file_format.md).
 
-☐ **H3 — worker-count invariance.** One sample gathered at 1, 2, 4, 8 and 16 workers gives
+✅ **H3 — worker-count invariance.** One sample gathered at 1, 2, 4, 8 and 16 workers gives
 byte-identical files apart from the header's timestamp.
 ***Depends:*** F3. ***Source:*** [spec §7](../spec/psp_file_format.md).
 

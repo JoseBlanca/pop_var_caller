@@ -1249,6 +1249,231 @@ mod tests {
         assert_eq!(header.sample, "SRR7279481");
     }
 
+    // -----------------------------------------------------------------
+    // Worker-count invariance
+    // -----------------------------------------------------------------
+
+    /// The genome the invariance test covers: two contigs, records every 40 bases, far enough
+    /// across the 1 kb grid that the sample cuts many blocks.
+    #[cfg(test)]
+    const RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE: u64 = 500;
+    #[cfg(test)]
+    const BASES_BETWEEN_RECORDS: u64 = 40;
+
+    /// Where one run's shards begin and end, as record ordinals into the whole sample.
+    ///
+    /// **Deliberately uneven.** An even split of two equal contigs puts the two-worker boundary
+    /// exactly on the contig's first record — a grid line — and the four-worker boundaries on
+    /// grid lines too, since 250 records at 40 bases is 10,000, a whole number of 1 kb cells. A
+    /// sweep whose every boundary sits on a grid line cannot tell a cut that follows the
+    /// coordinate from one that follows the shards, which is the thing it exists to tell apart.
+    /// The `+ shard` skew is what moves them off.
+    fn shard_boundaries(workers: u64) -> Vec<u64> {
+        let records = 2 * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        let mut boundaries = vec![0];
+        boundaries
+            .extend((1..workers).map(|shard| (shard * records / workers + shard).min(records)));
+        boundaries.push(records);
+        boundaries.dedup();
+        boundaries
+    }
+
+    /// The position a record ordinal lands on, and its contig.
+    fn where_the_record_at(ordinal: u64) -> (u32, u64) {
+        let per_contig = RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        let contig = u32::try_from(ordinal / per_contig).expect("two contigs");
+        (contig, 1 + (ordinal % per_contig) * BASES_BETWEEN_RECORDS)
+    }
+
+    /// One sample's records, produced by `workers` threads each owning a contiguous span of the
+    /// genome, then put back in coordinate order.
+    ///
+    /// **The threads are real and the spans are uneven**, so the interleaving in time genuinely
+    /// varies with `workers`; what must not vary is the sequence that comes out.
+    fn a_sample_gathered_by(workers: u64) -> Vec<SampleLocusObservations> {
+        let boundaries = shard_boundaries(workers);
+        let shards: Vec<(u64, u64)> = boundaries
+            .windows(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+        let gathered: Vec<Vec<SampleLocusObservations>> = std::thread::scope(|threads| {
+            let running: Vec<_> = shards
+                .iter()
+                .map(|&(from, to)| {
+                    threads.spawn(move || {
+                        (from..to)
+                            .map(|at| {
+                                let (contig, position) = where_the_record_at(at);
+                                a_record(contig, position, 1)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| thread.join().expect("a worker finished"))
+                .collect()
+        });
+        // The shards are contiguous and in order, so concatenating them *is* the coordinate-order
+        // merge a run would do.
+        gathered.into_iter().flatten().collect()
+    }
+
+    /// Write a sample and give back the file's bytes.
+    fn the_file_written_from(records: &[SampleLocusObservations]) -> Vec<u8> {
+        let (_dir, path) = a_file();
+        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        for record in records {
+            writer.push(record).expect("in order");
+        }
+        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+        bytes_of(&path)
+    }
+
+    /// **One sample gathered at 1, 2, 4, 8 and 16 workers gives byte-identical files** — spec §7's
+    /// byte-identity claim, and H3.
+    ///
+    /// **What this can and cannot prove, stated plainly, because the difference decides what the
+    /// test is worth.** ng's writer is serial: it is handed records in coordinate order and the
+    /// producing is what a run parallelises. So byte-identity across worker counts rests on two
+    /// things, and only the first is this file's doing:
+    ///
+    /// 1. **the writer is a function of the record sequence alone** — nothing about *when* records
+    ///    arrive, or in what batches, reaches the bytes. **That half is already held** by
+    ///    [`the_same_records_written_twice_give_the_same_bytes`], which is where a leaked
+    ///    timestamp, a hash iteration order or an address would show;
+    /// 2. **the sharding gives back the same sequence** whatever the worker count, which is the
+    ///    run's job and is reproduced here so the claim is end to end rather than assumed.
+    ///
+    /// **And the block cut must not follow the shards.** The grid is a function of the coordinate
+    /// (spec §4.1), so a shard boundary falling mid-block must not close one — which is only
+    /// tested if some boundary actually falls mid-block. That is asserted below, not hoped for.
+    #[test]
+    fn one_sample_gathered_at_any_worker_count_gives_byte_identical_files() {
+        let by_one = a_sample_gathered_by(1);
+        let expected = the_file_written_from(&by_one);
+
+        // **The fixture has to cut several blocks**, or "the cut does not follow the shards" is a
+        // claim about a file with one block in it.
+        let blocks = {
+            let (_dir, path) = a_file();
+            let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+            for record in &by_one {
+                writer.push(record).expect("in order");
+            }
+            writer
+                .finish(b"a per-sample summary")
+                .expect("it finishes")
+                .blocks
+        };
+        assert!(
+            blocks >= 16,
+            "the sample cuts {blocks} blocks; with fewer than the largest worker count there is \
+             no shard boundary that can fall inside one"
+        );
+
+        for workers in [2u64, 4, 8, 16] {
+            // **A shard boundary that falls mid-block**, without which a writer that closed a
+            // block at every shard boundary would produce the same file anyway.
+            let boundaries = shard_boundaries(workers);
+            let mid_block_boundaries = boundaries[1..boundaries.len() - 1]
+                .iter()
+                .filter(|at| {
+                    let (_contig, position) = where_the_record_at(**at);
+                    (position - 1) % 1_000 != 0
+                })
+                .count();
+            assert!(
+                mid_block_boundaries > 0,
+                "at {workers} workers every shard boundary lands on a grid line, so this round \
+                 cannot tell a coordinate cut from a shard cut"
+            );
+
+            let gathered = a_sample_gathered_by(workers);
+            assert_eq!(
+                gathered.len(),
+                by_one.len(),
+                "at {workers} workers the sharding produced a different number of records"
+            );
+            assert!(
+                gathered == by_one,
+                "at {workers} workers the sharding produced a different record sequence"
+            );
+            assert!(
+                the_file_written_from(&gathered) == expected,
+                "at {workers} workers the file differs from the one-worker file"
+            );
+        }
+    }
+
+    /// **The header's timestamp is the only thing allowed to differ, and it differs only inside
+    /// the header** — the second half of spec §7's sentence, which nothing held.
+    ///
+    /// The invariance claim is *byte-identical apart from any timestamp in the header*. The sweep
+    /// above holds the first half by keeping `created` fixed; this holds the second, by writing
+    /// the same records twice with two different stamps and requiring every differing byte to lie
+    /// inside the header.
+    ///
+    /// **Why it is worth a test of its own.** The timestamp is written into the header's TOML, so
+    /// a stamp of a different rendered *width* moves the header's length — and with it every
+    /// offset in the footer, the index, and the blocks' positions in the file. A run whose files
+    /// differed past the header would be one where nothing downstream could compare two samples
+    /// byte for byte, which is what §7 offers.
+    #[test]
+    fn two_runs_differing_only_in_their_timestamp_differ_only_inside_the_header() {
+        let write_stamped = |created: &str| {
+            let (dir, path) = a_file();
+            let mut header = a_header(1_000);
+            header.writer.created = created.parse().expect("a valid RFC 3339 stamp");
+            let mut writer = PspWriter::create(&path, header).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+            let bytes = bytes_of(&path);
+            drop(dir);
+            bytes
+        };
+        // Two stamps of the same rendered width, which is what a real run's clock produces.
+        let early = write_stamped("2026-08-28T00:00:00Z");
+        let later = write_stamped("2026-08-30T11:22:33Z");
+        assert_eq!(
+            early.len(),
+            later.len(),
+            "two stamps of the same width must not change the file's length"
+        );
+
+        let (_header, header_bytes) = {
+            let (dir, path) = a_file();
+            rewrite(&path, &early);
+            let read = crate::ng::psp::read_header_and_its_length(&path).expect("the header reads");
+            drop(dir);
+            read
+        };
+        let differing: Vec<usize> = early
+            .iter()
+            .zip(&later)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(at, _)| at)
+            .collect();
+        assert!(
+            !differing.is_empty(),
+            "two different stamps have to change something, or this test proves nothing"
+        );
+        assert!(
+            differing.iter().all(|at| *at < header_bytes),
+            "the two files differ outside the {header_bytes}-byte header, at {:?} — a timestamp \
+             is the one field spec §7 allows to differ, and only inside the header",
+            differing
+                .iter()
+                .filter(|at| **at >= header_bytes)
+                .take(8)
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// A file with no records at all still finishes, and its index is empty rather than absent.
     #[test]
     fn a_sample_with_no_records_still_finishes() {
