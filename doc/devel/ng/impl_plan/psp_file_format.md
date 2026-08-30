@@ -333,7 +333,7 @@ file rather than reading the blocks that reached disk.
 byte-identical files apart from the header's timestamp.
 ***Depends:*** F3. ***Source:*** [spec §7](../spec/psp_file_format.md).
 
-☐ **H4 — the memory number, measured not asserted.** N samples open and walked in lockstep at 1, 8,
+✅ **H4 — the memory number, measured not asserted.** N samples open and walked in lockstep at 1, 8,
 62 and 5,000, peak resident against the 500 kB per-open-sample budget. **Report the per-sample slope,
 not one point** — the budget is about the slope.
 ***Depends:*** G2. ***Source:*** [spec §5.2](../spec/psp_file_format.md).

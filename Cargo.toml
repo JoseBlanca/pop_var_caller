@@ -338,6 +338,13 @@ test = true
 name = "ng_psp_parity"
 test = true
 
+# The open-cost harness carries a test on the one piece of logic it has: which field of
+# `/proc/self/status` the peak is read from. `VmHWM` and `VmRSS` differ by three characters and
+# by everything that matters, and reading the wrong one turns the measurement into noise.
+[[example]]
+name = "ng_psp_open_cost"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.

@@ -19,7 +19,28 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **the same sample gathered at any worker count gives the
+> - **Last completed task (2026-08-30):** **an open sample costs 480 kB against a 500 kB budget,
+> and three quarters of it is not the reader** (step H4 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). Measured at 1, 2, 4, 8, 16, 32, 62, 125, 250, 500, 1,000 and **5,000** open
+> samples, one process each because `VmHWM` is a high-water mark and two counts in one process
+> would both report the larger — the slope would come back zero and the claim would pass by
+> construction. Least squares, **R² = 0.99999**. **The reader's own cost is 123 kB on the human
+> corpus and 101 kB on tomato** — near enough the same on two corpora whose depth and contig count
+> differ by two orders of magnitude, which is what spec §1.1 claims and the evidence for it.
+> **What is not the same is the header: 357 kB a sample against 7 kB, and the difference is 2,580
+> contigs against 13.** So **74 % of the human per-sample cost is a contig list identical in every
+> sample of the cohort**, at about 138 bytes a contig, retained N times over. The budget is met
+> with 19.7 kB — 4 % — to spare, and on a reference with about 3,700 contigs it would not be met at
+> all. **Sharing that list would take 480 kB to 123 kB**; it is the largest memory lever the store
+> has, it is not in any plan, and it belongs with `run_streaming.md`, which owns the run objects.
+> ⚠ **Two spec figures do not survive the port and are recorded rather than explained**: §5.2's
+> 257 kB and §5.4's 338 kB are prototype numbers with no contig list in them, so they do not
+> predict 480 kB; and §5.3's 190 kB zstd floor is not visible in a reader measured at 123 kB.
+> At 5,000 samples: **2.40 GB, measured rather than extrapolated.**
+> [H4](doc/devel/reports/implementations/ng_psp_h4_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **the same sample gathered at any worker count gives the
 > same file, and the timestamp is the only thing allowed to differ** (step H3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). ⚠ **What this can prove is narrower than the plan's sentence, and the report says

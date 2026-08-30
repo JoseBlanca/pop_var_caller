@@ -7,7 +7,7 @@
 //! real corpus rather than a forty-record fixture, and against a codec that is not it.
 //!
 //! ```text
-//! cargo run --release --example ng_psp_parity -- <a production .psp> [--limit N] [--work DIR]
+//! cargo run --release --example ng_psp_parity -- <a production .psp> [--limit N] [--work DIR] [--label NAME] [--grid-bp N]
 //! ```
 //!
 //! # The three streams, and what each pair proves
@@ -119,13 +119,13 @@ const PROTOTYPE_BLOCK_BYTES: usize = 1 << 20;
 /// without the array would silently stop counting the groups past its end.
 const READ_GROUPS_IN_THE_CORPUS: usize = 4;
 
-/// The genomic grid both stores cut on, in base pairs.
+/// The default for `--grid-bp`: the genomic grid both stores cut on, in base pairs.
 ///
 /// **Smaller than the settled 100 kb**, so that a corpus of a few hundred thousand records cuts
 /// hundreds of blocks rather than a handful: every running difference in the format resets at a
 /// block boundary, and a parity run that crossed two of them would be proving very little about
 /// the reset.
-const GRID_BP: u32 = 10_000;
+const DEFAULT_GRID_BP: u32 = 10_000;
 
 // ---------------------------------------------------------------------
 // The corpus: a production record as an ng record
@@ -233,7 +233,11 @@ fn as_a_read_set(ids: &[ChainId]) -> Vec<ChainId> {
 
 /// ng's header, built from the production file's own so that the two stores describe the same
 /// reference and the same contig numbering.
-fn an_ng_header(source: &Path, production: &ProductionPspReader<BufReader<File>>) -> Header {
+fn an_ng_header(
+    source: &Path,
+    production: &ProductionPspReader<BufReader<File>>,
+    grid_bp: u32,
+) -> Header {
     let parsed = production.header();
     Header {
         format_version: FORMAT_VERSION,
@@ -267,14 +271,14 @@ fn an_ng_header(source: &Path, production: &ProductionPspReader<BufReader<File>>
             command_line: std::env::args().collect::<Vec<_>>().join(" "),
             parameters: BTreeMap::from([(
                 "genomic-block-size-bp".to_string(),
-                ParameterValue::Integer(i64::from(GRID_BP)),
+                ParameterValue::Integer(i64::from(grid_bp)),
             )]),
             created: "2026-08-28T00:00:00Z"
                 .parse()
                 .expect("a valid RFC 3339 stamp"),
         },
         manifest: Manifest {
-            genomic_block_size_bp: Bp(u64::from(GRID_BP)),
+            genomic_block_size_bp: Bp(u64::from(grid_bp)),
             ..Manifest::as_this_build_writes_it()
         },
     }
@@ -320,9 +324,14 @@ struct WhatTheNgStoreWriteProduced {
 /// same source records: the two used to implement the limit differently and disagreed by one
 /// record at `--limit 0`, which then surfaced as *the ng store holds records the source does
 /// not* — a data-integrity message for an argument-parsing difference.
-fn write_the_ng_store(source: &Path, out: &Path, limit: usize) -> WhatTheNgStoreWriteProduced {
+fn write_the_ng_store(
+    source: &Path,
+    out: &Path,
+    limit: usize,
+    grid_bp: u32,
+) -> WhatTheNgStoreWriteProduced {
     let mut production = open_production(source);
-    let header = an_ng_header(source, &production);
+    let header = an_ng_header(source, &production, grid_bp);
     let mut writer = PspWriter::create(out, header.clone()).expect("create the ng store");
     let (mut pushed, mut skipped) = (0u64, 0u64);
     for record in production.records().take(limit) {
@@ -438,9 +447,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let source = PathBuf::from(
         args.next()
-            .expect("usage: ng_psp_parity <a production .psp> [--limit N] [--work DIR]"),
+            .expect("usage: ng_psp_parity <a production .psp> [--limit N] [--work DIR] [--label NAME] [--grid-bp N]"),
     );
     let mut limit = usize::MAX;
+    let mut grid_bp = DEFAULT_GRID_BP;
     let mut work = PathBuf::from("tmp/ng_psp_parity");
     let mut label = source
         .file_stem()
@@ -455,6 +465,14 @@ fn main() {
                 limit = value
                     .parse()
                     .unwrap_or_else(|why| panic!("--limit {value:?} is not a record count: {why}"));
+            }
+            "--grid-bp" => {
+                let value = args
+                    .next()
+                    .expect("--grid-bp needs a genomic block size in base pairs");
+                grid_bp = value.parse().unwrap_or_else(|why| {
+                    panic!("--grid-bp {value:?} is not a base-pair count: {why}")
+                });
             }
             "--work" => {
                 work = PathBuf::from(args.next().expect("--work needs a directory to write into"))
@@ -471,11 +489,12 @@ fn main() {
         limit > 0,
         "--limit needs at least one record; 0 compares nothing"
     );
+    assert!(grid_bp > 0, "--grid-bp needs a positive block size");
     std::fs::create_dir_all(&work).expect("create the work directory");
     let ng_store = work.join(format!("{label}.ngpsp"));
     let prototype_store = work.join(format!("{label}.ngs"));
 
-    let written = write_the_ng_store(&source, &ng_store, limit);
+    let written = write_the_ng_store(&source, &ng_store, limit, grid_bp);
     assert!(
         written.records_pushed > 0,
         "the corpus produced no ng records at all"
@@ -500,7 +519,7 @@ fn main() {
         prototype_store.to_str().expect("a utf-8 path"),
         prototype::EncodeSettings {
             block_bytes: PROTOTYPE_BLOCK_BYTES,
-            genomic_block_bp: GRID_BP,
+            genomic_block_bp: grid_bp,
             // The store carries every field rather than the light subset, does not length-prefix
             // its records, and does write a record head — which is the shape ng writes.
             light_only: false,
@@ -515,7 +534,7 @@ fn main() {
     let (shape, worst) =
         walk_the_three_streams_in_lockstep(&source, &ng_store, &prototype_store, limit, &written);
     assert_the_run_proves_something(&shape, &worst);
-    print_the_report(&label, &work, &shape, &worst, &written);
+    print_the_report(&label, &work, grid_bp, &shape, &worst, &written);
 }
 
 /// Walk the source, the ng store and the prototype's store together, and fail on the first
@@ -1042,6 +1061,7 @@ fn assert_the_run_proves_something(shape: &CorpusShape, worst: &WorstDrift) {
 fn print_the_report(
     label: &str,
     work: &Path,
+    grid_bp: u32,
     shape: &CorpusShape,
     worst: &WorstDrift,
     written: &WhatTheNgStoreWriteProduced,
@@ -1050,7 +1070,7 @@ fn print_the_report(
     println!("phase\tng-psp-parity");
     println!("corpus\t{label}");
     println!("work-dir\t{}", work.display());
-    println!("genomic-grid-bp\t{GRID_BP}");
+    println!("genomic-grid-bp\t{grid_bp}");
     println!("records-compared\t{}", shape.records);
     println!("records-pushed\t{}", written.records_pushed);
     println!(
