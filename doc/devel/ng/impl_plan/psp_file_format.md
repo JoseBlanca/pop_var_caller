@@ -367,16 +367,15 @@ survives is an open question the arch doc records** (arch §7).
 >
 > **Three things are raised rather than taken, and all three are the owner's:**
 >
-> 1. **Sharing the contig list across a cohort's open samples** would take 480 kB to 123 kB. It is
->    the largest memory lever the store has and it is in no plan; it belongs with
->    [`run_streaming.md`](../spec/run_streaming.md), which owns the run objects.
-> 2. **Spec §7's byte-identity holds only while every timestamp renders to the same width**, and
->    nothing enforces it: `created` is a `toml::value::Datetime`, and two extra characters move
->    every offset past the header. Normalise the stamp, refuse a variable-width one, or amend §7.
-> 3. **Spec §6.7's table is short three rows** — the wrong-file class, a malformed header for
->    `append` and `replace_trailer`, and `records_from_block`'s no-such-block. H2 sharpened the
->    first: a *truncated* ng psp is never reported as the wrong kind of file, so that row would be
->    about foreign files only.
+> 1. ✅ **Sharing the contig list** would take 480 kB to 123 kB — the largest memory lever the
+>    store has. **Ruled 2026-08-30: not a psp question.** The list a reader needs can come from the
+>    code that already handles the fasta reference, rather than from N copies parsed out of N
+>    headers. Nothing changes in `psp/`; the saving is the run assembler's to take.
+> 2. ✅ **Spec §7's byte-identity holds only while every timestamp renders to the same width**, and
+>    nothing enforces it. **Ruled 2026-08-30: not worth chasing.** The writer is unchanged and §7
+>    keeps its wording; a test records where the promise stops.
+> 3. ⏳ **Spec §6.7's table and §7's instruction list are short seven error classes, not three** —
+>    the count in the first version of this checkpoint was wrong. With the owner for a ruling.
 >
 > **What Milestone H leaves owed** is arch §7's question, now much narrower. The skip's value is
 > measured on stores built from a production `.psp`, which names about 3.4 % of the reads ng will
