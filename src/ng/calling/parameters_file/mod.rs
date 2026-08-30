@@ -189,7 +189,7 @@ pub const FORMAT_VERSION: u32 = 1;
 pub enum ParametersFileError {
     /// The text is not a parameters file: it is not TOML, or it is TOML this shape does not
     /// accept.
-    #[error("the parameters file could not be read")]
+    #[error("the parameters file could not be read{}", .in_the_files_words.as_deref().map(|said| format!(": {said}")).unwrap_or_default())]
     Malformed {
         /// The 1-based line the failure is on, where the failure has a position.
         ///
@@ -210,6 +210,30 @@ pub enum ParametersFileError {
         /// names the failure and leaves the detail to the source.
         #[source]
         source: toml::de::Error,
+        /// **What the parser said, in the file's own vocabulary** — and `None` wherever it said
+        /// something this module has no better word for.
+        ///
+        /// **Spec §4 chose an existing parser partly for its diagnostics, and for most of the
+        /// edits a person makes they are good**: a mistyped key lists the keys expected, a
+        /// warrant outside the four lists the four, a mistyped unit lists the three units. **One
+        /// shape is not.** A value the key cannot hold is refused as `invalid type: string "two",
+        /// expected u8`, or as ``invalid value: integer `-1`, expected u8`` — and `u8`, `f64` and
+        /// `u64` appear nowhere in this file, its comments or its spec. Owner's ruling of
+        /// 2026-08-30: re-word that one, scoped to it, and leave everything the crate does well
+        /// alone.
+        ///
+        /// **A sentence added rather than a message replaced.** The parser's own diagnostic
+        /// carries the line, the column, the offending line of the file and a caret under it, and
+        /// nothing here can reproduce those; it stays as this error's `source`. What this adds is
+        /// the one clause a geneticist can act on, at the head of the chain.
+        ///
+        /// **It is `None` for every shape it does not recognise**, so a message this module has
+        /// not met degrades to the parser's own rather than to a wrong translation. Both halves of
+        /// the message it does recognise are `serde`'s rather than the `toml` crate's, so it is a
+        /// `serde` upgrade that could reword them, and one that did would lose the clause instead
+        /// of mistranslating it. `a_wrong_type_is_reported_in_the_files_own_words` is what would
+        /// notice.
+        in_the_files_words: Option<String>,
     },
     /// The file parses, spells this shape, and says something no run can mean.
     ///
@@ -349,7 +373,18 @@ pub struct WarrantedValue {
 ///
 /// **A new quantity with a new unit adds a variant here**, which is a deliberate act, rather than
 /// silently reusing a word that means something else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # It is read by hand, and the reason is one message
+///
+/// `Serialize` is derived and `Deserialize` is not (`from_toml`'s `AUnitAndItsCount`). Under the
+/// derive, an `observations` table left empty is refused with *wanted exactly 1 element, found 0
+/// elements* — which names neither the key nor any of the three units, and "element" is the
+/// parser's word for a key of a table rather than for anything in this file.
+/// **And that is the path the file's own header invites**: it tells a reader who changes a number
+/// to "change its warrant to `supplied` and delete its `observations`", and a reader who empties
+/// the braces instead of deleting the key lands exactly there. Owner's ruling of 2026-08-30, one
+/// of two message shapes re-worded and the only one worth a hand-written reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceCount {
     /// Reads — what a per-read rate is fitted over, as

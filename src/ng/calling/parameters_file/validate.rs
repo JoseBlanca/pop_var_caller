@@ -648,8 +648,8 @@ impl ParametersFile {
                 at,
                 if fitted_any {
                     format!(
-                        "is `{}`, and `length_spectrum_by_stratum` holds {} fitted stratum \
-                         spectra; the bottom rung states the median of those, so its warrant is \
+                        "is `{}`, and {} of this file's strata were fitted on their own tracts; \
+                         the bottom rung states the median of those, so its warrant is \
                          `fitted_here` — it is `defaulted` only where no stratum was fitted at all",
                         the_word_for(warrant),
                         tracts.length_spectrum_by_stratum.len()

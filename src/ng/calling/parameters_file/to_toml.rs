@@ -89,6 +89,8 @@ impl ParametersFile {
                 "",
                 "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
                 "",
+                "**Two keys do not take a warrant of your choosing.** `repeat_tracts.fallback_length_spectrum_concentration`'s is decided by whether this file holds any fitted stratum spectrum, and `stated_constants.repeat_tract_outlier_weight`'s is `defaulted` only at the caller's own constant — both are refused if you set them otherwise, and both say so.",
+                "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
                 "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured; a zero means it was measured and found to be zero. The sections below say which is which where it matters.",

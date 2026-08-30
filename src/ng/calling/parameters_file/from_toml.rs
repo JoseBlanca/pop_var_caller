@@ -3,7 +3,8 @@
 //!
 //! # Why this is thin
 //!
-//! The shape derives `Deserialize`, and the writer's own text already parses through it:
+//! The shape derives `Deserialize` — every type but [`EvidenceCount`], whose reader is written by
+//! hand for one message's sake (below) — and the writer's own text already parses through it:
 //! `to_toml`'s `the_written_text_reads_back_as_the_same_file` writes the whole fixture and reads
 //! it back equal, and the parent module's `the_documented_inline_form_parses` pins that the
 //! one-row-a-line inline form the hand-written writer emits is a form the derived reader accepts.
@@ -41,16 +42,20 @@
 //! contamination table in which no row was measured — is accepted here and refused by step C2's
 //! `validate`, which runs after this and before the projection back to `RunParameters`.
 //!
-//! **It does not translate the parser's vocabulary into the file's.** Spec §4 chose an existing
-//! parser partly for what its diagnostics buy, and for four of the five edits a person is likely
-//! to make they are good: a mistyped key lists the keys that were expected, a warrant outside the
-//! four lists the four. Two kinds of message are still the crate's rather than this file's — a
-//! scalar of the wrong type names a Rust type (`expected u8`), and an `observations` table with
-//! no entry or with two reports "wanted exactly 1 element". Both are legible to a programmer and
-//! not to the geneticist spec §1.2 goal 3 describes. **Whether this module should re-word them is
-//! a decision the owner has not been asked**, and it is raised at Checkpoint C rather than
-//! settled here, because re-wording turns this file from a wrapper over a parser into a
-//! translator of one.
+//! **It translates two of the parser's messages into the file's vocabulary, and only two.** Spec
+//! §4 chose an existing parser partly for what its diagnostics buy, and for most of the edits a
+//! person is likely to make they are good: a mistyped key lists the keys that were expected, a
+//! warrant outside the four lists the four, a mistyped unit lists the three units. **Two were
+//! not.** A value the key cannot hold named a Rust type — `invalid type: string "two", expected
+//! u8` — where `u8`, `f64` and `u64` appear nowhere in this file, its comments or its spec; and
+//! an `observations` table left empty or given two entries reported *wanted exactly 1 element*,
+//! naming neither the key nor any of the three units, in the very path the file's own header
+//! invites. Owner's ruling of 2026-08-30, after C1's reader pass raised both.
+//!
+//! **The first is a clause added to this module's own message**, with the parser's diagnostic —
+//! line, column, offending line and caret — kept underneath as the error's source
+//! ([`a_value_the_key_cannot_hold_in_the_files_words`]). **The second is a hand-written reader**
+//! for [`EvidenceCount`] alone. Everything else the crate says is left exactly as it is.
 //!
 //! # One naming rule
 //!
@@ -59,7 +64,9 @@
 //! `the_failure_is_on_line` is a claim about an error and panics when it is false. The sibling
 //! files each state their own rule and none of them is the crate's (`to_toml.rs` header).
 
-use super::{ParametersFile, ParametersFileError};
+use super::{EvidenceCount, ParametersFile, ParametersFileError};
+use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 
 impl ParametersFile {
     /// **The file, from text** — the reverse of [`ParametersFile::to_toml`].
@@ -81,13 +88,103 @@ impl ParametersFile {
     /// so that one case names a line a reader cannot act on. See
     /// `a_missing_key_is_reported_at_the_thing_that_should_have_held_it`.
     pub fn from_toml(text: &str) -> Result<Self, ParametersFileError> {
-        toml::from_str(text).map_err(|source| ParametersFileError::Malformed {
-            line: source
+        toml::from_str(text).map_err(|source| {
+            let line = source
                 .span()
-                .map(|span| the_line_number_at(text, span.start)),
-            source,
+                .map(|span| the_line_number_at(text, span.start));
+            ParametersFileError::Malformed {
+                line,
+                in_the_files_words: a_value_the_key_cannot_hold_in_the_files_words(
+                    source.message(),
+                    line,
+                ),
+                source,
+            }
         })
     }
+}
+
+/// **A value the key cannot hold, said in the file's words** — and `None` for anything else.
+///
+/// `serde` raises two messages for this, and the difference is not one a person editing a file
+/// would draw: `invalid type: string "two", expected u8` where the *kind* is wrong, and
+/// ``invalid value: integer `-1`, expected u8`` where the kind is right and the number is not one
+/// the key can hold. Both end in a **Rust type** — `u8`, `f64`, `u64` — and none of those appears
+/// in this file, in its comments, or in its spec. Owner's ruling of 2026-08-30 to re-word this
+/// shape, and this shape only.
+///
+/// **It takes the message alone, never the rendering.** `toml::de::Error`'s `Display` writes the
+/// offending line of the *document* above the message, so a search over the rendered text reads
+/// the user's own file back — and a file with `invalid type: string` in a trailing comment, which
+/// is what a person pasting the last error in while they edit produces, would have had a clause
+/// fabricated out of its own text.
+///
+/// **It names the line and never the key.** The failing key is not in `serde`'s message, and a
+/// wrongly-typed *element* of a list — a sample name written as a number — sits on a line with no
+/// key on it at all, so a sentence saying *this key* would be contradicted by the caret under it.
+///
+/// **Every unrecognised half gives `None` for the whole sentence**, so a message this function
+/// has not met reaches the reader as `serde`'s own rather than as a half-translation. Both halves
+/// are `serde`'s rather than the `toml` crate's — the first from `Error::invalid_type`, the second
+/// from each visitor's `expecting` — so it is a `serde` upgrade that could reword them, and one
+/// that did would drop the clause rather than mistranslate it.
+fn a_value_the_key_cannot_hold_in_the_files_words(
+    said: &str,
+    line: Option<usize>,
+) -> Option<String> {
+    let at = match line {
+        Some(line) => format!("line {line} holds"),
+        None => "one of this file's values is".to_owned(),
+    };
+    if let Some(after) = said.strip_prefix("invalid type: ") {
+        let (found, wanted) = after.split_once(", expected ")?;
+        return Some(format!(
+            "{at} {}, where {} belongs",
+            a_word_for_what_was_there(found.trim())?,
+            a_word_for_what_a_key_holds(wanted.trim())?
+        ));
+    }
+    // **The kind is right and the number is not** — a negative in a count, or one past what the
+    // key's width holds. `serde` writes the offending value in backticks here, and quoting it
+    // back is worth more than naming its kind: the reader typed it.
+    let after = said.strip_prefix("invalid value: integer `")?;
+    let (value, wanted) = after.split_once("`, expected ")?;
+    Some(format!(
+        "{at} {value}, and this key takes {}",
+        a_word_for_what_a_key_holds(wanted.trim())?
+    ))
+}
+
+/// The file's word for the kind of thing the parser found, from `serde`'s own phrase for it.
+fn a_word_for_what_was_there(found: &str) -> Option<&'static str> {
+    // `serde` writes the value itself after the kind — `string "two"`, ``integer `3` `` — so this
+    // matches the opening word and drops the value, which the parser's caret already points at.
+    Some(match found.split_whitespace().next()? {
+        "string" => "text",
+        "integer" => "a whole number",
+        "floating" => "a number with a decimal point",
+        "boolean" => "true or false",
+        "sequence" => "a list",
+        "map" => "a table",
+        _ => return None,
+    })
+}
+
+/// The file's word for what the key holds, from the Rust type `serde` names.
+///
+/// **Only the types this file's shape uses.** Every integer key in it is unsigned — the shape has
+/// no signed field at all — which is what makes *zero or more* a true thing to say rather than an
+/// accident. A field added at some other type falls through to `None` and keeps `serde`'s own
+/// message, rather than being described by a sentence written for a type it does not have.
+fn a_word_for_what_a_key_holds(wanted: &str) -> Option<&'static str> {
+    Some(match wanted {
+        "u8" | "u32" | "u64" => "a whole number, zero or more",
+        "f64" => "a number",
+        "a string" | "a borrowed string" => "text",
+        "a boolean" => "true or false",
+        "a sequence" => "a list, in square brackets",
+        _ => return None,
+    })
 }
 
 /// **Which 1-based line of `text` the byte at `offset` falls on.**
@@ -104,6 +201,77 @@ fn the_line_number_at(text: &str, offset: usize) -> usize {
         .filter(|byte| **byte == b'\n')
         .count()
         + 1
+}
+
+/// **`observations = { reads = 812344 }`, read by hand.**
+///
+/// The derive reads this shape correctly and refuses it in the `toml` crate's words: *wanted
+/// exactly 1 element, found 0 elements* for an empty table, and *wanted exactly 1 element, more
+/// than 1 element* for one naming two units — raised by that crate's own table deserialiser
+/// before `serde` sees the enum at all. Neither message contains the word `observations`, either
+/// of the three unit names, or anything a reader of this file has met; "element" is the parser's
+/// word for a key of a table. And the empty case sits in the path the file's own header sends a
+/// person down. Owner's ruling of 2026-08-30.
+///
+/// **It refuses exactly what the derive refuses**, in three cases rather than one: no unit, an
+/// unknown unit, and two units. The count itself is left to `serde`, whose message for a
+/// non-integer there names the key and the value.
+impl<'de> Deserialize<'de> for EvidenceCount {
+    fn deserialize<D: Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        /// The three units this file counts in, in the file's own spelling, for a message that
+        /// has to list them.
+        const THE_UNITS: &str = "`reads`, `covered_positions` or `bases_compared`";
+
+        struct AUnitAndItsCount;
+
+        impl<'de> Visitor<'de> for AUnitAndItsCount {
+            type Value = EvidenceCount;
+
+            fn expecting(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    out,
+                    "an `observations` table naming one of {THE_UNITS} and how many of them"
+                )
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut table: A) -> Result<Self::Value, A::Error> {
+                let Some(unit) = table.next_key::<String>()? else {
+                    return Err(de::Error::custom(format!(
+                        "`observations` is empty. It names one of {THE_UNITS}, and how many of \
+                         them stood behind the `value` beside it. If you changed that value, \
+                         delete the whole `observations` key and set `warrant` to `supplied` — \
+                         an empty `{{ }}` still says the number was measured, and no longer says \
+                         on what"
+                    )));
+                };
+                // **The unit is matched before the count is read**, so that a table naming a
+                // unit this file does not count in is told so — rather than being told the type
+                // of the number beside a key the file does not have.
+                let counted: fn(u64) -> EvidenceCount = match unit.as_str() {
+                    "reads" => EvidenceCount::Reads,
+                    "covered_positions" => EvidenceCount::CoveredPositions,
+                    "bases_compared" => EvidenceCount::BasesCompared,
+                    unknown => {
+                        return Err(de::Error::custom(format!(
+                            "`observations` counts `{unknown}`, and the units this file counts \
+                             in are {THE_UNITS}"
+                        )));
+                    }
+                };
+                let counted = counted(table.next_value::<u64>()?);
+                if let Some(also) = table.next_key::<String>()? {
+                    return Err(de::Error::custom(format!(
+                        "`observations` names both `{unit}` and `{also}`, and it names one — \
+                         delete the wrong one. The three units differ by orders of magnitude on \
+                         the same cohort, so a count under the wrong one compares to nothing"
+                    )));
+                }
+                Ok(counted)
+            }
+        }
+
+        reader.deserialize_map(AUnitAndItsCount)
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +299,7 @@ mod tests {
 
     /// Both derivations of the failing line, asserted to be `expected` and so to agree.
     #[track_caller]
-    fn the_failure_is_on_line(error: &ParametersFileError, expected: usize) {
+    pub(super) fn the_failure_is_on_line(error: &ParametersFileError, expected: usize) {
         assert_eq!(
             error.line(),
             Some(expected),
@@ -151,7 +319,7 @@ mod tests {
     /// Returns the text and the 1-based line the replacement landed on, **counted from the text
     /// itself** and by a different route than [`the_line_number_at`] takes, so a fixture's
     /// expected line is a third derivation rather than an echo of the one under test.
-    fn the_written_file_with(find: &str, replace_with: &str) -> (String, usize) {
+    pub(super) fn the_written_file_with(find: &str, replace_with: &str) -> (String, usize) {
         let text = a_file_using_every_shape().to_toml();
         let at = text
             .find(find)
@@ -412,6 +580,256 @@ mod tests {
             the_line_number_at("a\nb\nc", 99),
             3,
             "an offset past the end belongs to the last line, as the crate clamps it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_two_messages_written_for_a_programmer {
+    use super::super::tests::a_file_using_every_shape;
+    use super::tests::{the_failure_is_on_line, the_written_file_with};
+    use super::*;
+
+    fn refused(text: &str) -> ParametersFileError {
+        ParametersFile::from_toml(text).expect_err("this edit is not a parameters file")
+    }
+
+    /// **A value the key cannot hold is reported in the file's words, and the parser's own
+    /// diagnostic is still underneath it.**
+    ///
+    /// `serde` says `invalid type: string "two", expected u8`, and `u8` appears nowhere in this
+    /// file, its comments or its spec. Owner's ruling of 2026-08-30: re-word this shape, and this
+    /// one only.
+    ///
+    /// **The line comes out of the fixture rather than being typed here**, and is asserted
+    /// through `the_failure_is_on_line`, which compares this module's arithmetic against the
+    /// number the crate renders in its own prose — so a line added to the writer's header moves
+    /// the expectation with it rather than failing the test.
+    #[test]
+    fn a_wrong_type_is_reported_in_the_files_own_words() {
+        let (text, line) = the_written_file_with("ploidy = 2", "ploidy = \"two\"");
+        let error = refused(&text);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the parameters file could not be read: line {line} holds text, where a whole \
+                 number, zero or more belongs"
+            )
+        );
+        the_failure_is_on_line(&error, line);
+        assert!(
+            error.rendered_by_the_parser().contains("expected u8"),
+            "the parser's own diagnostic is kept as the source, caret and all: {}",
+            error.rendered_by_the_parser()
+        );
+
+        // A number key given text, and a text key given a number: the same shape both ways round.
+        let (text, line) = the_written_file_with(
+            "reference_concentration = 1.0",
+            "reference_concentration = \"one\"",
+        );
+        let error = refused(&text);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the parameters file could not be read: line {line} holds text, where a number \
+                 belongs"
+            )
+        );
+        let (text, line) = the_written_file_with("reference_digest = ", "reference_digest = 12 #");
+        let error = refused(&text);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the parameters file could not be read: line {line} holds a whole number, where \
+                 text belongs"
+            )
+        );
+    }
+
+    /// **A number of the right kind that the key still cannot hold says which number it was.**
+    ///
+    /// `serde` raises this one as `invalid value` rather than `invalid type` — a different message
+    /// for what a person editing a file would call the same mistake — so a translation written for
+    /// the first alone would miss the edit most likely to make it: typing a negative, or a count
+    /// past the width of its key.
+    #[test]
+    fn a_number_the_key_cannot_hold_names_the_number() {
+        let (text, line) = the_written_file_with("ploidy = 2", "ploidy = -1");
+        let error = refused(&text);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the parameters file could not be read: line {line} holds -1, and this key takes \
+                 a whole number, zero or more"
+            )
+        );
+        the_failure_is_on_line(&error, line);
+
+        let (text, line) = the_written_file_with("ploidy = 2", "ploidy = 300");
+        assert_eq!(
+            refused(&text).to_string(),
+            format!(
+                "the parameters file could not be read: line {line} holds 300, and this key takes \
+                 a whole number, zero or more"
+            )
+        );
+    }
+
+    /// **A message this module has no better word for reaches the reader as the parser's own.**
+    ///
+    /// The clause is added where it helps and omitted everywhere else, so a `serde` upgrade that
+    /// reworded its diagnostics loses the clause rather than mistranslating it — and the shapes
+    /// spec §4 chose this parser *for* are left exactly as they are.
+    ///
+    /// **The last case is the one that matters.** The translation reads the parser's *message*
+    /// and never its rendering, because the rendering echoes the offending line of the user's own
+    /// file above the message — so a file carrying `invalid type: string` in a comment, which is
+    /// what a person pasting the last error back in while they edit produces, would otherwise have
+    /// had a clause fabricated out of its own text.
+    #[test]
+    fn every_other_failure_keeps_the_parsers_own_message() {
+        for (find, replace_with) in [
+            // A mistyped key, which the parser answers by listing the keys it expected.
+            ("ploidy = 2", "ploidyy = 2"),
+            // A warrant outside the four, which it answers by listing the four.
+            (
+                "warrant = \"fitted_here\"",
+                "warrant = \"fitted_over_there\"",
+            ),
+            // A rung outside its own four, which is the same shape one vocabulary along.
+            (
+                "rung = \"fitted_curve\"",
+                "rung = \"a curve somebody fitted\"",
+            ),
+            // Not TOML at all.
+            ("ploidy = 2", "ploidy ="),
+            // A file whose own text carries the words the translation looks for. The failure is
+            // the mistyped key; the comment is what a person pasting the last error back in
+            // produces, and a search over the parser's *rendering* would have read it.
+            (
+                "ploidy = 2",
+                "ploidyy = 2 # invalid type: string \"two\", expected u8",
+            ),
+        ] {
+            let (text, _) = the_written_file_with(find, replace_with);
+            let error = refused(&text);
+            assert_eq!(
+                error.to_string(),
+                "the parameters file could not be read",
+                "nothing is added to a message this module has no better word for; the parser \
+                 said:\n{}",
+                error.rendered_by_the_parser()
+            );
+        }
+    }
+
+    /// **An `observations` table left empty names the key, its three units, and both halves of
+    /// the fix.**
+    ///
+    /// The derive answers it with *wanted exactly 1 element, found 0 elements* — no key, no unit,
+    /// and "element" is the parser's word for a key of a table. **And this is the path the file's
+    /// own header sends a reader down**: it says that a number you change needs its warrant set
+    /// to `supplied` and its `observations` deleted, and a reader who empties the braces rather
+    /// than deleting the key lands here. So the message says *both* halves — deleting the
+    /// observations alone leaves a number somebody typed claiming it was fitted here, which
+    /// validates.
+    #[test]
+    fn an_emptied_observations_table_names_the_key_and_its_units() {
+        let (text, _) =
+            the_written_file_with("observations = { reads = 812344 }", "observations = {}");
+        let said = refused(&text).rendered_by_the_parser();
+        assert!(said.contains("`observations` is empty"), "{said}");
+        assert!(
+            said.contains("`reads`, `covered_positions` or `bases_compared`"),
+            "it names the three units the file counts in: {said}"
+        );
+        assert!(
+            said.contains("delete the whole `observations` key")
+                && said.contains("set `warrant` to `supplied`"),
+            "and both halves of the edit the header's own instruction meant: {said}"
+        );
+        assert!(
+            !said.contains("element"),
+            "and it does not speak of elements: {said}"
+        );
+    }
+
+    /// **A table naming two units, or a unit this file does not count in, says so and says what
+    /// to do.**
+    ///
+    /// The unknown unit is checked before the count is read, so a table naming a unit the file
+    /// does not have is told that — rather than being told the type of the number beside a key
+    /// the file has never had.
+    #[test]
+    fn an_observations_table_that_names_the_wrong_number_of_units_says_which() {
+        let (text, _) = the_written_file_with(
+            "observations = { reads = 812344 }",
+            "observations = { reads = 812344, bases_compared = 7 }",
+        );
+        let said = refused(&text).rendered_by_the_parser();
+        assert!(
+            said.contains("`reads`") && said.contains("`bases_compared`"),
+            "{said}"
+        );
+        assert!(said.contains("delete the wrong one"), "{said}");
+
+        for count in ["4", "\"four\""] {
+            let (text, _) = the_written_file_with(
+                "observations = { reads = 812344 }",
+                &format!("observations = {{ lanes = {count} }}"),
+            );
+            let said = refused(&text).rendered_by_the_parser();
+            assert!(
+                said.contains("counts `lanes`"),
+                "the unit is judged before the count, so a unit this file does not have is what \
+                 the message is about whatever type its number is: {said}"
+            );
+            assert!(
+                said.contains("`reads`, `covered_positions` or `bases_compared`"),
+                "{said}"
+            );
+        }
+    }
+
+    /// **The hand-written reader accepts every shape the derive did**, which is what stops the
+    /// re-wording from narrowing what a file may say.
+    #[test]
+    fn the_hand_written_reader_takes_every_unit_the_file_writes() {
+        let file = a_file_using_every_shape();
+        let read = ParametersFile::from_toml(&file.to_toml()).expect("the writer's own text");
+        assert_eq!(read, file);
+
+        // All three units, each in the row the file writes it in.
+        let counts: Vec<EvidenceCount> = [
+            read.base_quality_calibration.by_read_group[0]
+                .error_probability_multiplier
+                .observations,
+            read.inbreeding.by_sample[0]
+                .inbreeding_coefficient
+                .observations,
+            read.repeat_tracts.substitution_rate_by_stratum[0]
+                .rate
+                .observations,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(
+            counts,
+            vec![
+                EvidenceCount::Reads(812_344),
+                EvidenceCount::CoveredPositions(180_600_412),
+                EvidenceCount::BasesCompared(40_122),
+            ]
+        );
+
+        // **And the layout `serde`'s own serialiser writes**, which is the other of the two golden
+        // files: a `[[…]]` header table rather than an inline one, on the same three units.
+        let serdes = toml::to_string(&file).expect("the shape serialises");
+        assert_eq!(
+            ParametersFile::from_toml(&serdes).expect("and reads back"),
+            file
         );
     }
 }
