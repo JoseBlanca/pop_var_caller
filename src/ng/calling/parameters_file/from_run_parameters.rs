@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use super::bindings::hex_digest;
 use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, CensusIdentity, Contamination,
     ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach, EvidenceCount,
@@ -26,6 +27,7 @@ use crate::ng::calling::likelihood::{ContaminationView, ReadGroupCalibration};
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::parameter_estimation::joint::census::Stratum;
 use crate::ng::parameter_estimation::joint::contamination::ContaminationSource;
+use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches as DeclaredBatches;
 use crate::ng::parameter_estimation::joint::share_curve::{
     ShareCurve as FittedShareCurve, ShareCurveSource, ShareShape as FittedShape, ShareSource,
@@ -45,8 +47,8 @@ impl ParametersFile {
     /// `run` is the parameters calling read; `read_groups` is the run's own table, which supplies
     /// every name in the file; `base_quality_rate_by_read_group` and `inbreeding_by_sample` are
     /// the two pre-pass estimate sets assembly consumed and did not keep (below);
-    /// `reference_digest` and `census` are what the file is bound to (spec §3.1, §6), and neither
-    /// is derivable from the numbers.
+    /// `reference` and `census` are what the file is bound to (spec §3.1, §6), and neither is
+    /// derivable from the numbers.
     ///
     /// # It reads more than `RunParameters`, and that is the point
     ///
@@ -80,13 +82,26 @@ impl ParametersFile {
     /// gets no row. Those are three of spec §5's five states, and this is the only code that can
     /// get them wrong on the way out.
     ///
-    /// # What this does not mint
+    /// # The two derived bindings, and why only one of them is this run's to choose
     ///
-    /// `reference_digest` and `census` are stored verbatim. **Minting them is the caller's**, and
-    /// the census's term names must be the ones
-    /// [`RecordingTerms::first_disagreement`](crate::ng::parameter_estimation::joint::census::RecordingTerms::first_disagreement)
-    /// uses, because spec §6's fourth binding reports which term differed in those words. The
-    /// digest is a lower-case hex digest of the reference; nothing here can check that it is one.
+    /// **The reference arrives as the run's own [`ReferenceDigest`] and is spelled here**, so
+    /// that the string this writes and the string a later run compares it against come out of
+    /// one function — step D2's is what does the comparing. A file naming another reference is
+    /// refused (spec §6), so a file this run is allowed to write already names this run's
+    /// reference, and the run's own digest is the only value this could write.
+    ///
+    /// **The census arrives already minted**, by [`CensusIdentity::of`], and there are two
+    /// reasons rather than one. A mismatched census *demotes* rather than refusing (spec §6), so
+    /// a run that read a file fitted under other terms and writes its parameters out again (spec
+    /// §7 — every run writes the file it used) has to write back the terms it read, not its own.
+    /// And a **direct-mode run has no census at all** — no pre-pass and no psp
+    /// (`run_streaming.md` §2) — so there is no `RecordingTerms` for it to hand over. Which
+    /// census a file names is therefore its caller's to say, where which reference it names is
+    /// not.
+    ///
+    /// **⚑ One run cannot satisfy this signature**: `ReferenceDigest::of` refuses a reference
+    /// read from a `.fai` alone, which holds no bases to digest, while spec §7 says writing is
+    /// unconditional. What such a run writes is step F1's, at the call site.
     ///
     /// **Six arguments rather than a bundle type**, on the same grounds
     /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)
@@ -139,7 +154,7 @@ impl ParametersFile {
         read_groups: &ReadGroups,
         base_quality_rate_by_read_group: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
         inbreeding_by_sample: &[Estimate<InbreedingF>],
-        reference_digest: &str,
+        reference: &ReferenceDigest,
         census: CensusIdentity,
     ) -> Self {
         let read_group_count = run.read_group_count();
@@ -176,7 +191,7 @@ impl ParametersFile {
             format_version: FORMAT_VERSION,
             ploidy: run.ploidy().get(),
             fitted_from: InputsFittedFrom {
-                reference_digest: reference_digest.to_owned(),
+                reference_digest: hex_digest(&reference.0),
                 samples: samples
                     .iter()
                     .map(|of_sample| of_sample.sample.to_string())
@@ -770,9 +785,10 @@ mod tests {
     /// are whatever the sequencing centre typed.
     const AWKWARD_SAMPLE: &str = "Ailsa ‘Craig’ \"×2\"";
 
-    /// The one reference every fixture here is fitted against, so that a test varying something
-    /// else does not look as though it varies this too.
-    const A_REFERENCE_DIGEST: &str = "0123456789abcdef";
+    // The one reference every fixture here is fitted against, so that a test varying something
+    // else does not look as though it varies this too. The module's own, shared with the round
+    // trip in `to_run_parameters`, which writes a file this one's fixtures produced.
+    use super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST as A_REFERENCE;
 
     /// The run's read-group table: **two lanes of one plant and one lane of another**, so the
     /// two per-axis lengths differ (three read groups, two samples) and a row that named its
@@ -1172,13 +1188,10 @@ mod tests {
         )
     }
 
+    /// The census this module's fixtures name — the module's own, so the shape of a real
+    /// identity is what the projection is exercised against.
     fn a_census() -> CensusIdentity {
-        CensusIdentity {
-            terms: vec![super::super::CensusTerm {
-                term: "the loci actually kept".into(),
-                digest: "fedcba9876543210".into(),
-            }],
-        }
+        super::super::tests::a_census_a_run_could_have_fitted_under()
     }
 
     /// The file this run and this table write — for the tests that vary one of the two.
@@ -1188,7 +1201,7 @@ mod tests {
             read_groups,
             &the_runs_fitted_rates(),
             &the_runs_inbreeding(),
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         )
     }
@@ -1208,7 +1221,10 @@ mod tests {
 
         assert_eq!(file.format_version, FORMAT_VERSION);
         assert_eq!(file.ploidy, 2);
-        assert_eq!(file.fitted_from.reference_digest, A_REFERENCE_DIGEST);
+        assert_eq!(
+            file.fitted_from.reference_digest, "0123456789abcdef0123456789abcdef",
+            "the file spells the run's reference as 32 lower-case hex characters"
+        );
         assert_eq!(
             file.fitted_from.samples,
             vec!["TS-1".to_owned(), AWKWARD_SAMPLE.to_owned()],
@@ -2035,7 +2051,7 @@ mod tests {
             &read_groups,
             &rates,
             &one_coefficient,
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
 
@@ -2146,7 +2162,7 @@ mod tests {
             &read_groups,
             &one_short,
             &the_runs_inbreeding(),
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
     }
@@ -2168,7 +2184,7 @@ mod tests {
             &read_groups,
             &a_wider_fit,
             &the_runs_inbreeding(),
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
     }
@@ -2194,7 +2210,7 @@ mod tests {
             &read_groups,
             &another_fit,
             &the_runs_inbreeding(),
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
     }
@@ -2213,7 +2229,7 @@ mod tests {
             &read_groups,
             &the_runs_fitted_rates(),
             &another_fits_estimates,
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
     }
@@ -2233,7 +2249,7 @@ mod tests {
             &read_groups,
             &the_runs_fitted_rates(),
             &one_short,
-            A_REFERENCE_DIGEST,
+            &A_REFERENCE,
             a_census(),
         );
     }

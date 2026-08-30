@@ -227,9 +227,28 @@ a row, each failed its own row's test.
 
 ### Milestone D — what the file is bound to
 
-☐ **D1. The bindings, recorded.** The reference's content digest, the ordered sample list by name,
+✅ **D1. The bindings, recorded.** The reference's content digest, the ordered sample list by name,
 the read-group table, and the census recording terms the fit ran under — written by B1 and read by
 C2.
+
+**Landed 2026-08-30, and what was left was the two bindings that are not names.** The sample list
+and the read-group table come off the run's own `ReadGroups` and were already written and read; the
+other two are *derived*, and neither was derived anywhere — `of_run` took the reference digest as a
+`&str`, its own documentation saying "nothing here can check that it is one", and took a
+`CensusIdentity` nothing in the tree could build. **D2 cannot compare a file's bindings against a
+run's until both sides come out of one function**, which is what `bindings.rs` is:
+`CensusIdentity::of` over a census's `RecordingTerms` — twelve terms, named and ordered as
+`RecordingTerms::first_disagreement` names and orders them — and one hex spelling.
+
+**⚑ The review's Major was seven surviving mutants, every one a *part* of a value that is not a
+scalar** — a block's contig, a stratum's period, the digest over all the kept loci. With the contig
+undigested, two runs whose kept loci differ only in which chromosome a megabase sits on mint
+byte-identical identities, which the fit calls unpoolable and D3 would not demote. Eight
+part-by-part cases now, all 66 pairs for the order, and fourteen mutants each fail a test.
+
+**The module's shared fixture changed twice, and both were the artefact teaching a reader something
+false**: the reference digest was 16 hex characters where a reference digest spells as 32, and the
+census carried one term where no run can produce fewer than twelve.
 *Depends:* C4. *Source:* §3.1, §6.
 
 ☐ **D2. The three refusals.** A different reference, a sample list that does not match the run's,

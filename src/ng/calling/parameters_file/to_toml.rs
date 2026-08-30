@@ -107,6 +107,13 @@ impl ParametersFile {
                 "What these numbers were fitted from. A run whose reference, samples or read groups do not match these is refused; one whose census does not match keeps the numbers and reports every one of them as supplied rather than fitted.",
             ],
         );
+        note(
+            &mut out,
+            &[
+                "",
+                "The MD5 of the reference these numbers were fitted against: every contig's bases, uppercased, run together in the order the FASTA holds them. So soft-masking and line width do not change it and contig order does. `[fitted_from.census]` below has a `reference digest` line of its own — that is this same reference seen from the evidence's side, and the key that turns a run away from the wrong reference is this one.",
+            ],
+        );
         scalar(
             &mut out,
             "reference_digest",
@@ -124,6 +131,16 @@ impl ParametersFile {
         );
 
         section(&mut out, "fitted_from.census");
+        note(
+            &mut out,
+            &[
+                "Which store of evidence these numbers were fitted from — one line for each of the things two runs' evidence has to agree on before it can be pooled, each written as a digest of what that thing was rather than as the thing itself, because several of them are whole tables and settings blocks.",
+                "",
+                "A run whose own evidence disagrees on any one of these lines is the demotion the section above describes, and it demotes **every** number in the file rather than the ones that line touches — the numbers were fitted together out of this one store of evidence, so a disagreement about the evidence disqualifies all of them. The run says which line differed.",
+                "",
+                "Do not edit these to make a run match. Nothing checks a digest against what it claims to digest, so an edit buys a run that reports numbers as fitted from its own data when they were fitted from somebody else's — and there is no way to work out the right value by hand in any case. The same goes for `reference_digest`, `samples` and `read_groups` above, where a mismatch is turned away rather than demoted.",
+            ],
+        );
         one_a_line(
             &mut out,
             "terms",

@@ -683,7 +683,7 @@ impl From<ShareShape> for FittedShape {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::a_file_using_every_shape;
+    use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
     use super::super::{ParametersFile, ParametersFileError, Warrant};
     use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
     use crate::ng::parameter_estimation::{Estimate, Provenance};
@@ -766,7 +766,7 @@ mod tests {
             &read_groups,
             &the_rates_the_projection_out_reads(&projected),
             &projected.inbreeding_by_sample,
-            &file.fitted_from.reference_digest,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
         );
         assert_eq!(written, file);
@@ -787,7 +787,7 @@ mod tests {
             &read_groups,
             &the_rates_the_projection_out_reads(&projected),
             &projected.inbreeding_by_sample,
-            &read.fitted_from.reference_digest,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
         );
         assert_eq!(written.to_toml(), text);
@@ -1175,8 +1175,11 @@ mod the_north_star_round_trip {
 
     use std::collections::BTreeMap;
 
-    use super::super::tests::a_file_using_every_shape;
-    use super::super::{CensusIdentity, CensusTerm, ParametersFile};
+    use super::super::ParametersFile;
+    use super::super::tests::{
+        THE_REFERENCE_A_RUN_FITTED_AGAINST, a_census_a_run_could_have_fitted_under,
+        a_file_using_every_shape,
+    };
     // **The one helper both modules need**, rather than a second copy of it: the rates `of_run`
     // reads back are rebuilt the same way whichever fixture they came from.
     use super::tests::the_rates_the_projection_out_reads;
@@ -1698,25 +1701,14 @@ mod the_north_star_round_trip {
         }
     }
 
-    fn a_census() -> CensusIdentity {
-        CensusIdentity {
-            terms: vec![CensusTerm {
-                term: "the loci actually kept".into(),
-                digest: "fedcba9876543210".into(),
-            }],
-        }
-    }
-
-    const A_REFERENCE_DIGEST: &str = "0123456789abcdef";
-
     fn written(run: &TheRun) -> ParametersFile {
         ParametersFile::of_run(
             &run.parameters,
             &run.read_groups,
             &run.rates,
             &run.inbreeding,
-            A_REFERENCE_DIGEST,
-            a_census(),
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            a_census_a_run_could_have_fitted_under(),
         )
     }
 
@@ -1747,7 +1739,7 @@ mod the_north_star_round_trip {
             &run.read_groups,
             &the_rates_the_projection_out_reads(&back),
             &back.inbreeding_by_sample,
-            &read.fitted_from.reference_digest,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
         );
         assert_eq!(again, first, "and the parameters are the file again");
@@ -1968,7 +1960,7 @@ mod the_north_star_round_trip {
             &read_groups,
             &the_rates_the_projection_out_reads(&back),
             &back.inbreeding_by_sample,
-            &file.fitted_from.reference_digest,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
         );
         assert_eq!(again, file);

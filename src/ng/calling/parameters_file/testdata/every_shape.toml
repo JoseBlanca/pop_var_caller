@@ -2,7 +2,7 @@ format_version = 1
 ploidy = 2
 
 [fitted_from]
-reference_digest = "0123456789abcdef"
+reference_digest = "0123456789abcdef0123456789abcdef"
 samples = ["TS-1", 'Ailsa ‘Craig’ "×2"']
 
 [[fitted_from.read_groups]]
@@ -24,8 +24,52 @@ library = "lib5"
 sample = 'Ailsa ‘Craig’ "×2"'
 
 [[fitted_from.census.terms]]
+term = "selection seed"
+digest = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+
+[[fitted_from.census.terms]]
+term = "reference digest"
+digest = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+
+[[fitted_from.census.terms]]
+term = "analysed region set"
+digest = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+
+[[fitted_from.census.terms]]
+term = "repeat catalog build settings"
+digest = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+
+[[fitted_from.census.terms]]
+term = "STR routing criteria"
+digest = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+
+[[fitted_from.census.terms]]
+term = "generic target position count"
+digest = "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f"
+
+[[fitted_from.census.terms]]
+term = "STR per-stratum cap"
+digest = "70707070707070707070707070707070"
+
+[[fitted_from.census.terms]]
 term = "the loci actually kept"
-digest = "fedcba9876543210"
+digest = "81818181818181818181818181818181"
+
+[[fitted_from.census.terms]]
+term = "per-stratum locus counts"
+digest = "92929292929292929292929292929292"
+
+[[fitted_from.census.terms]]
+term = "per-locus read cap"
+digest = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+
+[[fitted_from.census.terms]]
+term = "depth ladder edges"
+digest = "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4"
+
+[[fitted_from.census.terms]]
+term = "per-position depth cap"
+digest = "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
 
 [[base_quality_calibration.by_read_group]]
 read_group = 0

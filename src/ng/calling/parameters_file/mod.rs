@@ -155,6 +155,7 @@
 //!   hand-written writer that means to match serde's bytes has to do the same — or, better,
 //!   choose its own order and pin it with its own golden file.
 
+mod bindings;
 mod from_run_parameters;
 mod from_toml;
 mod to_run_parameters;
@@ -1203,6 +1204,7 @@ pub struct StatedConstants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
 
     /// A plant whose name needs escaping and is not ASCII.
     ///
@@ -1235,6 +1237,49 @@ mod tests {
     /// no expected slipped reads at all.
     pub(super) const THE_ROW_THAT_BORROWED_EVERYTHING: usize = 2;
 
+    /// **The reference every fixture in this module was fitted against.**
+    ///
+    /// A real digest and not a short string: the file spells a reference as the 32 lower-case
+    /// hex characters of its 16-byte MD5, and a fixture carrying eight bytes' worth would teach
+    /// a reader of the golden file the wrong width.
+    pub(super) const THE_REFERENCE_A_RUN_FITTED_AGAINST: ReferenceDigest = ReferenceDigest([
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef,
+    ]);
+
+    /// **The census a run fitted under, as `[fitted_from.census]` carries it** — the twelve
+    /// values the fit refuses to pool across, each digested.
+    ///
+    /// **A minted identity with its digests replaced**, rather than a hand-written list. The
+    /// names and their order are what a mismatch is reported in, so they come from
+    /// [`CensusIdentity::of`] and cannot drift from it; a thirteenth value added to the census
+    /// fails the length assertion below rather than quietly leaving this fixture a term short.
+    ///
+    /// **The digests are synthetic, and that is deliberate.** Three of the twelve are taken over
+    /// another module's `Debug` rendering of its own defaults — the catalog build settings, this
+    /// run's catalog criteria, and the census depth ladder — so pinning the minted values in a
+    /// golden file would make tuning a catalog default rewrite this module's testdata for a
+    /// reason no reader could see. Every digest differs from every other, so a writer emitting
+    /// one term's digest beside another's name is visible.
+    pub(super) fn a_census_a_run_could_have_fitted_under() -> CensusIdentity {
+        const SYNTHETIC: [&str; 12] = [
+            "1a", "2b", "3c", "4d", "5e", "6f", "70", "81", "92", "a3", "b4", "c5",
+        ];
+        let mut identity = CensusIdentity::of(&super::bindings::a_censuss_recording_terms());
+        assert_eq!(
+            identity.terms.len(),
+            SYNTHETIC.len(),
+            "the census now names {} values and this fixture has {} stand-in digests; add one \
+             and regenerate both golden files",
+            identity.terms.len(),
+            SYNTHETIC.len()
+        );
+        for (term, byte) in identity.terms.iter_mut().zip(SYNTHETIC) {
+            term.digest = byte.repeat(16);
+        }
+        identity
+    }
+
     /// A file with **every section non-empty and every shape used at least once**.
     ///
     /// What a shape fixture can be wrong about is leaving a variant or a row kind unexercised, so
@@ -1253,7 +1298,9 @@ mod tests {
             format_version: FORMAT_VERSION,
             ploidy: 2,
             fitted_from: InputsFittedFrom {
-                reference_digest: "0123456789abcdef".into(),
+                reference_digest: super::bindings::hex_digest(
+                    &THE_REFERENCE_A_RUN_FITTED_AGAINST.0,
+                ),
                 samples: vec!["TS-1".into(), AWKWARD_SAMPLE.into()],
                 read_groups: vec![
                     ReadGroupRow {
@@ -1277,12 +1324,7 @@ mod tests {
                         sample: AWKWARD_SAMPLE.into(),
                     },
                 ],
-                census: CensusIdentity {
-                    terms: vec![CensusTerm {
-                        term: "the loci actually kept".into(),
-                        digest: "fedcba9876543210".into(),
-                    }],
-                },
+                census: a_census_a_run_could_have_fitted_under(),
             },
             base_quality_calibration: BaseQualityCalibration {
                 by_read_group: vec![
