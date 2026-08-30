@@ -97,12 +97,19 @@ differential against production's `refine_qual` over the same nine numbers.
 - **The production reuse target and oracle:**
   [`qual_refine.rs`](../../../../src/vcf/qual_refine.rs) (`refine_qual` and the four functions
   under it) and [`allele_balance.rs`](../../../../src/var_calling/allele_balance.rs).
-- **Milestone A needs no change to production.** `run_em_columnar` is already public,
-  `PosteriorRecord` is `pub` with `pub` fields, and its `qual_phred` is
-  `compute_qual_via_exact_af`'s return over the *input* likelihood table and the EM's pseudocounts
+- **Milestone A needs no change to production.** `run_em_columnar` is `pub(crate)` and the
+  `EmOutputs` it returns carries `qual_phred`, which is `compute_qual_via_exact_af`'s return over
+  the *input* likelihood table and the record-static pseudocounts
   ([`posterior_engine.rs:2479`](../../../../src/var_calling/posterior_engine.rs)) — the same two
-  inputs ng's function takes. [`loop_parity.rs`](../../../../src/ng/calling/loop_parity.rs) already
-  drives that entry point and its fixture shape is the one to copy.
+  inputs ng's function takes, and neither of them moved by the EM.
+  [`loop_parity.rs`](../../../../src/ng/calling/loop_parity.rs) already drives that entry point and
+  its fixture shape is the one to copy.
+- **⚠ The prior the site quality reads is not the prior the frequency loop reads**, and a fixture
+  built on the second tests nothing. Production carries two concentration pairs per record:
+  `scratch.alpha`, `[1, θ̂/k, …]` from the run's nucleotide diversity, which the EM uses and which
+  `loop_parity` holds identical; and `scratch.pseudocounts`, `[10, 0.01, …]` from four compiled-in
+  GATK constants, which the site quality uses and which spec §5.4 says ng replaces.
+  `with_nucleotide_diversity` moves the first and not the second.
 - **Milestone D needs one visibility widening, and it is the freeze exception** (CLAUDE.md; widen
   `pub(crate)`, change nothing else): `mod qual_refine` in
   [`vcf/mod.rs:38`](../../../../src/vcf/mod.rs) is private and `refine_qual` is `pub(super)`. Both
@@ -116,26 +123,35 @@ differential against production's `refine_qual` over the same nine numbers.
 
 ### Milestone A — the oracle for the baseline that already shipped
 
-**A1. The site quality against production's, at production's constants.**  ☐
+**A1. The site quality against production's, at production's constants.**  ✅
 New `src/ng/calling/quality_parity.rs`, beside `loop_parity.rs` and `genotype_table_parity.rs` and
 named for the same reason. One fixture's genotype log-likelihood table, in the genotype order
 `genotype_table_parity` already pins, goes to both sides: to `run_em_columnar`, whose
-`PosteriorRecord.qual_phred` is production's answer, and to ng's
-`score_uncorrected_site_quality`. **ng is seeded at `(ALPHA_REF, θ)` so the two priors are the same
-construction rather than two transcriptions** — production sums its ALT pseudocounts into
-`alpha_alt` and reads `ALPHA_REF` out of `crate::genetics`, and a hand-typed pair on ng's side
-would leave the test passing after a change to production's constant. That is `loop_parity`'s own
-rule and this module inherits it. Fixtures at one, three and a few dozen samples, and one where the
-zero term underflows. *Depends:* none. *Source:* spec §11, §14 test 2.
+`EmOutputs.qual_phred` is production's answer, and to ng's `score_uncorrected_site_quality`. **ng
+is seeded from `DEFAULT_REF_PSEUDOCOUNT` and `DEFAULT_SNP_ALT_PSEUDOCOUNT` — the site quality's
+pair, not the EM's — so the two priors are the same construction rather than two transcriptions**:
+production sums the per-allele pseudocount over the alternatives to reach the Beta's `α_alt`, and a
+hand-typed total would agree at two alleles, part at three, and go on passing after a change to
+production's constant. One fixture moves both constants, since every other one runs at the shipped
+values where a port that hard-coded them would pass. Fixtures at one, twelve and forty samples, one
+triallelic, one with no evidence at all, and one driven past ng's ceiling — which production has
+none of, so it is the one place the two are asserted to part. *Depends:* none. *Source:* spec §11,
+§14 test 2.
 
-**A2. The second arm, and the permutation tolerance.**  ☐
+**A2. The second arm, and the permutation tolerance.**  ✅ *(landed in A1's commit — see below.)*
 Same fixtures with ng's **fitted** seed instead of production's constants: the movement is reported
-and asserted in sign and rough size against spec §5.4's table. **A silent agreement here is a
+and asserted in sign against spec §5.4's table, at both ends of it. **A silent agreement here is a
 failure**, not a pass — it would mean the seed never reached the prior — so the test asserts a
 non-zero difference in the stated direction rather than a bound. Alongside it, spec §14 test 5's
 second half: permuting the cohort moves the fold's summation order, so the same locus under a
-permuted sample order must agree to a tolerance (production's proptest uses `1e-6`), asserted as a
-tolerance and never as bitwise equality. *Depends:* A1. *Source:* spec §5.4, §11, §14 tests 2 and 5.
+permuted sample order must agree to a tolerance, asserted as a tolerance and never as bitwise
+equality. *Depends:* A1. *Source:* spec §5.4, §11, §14 tests 2 and 5.
+
+**Not split from A1, and the reason is the module's own prose.** A commit holding arm one alone
+would ship a file whose doc comment describes two arms and contains one, and whose central claim —
+*only one of these two is parity* — would have nothing to point at. The two arms are seven tests
+and two in one 470-line module; splitting them buys no bisectability, because neither arm can fail
+silently: an arm-one break is a numeric disagreement and an arm-two break is a direction.
 
 > **Checkpoint A:** ng's site quality reproduces production's number where the two priors are the
 > same, and the fitted seed's departure from it is measured rather than assumed. Pause for review.

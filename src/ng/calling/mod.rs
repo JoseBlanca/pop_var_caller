@@ -53,6 +53,8 @@
 mod genotype_table_parity;
 #[cfg(test)]
 mod loop_parity;
+#[cfg(test)]
+mod quality_parity;
 
 pub mod allele_candidates;
 pub mod evidence_shaping;
