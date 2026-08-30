@@ -1066,6 +1066,17 @@ mod tests {
     fn every_truncation_of_a_finished_psp_is_refused_without_panicking() {
         let (_dir, path) = a_finished_psp();
         let whole = bytes_of(&path);
+        // **The sweep's whole argument is the section boundaries a stride skipped**, so the
+        // fixture has to have several. Without this it passes unchanged on a psp with no blocks
+        // at all — measured: a finished file with zero records pushed is 3,204 bytes of header,
+        // empty index, trailer and footer, and every cut of it is `Incomplete` too.
+        {
+            let psp = PspReader::open(&path).expect("the fixture opens");
+            assert!(
+                psp.block_index().len() >= 8,
+                "the fixture needs several blocks, or most of these cuts land in the header"
+            );
+        }
         let mut incomplete = 0;
         let mut damaged = 0;
         let mut not_an_ng_psp = 0;

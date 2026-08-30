@@ -91,6 +91,13 @@ pub(super) fn walk_from<'a>(
     // index's own offset, so this never saturates; it is written this way because an underflow
     // here would be a sixteen-exabyte read rather than an error.
     let blocks_bytes = blocks_end.saturating_sub(block_offset);
+    // ⚠ **This arm has no test, and the H2 review could not find a fixture that reaches it.**
+    // `Seek` on a regular file fails only for an offset `SeekFrom::Start(u64)` cannot express,
+    // and every offset arriving here has already been bounded inside the file by `open`. The
+    // write-only descriptor that gives the *read* below a genuine `EBADF` does not help: seeking
+    // a write-only descriptor succeeds, which is exactly why that trick works for the read. It is
+    // written out rather than left to `?` on a bare `io::Error` so that the class is right the
+    // day something does reach it — but do not read it as covered.
     file.seek(SeekFrom::Start(block_offset))
         .map_err(|source| PspReadError::Io {
             path: path.to_path_buf(),

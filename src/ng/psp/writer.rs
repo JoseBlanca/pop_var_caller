@@ -994,6 +994,20 @@ mod tests {
     #[cfg(unix)]
     const WRITE_THE_PSP_HERE: &str = "NG_PSP_KILLED_WRITER_TARGET";
 
+    /// The file the child touches **when it stops pushing records of its own accord**. The
+    /// parent requires it to be absent, which is how *the child was still writing when it was
+    /// killed* is checked rather than assumed.
+    #[cfg(unix)]
+    fn where_the_child_says_it_stopped_pushing(psp: &Path) -> PathBuf {
+        psp.with_extension("stopped-pushing")
+    }
+
+    /// How long the child keeps pushing before it gives up. Far longer than the parent's own
+    /// wait, so the kill always arrives first; bounded only so that an orphan left by a parent
+    /// that died itself does not write for ever.
+    #[cfg(unix)]
+    const THE_CHILD_PUSHES_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
     /// The name of the test the child is told to run. **Kept beside the test it names**, because
     /// a rename that misses it makes the child run nothing at all.
     #[cfg(unix)]
@@ -1054,28 +1068,51 @@ mod tests {
 
         // The child arm. Reached only in the re-executed copy of this binary.
         if let Ok(psp_path) = std::env::var(WRITE_THE_PSP_HERE) {
-            let mut writer =
-                PspWriter::create(Path::new(&psp_path), a_header(1_000)).expect("a header");
-            // 80,000 records four bases apart on the 1 kb grid — about 320 blocks, so the parent
-            // has many stopping points to catch it at rather than one.
-            for contig in 0..2u32 {
-                for at in 0..40_000u64 {
-                    writer
-                        .push(&a_record(contig, 1 + at * 4, 1))
-                        .expect("in order");
-                }
-            }
-            // Stop pushing and wait to be killed — **bounded**, so an orphan left by a parent
-            // that died itself does not sleep for ever on a machine these suites run on all day.
+            let psp_path = PathBuf::from(psp_path);
+            let mut writer = PspWriter::create(&psp_path, a_header(1_000)).expect("a header");
+            // **It pushes until it is killed, rather than a fixed count**, and that is a
+            // correction rather than a preference. The first version pushed 80,000 records and
+            // then slept, and the H2 review measured what that did: the whole workload takes
+            // about 5 ms while the parent kills at about 12 ms, so in **25 runs out of 25** the
+            // child had *finished* and was asleep when the signal arrived. A writer that has
+            // stopped writing is not what this test is about, and it made the test a race —
+            // adding a `finish` call after the loop failed 40 of 40 standalone runs and passed
+            // 3 of 10 under the parallel suite.
             //
-            // **And it panics rather than returning**, because this branch is inside the test it
-            // is spawned to re-run: returning would be a *pass*. A process that reaches here was
-            // never killed, which means it was not the child the parent spawned — the usual cause
-            // being the environment variable already set in the shell.
-            std::thread::sleep(std::time::Duration::from_secs(120));
+            // Four bases apart on the 1 kb grid, so a block closes every 250 records and the
+            // parent has a boundary to catch it at whenever it looks.
+            // **Bounded by the coordinates as well as by the clock.** Positions are four bases
+            // apart and the header's two contigs are about 90 and 53 megabases, so a per-contig
+            // cap of twenty million records keeps every position inside its contig. Forty million
+            // pushes is roughly 2.5 s of work against a parent that kills at about 12 ms — a
+            // margin of some two hundred, where the version this replaces *lost* the race.
+            const RECORDS_PER_CONTIG: u64 = 20_000_000;
+            let give_up_at = std::time::Instant::now() + THE_CHILD_PUSHES_FOR;
+            let mut at = 0u64;
+            while std::time::Instant::now() < give_up_at && at < 2 * RECORDS_PER_CONTIG {
+                let contig = u32::try_from(at / RECORDS_PER_CONTIG).expect("two contigs");
+                let position = 1 + (at % RECORDS_PER_CONTIG) * 4;
+                writer
+                    .push(&a_record(contig, position, 1))
+                    .expect("in order");
+                at += 1;
+            }
+            // **Only reached if the kill never came**, and the marker is what says so. Its
+            // presence tells the parent that the file it is about to judge is not the file of an
+            // interrupted writer but of one that stopped on its own.
+            std::fs::write(
+                where_the_child_says_it_stopped_pushing(&psp_path),
+                b"stopped",
+            )
+            .expect("the marker is written");
+            // **It panics rather than returning**, because this branch is inside the test it is
+            // spawned to re-run: returning would be a *pass*. A process that reaches here was
+            // never killed, which means it was not the child the parent spawned — the usual
+            // cause being the environment variable already set in the shell.
             panic!(
-                "this process took the writer branch and was never killed: {WRITE_THE_PSP_HERE} \
-                 was set in an environment this test did not create"
+                "this process took the writer branch and pushed for {THE_CHILD_PUSHES_FOR:?} \
+                 without being killed: {WRITE_THE_PSP_HERE} was set in an environment this test \
+                 did not create"
             );
         }
 
@@ -1150,6 +1187,14 @@ mod tests {
             bytes_on_disk > enough_bytes,
             "the child wrote {bytes_on_disk} bytes before the kill; with no blocks on disk this \
              file is refused for being empty rather than for being unfinished"
+        );
+        // **The child was still pushing when the signal arrived.** That is the difference between
+        // interrupting a writer and killing one that had already stopped, and it is the property
+        // the first version of this test claimed and did not have.
+        assert!(
+            !where_the_child_says_it_stopped_pushing(&path).exists(),
+            "the child stopped pushing of its own accord before the kill, so the file it left is \
+             not an interrupted writer's — it is one that finished its work and waited"
         );
 
         let bytes = bytes_of(&path);

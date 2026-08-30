@@ -19,7 +19,29 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-28):** **a writer killed for real leaves a file every reader
+> - **Last completed task (2026-08-30):** **H2 reviewed — the killed writer was not writing when
+> it was killed** (step H2 of [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch
+> `ng-psp-encoding`, status `fixes-applied`). Seven checklists and a numbers pass across three
+> agents. **The test did not do what its own doc said, and the doc's claim was the reason it
+> existed.** Measured independently by two agents: the child's 80,000 pushes take about **5 ms**
+> while the parent kills at about **12 ms**, so in **25 runs out of 25** the child had finished and
+> was asleep when the signal arrived; the file it leaves ends **on a block boundary**, never inside
+> one, because each block reaches the `BufWriter` in one `write_all` and the blocks here average 57
+> bytes against an 8 kB buffer; and a writer given 58,251 pushes and then simply **dropped** leaves
+> a **byte-identical** file. So *the state is unreachable from inside the process* was false in
+> both halves. ⚠ **And the mutation I had recorded as a no-op is not one** — it fails 40 of 40
+> standalone runs. I ran it once, saw it pass, and wrote that down as a property; that is what a
+> flaky test looks like from inside. The child now **pushes until it is killed** and touches a
+> marker only if it stops on its own, which the parent requires to be absent — so *the writer was
+> still writing* is asserted rather than assumed. **A second Major**: the truncation sweep folded
+> *wrong kind of file* into its *unfinished* counter, so a defect flipping **3,694 of 3,742** cuts
+> still passed, while the sibling test added in the same commit exists to forbid that
+> misdiagnosis. **A third**: every way the child can fail reached the parent as an ordinary exit,
+> so a stale test-name filter fired the signal assertion with a message about destructors.
+> [H2](doc/devel/reports/implementations/ng_psp_h2_2026-08-28.md);
+> [the review](doc/devel/reports/reviews/ng_psp_h2_2026-08-28.md).
+>
+> - **Previously (2026-08-28):** **a writer killed for real leaves a file every reader
 > refuses, and a failing read is not damage** (step H2 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). **Dropping a writer in-process was never the same test**, and the difference is
