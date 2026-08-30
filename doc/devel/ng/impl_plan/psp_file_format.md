@@ -347,6 +347,45 @@ survives is an open question the arch doc records** (arch §7).
 
 > **Checkpoint H: the store is proven against the prototype and its costs are measured. Pause for
 > review.**
+>
+> ✅ **Reviewed** — H1, H2 and H3 each in isolated worktrees, twelve agents in all, with a
+> dedicated numbers pass on every step. **Three Blockers and five Majors, and the shape that
+> recurred is a test that could not fail rather than code that was wrong**: eighteen of H1's
+> twenty-six field comparisons had no test behind them; H2's killed writer had *finished writing*
+> 5 ms before the kill arrived at 12 ms, so it was not interrupted at all; and H3's mid-block
+> precondition divided by a literal grid, so writing the fixture on a finer one made every shard
+> boundary a grid line and the test still passed. Each was reproduced here before anything changed.
+>
+> **What the milestone measured, which is what it was for:**
+>
+> | | |
+> |---|---|
+> | parity, both corpora | 7,687,686 records on tomato and 74,623 on hg002, every field of every observation, against a codec that is not ours |
+> | an open sample | **480 kB against the 500 kB budget** — and **74 % of it is the contig list**, identical in every sample of the cohort |
+> | the reader alone | **123 kB** on a human reference and **101 kB** on tomato, two corpora two orders of magnitude apart in depth — spec §1.1's claim, evidenced |
+> | the head-driven skip | **2.40× to 3.11×**, losing about **5 %** over a 27× rise in depth; every reading above the prototype's 2.06× |
+>
+> **Three things are raised rather than taken, and all three are the owner's:**
+>
+> 1. **Sharing the contig list across a cohort's open samples** would take 480 kB to 123 kB. It is
+>    the largest memory lever the store has and it is in no plan; it belongs with
+>    [`run_streaming.md`](../spec/run_streaming.md), which owns the run objects.
+> 2. **Spec §7's byte-identity holds only while every timestamp renders to the same width**, and
+>    nothing enforces it: `created` is a `toml::value::Datetime`, and two extra characters move
+>    every offset past the header. Normalise the stamp, refuse a variable-width one, or amend §7.
+> 3. **Spec §6.7's table is short three rows** — the wrong-file class, a malformed header for
+>    `append` and `replace_trailer`, and `records_from_block`'s no-such-block. H2 sharpened the
+>    first: a *truncated* ng psp is never reported as the wrong kind of file, so that row would be
+>    about foreign files only.
+>
+> **What Milestone H leaves owed** is arch §7's question, now much narrower. The skip's value is
+> measured on stores built from a production `.psp`, which names about 3.4 % of the reads ng will
+> name, so those heads are lighter than ng's will be. The bias is one-directional, so every figure
+> is an **upper bound**; closing it needs an ng-written store.
+>
+> Two spec figures do not survive the port and are recorded rather than explained: §5.2's 257 kB
+> and §5.4's 338 kB are prototype numbers with no contig list in them, and §5.3's 190 kB zstd floor
+> is not visible in a reader measured at 123 kB.
 
 ---
 
