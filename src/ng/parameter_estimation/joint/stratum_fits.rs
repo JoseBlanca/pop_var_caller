@@ -44,6 +44,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::ng::parameter_estimation::Provenance;
 use crate::ng::types::ReadGroupId;
 
 use super::census::Stratum;
@@ -393,6 +394,20 @@ pub struct StratumFits {
     /// The strength the bottom rung states: the run's own median fitted concentration where any
     /// stratum was fitted, and [`STATED_FLAT_CONCENTRATION`] where none was.
     stated_concentration: f64,
+    /// **Where that strength came from, carried rather than re-derived.**
+    ///
+    /// [`Provenance::FittedHere`] where the run took the median of its own strata's fits and
+    /// [`Provenance::Defaulted`] where it fitted none — and [`Provenance::Supplied`] where a
+    /// parameters file handed the number over, which is the state that cannot be worked out
+    /// from the numbers beside it.
+    ///
+    /// **It is a field because it is not a function of anything else this type holds.** Until
+    /// 2026-08-30 the one caller that needed it — the parameters file's writer — re-derived it
+    /// from whether `length_spectrum_by_stratum` was empty, which is true of a run that fitted
+    /// the median itself and false of a run handed one, and those two are exactly what a
+    /// warrant is for. A file demoted to `supplied` (spec §2.1) and written back out re-emerged
+    /// as `fitted_here`.
+    stated_concentration_warrant: Provenance,
 }
 
 impl StratumFits {
@@ -487,6 +502,13 @@ impl StratumFits {
         let stated_concentration = median_concentration(&length_spectrum_by_stratum);
         Self {
             slippage_group_of,
+            // **The fit's own warrant for it**: a median over this run's strata is a number the
+            // run measured, and the flat constant where it measured none is a stated guess.
+            stated_concentration_warrant: if length_spectrum_by_stratum.is_empty() {
+                Provenance::Defaulted
+            } else {
+                Provenance::FittedHere
+            },
             by_stratum,
             length_spectrum_by_stratum,
             length_spectrum_by_period: BTreeMap::new(),
@@ -504,6 +526,12 @@ impl StratumFits {
     /// the ladder's bottom rung was computed when the fit ran and is written down
     /// ([`Self::stated_concentration`]) rather than recomputed here. Recomputing it would make a
     /// file that was hand-edited disagree with itself in a way no reader could see.
+    ///
+    /// **The warrant on that median is taken from the file too**, for the same reason and one
+    /// more: spec §2.1 demotes every number of a file fitted under another census to `supplied`,
+    /// and *supplied* is not a state anything about this run's strata could imply. A caller that
+    /// worked the warrant out from whether any stratum was fitted would turn every demoted file
+    /// back into a fitted one.
     ///
     /// `slippage_by_stratum` is one entry per stratum the file names, holding that stratum's
     /// slippage groups **densely from zero** — `None` where the pair has no row, which is spec
@@ -523,6 +551,7 @@ impl StratumFits {
         length_spectrum_by_stratum: BTreeMap<Stratum, FittedLengthSpectrum>,
         length_spectrum_by_period: BTreeMap<u8, FittedLengthSpectrum>,
         stated_concentration: f64,
+        stated_concentration_warrant: Provenance,
     ) -> Self {
         let by_stratum = slippage_by_stratum
             .into_iter()
@@ -571,6 +600,7 @@ impl StratumFits {
             length_spectrum_by_stratum: checked(length_spectrum_by_stratum, "stratum's own"),
             length_spectrum_by_period: checked(length_spectrum_by_period, "period's pooled"),
             stated_concentration: checked_stated_concentration(stated_concentration),
+            stated_concentration_warrant,
         }
     }
 
@@ -678,6 +708,17 @@ impl StratumFits {
     #[must_use]
     pub fn stated_concentration(&self) -> f64 {
         self.stated_concentration
+    }
+
+    /// **Where the bottom rung's stated strength came from** — see
+    /// [`Self::stated_concentration`] for what the number is.
+    ///
+    /// **Carried, never inferred.** `Supplied` is the state that says a parameters file handed
+    /// this number over, and nothing about a run's own strata distinguishes it from a median the
+    /// run took itself.
+    #[must_use]
+    pub fn stated_concentration_warrant(&self) -> Provenance {
+        self.stated_concentration_warrant
     }
 
     /// How many strata carry a length spectrum of their own — the tract ladder's top rung,

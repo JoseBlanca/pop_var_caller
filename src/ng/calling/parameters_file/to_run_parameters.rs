@@ -374,6 +374,11 @@ impl ParametersFile {
             length_spectrum_by_stratum,
             length_spectrum_by_period,
             tracts.fallback_length_spectrum_concentration.value,
+            // **The file's own warrant, carried rather than worked out from the strata beside
+            // it.** A file demoted to `supplied` (spec §2.1) says nothing about whether *this*
+            // run fitted anything, and re-deriving would turn every demoted file back into a
+            // fitted one on the way out.
+            tracts.fallback_length_spectrum_concentration.warrant.into(),
         ))
     }
 
@@ -684,8 +689,9 @@ impl From<ShareShape> for FittedShape {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
-    use super::super::{ParametersFile, ParametersFileError, Warrant};
+    use super::super::{ParametersFile, ParametersFileError, Warrant, WarrantedValue};
     use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+    use crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
     use crate::ng::parameter_estimation::{Estimate, Provenance};
     use crate::ng::read::input::read_groups::ReadGroups;
     use crate::ng::types::{ErrorRate, ReadGroupId};
@@ -770,6 +776,61 @@ mod tests {
             file.fitted_from.census.clone(),
         );
         assert_eq!(written, file);
+    }
+
+    /// **⚑ The bottom rung's warrant survives the trip too, and until 2026-08-30 it could not.**
+    ///
+    /// `repeat_tracts.fallback_length_spectrum_concentration` is the tract ladder's bottom rung:
+    /// one concentration for the whole run, the median of what its strata fitted. **The
+    /// projection in read only the number and the writer worked the warrant out again** from
+    /// whether any stratum was fitted — which is true of a run that took the median itself and
+    /// equally true of a run handed one, so a file marked `supplied` came back out saying
+    /// `fitted_here`.
+    ///
+    /// The round trip above cannot see that: its fixture is `fitted_here` *and* has fitted
+    /// strata, so the re-derivation gives the right answer for the wrong reason. **This one
+    /// varies the warrant while leaving the strata alone**, which is exactly the state spec
+    /// §2.1's demotion produces and step D3 depends on.
+    #[test]
+    fn the_bottom_rungs_warrant_is_the_files_and_not_worked_out_from_its_strata() {
+        for warrant in [Warrant::Supplied, Warrant::Borrowed, Warrant::FittedHere] {
+            let mut file = a_file_using_every_shape();
+            file.repeat_tracts
+                .fallback_length_spectrum_concentration
+                .warrant = warrant;
+            assert!(
+                !file.repeat_tracts.length_spectrum_by_stratum.is_empty(),
+                "the fixture keeps its fitted strata, which is what a re-derivation would read"
+            );
+
+            let read_groups = the_files_read_groups(&file);
+            let projected = file.to_run_parameters().expect("a usable file");
+            assert_eq!(
+                projected
+                    .parameters
+                    .ssr_slippage_fits()
+                    .stated_concentration_warrant(),
+                warrant.into(),
+                "the run carries the warrant the file stated"
+            );
+
+            let written = ParametersFile::of_run(
+                &projected.parameters,
+                &read_groups,
+                &the_rates_the_projection_out_reads(&projected),
+                &projected.inbreeding_by_sample,
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                file.fitted_from.census.clone(),
+            );
+            assert_eq!(
+                written
+                    .repeat_tracts
+                    .fallback_length_spectrum_concentration
+                    .warrant,
+                warrant,
+                "and writes back the one it read"
+            );
+        }
     }
 
     /// **And the text survives the whole trip**, which is the loop a run actually makes: a file
@@ -919,10 +980,14 @@ mod tests {
         small.repeat_tracts.length_spectrum_by_stratum.clear();
         small.repeat_tracts.length_spectrum_by_period.clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
-        small
-            .repeat_tracts
-            .fallback_length_spectrum_concentration
-            .warrant = Warrant::Defaulted;
+        // **A run that fitted no stratum states the compiled-in flat concentration**, which is
+        // what `defaulted` says: the fixture's `fitted_here` at 3.5 is a claim about a median
+        // over strata this file no longer has.
+        small.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
+            value: STATED_FLAT_CONCENTRATION,
+            warrant: Warrant::Defaulted,
+            observations: None,
+        };
 
         let run = small
             .to_run_parameters()
@@ -1200,7 +1265,9 @@ mod the_north_star_round_trip {
         DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
         StratumOutcome, StratumRefusal,
     };
-    use crate::ng::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, NoSlippage};
+    use crate::ng::parameter_estimation::joint::stratum_fits::{
+        LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION,
+    };
     use crate::ng::read::input::read_groups::ReadGroups;
     use crate::ng::types::{Ploidy, SsrPeriod};
 
@@ -1942,10 +2009,13 @@ mod the_north_star_round_trip {
             small.repeat_tracts.length_spectrum_by_stratum.clear();
             small.repeat_tracts.length_spectrum_by_period.clear();
             small.repeat_tracts.substitution_rate_by_stratum.clear();
-            small
-                .repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant = super::super::Warrant::Defaulted;
+            // A run that fitted no stratum states the flat constant, marked `defaulted`.
+            small.repeat_tracts.fallback_length_spectrum_concentration =
+                super::super::WarrantedValue {
+                    value: STATED_FLAT_CONCENTRATION,
+                    warrant: super::super::Warrant::Defaulted,
+                    observations: None,
+                };
             small
         };
         let read_groups = ReadGroups::of_lanes(&[(

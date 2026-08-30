@@ -425,16 +425,19 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
     let fits: &StratumFits = run.ssr_slippage_fits();
     let read_group_count = run.read_group_count();
     RepeatTracts {
-        // **Fitted where the run had a stratum to take a median over, defaulted where it did
-        // not** — and the two can be the same number, since a median over fitted strata can land
-        // on exactly the stated 1.0. That is why the warrant is here at all.
+        // **The run's own warrant, copied rather than re-derived** — fitted where it had strata
+        // to take a median over, defaulted where it had none, and *supplied* where a parameters
+        // file handed the number over, which is the state no arithmetic over this run's strata
+        // could reach. Until 2026-08-30 this worked the warrant out from
+        // `strata_with_a_length_spectrum()`, and a file demoted under spec §2.1 came back out
+        // saying `fitted_here`.
+        //
+        // **The value and the warrant can disagree about how interesting they are**: a median
+        // over fitted strata can land on exactly the stated 1.0, which is why the warrant
+        // travels at all.
         fallback_length_spectrum_concentration: WarrantedValue {
             value: fits.stated_concentration(),
-            warrant: if fits.strata_with_a_length_spectrum() == 0 {
-                Warrant::Defaulted
-            } else {
-                Warrant::FittedHere
-            },
+            warrant: fits.stated_concentration_warrant().into(),
             observations: None,
         },
         // **One row a read group the run declared a slippage group for.** A read group the

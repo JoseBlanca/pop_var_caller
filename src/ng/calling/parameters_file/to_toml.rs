@@ -89,7 +89,7 @@ impl ParametersFile {
                 "",
                 "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
                 "",
-                "**Two keys do not take a warrant of your choosing.** `repeat_tracts.fallback_length_spectrum_concentration`'s is decided by whether this file holds any fitted stratum spectrum, and `stated_constants.repeat_tract_outlier_weight`'s is `defaulted` only at the caller's own constant — both are refused if you set them otherwise, and both say so.",
+                "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the caller's own constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
@@ -286,7 +286,7 @@ impl ParametersFile {
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
-                "`fallback_length_spectrum_concentration` is what a tract falls back to where neither its own stratum nor its period was fitted: this many chromosomes' worth of belief, spread flat over whatever lengths the tract offers, so a larger number moves the prior less. A run that fitted any stratum states the median of the concentrations those fits produced and marks it `fitted_here`; a run that fitted none states a built-in constant and marks it `defaulted`. It carries no `observations` either way — a median over strata is not a measurement with a sample size.",
+                "`fallback_length_spectrum_concentration` is what a tract falls back to where neither its own stratum nor its period was fitted: this many chromosomes' worth of belief, spread flat over whatever lengths the tract offers, so a larger number makes the prior harder for the reads to move. A run that fitted any stratum states the median of the concentrations those fits produced and marks it `fitted_here`; a run that fitted none states a built-in constant and marks it `defaulted`; a run handed this file by another run marks it `supplied`, and so should you if you change it. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size.",
             ],
         );
         scalar_with_note(

@@ -66,6 +66,7 @@ use super::{
     ShareCurve, ShareSmoothing, SlippageCurve, Warrant, WarrantedValue,
 };
 use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How far a length spectrum's shares may sum from one and still be a distribution.
@@ -634,34 +635,36 @@ impl ParametersFile {
             &tracts.fallback_length_spectrum_concentration,
             EvidenceCount::Reads(0),
         )?;
-        // **Its warrant is not free: the file's own strata decide it.** The bottom rung states
-        // the median of the concentrations this run's strata fitted wherever any was fitted, and
-        // the compiled-in flat constant only where none was — so `defaulted` beside a non-empty
-        // `length_spectrum_by_stratum`, or `fitted_here` beside an empty one, is a claim the
-        // file's own rows refute. **It is refused here because nothing downstream can**: the
-        // projection carries only the number, and the writer re-derives the warrant from the same
-        // strata, so a contradiction is rewritten on the way out rather than reported.
-        let fitted_any = !tracts.length_spectrum_by_stratum.is_empty();
+        // **Two of the four warrants are claims this file's own rows can refute** — and the
+        // other two are not, which is the whole of what changed on 2026-08-30 when the warrant
+        // began travelling through `StratumFits` instead of being re-derived by the writer.
+        //
+        // `fitted_here` says the number is the median of the concentrations this file's strata
+        // fitted, so a file that names no fitted stratum spectrum has no median to have taken.
+        // `defaulted` says it is the caller's own constant, so any other number contradicts it —
+        // the same rule the outlier weight carries, for the same reason.
+        //
+        // **`supplied` and `borrowed` are free, and that is the point.** A file demoted under
+        // spec §2.1 marks every number `supplied`, including this one; nothing about the strata
+        // beside it can say whether the number was handed over. An earlier version of this check
+        // required `fitted_here` exactly where any stratum was fitted, which refused every
+        // demoted file — recorded here because the check looked complete and was not.
         let warrant = tracts.fallback_length_spectrum_concentration.warrant;
-        if fitted_any != (warrant == Warrant::FittedHere) {
+        let value = tracts.fallback_length_spectrum_concentration.value;
+        if warrant == Warrant::FittedHere && tracts.length_spectrum_by_stratum.is_empty() {
             return Err(refuse(
                 at,
-                if fitted_any {
-                    format!(
-                        "is `{}`, and {} of this file's strata were fitted on their own tracts; \
-                         the bottom rung states the median of those, so its warrant is \
-                         `fitted_here` — it is `defaulted` only where no stratum was fitted at all",
-                        the_word_for(warrant),
-                        tracts.length_spectrum_by_stratum.len()
-                    )
-                } else {
-                    format!(
-                        "is `{}`, and no stratum in this file was fitted on its own tracts, so \
-                         there is no median to take; a run with nothing fitted states the \
-                         compiled-in flat concentration and marks it `defaulted`",
-                        the_word_for(warrant)
-                    )
-                },
+                "is `fitted_here`, and no stratum in this file was fitted on its own tracts, so \
+                 there is no median for it to be the median of",
+            ));
+        }
+        if warrant == Warrant::Defaulted && value != STATED_FLAT_CONCENTRATION {
+            return Err(refuse(
+                at,
+                format!(
+                    "is `defaulted` at {value}, and the constant a run falls back to is \
+                     {STATED_FLAT_CONCENTRATION}; a number somebody chose is `supplied`"
+                ),
             ));
         }
         if tracts.fallback_length_spectrum_concentration.value <= 0.0 {
@@ -1432,6 +1435,22 @@ mod tests {
     /// its rows refute is refused rather than silently rewritten on the way out.
     #[test]
     fn a_fallback_warrant_the_files_own_strata_refute_is_refused() {
+        // **`fitted_here` says the number is a median of this file's fitted strata**, so a file
+        // that names none has nothing for it to be the median of.
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum.clear();
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts.fallback_length_spectrum_concentration"
+        );
+        assert!(
+            problem.contains("no median for it to be the median of"),
+            "{problem}"
+        );
+
+        // **`defaulted` says the number is the caller's own constant**, so any other number
+        // contradicts it — the rule the outlier weight carries, for the same reason.
         let (field, problem) = refused(|file| {
             file.repeat_tracts
                 .fallback_length_spectrum_concentration
@@ -1441,16 +1460,35 @@ mod tests {
             field,
             "repeat_tracts.fallback_length_spectrum_concentration"
         );
-        assert!(problem.contains("median of those"), "{problem}");
+        assert!(problem.contains("is `defaulted` at 3.5"), "{problem}");
+    }
 
-        let (field, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum.clear();
-        });
-        assert_eq!(
-            field,
-            "repeat_tracts.fallback_length_spectrum_concentration"
-        );
-        assert!(problem.contains("no median to take"), "{problem}");
+    /// **⚑ A demoted file marks this number `supplied`, and that is accepted** — which the check
+    /// above forbade until 2026-08-30.
+    ///
+    /// Spec §2.1 demotes every number of a file fitted under another census to `supplied`,
+    /// wholesale. An earlier version of the rule required `fitted_here` exactly where any
+    /// stratum was fitted, so a demoted file — every number `supplied`, the strata still listed
+    /// — was refused by the caller that had just demoted it. The warrant travels through
+    /// `StratumFits` now rather than being re-derived from the strata, and `supplied` and
+    /// `borrowed` are free.
+    #[test]
+    fn the_warrant_a_demoted_file_carries_on_the_bottom_rung_is_accepted() {
+        for warrant in [Warrant::Supplied, Warrant::Borrowed] {
+            accepted(|file| {
+                file.repeat_tracts
+                    .fallback_length_spectrum_concentration
+                    .warrant = warrant;
+            });
+            // And with no fitted stratum beside it either, which is the other half of the
+            // shape the old rule keyed on.
+            accepted(|file| {
+                file.repeat_tracts.length_spectrum_by_stratum.clear();
+                file.repeat_tracts
+                    .fallback_length_spectrum_concentration
+                    .warrant = warrant;
+            });
+        }
     }
 
     #[test]
