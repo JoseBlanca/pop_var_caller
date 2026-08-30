@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **the documents said an open psp costs tens of kilobytes;
+> - **Last completed task (2026-08-30):** **the psp store is on `main`** — 116 commits, and
+> `main`'s own 71 merged into it first. The store is what one sample's reads showed at every
+> position a run analysed, written once and read back by the cohort gather; nothing in the run
+> writes or reads one yet, and that wiring waits for the caller to work end to end from BAM to
+> VCF. **One rename did not merge on its own**: this branch made the summed per-read log-error a
+> whole number of 1/4,096ths of a nat rather than an `f64`, so a run reading observations from
+> memory and one reading them back from a file agree on a number rather than on a tolerance — and
+> six fixtures in code `main` wrote meanwhile still built one from a float. All six are test
+> fixtures; no production code on either side needed changing. ⚠ **The merge commit itself does
+> not compile**: the resolved files were never staged, and the commit after it is the other half.
+> Before the merge, the four defects the milestone reviews had recorded and left were fixed — a
+> walk whose predicate panicked could report a sound file corrupt, "write a block and give it its
+> index entry" existed twice, a refusal said *manifest* for a failure in the header's writer
+> parameters, and a failed trailer replacement could not tell *nothing happened* from *the file is
+> torn*. `ng::psp` is **402 tests**, the library 4,936, and `clippy --all-targets --all-features
+> -D warnings` is clean.
+>
+> - **Previously (2026-08-30):** **the documents said an open psp costs tens of kilobytes;
 > it costs 480 kB, and three quarters of that is the reference's contig list** (branch
 > `ng-psp-encoding`, status `implemented`). [`run_streaming.md`](doc/devel/ng/spec/run_streaming.md)
 > §7.2 was headed *an open psp costs tens of kilobytes, not megabytes* and cited again in §5.3; it
