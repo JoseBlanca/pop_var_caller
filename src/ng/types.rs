@@ -856,6 +856,46 @@ impl ExpectedHeterozygosity {
     }
 }
 
+/// **How often a chromosome drawn at random from the population carries something other
+/// than the reference base**, at an ordinary site — the mean alternative-allele
+/// frequency. A probability in `[0, 1]`.
+///
+/// **The partner of [`ExpectedHeterozygosity`], and a type of its own so the two cannot
+/// be swapped.** The SNP/indel genotype prior's two concentration numbers are exactly
+/// this frequency and a total conviction in other clothes, and
+/// `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity turns the pair back into
+/// them. Both are probabilities in `[0, 1]`, both are population quantities with no
+/// panel in them, and both reach the seed builder in the same call — so as bare floats
+/// a swapped pair compiles and returns a seed that is wrong in a way no downstream check
+/// refuses.
+///
+/// **They are different questions about the same population.** This one asks how often
+/// *one* chromosome is non-reference; the heterozygosity asks how often *two* differ.
+/// On a population where the alternative allele is rare the second is about twice the
+/// first, and on one where the reference base is the rare one it is far smaller than
+/// the first — so their sizes do not separate them either.
+///
+/// Source: the joint fit's own fitted density, in closed form
+/// (`FrequencyDensity::expected_alternative_frequency`,
+/// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §2). A run whose pre-pass fitted no
+/// density has none of this, and its seed falls to the neutral shape at whatever
+/// diversity it did fit.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct ExpectedAlternativeFrequency(f64);
+
+impl ExpectedAlternativeFrequency {
+    /// The only constructor. A frequency that is not a probability in `[0, 1]` is
+    /// rejected rather than coerced.
+    pub fn try_new(frequency: f64) -> Result<Self, DomainError> {
+        checked_probability(frequency, DomainError::ExpectedAlternativeFrequency).map(Self)
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// The chance that two repeat-tract copies drawn at random from the cohort carry
 /// different numbers of repeats — Nei's gene diversity, measured on repeat tracts.
 ///
@@ -888,75 +928,21 @@ impl RepeatGeneDiversity {
     /// The only constructor. A value that is not a probability in `[0, 1]` is rejected
     /// rather than coerced.
     ///
-    /// **The whole of `[0, 1]` is accepted**, even though the genotype prior's seed can
-    /// only reproduce a value strictly below the shape it builds over a locus's
-    /// candidate lengths. A measurement that shape cannot hold is a real measurement and
-    /// a real refusal, reported with both numbers by the seed builder
-    /// (`ng::calling::genotype_prior::SsrSeedOutcome`) — so a range check here would
-    /// catch it in the wrong place and without the numbers that explain it.
+    /// **The whole of `[0, 1]` is accepted**, and there is no consumer left that can
+    /// refuse a value inside it. Until 2026-08-26 the repeat tract's genotype prior
+    /// scaled a constructed geometric shape to reproduce this measurement, which was
+    /// possible only below a ceiling the shape itself set — at one outbred sample, below
+    /// every measurement — and the builder refused above it. The prior is now seeded from
+    /// the length spectrum the joint repeat fit produces per stratum
+    /// (`doc/devel/ng/spec/population_diversity.md` §4.2), which asserts no such scaling,
+    /// so nothing reads this value today.
+    ///
+    /// **It stays because the pre-pass still owes it**
+    /// (`doc/devel/ng/spec/parameter_prepass_cohort.md` §3): the STR gene diversity is one
+    /// of the two diversities that step is specified to emit, separately from
+    /// [`ExpectedHeterozygosity`] and precisely so that a consumer cannot confuse them.
     pub fn try_new(diversity: f64) -> Result<Self, DomainError> {
         checked_probability(diversity, DomainError::RepeatGeneDiversity).map(Self)
-    }
-
-    #[inline]
-    pub fn get(self) -> f64 {
-        self.0
-    }
-}
-
-/// The factor by which the genotype prior's starting mass falls for each repeat unit a
-/// candidate length sits away from the cohort's modal length — production's `G₀` decay
-/// `p` (`src/ssr/cohort/param_estimation.rs`), retyped.
-///
-/// **Two fractions in this caller are indexed by repeat units and they are not the same
-/// quantity.** This one is a *ratio between prior weights*: a tract one repeat further
-/// from the mode starts with this much less of the prior's mass. The stutter model's
-/// `whole_repeat_one_step_share` is a *share of slips*: of the reads whose copying error
-/// moved them by whole repeat units, the fraction that moved by exactly one
-/// (`doc/devel/ng/spec/read_likelihoods.md` §4.2). They live within a screen of each
-/// other in a scoring context and a bare `f64` accepts either, which is the confusion
-/// `doc/devel/ng/arch/calling_priors.md` §5 asks this type to prevent. **And the stutter
-/// model's geometric parameters are success probabilities rather than decays** — its own
-/// constructor documents that trap (`src/ng/alignment/stutter.rs`), where the mass falls
-/// by `1 − p` per step rather than by `p` — so the two are not even the same kind of
-/// number.
-///
-/// Fitted per group of loci by the parameter pre-pass, against how spread a variable
-/// tract's alleles are. Where a group is too thin to fit one, the run takes
-/// [`Self::FALLBACK`].
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
-pub struct SeedDecayPerRepeat(f64);
-
-impl SeedDecayPerRepeat {
-    /// The coded decay for a group of loci the pre-pass could not fit — production's
-    /// `DEFAULT_G0_FALLBACK_P` (`src/ssr/cohort/param_estimation.rs`), value and
-    /// reasoning.
-    ///
-    /// **It is the decay every figure in `doc/devel/ng/spec/calling_priors.md` §5.1 is
-    /// quoted at**, including the one repeat tract in ten whose measured diversity the
-    /// prior's shape cannot hold — which becomes 242 tracts in 1,236 at a decay of `0.3`
-    /// and 49 at `0.7`. Those counts are facts about this value, not about the method.
-    ///
-    /// **A value of the type rather than a free-standing constant**, following
-    /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`] and [`AlleleId::REFERENCE`], for the
-    /// same reason: as a loose `f64` it is exactly as constructible into a stutter
-    /// one-step share as into this.
-    pub const FALLBACK: Self = Self(0.5);
-
-    /// The only constructor. A decay outside `(0, 1]` is rejected rather than coerced.
-    ///
-    /// **Zero is refused and one is allowed.** At zero every candidate but the mode
-    /// itself would carry only the shape's floor, so the shape would stop being a
-    /// geometry and become a spike — and it is not a value any fit returns, since
-    /// production clamps its own no steeper than `0.1`. At one the shape is flat: every
-    /// candidate length equally likely before the reads, which is a coherent belief for
-    /// a group of tracts nobody has a spread for.
-    pub fn try_new(decay: f64) -> Result<Self, DomainError> {
-        if decay.is_finite() && decay > 0.0 && decay <= 1.0 {
-            Ok(Self(decay))
-        } else {
-            Err(DomainError::SeedDecayPerRepeat(decay))
-        }
     }
 
     #[inline]
@@ -1082,6 +1068,15 @@ pub enum DomainError {
     /// wrong fit.
     #[error("expected heterozygosity {0} is not a finite probability in [0, 1]")]
     ExpectedHeterozygosity(f64),
+    /// An [`ExpectedAlternativeFrequency`] was built from a value that is not a finite
+    /// probability in `[0, 1]`.
+    ///
+    /// **Its own variant beside [`Self::ExpectedHeterozygosity`], because the two arrive
+    /// together.** They are the two numbers the SNP/indel genotype prior is built from
+    /// and they reach the seed builder in one call, so a message naming the wrong one
+    /// sends the reader to the wrong half of a two-number fit.
+    #[error("expected alternative-allele frequency {0} is not a finite probability in [0, 1]")]
+    ExpectedAlternativeFrequency(f64),
     /// A [`RepeatGeneDiversity`] was built from a value that is not a finite
     /// probability in `[0, 1]`.
     ///
@@ -1092,14 +1087,6 @@ pub enum DomainError {
     /// sends the reader to the wrong half of the pre-pass.
     #[error("repeat gene diversity {0} is not a finite probability in [0, 1]")]
     RepeatGeneDiversity(f64),
-    /// A [`SeedDecayPerRepeat`] was built from a value that is not a finite fraction in
-    /// `(0, 1]`.
-    ///
-    /// **Zero is refused as well as negatives**, which is why this cannot share
-    /// [`Self::ErrorRate`]'s range: at a decay of zero every candidate length but the
-    /// cohort's mode falls to the floor and the shape stops being a geometry.
-    #[error("seed decay per repeat {0} is not a finite fraction in (0, 1]")]
-    SeedDecayPerRepeat(f64),
     /// A [`Ploidy`] was built from zero genome copies, which the likelihood
     /// divides by.
     #[error("ploidy {0} is not a positive number of genome copies")]
@@ -1616,6 +1603,15 @@ mod tests {
         assert_eq!(ExpectedHeterozygosity::try_new(0.0).unwrap().get(), 0.0);
         assert_eq!(ExpectedHeterozygosity::try_new(1.0).unwrap().get(), 1.0);
 
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(0.0).unwrap().get(),
+            0.0
+        );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(1.0).unwrap().get(),
+            1.0
+        );
+
         assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
         let just_below_one = f64::from_bits(1.0f64.to_bits() - 1);
         // Pinned, not assumed: any value below one would satisfy the assertion that
@@ -1712,6 +1708,14 @@ mod tests {
             ExpectedHeterozygosity::try_new(1.5),
             Err(DomainError::ExpectedHeterozygosity(1.5))
         );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(-0.5),
+            Err(DomainError::ExpectedAlternativeFrequency(-0.5))
+        );
+        assert_eq!(
+            ExpectedAlternativeFrequency::try_new(1.5),
+            Err(DomainError::ExpectedAlternativeFrequency(1.5))
+        );
     }
 
     /// `NaN` and both infinities are not probabilities and none of them
@@ -1750,6 +1754,13 @@ mod tests {
                     Err(DomainError::ExpectedHeterozygosity(_))
                 ),
                 "expected heterozygosity {bad}"
+            );
+            assert!(
+                matches!(
+                    ExpectedAlternativeFrequency::try_new(bad),
+                    Err(DomainError::ExpectedAlternativeFrequency(_))
+                ),
+                "expected alternative-allele frequency {bad}"
             );
         }
     }

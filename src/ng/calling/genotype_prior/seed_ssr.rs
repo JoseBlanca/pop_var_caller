@@ -1,5 +1,5 @@
-//! The STR starting point: mass falling off geometrically from the cohort's modal repeat
-//! count, totalling what the cohort's measured repeat diversity implies.
+//! The STR starting point: the population's own fitted **length spectrum** at this tract's
+//! stratum, read onto the locus's candidate lengths.
 //!
 //! Everything the SNP/indel starting point leans on is false at a repeat tract, and the three
 //! failures are separate (`doc/devel/ng/spec/calling_priors.md` §5). The reference accession's
@@ -8,246 +8,191 @@
 //! adjacent to one of 10 and far from one of 4 — so splitting mass evenly across alternatives
 //! throws away the only structure that makes a rare long allele believable. And repeat tracts
 //! mutate orders of magnitude faster than bases do, so how variable they are is a separate
-//! number the pre-pass measures separately.
+//! number, measured separately.
 //!
-//! ## Two questions, two parameters, and this is where ng departs from production
+//! ## The two questions, and both are answered by one fitted pair
 //!
-//! **Where the mass sits** is production's `G₀` — its name for the pseudocount prior it puts
-//! over a tract's candidate lengths — ported unchanged: a candidate's weight falls by a fixed
-//! factor for every repeat unit it sits away from the cohort's mode at this locus
-//! ([`fill_seed_shape`], from `src/ssr/cohort/allele_freq_prior.rs`).
+//! **Where the mass sits** is the stratum's fitted length spectrum: how that stratum's
+//! chromosomes are spread over tract lengths, indexed in whole repeat units either side of the
+//! **reference** tract length.
 //!
-//! **How much mass there is** is new here, and it is new because production records a defect
-//! against itself. `G₀` was fitted as a smoothing strength for a plug-in frequency estimate,
-//! where its total means nothing else. Reused unchanged as a Dirichlet concentration that
-//! total stops being a smoothing knob and becomes a claim about how polymorphic the locus is —
-//! and how hard the prior will resist the reads. So ng sets the total from the one measured
-//! quantity that answers that question, the cohort's repeat gene diversity, and leaves the
-//! decay to do only the job it was fitted for (spec §5.1).
+//! **How much mass there is** is the concentration fitted beside it: how monomorphic the
+//! stratum's tracts are, in chromosomes' worth of belief.
 //!
-//! ## The units error this module exists to avoid
+//! Together they are a Dirichlet over a tract's length frequencies, estimated from that
+//! stratum's own tracts by the joint repeat fit
+//! (`parameter_estimation::joint::ssr_fit::StratumFit`), conditioning on each sample's
+//! homozygote excess as it goes so that inbreeding is divided out inside the estimator.
 //!
-//! Gene diversity is a **probability** — the chance two copies drawn at random carry different
-//! lengths. A concentration is a **count of chromosomes**. Setting the total to the diversity
-//! equates the two, and the spec records that it was in the design document until 2026-08-19.
+//! ## What this replaced, and why — `population_diversity.md` §4.2
 //!
-//! What a Dirichlet with total `A` actually implies is `A(1 − c)/(A + 1)`, where `c` is the
-//! **Simpson index** of the shape — the chance that two copies drawn from the shape alone land
-//! on the same length. So a total of `D` asserts `D(1 − c)/(D + 1)`, which is always less.
-//! **Measured on 1,236 polymorphic tomato repeat tracts** at the coded fallback decay, the
-//! prior would assert a median 0.40 of what was measured, tenth percentile 0.22 (spec §5.1).
-//! The total that does reproduce it is `D / (1 − c − D)`, which is what [`fill_ssr_seed`] uses,
-//! and the identity is what `tests::the_seed_implies_the_diversity_that_was_measured` pins.
+//! Until 2026-08-26 this module built the shape rather than reading it: mass falling off
+//! geometrically from the cohort's commonest length at the tract, scaled so that the prior's own
+//! implied gene diversity reproduced a separately measured cohort-wide repeat gene diversity.
+//! Both halves are gone, and the four reasons are facts about the two constructions:
+//!
+//! - **The constructed shape had one free parameter and the fitted one has none.** The decay was
+//!   a single number per group of loci with a coded fallback of 0.5.
+//! - **The constructed version had a failure mode the fitted one does not have.** Scaling a
+//!   shape to reproduce a measured diversity is only possible below a ceiling the shape itself
+//!   sets, and above it the builder refused. **At one outbred sample that was every tract** — a
+//!   single diploid shows at most three lengths, whose shape can imply at most 0.625, against
+//!   the ~0.72 repeat diversity HG002 actually has. A fitted Dirichlet asserts no such scaling
+//!   and cannot fail this way, which is why there is no refusal left in this module.
+//! - **It removed a per-locus input that has no source**: the cohort's commonest length *at this
+//!   tract*, which would come from repeat-tract candidate selection, unwritten. The fitted
+//!   spectrum is indexed from the reference tract length, which every locus already knows.
+//! - **It removed the need for a cohort-wide repeat diversity number entirely**, which nothing
+//!   emits.
+//!
+//! ## Two words this project keeps apart, and they are both "spectrum"
+//!
+//! A **length spectrum** is this path's: how a stratum's chromosomes are spread over tract
+//! **lengths**. A **frequency spectrum** is the ordinary-site path's: how allele **frequencies**
+//! are spread across the population, which [`seed_generic`](super::seed_generic) reads. Neither
+//! is ever called just "the spectrum" (`population_diversity.md` §2).
 
-use crate::genetics::{ALPHA_REF, MIN_ALT_CONCENTRATION};
-use crate::ng::types::{RepeatGeneDiversity, SeedDecayPerRepeat};
+use crate::genetics::MIN_ALT_CONCENTRATION;
+use crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrum;
 
 use super::Concentration;
 
-/// The floor on a shape weight, so a candidate far from the mode keeps a strictly positive
-/// share rather than falling into an absorbing zero.
+/// The floor on a candidate's share of the prior's mass, so a candidate the fit gives nothing
+/// keeps a strictly positive share rather than falling into an absorbing zero.
 ///
-/// **Ported from production's `G0_FLOOR`** (`src/ssr/cohort/allele_freq_prior.rs`), which gives
-/// one reason for it: `decay^|Δ|` must not underflow to exactly `0.0` for a far candidate over
-/// a long tract. At a decay of `0.5` that underflow is complete at an offset of **1,075 repeat
-/// units and beyond** (`tests::a_candidate_too_far_for_the_decay_to_reach_keeps_its_share`).
-/// Why a zero would matter is the spec's sentence rather than production's: a masked long
-/// heterozygous copy that the candidate set nearly missed has to stay recoverable rather than
-/// fall into a prior it can never climb out of (spec §5).
+/// **Ported from production's `G0_FLOOR`** (`src/ssr/cohort/allele_freq_prior.rs`). Why a zero
+/// would matter is the spec's sentence rather than production's: a masked long heterozygous copy
+/// that the candidate set nearly missed has to stay recoverable rather than fall into a prior it
+/// can never climb out of (`calling_priors.md` §5).
 ///
-/// **Here it does a second job production's does not need: it keeps the normalisation
-/// possible.** ng divides by the weights' total, and a tract whose every candidate sits past
-/// the underflow distance would divide by zero and fill the buffer with `NaN`
-/// (`tests::a_tract_whose_every_candidate_is_past_the_underflow_distance_is_still_seeded`).
+/// **Two candidates reach it, and they are different situations.** One is a candidate *outside*
+/// the fitted spectrum's reach — further from the reference tract length than the fit was ever
+/// allowed to place mass — which is outside everything the fit saw rather than something it
+/// measured as rare. The other is a candidate inside the reach at a length class the fit put no
+/// mass on. Both take the floor, and the floor is what makes the shape's total strictly
+/// positive, so the shares are always a distribution
+/// (`tests::a_candidate_the_fit_reaches_and_gives_nothing_still_keeps_a_share`).
 ///
 /// It has production's value, which happens to equal [`MIN_ALT_CONCENTRATION`], and **the two
 /// are not the same quantity**: this floors a dimensionless share of the shape, that floors a
-/// count of chromosomes. Production picked this one as "any representable positive number";
-/// `MIN_ALT_CONCENTRATION` is sized rather than arbitrary — `src/genetics.rs` puts it far below
-/// any real diversity so it cannot perturb a genuine estimate.
+/// count of chromosomes.
 const SHAPE_FLOOR: f64 = 1e-12;
 
-/// What [`fill_ssr_seed`] did, and the buffer it wrote, on whichever of the two terms applies.
-///
-/// **A refusal hands back no concentration**, so the reads cannot be met with a starting point
-/// that silently missed its target — the failure spec §12 test 11 exists to prevent. What it
-/// hands back instead is the buffer itself, still holding the shape, because completing a
-/// refusal is a policy decision that belongs to the caller and not here (spec Q2).
-///
-/// **This does not make the mistake unrepresentable, and it is not meant to.**
-/// [`Concentration::new`] is public, so a caller can still wrap the shape by hand — and it has
-/// to be able to, because the provisional policy `doc/devel/ng/arch/calling_priors.md` §5 names
-/// for these loci is exactly that: scale the shape to some total and carry the marker onto the
-/// locus's output. What the type does is make that an explicit decision with a name on it,
-/// rather than something a caller falls into by reading a buffer it was never handed.
-#[must_use]
-#[derive(Debug)]
-pub enum SsrSeedOutcome<'a> {
-    /// The total that reproduces the measured diversity exists, and the buffer holds the shape
-    /// scaled to it.
-    Seeded(Concentration<'a>),
-    /// **No total reproduces the measurement**, because `A(1 − c)/(A + 1)` rises to `1 − c` and
-    /// stops: the shape itself cannot express that much diversity over this locus's candidate
-    /// lengths, and rescaling is not a repair.
-    ///
-    /// **How often this fires is a property of the panel, not of the caller, and the two ends
-    /// of the range are far apart.** On the 63-accession tomato panel at the coded fallback
-    /// decay it is 119 of 1,236 polymorphic tracts, about one in ten — 242 at a decay of `0.3`
-    /// and 49 at `0.7`. At **one outbred sample it is every locus**: a single diploid genome
-    /// shows at most three lengths at a tract, whose shape can imply at most 0.444 (two
-    /// lengths) or 0.625 (three) at the fallback decay, while the pre-pass reports that
-    /// genome's own repeat diversity — about 0.72 on the GIAB HG002 benchmark, where 72 tandem
-    /// repeats in 100 are heterozygous (spec §5.3). Whichever policy spec Q2 settles on has to
-    /// work at ten refusals in ten, not only at one in ten
-    /// (`tests::a_single_outbred_genome_is_refused_at_every_tract`).
-    ///
-    /// It also carries a guard against a total too large to represent. **No shape reaches it**:
-    /// the worst a shape can ask for is its ceiling divided by that ceiling's own last unit in
-    /// the last place, which for a binary float is at most `2^53` — measured at `2^53 − 1`,
-    /// about 9.0e15 chromosomes (`tests::the_largest_total_any_shape_can_ask_for_is_finite`).
-    /// The guard stays because the alternative is an infinity reaching a `debug_assert!` that
-    /// release compiles out.
-    DiversityUnreachable {
-        /// The cohort's repeat gene diversity, as the pre-pass measured it.
-        measured: f64,
-        /// `1 − c`: the most this locus's candidate lengths can imply, at any total.
-        ceiling: f64,
-        /// The buffer, holding the shape normalised to sum to one — no total asserted. It is
-        /// handed back mutably so a caller that has a policy for these loci can scale it in
-        /// place and wrap the result, with nothing allocated and nothing recomputed.
-        shape: &'a mut [f64],
-    },
-}
-
-/// Fill `out` with the STR seed: mass falling off geometrically from `modal_repeat_count`,
-/// scaled so that the prior's own implied gene diversity is the `gene_diversity` the pre-pass
-/// measured.
+/// Fill `out` with the STR seed: the stratum's fitted length spectrum read onto this locus's
+/// candidate lengths, at the concentration it was fitted with.
 ///
 /// ```text
-/// shape:   w_j ∝ max(decay ^ |repeat count of j − modal repeat count|, SHAPE_FLOOR),  Σ w = 1
-/// total:   A   = D / (1 − c − D),      c = Σ_j w_j²        (the shape's Simpson index)
-/// seed:    α_j = A · w_j,  floored at MIN_ALT_CONCENTRATION
+/// offset:  d_j = repeat count of j − reference_repeat_count
+/// shape:   w_j = max(spectrum(d_j), SHAPE_FLOOR)          (1/K on the stated-flat rung)
+/// seed:    α_j = concentration · w_j,  floored at MIN_ALT_CONCENTRATION
 /// ```
 ///
-/// **Why that total and not `D` itself:** the two are different quantities in different units,
-/// and the substitution makes the prior assert a median 0.40 of what was measured on tomato —
-/// see this module's own documentation, and spec §5.1.
+/// ## The scaling is the Dirichlet's own conditioning, not a renormalisation
+///
+/// A Dirichlet over the fit's `2·span + 1` length classes, **conditioned on the tract carrying
+/// one of this locus's candidate lengths**, is exactly the Dirichlet over those candidates with
+/// each class's own `α` kept — that is the distribution's marginal-conditional property, and it
+/// is why nothing here divides by the retained mass. Two consequences worth stating because
+/// neither is an accident:
+///
+/// - **The shape is right by construction.** Normalising the seed gives back the fitted spectrum
+///   restricted to the candidate lengths, which is what
+///   `population_diversity.md` §8's first check asks for
+///   (`tests::the_seed_normalises_back_to_the_fitted_spectrum_over_the_candidates`).
+/// - **The total is `concentration × (mass the candidates cover)`, which is smaller than the
+///   concentration wherever the candidate set misses fitted mass.** A locus whose candidates
+///   cover a tenth of what the stratum spreads over is held with a tenth of the conviction, and
+///   that is the honest reading: the fit expected lengths this locus is not being called over
+///   (`tests::a_candidate_set_covering_less_fitted_mass_is_held_with_less_conviction`).
+///
+/// ## `candidate_repeat_counts` and `reference_repeat_count`
 ///
 /// `candidate_repeat_counts` is parallel to the locus's
 /// [`CandidateAlleles`](crate::ng::calling::CandidateAlleles), so entry 0 is the reference
 /// allele's — but **nothing here privileges entry 0**, which is the whole difference from the
 /// SNP/indel path: at a repeat tract the reference length is one common length among several
-/// (spec §5).
+/// (`calling_priors.md` §5).
+///
+/// `reference_repeat_count` is the **tract's own** reference repeat count, the same number that
+/// picked the stratum this spectrum came from. It is what the spectrum's offsets are measured
+/// from, and it is not any candidate's — the reference allele usually spells it, but a locus
+/// whose reference allele was cut by selection still has one.
 ///
 /// ## Three things a caller can get wrong that nothing here can catch
 ///
-/// The lengths of the two slices are checkable and are checked. These are not, and each was
-/// measured on one diploid sample at three candidate lengths with an inbreeding coefficient of
-/// 0.3, as a difference within the prior row — which is all a prior means:
+/// The lengths of the two slices are checkable and are checked. These are not:
 ///
-/// - **the reference allele's repeat count passed as the modal count.** The prior flips which
-///   homozygote it favours, a swing of 1.44 nats (6.3 phred).
-/// - **the SNP/indel diversity passed where the repeat diversity belongs.** The heterozygote is
-///   penalised 7.49 nats instead of 2.97 — 4.52 nats (19.6 phred) more hostile to
-///   heterozygotes. [`RepeatGeneDiversity`] exists so this needs a deliberate conversion.
+/// - **a candidate's repeat count passed as the reference tract's.** The shape re-centres on
+///   that candidate, which is the flattening
+///   [`StratumFits::length_spectrum_at`](crate::ng::parameter_estimation::joint::stratum_fits::StratumFits::length_spectrum_at)'s
+///   own documentation warns about; measured as a difference within the prior row in
+///   `tests::the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it`.
+/// - **another stratum's spectrum.** Every fitted spectrum has the same shape and the same
+///   length, so one stratum's reads as another's with nothing to say so.
 /// - **the buffer reused across loci with the call skipped.** The previous locus's row, entry
 ///   for entry.
 ///
-/// ## Two alleles of the same length land on one rung
+/// ## Two alleles of the same length land on one class
 ///
 /// The seed is keyed by repeat count, so two candidates that differ by an interior
-/// substitution — an interrupted repeat — sit at the same offset and **each receives the
-/// rung's full weight**, which is production's behaviour. That costs more than the extra prior
-/// mass spec §5.2 names: a second spelling flattens the shape, which lowers its Simpson index
-/// and **raises the ceiling from 0.444 to 0.625** on a two-length tract at the fallback decay
-/// (`tests::a_second_spelling_of_one_length_raises_the_ceiling`), so whether a locus is refused
-/// at all depends on how many spellings the cohort happened to show. Whether to divide the rung
-/// instead needs the interrupted-repeat work to say how it should be weighted; the signature
-/// takes counts rather than sequences precisely so that change lands in this one function
-/// (spec §5.2, open as spec Q3).
+/// substitution — an interrupted repeat — sit at the same offset and **each receives that
+/// class's full weight**, which is production's behaviour. Whether to divide the class instead
+/// needs the interrupted-repeat work to say how it should be weighted; the signature takes
+/// counts rather than sequences precisely so that change lands in this one function
+/// (`calling_priors.md` §5.2, open as that spec's Q3).
 ///
 /// ## The ends of the range
 ///
-/// **At one candidate allele** the shape is a single entry, its Simpson index is exactly 1, and
-/// the ceiling is 0 — so the rule above would refuse every monomorphic tract, whatever the
-/// measurement. It is refused as a rule with nothing to refuse: a locus with one allele has one
-/// genotype, whose prior probability is 1 at **any** positive concentration. This returns
-/// [`SsrSeedOutcome::Seeded`] there, at one chromosome
-/// (`tests::a_locus_with_one_candidate_length_is_seeded_rather_than_refused`).
+/// **At one candidate allele** the locus has one genotype, whose prior probability is 1 at any
+/// positive concentration, so what this returns there cannot be wrong — it is
+/// `concentration × w`, with no special case
+/// (`tests::a_locus_with_one_candidate_length_is_seeded_from_that_length_alone`).
 ///
-/// **At one sample every tract is refused**, and that is the cohort end of the range rather
-/// than an edge case — see [`SsrSeedOutcome::DiversityUnreachable`].
-///
-/// **As the measurement approaches the ceiling the total rises without bound**, because
-/// `A = D/(1 − c − D)` has the ceiling as its pole: closing the gap to the ceiling by a factor
-/// of ten multiplies the total by about ten
-/// (`tests::the_total_climbs_without_bound_as_the_measurement_nears_the_ceiling`). That is the
-/// honest answer and it is also an immovable prior — at a gap of one part in a million the seed
-/// is worth about a million chromosomes, a hundred times the largest cohort this caller commits
-/// to, so the reads cannot move it. Capping it is part of what spec Q2 has to settle, and this
-/// function does not cap it.
+/// **At one sample nothing special happens**, which is the change this rewrite bought: the
+/// stratum's spectrum is fitted across *tracts*, and a single genome carries the same tracts a
+/// panel does (`population_diversity.md` §4.3). The construction this replaced refused every
+/// tract there (`tests::a_single_diploids_candidate_sets_are_all_seeded`).
 ///
 /// ## Shape and cost
 ///
-/// Fills the caller's buffer and **allocates nothing**. Four passes over the locus's candidate
-/// lengths — write the raw weights, sum them, normalise and accumulate the Simpson index,
-/// scale — and no `lgamma`, against one `lgamma` per allele a genotype carries a copy of in the
-/// prior row this feeds.
+/// Fills the caller's buffer and **allocates nothing**. Three passes over the locus's candidate
+/// lengths — write the weights, sum them, scale — and no `lgamma`, against one `lgamma` per
+/// allele a genotype carries a copy of in the prior row this feeds. (The sum is the shared
+/// filler's, and `fill_ssr_seed` discards it: the seed scales the *unnormalised* weights, which
+/// is §4.2's conditioning argument above.)
+///
+/// # Panics
 ///
 /// **Both slice lengths are checked in release**: `out` is the caller's and is reused across
-/// loci, so a short one would leave the previous locus's entries standing in this locus's seed,
-/// which is the silent failure this module refuses everywhere.
+/// loci, so a short one would leave the previous locus's entries standing in this locus's seed.
+#[must_use]
 pub fn fill_ssr_seed<'a>(
     candidate_repeat_counts: &[u32],
-    modal_repeat_count: u32,
-    decay: SeedDecayPerRepeat,
-    gene_diversity: RepeatGeneDiversity,
+    reference_repeat_count: u32,
+    spectrum: LengthSpectrum<'_>,
     out: &'a mut [f64],
-) -> SsrSeedOutcome<'a> {
-    assert_lengths(candidate_repeat_counts, out);
-
-    if candidate_repeat_counts.len() == 1 {
-        // One length, one genotype, and its prior probability is 1 at any positive
-        // concentration — so no total can be wrong here, and the ceiling rule below, which
-        // would refuse every monomorphic tract, has nothing to refuse. The value is arbitrary
-        // for that reason; it is `ALPHA_REF` so that a reader who finds it in a buffer
-        // recognises it as one chromosome's worth rather than as a number this file chose.
-        out[0] = ALPHA_REF;
-        return SsrSeedOutcome::Seeded(Concentration::new(out));
-    }
-
-    let simpson_index = fill_seed_shape(candidate_repeat_counts, modal_repeat_count, decay, out);
-    let ceiling = 1.0 - simpson_index;
-    let measured = gene_diversity.get();
-
-    let headroom = ceiling - measured;
-    let total = measured / headroom;
-    if headroom <= 0.0 || !total.is_finite() {
-        // `out` keeps the normalised shape: the refusal asserts no total, and the shape is what
-        // any policy for these loci will need (spec Q2).
-        return SsrSeedOutcome::DiversityUnreachable {
-            measured,
-            ceiling,
-            shape: out,
-        };
-    }
-
+) -> Concentration<'a> {
+    let _ = fill_candidate_weights(
+        candidate_repeat_counts,
+        reference_repeat_count,
+        spectrum,
+        out,
+    );
+    let concentration = spectrum.concentration();
     for slot in out.iter_mut() {
-        *slot = (total * *slot).max(MIN_ALT_CONCENTRATION);
+        *slot = (concentration * *slot).max(MIN_ALT_CONCENTRATION);
     }
-    SsrSeedOutcome::Seeded(Concentration::new(out))
+    Concentration::new(out)
 }
 
 /// Fill `out` with the share of the prior's starting mass each **candidate** at this locus
 /// carries — one entry per candidate, in the candidate set's own order, summing to 1.
 ///
 /// This is the same shape [`fill_ssr_seed`] scales into a concentration, before it is scaled:
-/// where a length sits relative to the cohort's mode, with no claim yet about how much
+/// where a length sits in the stratum's fitted spread, with no claim yet about how much
 /// conviction there is. One implementation stands behind both, so the prior's belief about
-/// lengths cannot drift between its two consumers (`doc/devel/ng/arch/calling_priors.md` §5) —
-/// with one exception: a locus carrying a single candidate never reaches the shared code at all,
-/// because [`fill_ssr_seed`] short-circuits it, and the two agree there only because `ALPHA_REF`
-/// is 1.
+/// lengths cannot drift between its two consumers
+/// (`doc/devel/ng/arch/calling_priors.md` §5).
 ///
 /// **The consumer is the read likelihood's contamination term.** Scoring a read against a
 /// candidate allele mixes three sources: the sample's own copies, a uniform outlier share, and a
@@ -265,11 +210,8 @@ pub fn fill_ssr_seed<'a>(
 /// lands on one of them, and three cases break that. **None is this function's to settle**; they
 /// are recorded here so the likelihood step meets them as a decision rather than as a surprise:
 ///
-/// - **Two candidates of one length each take the rung's full share.** That is deliberate as a
-///   concentration and open as spec Q3 (see [`fill_ssr_seed`]); read as a claim about *lengths*
-///   it double-counts. Measured on candidates at the mode, the mode again, and one repeat above,
-///   at the fallback decay: length-at-the-mode arrives with `0.8` of the mass against the
-///   geometry's own `0.667`
+/// - **Two candidates of one length each take that class's full share.** Read as a claim about
+///   *lengths* it double-counts
 ///   (`tests::two_spellings_of_one_length_carry_that_lengths_share_twice`).
 /// - **A read at a length that is not a candidate has no entry.** The candidate set is
 ///   post-prune, while the mixture's sibling uniform term is spread over every length the stutter
@@ -278,78 +220,95 @@ pub fn fill_ssr_seed<'a>(
 ///
 /// ## Cost, and when a caller should not use this
 ///
-/// Three passes over the candidate lengths — write the raw weights, sum them, normalise — built
-/// **once per locus** rather than once per scoring call. But a loop that has just called
-/// [`fill_ssr_seed`] at this locus already holds the shape and should not rebuild it: on a seed
-/// it is the concentration divided by its own total, and on a refusal it is exactly the buffer
-/// the refusal handed back. This export is for a caller that wants the shape and not the seed.
+/// Two passes over the candidate lengths — write the weights, normalise — built **once per
+/// locus** rather than once per scoring call. But a loop that has just called [`fill_ssr_seed`]
+/// at this locus already holds the shape and should not rebuild it: it is that concentration
+/// divided by its own total. This export is for a caller that wants the shape and not the seed.
 ///
 /// **It does not survive a candidate being added.** A discovery round appends candidates mid
 /// locus (`doc/devel/ng/arch/calling_em_loop.md` §5), and a frozen buffer is then one entry short
 /// with nothing to raise, because by construction it is not refilled. Discovery is off by
-/// default; a loop that turns it on has to rebuild this, and what that costs the sibling spec's
-/// freeze requirement is the loop's to record.
+/// default; a loop that turns it on has to rebuild this.
 ///
 /// ## Two things a caller can get wrong that nothing here can catch
 ///
-/// - **The reference allele's repeat count passed as the cohort's modal count.** The peak moves
-///   off the mode and onto the reference: measured on candidates three below, at, two above and
-///   five above the mode, the mode's share falls from `0.711` to `0.108` — a factor of 6.6 —
-///   while the reference's rises from `0.089` to `0.862`
-///   (`tests::the_mode_is_the_cohorts_and_nothing_here_can_check_it`).
+/// - **A candidate's repeat count passed as the reference tract's**, which re-centres the shape.
 /// - **A buffer reused across loci with the call skipped.** The previous locus's shares.
 ///
 /// **Shares, not chromosome counts.** The entries sum to 1 and carry no conviction; nothing here
 /// may be handed where a [`Concentration`] belongs, which is why this returns nothing rather than
 /// wrapping the buffer.
+///
+/// # Panics
+///
+/// As [`fill_ssr_seed`], on an empty candidate set or a buffer that is not one entry per
+/// candidate.
 pub fn fill_seed_share_per_candidate(
     candidate_repeat_counts: &[u32],
-    modal_repeat_count: u32,
-    decay: SeedDecayPerRepeat,
+    reference_repeat_count: u32,
+    spectrum: LengthSpectrum<'_>,
     out: &mut [f64],
 ) {
-    // The Simpson index is the seed builder's business, not this consumer's: it is the ceiling
-    // on implied diversity, which a contamination term has no use for.
-    let _ = fill_seed_shape(candidate_repeat_counts, modal_repeat_count, decay, out);
+    let total = fill_candidate_weights(
+        candidate_repeat_counts,
+        reference_repeat_count,
+        spectrum,
+        out,
+    );
+    for slot in out.iter_mut() {
+        *slot /= total;
+    }
 }
 
-/// Fill `out` with the seed's shape — the share of the prior's mass each candidate length
-/// carries, summing to 1 — and return its **Simpson index**, `Σ w²`: the chance that two copies
-/// drawn from the shape alone land on the same length.
+/// Fill `out` with each candidate's **unnormalised** weight under the spectrum, and return their
+/// total.
 ///
-/// `1 − c` is therefore the diversity the shape itself carries, and it is the ceiling
-/// [`fill_ssr_seed`] measures the pre-pass's measurement against. It comes back from here rather
-/// than being recomputed because the caller has just written every entry.
+/// **Unnormalised is what the seed wants and normalised is what the share wants**, and the
+/// difference between the two is the whole of `population_diversity.md`'s conditioning argument
+/// — see [`fill_ssr_seed`]. Returning the total rather than recomputing it keeps the share's
+/// second pass from walking the buffer a third time.
 ///
-/// **The lengths are checked here too**, and not only in [`fill_ssr_seed`]: a longer `out`
-/// leaves stale entries in the total it normalises against, and a shorter one drops candidates
-/// silently. Two integer comparisons per locus, against a wrong shape at every locus after it.
-fn fill_seed_shape(
+/// **The stated-flat rung writes `1/K` rather than `1`**, so that the seed's total on that rung
+/// is the stated concentration itself rather than the concentration times the candidate count.
+/// A flat shape asserts no belief about which length is likelier; it must not also assert more
+/// conviction at a locus with more candidates
+/// (`tests::the_stated_flat_rung_holds_the_locus_at_the_stated_concentration_whatever_the_candidate_count`).
+fn fill_candidate_weights(
     candidate_repeat_counts: &[u32],
-    modal_repeat_count: u32,
-    decay: SeedDecayPerRepeat,
+    reference_repeat_count: u32,
+    spectrum: LengthSpectrum<'_>,
     out: &mut [f64],
 ) -> f64 {
     assert_lengths(candidate_repeat_counts, out);
-    let decay = decay.get();
-    for (slot, &repeat_count) in out.iter_mut().zip(candidate_repeat_counts) {
-        let offset = (i64::from(repeat_count) - i64::from(modal_repeat_count)).abs();
-        // A tract cannot sit `i32::MAX` repeat units from the mode on any genome, and the
-        // weight has underflowed to zero long before that anyway — the clamp is here so the
-        // conversion cannot wrap rather than because the case is reachable. Wrapping would send
-        // the offset negative and put nearly all the prior's mass on the *far* candidate
-        // (`tests::an_offset_past_the_integer_range_is_clamped_rather_than_wrapped`).
-        let offset = i32::try_from(offset).unwrap_or(i32::MAX);
-        *slot = decay.powi(offset).max(SHAPE_FLOOR);
+    match spectrum.fitted_weights() {
+        None => {
+            let share = 1.0 / candidate_repeat_counts.len() as f64;
+            out.fill(share);
+        }
+        Some(weights) => {
+            let span = i64::from(
+                spectrum
+                    .allele_span()
+                    .expect("a fitted spectrum has a span"),
+            );
+            for (slot, &repeat_count) in out.iter_mut().zip(candidate_repeat_counts) {
+                let offset = i64::from(repeat_count) - i64::from(reference_repeat_count);
+                // **Outside the fit's reach takes the floor, not the end class's weight.** The
+                // end class holds the mass the fit put at exactly `±span` repeats; handing it to
+                // a candidate twelve repeats away would assert that a twelve-repeat departure is
+                // as common as a six-repeat one, which the fit never said and its own span is
+                // the statement that it declined to say
+                // (`tests::a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class`).
+                let weight = if offset.abs() <= span {
+                    weights[(offset + span) as usize]
+                } else {
+                    0.0
+                };
+                *slot = weight.max(SHAPE_FLOOR);
+            }
+        }
     }
-
-    let raw_total: f64 = out.iter().sum();
-    let mut simpson_index = 0.0;
-    for slot in out.iter_mut() {
-        *slot /= raw_total;
-        simpson_index += *slot * *slot;
-    }
-    simpson_index
+    out.iter().sum()
 }
 
 /// The one shape check both fillers make, in release.
@@ -371,744 +330,554 @@ fn assert_lengths(candidate_repeat_counts: &[u32], out: &[f64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::parameter_estimation::joint::stratum_fits::{
+        FittedFrom, STATED_FLAT_CONCENTRATION,
+    };
 
-    /// What a written seed actually implies about diversity, computed from the buffer rather
-    /// than from the arithmetic that produced it: `A(1 − c)/(A + 1)`, with both `A` and `c`
-    /// read back off the entries.
+    /// **A five-class spectrum leaning long, and every class a different number.** Two
+    /// properties are deliberate and both kill a class of mutation: no two classes share a
+    /// weight, so reading one class for another shows up; and the two ends differ (`0.04`
+    /// against `0.05`), so an offset whose sign is flipped is a different answer rather than
+    /// the same one by symmetry.
     ///
-    /// **Reading it back is the point.** Recomputing it from the total the builder chose would
-    /// re-run the builder's own algebra and could only ever agree with itself; this sees what
-    /// the caller of `Concentration::get` sees, floors included.
-    fn implied_gene_diversity(alpha: &[f64]) -> f64 {
-        let total: f64 = alpha.iter().sum();
-        let simpson_index: f64 = alpha.iter().map(|a| (a / total) * (a / total)).sum();
-        total * (1.0 - simpson_index) / (total + 1.0)
+    /// Indexed `-2 ..= +2` in whole repeat units from the reference tract length.
+    fn leaning_long() -> Vec<f64> {
+        vec![0.04, 0.16, 0.50, 0.25, 0.05]
     }
 
-    /// Seed a tract and hand back the entries, or panic naming the refusal.
-    fn seeded(counts: &[u32], modal: u32, decay: f64, measured: f64, out: &mut [f64]) -> Vec<f64> {
-        match fill_ssr_seed(
-            counts,
-            modal,
-            SeedDecayPerRepeat::try_new(decay).unwrap(),
-            RepeatGeneDiversity::try_new(measured).unwrap(),
-            out,
-        ) {
-            SsrSeedOutcome::Seeded(concentration) => concentration.get().to_vec(),
-            SsrSeedOutcome::DiversityUnreachable {
-                measured, ceiling, ..
-            } => panic!("expected a seed, got a refusal: measured {measured}, ceiling {ceiling}"),
-        }
+    /// The tract this module's fixtures sit at: 11 whole repeats in the reference.
+    const REFERENCE_REPEATS: u32 = 11;
+
+    /// The candidate lengths, in an order no sort would produce and at offsets that are not
+    /// symmetric about the reference: `0, +1, −2, +2`.
+    fn candidates() -> Vec<u32> {
+        vec![11, 12, 9, 13]
     }
 
-    /// Seed a tract and hand back the refusal's two numbers, or panic naming the seed.
-    fn refused(
-        counts: &[u32],
-        modal: u32,
-        decay: f64,
-        measured: f64,
+    fn own_fit(weights: &[f64], concentration: f64) -> LengthSpectrum<'_> {
+        LengthSpectrum::fitted(weights, concentration, FittedFrom::ThisStratum)
+    }
+
+    fn seed(
+        candidate_repeat_counts: &[u32],
+        reference: u32,
+        spectrum: LengthSpectrum<'_>,
         out: &mut [f64],
-    ) -> (f64, f64) {
-        match fill_ssr_seed(
-            counts,
-            modal,
-            SeedDecayPerRepeat::try_new(decay).unwrap(),
-            RepeatGeneDiversity::try_new(measured).unwrap(),
-            out,
-        ) {
-            SsrSeedOutcome::DiversityUnreachable {
-                measured, ceiling, ..
-            } => (measured, ceiling),
-            SsrSeedOutcome::Seeded(c) => {
-                panic!("expected a refusal, got a seed: {:?}", c.get())
-            }
+    ) -> Vec<f64> {
+        fill_ssr_seed(candidate_repeat_counts, reference, spectrum, out)
+            .get()
+            .to_vec()
+    }
+
+    fn shares(
+        candidate_repeat_counts: &[u32],
+        reference: u32,
+        spectrum: LengthSpectrum<'_>,
+    ) -> Vec<f64> {
+        let mut out = vec![0.0; candidate_repeat_counts.len()];
+        fill_seed_share_per_candidate(candidate_repeat_counts, reference, spectrum, &mut out);
+        out
+    }
+
+    /// **Relative, with no absolute floor**, and the floor is exactly what went wrong when
+    /// there was one. Written `1e-12 * right.abs().max(1.0)`, the tolerance never fell below
+    /// `1e-12` — the size of [`MIN_ALT_CONCENTRATION`] itself — so
+    /// `close(x, MIN_ALT_CONCENTRATION)` accepted anything in `[0, 2e-12]`, zero included, and
+    /// the test that exists to pin the concentration floor passed with the floor deleted.
+    ///
+    /// An exact zero is compared exactly, because a relative tolerance around zero is no
+    /// tolerance at all.
+    fn close(left: f64, right: f64) -> bool {
+        if right == 0.0 {
+            return left == 0.0;
         }
+        (left - right).abs() <= 1e-9 * right.abs()
     }
 
-    /// The shape's ceiling, `1 − c`, for a candidate set at a decay.
-    fn ceiling_of(counts: &[u32], modal: u32, decay: f64) -> f64 {
-        let mut shape = vec![f64::NAN; counts.len()];
-        1.0 - fill_seed_shape(
-            counts,
-            modal,
-            SeedDecayPerRepeat::try_new(decay).unwrap(),
-            &mut shape,
-        )
-    }
-
-    /// A locus's candidate lengths as offsets from the mode, which is what every fixture here
-    /// actually cares about: `spread(&[0, 1, -2])` is a tract whose candidates sit at the mode,
-    /// one repeat above it, and two below.
-    fn spread(offsets: &[i32]) -> (Vec<u32>, u32) {
-        const MODE: u32 = 20_000;
-        let counts = offsets
-            .iter()
-            .map(|&d| u32::try_from(i64::from(MODE) + i64::from(d)).expect("fixture offset"))
-            .collect();
-        (counts, MODE)
-    }
-
-    /// **Spec §12 test 10, and the reason this module exists.** The seed's own implied gene
-    /// diversity is the diversity that was measured — not its concentration total, which is a
-    /// different quantity in different units and would make the prior assert about two-fifths
-    /// of the measurement.
+    /// **The whole of what this builder does, in one assertion**: each candidate's starting
+    /// chromosomes are the concentration times that candidate's own share of the fitted length
+    /// spectrum, at the offset of its repeat count from the **tract's** reference length.
     ///
-    /// Swept over decays from a steep `0.2` to a flat `1.0`, over candidate spreads from two
-    /// lengths to eleven, and over diversities from a hundredth to a half — every combination
-    /// whose measurement the shape can hold. The tolerance is on the **relative** error,
-    /// because the diversities span more than an order of magnitude.
-    ///
-    /// **No entry in this sweep meets the concentration floor**, so what it measures is the
-    /// identity's own arithmetic; the floored path is a different measurement and
-    /// `tests::the_concentration_floor_lifts_the_implied_diversity_and_by_how_much` makes it.
+    /// **Three mutations die here**, which is why the fixture is shaped the way it is. Reading
+    /// the offset with its sign flipped swaps `9`'s `0.04` for `13`'s `0.05`. Reading the class
+    /// at `offset` rather than `offset + span` shifts every candidate two classes. And
+    /// normalising the shares before scaling gives a total of the concentration rather than of
+    /// `concentration × 0.84`.
     #[test]
-    fn the_seed_implies_the_diversity_that_was_measured() {
-        let spreads: [&[i32]; 5] = [
-            &[0, 1],
-            &[0, -1, 1],
-            &[0, -1, 1, -2, 2],
-            &[-3, -1, 0, 2, 5],
-            &[-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5],
-        ];
-        let mut worst_relative_error = 0.0_f64;
-        let mut cases = 0_u32;
-        let mut refusals = 0_u32;
-        let mut floored_entries = 0_u32;
-
-        for spread_offsets in spreads {
-            let (counts, mode) = spread(spread_offsets);
-            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
-                for measured in [0.01, 0.05, 0.087, 0.2, 0.5] {
-                    let mut out = vec![f64::NAN; counts.len()];
-                    let outcome = fill_ssr_seed(
-                        &counts,
-                        mode,
-                        SeedDecayPerRepeat::try_new(decay).unwrap(),
-                        RepeatGeneDiversity::try_new(measured).unwrap(),
-                        &mut out,
-                    );
-                    let SsrSeedOutcome::Seeded(concentration) = outcome else {
-                        refusals += 1; // the shape cannot hold it; the next test's case
-                        continue;
-                    };
-                    cases += 1;
-                    floored_entries += concentration
-                        .get()
-                        .iter()
-                        .filter(|&&a| a == MIN_ALT_CONCENTRATION)
-                        .count() as u32;
-                    let implied = implied_gene_diversity(concentration.get());
-                    worst_relative_error =
-                        worst_relative_error.max(((implied - measured) / measured).abs());
-                }
-            }
-        }
-
-        // Pinned rather than bounded: a tolerance that held over three cases would look exactly
-        // like one that held over 118, and a sweep that silently shrank is the way this test
-        // stops testing anything. 118 + 7 is the whole 5 x 5 x 5 grid, so nothing is skipped.
-        assert_eq!((cases, refusals), (118, 7));
-        // All seven refusals sit at the sweep's widest diversity, 0.5. Five of them are the
-        // two-length tract at every decay in the sweep — two lengths cannot imply more than 0.5
-        // however flat the shape is — and the other two are the steepest decay, 0.2, on the
-        // three-length and the ragged five-length tract.
-        assert_eq!(
-            floored_entries, 0,
-            "the sweep must stay on the floor-free path"
-        );
-        // Measured, not chosen: the worst is 1.12e-15 relative, about seven units in the last
-        // place of a diversity of 0.087, which is the arithmetic of the identity and not a bias.
-        assert!(
-            worst_relative_error < 2e-15,
-            "worst relative error {worst_relative_error:e} over {cases} cases"
-        );
-    }
-
-    /// Where the concentration floor lifts an entry, the identity drifts **upward** — the seed
-    /// implies slightly more diversity than was asked for — and this measures how far.
-    ///
-    /// It is one-directional and bounded by about `n · 1e-12 / D`, so it becomes material only
-    /// far below any diversity a cohort can resolve: at 50 candidate lengths and a diversity of
-    /// 1 in 10,000 it is 3 parts in 10 million, against the 1.12e-15 of the floor-free path.
-    #[test]
-    fn the_concentration_floor_lifts_the_implied_diversity_and_by_how_much() {
-        let far = 1_075; // past the underflow distance at the fallback decay
-        let (counts, mode) = spread(&[0, 1, far]);
-        let mut out = vec![f64::NAN; counts.len()];
-        let alpha = seeded(&counts, mode, 0.5, 0.087, &mut out);
-        assert_eq!(alpha[2], MIN_ALT_CONCENTRATION);
-        let drift = (implied_gene_diversity(&alpha) - 0.087) / 0.087;
-        assert!((0.0..2e-11).contains(&drift), "drift {drift:e}");
-
-        let wide: Vec<i32> = (0..50).collect();
-        let (counts, mode) = spread(&wide);
-        let mut out = vec![f64::NAN; counts.len()];
-        let alpha = seeded(&counts, mode, 0.5, 1e-4, &mut out);
-        let floored = alpha
-            .iter()
-            .filter(|&&a| a == MIN_ALT_CONCENTRATION)
-            .count();
-        assert_eq!(floored, 23);
-        let drift = (implied_gene_diversity(&alpha) - 1e-4) / 1e-4;
-        assert!((0.0..1e-6).contains(&drift), "drift {drift:e}");
-    }
-
-    /// **Spec §12 test 11.** The refusal fires exactly at the bound and not a step early or
-    /// late: a measurement a hair below the shape's ceiling is seeded, one at the ceiling and
-    /// one above it are refused, and the refusal reports the ceiling it measured against.
-    ///
-    /// The ceiling is `1 − c`, so it is a property of the candidate spread and the decay alone
-    /// — this walks four spreads at three decays and finds each one's bound from the shape
-    /// itself rather than from a hard-coded number.
-    #[test]
-    fn a_diversity_the_shape_cannot_hold_is_refused_exactly_at_the_bound() {
-        let spreads: [&[i32]; 4] = [&[0, 1], &[0, -1, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5]];
-        for spread_offsets in spreads {
-            let (counts, mode) = spread(spread_offsets);
-            for decay in [0.3, 0.5, 0.7] {
-                let ceiling = ceiling_of(&counts, mode, decay);
-                let mut out = vec![f64::NAN; counts.len()];
-                seeded(&counts, mode, decay, ceiling * (1.0 - 1e-9), &mut out);
-
-                for measured in [ceiling, ceiling * (1.0 + 1e-9), (ceiling + 1.0) / 2.0, 1.0] {
-                    assert_eq!(
-                        refused(&counts, mode, decay, measured, &mut out),
-                        (measured, ceiling),
-                        "at the ceiling {ceiling}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// A refusal hands back the **shape** — summing to one, with no total asserted — so
-    /// whichever policy spec Q2 settles on has the geometry to work from, and it hands it back
-    /// through the outcome rather than leaving the caller to read a buffer it was not given.
-    #[test]
-    fn a_refusal_hands_back_the_shape_and_asserts_no_total() {
-        let (counts, mode) = spread(&[0, -1, 1, -2, 2]);
-        let ceiling = ceiling_of(&counts, mode, 0.5);
-        let mut expected = vec![f64::NAN; counts.len()];
-        fill_seed_shape(&counts, mode, SeedDecayPerRepeat::FALLBACK, &mut expected);
-
-        let mut out = vec![f64::NAN; counts.len()];
-        let outcome = fill_ssr_seed(
-            &counts,
-            mode,
-            SeedDecayPerRepeat::FALLBACK,
-            RepeatGeneDiversity::try_new((ceiling + 1.0) / 2.0).unwrap(),
+    fn the_seed_is_the_fitted_spectrum_at_the_fitted_concentration() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 4];
+        let filled = seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
             &mut out,
         );
-        let SsrSeedOutcome::DiversityUnreachable { shape, .. } = outcome else {
-            panic!("expected a refusal");
-        };
-        assert_eq!(shape, expected.as_slice());
-        assert!((shape.iter().sum::<f64>() - 1.0).abs() < 1e-15);
-    }
 
-    /// **One outbred genome is refused at every tract**, which is the cohort end of this
-    /// caller's committed range and not an edge case.
-    ///
-    /// A single diploid sample shows at most three lengths at a tract, and the pre-pass reports
-    /// that genome's own repeat diversity — about 0.72 on GIAB HG002, where 72 tandem repeats
-    /// in 100 are heterozygous. Both candidate sets a single sample can produce fall well short
-    /// of it, and no decay rescues them: the ceiling saturates at 0.8148 at the fallback decay
-    /// however many lengths a tract carries, so this is a property of the shape rather than of
-    /// the candidate set being thin.
-    #[test]
-    fn a_single_outbred_genome_is_refused_at_every_tract() {
-        const HG002_REPEAT_DIVERSITY: f64 = 0.72;
-        let (two_lengths, mode) = spread(&[0, 1]);
-        let (three_lengths, _) = spread(&[0, -1, 1]);
-
-        assert!((ceiling_of(&two_lengths, mode, 0.5) - 0.4444444444444444).abs() < 1e-15);
-        assert!((ceiling_of(&three_lengths, mode, 0.5) - 0.625).abs() < 1e-15);
-
-        for counts in [&two_lengths, &three_lengths] {
-            let mut out = vec![f64::NAN; counts.len()];
-            let (measured, _) = refused(counts, mode, 0.5, HG002_REPEAT_DIVERSITY, &mut out);
-            assert_eq!(measured, HG002_REPEAT_DIVERSITY);
+        // offsets 0, +1, −2, +2 → weights 0.50, 0.25, 0.04, 0.05, each × 12 chromosomes.
+        for (slot, (candidate, expected)) in filled
+            .iter()
+            .zip(candidates().iter().zip([6.0, 3.0, 0.48, 0.60]))
+        {
+            assert!(
+                close(*slot, expected),
+                "the candidate at {candidate} repeats starts with {slot} chromosomes where the \
+                 spectrum's share at its offset from {REFERENCE_REPEATS}, times 12, is {expected}"
+            );
         }
-
-        // And no candidate set reaches it: the ceiling saturates at 1 − 5/27 = 0.8148 as the
-        // shape spreads over every offset, so a panel reporting more than that is refused
-        // everywhere whatever its tracts look like.
-        let wide: Vec<i32> = (-60..=60).collect();
-        let (counts, mode) = spread(&wide);
-        let saturated = ceiling_of(&counts, mode, 0.5);
-        // 1 − 5/27 = 0.814814…, to within the 5 parts in a trillion the shape floor adds by
-        // lifting the candidates past offset 40, where `0.5^|Δ|` falls under it.
-        assert!(
-            (saturated - (1.0 - 5.0 / 27.0)).abs() < 1e-10,
-            "{saturated}"
-        );
-        assert!(saturated < 0.815);
     }
 
-    /// The shape is production's `G₀`, ported: consecutive repeat units away from the mode are
-    /// a constant factor apart, and it is the same factor on both sides.
+    /// **The middle rung is seeded from its own weights, not treated as flat** — the rung that
+    /// is the whole new fitting cost of this step, and the one no test pinned a number for.
     ///
-    /// This is a **ratio** test rather than a value test, because normalising the shape divides
-    /// every entry by the same total and the ratios are what survives it.
+    /// Measured, and it is why this test exists: with the pooled rung routed to the flat arm,
+    /// all seventeen of this module's tests passed. The one fixture that ever handed a pooled
+    /// spectrum was `the_shared_export_is_the_seed_divided_by_its_total`, whose only assertion —
+    /// share equals seed entry over seed total — is an identity that holds for any shape,
+    /// flat included.
     #[test]
-    fn mass_falls_off_by_the_decay_for_every_repeat_unit_away_from_the_mode() {
-        let (counts, mode) = spread(&[0, 1, 2, 3, -1, -2, -3]);
-        for decay in [0.2, 0.5, 0.9] {
-            let mut shape = vec![f64::NAN; counts.len()];
-            fill_seed_shape(
+    fn the_pooled_rung_is_seeded_from_its_own_weights() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 4];
+        let filled = seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            LengthSpectrum::fitted(&weights, 12.0, FittedFrom::ItsPeriodsPooledTracts),
+            &mut out,
+        );
+
+        for (slot, (candidate, expected)) in filled
+            .iter()
+            .zip(candidates().iter().zip([6.0, 3.0, 0.48, 0.60]))
+        {
+            assert!(
+                close(*slot, expected),
+                "on the pooled rung the candidate at {candidate} repeats starts with {slot} \
+                 chromosomes where its class's share times 12 is {expected}; a flat shape would \
+                 give every candidate {}",
+                12.0 / 4.0
+            );
+        }
+    }
+
+    /// **A buffer *longer* than the candidate set is refused too**, and it is the half the
+    /// message names that no fixture reached: both mis-sized-buffer tests passed a shorter one.
+    ///
+    /// It is not a harmless overshoot. `fill_candidate_weights` writes one entry per candidate
+    /// and then sums the **whole** buffer, so the previous locus's trailing entries enter both
+    /// the shares and the seed's total.
+    #[test]
+    #[should_panic(expected = "must cover the locus's candidate lengths exactly")]
+    fn a_buffer_longer_than_the_candidate_set_is_refused() {
+        let mut out = vec![0.0; 5];
+        let weights = leaning_long();
+        let _ = fill_ssr_seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+    }
+
+    /// **The shape floor is production's `G0_FLOOR`, and this pins its value** — every other
+    /// assertion about it is written `12.0 * SHAPE_FLOOR`, which tracks the constant and would
+    /// survive any change to it.
+    #[test]
+    fn the_shape_floor_is_the_value_production_uses() {
+        assert_eq!(SHAPE_FLOOR, 1e-12, "production's `G0_FLOOR`");
+    }
+
+    /// **`population_diversity.md` §8's first check**: normalised, the seed is the fitted
+    /// spectrum restricted to the lengths this locus is being called over. Nothing about the
+    /// shape is invented by the mapping.
+    #[test]
+    fn the_seed_normalises_back_to_the_fitted_spectrum_over_the_candidates() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 4];
+        let filled = seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+
+        let total: f64 = filled.iter().sum();
+        let covered = 0.50 + 0.25 + 0.04 + 0.05;
+        for (slot, fitted) in filled.iter().zip([0.50, 0.25, 0.04, 0.05]) {
+            assert!(
+                close(slot / total, fitted / covered),
+                "normalised, the seed gives {} where the fitted spectrum restricted to these \
+                 four lengths gives {}",
+                slot / total,
+                fitted / covered
+            );
+        }
+    }
+
+    /// **A candidate set that covers less of the fitted spread is held with less conviction**,
+    /// and that is the Dirichlet's own conditioning rather than a policy: the total is the
+    /// concentration times the mass the candidates cover.
+    #[test]
+    fn a_candidate_set_covering_less_fitted_mass_is_held_with_less_conviction() {
+        let weights = leaning_long();
+        let mut wide = vec![0.0; 4];
+        let wide = seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut wide,
+        );
+        let mut narrow = vec![0.0; 1];
+        let narrow = seed(
+            &[REFERENCE_REPEATS],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut narrow,
+        );
+
+        let wide_total: f64 = wide.iter().sum();
+        let narrow_total: f64 = narrow.iter().sum();
+        assert!(
+            close(wide_total, 12.0 * 0.84),
+            "four candidates covering 0.84 of the fitted mass are held with {wide_total} \
+             chromosomes"
+        );
+        assert!(
+            close(narrow_total, 12.0 * 0.50),
+            "one candidate covering 0.50 of it is held with {narrow_total}"
+        );
+    }
+
+    /// **Outside the fit's reach takes the floor, not the end class's weight.** The end class
+    /// holds what the fit put at exactly two repeats out; handing it to a candidate five repeats
+    /// out would claim the fit measured something it declined to measure.
+    #[test]
+    fn a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 2];
+        let filled = seed(
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+
+        assert!(close(filled[0], 6.0));
+        assert!(
+            close(filled[1], 12.0 * SHAPE_FLOOR),
+            "the candidate five repeats out starts with {} chromosomes; the floor puts it at \
+             {}, and the end class at +2 repeats would put it at {}",
+            filled[1],
+            12.0 * SHAPE_FLOOR,
+            12.0 * 0.05
+        );
+    }
+
+    /// **The span is read off the spectrum's own class count**, so the same candidate is outside
+    /// the reach of a three-class fit and inside a five-class one.
+    #[test]
+    fn how_far_the_spectrum_reaches_is_read_off_its_own_class_count() {
+        let narrow = vec![0.2, 0.5, 0.3];
+        let wide = leaning_long();
+        let candidate = [REFERENCE_REPEATS + 2];
+
+        let mut out = vec![0.0; 1];
+        let at_span_one = seed(
+            &candidate,
+            REFERENCE_REPEATS,
+            own_fit(&narrow, 12.0),
+            &mut out,
+        );
+        let mut out = vec![0.0; 1];
+        let at_span_two = seed(
+            &candidate,
+            REFERENCE_REPEATS,
+            own_fit(&wide, 12.0),
+            &mut out,
+        );
+
+        assert!(
+            close(at_span_one[0], 12.0 * SHAPE_FLOOR),
+            "two repeats out is past a three-class spectrum's reach, and it gave {}",
+            at_span_one[0]
+        );
+        assert!(
+            close(at_span_two[0], 12.0 * 0.05),
+            "two repeats out is the end class of a five-class spectrum, and it gave {}",
+            at_span_two[0]
+        );
+    }
+
+    /// **A length the fit reached and put no mass on keeps a share**, so a masked long copy the
+    /// candidate set nearly missed stays recoverable rather than falling into a prior it can
+    /// never climb out of.
+    #[test]
+    fn a_candidate_the_fit_reaches_and_gives_nothing_still_keeps_a_share() {
+        let weights = vec![0.04, 0.0, 0.66, 0.25, 0.05];
+        let mut out = vec![0.0; 2];
+        let filled = seed(
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS - 1],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+
+        assert!(
+            filled[1] > 0.0,
+            "the candidate one repeat short sits on a class the fit gave 0.0, and it must not \
+             be an absorbing zero; it is {}",
+            filled[1]
+        );
+        assert!(
+            close(filled[1], 12.0 * SHAPE_FLOOR),
+            "the empty class takes the shape's floor times the concentration, {}, and gave {}",
+            12.0 * SHAPE_FLOOR,
+            filled[1]
+        );
+    }
+
+    /// **The concentration floor is what makes the shape floor safe.** At a weak concentration
+    /// the shape's floor scales below `MIN_ALT_CONCENTRATION`, and an entry under it is what
+    /// [`Concentration::new`] refuses in debug — so this is the check, and without it the
+    /// builder panics rather than returning a small number.
+    #[test]
+    fn a_far_candidate_at_a_weak_concentration_still_clears_the_concentration_floor() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 2];
+        let filled = seed(
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 1e-3),
+            &mut out,
+        );
+
+        // **The fixture only tests the floor if the unfloored value is below it**: `1e-3 ×
+        // SHAPE_FLOOR` is `1e-15`, against a `MIN_ALT_CONCENTRATION` of `1e-12`. A const block,
+        // because both operands are constants and the check is about the fixture rather than
+        // about the run.
+        const {
+            assert!(1e-3 * SHAPE_FLOOR < MIN_ALT_CONCENTRATION);
+        }
+        assert_eq!(
+            filled[1], MIN_ALT_CONCENTRATION,
+            "the floor is exactly representable, so this is an exact comparison — through a \
+             tolerance the size of the floor itself it would accept zero"
+        );
+    }
+
+    /// **The bottom rung holds the locus at the stated concentration whatever the candidate
+    /// count**, because a flat shape asserts no belief about which length is likelier and must
+    /// not assert more conviction at a locus with more candidates.
+    #[test]
+    fn the_stated_flat_rung_holds_the_locus_at_the_stated_concentration_whatever_the_candidate_count()
+     {
+        for count in [1_usize, 3, 7] {
+            let counts: Vec<u32> = (0..count as u32).map(|i| REFERENCE_REPEATS + i).collect();
+            let mut out = vec![0.0; count];
+            let filled = seed(
                 &counts,
-                mode,
-                SeedDecayPerRepeat::try_new(decay).unwrap(),
-                &mut shape,
+                REFERENCE_REPEATS,
+                LengthSpectrum::stated_flat(2.5),
+                &mut out,
             );
 
-            // Entries 0..4 are the mode and three lengths above it; 0, 4, 5, 6 are the mode and
-            // three below.
-            for pair in [[0, 1], [1, 2], [2, 3]] {
-                assert!((shape[pair[1]] / shape[pair[0]] - decay).abs() < 1e-15);
-            }
-            for pair in [[0, 4], [4, 5], [5, 6]] {
-                assert!((shape[pair[1]] / shape[pair[0]] - decay).abs() < 1e-15);
-            }
-        }
-    }
-
-    /// **The shape floor, at the one place it is the thing doing the work.** A candidate far
-    /// enough from the mode that `decay^|Δ|` underflows keeps a strictly positive *share*, and
-    /// this measures that share rather than the concentration — because on the seeded path
-    /// `MIN_ALT_CONCENTRATION` would lift a zero to `1e-12` and the test would pass with the
-    /// shape floor deleted.
-    ///
-    /// At the fallback decay the underflow is complete at an offset of **1,075 repeat units**,
-    /// which this finds rather than assumes.
-    #[test]
-    fn a_candidate_too_far_for_the_decay_to_reach_keeps_its_share() {
-        let decay = SeedDecayPerRepeat::FALLBACK;
-        let underflow_offset = (1..)
-            .find(|&d| decay.get().powi(d) == 0.0)
-            .expect("underflow");
-        assert_eq!(underflow_offset, 1075);
-
-        let (counts, mode) = spread(&[0, 1, underflow_offset]);
-        let mut shape = vec![f64::NAN; counts.len()];
-        fill_seed_shape(&counts, mode, decay, &mut shape);
-        // The raw weights are 1, 0.5 and the floor, so the far candidate's share is the floor
-        // over their total. Exactly, not merely positive: `> 0.0` passes with the floor gone.
-        let expected_far_share = SHAPE_FLOOR / (1.0 + 0.5 + SHAPE_FLOOR);
-        assert!(
-            (shape[2] / expected_far_share - 1.0).abs() < 1e-12,
-            "{:e}",
-            shape[2]
-        );
-
-        // And at a diversity near the ceiling the total is large enough that the share survives
-        // into the concentration, above `MIN_ALT_CONCENTRATION` rather than rescued by it.
-        let ceiling = ceiling_of(&counts, mode, decay.get());
-        let mut out = vec![f64::NAN; counts.len()];
-        let alpha = seeded(&counts, mode, decay.get(), ceiling * (1.0 - 1e-9), &mut out);
-        assert!(alpha[2] > MIN_ALT_CONCENTRATION, "{:e}", alpha[2]);
-    }
-
-    /// A tract whose **every** candidate sits past the underflow distance is still seeded. This
-    /// is the shape floor's second job: without it every raw weight is exactly zero, the total
-    /// they are normalised against is zero, and the buffer fills with `NaN`.
-    #[test]
-    fn a_tract_whose_every_candidate_is_past_the_underflow_distance_is_still_seeded() {
-        let (counts, mode) = spread(&[2_000, 3_000]);
-        let mut out = vec![f64::NAN; counts.len()];
-        let alpha = seeded(&counts, mode, 0.5, 0.087, &mut out);
-        // Both candidates underflowed to the same floor, so the shape is flat and they share
-        // the mass equally.
-        assert!(alpha.iter().all(|a| a.is_finite() && *a > 0.0), "{alpha:?}");
-        assert_eq!(alpha[0], alpha[1]);
-    }
-
-    /// An offset past the integer range is clamped rather than wrapped. A wrapping conversion
-    /// sends the offset negative, so `decay.powi` returns a huge weight and nearly all the
-    /// prior's mass lands on the **far** candidate instead of the mode — the shape inverted.
-    #[test]
-    fn an_offset_past_the_integer_range_is_clamped_rather_than_wrapped() {
-        let mut shape = [f64::NAN; 2];
-        fill_seed_shape(
-            &[20, u32::MAX],
-            20,
-            SeedDecayPerRepeat::FALLBACK,
-            &mut shape,
-        );
-        assert!(shape[0] > 0.999, "the mode must keep the mass: {shape:?}");
-        assert!(shape[1] < 1e-11, "the far candidate must not: {shape:?}");
-    }
-
-    /// **One candidate length is seeded, not refused.** Its shape has a Simpson index of
-    /// exactly 1 and therefore a ceiling of 0, so the rule that governs every other locus would
-    /// refuse it whatever the measurement — including a measurement of zero. There is nothing
-    /// to refuse: one length means one genotype, whose prior probability is 1 at any positive
-    /// concentration.
-    #[test]
-    fn a_locus_with_one_candidate_length_is_seeded_rather_than_refused() {
-        for measured in [0.0, 0.087, 0.9, 1.0] {
-            let mut out = [f64::NAN];
-            assert_eq!(seeded(&[20], 20, 0.5, measured, &mut out), [ALPHA_REF]);
-        }
-
-        // And the ceiling really is zero there, which is what makes the branch necessary rather
-        // than defensive.
-        let mut shape = [f64::NAN];
-        let simpson_index = fill_seed_shape(&[20], 20, SeedDecayPerRepeat::FALLBACK, &mut shape);
-        assert_eq!(simpson_index, 1.0);
-    }
-
-    /// A cohort with no repeat variation at all seeds every candidate at the floor — the
-    /// concentration total goes to zero with the measurement, and what survives is an
-    /// effectively-certain homozygote of some length, with the reads left to say which.
-    ///
-    /// That is the repeat-tract twin of production's `θ = 0` behaviour on the SNP path, where
-    /// `MIN_ALT_CONCENTRATION` yields an effectively-certain hom-ref prior
-    /// (`src/genetics.rs`). **The shape's own preference for the mode is what is lost**, and
-    /// this measures how far up the range that loss reaches: the mode's entry clears the floor
-    /// again at a diversity of 1.8 in a trillion, so every diversity a pre-pass could report
-    /// keeps the geometry.
-    #[test]
-    fn a_cohort_with_no_repeat_variation_seeds_every_candidate_at_the_floor() {
-        let (counts, mode) = spread(&[0, -1, 1, -2, 2]);
-        let mut out = vec![f64::NAN; counts.len()];
-        let alpha = seeded(&counts, mode, 0.5, 0.0, &mut out);
-        assert!(
-            alpha.iter().all(|&a| a == MIN_ALT_CONCENTRATION),
-            "{alpha:?}"
-        );
-
-        // Where the geometry comes back: the smallest diversity at which the modal candidate
-        // sits above the floor, found by bisection so the figure is measured, not recalled.
-        let mode_is_above_the_floor = |measured: f64| {
-            let mut out = vec![f64::NAN; counts.len()];
-            seeded(&counts, mode, 0.5, measured, &mut out)[0] > MIN_ALT_CONCENTRATION
-        };
-        let (mut low, mut high) = (0.0_f64, 1e-6_f64);
-        assert!(mode_is_above_the_floor(high));
-        for _ in 0..200 {
-            let mid = 0.5 * (low + high);
-            if mode_is_above_the_floor(mid) {
-                high = mid;
-            } else {
-                low = mid;
+            let total: f64 = filled.iter().sum();
+            assert!(
+                close(total, 2.5),
+                "{count} candidates on the stated-flat rung are held with {total} chromosomes, \
+                 where the rung states 2.5"
+            );
+            for slot in &filled {
+                assert!(close(*slot, 2.5 / count as f64));
             }
         }
-        assert!(
-            (1.84e-12..1.86e-12).contains(&high),
-            "the geometry returns at a diversity of {high:e}"
+    }
+
+    /// A locus with one candidate length has one genotype, whose prior probability is 1 at any
+    /// positive concentration — so there is no special case, and this pins what the general rule
+    /// gives there.
+    #[test]
+    fn a_locus_with_one_candidate_length_is_seeded_from_that_length_alone() {
+        let weights = leaning_long();
+        let mut out = vec![0.0; 1];
+        let filled = seed(
+            &[REFERENCE_REPEATS],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
         );
+        assert!(close(filled[0], 6.0));
     }
 
-    /// As the measurement climbs toward the shape's ceiling the total rises without bound,
-    /// because the ceiling is the pole of `A = D/(1 − c − D)`. **That is the honest answer and
-    /// it is also an immovable prior**, which is half of what spec Q2 has to settle.
+    /// **The failure this rewrite removed.** A single outbred diploid shows at most three
+    /// lengths at a tract, and the construction this replaced refused **every** such locus: it
+    /// scaled a geometric shape to reproduce a measured repeat diversity, which is possible only
+    /// below a ceiling the shape sets — at most 0.625 over three lengths at the coded fallback
+    /// decay, against the ~0.72 HG002 actually has (`population_diversity.md` §4.2).
     ///
-    /// The sizes, on a five-length tract at the fallback decay: closing the gap to the ceiling
-    /// by a factor of ten multiplies the total by about ten, and at a gap of one part in a
-    /// million the seed is worth about a million chromosomes — a hundred times the largest
-    /// cohort this caller commits to, so no cohort can move it.
+    /// The fitted pair asserts no such scaling, so each of those candidate sets is seeded, and
+    /// seeded from the stratum's own shape rather than from a shape chosen here.
     #[test]
-    fn the_total_climbs_without_bound_as_the_measurement_nears_the_ceiling() {
-        let (counts, mode) = spread(&[0, -1, 1, -2, 2]);
-        let ceiling = ceiling_of(&counts, mode, 0.5);
+    fn a_single_diploids_candidate_sets_are_all_seeded() {
+        let weights = leaning_long();
+        for lengths in [
+            &[REFERENCE_REPEATS][..],
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 1][..],
+            &[
+                REFERENCE_REPEATS - 2,
+                REFERENCE_REPEATS,
+                REFERENCE_REPEATS + 1,
+            ][..],
+        ] {
+            let mut out = vec![0.0; lengths.len()];
+            let filled = seed(
+                lengths,
+                REFERENCE_REPEATS,
+                own_fit(&weights, 12.0),
+                &mut out,
+            );
+            let total: f64 = filled.iter().sum();
 
-        let mut totals = Vec::new();
-        for gap_fraction in [1e-2, 1e-3, 1e-4, 1e-6] {
-            let mut out = vec![f64::NAN; counts.len()];
-            let alpha = seeded(&counts, mode, 0.5, ceiling * (1.0 - gap_fraction), &mut out);
-            totals.push(alpha.iter().sum::<f64>());
-        }
-
-        for pair in totals.windows(2).take(2) {
-            let growth = pair[1] / pair[0];
-            assert!((9.0..11.0).contains(&growth), "total grew by {growth}");
-        }
-        // Several thousand samples is the top of this caller's committed cohort range, so
-        // roughly ten thousand chromosomes; the last seed outweighs all of them a hundred-fold.
-        assert!(
-            (999_000.0..1_001_000.0).contains(&totals[3]),
-            "{}",
-            totals[3]
-        );
-    }
-
-    /// **The largest total any shape can ask for is finite**, so the overflow arm of the
-    /// refusal is a guard rather than a case — and this is the measurement that says so.
-    ///
-    /// The worst input is the largest measurement strictly below a shape's ceiling — one unit
-    /// in the last place under it — and the total it asks for is then the ceiling divided by
-    /// its own last unit in the last place. For a binary float that ratio is at most `2^53`,
-    /// which is where the measured worst lands: **9.007e15 chromosomes**, exactly `2^53 − 1`,
-    /// over four spreads at five decays. So the arm is unreachable by construction rather than
-    /// merely unreached by this sweep.
-    ///
-    /// It matters that the guard stays: `out` is written before anything reads it back, and the
-    /// finiteness check on [`Concentration`] is a `debug_assert!` that release compiles out, so
-    /// an infinity here would travel into a prior row as a `NaN` with nothing raised.
-    #[test]
-    fn the_largest_total_any_shape_can_ask_for_is_finite() {
-        let spreads: [&[i32]; 4] = [&[0, 1], &[0, -1, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5]];
-        let mut worst_total = 0.0_f64;
-        for spread_offsets in spreads {
-            let (counts, mode) = spread(spread_offsets);
-            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
-                let ceiling = ceiling_of(&counts, mode, decay);
-                let measured = f64::from_bits(ceiling.to_bits() - 1);
-                assert!(measured < ceiling);
-                let mut out = vec![f64::NAN; counts.len()];
-                let total: f64 = seeded(&counts, mode, decay, measured, &mut out)
-                    .iter()
-                    .sum();
-                assert!(total.is_finite(), "{total} at decay {decay}");
-                worst_total = worst_total.max(total);
-            }
-        }
-        assert_eq!(worst_total, (1_u64 << 53) as f64 - 1.0, "worst total");
-    }
-
-    /// Two candidates of the same length land on one rung and **each takes its full weight** —
-    /// production's behaviour, kept deliberately until the interrupted-repeat work says how to
-    /// divide it (spec §5.2, Q3).
-    ///
-    /// Recorded as a test rather than as a comment so that the day the division lands, the
-    /// change is visible as this test failing rather than as a silent shift in every
-    /// interrupted tract's prior.
-    #[test]
-    fn two_candidates_of_one_length_each_take_the_rungs_full_weight() {
-        let (one_spelling, mode) = spread(&[0, 1]);
-        let (two_spellings, _) = spread(&[0, 1, 1]);
-        let decay = SeedDecayPerRepeat::FALLBACK;
-
-        let mut single = vec![f64::NAN; one_spelling.len()];
-        fill_seed_shape(&one_spelling, mode, decay, &mut single);
-        let mut doubled = vec![f64::NAN; two_spellings.len()];
-        fill_seed_shape(&two_spellings, mode, decay, &mut doubled);
-
-        // The second spelling adds a whole extra rung to the raw total, 1.5 to 2, so the mode's
-        // share falls from 1/1.5 to 1/2.
-        assert!((single[0] - 1.0 / 1.5).abs() < 1e-15);
-        assert!((doubled[0] - 0.5).abs() < 1e-15);
-        assert_eq!(doubled[1], doubled[2]);
-    }
-
-    /// **A second spelling of one length also raises the ceiling**, which is spec Q3 with a
-    /// size attached: it flattens the shape, which lowers the Simpson index, so whether a tract
-    /// is refused at all depends on how many spellings of one length the cohort happened to
-    /// show — not only how much prior mass it collects.
-    #[test]
-    fn a_second_spelling_of_one_length_raises_the_ceiling() {
-        let (one_spelling, mode) = spread(&[0, 1]);
-        let (two_spellings, _) = spread(&[0, 1, 1]);
-        assert!((ceiling_of(&one_spelling, mode, 0.5) - 0.4444444444444444).abs() < 1e-15);
-        assert!((ceiling_of(&two_spellings, mode, 0.5) - 0.625).abs() < 1e-15);
-
-        // So a measurement between the two is refused at one tract and seeded at the other.
-        let mut out = vec![f64::NAN; one_spelling.len()];
-        refused(&one_spelling, mode, 0.5, 0.5, &mut out);
-        let mut out = vec![f64::NAN; two_spellings.len()];
-        seeded(&two_spellings, mode, 0.5, 0.5, &mut out);
-    }
-
-    /// **The shared export sums to one**, which is what makes it a set of shares rather than a
-    /// set of weights — the read likelihood's contamination term divides nothing by anything and
-    /// would silently mis-weight every read if it did not.
-    ///
-    /// Swept over the same spreads and decays the seed itself is swept over, so a shape that
-    /// normalises correctly for the seed and not for this consumer cannot exist.
-    #[test]
-    fn the_shared_export_sums_to_one() {
-        let spreads: [&[i32]; 4] = [&[0], &[0, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5]];
-        let mut worst = 0.0_f64;
-        for spread_offsets in spreads {
-            let (counts, mode) = spread(spread_offsets);
-            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
-                let mut out = vec![f64::NAN; counts.len()];
-                fill_seed_share_per_candidate(
-                    &counts,
-                    mode,
-                    SeedDecayPerRepeat::try_new(decay).unwrap(),
-                    &mut out,
+            for (slot, &length) in filled.iter().zip(lengths) {
+                let offset = i64::from(length) - i64::from(REFERENCE_REPEATS);
+                let fitted = weights[(offset + 2) as usize];
+                assert!(
+                    close(
+                        slot / total,
+                        fitted
+                            / lengths
+                                .iter()
+                                .map(|&l| weights
+                                    [(i64::from(l) - i64::from(REFERENCE_REPEATS) + 2) as usize])
+                                .sum::<f64>()
+                    ),
+                    "a candidate set of {} lengths is seeded from the stratum's own shape",
+                    lengths.len()
                 );
-                assert!(out.iter().all(|w| w.is_finite() && *w > 0.0), "{out:?}");
-                worst = worst.max((out.iter().sum::<f64>() - 1.0).abs());
             }
         }
-        assert!(worst < 1e-15, "worst departure from one: {worst:e}");
     }
 
-    /// **The shares are the seed's own shape**, not a second one that happens to look like it —
-    /// the whole reason arch §5 puts one implementation behind both consumers.
-    ///
-    /// Checked as an equality against the seed divided by its total, over four spreads and five
-    /// decays. **The sweep is what makes it bite:** a divergence confined to candidates three or
-    /// more repeats from the mode survives a single fixture whose widest offset is two, and
-    /// survives the sums-to-one test above, which renormalises.
+    /// **The shared export is the seed divided by its own total**, on every rung — one
+    /// implementation stands behind both, so the prior's belief about lengths cannot drift
+    /// between its two consumers.
     #[test]
     fn the_shared_export_is_the_seed_divided_by_its_total() {
-        let spreads: [&[i32]; 4] = [&[0, 1], &[0, -1, 1, -2, 2], &[-3, 0, 2, 5], &[-5, 0, 3, 7]];
-        for spread_offsets in spreads {
-            let (counts, mode) = spread(spread_offsets);
-            for decay in [0.2, 0.5, 0.7, 0.9, 1.0] {
-                // Half of whatever this spread and decay can hold, so every combination is
-                // seeded rather than refused — a steep decay over a wide spread has a ceiling
-                // of about 0.016, well under any fixed diversity worth writing.
-                let measured = 0.5 * ceiling_of(&counts, mode, decay);
-                let mut seed = vec![f64::NAN; counts.len()];
-                let alpha = seeded(&counts, mode, decay, measured, &mut seed);
-                assert!(
-                    alpha.iter().all(|&a| a > MIN_ALT_CONCENTRATION),
-                    "the fixture must stay off the concentration floor: {alpha:?}"
-                );
-                let total: f64 = alpha.iter().sum();
+        let weights = leaning_long();
+        for spectrum in [
+            own_fit(&weights, 12.0),
+            LengthSpectrum::fitted(&weights, 3.0, FittedFrom::ItsPeriodsPooledTracts),
+            LengthSpectrum::stated_flat(2.5),
+        ] {
+            let mut out = vec![0.0; 4];
+            let filled = seed(&candidates(), REFERENCE_REPEATS, spectrum, &mut out);
+            let total: f64 = filled.iter().sum();
+            let exported = shares(&candidates(), REFERENCE_REPEATS, spectrum);
 
-                let mut shares = vec![f64::NAN; counts.len()];
-                fill_seed_share_per_candidate(
-                    &counts,
-                    mode,
-                    SeedDecayPerRepeat::try_new(decay).unwrap(),
-                    &mut shares,
+            let sum: f64 = exported.iter().sum();
+            assert!(close(sum, 1.0), "the shares sum to {sum}");
+            for (share, slot) in exported.iter().zip(&filled) {
+                assert!(
+                    close(*share, slot / total),
+                    "the share {share} against the seed entry {slot} over its total {total}"
                 );
-                for (share, concentration) in shares.iter().zip(&alpha) {
-                    assert!(
-                        (share - concentration / total).abs() < 1e-15,
-                        "{share} against {}",
-                        concentration / total
-                    );
-                }
             }
         }
     }
 
-    /// **Two spellings of one length carry that length's share twice**, which is deliberate as a
-    /// concentration (spec §5.2, open as Q3) and is the first of the three reasons this export
-    /// is per candidate rather than per length.
-    ///
-    /// Recorded with its size so the likelihood step meets it as a number: at the fallback decay
-    /// a tract with the mode spelled twice and one length above hands the modal *length* 0.8 of
-    /// the mass, where the geometry itself says 0.667.
+    /// **Two spellings of one length carry that length's share twice**, which is production's
+    /// behaviour as a concentration and is what the read likelihood's contamination term has to
+    /// meet as a decision rather than as a surprise.
     #[test]
     fn two_spellings_of_one_length_carry_that_lengths_share_twice() {
-        let (two_spellings, mode) = spread(&[0, 0, 1]);
-        let mut shares = vec![f64::NAN; two_spellings.len()];
-        fill_seed_share_per_candidate(
-            &two_spellings,
-            mode,
-            SeedDecayPerRepeat::FALLBACK,
-            &mut shares,
+        let weights = leaning_long();
+        // The reference length twice — an interrupted repeat spells the same count — plus one
+        // repeat above it.
+        let exported = shares(
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS, REFERENCE_REPEATS + 1],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
         );
-        assert!((shares[0] - 0.4).abs() < 1e-15);
-        assert!((shares[1] - 0.4).abs() < 1e-15);
-        assert!((shares[2] - 0.2).abs() < 1e-15);
-        assert!((shares[0] + shares[1] - 0.8).abs() < 1e-15);
 
-        // What the geometry alone says about those two lengths, with one spelling each.
-        let (one_spelling, _) = spread(&[0, 1]);
-        let mut geometric = vec![f64::NAN; one_spelling.len()];
-        fill_seed_share_per_candidate(
-            &one_spelling,
-            mode,
-            SeedDecayPerRepeat::FALLBACK,
-            &mut geometric,
-        );
-        assert!((geometric[0] - 2.0 / 3.0).abs() < 1e-15);
-    }
-
-    /// The modal repeat count is the **cohort's**, and passing the reference allele's instead
-    /// moves the peak off the mode with nothing raised — the trap the seed builder carries, on
-    /// the export that has it too.
-    #[test]
-    fn the_mode_is_the_cohorts_and_nothing_here_can_check_it() {
-        let (counts, mode) = spread(&[-3, 0, 2, 5]);
-        let mut right = vec![f64::NAN; counts.len()];
-        fill_seed_share_per_candidate(&counts, mode, SeedDecayPerRepeat::FALLBACK, &mut right);
-        let mut wrong = vec![f64::NAN; counts.len()];
-        fill_seed_share_per_candidate(&counts, counts[0], SeedDecayPerRepeat::FALLBACK, &mut wrong);
-
-        // Entry 1 is the cohort's mode; entry 0 is the reference candidate, three repeats below.
-        assert!((right[1] - 0.7111111111111111).abs() < 1e-15);
-        assert!((wrong[1] - 0.10774410774410774).abs() < 1e-15);
-        assert!((right[0] - 0.08888888888888889).abs() < 1e-15);
-        assert!((wrong[0] - 0.8619528619528619).abs() < 1e-15);
-        assert!(right[1] / wrong[1] > 6.5, "{}", right[1] / wrong[1]);
-    }
-
-    /// The shared export makes the same length checks, because it is public and its caller's
-    /// assertion no longer stands between it and a mis-sized buffer.
-    #[test]
-    #[should_panic(expected = "cover the locus's candidate lengths exactly")]
-    fn a_mis_sized_buffer_is_refused_by_the_shared_export_too() {
-        let mut out = [f64::NAN; 2];
-        fill_seed_share_per_candidate(&[20, 21, 22], 20, SeedDecayPerRepeat::FALLBACK, &mut out);
-    }
-
-    /// A buffer that does not match the candidate set is refused **in release**, because `out`
-    /// is the loop's and is reused across loci: a short one would leave the previous tract's
-    /// entries standing in this one's seed.
-    #[test]
-    #[should_panic(expected = "cover the locus's candidate lengths exactly")]
-    fn a_mis_sized_buffer_is_refused() {
-        let mut out = [f64::NAN; 2];
-        let _ = fill_ssr_seed(
-            &[20, 21, 22],
-            20,
-            SeedDecayPerRepeat::FALLBACK,
-            RepeatGeneDiversity::try_new(0.087).unwrap(),
-            &mut out,
+        let at_the_reference_length = exported[0] + exported[1];
+        let geometry = 0.50 / (0.50 + 0.25);
+        assert!(
+            close(
+                at_the_reference_length,
+                (0.50 + 0.50) / (0.50 + 0.50 + 0.25)
+            ),
+            "the reference length arrives with {at_the_reference_length} of the mass where the \
+             spectrum's own two-class ratio gives it {geometry}"
         );
     }
 
-    /// The shape filler makes the same check, because plan step E2 makes it public and its
-    /// caller's assertion then stops covering it.
+    /// **A candidate's repeat count passed where the tract's belongs re-centres the shape on
+    /// that candidate**, and nothing here can catch it — the measured size of the mistake is
+    /// what this test records.
+    ///
+    /// Measured on the four candidates above, with `9` passed as the reference instead of `11`:
+    /// the tract's own reference length falls from **0.595 of the prior's mass to 0.091**, a
+    /// factor of 6.5, while the candidate at 9 rises from **0.048 to 0.909**, a factor of 19.
     #[test]
-    #[should_panic(expected = "cover the locus's candidate lengths exactly")]
-    fn a_mis_sized_buffer_is_refused_by_the_shape_filler_too() {
-        let mut out = [f64::NAN; 2];
-        fill_seed_shape(&[20, 21, 22], 20, SeedDecayPerRepeat::FALLBACK, &mut out);
+    fn the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it() {
+        let weights = leaning_long();
+        let right = shares(&candidates(), REFERENCE_REPEATS, own_fit(&weights, 12.0));
+        let wrong = shares(&candidates(), 9, own_fit(&weights, 12.0));
+
+        assert!(
+            (right[0] - 0.5952).abs() < 5e-4 && (wrong[0] - 0.0909).abs() < 5e-4,
+            "the tract's own length holds {} of the mass and {} when a candidate's count is \
+             passed instead",
+            right[0],
+            wrong[0]
+        );
+        assert!(
+            (right[2] - 0.0476).abs() < 5e-4 && (wrong[2] - 0.9091).abs() < 5e-4,
+            "the candidate at 9 repeats holds {} of the mass and {} when its own count is \
+             passed as the tract's",
+            right[2],
+            wrong[2]
+        );
     }
 
-    /// An empty candidate set is refused: every repeat tract has a reference allele, so it is a
-    /// caller that has lost track of which locus it is on rather than a thin one.
     #[test]
-    #[should_panic(expected = "at least one length")]
+    #[should_panic(expected = "its candidate set has at least one")]
     fn an_empty_candidate_set_is_refused() {
         let mut out: [f64; 0] = [];
+        let weights = leaning_long();
+        let _ = fill_ssr_seed(&[], REFERENCE_REPEATS, own_fit(&weights, 12.0), &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "must cover the locus's candidate lengths exactly")]
+    fn a_mis_sized_buffer_is_refused() {
+        let mut out = vec![0.0; 3];
+        let weights = leaning_long();
         let _ = fill_ssr_seed(
-            &[],
-            20,
-            SeedDecayPerRepeat::FALLBACK,
-            RepeatGeneDiversity::try_new(0.087).unwrap(),
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
             &mut out,
         );
     }
 
-    /// The two scalars refuse what is not their own quantity, and they refuse it with a
-    /// `DomainError` rather than a panic — a degenerate fit is a run to abandon with a message,
-    /// not a process to abort.
     #[test]
-    fn the_scalars_refuse_values_that_are_not_their_own_quantity() {
-        for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
-            assert!(
-                matches!(
-                    SeedDecayPerRepeat::try_new(bad),
-                    Err(crate::ng::types::DomainError::SeedDecayPerRepeat(_))
-                ),
-                "decay {bad}"
-            );
-        }
-        assert_eq!(SeedDecayPerRepeat::try_new(1.0).unwrap().get(), 1.0);
-        assert_eq!(SeedDecayPerRepeat::FALLBACK.get(), 0.5);
+    #[should_panic(expected = "must cover the locus's candidate lengths exactly")]
+    fn a_mis_sized_buffer_is_refused_by_the_shared_export_too() {
+        let mut out = vec![0.0; 3];
+        let weights = leaning_long();
+        fill_seed_share_per_candidate(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+    }
 
-        for bad in [-0.5, 1.5, f64::NAN, f64::INFINITY] {
-            assert!(
-                matches!(
-                    RepeatGeneDiversity::try_new(bad),
-                    Err(crate::ng::types::DomainError::RepeatGeneDiversity(_))
-                ),
-                "diversity {bad}"
-            );
-        }
-        assert_eq!(RepeatGeneDiversity::try_new(0.0).unwrap().get(), 0.0);
-        assert_eq!(RepeatGeneDiversity::try_new(1.0).unwrap().get(), 1.0);
+    /// The bottom rung's stated strength is one chromosome's worth of belief, which is what
+    /// lets the reads move the prior from the first read onward.
+    #[test]
+    fn the_stated_flat_concentration_is_one_chromosomes_worth() {
+        assert_eq!(STATED_FLAT_CONCENTRATION, 1.0);
     }
 }

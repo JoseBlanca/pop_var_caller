@@ -202,6 +202,79 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-27 — three numbers written before the measurement that produced them existed
+
+**Not an owner correction — caught in review before sending, and logged because the mechanism is
+the same one the entries below describe.** Writing up a six-part measurement, the prose for each
+part was drafted while the next sweep was still running, so three figures were carried from a run
+that was later superseded:
+
+> ❌ "a lump at one intermediate frequency … 1.52 per kb … gap **0.287**" — from a version of the
+> program that used a point mass; the shipped version uses a narrow Beta and gives 1.51 and 0.192.
+>
+> ❌ "on a population the curve can hold, they agree to within 4% at 63 samples; on one it cannot
+> hold, the curve's is up to 5% high" — **backwards**. The widest cell is 8.9% and it is on a
+> population the curve *can* hold.
+>
+> ❌ "every cell within its own uncertainty of the predicted value" — 21 of 36 are within one
+> standard error, 33 within two, 3 beyond two.
+
+> ✅ Each replaced by the figure re-extracted from the run that shipped, and the third replaced by
+> the count: *"21 of the 36 cells sit within one standard error of the prediction, 33 within two,
+> and all 36 within three — for 36 draws from a correct formula the expected counts are about 25,
+> 34 and 36."*
+
+Three failures, and the first is the new rule:
+
+1. **Prose written before its measurement exists is prose written from memory of an earlier
+   measurement.** Every one of the three came from drafting a section while its run was still
+   going. **New rule: a section is written after the run it reports, never during — and if a
+   number must be quoted before the final run, it is quoted with the run's filename beside it so
+   the staleness is visible.**
+2. **The second one asserted a direction, not just a size, and the direction was the interesting
+   half.** "The curve is worse on populations it cannot hold" is a mechanism claim; it was written
+   because it was the expected answer, and the data said the opposite. This is the *wrong mechanism
+   claim* failure the project's own review history puts at about 60 in 300 — and it was reached by
+   assuming rather than by reading the column.
+3. **"Within its own uncertainty" is a hedge dressed as a measurement.** Replacing it with three
+   counts and the counts a correct formula would give is both shorter and checkable. **A phrase of
+   the form "within X" over many cells has to say how many cells and how many were not.**
+
+**A review of the same report then found four more, and the two that matter are both the second
+failure above in a stronger form.** Every counted figure in the draft was right; what was wrong was
+why and where.
+
+> ❌ "Ten individuals is the worst panel size … the likeliest reason is the residual: the variance
+> term is the sum of the samples' own, which is exact only if their posteriors are independent."
+>
+> The residual has the **opposite sign** — the ignored covariance is positive, so ignoring it biases
+> the estimate *up* and these cells were *down* — and it is **ten times too small**, because the
+> whole variance term in those cells is 2 points against a 10-to-25-point shortfall.
+
+> ❌ "a quantity that moves in 7-nat steps lands in a 0.34-nat window about one time in twenty"
+>
+> That predicts 5 calls in 100 moving, in a section whose measurement three paragraphs above it is
+> 0.44 in 100 at worst and 0.00 in 28 of 36 cells. **The argument offered to explain a null
+> contradicted the null.**
+
+Three rules, and the first is why the hedging did not save either one:
+
+1. **Labelling a claim "an explanation and not a measurement" limits its confidence and not its
+   direction.** Both sentences above were hedged. A hedge on a mechanism that points the wrong way
+   is still a wrong mechanism, and a reader who trusts the hedge still comes away believing the
+   sign. **Before hedging a mechanism, check it against the sign and the size of the thing it
+   explains** — those are two arithmetic checks, and both of these failed one.
+2. **A mechanism proposed for a number must be arithmetically capable of producing that number.**
+   "Could this cause be this large?" is a one-line check and it was not run in either case.
+3. **An explanation of a null must not predict a non-null.** If the argument for "nothing moved"
+   yields a rate an order of magnitude above the largest cell measured, the argument is refuting the
+   result rather than accounting for it.
+
+**And one that is not about mechanism:** a table divided two quantities that do not cancel — a
+panel-level estimator over a population-level truth — leaving an unrelated 15% factor standing in
+every one-sample cell and being read as the effect under study. **When a ratio is meant to make
+something cancel, name what cancels and check it does**, at the point the ratio is written.
+
 ### 2026-08-24 — an abstract argument-about-an-argument, built on an undefined project verb
 
 Comparing what three callers allow as candidate alleles at one repeat tract, a reply ended a
@@ -619,3 +692,104 @@ consistent about the fix being structural rather than motivational:
   <https://experienceleague.adobe.com/en/perspectives/brand-consistency-at-scale>
 - **BLUF / the Pyramid Principle** — conclusion first, then support, then data.
   <https://en.wikipedia.org/wiki/BLUF_(communication)>
+
+---
+
+### 2026-08-25 — two decisions asked with none of the context needed to answer them
+
+A milestone report ended with two questions for the owner. Both were real decisions;
+neither was answerable.
+
+> ❌ "**Does §3 get amended, or do you want me to keep hunting for a fixture where
+> it's permanent?**" … "Neither §3 nor §7 answers it. I pinned the behaviour with a
+> test rather than changing it. Options as I see them: leave it, skip silent samples
+> on the flat pass only, or give the flat pass a uniform-over-*alleles* rather than
+> uniform-over-*genotypes* reading."
+>
+> Owner: *"explain to me what do you need from me giving me the context. Otherwise I
+> can't answer"*
+
+Three failures in one reply, and the vocabulary was the least of them.
+
+**1. The decision was stated in the design document's own section numbers.** `§3`,
+`§7`, `§12's Q7` — the reader has to open three documents before the question means
+anything. The repair is to quote the sentence being challenged, in full, once:
+
+> ✅ "§3 justifies running the first pass with no prior by saying that the alternative
+> traps the loop permanently: *'The loop converges, and it converges to no-variant,
+> having never let the reads speak.'* I could not make that happen."
+
+**2. The second question should never have been asked, because measuring it took
+four minutes and dissolved it.** The concern — samples with no reads voting as though
+heterozygous on the first pass — was real on pass 1 and gone by convergence: no call
+changed, and the fitted allele frequency moved by 0.0007 with 12 of 63 samples
+silent. **Offering three options for a thing you have not measured is asking the
+reader to do your work.** Before escalating a design question, run the measurement
+that would make it moot.
+
+**3. "Options as I see them" is not a recommendation.** The skill already says a
+decision needs one; a list of three with no ranking and no consequence attached is
+the failure it names, dressed as thoroughness.
+
+The rule this adds to the D row: **a decision paragraph must be answerable by
+someone who has read only this reply.** If answering it requires opening a document,
+recalling a section number, or asking you what a term means, it is not ready — and
+if a measurement you could run would settle it, run the measurement instead of
+sending the question.
+
+### 2026-08-25 — a range claim measured on two axes, reported on one
+
+Not a chat failure but a writing one, caught by a reviewer and worth logging here
+because the reply repeated it to the owner as fact.
+
+A sweep covered likelihood advantage **× cohort size** (3, 6, 20, 63 samples). The
+comment written from it said the effect bit near 1 nat "and nowhere else" and that at
+0.5 nats "there is nothing to lose" — while the sweep's own output showed the two
+arms parting at 0.5 nats for 20 and 63 samples. The second axis was measured, then
+dropped from the sentence.
+
+`CLAUDE.md` names this exactly: *"a figure measured at 3× on 50 samples is a fact
+about that corner, not a property of the caller."* **The failure is not forgetting to
+measure the axis — it is measuring it and then writing as though it were not there.**
+Before writing a sentence from a sweep, list the sweep's axes and check each one
+appears in the sentence or is explicitly said not to matter.
+
+### 2026-08-27 — a cost claim, in a decision paragraph, about code I had not opened
+
+**The owner's correction, in full:**
+
+> "it eats per-sample windowed histograms the joint route never builds" if you mean the windowed
+> histogram build for every sample to calculate the F, they are built, per sample, not in the
+> cohort step
+
+Putting three options to the owner for where a run should get its inbreeding coefficient, one of
+them was *run the existing runs-of-homozygosity estimator alongside*, and I priced it:
+
+> ❌ "It is the shipped, tested one, but it eats per-sample windowed histograms the joint route
+> never builds — so this is a second pass over the reads for every sample, to fix a few per cent at
+> large panels."
+
+**The histograms are built.** `generic/accumulators.rs` fills them per sample during the ordinary
+per-sample accumulation whenever the inbreeding mode is `Fitted`, and `generic/estimate.rs` already
+fits the coefficient from them and puts it on `GenericSampleParameters` beside the window count.
+Nothing extra is read. What is actually missing is one join: no code takes those per-sample
+coefficients, means them over the panel, and hands the mean to the correction — because the run
+assembly that would own that join is not built.
+
+> ✅ "The coefficient already exists, per sample: the per-sample step builds the windowed histograms
+> and fits it. What is missing is the join — nothing means them over the panel and hands the mean
+> to the correction, because the assembly that would is unbuilt."
+
+**The mechanism, and it is not carelessness about a number.** The design document says the runs
+estimator *"lives in the per-sample histogram route and walks genome windows"*, which is true and is
+a statement about **where** something lives. I turned it into a statement about **what it would
+cost to get** — and then wrote that cost into a decision paragraph, where a wrong cost is not a
+blemish on the prose, it is a wrong answer to the question being asked. The owner was being asked to
+choose between three options priced in units I had inferred rather than read.
+
+**The rule.** *Every claim about what an option costs is a claim about code, and it is checked by
+opening the code — not by reasoning from the design document's description of where things live.* A
+`grep` for the type the estimator takes would have settled it in one call, and the reply asked for a
+ruling instead. This is the D-paragraph form of the failure the plan-driven skill already names for
+reports: **run the thing and read the number; do not recall it.** In a decision paragraph the cost
+*is* the number.

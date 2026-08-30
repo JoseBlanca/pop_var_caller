@@ -680,8 +680,10 @@ pub fn fill_batch_allele_copies(
 /// a locus with one candidate allele a batch full of evidence and a batch with none are
 /// bit-identical, both `[1.0]`, and at any allele count the fallback row is a legal-looking
 /// frequency. A caller that wants to say *this locus was scored against a contaminant nobody
-/// measured* has no other way to know (C2's review). Nothing consumes it yet; the loop is where
-/// it belongs.
+/// measured* has no other way to know (C2's review). **The loop calls this and does not yet
+/// report it**: what the run says about the contamination it used is the step after the loop's
+/// wiring, and the call site binds this rather than dropping it so that a reader sees it is owed
+/// rather than handled.
 ///
 /// # Panics
 ///
@@ -690,6 +692,7 @@ pub fn fill_batch_allele_copies(
 /// sample holding materially more copies than the batch it is part of — the sample's own copies
 /// are one addend of that sum, so the two count paths have gone out of step, which is
 /// `fill_sample_concentration`'s own check for the same subtraction.
+#[must_use]
 pub fn fill_contaminant_allele_frequencies(
     batch_copies: &[f64],
     own_copies: SampleAlleleCopies<'_>,
@@ -788,6 +791,170 @@ pub fn fill_contaminant_allele_frequencies(
     batches_with_no_evidence
 }
 
+/// **The half of spec §3.6's mixture that is frozen for the run** — a contamination fraction per
+/// read group, and the sequencing batch each of those read groups ran in.
+///
+/// # Why it is a type and not two arguments
+///
+/// **Because the checks between them are worth making once and the loop would make them per
+/// row.** With contamination on, the mixture's *other* half moves: `q(o)` is recomputed for
+/// every sample of every pass, and each recomputation needs a fresh [`ContaminationMixture`]
+/// over the refilled table. Checking the fractions against the batching there costs
+/// `read groups × batches` per sample per pass.
+///
+/// **Both sides of that comparison, computed rather than asserted.** At a thousand libraries on
+/// four plates the checks are about 5,000 operations, so once a sample once a pass over a
+/// thousand samples and seven passes is about 3.5 × 10⁷ at one locus — against the row
+/// assembly's own `samples × observations × genotypes × passes`, about 1.5 × 10⁶ at ten
+/// observations and a six-allele diploid. **Roughly twenty times the work the assembly does.**
+/// Held apart, the expensive checks are made once per assembly and
+/// [`with_frequencies`](Self::with_frequencies) is what a row costs.
+///
+/// **What is still per row, and where it would bite.** `with_frequencies` range-checks the
+/// table it is handed, which is `batches × alleles`, and the fill above it rewrites the whole
+/// table per sample for the same reason. Under the shipped default that is one batch — an
+/// allele's worth of work — and it stays small for a plate-sized batching. It becomes the
+/// dominant cost only where a run declares roughly as many batches as it has samples, which
+/// nothing produces today, and closing it means changing what
+/// [`fill_contaminant_allele_frequencies`] writes rather than what this checks.
+///
+/// It also states in the type which half is which, which is the distinction §6.1's tier table
+/// turns on: the fraction is a property of the *library* and frozen before calling; the
+/// frequency is a property of the *locus* and moves with the loop.
+#[derive(Copy, Clone, Debug)]
+pub struct FrozenContamination<'a> {
+    fractions: &'a [ContaminationView],
+    batch_of_each_read_group: &'a [BatchId],
+    batch_count: usize,
+}
+
+impl<'a> FrozenContamination<'a> {
+    /// A fraction per read group, the batch each ran in, and how many batches the run declares.
+    ///
+    /// # Panics
+    ///
+    /// On a fraction outside `[0, 1)`; on the two slices disagreeing about how many read groups
+    /// the run has; on a run of no batches or no fractions — the uncontaminated case is
+    /// [`ContaminationMixture::uncontaminated`] and not an empty list; on a read group naming a
+    /// batch the run did not declare; and on a declared batch no read group ran in.
+    ///
+    /// **The last of those is the one that fails silently.** A run that declared three batches
+    /// against a batching naming only the first constructs cleanly otherwise: every read group
+    /// reads row 0, `batch_count` reports three, and **a run that declared batches is scored
+    /// against the cohort frequency with nothing said** (C2's review).
+    #[must_use]
+    pub fn new(
+        fractions: &'a [ContaminationView],
+        batch_of_each_read_group: BatchOfEachReadGroup<'a>,
+        batch_count: usize,
+    ) -> Self {
+        let BatchOfEachReadGroup(batch_of_each_read_group) = batch_of_each_read_group;
+        assert!(
+            !fractions.is_empty(),
+            "a mixture with no fractions and no frequencies is the uncontaminated case, and it \
+             is spelled `ContaminationMixture::uncontaminated` — one named way to say it, so \
+             that a caller reaches the decision rather than the shortest thing that compiles"
+        );
+        assert_eq!(
+            batch_of_each_read_group.len(),
+            fractions.len(),
+            "every read group runs in exactly one batch, so the batching holds {} entries \
+             against {} read-group fractions",
+            batch_of_each_read_group.len(),
+            fractions.len()
+        );
+        assert!(
+            batch_count > 0,
+            "a contaminated run has at least one sequencing batch, the default being one that \
+             holds all of it"
+        );
+        for (read_group, batch) in batch_of_each_read_group.iter().enumerate() {
+            assert!(
+                (batch.get() as usize) < batch_count,
+                "read group {read_group} says it ran in batch {batch}, and this mixture holds \
+                 {batch_count} batches"
+            );
+        }
+        for batch in 0..batch_count {
+            assert!(
+                batch_of_each_read_group
+                    .iter()
+                    .any(|declared| declared.get() as usize == batch),
+                "the run declares {batch_count} batches and no read group ran in batch \
+                 {batch}; a batching that names fewer batches than the frequency table has rows \
+                 would score every library against the first"
+            );
+        }
+        for (read_group, view) in fractions.iter().enumerate() {
+            assert!(
+                (0.0..1.0).contains(&view.fraction),
+                "read group {read_group} has a contamination fraction of {}, and a fraction is \
+                 a share of that group's reads that came from somebody else: a number at or \
+                 above zero, below one, and not a `NaN`. A whole library of another \
+                 individual's DNA is not a sample of this one",
+                view.fraction
+            );
+        }
+        Self {
+            fractions,
+            batch_of_each_read_group,
+            batch_count,
+        }
+    }
+
+    /// This half, plus one locus's contaminant allele frequencies — the whole mixture a row
+    /// reads.
+    ///
+    /// **What a row costs**, and deliberately: the checks here are the ones that depend on the
+    /// table just filled, and nothing that was already settled at construction is made again.
+    ///
+    /// # Panics
+    ///
+    /// On a frequency table that is not `batch_count × allele_count` entries, and on an entry
+    /// outside `[0, 1]`.
+    #[must_use]
+    pub fn with_frequencies(
+        self,
+        contaminant_allele_frequencies: &'a [f64],
+        allele_count: usize,
+    ) -> ContaminationMixture<'a> {
+        assert!(
+            allele_count > 0,
+            "a locus is called over at least its reference allele, so a mixture cannot be for \
+             none"
+        );
+        assert_eq!(
+            contaminant_allele_frequencies.len(),
+            self.batch_count * allele_count,
+            "the frequency table holds {} entries and the run declares {} batches over \
+             {allele_count} alleles",
+            contaminant_allele_frequencies.len(),
+            self.batch_count
+        );
+        for (slot, &frequency) in contaminant_allele_frequencies.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&frequency),
+                "the contaminating population shows allele {} of batch {} at a frequency of \
+                 {frequency}, which is not a frequency",
+                slot % allele_count,
+                slot / allele_count
+            );
+        }
+        ContaminationMixture {
+            fractions: self.fractions,
+            batch_of_each_read_group: self.batch_of_each_read_group,
+            contaminant_allele_frequencies,
+            allele_count,
+        }
+    }
+
+    /// How many sequencing batches the run declares.
+    #[must_use]
+    pub fn batch_count(&self) -> usize {
+        self.batch_count
+    }
+}
+
 /// **Both halves of spec §3.6's mixture, for one locus** — how much of each read group came
 /// from somebody else, and what that somebody else's DNA would have shown here.
 ///
@@ -823,8 +990,10 @@ pub fn fill_contaminant_allele_frequencies(
 /// one batch holding two read groups are *the same value*, so nothing downstream can tell a
 /// batching that was stated from one that was assumed — where the other half of this mixture
 /// carries [`ContaminationSource`] for exactly that reason. The distinction belongs to
-/// `SequencingBatches::is_default`, which the architecture specifies and nothing has built
-/// (C2's review).
+/// [`SequencingBatches::is_default`](crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches::is_default),
+/// which answers it — built at the calling loop's E2a, and reachable from the run's parameters
+/// through `RunParameters::sequencing_batches`. **Nothing reports it yet**, which is the step
+/// after this one.
 ///
 /// **[`uncontaminated`](Self::uncontaminated) is the uncontaminated case and is not a special path.** With no
 /// fractions the mixture collapses to `own(o | g)` and the row computes spec §3.3 — to a few
@@ -894,7 +1063,9 @@ impl<'a> ContaminationMixture<'a> {
         contaminant_allele_frequencies: &'a [f64],
         allele_count: usize,
     ) -> Self {
-        let BatchOfEachReadGroup(batch_of_each_read_group) = batch_of_each_read_group;
+        // **Both halves or neither, checked before anything else.** Each half on its own has a
+        // named refusal below, and both of those say *this half is missing*; only the pair says
+        // that the caller meant the uncontaminated case and half-spelled it.
         assert_eq!(
             fractions.is_empty(),
             contaminant_allele_frequencies.is_empty(),
@@ -909,14 +1080,6 @@ impl<'a> ContaminationMixture<'a> {
              is spelled `ContaminationMixture::uncontaminated` — one named way to say it, so \
              that a caller reaches the decision rather than the shortest thing that compiles"
         );
-        assert_eq!(
-            batch_of_each_read_group.len(),
-            fractions.len(),
-            "every read group runs in exactly one batch, so the batching holds {} entries \
-             against {} read-group fractions",
-            batch_of_each_read_group.len(),
-            fractions.len()
-        );
         assert!(
             allele_count > 0,
             "a locus is called over at least its reference allele, so a mixture cannot be for \
@@ -929,57 +1092,12 @@ impl<'a> ContaminationMixture<'a> {
              wide, so it is not a whole number of batches",
             contaminant_allele_frequencies.len()
         );
-        // **Every batch a read group names must have a row**, checked here so that the row's
-        // per-observation lookup cannot reach past the table. A batching that names three
-        // batches against a two-row table would otherwise read one read group's contaminant
-        // frequency from another batch, or from nothing.
-        let batch_count = contaminant_allele_frequencies.len() / allele_count;
-        for (read_group, batch) in batch_of_each_read_group.iter().enumerate() {
-            assert!(
-                (batch.get() as usize) < batch_count,
-                "read group {read_group} says it ran in batch {batch}, and the frequency table \
-                 holds {batch_count} batches"
-            );
-        }
-        // **And the other direction, which is the one that fails silently.** A table with
-        // three rows and a batching that names only the first constructs cleanly: every read
-        // group reads row 0, `batch_count()` reports three, and **a run that declared batches
-        // is scored against the cohort frequency with nothing said**. It is the mirror of the
-        // producer's own empty-batch check, and without both a defaulted batching slips past
-        // each end (C2's review).
-        for batch in 0..batch_count {
-            assert!(
-                batch_of_each_read_group
-                    .iter()
-                    .any(|declared| declared.get() as usize == batch),
-                "the frequency table holds {batch_count} batches and no read group ran in \
-                 batch {batch}; a mixture whose batching names fewer batches than its table \
-                 has rows would score every library against the first"
-            );
-        }
-        for (read_group, view) in fractions.iter().enumerate() {
-            assert!(
-                (0.0..1.0).contains(&view.fraction),
-                "read group {read_group} has a contamination fraction of {}, and a fraction is \
-                 a share of that group's reads that came from somebody else: a number at or \
-                 above zero, below one, and not a `NaN`. A whole library of another \
-                 individual's DNA is not a sample of this one",
-                view.fraction
-            );
-        }
-        for (allele, &frequency) in contaminant_allele_frequencies.iter().enumerate() {
-            assert!(
-                (0.0..=1.0).contains(&frequency),
-                "the contaminating population shows allele {allele} at a frequency of \
-                 {frequency}, which is not a frequency"
-            );
-        }
-        Self {
+        FrozenContamination::new(
             fractions,
             batch_of_each_read_group,
-            contaminant_allele_frequencies,
-            allele_count,
-        }
+            contaminant_allele_frequencies.len() / allele_count,
+        )
+        .with_frequencies(contaminant_allele_frequencies, allele_count)
     }
 
     /// Whether this is the uncontaminated case, in which the row computes spec §3.3.
@@ -1131,16 +1249,40 @@ pub struct GenericObservation {
     pub num_reads: u32,
     /// Σ `ln P(error)` over those reads — `q_sum_o`, straight off the merge's row.
     pub q_sum: f64,
+    /// Of those reads, how many were on the forward strand.
+    ///
+    /// **The read model does not use this, and it is carried anyway** — the same reason
+    /// [`Self::q_sum`]'s own comment gives for keeping a term that cancels. The site
+    /// quality's artifact correction compares the strand split of the reference allele's
+    /// reads against the alternative's, and the evidence it compares is released with the
+    /// locus (`doc/devel/ng/spec/calling_quality.md` §3.3). This view is where that
+    /// specification says the counts travel, and the merge's `AlleleSupport` already has
+    /// them; anything that gathered them a second way would be a second answer to the same
+    /// question.
+    pub forward_reads: u32,
+    /// Of those reads, how many started strictly left of the record they were seen at —
+    /// freebayes' `placedLeft`, and the read-position half of the same correction.
+    ///
+    /// **Counted against each record's own position, not the cohort locus's first base**, by
+    /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
+    /// sample's records this mixes as many questions as it has records. Carried forward from
+    /// [`AlleleSupport::placed_left`](crate::ng::run::cohort_merge::AlleleSupport::placed_left),
+    /// whose own comment is the one to read before drawing a conclusion from it.
+    pub placed_left_reads: u32,
 }
 
 impl GenericObservation {
-    /// The four numbers of one merge row, under the candidate id selection gave that row's
+    /// The six numbers of one merge row, under the candidate id selection gave that row's
     /// allele.
     ///
     /// **The id is an argument because this module cannot compute it.** The row's own
     /// `allele` field indexes the merge's unification table and [`AlleleId`] indexes the
     /// candidate table, and only selection knows how one maps onto the other (see the
     /// module's *Two allele tables* note).
+    ///
+    /// **Four of the six are the read model's and two are the site quality's**
+    /// ([`Self::forward_reads`], [`Self::placed_left_reads`]). They are copied here rather
+    /// than fetched later because the merge row they come from is released with the locus.
     #[must_use]
     pub fn of_supported_allele(row: &SupportedAllele, allele: AlleleId) -> Self {
         Self {
@@ -1148,6 +1290,8 @@ impl GenericObservation {
             read_group: row.read_group,
             num_reads: row.support.num_reads,
             q_sum: row.support.q_sum,
+            forward_reads: row.support.num_fwd,
+            placed_left_reads: row.support.placed_left,
         }
     }
 
@@ -1168,8 +1312,9 @@ impl GenericObservation {
     /// **`out` is caller scratch, cleared and refilled**, so a worker holds one buffer
     /// across every sample of every locus and the row function still allocates nothing
     /// (spec §8). There is no borrow to be had instead: a merge row is 48 bytes and this one
-    /// is 24, so no reinterpretation of the merge's `Vec` exists and somebody has to fill a
-    /// parallel buffer.
+    /// is 32 — it was 24 before the two site-quality counters joined it — so no
+    /// reinterpretation of the merge's `Vec` exists and somebody has to fill a parallel
+    /// buffer.
     ///
     /// **The output order is the input order**, so `out` is ascending on
     /// `(candidate allele, read group)` exactly when selection's mapping keeps alleles in
@@ -1588,6 +1733,51 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
     }
 }
 
+/// **The run's per-read-group calibration, and the one spelling of the lookup.**
+///
+/// A wrapper rather than a bare slice because it is what the *frequency-free* half of the row
+/// is handed: [`generic::fill_generic_emissions`] takes this and not
+/// [`ReadGroupParameters`], so that a fill whose results are cached across the loop's passes
+/// cannot reach a quantity that moves between them (spec §6.1).
+#[derive(Copy, Clone, Debug)]
+pub struct ReadGroupCalibrations<'a>(&'a [ReadGroupCalibration]);
+
+impl<'a> ReadGroupCalibrations<'a> {
+    /// One calibration per read group, indexed by [`ReadGroupId`].
+    #[must_use]
+    pub fn over(calibration: &'a [ReadGroupCalibration]) -> Self {
+        Self(calibration)
+    }
+
+    /// How many read groups the run supplied a calibration for.
+    ///
+    /// **No `is_empty` beside it**, which clippy would normally ask for: an empty one is a run
+    /// whose read-group axis went missing, and `FrozenParameters` refuses it at construction, so
+    /// the question has one answer everywhere it could be asked.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// One read group's calibration.
+    ///
+    /// # Panics
+    ///
+    /// On a read group the run supplied no calibration for. A row scoring evidence from a group
+    /// the parameters do not cover is a caller bug, and reading it as uncalibrated would be a
+    /// genotype quietly moved rather than a run that stopped.
+    #[must_use]
+    pub fn of(&self, read_group: ReadGroupId) -> &'a ReadGroupCalibration {
+        let at = read_group.get() as usize;
+        self.0.get(at).unwrap_or_else(|| {
+            panic!(
+                "read group {at} has no calibration; the run supplied {}",
+                self.0.len()
+            )
+        })
+    }
+}
+
 /// Everything the SNP/indel row knows about a read group — its calibration and its share of
 /// somebody else's DNA.
 ///
@@ -1602,7 +1792,7 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
 /// sample showed, what the locus is, what the run's chemistry is, its scratch, and its output.
 #[derive(Copy, Clone, Debug)]
 pub struct ReadGroupParameters<'a> {
-    calibration: &'a [ReadGroupCalibration],
+    calibration: ReadGroupCalibrations<'a>,
     contamination: ContaminationMixture<'a>,
 }
 
@@ -1625,7 +1815,7 @@ impl<'a> ReadGroupParameters<'a> {
             calibration.len()
         );
         Self {
-            calibration,
+            calibration: ReadGroupCalibrations::over(calibration),
             contamination,
         }
     }
@@ -1645,13 +1835,13 @@ impl<'a> ReadGroupParameters<'a> {
     /// genotype quietly moved rather than a run that stopped.
     #[must_use]
     pub fn calibration_of(&self, read_group: ReadGroupId) -> &'a ReadGroupCalibration {
-        let at = read_group.get() as usize;
-        self.calibration.get(at).unwrap_or_else(|| {
-            panic!(
-                "read group {at} has no calibration; the run supplied {}",
-                self.calibration.len()
-            )
-        })
+        self.calibration.of(read_group)
+    }
+
+    /// Just the calibration half — what the row's frequency-free fill is handed.
+    #[must_use]
+    pub fn calibrations(&self) -> ReadGroupCalibrations<'a> {
+        self.calibration
     }
 
     /// The mixture, for the two halves the row reads per observation.
@@ -1663,20 +1853,39 @@ impl<'a> ReadGroupParameters<'a> {
     /// How many read groups the run has.
     #[must_use]
     pub fn read_group_count(&self) -> usize {
-        self.calibration.len()
+        self.calibration.count()
     }
 }
 
-/// The SNP/indel row's own scratch — **one verdict per `(partial observation, candidate
-/// allele)`**, held across a locus and refilled per sample.
+/// The SNP/indel row's **emission cache** — everything about one sample's evidence at one locus
+/// that reads no allele frequency, so that it can be computed once and read by every assembly of
+/// the genotype-likelihood row — of which a contaminated locus makes one per pass.
 ///
-/// # Why the verdict is cached rather than recomputed
+/// Two things live here, and they are the whole of what spec §6.1 calls the emission on this
+/// path:
 ///
-/// Whether an allele could have produced a partial read is a property of the two of them and of
-/// nothing else — not of the genotype being scored. Every genotype carrying that allele asks
+/// - **one verdict per `(partial observation, candidate allele)`** — whether that allele could
+///   have produced that read;
+/// - **one charged error per observation**, complete and partial alike — `ε̄`, the geometric mean
+///   of the reads' own error probabilities scaled by the read group's calibration.
+///
+/// # Why they are cached rather than recomputed
+///
+/// Two reasons, and the second is the one this type's shape is for.
+///
+/// **Within one row**, whether an allele could have produced a partial read is a property of the
+/// two of them and not of the genotype being scored. Every genotype carrying that allele asks
 /// the same question, so without a cache the answer is recomputed `genotypes` times instead of
 /// once: at a six-allele diploid, 21 times over rather than 6. It is the same argument the STR
 /// path's emission cache rests on, one axis narrower.
+///
+/// **Across the loop's passes**, with contamination on the row is no longer a constant: `q(o)`
+/// moves with the frequencies (spec §3.6). What does not move is everything in here, so the
+/// driver fills this once per locus and assembles a row from it per pass — which is what keeps
+/// the expensive
+/// half, `candidates × Σ_s (observations in sample s)`, independent of the pass count
+/// (spec §6.1). **One of these per scratch row**, therefore, and not one reused across samples:
+/// a shared one would be overwritten by the next sample before the next pass could read it.
 ///
 /// # Why it is a separate type from [`GenericEvidenceBuffer`]
 ///
@@ -1697,20 +1906,115 @@ impl<'a> ReadGroupParameters<'a> {
 pub struct GenericRowScratch {
     /// Partial-major, one row of `alleles` per partial observation.
     compatible: Vec<bool>,
+    /// One entry per observation this sample showed: the complete observations first, in the
+    /// evidence's own order, then the partials in theirs.
+    ///
+    /// **One buffer over both, rather than two**, because the two walks are the same walk with
+    /// a different spread: an unexplained complete observation is charged `ε̄/m` and an
+    /// unexplained partial `ε̄/1`, and both numbers are the same `ε̄` scaled.
+    charged_error: Vec<f64>,
+    supported: usize,
     alleles: usize,
 }
 
 impl GenericRowScratch {
     /// Size the cache for one sample at one locus and clear it.
     ///
-    /// **Filled `false` rather than left alone**, so a verdict that was never written reads as
-    /// *this allele cannot have produced this read* — the conservative direction, and one an
-    /// incomplete fill shows up as a partial that stopped constraining anything rather than as
-    /// one that silently constrained the wrong genotype.
-    pub fn prepare_verdicts(&mut self, partials: usize, alleles: usize) {
+    /// **The verdicts are filled `false` rather than left alone**, so one that was never written
+    /// reads as *this allele cannot have produced this read* — the conservative direction, and
+    /// one an incomplete fill shows up as a partial that stopped constraining anything rather
+    /// than as one that silently constrained the wrong genotype.
+    ///
+    /// **The charged errors are filled with `NaN`, and that is the opposite choice for the
+    /// opposite reason.** There is no conservative charged error: zero is a real value — a
+    /// library whose reads are never wrong — so a slot the fill skipped would take every
+    /// genotype that fails to explain the observation to `−∞` and look like evidence. It is the
+    /// same argument [`SsrRowScratch::prepare_emissions`] makes for its own fill value.
+    pub fn prepare_emissions(&mut self, supported: usize, partials: usize, alleles: usize) {
         self.alleles = alleles;
+        self.supported = supported;
         self.compatible.clear();
         self.compatible.resize(partials * alleles, false);
+        self.charged_error.clear();
+        self.charged_error.resize(supported + partials, f64::NAN);
+    }
+
+    /// One complete observation's charged error `ε̄`, by its position in
+    /// [`GenericSampleEvidence::supported`].
+    ///
+    /// # Panics
+    ///
+    /// **In release as well as debug**, on a position past what the cache was prepared for —
+    /// which is what an assembly paired with another sample's fill produces, and reading a
+    /// neighbouring observation's `ε̄` is worse than stopping.
+    #[must_use]
+    pub fn charged_error_of_supported(&self, observation: usize) -> f64 {
+        assert!(
+            observation < self.supported,
+            "complete observation {observation} is past the {} this cache was prepared for",
+            self.supported
+        );
+        self.charged_error[observation]
+    }
+
+    /// Write one complete observation's charged error. See
+    /// [`charged_error_of_supported`](Self::charged_error_of_supported) for the index.
+    pub fn set_supported_charged_error(&mut self, observation: usize, charged_error: f64) {
+        assert!(
+            observation < self.supported,
+            "complete observation {observation} is past the {} this cache was prepared for",
+            self.supported
+        );
+        self.charged_error[observation] = charged_error;
+    }
+
+    /// One partial read's charged error, **already divided by its spread of one**, by its
+    /// position in [`GenericSampleEvidence::partials`].
+    ///
+    /// # Panics
+    ///
+    /// As [`charged_error_of_supported`](Self::charged_error_of_supported). **The two indices
+    /// are separate accessors and not one axis with an offset**, because the partials sit above
+    /// the complete observations in one buffer: a caller adding the offset by hand would address
+    /// a real value from the wrong half whenever it got the base wrong.
+    #[must_use]
+    pub fn charged_error_of_partial(&self, partial: usize) -> f64 {
+        self.charged_error[self.partial_slot(partial)]
+    }
+
+    /// Write one partial read's charged error. See
+    /// [`charged_error_of_partial`](Self::charged_error_of_partial) for the index.
+    pub fn set_partial_charged_error(&mut self, partial: usize, charged_error: f64) {
+        let slot = self.partial_slot(partial);
+        self.charged_error[slot] = charged_error;
+    }
+
+    /// How many complete observations the cache was prepared for.
+    #[must_use]
+    pub fn supported_count(&self) -> usize {
+        self.supported
+    }
+
+    /// How many partial reads the cache was prepared for.
+    #[must_use]
+    pub fn partial_count(&self) -> usize {
+        self.charged_error.len() - self.supported
+    }
+
+    /// How many candidate alleles the cache was prepared for.
+    #[must_use]
+    pub fn allele_count(&self) -> usize {
+        self.alleles
+    }
+
+    fn partial_slot(&self, partial: usize) -> usize {
+        let slot = self.supported + partial;
+        assert!(
+            slot < self.charged_error.len(),
+            "partial {partial} is past the {} this cache was prepared for",
+            self.charged_error.len() - self.supported
+        );
+        slot
     }
 
     /// Whether this allele could have produced this partial read.
@@ -1881,14 +2185,33 @@ mod tests {
         assert_eq!(observation.q_sum, -41.25);
     }
 
-    /// The type's doc promises four scalars and cheap copying. A field owning heap would
+    /// **And the two the formula does not read**, which is the whole reason they are here:
+    /// the site quality's artifact correction compares the reference allele's strand and
+    /// read-position split against the alternative's, and the merge row they come from is
+    /// released with the locus (`doc/devel/ng/spec/calling_quality.md` §3.3).
+    ///
+    /// The fixture's `num_fwd` is 7 and its `placed_left` is 3 — deliberately different from
+    /// each other and from every other field, so a copy that crossed the two, or took
+    /// `num_reads` for either, changes this assertion.
+    #[test]
+    fn the_view_also_keeps_the_two_counts_the_site_quality_reads() {
+        let observation =
+            GenericObservation::of_supported_allele(&supported_row(3, 9, 17, -41.25), AlleleId(3));
+
+        assert_eq!(observation.forward_reads, 7);
+        assert_eq!(observation.placed_left_reads, 3);
+    }
+
+    /// The type's doc promises plain scalars and cheap copying. A field owning heap would
     /// make both false, and would also break the no-allocation contract the row function
     /// works under (spec §8), so the width is pinned rather than described.
     #[test]
-    fn the_observation_stays_four_scalars_wide() {
-        // 24 and not 18: the `f64` wants eight-byte alignment, so the two-byte allele id and
-        // the two four-byte counts are padded out to sixteen before it.
-        assert_eq!(std::mem::size_of::<GenericObservation>(), 24);
+    fn the_observation_stays_a_handful_of_scalars_wide() {
+        // **32, and it was 24 before the two site-quality counters joined it.** Not 34: the
+        // `f64` wants eight-byte alignment, so the two-byte allele id and the four
+        // four-byte counts are padded out to twenty-four before it. The two counters cost
+        // eight bytes on a struct the merge already pays 48 for.
+        assert_eq!(std::mem::size_of::<GenericObservation>(), 32);
         assert_eq!(std::mem::align_of::<GenericObservation>(), 8);
         assert!(!std::mem::needs_drop::<GenericObservation>());
     }
@@ -2017,9 +2340,21 @@ mod tests {
     /// site that concatenated two samples' rows, or applied a selection mapping that
     /// reordered the alleles, would break the order with nothing saying so — and
     /// floating-point addition is not associative, so the run's genotypes move with it.
+    /// **Debug-profile only, following the convention `genotype_prior/` already uses.** The
+    /// check this reaches is a `debug_assert!` by a recorded decision, not by oversight — see
+    /// [`GenericSampleEvidence::new`]'s doc: the scan is linear in the rows and the order is
+    /// the merge's property to hold rather than this constructor's to re-establish at every
+    /// call. Without the `cfg` the test fails under `--release` with *"test did not panic as
+    /// expected"*, which is what kept `cargo test --release --lib ng::calling` red and so kept
+    /// **every** release-held assertion in this folder outside CI's reach.
+    ///
+    /// **This attribute is not a way to quiet a failing test.** It says the check under it is
+    /// deliberately debug-only. A test on a check that is meant to hold in release must not
+    /// carry it, or the release gate stops meaning anything.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn rows_out_of_pair_order_are_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn rows_out_of_pair_order_are_refused_in_debug() {
         let out_of_order = [
             GenericObservation::of_supported_allele(&supported_row(1, 0, 3, -1.0), AlleleId(1)),
             GenericObservation::of_supported_allele(&supported_row(0, 0, 3, -1.0), AlleleId(0)),
@@ -2034,9 +2369,14 @@ mod tests {
     /// rows produces**, and the sum would then charge that evidence twice. The order check has
     /// to be strict rather than merely non-decreasing, and both fixtures below are strictly
     /// descending, so neither puts an equal pair in front of it.
+    /// **Debug-profile only** — the check it reaches is a `debug_assert!` by the recorded
+    /// decision in [`GenericSampleEvidence::new`]'s doc, not by oversight. See
+    /// [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute is here and what
+    /// it must never be used for.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn one_pair_appearing_twice_is_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn one_pair_appearing_twice_is_refused_in_debug() {
         let duplicated = [
             GenericObservation::of_supported_allele(&supported_row(1, 0, 3, -1.0), AlleleId(1)),
             GenericObservation::of_supported_allele(&supported_row(1, 0, 5, -2.0), AlleleId(1)),
@@ -2045,9 +2385,14 @@ mod tests {
         let _ = GenericSampleEvidence::new(&duplicated, 0.0, &[]);
     }
 
+    /// **Debug-profile only** — the check it reaches is a `debug_assert!` by the recorded
+    /// decision in [`GenericSampleEvidence::new`]'s doc, not by oversight. See
+    /// [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute is here and what
+    /// it must never be used for.
     #[test]
     #[should_panic(expected = "not ascending")]
-    fn rows_out_of_read_group_order_within_one_allele_are_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn rows_out_of_read_group_order_within_one_allele_are_refused_in_debug() {
         let out_of_order = [
             GenericObservation::of_supported_allele(&supported_row(2, 9, 3, -1.0), AlleleId(2)),
             GenericObservation::of_supported_allele(&supported_row(2, 4, 3, -1.0), AlleleId(2)),
@@ -3024,7 +3369,7 @@ mod tests {
     #[should_panic(expected = "allele 4 is past the 3")]
     fn the_scratch_refuses_an_allele_past_the_stride_it_was_prepared_for() {
         let mut scratch = GenericRowScratch::default();
-        scratch.prepare_verdicts(2, 3);
+        scratch.prepare_emissions(0, 2, 3);
 
         let _ = scratch.is_compatible(0, AlleleId(4));
     }
@@ -3033,7 +3378,7 @@ mod tests {
     #[should_panic(expected = "partial 5 is past the 2")]
     fn the_scratch_refuses_a_partial_past_the_rows_it_was_prepared_for() {
         let mut scratch = GenericRowScratch::default();
-        scratch.prepare_verdicts(2, 3);
+        scratch.prepare_emissions(0, 2, 3);
 
         let _ = scratch.is_compatible(5, AlleleId(0));
     }
@@ -3047,7 +3392,7 @@ mod tests {
     fn one_scratch_is_reused_across_samples_and_forgets_the_last() {
         let mut scratch = GenericRowScratch::default();
 
-        scratch.prepare_verdicts(3, 2);
+        scratch.prepare_emissions(0, 3, 2);
         assert_eq!(scratch.verdict_count(), 6);
         for partial in 0..3 {
             for allele in 0..2u16 {
@@ -3056,7 +3401,7 @@ mod tests {
         }
 
         // A narrower sample at the same locus.
-        scratch.prepare_verdicts(1, 2);
+        scratch.prepare_emissions(0, 1, 2);
         assert_eq!(scratch.verdict_count(), 2);
         assert!(
             !scratch.is_compatible(0, AlleleId(0)) && !scratch.is_compatible(0, AlleleId(1)),
@@ -3064,7 +3409,7 @@ mod tests {
         );
 
         // And a wider locus afterwards, which grows it.
-        scratch.prepare_verdicts(2, 5);
+        scratch.prepare_emissions(0, 2, 5);
         assert_eq!(scratch.verdict_count(), 10);
         assert!((0..2).all(|partial| {
             (0..5u16).all(|allele| !scratch.is_compatible(partial, AlleleId(allele)))
@@ -3077,11 +3422,85 @@ mod tests {
     fn a_sample_with_no_partials_prepares_an_empty_cache() {
         let mut scratch = GenericRowScratch::default();
 
-        scratch.prepare_verdicts(2, 3);
+        scratch.prepare_emissions(0, 2, 3);
         scratch.set_compatible(1, AlleleId(2), true);
-        scratch.prepare_verdicts(0, 3);
+        scratch.prepare_emissions(0, 0, 3);
 
         assert_eq!(scratch.verdict_count(), 0);
+    }
+
+    /// **The charged errors are held on the same buffer as the verdicts, and the two halves of
+    /// it are addressed by separate accessors** — the partials sit above the complete
+    /// observations, so a caller adding the offset by hand would read a real value from the
+    /// wrong half whenever it got the base wrong.
+    #[test]
+    fn the_two_halves_of_the_emission_cache_are_addressed_apart() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_emissions(2, 3, 2);
+
+        assert_eq!(scratch.supported_count(), 2);
+        assert_eq!(scratch.partial_count(), 3);
+        assert_eq!(scratch.allele_count(), 2);
+
+        for at in 0..2 {
+            scratch.set_supported_charged_error(at, 0.1 * (at + 1) as f64);
+        }
+        for at in 0..3 {
+            scratch.set_partial_charged_error(at, 10.0 + at as f64);
+        }
+        assert_eq!(scratch.charged_error_of_supported(0), 0.1);
+        assert_eq!(scratch.charged_error_of_supported(1), 0.2);
+        assert_eq!(scratch.charged_error_of_partial(0), 10.0);
+        assert_eq!(scratch.charged_error_of_partial(2), 12.0);
+    }
+
+    /// An unwritten charged error is a `NaN` and not a zero, and the direction matters: **zero
+    /// is a real value** — a library whose reads are never wrong — so a slot the fill skipped
+    /// would take every genotype that fails to explain the observation to `−∞` and read as
+    /// evidence.
+    #[test]
+    fn an_unfilled_charged_error_is_not_a_number() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_emissions(2, 1, 2);
+        assert!(scratch.charged_error_of_supported(1).is_nan());
+        assert!(scratch.charged_error_of_partial(0).is_nan());
+
+        scratch.set_supported_charged_error(1, 0.5);
+        scratch.prepare_emissions(2, 1, 2);
+        assert!(
+            scratch.charged_error_of_supported(1).is_nan(),
+            "preparing again must forget what the last sample wrote"
+        );
+    }
+
+    /// A complete observation past the cache's own count is refused rather than read out of the
+    /// partials above it — which is exactly what an assembly paired with another sample's fill
+    /// would reach.
+    #[test]
+    #[should_panic(expected = "complete observation 2 is past the 2")]
+    fn a_complete_observation_past_the_prepared_cache_is_a_caller_bug() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_emissions(2, 3, 2);
+        let _ = scratch.charged_error_of_supported(2);
+    }
+
+    /// And the same on the writing side, which is the door a fill comes through.
+    #[test]
+    #[should_panic(expected = "complete observation 5 is past the 1")]
+    fn writing_a_complete_observation_past_the_prepared_cache_is_a_caller_bug() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_emissions(1, 0, 2);
+        scratch.set_supported_charged_error(5, 0.1);
+    }
+
+    /// A partial past the cache's own count runs off the end of the buffer rather than into a
+    /// neighbour, and is refused by name.
+    #[test]
+    #[should_panic(expected = "partial 3 is past the 3")]
+    fn a_partial_past_the_prepared_cache_is_a_caller_bug() {
+        let mut scratch = GenericRowScratch::default();
+        scratch.prepare_emissions(2, 3, 2);
+        let _ = scratch.charged_error_of_partial(3);
     }
 
     // ---- C2: the frequency the contaminant is drawn against ----
@@ -3524,9 +3943,15 @@ mod tests {
     /// A sample that claims more copies than the batch it is one addend of means the two count
     /// paths have gone out of step — the check `fill_sample_concentration` makes for the same
     /// subtraction, at the same threshold.
+    /// **Debug-profile only** — `fill_contaminant_allele_frequencies`' own `# Panics` says so
+    /// in as many words (*"**In debug**, on a sample holding materially more copies than the
+    /// batch it is part of"*), mirroring `fill_sample_concentration`'s check for the same
+    /// subtraction. See [`rows_out_of_pair_order_are_refused_in_debug`] for why the attribute
+    /// is here and what it must never be used for.
     #[test]
     #[should_panic(expected = "count paths have gone out of step")]
-    fn a_sample_carrying_more_than_its_whole_batch_is_a_caller_bug() {
+    #[cfg(debug_assertions)]
+    fn a_sample_carrying_more_than_its_whole_batch_is_refused_in_debug() {
         let batch_copies = [2.0, 0.0];
         let impossible = [4.0, 0.0];
         let mut out = [f64::NAN; 2];
@@ -3562,7 +3987,7 @@ mod tests {
     /// another batch's frequencies, or past the end. Checked at construction, so the row's
     /// per-observation lookup cannot reach it.
     #[test]
-    #[should_panic(expected = "the frequency table holds 1 batches")]
+    #[should_panic(expected = "this mixture holds 1 batches")]
     fn a_batching_past_the_frequency_table_is_a_caller_bug() {
         let fractions = [
             a_read_group_contaminated_at(0.02),
@@ -3614,6 +4039,79 @@ mod tests {
             &frequencies,
             2,
         );
+    }
+
+    /// **The frozen half of the mixture can be built on its own**, because the loop builds it
+    /// once and hands it a refilled frequency table at every sample of every pass — and a run
+    /// of no batches is refused there rather than at whichever row first indexed the table.
+    #[test]
+    #[should_panic(expected = "at least one sequencing batch")]
+    fn a_frozen_contamination_over_no_batches_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let _ = FrozenContamination::new(
+            &fractions,
+            BatchOfEachReadGroup(&[BatchId::ALL_TOGETHER]),
+            0,
+        );
+    }
+
+    /// And a locus of no alleles, refused where the frequencies join it.
+    #[test]
+    #[should_panic(expected = "at least its reference allele")]
+    fn a_frozen_contamination_over_a_locus_of_no_alleles_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let _ = FrozenContamination::new(
+            &fractions,
+            BatchOfEachReadGroup(&[BatchId::ALL_TOGETHER]),
+            1,
+        )
+        .with_frequencies(&[], 0);
+    }
+
+    /// **A frequency table that is not this run's batches by this locus's alleles is refused
+    /// where the two meet.**
+    ///
+    /// `ContaminationMixture::new` derives the batch count *from* the table's length, so it can
+    /// only catch a length that is not a whole number of batches. The two-step door the loop
+    /// uses knows the batch count already — it comes from the run's batching — so it catches the
+    /// case the one-step door cannot: a table of the right shape for a different run.
+    #[test]
+    #[should_panic(expected = "the frequency table holds 4 entries and the run declares 1")]
+    fn a_frequency_table_for_another_runs_batches_is_a_caller_bug() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frozen = FrozenContamination::new(
+            &fractions,
+            BatchOfEachReadGroup(&[BatchId::ALL_TOGETHER]),
+            1,
+        );
+        let _ = frozen.with_frequencies(&[0.9, 0.1, 0.5, 0.5], 2);
+    }
+
+    /// **The same frozen half, folded twice over two different frequency tables** — which is
+    /// what the loop does at every pass, and what the split exists for: the checks between the
+    /// fractions and the batching are made once and not once a sample.
+    #[test]
+    fn one_frozen_half_serves_two_frequency_tables() {
+        let fractions = [a_read_group_contaminated_at(0.02)];
+        let frozen = FrozenContamination::new(
+            &fractions,
+            BatchOfEachReadGroup(&[BatchId::ALL_TOGETHER]),
+            1,
+        );
+        assert_eq!(frozen.batch_count(), 1);
+
+        let first = frozen.with_frequencies(&[0.9, 0.1], 2);
+        let second = frozen.with_frequencies(&[0.2, 0.8], 2);
+        assert_eq!(
+            first.contaminant_frequency_of(ReadGroupId(0), AlleleId(1)),
+            0.1
+        );
+        assert_eq!(
+            second.contaminant_frequency_of(ReadGroupId(0), AlleleId(1)),
+            0.8
+        );
+        assert_eq!(first.fraction_of(ReadGroupId(0)), 0.02);
+        assert_eq!(second.fraction_of(ReadGroupId(0)), 0.02);
     }
 
     #[test]

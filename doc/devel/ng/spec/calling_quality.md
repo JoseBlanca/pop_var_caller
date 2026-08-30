@@ -268,12 +268,34 @@ QUAL = −10·log₁₀ P( cohort allele count = 0 | every sample's reads )
 ```
 
 This matters, and production's own comment records why the earlier formula was replaced
-([`posterior_engine.rs:3446`](../../../../src/var_calling/posterior_engine.rs)). The obvious
+([`posterior_engine.rs:3446`](../../../../src/var_calling/posterior_engine.rs)). **The obvious
 alternative — multiply each sample's probability of being hom-ref — is not a normalised posterior,
-and every hom-ref sample you add multiplies in another factor below one. Under it, `QUAL` grows with
-cohort size at a site nobody carries. The marginal does not: adding a hom-ref sample to a
-sparse-variant prior adds essentially no evidence either way, so the number stays bounded by what
-the few non-hom-ref samples actually justify. This is also what GATK means by `P(AC = 0 | data)`.
+and that is the whole objection.** It is a product of marginals over an event that is not the
+intersection of those marginals: the samples are coupled through the allele frequency, and
+`Π_s P(GT_s = hom-ref)` throws that coupling away. It has no denominator, so it is not a
+probability of anything and cannot be compared between loci of different cohort sizes. The marginal
+above is a posterior over one well-defined quantity, the cohort's allele count, normalised over
+every value that quantity can take. This is also what GATK means by `P(AC = 0 | data)`.
+
+> **A correction, 2026-08-25.** This paragraph used to justify the choice by a different and
+> stronger claim: that the product formula *"grows with cohort size at a site nobody carries"*
+> where the marginal *"stays bounded by what the few non-hom-ref samples actually justify"*.
+> **Measured on the shipped implementation, that contrast does not hold — both grow, and in the
+> same proportion.** With samples that firmly say reference (12 nats against either
+> alternative-carrying genotype), taking the cohort from 1 to 500 moves the product formula from
+> 0.0000267 to 0.0133 Phred and the marginal from 0.0000000267 to 0.0000134 — each 500 times its
+> own base. With thin samples (1 nat, which is a sample at three reads a position) the marginal
+> grows *faster*: 0.0019 → 831.88 against the product's 1.77 → 885.11.
+>
+> **The marginal's growth is correct and the old sentence mistook it for a defect of the other
+> formula.** In a cohort of 501 thinly-covered samples, *nobody here carries this allele* is a far
+> stronger claim than in a cohort of one, and thin reads cannot support it; a quality that did not
+> rise would be understating what the data leave open. What is bounded is not the number but its
+> *warrant* — it never exceeds what a normalised posterior over the count permits, which is the
+> property the paragraph above now states directly.
+>
+> The arithmetic is production's, unchanged, and reproduces it to `1.2e-5` Phred. The numbers here
+> are from [C3a's report](../../reports/implementations/ng_calling_loop_c3a_2026-08-25.md) §5.
 
 **At a locus with several alternative alleles there is one quality, over their union.** "Any
 non-reference allele" is the collapse; a triallelic site does not get three qualities. Inherited

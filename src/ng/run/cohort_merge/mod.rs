@@ -39,6 +39,7 @@ pub mod observation_cache;
 pub mod organise;
 pub mod parallel;
 pub mod serial;
+pub mod timing;
 
 /// The fixtures the module's test suites share — the coordinates every test writes and the
 /// failure every fake source yields.
@@ -547,29 +548,40 @@ impl Default for CohortLocusBuilderRegionsLen {
     }
 }
 
-/// 200 bases — set by the owner on 2026-08-18, and confirmed on a real cohort the day it was
-/// set (spec §14 question 1).
+/// 500 bases — **raised from 200 on 2026-08-28**, on a sweep taken at 63 accessions rather than
+/// the 16 the earlier number came from
+/// ([`cohort_merge_parallel_cost_2026-08-28.md`](../../../../doc/devel/ng/research/cohort_merge_parallel_cost_2026-08-28.md) §5.1).
 ///
 /// **What a region's width really decides is whether threads help at all.** Measured on the
-/// tomato benchmark's 63 accessions over 100 kb of SL4.0 — real reads through the generic
-/// locus generator, one record per covered position per sample — the merge on **one thread
-/// barely notices the width**: 656 ms at 20 bases against 615 at 100, 616 at 200, 624 at 500
-/// and 636 at 1,000. On eight threads it notices a great deal, because the cost a narrow
-/// region adds falls on the organiser, which no thread but one ever runs: at 16 samples, eight
-/// threads take 173 ms at 20 bases against 130 ms on one thread — **threads make a 20-base
-/// merge slower than no threads** — and 93 ms at 200 bases, which is 1.4 times one thread.
-/// The eight-thread optimum on that data is 100–200 bases at both cohort sizes.
+/// tomato benchmark's 63 accessions over 100 kb of SL4.0 — real reads through the generic locus
+/// generator, one record per covered position per sample — the merge on **one thread barely
+/// notices the width**: 656 ms at 20 bases against 615 at 100, 616 at 200, 624 at 500 and 636 at
+/// 1,000. On eight threads it notices a great deal, because what a narrow region adds is
+/// per-round cost: at 20 bases, launching each round's builders is 12.0% of the merge and waiting
+/// for its slowest is 5.0%; at 1,000 bases those are 0.5% and 3.9%.
 ///
-/// **What it costs is the ground the observation cache holds**, which is §14 question 1's
-/// trade: with 16 regions in flight the cache spans 3,200 bases rather than 320.
+/// **Eight threads at 63 accessions:** 579 ms at 20 bases, 406 at 100, 260 at 200, 220 at 500,
+/// 219 at 1,000. **The ordering is what this number rests on, not those milliseconds** — five
+/// sweeps under different host loads span a factor of two in absolute terms, and every one of
+/// them puts 200 slower than 500 and 500 level with or slightly slower than 1,000.
 ///
-/// **The fabricated fixture that first argued for this number argued too strongly**, and the
+/// **What it costs is the ground the observation cache holds**, and that was measured too: peak
+/// resident 3.148 GB at 200 bases, 3.244 at 500, 3.343 at 1,000, 3.590 at 2,000. **500 buys the
+/// speed for 3% more memory**; 1,000 is not reliably better and 2,000 is worse. With 16 regions
+/// in flight the cache spans 8,000 bases rather than 3,200.
+///
+/// **The 16-sample sweep this replaces put the optimum at 100–200 bases**, and it was not wrong
+/// about its own corner: fewer samples make each region's fixed cost smaller relative to the
+/// building, which moves the optimum narrower. Denser ground moves it wider for the same reason.
+/// So this number is a fact about tens of samples at about one record per covered base, and a
+/// cohort far from that should sweep it again — it is a run parameter precisely so that costs no
+/// code.
+///
+/// **The fabricated fixture that first argued for the old number argued too strongly**, and the
 /// note it left is kept as a caution. Over ground with a record every hundred bases it made 200
 /// look 1.7 times better than 20 and wider still better again; real observations arrive about
-/// **one per covered base**, a hundred times denser, and there the same change is worth 3–6% on
-/// one thread. The threading result above is the real reason, and no fabricated ground showed
-/// it.
-pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 200;
+/// **one per covered base**, a hundred times denser.
+pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 500;
 
 /// How many of those regions the merge works at once (spec §6.2).
 ///
@@ -672,12 +684,12 @@ mod tests {
         assert_eq!(DEFAULT_MAX_COHORT_LOCUS_SPAN, 50);
         assert_eq!(DEFAULT_MIN_ALT_OBS, 2);
         assert_eq!(DEFAULT_MIN_ALT_READ_SHARE, 0.02);
-        assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 200);
+        assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 500);
 
         assert_eq!(MaxCohortLocusSpan::default().get(), 50);
         assert_eq!(MinAltObs::default().get(), 2);
         assert_eq!(MinAltReadShare::default().get(), 0.02);
-        assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 200);
+        assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 500);
 
         assert_eq!(MinAltReads::default(), MinAltReads::DEFAULT);
         assert_eq!(MinAltReads::DEFAULT.floor.get(), 2);

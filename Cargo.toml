@@ -244,6 +244,18 @@ default = ["alloc-mimalloc"]
 #
 #     cargo bench --features bench-fixtures --bench ng_joint_fit_perf
 bench-fixtures = []
+# Compile the cohort merge's stopwatches (`src/ng/run/cohort_merge/timing.rs`), so a
+# probe can ask a merge where its own wall time went: drawing the readers forward,
+# evicting, the builders' own work, the wait for each round's slowest builder, and
+# what launching them costs.
+#
+# **Off by default because timing in the hot path is itself a change to what is being
+# measured.** Without the feature every counter is a zero-sized type whose methods are
+# empty, so the merge's source reads the same in both builds and the timed build is
+# the only one that reads a clock.
+#
+#     cargo run --release --features merge-timing --example ng_cohort_merge_real_cost
+merge-timing = []
 
 [dev-dependencies]
 bstr = "1"

@@ -151,6 +151,29 @@ with `error[E0451]`.
 /// How the run's starting concentration was obtained — must reach the run's output,
 /// because a run on the fallback and a run on a fitted spectrum are otherwise
 /// indistinguishable (spec §4, §4.1).
+///
+/// ⚠ SUPERSEDED AGAIN 2026-08-27 by `spec/ordinary_site_prior_moments.md` §7, which has
+/// not been built. Both numbers become integrals of the fitted curve, so the fields that
+/// describe the search and the blend go with them: `shape_from_panel` (there is no blend),
+/// `spectrum_match` (there is no search to be far from anything), and
+/// `DiversityUnreachable` — which becomes unreachable by Jensen's inequality, since a
+/// curve's own two moments always satisfy `E[2f(1-f)] <= 2 E[f] (1 - E[f])`. What the
+/// regime must still carry is which of the three information states produced the pair:
+/// a fitted curve, a fitted diversity with no curve, or neither. See that spec for what
+/// replaces the list below; the note beneath it is the 2026-08-26 state, kept because it
+/// is what the code currently does.
+///
+/// ⚠ SUPERSEDED 2026-08-26 by `spec/ordinary_site_seed.md` §4.2, and built. The shipped
+/// enum has FIVE variants, not three, and the fitted one carries the blend's weight:
+/// `shape_from_panel: f64` — what share of the seed's expected frequency came from the
+/// panel's own fitted shape rather than from the neutral one. Two runs that leaned
+/// differently on their panels must not look the same, and the panel's size enters as a
+/// weight rather than as a switch. The two variants added are refusals of the pin that
+/// must not be silent: `DiversityUnreachable { spectrum_match, shape_from_panel,
+/// expected_frequency }` — no total reaches the measured diversity at the blended shape,
+/// so the pair falls to the neutral rung and says which of the two ways it got there —
+/// and `ZeroDiversity`, a cohort with no variation at all.
+/// The `data_dominated` field below shipped as `census_sites_outweigh_regularizer`.
 pub enum SeedRegime {
     /// Read off the pre-pass's fitted spectrum by the §4.1 projection.
     /// `data_dominated` is the PANEL-WIDE comparison, and spec §4.1 is explicit that a
@@ -166,14 +189,18 @@ pub enum SeedRegime {
         data_dominated: bool,
         spectrum_match: SpectrumMatch,
     },
-    /// No spectrum emitted (absent below the panel-size floor, or one sample):
-    /// the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE, never on cohort
-    /// size (spec §4.1).
+    /// No spectrum emitted: the neutral pair (1, θ) at the fitted θ. A branch on ABSENCE,
+    /// never on cohort size (spec §4.1). ⚠ The parenthesis here used to read "absent below
+    /// the panel-size floor, or one sample"; there is no panel-size floor and there is no
+    /// switch left to place one at (`ordinary_site_seed.md` §4, `population_diversity.md`
+    /// §9 question 3, answered).
     NeutralShape,
     /// No fitted θ at all: the species-range fallback.
     FallbackDiversity,
 }
+```
 
+```rust
 /// How far the fit's pair is from the measured spectrum. REPORTED, never returned as though it
 /// had matched — the rule spec §12 test 11 sets for the STR seed, applied here.
 pub struct SpectrumMatch { divergence_nats: f64, at_search_limit: bool }   // both by accessor
@@ -314,6 +341,20 @@ is therefore not minted — nothing in the three calling docs consumes one.
 
 ## 4. The SNP/indel path
 
+> **⛔ Superseded, 2026-08-27**, by
+> [`../spec/ordinary_site_prior_moments.md`](../spec/ordinary_site_prior_moments.md) §2 and §5, and
+> **the code no longer matches this section.** The seed is not projected any more: it is built from
+> two integrals of the fitted population curve — its mean alternative-allele frequency and its
+> heterozygosity — by `seed_from_population_moments(frequency, diversity)`, which takes no
+> spectrum, no panel size and no inbreeding coefficient. The projection into allele-count classes,
+> the two-parameter search this section prices at 399 predictions, the blend toward a neutral
+> shape, `FittedSpectrum`, `FittedFrequencySpectrum` and `SpectrumMatch` are all deleted.
+>
+> **What still stands here**: the identity that turns two moments into a pair, the reason `α_ref`
+> near 1 holds the heterozygote-to-homozygous-alternative prior ratio near 2:1, and the ruling
+> that the SNP-versus-indel split belongs to the per-locus expansion. **Kept as the record of what
+> was replaced.**
+
 The seed comes from the pre-pass's fitted spectrum, projected onto `(α_ref, α_alt)`:
 
 ```rust
@@ -377,6 +418,23 @@ Census-site exclusion on depth, the regularizer sweep, and the per-class reporti
 the output.
 
 ## 5. The STR path
+
+> **⛔ Superseded, and the code no longer matches this section.**
+> [`../spec/population_diversity.md`](../spec/population_diversity.md) §4 replaces the repeat
+> tract's prior seed, and step E2e of [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md)
+> built the replacement on 2026-08-26. **What the shipped `fill_ssr_seed` takes now** is the
+> locus's candidate repeat counts, the **tract's own reference repeat count**, and a
+> `LengthSpectrum` — the fitted length spectrum and concentration the joint repeat fit produces per
+> stratum, at one of three named rungs — and it returns a `Concentration` with no refusal in it.
+> **Three of the four items in the signature below no longer exist**: `modal_repeat_count`,
+> `SeedDecayPerRepeat` and `SsrSeedOutcome` are deleted, and `RepeatGeneDiversity` survives only
+> because [`../spec/parameter_prepass_cohort.md`](../spec/parameter_prepass_cohort.md) §3 still
+> asks the pre-pass to emit it. **Passing a candidate's repeat count where the tract's belongs is
+> now the mistake this section's `modal_repeat_count` invites**: it moves 0.595 of the prior's mass
+> off the reference length onto 0.091, measured in `seed_ssr`'s own tests.
+>
+> The rest of this document — §1 to §4, the concentration, the row, the SNP/indel path — is **not**
+> superseded. §5 is kept as the record of what was replaced.
 
 The projection does not reach here (spec §5); the seed is per locus, from three inputs the STR
 side already has:
@@ -510,11 +568,11 @@ Every row read on 2026-08-21.
 | `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
 | `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, **retyped** and renamed for what it decays |
 | `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, [`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs) | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
-| `project_spectrum_seed` | — (production never fitted a spectrum) | **new**; optimiser reuses [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) |
-| `FittedSpectrum` input | joint route's `FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs); `expected_heterozygosity` on `JointFit`, [`joint/fit.rs:199`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; the concrete spectrum type is the pre-pass cohort-gather's to pin (impl-time confirmation) |
+| `seed_from_population_moments` | — (production never fitted a population curve) | **new**; three multiplications and a divide, no optimiser. ⛔ *It was `project_spectrum_seed` over a two-parameter search until 2026-08-27* |
+| the seed's two inputs | joint route's `FrequencyDensity::expected_alternative_frequency` and `::expected_heterozygosity`, [`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; two closed-form integrals of the same fitted curve, with no panel in either. ⛔ *It was `FittedSpectrum`, the density evaluated into a panel's allele-count classes, until 2026-08-27* |
 | `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs) | import value + reasoning; carried as overridable, regime-reported |
 | `InbreedingF` | [`types.rs:412`](../../../../src/ng/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
-| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit the four-variant enum |
+| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit `Provenance`'s own variants onto it. **It shipped with five, not the three §2.3 draws** — see the ⚠ there |
 | Wright biallelic formulas | [`genetics.rs:66`](../../../../src/genetics.rs) | **test oracle only** (spec §3.2) — plus the row basis of `PlugInWrightPrior` |
 | independent parity oracle | `pochhammer_ln` / `dm_log_prior_oracle`, [`genetics.rs:240`](../../../../src/genetics.rs) | carry the test across (spec §9) |
 

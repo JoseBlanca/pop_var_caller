@@ -253,6 +253,7 @@ impl<S> ObservationCache<S> {
         // again into its own array (`LocusCloser::over`); doing it twice costs nothing beside
         // the walk, and the alternative — a scratch buffer on the cache — would need interior
         // mutability on a `&self` method that several builders will hold at once.
+        let windowing = super::timing::Stopwatch::start();
         let observations_per_sample: Vec<&[SampleLocusObservations]> = self
             .samples
             .iter()
@@ -261,6 +262,7 @@ impl<S> ObservationCache<S> {
                 &held[first_reaching_index(held, left_edge)..]
             })
             .collect();
+        windowing.add_to(&super::timing::WINDOW_NANOS);
         f(&observations_per_sample)
     }
 
@@ -314,46 +316,59 @@ impl<S> ObservationCache<S> {
         }
     }
 
-    /// [`evict_before`](Self::evict_before), moving what it drops into `graveyard` instead of
-    /// freeing it here.
+    /// [`evict_before`](Self::evict_before) with the samples evicted at the same time as each
+    /// other, and what it drops moved out rather than freed here.
     ///
-    /// **Same records dropped, freed somewhere else.** What eviction costs is not deciding what
-    /// to drop — that is one walk of the window's prefix — but returning every record's
-    /// buffers to the allocator, and that runs on whichever thread calls it. Moving the records
-    /// out first makes the free a job of its own that a caller can put beside work rather than
-    /// in front of it; the caller owns `graveyard` and decides when it dies.
+    /// **Eviction is per sample and shares nothing between them**, so this is that walk on a pool:
+    /// each sample finds its own first survivor, drains its own prefix into its own spare list,
+    /// and pushes what will not fit into a list of its own. Those come back as one buffer, so the
+    /// caller still has a single thing to free beside the next round's builders.
     ///
-    /// **The records moved out are unreachable by construction**, which is what makes this safe
-    /// to hand to another thread: they are exactly the ones
-    /// [`evict_before`](Self::evict_before) would have dropped, so nothing the cache still
-    /// holds and no window a builder can be given refers to them.
+    /// **What the graveyard is for.** What eviction costs is not deciding what to drop — that is
+    /// one search per sample — but returning every dropped record's buffers to the allocator.
+    /// Moving them out first makes that free a job of its own that the caller can put beside its
+    /// builders rather than in front of them; the caller owns the buffer and decides when it dies,
+    /// and one that never empties it holds every record the run ever evicted.
     ///
-    /// A caller that never empties `graveyard` holds every record the run ever evicted, which
-    /// is the whole cohort — so it is a buffer to drain each round, not one to accumulate.
-    pub(super) fn evict_before_into(
+    /// **Why it is worth a method rather than left serial**: it runs between rounds, when every
+    /// worker but the organiser's is idle. Measured on 63 tomato accessions over 100 kb it was
+    /// 13.6% of the merge and the largest part no thread but one ever ran; putting it here halves
+    /// it — 225 ms to 105 over eight merges — and takes 4.4% off the merge. About a third of the
+    /// saving comes back as a slower cover, because a record is now freed by whichever worker
+    /// drained its sample and the recycled ones cross threads more often on the next draw.
+    pub(super) fn evict_before_in_parallel(
         &mut self,
         position: GenomePosition,
         graveyard: &mut Vec<SampleLocusObservations>,
-    ) {
-        for sample in &mut self.samples {
-            let first_survivor = first_reaching_index(&sample.held_observations, position);
-            let SampleWindow {
-                held_observations,
-                spare,
-                ..
-            } = sample;
-            let room = held_observations.len();
-            for record in held_observations.drain(..first_survivor) {
-                // **The source's offer comes first, the graveyard second.** A record the
-                // source will refill costs nothing to keep and saves the allocation the next
-                // draw would make; only what the sample cannot hold goes on to be freed, and
-                // that freeing is what the caller's partner thread is for.
-                if spare.len() < room {
-                    spare.push(record);
-                } else {
-                    graveyard.push(record);
+    ) where
+        S: Send,
+    {
+        use rayon::prelude::*;
+
+        let dropped: Vec<Vec<SampleLocusObservations>> = self
+            .samples
+            .par_iter_mut()
+            .map(|sample| {
+                let first_survivor = first_reaching_index(&sample.held_observations, position);
+                let SampleWindow {
+                    held_observations,
+                    spare,
+                    ..
+                } = sample;
+                let room = held_observations.len();
+                let mut dead = Vec::new();
+                for record in held_observations.drain(..first_survivor) {
+                    if spare.len() < room {
+                        spare.push(record);
+                    } else {
+                        dead.push(record);
+                    }
                 }
-            }
+                dead
+            })
+            .collect();
+        for mut sample in dropped {
+            graveyard.append(&mut sample);
         }
     }
 }
@@ -451,11 +466,14 @@ where
                 .samples
                 .par_iter_mut()
                 .map(|sample| {
+                    let drawing = super::timing::Stopwatch::start();
                     let mut reach = snapshot;
                     sample.draw_to(&mut reach)?;
+                    drawing.add_to(&super::timing::COVER_BUSY_NANOS);
                     Ok(reach)
                 })
                 .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
+            super::timing::COVER_SWEEPS.add(1);
             if widest == chain_reach {
                 break;
             }
@@ -472,10 +490,14 @@ where
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
     fn sweep(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
+        super::timing::COVER_SWEEPS.add(1);
         for sample in &mut self.samples {
             // Not `reach_grew |= sample.draw_to(…)?`: that reads as though the call could be
             // skipped, and a later `||` in its place would skip it.
-            if sample.draw_to(chain_reach)? {
+            let drawing = super::timing::Stopwatch::start();
+            let grew = sample.draw_to(chain_reach)?;
+            drawing.add_to(&super::timing::COVER_BUSY_NANOS);
+            if grew {
                 reach_grew = true;
             }
         }

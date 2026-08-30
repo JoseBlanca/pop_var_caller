@@ -23,15 +23,21 @@
 //! [`share_curve`] does the same for the other two slippage numbers — which way a read slipped
 //! and how far — whose shapes differ from the level's and from each other.
 //!
+//! [`sequencing_batches`] holds who was sequenced beside whom, as the run was told — the
+//! grouping the contaminating population is drawn from, and the one thing in this module that is
+//! declared rather than fitted.
+//!
 //! **The two halves of the estimator run in that order and depend on each other in one direction
 //! only**: [`ssr_fit`] takes each sample's homozygote excess from [`fit`] and gives nothing back,
 //! so a run may drop the ordinary-position records before it reads a single tract.
 
 pub mod census;
 pub mod census_file;
+pub mod census_moments;
 pub mod contamination;
 pub mod fit;
 pub mod loci;
+pub mod sequencing_batches;
 pub mod share_curve;
 pub mod slippage_curve;
 pub mod ssr_fit;

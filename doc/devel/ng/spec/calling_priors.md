@@ -1,12 +1,25 @@
 # ng — the genotype prior
 
 *Design spec draft, 2026-08-18, amended 2026-08-19 (§4.1: the prior's starting point is read off the
-pre-pass's fitted spectrum rather than fixed at the neutral shape). **No code yet — this settles
-the design.** First of three
+pre-pass's fitted spectrum rather than fixed at the neutral shape). First of three
 documents on variant calling, written in pieces at the owner's direction; the siblings are the
 **read likelihood models** (one for the SNP/indel path, one with stutter for the STR path) and
 the **EM loop** that ties them together. Neither exists yet, and this document is written so it
 can be read before them.*
+
+> **⛔ §5 is superseded, and the code no longer matches it.**
+> [`population_diversity.md`](population_diversity.md) §4 replaces the repeat tract's prior seed:
+> the shape is no longer constructed as a geometric decay from the cohort's modal repeat count, and
+> the total is no longer scaled to reproduce a measured repeat gene diversity. It is the **length
+> spectrum and concentration the joint repeat fit already produces per stratum**, mapped onto the
+> locus's candidate lengths by their offset from the *reference* tract length. Step E2e of
+> [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) built that and deleted the
+> construction, `SeedDecayPerRepeat`, and `SsrSeedOutcome` with its `DiversityUnreachable` refusal.
+> **§5 and its open question Q2 are kept as the record of what was replaced and why** — Q2 asked
+> what to do at a locus the geometry could not hold, which is a question the fitted pair cannot
+> raise. §4, the ordinary-site half, is **not** superseded: `population_diversity.md` §3 supplies
+> its inputs and changes none of its rules.
+> *(The status line above said "no code yet" until 2026-08-26; §4 and §5 were both built.)*
 
 *Reads on: [`cohort_merge.md`](cohort_merge.md) — what a cohort observation is, the input to
 calling; [`parameter_prepass.md`](parameter_prepass.md) and
@@ -342,6 +355,31 @@ a named, overridable parameter and record which of the two produced the value in
 because a run at the fallback and a run at a fitted `θ` are otherwise indistinguishable.
 
 ### 4.1 Where the two numbers come from: the fitted spectrum, projected
+
+**⚠ Superseded in part, twice — and the second time removes the mechanism this section is about.**
+[`ordinary_site_seed.md`](ordinary_site_seed.md) (2026-08-26) solved the pair's *total* from the
+measured diversity rather than from the search.
+[`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) (2026-08-27) **deletes the
+search itself**: both numbers are integrals of the fitted curve, in closed form, exact at every
+panel size. Measured, the search is the worse of the two routes in **34 of 36 cells**, worst case
+0.749× the truth, because a curve fit in class space has an objective with `2N + 1` terms and its
+answer therefore moves with the cohort. **What goes with it:** the projection into allele-count
+classes, the panel-size ceiling, the divergence report, the blend toward the neutral shape, and the
+inbreeding coefficient at this seam — the last because a curve describes a population and not
+particular individuals.
+
+**⚠ The 2026-08-26 note this replaces read:**
+What follows describes the seed as *the pair whose predicted spectrum best matches the fitted one*.
+That is now the source of the seed's **shape** only. Its **scale** — how much conviction the pair
+carries — is solved from the run's measured heterozygosity instead, because compressing a spectrum
+into two numbers loses exactly that: with the density known exactly, the pair implies a
+heterozygosity 9.9% below the density's own at 63 individuals on a tomato-like shape and 18.6% below
+on a human-like one, and further below the larger the panel. And the shape itself is blended toward
+the neutral one at a weight that rises with the panel, so this section's rung and §3.4's neutral
+rung of [`population_diversity.md`](population_diversity.md) are the two ends of one ramp rather
+than alternatives. **The objective, the two-branch prediction and the panel's `F` are all unchanged**
+— everything below about *how* the search works still holds.
+
 
 **The neutral `1/p` density and the neutral frequency spectrum are the same statement written
 twice** — once at a locus, once across a panel. Under neutrality the expected number of sites at

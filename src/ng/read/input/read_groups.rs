@@ -408,6 +408,62 @@ impl ReadGroups {
     pub fn read_groups_per_sample(&self) -> &[SampleReadGroups] {
         &self.per_sample
     }
+
+    /// **A run's read-group shape, for a test that has no file to read one from** — one entry
+    /// per `(ID, SM)` pair, in the order given, minted the way a real header would be.
+    ///
+    /// The only thing a caller supplies is the pair, because that is all any consumer of this
+    /// table keys on: the identifier the run mints is the position, and the by-sample view is
+    /// the same grouping [`group_by_sample`] builds from a real header — first-seen sample
+    /// order, each sample's read groups in identifier order. **Building the two views by hand
+    /// in a test module would let them disagree**, and a sample-keyed view that has drifted
+    /// from its read-group-keyed twin is exactly the defect the two are separate types for.
+    ///
+    /// Test-only: a run reads its read groups from the files it was given.
+    #[cfg(test)]
+    pub(crate) fn of_libraries(libraries: &[(&str, &str)]) -> Self {
+        let triples: Vec<(&str, &str, &str)> = libraries
+            .iter()
+            .map(|(id, sample)| (*id, *sample, *id))
+            .collect();
+        Self::of_lanes(&triples)
+    }
+
+    /// **The same, for a test that needs a library sequenced over more than one lane** — one
+    /// entry per `(ID, SM, LB)` triple.
+    ///
+    /// `@RG LB` is a grouping key rather than an identity: several read groups sharing one
+    /// declared library are the lanes of one preparation, which is what [`ReadGroup::experiment`]
+    /// falls back to. [`Self::of_libraries`] gives each read group a library of its own by
+    /// naming it after the read group, so a fixture built through it **cannot** tell a library
+    /// name from a read-group name — this is what a test about that distinction needs.
+    ///
+    /// Test-only, as its sibling.
+    #[cfg(test)]
+    pub(crate) fn of_lanes(read_groups: &[(&str, &str, &str)]) -> Self {
+        let read_groups: Vec<ReadGroup> = read_groups
+            .iter()
+            .map(|(id, sample, library)| ReadGroup {
+                file: Arc::from(Path::new("a test's run")),
+                id: Box::from(*id),
+                sample: Box::from(*sample),
+                library: NameWithOrigin {
+                    value: Box::from(*library),
+                    origin: NameOrigin::Declared,
+                },
+                experiment: NameWithOrigin {
+                    value: Box::from(*library),
+                    origin: NameOrigin::Synthesized,
+                },
+                platform: None,
+            })
+            .collect();
+        let per_sample = group_by_sample(&read_groups);
+        Self {
+            read_groups,
+            per_sample,
+        }
+    }
 }
 
 /// One sample and the read groups that name it.

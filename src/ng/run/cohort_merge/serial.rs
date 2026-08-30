@@ -21,6 +21,7 @@
 
 use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
+use super::timing;
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
@@ -152,6 +153,10 @@ pub fn merge_cohort_through_cache<S, E>(
 where
     S: ObservationSource<Error = E>,
 {
+    // Zero-sized and doing nothing without `--features merge-timing` (`super::timing`), and
+    // named the same parts as the parallel driver's so the two breakdowns can be compared
+    // line for line. A region is this driver's round.
+    let whole_merge = timing::Stopwatch::start();
     let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
 
@@ -159,11 +164,18 @@ where
         for building_region in
             building_regions_of(*analysed_region, cohort_locus_builder_regions_len)
         {
+            let evicting = timing::Stopwatch::start();
             cache.evict_before(GenomePosition {
                 contig: building_region.contig,
                 position: building_region.start,
             });
+            evicting.add_to(&timing::EVICT_NANOS);
+            let covering = timing::Stopwatch::start();
             cache.cover(building_region)?;
+            covering.add_to(&timing::COVER_NANOS);
+            timing::ROUNDS.add(1);
+            timing::REGIONS.add(1);
+            let builder = timing::Stopwatch::start();
             let outcome = cache.with_observations(building_region, |observations_per_sample| {
                 build_region(
                     building_region,
@@ -172,13 +184,20 @@ where
                     min_alt_reads,
                 )
             });
+            let busy = builder.elapsed_nanos();
+            timing::BUILDER_BUSY_NANOS.add(busy);
+            timing::SLOWEST_BUILDER_NANOS.add(busy);
+            timing::ROUND_WALL_NANOS.add(busy);
+            let organising = timing::Stopwatch::start();
             merged
                 .cohort_observations
                 .extend(outcome.cohort_observations);
             merged.failed_locus_spans.extend(outcome.failed_locus_spans);
+            organising.add_to(&timing::ORGANISE_NANOS);
         }
     }
 
+    whole_merge.add_to(&timing::MERGE_WALL_NANOS);
     Ok(merged)
 }
 

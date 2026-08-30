@@ -337,12 +337,16 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
 ///
 /// Ported from the same engine as the mixture, whose own comment gives the saving as the reason.
 ///
-/// **Visible to the folder because both implementations behind the seam use it**: the comparator
-/// in [`hardy_weinberg`](super::hardy_weinberg) mixes the same two branches over a different
-/// random-mating term, and a second spelling of this would let the two disagree about `−∞` without
-/// anything saying so.
+/// **Visible to the crate because three callers use it**: both implementations behind the
+/// genotype-prior seam — the comparator in [`hardy_weinberg`](super::hardy_weinberg) mixes the
+/// same two branches over a different random-mating term — and the site quality's collapse
+/// step, which folds a row over genotypes into a row over non-reference copy counts
+/// (`doc/devel/ng/spec/calling_quality.md` §5.2). A second spelling of this would let them
+/// disagree about `−∞` without anything saying so, and the `−∞` guards are exactly what the
+/// collapse needs: a kernel entry no genotype reached stays impossible rather than becoming a
+/// `NaN`.
 #[inline]
-pub(super) fn log_sum_exp_2(a: f64, b: f64) -> f64 {
+pub(crate) fn log_sum_exp_2(a: f64, b: f64) -> f64 {
     if a == f64::NEG_INFINITY {
         return b;
     }

@@ -46,6 +46,25 @@ jobs:
         # review). They cost about 0.03 s.
         run: cargo test --lib --tests --examples --all-features
 
+      - name: Test the calling module under --release (holds its release-only assertions)
+        # `src/ng/calling/` is designed with no `Result` anywhere: a caller bug is an
+        # assertion, and a good few of those are deliberately held in RELEASE because the
+        # failure they prevent is silent — a truncated row scored as a whole one, a `NaN`
+        # laundered into a plausible allele frequency. A debug test run cannot tell
+        # `assert!` from `debug_assert!`, so the step above verifies none of them.
+        #
+        # Measured while adding this (2026-08-25): downgrading the six release-held checks
+        # in `score_one_sample` to `debug_assert` and running under `--release` fails six
+        # tests, one per check. Under the debug run it fails none.
+        #
+        # SCOPED TO `ng::calling` ON PURPOSE. Crate-wide, `cargo test --release --lib` has
+        # 8 failures in `genetics`, `ng::alignment`, `sample_summary`, `ssr::cohort` and
+        # `var_calling` — all `#[should_panic]` tests on checks that are debug-only by
+        # design and simply lack `#[cfg(debug_assertions)]`. Two of them already say
+        # `_in_debug` in their names. They live in the frozen caller and in modules ng may
+        # not edit, so widening this scope is their owners' work, not this step's.
+        run: cargo test --release --lib ng::calling --all-features
+
       - name: Doc build (deny warnings)
         env:
           RUSTDOCFLAGS: -D warnings

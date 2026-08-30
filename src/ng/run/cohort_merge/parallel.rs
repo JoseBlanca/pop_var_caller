@@ -29,6 +29,7 @@ use rayon::prelude::*;
 use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::organise::{Organiser, RegionIndex};
+use super::timing;
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads, refuse_malformed_analysed_regions,
@@ -104,6 +105,9 @@ where
     S: ObservationSource<Error = E> + Sync + Send,
     E: Send,
 {
+    // Zero-sized and doing nothing without `--features merge-timing`, which is the only
+    // build where any of the stopwatches below reads a clock (`super::timing`).
+    let whole_merge = timing::Stopwatch::start();
     let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
 
@@ -149,20 +153,29 @@ where
             // The pool's size is the thing to ask, not the count of regions in flight: a run
             // with sixteen regions on one worker still has one worker.
             let beside_the_builders = rayon::current_num_threads() > 1;
+            let evicting = timing::Stopwatch::start();
             if beside_the_builders {
-                cache.evict_before_into(evicted_base, &mut graveyard);
+                // **On the pool, because eviction is per sample and shares nothing between
+                // them**, and it runs between rounds when every worker but this one is idle.
+                cache.evict_before_in_parallel(evicted_base, &mut graveyard);
             } else {
                 cache.evict_before(evicted_base);
             }
+            evicting.add_to(&timing::EVICT_NANOS);
             let last = regions_in_round
                 .last()
                 .copied()
                 .expect("the round is not empty");
+            let covering = timing::Stopwatch::start();
             cache.cover_in_parallel(GenomeRegion {
                 contig: first.contig,
                 start: first.start,
                 end: last.end,
             })?;
+            covering.add_to(&timing::COVER_NANOS);
+            timing::ROUNDS.add(1);
+            timing::REGIONS.add(regions_in_round.len() as u64);
+            timing::SLOWEST_IN_THIS_ROUND_NANOS.take();
 
             let cache = &*cache;
             // **The round's dead records are freed beside its builders, not in front of them.**
@@ -173,16 +186,23 @@ where
             // buffer comes back so the next round's eviction reuses its capacity.
             let build_the_round = || {
                 in_region_order(regions_in_round.par_iter().map(|building_region| {
-                    cache.with_observations(*building_region, |observations_per_sample| {
-                        build_region(
-                            *building_region,
-                            observations_per_sample,
-                            max_cohort_locus_span,
-                            min_alt_reads,
-                        )
-                    })
+                    let builder = timing::Stopwatch::start();
+                    let outcome =
+                        cache.with_observations(*building_region, |observations_per_sample| {
+                            build_region(
+                                *building_region,
+                                observations_per_sample,
+                                max_cohort_locus_span,
+                                min_alt_reads,
+                            )
+                        });
+                    let busy = builder.elapsed_nanos();
+                    timing::BUILDER_BUSY_NANOS.add(busy);
+                    timing::SLOWEST_IN_THIS_ROUND_NANOS.raise_to(busy);
+                    outcome
                 }))
             };
+            let round = timing::Stopwatch::start();
             let outcomes = if beside_the_builders {
                 let mut dead = std::mem::take(&mut graveyard);
                 let (outcomes, emptied) = rayon::join(build_the_round, move || {
@@ -194,7 +214,10 @@ where
             } else {
                 build_the_round()
             };
+            round.add_to(&timing::ROUND_WALL_NANOS);
+            timing::SLOWEST_BUILDER_NANOS.add(timing::SLOWEST_IN_THIS_ROUND_NANOS.take());
 
+            let organising = timing::Stopwatch::start();
             for outcome in outcomes {
                 // Destructured for the reason `organise.rs` gives at its own two consumers of
                 // this type: a field `RegionOutcome` gains has to be answered for here —
@@ -209,6 +232,7 @@ where
                 regions_handed_out += 1;
             }
             merged.cohort_observations.extend(organiser.drain_ready());
+            organising.add_to(&timing::ORGANISE_NANOS);
         }
     }
 
@@ -228,6 +252,7 @@ where
         "a builder produced a locus on ground an earlier locus already owned",
     );
 
+    whole_merge.add_to(&timing::MERGE_WALL_NANOS);
     Ok(merged)
 }
 

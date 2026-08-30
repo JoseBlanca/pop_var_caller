@@ -551,6 +551,139 @@ pub fn genotype_log_likelihood_row(
     scratch: &mut super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
+    fill_generic_emissions(evidence, alleles, read_groups.calibrations(), scratch);
+    assemble_genotype_log_likelihood_row(
+        evidence,
+        genotypes,
+        read_groups,
+        error_spreads,
+        scratch,
+        out,
+    );
+}
+
+/// **The frequency-free half of one sample's row** — what spec §6.1 calls the emission, one
+/// value per `(observation, candidate allele)`, computed **once per locus** and read by every
+/// pass of the frequency loop.
+///
+/// # Why this is a function of its own
+///
+/// With contamination on, the row is no longer a constant across the loop: `q(o)`, the
+/// contaminating population's frequency for the allele an observation shows, is the locus's own
+/// number and moves with every pass (spec §3.6, corrected 2026-08-24). **What does not move is
+/// everything answering how one copy of one allele produced one observed sequence**, and that is
+/// what this fills:
+///
+/// - **per observation**, the charged error `ε̄` — the geometric mean of its reads' own error
+///   probabilities, scaled by the read group's calibration. It reads no frequency;
+/// - **per `(partial read, candidate)`**, whether that allele could have produced that read.
+///   This is the byte comparison, and it is the reason the split is worth making: without a
+///   cache surviving the loop it is redone at every pass.
+///
+/// So this half stays `candidates × Σ_s (observations in sample s)` however many passes a locus
+/// takes, and what a pass costs is [`assemble_genotype_log_likelihood_row`] — one multiply and
+/// one add inside a logarithm the row was taking anyway (spec §6.1).
+///
+/// **Which of the two halves is the larger depends on the evidence**, and on this path it is
+/// often the assembly: at a diploid locus over `A` alleles the assembly walks `genotypes`, which
+/// grows as `C(A + 1, 2)`, while this walks `A`. What is genuinely expensive here is the byte
+/// comparison per `(partial read, candidate)` — and on the repeat-tract path, an alignment per
+/// `(observation, candidate)`, which is what spec §6.1 calls *the expensive part*. **The split's
+/// point on this path is the count rather than the clock**: it is what keeps the emission
+/// evaluations from growing with the pass count.
+///
+/// **It takes the calibration and not [`super::ReadGroupParameters`]**, which is the whole point
+/// stated in the signature: a fill that could reach the mixture could read a frequency, and then
+/// caching it across passes would be wrong.
+///
+/// # Panics
+///
+/// **In release as well as debug** (spec §8), on an observation naming an allele the locus is
+/// not called over, and on a read group the run supplied no calibration for.
+pub fn fill_generic_emissions(
+    evidence: &super::GenericSampleEvidence<'_>,
+    alleles: &CandidateAlleles,
+    calibration: super::ReadGroupCalibrations<'_>,
+    scratch: &mut super::GenericRowScratch,
+) {
+    let allele_count = alleles.len();
+    scratch.prepare_emissions(
+        evidence.supported.len(),
+        evidence.partials.len(),
+        allele_count,
+    );
+
+    for (at, observation) in evidence.supported.iter().enumerate() {
+        assert!(
+            usize::from(observation.allele.get()) < allele_count,
+            "an observation names allele {}, past the {allele_count} this locus is called over",
+            observation.allele.get()
+        );
+        scratch.set_supported_charged_error(
+            at,
+            calibration
+                .of(observation.read_group)
+                .charged_error(observation.q_sum, observation.num_reads),
+        );
+    }
+
+    if evidence.partials.is_empty() {
+        return;
+    }
+    // The locus's own length in reference positions — what decides whether a witness reached a
+    // border, and the only thing the witness is used for.
+    let locus_len = LocusLen::from_positions(alleles.reference().len() as u64);
+    for (partial_at, partial) in evidence.partials.iter().enumerate() {
+        // A partial the genotype cannot explain is charged with **no spread**: `m = 1`, which
+        // is what [`NO_ERROR_SPREAD`] is, so this is the same quantity the observation walk
+        // charges an unexplained read and carries the same name.
+        scratch.set_partial_charged_error(
+            partial_at,
+            calibration
+                .of(partial.read_group)
+                .charged_error(partial.q_sum, partial.num_reads)
+                / NO_ERROR_SPREAD,
+        );
+        for (allele_at, allele_bases) in alleles.iter().enumerate() {
+            scratch.set_compatible(
+                partial_at,
+                AlleleId(allele_at as u16),
+                allele_is_compatible_with_partial(
+                    &partial.witnessed_in_locus,
+                    &partial.bases,
+                    allele_bases,
+                    locus_len,
+                ),
+            );
+        }
+    }
+}
+
+/// **The per-genotype half of one sample's row** — spec §3.6's mixture, assembled from the
+/// emissions [`fill_generic_emissions`] cached, into one log-probability per candidate genotype.
+///
+/// **This is the half that runs again when the frequencies move.** Every quantity it reads
+/// beyond the cache is either frozen for the run — the contamination fraction — or a property of
+/// the locus's current frequency estimate: `q(o)`. An uncontaminated run's `q(o)` is not read at
+/// all, so its row is the same value at every pass and the driver assembles it once.
+///
+/// The formula, the two approximations inside it and what contamination costs the aggregation
+/// contract are all [`genotype_log_likelihood_row`]'s, which is this and the fill together.
+///
+/// # Panics
+///
+/// **In release as well as debug** (spec §8), for [`genotype_log_likelihood_row`]'s reasons, and
+/// additionally on a cache prepared for a different locus's allele count or for a different
+/// sample's observations — the two are what makes a fill and an assembly that were not paired a
+/// stop rather than a wrong genotype.
+pub fn assemble_genotype_log_likelihood_row(
+    evidence: &super::GenericSampleEvidence<'_>,
+    genotypes: &GenotypeTableView<'_>,
+    read_groups: super::ReadGroupParameters<'_>,
+    error_spreads: ErrorSpreadTable<'_>,
+    scratch: &super::GenericRowScratch,
+    out: &mut [LogProb],
+) {
     let contamination = read_groups.contamination();
     let genotype_count = genotypes.genotype_count();
     let allele_count = genotypes.allele_count();
@@ -559,6 +692,26 @@ pub fn genotype_log_likelihood_row(
         genotype_count,
         "a row holds one entry per candidate genotype — {genotype_count}, not {}",
         out.len()
+    );
+    // **The cache is checked against this locus and this sample**, because an assembly reading
+    // a cache filled for another is the failure the split introduces and nothing else catches:
+    // every emission it reads is a real number from the wrong row.
+    assert_eq!(
+        scratch.allele_count(),
+        allele_count,
+        "the emission cache was filled over {} alleles and this locus is called over \
+         {allele_count}, so the fill and this assembly are for different loci",
+        scratch.allele_count()
+    );
+    assert_eq!(
+        (scratch.supported_count(), scratch.partial_count()),
+        (evidence.supported.len(), evidence.partials.len()),
+        "the emission cache holds {} complete observations and {} partials, and this sample \
+         showed {} and {}; the fill and this assembly are for different samples",
+        scratch.supported_count(),
+        scratch.partial_count(),
+        evidence.supported.len(),
+        evidence.partials.len()
     );
     assert_eq!(
         error_spreads.allele_count(),
@@ -615,14 +768,13 @@ pub fn genotype_log_likelihood_row(
     let mut log_explained_mixture = [f64::NAN; MAX_PLOIDY_COPIES + 1];
 
     let counts = genotypes.genotype_allele_counts();
-    for observation in evidence.supported {
+    for (at, observation) in evidence.supported.iter().enumerate() {
         let allele = usize::from(observation.allele.get());
         assert!(
             allele < allele_count,
             "an observation names allele {allele}, past the {allele_count} this locus is called \
              over"
         );
-        let scale = read_groups.calibration_of(observation.read_group);
         // Hoisted out of the genotype loop: every one of these is a property of the observation
         // and of the read group it came from, not of the genotype being scored.
         let reads = f64::from(observation.num_reads);
@@ -638,10 +790,12 @@ pub fn genotype_log_likelihood_row(
         let from_somebody_else_carrying_this_allele = contamination_fraction
             * contamination.contaminant_frequency_of(observation.read_group, observation.allele);
         // `(1 − c) · ε̄` — this individual's share of what a read of this observation is charged
-        // for being wrong, before the spread divides it. `ε̄` is floored and deliberately not
-        // capped; [`ReadGroupCalibration::charged_error`] says why.
+        // for being wrong, before the spread divides it. **`ε̄` comes from the cache**: it reads
+        // no frequency, so it is one of the emissions computed once for the locus
+        // ([`fill_generic_emissions`]). It is floored and deliberately not capped;
+        // [`ReadGroupCalibration::charged_error`] says why.
         let this_individuals_charged_error =
-            from_this_individual * scale.charged_error(observation.q_sum, observation.num_reads);
+            from_this_individual * scratch.charged_error_of_supported(at);
 
         // **The explained side varies with the genotype only through its copy count**, so its
         // logarithm is taken here — at most `ploidy` of them per observation — rather than once
@@ -678,15 +832,7 @@ pub fn genotype_log_likelihood_row(
         }
     }
 
-    score_partials(
-        evidence,
-        alleles,
-        genotypes,
-        read_groups,
-        &copy_share,
-        scratch,
-        out,
-    );
+    score_partials(evidence, genotypes, read_groups, &copy_share, scratch, out);
 }
 
 /// Add what the reads that saw only part of the locus are worth — spec §5.3.
@@ -712,51 +858,22 @@ pub fn genotype_log_likelihood_row(
 /// it carries any allele compatible with it.
 fn score_partials(
     evidence: &super::GenericSampleEvidence<'_>,
-    alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     read_groups: super::ReadGroupParameters<'_>,
     copy_share: &[f64],
-    scratch: &mut super::GenericRowScratch,
+    scratch: &super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
     let contamination = read_groups.contamination();
     let allele_count = genotypes.allele_count();
-    assert_eq!(
-        alleles.len(),
-        allele_count,
-        "the candidate table holds {} alleles and the genotype table is built over \
-         {allele_count}, so one of them belongs to a different locus",
-        alleles.len()
-    );
-    scratch.prepare_verdicts(evidence.partials.len(), allele_count);
     if evidence.partials.is_empty() {
         return;
-    }
-
-    // The locus's own length in reference positions — what decides whether a witness reached a
-    // border, and the only thing the witness is used for.
-    let locus_len = LocusLen::from_positions(alleles.reference().len() as u64);
-
-    for (partial_at, partial) in evidence.partials.iter().enumerate() {
-        for (allele_at, allele_bases) in alleles.iter().enumerate() {
-            scratch.set_compatible(
-                partial_at,
-                AlleleId(allele_at as u16),
-                allele_is_compatible_with_partial(
-                    &partial.witnessed_in_locus,
-                    &partial.bases,
-                    allele_bases,
-                    locus_len,
-                ),
-            );
-        }
     }
 
     let counts = genotypes.genotype_allele_counts();
     let copies_of_the_genome = usize::from(genotypes.ploidy().get());
     let mut log_mixture = [f64::NAN; MAX_PLOIDY_COPIES + 1];
     for (partial_at, partial) in evidence.partials.iter().enumerate() {
-        let scale = read_groups.calibration_of(partial.read_group);
         let reads = f64::from(partial.num_reads);
         let contamination_fraction = contamination.fraction_of(partial.read_group);
         let from_this_individual = 1.0 - contamination_fraction;
@@ -772,10 +889,10 @@ fn score_partials(
             contamination_fraction * compatible_allele_frequency;
         // A partial the genotype cannot explain is charged with **no spread**: `m = 1`, which
         // is what `NO_ERROR_SPREAD` is, so this is the same quantity the observation walk
-        // charges an unexplained read and carries the same name.
-        let this_individuals_charged_error = from_this_individual
-            * scale.charged_error(partial.q_sum, partial.num_reads)
-            / NO_ERROR_SPREAD;
+        // charges an unexplained read and carries the same name. The cache holds it already
+        // divided, for the reason it holds the other half: it reads no frequency.
+        let this_individuals_charged_error =
+            from_this_individual * scratch.charged_error_of_partial(partial_at);
 
         // **The same hoist the observation walk makes, for the same reason**: the mixture varies
         // with the genotype only through how many compatible copies it carries, so its logarithm
@@ -1345,12 +1462,20 @@ mod tests {
 
     /// An observation of `num_reads` reads on one allele from one read group, carrying the
     /// summed log error the merge would have folded.
+    ///
+    /// **The two site-quality counters are set to half the reads and left alone**, because
+    /// nothing in this file reads them: they are the artifact correction's, not the read
+    /// model's (`doc/devel/ng/spec/calling_quality.md` §3.3). Half rather than zero so that a
+    /// fixture copied out of here into a test that *does* read them starts from a balanced
+    /// split rather than from one that looks like total strand bias.
     fn observation(allele: u16, read_group: u32, num_reads: u32, q_sum: f64) -> GenericObservation {
         GenericObservation {
             allele: AlleleId(allele),
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum,
+            forward_reads: num_reads / 2,
+            placed_left_reads: num_reads / 2,
         }
     }
 
@@ -2186,6 +2311,254 @@ mod tests {
             &table,
             &uncalibrated(),
         );
+    }
+
+    /// **The fill refuses an observation naming an allele the locus is not called over**, on its
+    /// own rather than through the assembly that follows it.
+    ///
+    /// The two halves are separate public functions now, and a caller may hold a fill's results
+    /// across the loop's passes — so the fill has to refuse the shapes it cannot cache, rather
+    /// than leaving that to whoever assembles a row from them.
+    #[test]
+    #[should_panic(expected = "an observation names allele 3, past the 3")]
+    fn the_fill_refuses_an_observation_naming_an_allele_the_locus_lacks() {
+        let alleles = locus(&[b"A", b"C", b"G"]);
+        let supported = [observation(3, 0, 4, -3.0)];
+        let calibration = uncalibrated();
+
+        fill_generic_emissions(
+            &GenericSampleEvidence::new(&supported, 0.0, &[]),
+            &alleles,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut GenericRowScratch::default(),
+        );
+    }
+
+    /// **An assembly reading a cache filled at another locus is refused**, and it is the failure the
+    /// split introduces: every emission it reads is a real number from the wrong locus.
+    #[test]
+    #[should_panic(expected = "the fill and this assembly are for different loci")]
+    fn an_assembly_over_another_locuss_emissions_is_a_caller_bug() {
+        let wide = locus(&[b"A", b"C", b"G"]);
+        let narrow = locus(&[b"A", b"C"]);
+        let narrow_table = diploid(2);
+        let narrow_view = narrow_table.view();
+        let spread_values = spreads(&narrow, &narrow_table);
+        let calibration = uncalibrated();
+        let mut scratch = GenericRowScratch::default();
+
+        fill_generic_emissions(
+            &GenericSampleEvidence::empty(),
+            &wide,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut scratch,
+        );
+        let mut out = vec![LogProb(f64::NAN); narrow_view.genotype_count()];
+        assemble_genotype_log_likelihood_row(
+            &GenericSampleEvidence::empty(),
+            &narrow_view,
+            ReadGroupParameters::uncontaminated(&calibration),
+            ErrorSpreadTable::over(&spread_values, &narrow_view),
+            &scratch,
+            &mut out,
+        );
+    }
+
+    /// **And an assembly reading a cache filled for another *sample*** — the same locus, a different
+    /// row. With one cache per scratch row this is what a driver that walked the rows out of
+    /// step would produce, and every charged error it reads belongs to somebody else.
+    #[test]
+    #[should_panic(expected = "the fill and this assembly are for different samples")]
+    fn an_assembly_over_another_samples_emissions_is_a_caller_bug() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let calibration = uncalibrated();
+        let mut scratch = GenericRowScratch::default();
+
+        let filled = [observation(0, 0, 4, -3.0), observation(1, 0, 4, -3.0)];
+        fill_generic_emissions(
+            &GenericSampleEvidence::new(&filled, 0.0, &[]),
+            &alleles,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut scratch,
+        );
+
+        let folded = [observation(0, 0, 4, -3.0)];
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        assemble_genotype_log_likelihood_row(
+            &GenericSampleEvidence::new(&folded, 0.0, &[]),
+            &view,
+            ReadGroupParameters::uncontaminated(&calibration),
+            ErrorSpreadTable::over(&spread_values, &view),
+            &scratch,
+            &mut out,
+        );
+    }
+
+    /// **The fill and the assembly together are the whole row**, and this is what says the split
+    /// moved no arithmetic: the composed function's answer is the two halves called in order.
+    #[test]
+    fn the_composed_row_is_its_two_halves_called_in_order() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let calibration = uncalibrated();
+        let supported = [observation(0, 0, 6, -4.0), observation(1, 0, 2, -3.0)];
+        let evidence = GenericSampleEvidence::new(&supported, -1.5, &[]);
+
+        let mut composed = vec![LogProb(f64::NAN); view.genotype_count()];
+        genotype_log_likelihood_row(
+            &evidence,
+            &alleles,
+            &view,
+            ReadGroupParameters::uncontaminated(&calibration),
+            ErrorSpreadTable::over(&spread_values, &view),
+            &mut GenericRowScratch::default(),
+            &mut composed,
+        );
+
+        let mut scratch = GenericRowScratch::default();
+        fill_generic_emissions(
+            &evidence,
+            &alleles,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut scratch,
+        );
+        let mut apart = vec![LogProb(f64::NAN); view.genotype_count()];
+        assemble_genotype_log_likelihood_row(
+            &evidence,
+            &view,
+            ReadGroupParameters::uncontaminated(&calibration),
+            ErrorSpreadTable::over(&spread_values, &view),
+            &scratch,
+            &mut apart,
+        );
+
+        assert_eq!(
+            composed, apart,
+            "the two halves called in order are the composed row, to the bit"
+        );
+        assert!(
+            composed.iter().all(|value| value.0.is_finite()),
+            "and the fixture actually scored something: {composed:?}"
+        );
+    }
+
+    /// **One emission cache, two contaminant frequency tables, two different rows — and the
+    /// same table twice gives the same row.** This is the property the loop rests on: with
+    /// contamination on the assembly runs again at every pass against a table that has moved,
+    /// and nothing it reads may have been consumed by the assembly before it.
+    ///
+    /// **The uncontaminated version of this test could not fail** and is what stood here first:
+    /// `assemble_genotype_log_likelihood_row` takes the cache by shared reference and
+    /// `GenericRowScratch` has no interior mutability, so calling it twice with identical
+    /// arguments returns identical rows whatever the body does. What makes it a test is the pair
+    /// of *different* tables — it says the second assembly really read the second one, which is
+    /// the half a repeatability check cannot see.
+    #[test]
+    fn one_fill_assembles_two_different_rows_from_two_frequency_tables() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let calibration = uncalibrated();
+        let supported = [observation(0, 0, 6, -4.0), observation(1, 0, 2, -3.0)];
+        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+
+        let mut scratch = GenericRowScratch::default();
+        fill_generic_emissions(
+            &evidence,
+            &alleles,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut scratch,
+        );
+
+        // **One fraction per calibration**, which `ReadGroupParameters::new` checks: the
+        // fixture's `uncalibrated()` covers four read groups even though this sample uses one.
+        let fractions = vec![crate::ng::calling::likelihood::ContaminationView {
+            fraction: 0.2,
+            markers_with_reads: 1_000,
+            reads_on_markers: 9_000,
+            source: crate::ng::parameter_estimation::joint::contamination::ContaminationSource::ThisReadGroupsReads,
+        }; calibration.len()];
+        let one_batch = vec![crate::ng::types::BatchId::ALL_TOGETHER; calibration.len()];
+        let frozen = crate::ng::calling::likelihood::FrozenContamination::new(
+            &fractions,
+            crate::ng::types::BatchOfEachReadGroup(&one_batch),
+            1,
+        );
+        let assemble = |frequencies: &[f64]| {
+            let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+            assemble_genotype_log_likelihood_row(
+                &evidence,
+                &view,
+                crate::ng::calling::likelihood::ReadGroupParameters::new(
+                    &calibration,
+                    frozen.with_frequencies(frequencies, 2),
+                ),
+                ErrorSpreadTable::over(&spread_values, &view),
+                &scratch,
+                &mut out,
+            );
+            out
+        };
+
+        // The contaminating population almost all reference, then almost all alternative.
+        let mostly_reference = assemble(&[0.99, 0.01]);
+        let mostly_alternative = assemble(&[0.01, 0.99]);
+        assert_ne!(
+            mostly_reference, mostly_alternative,
+            "one emission cache assembled against two contaminating populations must give two \
+             rows; the same row twice means the second assembly did not read the table"
+        );
+        assert_eq!(
+            mostly_reference,
+            assemble(&[0.99, 0.01]),
+            "and the same table twice gives the same row — nothing the assembly reads is \
+             consumed by it"
+        );
+        assert!(
+            mostly_reference.iter().all(|value| value.0.is_finite()),
+            "and the fixture actually scored something: {mostly_reference:?}"
+        );
+    }
+
+    /// **Assembling twice over one fill gives the same row twice** — the repeatability half, on
+    /// the uncontaminated path, where there is no table to vary.
+    #[test]
+    fn assembling_twice_over_one_fill_gives_the_same_row_twice() {
+        let alleles = locus(&[b"A", b"C"]);
+        let table = diploid(2);
+        let view = table.view();
+        let spread_values = spreads(&alleles, &table);
+        let calibration = uncalibrated();
+        let supported = [observation(0, 0, 6, -4.0), observation(1, 0, 2, -3.0)];
+        let partials = [partial(&[(0_u16, 1_u16)], b"A", 3, -6.0)];
+        let evidence = GenericSampleEvidence::new(&supported, -1.5, &partials);
+
+        let mut scratch = GenericRowScratch::default();
+        fill_generic_emissions(
+            &evidence,
+            &alleles,
+            crate::ng::calling::likelihood::ReadGroupCalibrations::over(&calibration),
+            &mut scratch,
+        );
+        let assemble = |scratch: &GenericRowScratch| {
+            let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+            assemble_genotype_log_likelihood_row(
+                &evidence,
+                &view,
+                ReadGroupParameters::uncontaminated(&calibration),
+                ErrorSpreadTable::over(&spread_values, &view),
+                scratch,
+                &mut out,
+            );
+            out
+        };
+        assert_eq!(assemble(&scratch), assemble(&scratch));
     }
 
     // ---- C1: the contamination mixture ----

@@ -151,6 +151,27 @@ pub struct RunsModelFit {
     /// against other runs, not a test a fit has passed.
     pub resolution: f64,
 
+    /// **How many windows held sites** — the evidence the coefficient rests on, and the number
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`] is a floor on.
+    ///
+    /// **The windows that hold sites, not the chain's length**, for the reason
+    /// [`Self::resolution`] is computed from the same count: the chain pads every contig from
+    /// window zero, so a region-restricted run's chain is far longer than its evidence.
+    ///
+    /// **It is here because a consumer needs the count itself**, which
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7 requires a run to print beside the
+    /// coefficient the SNP/indel prior's heterozygosity was corrected by.
+    ///
+    /// **Not because the count is otherwise unrecoverable — it very nearly is recoverable, and
+    /// saying so is the point.** [`resolution_at`] is a strictly monotone log–log interpolation of
+    /// this same number, so it inverts exactly between 1,200 and 76,800 windows, which covers every
+    /// fit that clears the 3,000 floor on any genome up to roughly 7.7 Gb; a tomato fit's 8,004
+    /// windows come back out of a resolution of 0.00997. What is wrong with recovering it that way
+    /// is that it is absurd — inverting a measured interpolation to get an integer back, through a
+    /// function that clamps outside its measured range and whose own documentation says it is not
+    /// a threshold. The count is cheaper to keep than to reconstruct.
+    pub windows_holding_sites: u32,
+
     /// Windows whose posterior landed between 0.01 and 0.99 — the ones the chain rather
     /// than their own reads decided. Non-zero is not a fault; it is the chain earning its
     /// keep.
@@ -663,6 +684,9 @@ pub fn fit_inbreeding(
         // reports 0.006768 where the truth is 0.029067 — understated 4.3-fold, on the
         // one number a consumer uses to decide whether a small `F` means anything.
         resolution: resolution_at(chain.windows_holding_sites),
+        // The same count the resolution above is read off, kept rather than only derived from —
+        // see the field's own note.
+        windows_holding_sites: chain.windows_holding_sites as u32,
         undecided_windows: best.undecided_windows,
         coefficient_was_capped: inbreeding.was_capped,
     };
@@ -1505,6 +1529,7 @@ mod tests {
                 outcome(0.0000, -1.41e9),
             ]),
             resolution: 0.01,
+            windows_holding_sites: 8_004,
             undecided_windows: 0,
             coefficient_was_capped: false,
         };

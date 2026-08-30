@@ -46,11 +46,12 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
-use crate::ng::types::{Ploidy, ReadGroupId};
+use crate::ng::types::{ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
 };
+use super::census_moments::CensusMomentSums;
 use super::contamination::{
     ContaminationConfig, SampleContaminationEstimates, fit_contamination_over,
 };
@@ -105,11 +106,75 @@ impl FrequencyDensity {
     /// finite-sample correction because there is no panel in it (spec §5.3).
     ///
     /// Only the segregating part contributes: a population carrying one allele has none.
+    ///
+    /// **This is the number the caller's genotype prior takes as its diversity**, wrapped in
+    /// [`ExpectedHeterozygosity`] by [`JointFit::fitted_diversity`]
+    /// (`doc/devel/ng/spec/population_diversity.md` §3.1).
+    ///
+    /// **⚠ It used to part company with what the caller's seed implied, and the two grew apart
+    /// with the panel.** Until 2026-08-27 the seed's shape came from a two-parameter
+    /// Dirichlet-multinomial fitted to this density's allele-count classes, and that family cannot
+    /// represent a point mass: the more classes it was fitted over the more it traded the ends
+    /// against the middle. Measured on four densities, the fitted pair's implied heterozygosity
+    /// sat **9.9% below** this number at 63 individuals on a strong rare-allele pile-up, **18.6%**
+    /// on a human-like shape, **40.9%** on a flat one and **53.9%** where the population's alleles
+    /// sit at middling frequencies; at 200 individuals, 15.4%, 25.8%, 49.4% and 61.0%
+    /// (`doc/devel/reports/implementations/ng_seed_shrinkage_2026-08-26.md`).
+    ///
+    /// **The seed now takes this integral and [`Self::expected_alternative_frequency`] directly**,
+    /// so nothing about a panel enters and the pair reproduces both moments exactly
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
     pub fn expected_heterozygosity(&self) -> f64 {
         let (a, b) = (self.a, self.b);
         // E[2f(1−f)] under Beta(a, b) is 2·a·b / ((a+b)(a+b+1)).
         self.p_segregating() * 2.0 * a * b / ((a + b) * (a + b + 1.0))
     }
+
+    /// `∫ π(f) · f df` — **the population's mean alternative-allele frequency**: pick a position
+    /// at random and then a chromosome at random from the whole population, and this is how often
+    /// that chromosome carries something other than the reference base.
+    ///
+    /// **There is no panel in it**, exactly as there is none in
+    /// [`Self::expected_heterozygosity`]: it describes the population the density was fitted to,
+    /// not the individuals the run happened to sequence.
+    ///
+    /// Two of the density's three parts contribute, and the third cannot:
+    ///
+    /// ```text
+    /// E[f]  =  p_fixed_alt  +  p_segregating · a / (a + b)
+    /// ```
+    ///
+    /// A position where the population carries only a non-reference base has every chromosome
+    /// alternative, so it contributes its whole share. A position that segregates contributes the
+    /// mean of its Beta, which is `a / (a + b)`. A position where the population carries only the
+    /// reference base contributes nothing.
+    ///
+    /// **This and [`Self::expected_heterozygosity`] are the two numbers the SNP/indel genotype
+    /// prior is built from** (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2): a
+    /// concentration pair is a mean frequency and a total conviction in other clothes, and
+    /// `doc/devel/ng/spec/ordinary_site_seed.md` §3's identity turns the two moments back into a
+    /// pair. So the prior reads two integrals of this curve rather than a projection of it into a
+    /// panel's allele-count classes.
+    pub fn expected_alternative_frequency(&self) -> f64 {
+        let (a, b) = (self.a, self.b);
+        // E[f] under Beta(a, b) is a / (a + b); positions fixed for a non-reference base are at
+        // frequency one and carry their whole share.
+        self.p_fixed_alt + self.p_segregating() * a / (a + b)
+    }
+
+    // **What stood here until 2026-08-27: `allele_count_classes`.**
+    //
+    // It evaluated this density into the `2N + 1` allele-count classes a panel of `N` diploid
+    // individuals has — `p_segregating · BetaBinomial(k | 2N, a, b)`, with the invariant mass
+    // added to class 0 and the fixed-non-reference mass to class `2N`. It was exact, and its own
+    // test pinned that the classes carry this density's heterozygosity at every panel size.
+    //
+    // **What consumed it was the caller's genotype prior, which searched those classes for a
+    // two-parameter pair, and that search is deleted**
+    // (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). The prior now reads
+    // [`Self::expected_heterozygosity`] and [`Self::expected_alternative_frequency`] — two
+    // integrals of this density, which reproduce its first two moments exactly and have no panel
+    // in them at all. Nothing else ever called it.
 }
 
 /// Positions a **sample** carries more copies of than the reference does.
@@ -221,6 +286,34 @@ pub struct JointFit {
     pub contamination: BTreeMap<String, SampleContaminationEstimates>,
     /// The population's expected heterozygosity, read off the density.
     pub expected_heterozygosity: f64,
+    /// **The same two numbers the SNP/indel genotype prior wants, averaged over the census
+    /// positions instead of integrated off the curve** — as running sums, which is all the fit can
+    /// carry without choosing an inbreeding coefficient.
+    ///
+    /// [`Self::expected_heterozygosity`] above and
+    /// `FrequencyDensity::expected_alternative_frequency` are the *other* route to the same pair:
+    /// two integrals of the fitted curve, with no census pass and no coefficient. **A run should
+    /// emit both and they should agree** — two routes to one quantity, and a large gap between
+    /// them is the fit telling you something (`doc/devel/ng/spec/ordinary_site_prior_moments.md`
+    /// §7). Measured at 63 samples across three populations and four depths, the curve's number
+    /// sits between 1.1% below and 10.7% above the census average's, and **which population is the
+    /// wide one is not predicted by whether the curve can hold its shape**.
+    ///
+    /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
+    /// needs the panel's inbreeding coefficient, which is not this fit's to choose.
+    /// [`CensusMomentSums::finish`] takes it, and
+    /// [`CensusMomentsReport::of`](super::census_moments::CensusMomentsReport::of) is where the two
+    /// meet.
+    ///
+    /// **Where that coefficient comes from is settled and is not this route's problem.** §4.1
+    /// prefers the runs-of-homozygosity estimator, and §8's fifth question asked how a run on this
+    /// route obtains one, since that estimator walks genome windows in the per-sample histogram
+    /// route while this one walks census positions. **That is true of where it lives and not of
+    /// whether a run can reach it**: `parameter_prepass.md`'s step table gives `F` its own row —
+    /// fitted after each sample's walk, from that sample's windowed histogram and nothing else —
+    /// over a section stating that both routes are built and both run. So the coefficient is
+    /// already there, per sample, and what was missing was only the join.
+    pub census_moments: CensusMomentSums,
     /// **For every kept position, in position order, the probability that it is mismapped** —
     /// that two stretches of genome the reference holds once are both piling reads up here.
     ///
@@ -264,6 +357,34 @@ pub struct JointFit {
     pub converged: bool,
     /// The log-likelihood at the returned parameters.
     pub log_likelihood: f64,
+}
+
+impl JointFit {
+    /// **The population's expected heterozygosity, in the type the caller's genotype prior
+    /// takes** — how often two copies of an ordinary site drawn at random from the population
+    /// differ (`doc/devel/ng/spec/population_diversity.md` §3.1, §3.2).
+    ///
+    /// **A wrap, not a computation.** [`Self::expected_heterozygosity`] is the number; this puts
+    /// it behind the constructor that refuses a value outside `[0, 1]`, so a degenerate fit
+    /// cannot hand the caller something that is not a probability.
+    ///
+    /// **`None` means the fit produced something that is not a heterozygosity**, and the ladder
+    /// below it takes over: `seed_from_population_moments` seeds from
+    /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`] and marks the run `FallbackDiversity`, which
+    /// is `population_diversity.md` §6's rule that neither number may fail a run. **It is not a
+    /// refusal**, and an earlier draft of this sentence said it was.
+    ///
+    /// It is not reachable from a fit that converged — `p_segregating()` clamps at zero and
+    /// `2ab/((a+b)(a+b+1))` cannot exceed a half, so the product is a probability — and it exists
+    /// because the alternative is `unwrap`.
+    ///
+    /// **It is fitted at every cohort size down to one** (`src/ng/types.rs`), because the density
+    /// it is read off is: a single diploid genome carries two copies of every site, and how often
+    /// those two differ is exactly what this asks.
+    #[must_use]
+    pub fn fitted_diversity(&self) -> Option<ExpectedHeterozygosity> {
+        ExpectedHeterozygosity::try_new(self.expected_heterozygosity).ok()
+    }
 }
 
 /// Why a fit could not be produced.
@@ -405,10 +526,13 @@ pub struct JointFitConfig {
     /// extra copy of the position — and, once per position, the probability that the position
     /// belongs to the duplicated class at all.
     ///
-    /// **Off by default because of what it weighs**: twelve bytes a position a sample, which
-    /// is 16 MB for three samples over the benchmark trio's positions and 1.5 GB for fifty
-    /// samples over two million. What it is for is checking the fitted rates against a truth
-    /// set position by position rather than as one mean.
+    /// **Off by default because of what it weighs**: twelve bytes a position a sample, which is
+    /// 16 MB for three samples over the benchmark trio's positions, **1.2 GB for fifty samples
+    /// over two million and 1.5 GB for the tomato cohort's sixty-three**. What it is for is
+    /// checking the fitted rates against a truth set position by position rather than as one mean.
+    ///
+    /// *(This said 1.5 GB for **fifty** until 2026-08-27. `12 × 50 × 2×10⁶` is 1.2 GB; 1.5 is the
+    /// sixty-three-sample figure, and spec §5 carries the same pairing.)*
     pub genotype_posteriors: bool,
     /// Whether to keep one line per pass of the alternation ([`PassSummary`]). Costs nothing
     /// but a few hundred bytes; off by default because a converged fit has nothing to say
@@ -1080,6 +1204,19 @@ struct Statistics {
     /// class**, in the same position order. Collected with `genotype_posterior`.
     duplicated_posterior: Vec<f32>,
     collect_genotype_posterior: bool,
+    /// **The two population moments as running sums over the census positions this chunk saw** —
+    /// [`CensusMomentSums`], four numbers whatever the census and whatever the cohort.
+    ///
+    /// It is here rather than reduced afterwards from `genotype_posterior` because that array is
+    /// twelve bytes a position a sample — **1.2 GB for fifty samples over the shipped
+    /// two-million-position census, 1.5 GB at the tomato cohort's sixty-three, and about twice
+    /// either while the chunks are merged** — held only to be summed once
+    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
+    ///
+    /// **It is collected on every pass and only the last pass's value is read**, because a sum
+    /// costs less than the branch that would skip it, and a pass that skipped it would leave the
+    /// field describing whichever earlier pass last filled it.
+    census_moments: CensusMomentSums,
 }
 
 /// What one pass of the alternation ended at. **Collected only when a run asks for it**, and
@@ -1134,6 +1271,11 @@ impl Statistics {
             genotype_posterior: Vec::new(),
             duplicated_posterior: Vec::new(),
             collect_genotype_posterior: false,
+            // A fit over no samples cannot happen — `fit_jointly` refuses one — but `Statistics`
+            // is constructed before that check runs in some test paths, and the accumulator
+            // refuses a panel of none. One is as harmless a stand-in as there is: no position is
+            // ever added to it.
+            census_moments: CensusMomentSums::over(samples.max(1)),
         }
     }
 }
@@ -1198,6 +1340,7 @@ impl Statistics {
             .extend_from_slice(&other.genotype_posterior);
         self.duplicated_posterior
             .extend_from_slice(&other.duplicated_posterior);
+        self.census_moments.merge(&other.census_moments);
     }
 }
 
@@ -1413,6 +1556,7 @@ pub fn fit_jointly(
         rates,
         contamination,
         expected_heterozygosity: parameters.density.expected_heterozygosity(),
+        census_moments: statistics.census_moments.clone(),
         duplicated: parameters.duplicated.map(|value| Estimate {
             value,
             provenance: Provenance::FittedHere,
@@ -2044,6 +2188,24 @@ fn one_position(
                 .extend(std::iter::repeat_n(0.0_f32, samples * 3));
             statistics.duplicated_posterior.push(0.0);
         }
+        // **And it counts as a position for the two population moments, carrying nothing.** Both
+        // routes to those moments have to see the same census: the stored array records this
+        // position as all-zero posteriors, so the running sums must record a position of no
+        // alternative copies rather than skip it, or the two would divide by different counts.
+        //
+        // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
+        // way here is taken through `p.max(f64::MIN_POSITIVE).ln()`, which floors a read's term at
+        // about −708, and `ln_sum_exp` returns `−∞` only when every input already is one — so
+        // reaching `!position_ln.is_finite()` from well-formed evidence would take on the order of
+        // 1e305 reads at a position. What the two lines below maintain is tested where it can be:
+        // an all-zero position counts and contributes nothing, in `census_moments`'s
+        // all-reference fixtures, which build the identical buffer. Replacing this block with a
+        // `panic!` leaves the suite green, and that is a statement about the branch's
+        // reachability, not about the bookkeeping.
+        scratch.position_genotype.fill(0.0);
+        statistics
+            .census_moments
+            .add_position(&scratch.position_genotype);
         return;
     }
     scratch.position_genotype.fill(0.0);
@@ -2285,6 +2447,12 @@ fn one_position(
         }
     }
 
+    // **The two population moments, summed here rather than stored and reduced afterwards.**
+    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
+    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
+    statistics
+        .census_moments
+        .add_position(&scratch.position_genotype);
     if statistics.collect_genotype_posterior {
         statistics
             .genotype_posterior
@@ -2856,6 +3024,186 @@ mod tests {
         };
         let truth = 0.09 * 2.0 * 0.5 * 2.0 / (2.5 * 3.5);
         assert!((density.expected_heterozygosity() - truth).abs() < 1e-12);
+
+        // **A second density, because the first has `a · b = 1` and hides the shape entirely.**
+        // At `a = 0.5, b = 2.0` the product in the numerator is exactly one, so deleting `a * b`
+        // from the formula altogether leaves this fixture's answer unchanged — measured, that
+        // mutation passed the whole library suite bar two distant tests. `Beta(0.35, 1.20)` has
+        // `a · b = 0.42`, so it does not.
+        let shape_shows = FrequencyDensity {
+            p_invariant: 0.9949,
+            p_fixed_alt: 0.0004,
+            a: 0.35,
+            b: 1.20,
+        };
+        let truth = 0.0047 * 2.0 * 0.35 * 1.20 / (1.55 * 2.55);
+        assert!(
+            (shape_shows.expected_heterozygosity() - truth).abs() < 1e-15,
+            "got {} against {truth}",
+            shape_shows.expected_heterozygosity()
+        );
+    }
+
+    /// **Two point masses that would leave nothing segregating are clamped at zero, not sent
+    /// negative** — and nothing tested that until a review mutated the clamp away and the whole
+    /// library suite stayed green.
+    ///
+    /// `p_segregating` is the shared input to both of this density's integrals, so without the
+    /// clamp a density whose masses total above one sends **the heterozygosity negative** — on
+    /// this fixture `−0.2 · 2ab/((a+b)(a+b+1))`, or `−0.0457`. Nothing on this path refuses it; it
+    /// would reach the genotype prior's own newtypes, which do, and the run would die naming a
+    /// probability rather than the density that produced it.
+    ///
+    /// **The mean frequency is pulled down but cannot go negative, and that is worth stating
+    /// because an earlier version of this comment claimed both moments went negative at once.**
+    /// `E[f] = p_fixed_alt·(1 − r) + r·(1 − p_invariant)` with `r = a/(a+b)`, and both terms are
+    /// non-negative whenever the two masses are probabilities — only a `p_invariant` above one,
+    /// which is not one, could do it. Unclamped, this fixture's frequency is 0.46 rather than the
+    /// 0.5 the clamp gives.
+    ///
+    /// **It is not reachable from a fit that converged** — the M-step clamps both masses off a
+    /// normalised branch total — which is exactly why the fields are public and this test exists:
+    /// what it guards is a density built by hand.
+    #[test]
+    fn two_point_masses_totalling_above_one_leave_nothing_segregating() {
+        let impossible = FrequencyDensity {
+            p_invariant: 0.7,
+            p_fixed_alt: 0.5,
+            a: 0.5,
+            b: 2.0,
+        };
+        assert_eq!(impossible.p_segregating(), 0.0);
+        // The heterozygosity follows the segregating share to zero; the frequency lands on the
+        // fixed-non-reference mass, which is what a population with nothing segregating has.
+        assert_eq!(impossible.expected_heterozygosity(), 0.0);
+        assert_eq!(impossible.expected_alternative_frequency(), 0.5);
+    }
+
+    /// **The mean alternative-allele frequency is the two contributing parts of the density**,
+    /// hand-computed on shapes that would tell an `a`-for-`b` swap apart from the truth.
+    ///
+    /// **Two densities, one either side of `a = b`**, because a swap is invisible on a symmetric
+    /// shape and a fixture set that only ever pointed one way would not see it: the first has the
+    /// rare-allele pile-up a neutral population has (`a < b`) and the second has the reference
+    /// base as the rare one at the positions that vary (`a > b`). Swapped, the first returns
+    /// 0.0085 for its 0.0025 and the second 0.05 for its 0.09.
+    ///
+    /// Both point masses are non-zero and different from each other, so dropping the
+    /// fixed-non-reference share or reading the invariant share in its place is a different
+    /// number too — 0.05 and 0.95 on the second density.
+    #[test]
+    fn the_expected_alternative_frequency_is_the_densitys_own() {
+        let rare_alternative = FrequencyDensity {
+            p_invariant: 0.99,
+            p_fixed_alt: 0.001,
+            a: 0.2,
+            b: 1.0,
+        };
+        // 0.001 + 0.009 · 0.2/1.2
+        assert!(
+            (rare_alternative.expected_alternative_frequency() - 0.0025).abs() < 1e-15,
+            "got {}",
+            rare_alternative.expected_alternative_frequency()
+        );
+
+        let rare_reference = FrequencyDensity {
+            p_invariant: 0.9,
+            p_fixed_alt: 0.04,
+            a: 3.0,
+            b: 0.6,
+        };
+        // 0.04 + 0.06 · 3.0/3.6
+        assert!(
+            (rare_reference.expected_alternative_frequency() - 0.09).abs() < 1e-15,
+            "got {}",
+            rare_reference.expected_alternative_frequency()
+        );
+    }
+
+    /// **A population carrying only non-reference bases has every chromosome alternative**, and a
+    /// population with no variation at all has none — the two ends the Beta cannot reach.
+    ///
+    /// It pins the point masses' own contributions rather than the Beta's: at `p_fixed_alt = 1`
+    /// the answer is 1 whatever `a` and `b` say, and at `p_invariant = 1` it is 0.
+    #[test]
+    fn the_two_point_masses_carry_their_own_ends() {
+        let all_alternative = FrequencyDensity {
+            p_invariant: 0.0,
+            p_fixed_alt: 1.0,
+            a: 0.2,
+            b: 1.0,
+        };
+        assert!((all_alternative.expected_alternative_frequency() - 1.0).abs() < 1e-15);
+
+        let no_variation = FrequencyDensity {
+            p_invariant: 1.0,
+            p_fixed_alt: 0.0,
+            a: 0.2,
+            b: 1.0,
+        };
+        assert_eq!(no_variation.expected_alternative_frequency(), 0.0);
+    }
+
+    /// A `JointFit` carrying one density and one heterozygosity, with everything else empty —
+    /// the two fields [`JointFit::fitted_diversity`] reads and nothing more.
+    ///
+    /// **The heterozygosity is given rather than derived from the density**, so a test can hand
+    /// over a value no density produces and see what the wrap does with it.
+    fn a_fit_carrying(density: FrequencyDensity, expected_heterozygosity: f64) -> JointFit {
+        JointFit {
+            census_moments: CensusMomentSums::over(1),
+            noise: BTreeMap::new(),
+            noisy_share: 0.0,
+            density: Estimate {
+                value: density,
+                provenance: Provenance::FittedHere,
+                observations: 1_000,
+            },
+            duplicated: None,
+            hom_excess: BTreeMap::new(),
+            rates: BTreeMap::new(),
+            contamination: BTreeMap::new(),
+            expected_heterozygosity,
+            noisy_posterior: Vec::new(),
+            genotype_posterior: Vec::new(),
+            duplicated_posterior: Vec::new(),
+            trace: Vec::new(),
+            passes: 1,
+            converged: true,
+            log_likelihood: -1.0,
+        }
+    }
+
+    /// A density with **every parameter different from every other**, so that a projection
+    /// reading `a` for `b`, or `p_invariant` for `p_fixed_alt`, is a different vector.
+    fn a_lopsided_density() -> FrequencyDensity {
+        FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.50,
+            b: 2.00,
+        }
+    }
+
+    /// **The diversity reaches the caller in the type that cannot be confused for the repeat
+    /// path's**, and it is a wrap rather than a computation.
+    #[test]
+    fn the_fitted_diversity_is_the_densitys_own_heterozygosity_wrapped() {
+        let density = a_lopsided_density();
+        let truth = density.expected_heterozygosity();
+        let fit = a_fit_carrying(density, truth);
+        let wrapped = fit
+            .fitted_diversity()
+            .expect("a heterozygosity of a real density is a probability");
+        assert_eq!(wrapped.get(), truth);
+    }
+
+    /// **A fit whose heterozygosity is not a probability hands back nothing**, so a run refuses
+    /// with a message rather than seeding from a value the type would have had to coerce.
+    #[test]
+    fn a_diversity_that_is_not_a_probability_does_not_reach_the_caller() {
+        let fit = a_fit_carrying(a_lopsided_density(), 1.5);
+        assert!(fit.fitted_diversity().is_none());
     }
 
     // The whole fit, against a cohort whose truth is known, is in `whole_fit_tests` below —
@@ -3233,6 +3581,10 @@ mod whole_fit_tests {
     };
     use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCap;
+    use crate::ng::parameter_estimation::joint::census_moments::{
+        CensusMoments, CensusMomentsReport, InbreedingSource, PanelInbreeding,
+    };
+    use crate::ng::types::InbreedingF;
 
     /// The mean of one of the two rates over every library the fit produced.
     ///
@@ -3247,6 +3599,214 @@ mod whole_fit_tests {
             / fit.noise.len() as f64
     }
 
+    /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the
+    /// integrated curve are two independent routes to one heterozygosity, and they land together.**
+    ///
+    /// This is the join `ordinary_site_prior_moments.md` §8's fifth question is about, exercised
+    /// end to end — the fit converges, the expectation step's running sums accumulate over every
+    /// position, the panel's coefficient is applied, and the report puts the census average beside
+    /// the number read off the fitted curve.
+    ///
+    /// **Why the two agreeing here is a check and not a tautology.** They share the converged fit
+    /// and nothing else: one averages `2k(2N − k)/(2N(2N − 1))` over the per-position posteriors
+    /// with a curvature term and an inbreeding correction, the other evaluates
+    /// `p_segregating · 2ab/((a + b)(a + b + 1))` on four fitted numbers. A defect in either
+    /// separates them.
+    ///
+    /// **The cohort is drawn from a single Beta with two point masses — inside the fit's own
+    /// family — which is the case where they *should* agree.** On populations outside it the
+    /// curve settles 5 to 7% off and stays there at every depth, which is the whole reason the
+    /// census average exists (report §9.1). So this test says the machinery works, not that the
+    /// curve is adequate; the report prints both numbers precisely because the gap is a
+    /// diagnostic.
+    ///
+    /// **Measured on this cohort: the curve reads 2.260e-2 and the census average 2.226e-2, a
+    /// ratio of 1.0155** — well inside the 1.1% below to 10.7% above the design measured across
+    /// three populations and four depths. The band asserted is 0.85 to 1.15, loose against that on
+    /// purpose: it is bounding *the machinery being connected*, and a band tight enough to pin the
+    /// ratio would be pinning the fit's own convergence on one seed.
+    #[test]
+    fn the_report_puts_the_census_average_beside_the_curves_own_number() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let samples = 10;
+        let cohort = draw_cohort(
+            samples,
+            3_000,
+            20.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0xB7E1_5162_8AED_2A6B,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            max_passes: 20,
+            duplicated_positions: false,
+            ..JointFitConfig::default()
+        };
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+
+        // The panel was drawn at F = 0.2 and this is what a user supplying it would give.
+        let supplied = [InbreedingF::try_new(0.2).expect("a legal coefficient"); 10];
+        let report = CensusMomentsReport::of(&fit, PanelInbreeding::Supplied(&supplied));
+
+        assert_eq!(report.samples, samples);
+        assert_eq!(report.measured.positions, 3_000);
+        assert_eq!(report.inbreeding_source, InbreedingSource::User);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+
+        // **The coefficient the caller supplied is the one the report carried and the one the
+        // arithmetic used.** Measured before these three lines existed: `of` could pass a literal
+        // zero to `finish` *and* store a literal zero as the panel coefficient, and the whole suite
+        // stayed green — the ratio band below is wide enough to swallow a 1% shift.
+        // (Averaged over the ten supplied values, so it arrives as 0.19999999999999998.)
+        assert!(
+            (report.panel_inbreeding - 0.2).abs() < 1e-12,
+            "got {}",
+            report.panel_inbreeding
+        );
+        let outbred = fit
+            .census_moments
+            .finish(InbreedingF::try_new(0.0).expect("zero is a legal coefficient"));
+        let correction = report.measured.heterozygosity / outbred.heterozygosity;
+        // An inbred panel shows fewer differences than its population has, so the census average is
+        // **divided** by `1 − F/(2N − 1)` to recover the population's number — a lift, not a cut.
+        // 2N = 20 chromosomes here, so it is exactly `1 / (1 − 0.2/19)`.
+        let expected = 1.0 / (1.0 - 0.2 / 19.0);
+        assert!(
+            (correction - expected).abs() < 1e-12,
+            "the supplied coefficient moved the heterozygosity by {correction}, not by {expected}"
+        );
+
+        // **The curve's number is the curve's, not a second copy of the census average** — the
+        // point of putting them side by side. `of` could set this field from the census and the
+        // ratio would then be exactly 1, inside the band.
+        assert_eq!(report.curve_heterozygosity, fit.expected_heterozygosity);
+
+        let ratio = report
+            .curve_over_census()
+            .expect("a cohort drawn at this density segregates");
+        assert!(
+            (0.85..1.15).contains(&ratio),
+            "the two routes to one heterozygosity should agree inside the fit's own family; the \
+             curve reads {:.4e} and the census average {:.4e}, a ratio of {ratio:.4}",
+            report.curve_heterozygosity,
+            report.measured.heterozygosity
+        );
+
+        // **Both are near the diversity the cohort was actually drawn with**, which is what stops
+        // the agreement above being two matching wrong numbers.
+        let drawn: f64 =
+            cohort.heterozygous.iter().sum::<f64>() / cohort.heterozygous.len() as f64 / 0.8;
+        assert!(
+            (0.7..1.4).contains(&(report.measured.heterozygosity / drawn)),
+            "the census average is {:.4e} against a drawn diversity of {drawn:.4e}",
+            report.measured.heterozygosity
+        );
+
+        // And a run that had no runs coefficient says so, with the circularity warning.
+        let excess = [InbreedingF::try_new(0.2).expect("legal"); 10];
+        let fallback = CensusMomentsReport::of(&fit, PanelInbreeding::HomozygoteExcess(&excess));
+        assert_eq!(
+            fallback.inbreeding_source,
+            InbreedingSource::JointFitHomozygoteExcess
+        );
+        assert_eq!(fallback.warnings().len(), 1);
+        assert_eq!(fallback.measured, report.measured, "the same coefficient");
+    }
+
+    /// **The two routes to the two population moments agree on a real fit** — the running sums the
+    /// expectation step keeps, and the reduction over the stored per-position array.
+    ///
+    /// This is what makes the memory decision safe. `JointFitConfig::genotype_posteriors` is off by
+    /// default because the array weighs twelve bytes a position a sample — 1.2 GB for fifty samples
+    /// over the shipped two-million-position census — so the moments are summed as the fit walks
+    /// and nothing is stored (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). **The stored
+    /// array stays as the harnesses' input and as this oracle**, and if the two ever part company
+    /// the sums are wrong, because the array is what every measurement behind the design was made
+    /// on.
+    ///
+    /// **They agree to `f32` and not to the last bit**, and the difference is where the array goes
+    /// through `f32` on the way out while the sums stay in `f64` throughout. Measured on this
+    /// cohort: **2.9e-11 on the frequency and 8.2e-10 on the heterozygosity** — four to five
+    /// orders inside the `1e-6` asserted, which is the `f32` significand itself. The tolerance is
+    /// deliberately loose against that measurement, because it bounds the rounding rather than the
+    /// arithmetic, and a rounding figure that tight would fail on a different cohort.
+    ///
+    /// It also pins the **position count**: both routes must divide by the same number, which is
+    /// the thing an early return on an underflowed position could quietly break.
+    ///
+    /// **What it does not pin is the formula.** Both routes call the same
+    /// [`alternative_copies_in`] and the same `nei_heterozygosity`, so a defect inside either — the
+    /// variance term dropped, `2N − 1` written as `2N` — moves both sides by the same factor and
+    /// this test stays green. Measured: gutting the variance term leaves it passing. It pins the
+    /// **plumbing** — that the sums saw the census the array saw — and the formula is pinned by the
+    /// hand-arithmetic fixtures in [`census_moments`](super::census_moments), which is where a
+    /// change to it should break something.
+    ///
+    /// [`alternative_copies_in`]: super::census_moments
+    #[test]
+    fn the_summed_moments_and_the_stored_array_agree() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let positions = 2_000;
+        let samples = 6;
+        let cohort = draw_cohort(
+            samples,
+            positions,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x243F_6A88_85A3_08D3,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            max_passes: 12,
+            duplicated_positions: false,
+            genotype_posteriors: true,
+            ..JointFitConfig::default()
+        };
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+
+        assert_eq!(
+            fit.genotype_posterior.len(),
+            fit.census_moments.positions() as usize * samples * 3,
+            "the stored array and the running sums must have seen the same census"
+        );
+
+        let selfing = InbreedingF::try_new(0.2).expect("a legal coefficient");
+        let summed = fit.census_moments.finish(selfing);
+        let stored = CensusMoments::from_posteriors(
+            &fit.genotype_posterior,
+            samples,
+            fit.census_moments.positions() as usize,
+            selfing,
+        );
+        let frequency_gap =
+            (summed.mean_alternative_frequency / stored.mean_alternative_frequency - 1.0).abs();
+        let heterozygosity_gap = (summed.heterozygosity / stored.heterozygosity - 1.0).abs();
+        assert!(
+            frequency_gap < 1e-6 && heterozygosity_gap < 1e-6,
+            "the two routes disagree by {frequency_gap:e} on the frequency and \
+             {heterozygosity_gap:e} on the heterozygosity, which is more than the f32 the stored \
+             array passes through: summed {summed:?}, stored {stored:?}"
+        );
+        // **And both are measuring something**, so the agreement above is not two zeros matching.
+        assert!(
+            summed.mean_alternative_frequency > 1e-4 && summed.heterozygosity > 1e-4,
+            "this cohort segregates at 9 positions in 100; got {summed:?}"
+        );
+    }
     /// **The test that says whether any of this works.** A cohort drawn at known parameters
     /// must come back at them.
     #[test]

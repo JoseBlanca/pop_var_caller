@@ -405,7 +405,8 @@ per locus with no cohort in it** (spec §4.5's decided repair of production's co
 ```rust
 /// §4.5.1's second half: the fraction (frozen, per read group) and the prior's seed
 /// shape normalised to sum to one — built once per locus by the loop from
-/// genotype_prior::fill_seed_share_per_candidate (calling_priors.md §5), frozen
+/// genotype_prior::fill_seed_share_per_candidate (population_diversity.md §4.2,
+/// which superseded calling_priors.md §5), frozen
 /// thereafter.
 ///
 /// OPEN: that builder fills one entry per CANDIDATE, and `c · seed(o)` asks for a

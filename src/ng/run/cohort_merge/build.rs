@@ -824,14 +824,22 @@ pub fn build_region(
 ) -> RegionOutcome {
     let mut outcome = RegionOutcome::default();
     if no_locus_can_begin_in(builder_region, observations_per_sample) {
+        super::timing::REGIONS_WITH_NO_LOCUS.add(1);
         return outcome;
     }
 
-    for locus in LocusCloser::over(
+    // The walk's setup is one allocation per sample several times over, so it is timed apart
+    // from the walk itself (`super::timing`): it is the fixed cost a building region pays
+    // whatever it holds, and the question is how much of the merge that comes to.
+    let opening_the_walk = super::timing::Stopwatch::start();
+    let closer = LocusCloser::over(
         observations_per_sample,
         max_cohort_locus_span,
         min_alt_reads,
-    ) {
+    );
+    opening_the_walk.add_to(&super::timing::WALK_SETUP_NANOS);
+
+    for locus in closer {
         // **Ownership, and the two ways a locus can fail to be ours.** One starting before
         // this builder's ground belongs to an earlier builder, which sees it whole; one
         // starting after its last base belongs to a later builder. Both are skipped rather

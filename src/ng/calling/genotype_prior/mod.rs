@@ -62,9 +62,13 @@
 //! - [`seed_generic`] — the SNP/indel starting point, read off the pre-pass's fitted frequency
 //!   spectrum (plan step D). *Generic* is the crate's word for the non-STR path, as in
 //!   `parameter_estimation::generic`, so it pairs with [`seed_ssr`] on the same axis.
-//! - [`seed_ssr`] — the STR starting point: mass falling off geometrically from the
-//!   cohort's modal repeat count, totalling what the cohort's measured repeat diversity
-//!   implies (plan step E). **STR** in prose, `ssr` in module paths, as everywhere in ng.
+//! - [`seed_ssr`] — the STR starting point, read off the fitted **length spectrum** and
+//!   concentration the joint repeat fit produces for this tract's stratum (plan step E2e;
+//!   `doc/devel/ng/spec/population_diversity.md` §4). **Its two spectra are different
+//!   quantities and neither is ever called just "the spectrum"**: [`seed_generic`]'s is a
+//!   *frequency* spectrum, how allele frequencies are spread across the population;
+//!   [`seed_ssr`]'s is a *length* spectrum, how a stratum's chromosomes are spread over tract
+//!   lengths. **STR** in prose, `ssr` in module paths, as everywhere in ng.
 //! - [`hardy_weinberg`] — the comparator: Hardy–Weinberg at a single estimated frequency,
 //!   plugged in as though it were the truth, kept only so the change the marginalized prior
 //!   makes stays measurable (plan step F). Named for the distribution, like its sibling
@@ -82,10 +86,8 @@ pub mod seed_ssr;
 
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use hardy_weinberg::PlugInWrightPrior;
-pub use seed_generic::{
-    FittedSpectrum, VariantClass, fill_locus_concentration, project_spectrum_seed,
-};
-pub use seed_ssr::{SsrSeedOutcome, fill_seed_share_per_candidate, fill_ssr_seed};
+pub use seed_generic::{VariantClass, fill_locus_concentration, seed_from_population_moments};
+pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::ng::types::InbreedingF;
@@ -93,13 +95,14 @@ use crate::ng::types::InbreedingF;
 /// The five types whose invariants are checked at construction, in a module of their own so
 /// that **nothing else in this folder can build one without the check**.
 ///
-/// The scalars this folder introduced — [`RepeatGeneDiversity`](crate::ng::types::RepeatGeneDiversity)
-/// and [`SeedDecayPerRepeat`](crate::ng::types::SeedDecayPerRepeat) — are **not** here. They
-/// are the parameter pre-pass's outputs, like every other measured scalar the caller consumes,
-/// so they live in [`crate::ng::types`] beside
-/// [`ExpectedHeterozygosity`](crate::ng::types::ExpectedHeterozygosity) and reject with a
+/// The measured scalars the caller consumes are **not** here. They are the parameter pre-pass's
+/// outputs, so they live in [`crate::ng::types`] —
+/// [`ExpectedHeterozygosity`](crate::ng::types::ExpectedHeterozygosity) and
+/// [`RepeatGeneDiversity`](crate::ng::types::RepeatGeneDiversity) — and reject with a
 /// `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the caller
-/// should refuse with a message, not abort.
+/// should refuse with a message, not abort. *(`SeedDecayPerRepeat` stood beside them until step
+/// E2e; it was the decay of a constructed geometric shape the fitted length spectrum replaced,
+/// and it went with the construction.)*
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is
 /// visible to a module's *descendants*, and `dirichlet_multinomial`, `hardy_weinberg`,
@@ -548,117 +551,98 @@ mod checked {
 
 pub use checked::{CohortAlleleCopies, Concentration, PriorRow, SampleAlleleCopies, SpectrumSeed};
 
-/// Where the run's seed came from.
+/// Where the run's seed came from — which of the pre-pass's measurements it rests on.
 ///
 /// **It has to reach the run's output.** Two runs that used different information are
 /// otherwise indistinguishable in what they emit, which is the complaint
 /// `doc/devel/ng/spec/calling_priors.md` §4 makes about production's own fallback.
 ///
-/// **Every variant is a branch on what the pre-pass had, never on how many samples there
-/// are.** A single sample arrives with a fitted spectrum; a cohort of five arrives without
-/// one, because the pre-pass emits the spectrum as *absent* below a panel-size floor rather
-/// than as a thin estimate. Nothing downstream may test the cohort size (spec §4.1).
+/// **The panel's size appears in none of these variants, and it used to appear in two.** Until
+/// 2026-08-27 the seed's expected frequency was searched for in the panel's own allele-count
+/// classes and then blended toward a neutral shape at a weight that rose with the panel, and both
+/// the weight and how well the search had matched travelled here. Both are gone: the frequency is
+/// now integrated off the fitted population curve in closed form, which has no panel in it
+/// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6, §6.1).
+///
+/// **Which variant a run lands in is a branch on what the pre-pass had.** The joint route fits
+/// the population's allele-frequency density and reads both moments off it, so a run on that route
+/// always has both, at one sample and at a thousand; the per-sample histogram route supplies a
+/// heterozygosity and no density at all.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SeedRegime {
-    /// Read off the pre-pass's fitted frequency spectrum by the projection of spec §4.1.
+    /// **Both moments came off the run's own fitted population curve** — the top of the ladder.
     ///
-    /// `regularizer_site_weight` is how many sites' worth of pseudo-counts held the fitted
-    /// spectrum at the neutral shape, and `census_sites_outweigh_regularizer` says whether
-    /// the real sites won. **Report that per allele-count class, not as one panel-wide
-    /// ratio**: on the panel spec §4.1 measures, the aggregate was 3,100 to 1 while the
-    /// thinnest class held two sites and was outweighed only 39 to 1, and the tail is where
-    /// the regularizer binds.
+    /// The seed's expected frequency is the curve's `∫ π(f) · f df` and its total is whatever
+    /// makes a pair of that frequency imply the curve's `∫ π(f) · 2f(1−f) df`
+    /// (`doc/devel/ng/spec/ordinary_site_seed.md` §3's identity).
     ///
-    /// `spectrum_match` says **how far** the two numbers are from what was measured, and whether
-    /// the search ran out of range before it got there. **A run that used a compromised starting
-    /// point and one that matched must not look the same in the output**, which is the complaint
-    /// this whole enum exists to answer.
-    FittedSpectrum {
-        regularizer_site_weight: f64,
-        census_sites_outweigh_regularizer: bool,
-        spectrum_match: SpectrumMatch,
-    },
-    /// No spectrum was emitted, so the pair is the neutral `(1, θ)` at the heterozygosity the
-    /// pre-pass **did** fit. A spectrum too thin to emit and a panel with nothing to fit
-    /// carry the same information about shape, which is why one variant covers both.
+    /// **It carries no numbers, and that is a change of 2026-08-27.** It used to carry the weight
+    /// of a blend, how many sites' worth of pseudo-counts had held a fitted spectrum at the
+    /// neutral shape, and how far a search's pair sat from the classes it was fitted to. The
+    /// blend and the search are deleted, and the two regulariser numbers described a spectrum
+    /// emission the cohort gather no longer makes (`parameter_prepass_cohort.md` §4). What a run
+    /// on this route owes its reader instead is
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7's list, which is a Milestone C
+    /// step and not built.
+    FittedCurve,
+    /// No population curve was fitted, so there is no measured shape and the pair is the
+    /// neutral `(1, θ)` at the heterozygosity the pre-pass **did** fit.
+    ///
+    /// **The middle rung of `population_diversity.md` §3.4's ladder.** (Its *bottom* rung is
+    /// [`Self::FallbackDiversity`], where no heterozygosity was fitted either.)
+    ///
+    /// **Which routes reach it, and one of them is a design intent rather than today's
+    /// behaviour.** A run whose assembly had no fitted density reaches it as the tree stands. The
+    /// per-sample histogram route is meant to, and cannot yet: `population_diversity.md` §3.5 says
+    /// it supplies the *ingredient* — each sample's observed heterozygosity — rather than the
+    /// heterozygosity itself, and **nothing computes the mean of `Hobs / (1 − F)` across
+    /// samples**, so a run on that route alone reaches [`Self::FallbackDiversity`] instead.
     NeutralShape,
-    /// The same neutral `(1, θ)` pair as [`SeedRegime::NeutralShape`], but `θ` itself is a
-    /// guess rather than a fit — too few sites, or no inbreeding coefficient for the sample —
-    /// so the run is on
+    // **What stood here until 2026-08-27: `DiversityUnreachable`.**
+    //
+    // A pair of expected frequency `f` makes a diploid heterozygous at most `2 f (1 − f)` of the
+    // time, however much conviction it carries, so a measured heterozygosity at or above that
+    // ceiling had no answer. The seed fell back to the neutral `(1, θ)` and reported which of two
+    // ways it had got there — deliberately distinguishable from `NeutralShape`'s, because this is
+    // the failure the repeat-tract seed used to have and it must not return silently
+    // (`population_diversity.md` §4.2).
+    //
+    // **It is absent rather than forgotten: on this route the state cannot arise.** Both of the
+    // seed's numbers are integrals of one fitted population curve, and
+    //
+    //     θ = E[2 f (1 − f)] = 2 E[f] − 2 E[f²]      against a ceiling of 2 E[f] (1 − E[f])
+    //
+    // with `E[f²] ≥ E[f]²` — Jensen's inequality, whose slack is exactly the spread of the
+    // population's frequencies. The measurement is therefore below the ceiling by twice that
+    // spread, and equals it only where the whole population sits at one frequency, which no
+    // density the fit can produce does. `seed_generic::total_for_diversity` holds the inequality
+    // as a release assertion and says what tripping it means
+    // (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
+    //
+    // `ZeroDiversity` below is **not** the same thing and stays: it is a real cohort state.
+    /// **The run's measured heterozygosity was exactly zero** — a cohort with no variation at all.
+    ///
+    /// Solving for the total gives zero and every entry of the pair with it, so the alternative
+    /// concentration is floored at
+    /// [`MIN_ALT_CONCENTRATION`](crate::genetics::MIN_ALT_CONCENTRATION) and the reference
+    /// concentration stays at the neutral 1. **A run here must say the diversity was zero**: the
+    /// pair it gets is a legal one and says nothing about how it was arrived at.
+    ///
+    /// **It carries no frequency, and that is not an omission.** With no diversity there is
+    /// nothing for a shape to scale, so a run that had a fitted curve and one that did not receive
+    /// the same seed.
+    ZeroDiversity,
+    /// **No heterozygosity was fitted at all** — too few sites, or no inbreeding coefficient for
+    /// the sample — so the pair is the neutral `(1, θ)` on
     /// [`ExpectedHeterozygosity::SPECIES_FALLBACK`](crate::ng::types::ExpectedHeterozygosity::SPECIES_FALLBACK),
     /// a species-range value taken from human data. **This is the variant that must never be
     /// silent.**
+    ///
+    /// **A run that had a fitted frequency but no heterozygosity lands here too, and the frequency
+    /// is discarded.** The pair's total comes from the heterozygosity, so a run without one has
+    /// nothing to pin a shape to. In practice the two arrive together: the joint route reads both
+    /// off one density.
     FallbackDiversity,
-}
-
-/// **How far the two numbers the fit returned are from the spectrum it was given**, and whether
-/// the search ran out of range before it got there.
-///
-/// **The fit always returns a pair, and sometimes no pair is close.** The two-parameter family
-/// cannot hold every shape — `doc/devel/ng/spec/calling_priors.md` §4.1 names a panel whose
-/// alleles sit mostly at middling frequency as one it cannot — so a run that used a compromised
-/// starting point and one that matched must not look the same in the output. That is what this
-/// carries, and it is the complaint [`SeedRegime`] exists to answer.
-///
-/// **It reports a distance rather than a verdict, and that is deliberate.** Nobody has measured
-/// how far off the starting pair has to be before a genotype moves, so this names no threshold
-/// and calls nothing a failure; whoever reads a run's output decides what is too far. An earlier
-/// version did classify, and it classified without looking: it reported *reproduced* whenever the
-/// search finished inside its range and no allele-count class came back at exactly zero, so a
-/// fitted pair sharing 4 parts in 100 of its mass with the measurement was reported as a match
-/// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct SpectrumMatch {
-    divergence_nats: f64,
-    at_search_limit: bool,
-}
-
-impl SpectrumMatch {
-    /// Build the report. Only the fit does this.
-    pub(super) fn new(divergence_nats: f64, at_search_limit: bool) -> Self {
-        debug_assert!(
-            divergence_nats.is_finite() && divergence_nats >= 0.0,
-            "the divergence is a distance and cannot be negative, got {divergence_nats}"
-        );
-        Self {
-            divergence_nats,
-            at_search_limit,
-        }
-    }
-
-    /// **How much information is lost by describing the measured spectrum with the fitted pair
-    /// instead of itself** — the Kullback–Leibler divergence of the measurement from the fitted
-    /// pair's prediction, in nats. **Zero means the family reproduced the measurement exactly.**
-    ///
-    /// It is free to compute. The fit's objective is already the measurement's own entropy minus
-    /// this quantity, so subtracting the winning score from that entropy gives it with no extra
-    /// prediction — which is why the fit costs the same 399 predictions it did before this was
-    /// reported.
-    ///
-    /// **A rough scale, so the number means something before anyone has calibrated it.** One nat
-    /// is a factor of `e` in likelihood, so a divergence of 0.01 nats is a pair that would
-    /// misprice the average site's allele-count class by about one per cent — invisible against a
-    /// single read. A divergence above about 1 nat means the prediction and the measurement
-    /// disagree about where most of the panel's variable sites sit. The spectra measured in this
-    /// module's own tests land at 1.1e-9 nats when the family can hold the shape, and at 0.481
-    /// and 3.153 nats on two it cannot
-    /// (`seed_generic::projection_tests::a_spectrum_the_family_cannot_hold_scores_far_from_it`).
-    #[inline]
-    pub fn divergence_nats(self) -> f64 {
-        self.divergence_nats
-    }
-
-    /// **The best pair sits on the edge of the range the fit searches**, so a better one may lie
-    /// outside it and what came back is a boundary rather than a summit.
-    ///
-    /// Not derivable from the divergence, which is why it is carried separately: a pair pinned
-    /// against a bound can still predict the measurement well. **A fully invariant cohort reaches
-    /// this legitimately** — its answer is an alternative concentration of zero, and the search
-    /// floors the ratio at `1e-9`.
-    #[inline]
-    pub fn at_search_limit(self) -> bool {
-        self.at_search_limit
-    }
 }
 
 /// How far below the cohort's total a sample's own copies may sit before it stops being rounding
@@ -864,9 +848,8 @@ pub trait GenotypePriorModel {
     /// string this returns directly.
     ///
     /// **Not the seed's provenance, which is a different question.**
-    /// [`SeedRegime`] says where the *concentration* came from and [`SpectrumMatch`] how far the
-    /// fit landed from the measurement; both describe the input the two implementations **share**,
-    /// so neither can tell two runs over the same seed apart.
+    /// [`SeedRegime`] says where the *concentration* came from, which describes the input the two
+    /// implementations **share** — so it cannot tell two runs over the same seed apart.
     fn name(&self) -> &'static str;
 }
 
@@ -1348,11 +1331,7 @@ mod tests {
         let fitted_seed = SpectrumSeed::new(
             1.0,
             6e-4, // tomato1's fitted θ, spec §4.1
-            SeedRegime::FittedSpectrum {
-                regularizer_site_weight: 10.0,
-                census_sites_outweigh_regularizer: true,
-                spectrum_match: SpectrumMatch::new(0.0, false),
-            },
+            SeedRegime::FittedCurve,
         );
         assert_eq!(fitted_seed.alpha_ref(), 1.0);
         assert_eq!(fitted_seed.alpha_alt_total(), 6e-4);
