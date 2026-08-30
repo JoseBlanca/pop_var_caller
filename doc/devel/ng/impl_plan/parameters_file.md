@@ -179,9 +179,29 @@ recorded in `PROJECT_STATUS.md` rather than edited here. Mutating the writer's f
 `{value:.5?}` fails all four tests.
 *Depends:* C1, C2. *Source:* §4, §13 test 1.
 
-☐ **C4. The north-star round trip.** A `RunParameters` assembled from the joint fit on real tomato
+✅ **C4. The north-star round trip.** A `RunParameters` assembled from the joint fit on real tomato
 records, written and read back, equal field for field: every float, every warrant, every count.
 **This is goal 1 and the test the whole design rests on.**
+
+**Landed 2026-08-30 on a run *shaped like* a fit's rather than on a real one**, by the owner's
+ruling: no program in this tree produces a `RunParameters` from the joint fit — the joint walk
+stops at a `JointFit`, every call to `assemble` is in a test module, and `assemble` needs the
+minted-error totals the joint route does not fit. **⚑ The real-fit round trip is owed, and it is
+owed a program rather than a test.** What is built instead goes through the fit's own doors —
+`StratumFits::over` on `StratumOutcome`s and `assemble` on the raw per-read-group maps — with
+three periods, 36 strata mixing fitted, derived and refused, two slippage groups, and the
+substitution rate at the `(read group × stratum × ploidy)` grain.
+
+**The review's Blocker was that the first draft of that fixture was not shaped like a fit's**:
+within a period, the fitted and derived strata contradicted each other about whether the period had
+a curve, and `LevelSource::Blend` — the fit's ordinary case — appeared nowhere in the file. Now the
+first period has no curves and the other two have both, which is what decides which outcomes each
+period's strata can have.
+
+**It also measured what spec §9 prices and nothing had re-measured**: 157 bytes an inbreeding row
+and 185 a substitution-rate row against §9's 146 each, which would put §9's 62 MB at 3,000 samples
+nearer 79 MB — and both are floors, since a real cohort's read-group ids and bases-compared counts
+are wider than this fixture's.
 *Depends:* C3. *Source:* §1.2 goal 1, §13 test 1.
 
 ☐ **C5. The five states survive the round trip. Own commit, do not bundle.** One fixture per row of

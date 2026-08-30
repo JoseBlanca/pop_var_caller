@@ -720,7 +720,7 @@ mod tests {
     /// calibration's, and the observation count, which it writes into the file. Both come back
     /// from the projection; the rate's own value does not, and nothing reads it, so this fills a
     /// placeholder rather than pretending to recover one.
-    fn the_rates_the_projection_out_reads(
+    pub(super) fn the_rates_the_projection_out_reads(
         projected: &super::RunParametersFromFile,
     ) -> BTreeMap<ReadGroupId, Estimate<ErrorRate>> {
         projected
@@ -1124,5 +1124,858 @@ mod tests {
         ] {
             assert_eq!(FittedShape::from(in_the_file), upstream, "{in_the_file:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod the_north_star_round_trip {
+    //! **Step C4: a run's parameters, written and read back, equal field for field.**
+    //!
+    //! Spec §1.2 goal 1 and §13's first test, and the plan calls it "the test the whole design
+    //! rests on". What it holds is that direct mode and psp mode score the same reads under the
+    //! same numbers: the two-mode oracle compares VCFs, so a parameter that comes back changed
+    //! shows up there as a changed genotype at some locus, with nothing to say why.
+    //!
+    //! # What this is built on, and what is owed
+    //!
+    //! **The plan asks for a `RunParameters` assembled from the joint fit on real tomato records.
+    //! This is not that**, by the owner's ruling of 2026-08-30, and the reason is that no program
+    //! in this tree produces one: `examples/ng_joint_records_walk.rs` stops at a `JointFit` and
+    //! never calls `RunParameters::assemble`; all thirty-three calls to `assemble` are inside
+    //! `#[cfg(test)]` modules; and `assemble` needs the per-read-group minted-error totals, which the joint route
+    //! does not fit — they come from the generic calibration pre-pass, whose only real-data
+    //! program is `examples/ng_minted_error_means.rs`. Joining the two is a new program.
+    //!
+    //! **So what is built here is a run shaped like a fit's output**: the maps keyed as the
+    //! pre-pass keys them, every one of them through the fit's own doors — `StratumFits::over`
+    //! takes `StratumOutcome`s, `RunParameters::assemble` takes the raw per-read-group maps — with
+    //! many strata carrying mixed origins and the substitution rates at the
+    //! `(read group × stratum × ploidy)` grain §9 prices. **⚑ The real-fit round trip is owed**,
+    //! and it is owed a program rather than a test.
+    //!
+    //! # Why the comparison is on the file and not on `RunParameters`
+    //!
+    //! `RunParameters` has no `PartialEq` — it holds a borrowed-from bundle nothing else compares
+    //! — so "equal field for field" is asserted two ways instead. **The file it writes the second
+    //! time is byte-identical to the first**, which covers every number the file carries; and
+    //! every accessor the run exposes is compared before against after.
+    //!
+    //! **What the second of those adds is the lookup**, which a file comparison cannot reach at
+    //! all: `StratumFits::at`'s four answers for a cell with no numbers, the three rungs of
+    //! `length_spectrum_at`, and the bottom rung's median. None of that is written down anywhere
+    //! in the file — the file carries the rows the lookup is built from, and the lookup is what
+    //! a locus asks.
+    //!
+    //! **Two things the trip does not cover, and neither is this step's.** The identity block —
+    //! the digest, the census, the sample list and the read-group table — is fed back into the
+    //! second write rather than round-tripped, because `to_run_parameters` deliberately carries
+    //! none of spec §6's four bindings; they are step D2's. And **the tract ladder's fallback
+    //! concentration carries a warrant the writer re-derives**, so a projection that lost it
+    //! would be invisible here; `validate` refuses the contradiction instead.
+
+    use std::collections::BTreeMap;
+
+    use super::super::tests::a_file_using_every_shape;
+    use super::super::{CensusIdentity, CensusTerm, ParametersFile};
+    // **The one helper both modules need**, rather than a second copy of it: the rates `of_run`
+    // reads back are rebuilt the same way whichever fixture they came from.
+    use super::tests::the_rates_the_projection_out_reads;
+    use super::*;
+    use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
+    use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
+    use crate::ng::parameter_estimation::joint::contamination::{
+        ContaminationEstimate, ContaminationSource, NotIdentifiedReason,
+    };
+    use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches as DeclaredBatches;
+    use crate::ng::parameter_estimation::joint::share_curve::{
+        ShareCurve as FittedShareCurve, ShareCurveSource, ShareShape as FittedShape, ShareSource,
+    };
+    use crate::ng::parameter_estimation::joint::slippage_curve::{
+        LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
+    };
+    use crate::ng::parameter_estimation::joint::ssr_fit::{
+        DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+        StratumOutcome, StratumRefusal,
+    };
+    use crate::ng::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, NoSlippage};
+    use crate::ng::read::input::read_groups::ReadGroups;
+    use crate::ng::types::{Ploidy, SsrPeriod};
+
+    /// **How many samples, libraries, periods and repeat counts the fixture run has.**
+    ///
+    /// Small enough to run in a unit test and large enough that every table of the file has more
+    /// than one row: 3 samples × 2 libraries is 6 read groups, 3 periods × 12 repeat counts is 36
+    /// strata, and the substitution rate is keyed by all three of read group, stratum and ploidy.
+    /// **The repeat-tract section comes to 132 rows** — 6 slippage-group, 36 slippage, 12
+    /// stratum spectra, 2 period pools and 76 substitution rates — which is measured by
+    /// `the_files_two_cohort_sized_rows_are_the_size_the_spec_prices_them_at` rather than
+    /// asserted here.
+    const SAMPLES: usize = 3;
+    const LIBRARIES_A_SAMPLE: usize = 2;
+    const PERIODS: [u8; 3] = [1, 2, 3];
+    const REPEAT_COUNTS: std::ops::RangeInclusive<u64> = 5..=16;
+    const SLIPPAGE_GROUPS: usize = 2;
+
+    /// A number that differs at every index, so no two cells of the file hold the same value.
+    ///
+    /// **Two rows carrying one number is how a projection that transposed an axis passes**: the
+    /// file would be written wrong and read back wrong the same way. So this mixes its indices
+    /// rather than adding them — a first draft added them with small weights and the 72
+    /// substitution rows then carried only 53 distinct values, because `8Δg + 15Δp + 22Δr = 0`
+    /// has a solution inside the fixture's own index ranges.
+    ///
+    /// **Its range is `[scale, 2·scale)`**, so a caller picks the magnitude and the mixing picks
+    /// the digits; every value the fixture uses as a share is called with a scale that keeps it
+    /// inside the range its key allows, and no clamp is needed.
+    fn a_number(scale: f64, of: &[usize]) -> f64 {
+        let mut mixed: u64 = 0x9e37_79b9_7f4a_7c15;
+        for index in of {
+            mixed ^= *index as u64 + 1;
+            mixed = mixed.wrapping_mul(0x1000_0000_01b3);
+            mixed ^= mixed >> 29;
+        }
+        // The low 40 bits as a fraction, so the value is spread over the whole of `[1, 2)` and
+        // two different index tuples collide only if their mixes agree in 40 bits.
+        scale * (1.0 + (mixed & 0xff_ffff_ffff) as f64 / (1u64 << 40) as f64)
+    }
+
+    fn the_runs_read_groups() -> ReadGroups {
+        let lanes: Vec<(String, String, String)> = (0..SAMPLES)
+            .flat_map(|sample| {
+                (0..LIBRARIES_A_SAMPLE).map(move |library| {
+                    (
+                        format!("HWI.{sample}.{library}"),
+                        format!("TS-{sample}"),
+                        format!("lib{sample}-{library}"),
+                    )
+                })
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str, &str)> = lanes
+            .iter()
+            .map(|(id, sample, library)| (id.as_str(), sample.as_str(), library.as_str()))
+            .collect();
+        ReadGroups::of_lanes(&borrowed)
+    }
+
+    fn read_group_count() -> usize {
+        SAMPLES * LIBRARIES_A_SAMPLE
+    }
+
+    /// The two per-read-group maps assembly takes, keyed as the pre-pass keys them.
+    ///
+    /// **One read group's fitted rate is zero**, which is how assembly reaches
+    /// `ReadGroupCalibration::defaulted` — a multiplier of exactly 1.0 whose warrant is
+    /// `Defaulted`, spec §5's third row and the one a reader must not read as a fitted answer.
+    /// A zero rate is a probability and the fit can emit one; what `from_fitted_rate` refuses is
+    /// the *scale* it would give, which charges every read of the library the error floor.
+    /// **The others' multipliers differ from one another**, because the minted mean is built from
+    /// a different rate than the one fitted: a fixture whose minted total is `rate.ln() · reads`
+    /// gives every library a scale of exactly one, which is the column where a transposed axis
+    /// would hide best.
+    #[allow(clippy::type_complexity)]
+    fn the_runs_calibration_inputs() -> (
+        BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        BTreeMap<ReadGroupId, MintedReadErrors>,
+    ) {
+        let mut rates = BTreeMap::new();
+        let mut minted = BTreeMap::new();
+        for group in 0..read_group_count() {
+            let id = ReadGroupId(group as u32);
+            // **Both maps hold every read group**, because assembly refuses a gap in either:
+            // the axis is `0..n` with nothing missing. What makes one library defaulted is the
+            // *value*, not an absence.
+            let rate = if group == THE_LIBRARY_NOTHING_WAS_FITTED_FOR {
+                0.0
+            } else {
+                a_number(0.002, &[group])
+            };
+            rates.insert(
+                id,
+                Estimate {
+                    value: ErrorRate::try_new(rate).expect("a rate"),
+                    // **Three warrants across the libraries**, so the file carries more than one
+                    // and a projection that hard-coded any of them fails.
+                    provenance: match group % 3 {
+                        0 => Provenance::FittedHere,
+                        1 => Provenance::Borrowed,
+                        _ => Provenance::Supplied,
+                    },
+                    observations: 100_000 + group as u64 * 7_919,
+                },
+            );
+            let reads = 1_000 + group as u32 * 13;
+            // The instrument's own mean, which is not the fitted rate — so the scale between them
+            // is a number of its own rather than exactly one at every library.
+            let reported = a_number(0.0025, &[group, 1]);
+            minted.insert(
+                id,
+                MintedReadErrors::of_observation(reported.ln() * f64::from(reads), reads),
+            );
+        }
+        (rates, minted)
+    }
+
+    /// **The one library the calibration fit produced nothing for**, so that the run carries a
+    /// defaulted scale beside fitted ones.
+    const THE_LIBRARY_NOTHING_WAS_FITTED_FOR: usize = 4;
+
+    /// **The one sample whose contamination could not be identified**, and it is a *sample*
+    /// rather than a library: the only per-unit refusal the contamination fit has is
+    /// `OwnFrequencyIsItsOwnEcho`, whose own documentation says "the refusal is the sample's, and
+    /// it refuses every library the sample has". Its other refusal stamps the whole run.
+    const THE_SAMPLE_THAT_IS_ITS_OWN_ECHO: usize = 2;
+
+    /// **Contamination measured on some samples and not on others**, and inside the measured ones
+    /// one library measured and found clean — a zero fraction with evidence behind it, which is
+    /// spec §5's second row and not the same claim as unmeasured.
+    fn the_runs_contamination() -> BTreeMap<ReadGroupId, ContaminationEstimate> {
+        (0..read_group_count())
+            .map(|group| {
+                let id = ReadGroupId(group as u32);
+                let sample = group / LIBRARIES_A_SAMPLE;
+                let estimate = if sample == THE_SAMPLE_THAT_IS_ITS_OWN_ECHO {
+                    ContaminationEstimate::NotIdentified {
+                        reason: NotIdentifiedReason::OwnFrequencyIsItsOwnEcho,
+                    }
+                } else {
+                    ContaminationEstimate::Estimated {
+                        alpha: if group % 3 == 1 {
+                            0.0
+                        } else {
+                            a_number(0.01, &[group])
+                        },
+                        source: ContaminationSource::ThisReadGroupsReads,
+                        panel_markers: 10_000,
+                        markers_with_reads: 4_000 + group as u64,
+                        reads_on_markers: 90_000 + group as u64 * 11,
+                        // Below `MAX_LEVERAGE`, above which the fit refuses the estimate rather
+                        // than emitting it.
+                        leverage: 0.4,
+                    }
+                };
+                (id, estimate)
+            })
+            .collect()
+    }
+
+    fn the_runs_inbreeding() -> Vec<Estimate<InbreedingF>> {
+        (0..SAMPLES)
+            .map(|sample| Estimate {
+                value: InbreedingF::try_new(a_number(0.1, &[sample])).expect("a coefficient"),
+                provenance: if sample % 2 == 0 {
+                    Provenance::FittedHere
+                } else {
+                    Provenance::Borrowed
+                },
+                observations: 180_000_000 + sample as u64 * 1_009,
+            })
+            .collect()
+    }
+
+    /// **Which periods the run fitted curves for.** A period with no curve is a real state — it
+    /// is what `LevelSource::Cell` and `ShareSource::Stratum` mean, in their own words — and it
+    /// is also what decides which outcomes a period's strata can have: `derive_thin_strata`
+    /// produces a derived stratum **only** where its period has a curve, so a period without one
+    /// holds fitted strata and refusals and nothing else.
+    fn the_period_has_curves(period: u8) -> bool {
+        period != PERIODS[0]
+    }
+
+    fn a_slippage_curve_over(from: u64, to: u64, seed: usize) -> FittedSlippageCurve {
+        FittedSlippageCurve {
+            rise_shape: RiseShape::new(a_number(0.4, &[seed])).expect("a rise shape"),
+            intercept: a_number(0.01, &[seed]),
+            slope: a_number(0.004, &[seed, 1]),
+            fitted_from: from,
+            fitted_to: to,
+            held_out_error: a_number(0.3, &[seed, 2]),
+            cells: (to - from + 1) as usize,
+        }
+    }
+
+    fn a_share_curve_over(from: u64, to: u64, seed: usize) -> FittedShareCurve {
+        FittedShareCurve {
+            shape: FittedShape::Turning,
+            intercept: a_number(1.4, &[seed]),
+            slope: -a_number(0.09, &[seed, 1]),
+            bend: a_number(0.006, &[seed, 2]),
+            centre: (from + to) as f64 / 2.0,
+            fitted_from: from,
+            fitted_to: to,
+            held_out_error: a_number(0.167, &[seed, 3]),
+            strata: (to - from + 1) as usize,
+            source: ShareCurveSource::ThisPeriod,
+        }
+    }
+
+    /// **The fit's own outcomes, mixed, and every one of them a state the fit can reach.**
+    ///
+    /// The mixture is by period and by repeat count, and the two are kept apart deliberately:
+    ///
+    /// - **the first period has no curves**, so its strata are fitted on their own tracts or
+    ///   refused for want of a spanning read, its levels come from the cell and its shares from
+    ///   the stratum — which is what `LevelSource::Cell` and `ShareSource::Stratum` mean;
+    /// - **the other two have both curves**, so a stratum with its own evidence blends
+    ///   (`LevelSource::Blend`, the fit's ordinary case) and one without is derived whole from
+    ///   them (`LevelSource::Curve`, both shares `ShareSource::Curve` and no slipped-read count,
+    ///   which is exactly what `derive_thin_strata` writes).
+    ///
+    /// **A refused stratum is `NoSpanningReads` everywhere**, because the other refusal —
+    /// `BelowTheFloor` — is what `derive_thin_strata` converts into a derived stratum wherever a
+    /// curve exists, so it cannot survive in a period that has one.
+    fn the_runs_outcomes() -> Vec<StratumOutcome> {
+        let mut outcomes = Vec::new();
+        for (which_period, period) in PERIODS.iter().enumerate() {
+            // **One curve a period**, which is what the fit produces and what the file's own
+            // section comment says.
+            let from = *REPEAT_COUNTS.start() + which_period as u64;
+            let to = *REPEAT_COUNTS.end() - which_period as u64;
+            let has_curves = the_period_has_curves(*period);
+            let level_curve = has_curves.then(|| a_slippage_curve_over(from, to, which_period));
+            let share_curve = has_curves.then(|| a_share_curve_over(from, to, which_period));
+            for (which_repeats, repeats) in REPEAT_COUNTS.enumerate() {
+                let stratum = Stratum {
+                    period: *period,
+                    reference_repeats: repeats,
+                };
+                let keys = [which_period, which_repeats];
+                // **What this stratum is**: fitted on its own tracts, derived whole from its
+                // period's curves — only possible where there are curves — or refused.
+                let fitted_here = which_repeats % 3 == 0 || (!has_curves && which_repeats % 3 == 1);
+                let refused = which_repeats % 3 == 2;
+                let slippage: Vec<Option<Slippage>> = (0..SLIPPAGE_GROUPS)
+                    .map(|group| {
+                        // **A pair with no row**: the second group is silent at every third
+                        // stratum, which is spec §5's fifth state.
+                        (group == 0 || which_repeats % 3 != 0).then(|| Slippage {
+                            level: a_number(0.04, &[which_period, which_repeats, group]),
+                            shorter_share: a_number(0.4, &[which_period, which_repeats, group, 1]),
+                            fall_off: a_number(0.2, &[which_period, which_repeats, group, 2]),
+                        })
+                    })
+                    .collect();
+                let level: Vec<Option<LevelProvenance>> = slippage
+                    .iter()
+                    .enumerate()
+                    .map(|(group, fitted)| {
+                        fitted.map(|_| match (&level_curve, fitted_here) {
+                            // Its period had no curve at all, so the cell keeps its own answer.
+                            (None, _) => LevelProvenance {
+                                source: LevelSource::Cell,
+                                curve: None,
+                                reach: None,
+                                slipped_reads: Some(a_number(8_000.0, &keys)),
+                            },
+                            // Its own evidence weighed against its period's curve.
+                            (Some(curve), true) => LevelProvenance {
+                                source: LevelSource::Blend {
+                                    curve_weight: a_number(0.3, &[group, which_repeats]),
+                                },
+                                curve: Some(*curve),
+                                reach: Some(curve.reach(repeats)),
+                                slipped_reads: Some(a_number(8_000.0, &keys)),
+                            },
+                            // Nothing of its own: the curve, whole.
+                            (Some(curve), false) => LevelProvenance {
+                                source: LevelSource::Curve,
+                                curve: Some(*curve),
+                                reach: Some(curve.reach(repeats)),
+                                slipped_reads: None,
+                            },
+                        })
+                    })
+                    .collect();
+                // **A share's origin, and the curve it names where it names one.** A source of
+                // `Stratum` means the period had no curve at all, so it carries neither the curve
+                // nor a reach — which is what `blend_share` writes in that arm.
+                let a_share = |source: ShareSource| match source {
+                    ShareSource::Stratum => ShareProvenance {
+                        source,
+                        curve: None,
+                        reach: None,
+                    },
+                    _ => ShareProvenance {
+                        source,
+                        curve: share_curve,
+                        reach: share_curve.map(|curve| curve.reach(repeats)),
+                    },
+                };
+                let shares: Vec<Option<SharesProvenance>> = slippage
+                    .iter()
+                    .enumerate()
+                    .map(|(group, fitted)| {
+                        // **A row with no shares provenance at all**, at one stratum in four:
+                        // the `shorter_share_and_fall_off_origin` key the file leaves out.
+                        fitted.filter(|_| which_repeats % 4 != 3).map(|_| {
+                            match (&share_curve, fitted_here) {
+                                (None, _) => SharesProvenance {
+                                    slipped_reads: Some(a_number(
+                                        8_000.0,
+                                        &[which_period, which_repeats, group],
+                                    )),
+                                    shorter_share: a_share(ShareSource::Stratum),
+                                    fall_off: a_share(ShareSource::Stratum),
+                                },
+                                (Some(_), true) => SharesProvenance {
+                                    slipped_reads: Some(a_number(
+                                        8_000.0,
+                                        &[which_period, which_repeats, group],
+                                    )),
+                                    shorter_share: a_share(ShareSource::Blend {
+                                        curve_weight: a_number(0.45, &[which_repeats, group]),
+                                    }),
+                                    fall_off: a_share(ShareSource::Curve),
+                                },
+                                // What `derive_thin_strata` writes, and it writes nothing else.
+                                (Some(_), false) => SharesProvenance {
+                                    slipped_reads: None,
+                                    shorter_share: a_share(ShareSource::Curve),
+                                    fall_off: a_share(ShareSource::Curve),
+                                },
+                            }
+                        })
+                    })
+                    .collect();
+
+                if refused {
+                    // **`NoSpanningReads`, not `BelowTheFloor`**: the second is what a period's
+                    // curves turn into a derived stratum, so it cannot survive beside them.
+                    outcomes.push(StratumOutcome::Refused {
+                        stratum,
+                        tracts: 0,
+                        reason: StratumRefusal::NoSpanningReads,
+                    });
+                } else if fitted_here {
+                    let span = 1 + which_period;
+                    let classes = 2 * span + 1;
+                    let mut weights: Vec<f64> = (0..classes)
+                        .map(|class| a_number(1.0, &[which_period, which_repeats, class]))
+                        .collect();
+                    // Normalised exactly, since `StratumFits::over` refuses a spectrum that is
+                    // not a distribution.
+                    let total: f64 = weights.iter().sum();
+                    for weight in &mut weights {
+                        *weight /= total;
+                    }
+                    outcomes.push(StratumOutcome::Fitted(Box::new(StratumFit {
+                        stratum,
+                        slippage,
+                        length_spectrum: weights,
+                        concentration: a_number(3.0, &keys),
+                        log_likelihood_a_tract: -a_number(2.0, &keys),
+                        tracts_fitted: 100 + which_repeats,
+                        // **Empty, which is what a stratum that stood on its own tracts has** —
+                        // this field names the neighbouring repeat counts it borrowed from.
+                        borrowed: Vec::new(),
+                        converged: true,
+                        tracts_of_its_own: 100 + which_repeats,
+                        reads_crossing: 5_000 + which_repeats as u64,
+                        level_provenance: level,
+                        shares_provenance: shares,
+                    })));
+                } else {
+                    outcomes.push(StratumOutcome::Derived(Box::new(DerivedStratum {
+                        stratum,
+                        slippage,
+                        level_provenance: level,
+                        shares_provenance: shares,
+                        tracts_of_its_own: 3,
+                        reads_crossing: 40,
+                    })));
+                }
+            }
+        }
+        outcomes
+    }
+
+    /// **The tract ladder's middle rung**, one pooled spectrum a period, for the periods whose
+    /// curves the fit drew — the rung a run that skips the second pass over its tracts does not
+    /// have, and the one the file writes in `length_spectrum_by_period`.
+    fn the_runs_period_pools()
+    -> BTreeMap<u8, crate::ng::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum> {
+        PERIODS
+            .iter()
+            .enumerate()
+            .filter(|(_, period)| the_period_has_curves(**period))
+            .map(|(which_period, period)| {
+                let classes = 2 * (1 + which_period) + 1;
+                let mut weights: Vec<f64> = (0..classes)
+                    .map(|class| a_number(1.0, &[which_period, class, 7]))
+                    .collect();
+                let total: f64 = weights.iter().sum();
+                for weight in &mut weights {
+                    *weight /= total;
+                }
+                (
+                    *period,
+                    crate::ng::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum {
+                        period: *period,
+                        length_spectrum: weights,
+                        concentration: a_number(2.5, &[which_period]),
+                        tracts_fitted: 400 + which_period,
+                        strata_pooled: REPEAT_COUNTS.count(),
+                        converged: true,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The substitution rate at the grain §9 prices it at: one row a
+    /// `(read group × stratum × ploidy)` that was fitted, and none where it was not.
+    fn the_runs_substitution_rates() -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+        let mut rates = BTreeMap::new();
+        for group in 0..read_group_count() {
+            for (which_period, period) in PERIODS.iter().enumerate() {
+                for (which_repeats, repeats) in REPEAT_COUNTS.enumerate() {
+                    // **A row only where one was fitted**, which is what makes this axis's size a
+                    // question about the cohort rather than about the shape (spec §9).
+                    if (group + which_period + which_repeats) % 3 != 0 {
+                        continue;
+                    }
+                    let key = StratumKey {
+                        read_group: ReadGroupId(group as u32),
+                        stratum: SsrStratum::new(
+                            SsrPeriod::try_new(usize::from(*period)).expect("a period"),
+                            RepeatCount(u32::try_from(repeats).expect("a repeat count")),
+                        ),
+                        ploidy: Ploidy::try_new(2).expect("diploid"),
+                    };
+                    rates.insert(
+                        key,
+                        Estimate {
+                            value: ErrorRate::try_new(a_number(
+                                0.001,
+                                &[group, which_period, which_repeats],
+                            ))
+                            .expect("a rate"),
+                            provenance: Provenance::FittedHere,
+                            // **A count at the size a real one has**, because the width of this
+                            // number is part of what the file's largest axis costs a cohort.
+                            observations: 172_000_000 + group as u64 * 1_009,
+                        },
+                    );
+                }
+            }
+        }
+        rates
+    }
+
+    /// Everything `of_run` needs, from one place, so the two directions cannot be handed
+    /// different inputs.
+    struct TheRun {
+        parameters: RunParameters,
+        read_groups: ReadGroups,
+        rates: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        inbreeding: Vec<Estimate<InbreedingF>>,
+    }
+
+    fn a_run_shaped_like_a_fits() -> TheRun {
+        let read_groups = the_runs_read_groups();
+        let (rates, minted) = the_runs_calibration_inputs();
+        let inbreeding = the_runs_inbreeding();
+        let slippage_group_of: BTreeMap<ReadGroupId, u32> = (0..read_group_count())
+            .map(|group| (ReadGroupId(group as u32), (group % SLIPPAGE_GROUPS) as u32))
+            .collect();
+        let parameters = RunParameters::assemble(
+            &rates,
+            &minted,
+            &the_runs_contamination(),
+            DeclaredBatches::all_together(&read_groups),
+            inbreeding.iter().map(|estimate| estimate.value).collect(),
+            SpectrumSeed::new(1.0, 6e-4, SeedRegime::FittedCurve),
+            StratumFits::over(&the_runs_outcomes(), slippage_group_of)
+                .with_period_length_spectra(the_runs_period_pools()),
+            the_runs_substitution_rates(),
+            Ploidy::try_new(2).expect("diploid"),
+        );
+        TheRun {
+            parameters,
+            read_groups,
+            rates,
+            inbreeding,
+        }
+    }
+
+    fn a_census() -> CensusIdentity {
+        CensusIdentity {
+            terms: vec![CensusTerm {
+                term: "the loci actually kept".into(),
+                digest: "fedcba9876543210".into(),
+            }],
+        }
+    }
+
+    const A_REFERENCE_DIGEST: &str = "0123456789abcdef";
+
+    fn written(run: &TheRun) -> ParametersFile {
+        ParametersFile::of_run(
+            &run.parameters,
+            &run.read_groups,
+            &run.rates,
+            &run.inbreeding,
+            A_REFERENCE_DIGEST,
+            a_census(),
+        )
+    }
+
+    /// **The whole trip: parameters, file, text, file, parameters, file — and the two files are
+    /// the same file.**
+    ///
+    /// Six stages rather than three, because three would not see a projection that lost something
+    /// on the way *in*: a field dropped by `to_run_parameters` and re-derived by `of_run` gives
+    /// the same file after one trip. Writing the file a second time, from the parameters the file
+    /// produced, is what makes the middle of the trip visible.
+    #[test]
+    fn a_run_shaped_like_a_fits_survives_the_whole_trip() {
+        let run = a_run_shaped_like_a_fits();
+        let first = written(&run);
+        first
+            .validate()
+            .expect("a run this caller can assemble writes a file it can use");
+
+        let text = first.to_toml();
+        let read = ParametersFile::from_toml(&text).expect("the writer's own text parses");
+        assert_eq!(read, first, "the text is the file");
+
+        let back = read
+            .to_run_parameters()
+            .expect("and the file is a run's parameters");
+        let again = ParametersFile::of_run(
+            &back.parameters,
+            &run.read_groups,
+            &the_rates_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &read.fitted_from.reference_digest,
+            read.fitted_from.census.clone(),
+        );
+        assert_eq!(again, first, "and the parameters are the file again");
+        // **Implied by the line above except in one place**: the shape's `PartialEq` compares
+        // floats with `==`, and `-0.0 == 0.0` while the two are written differently. That one
+        // case is the whole of what this buys.
+        assert_eq!(again.to_toml(), text, "byte for byte");
+    }
+
+    /// **Every number a locus reads answers the same after the trip**, which the file comparison
+    /// cannot see: two strata whose rows were exchanged, numbers and all, write the same file.
+    #[test]
+    fn every_lookup_a_locus_makes_answers_the_same_after_the_trip() {
+        let run = a_run_shaped_like_a_fits();
+        let before = &run.parameters;
+        let after = written(&run)
+            .to_run_parameters()
+            .expect("a run's own file is a run's parameters")
+            .parameters;
+
+        assert_eq!(after.ploidy(), before.ploidy());
+        assert_eq!(after.read_group_count(), before.read_group_count());
+        assert_eq!(
+            after.calibration_by_read_group(),
+            before.calibration_by_read_group()
+        );
+        assert_eq!(
+            after.contamination_by_read_group(),
+            before.contamination_by_read_group()
+        );
+        assert_eq!(
+            after.inbreeding_coefficient_by_sample(),
+            before.inbreeding_coefficient_by_sample()
+        );
+        assert_eq!(after.prior_seed(), before.prior_seed());
+        assert_eq!(
+            after.repeat_tract_outlier_weight(),
+            before.repeat_tract_outlier_weight()
+        );
+        assert_eq!(
+            after.ssr_substitution_rate().collect::<Vec<_>>(),
+            before.ssr_substitution_rate().collect::<Vec<_>>()
+        );
+
+        // **The slippage lookup at every cell a locus can ask about**, which is every read group
+        // against every `(period, repeat count)` the run has — and two beyond its range, so that
+        // *no such stratum* is compared as well as the answers.
+        let mut answered = 0_u32;
+        let mut absent = 0_u32;
+        for group in 0..read_group_count() {
+            let id = ReadGroupId(group as u32);
+            for period in PERIODS {
+                for repeats in *REPEAT_COUNTS.start() - 1..=*REPEAT_COUNTS.end() + 1 {
+                    let was = before.ssr_slippage_fits().at(id, period, repeats);
+                    let is = after.ssr_slippage_fits().at(id, period, repeats);
+                    assert_eq!(
+                        is, was,
+                        "read group {group}, period {period}, {repeats} repeats"
+                    );
+                    match was {
+                        Ok(_) => answered += 1,
+                        Err(_) => absent += 1,
+                    }
+                }
+            }
+        }
+        // **A length spectrum at every stratum**, which rides on a different table and does not
+        // depend on the read group — so it is walked once rather than once a library.
+        let mut rungs: BTreeMap<&str, u32> = BTreeMap::new();
+        for period in PERIODS {
+            for repeats in REPEAT_COUNTS {
+                let was = before
+                    .ssr_slippage_fits()
+                    .length_spectrum_at(period, repeats);
+                let is = after
+                    .ssr_slippage_fits()
+                    .length_spectrum_at(period, repeats);
+                assert_eq!(is.rung(), was.rung(), "period {period}, {repeats} repeats");
+                assert_eq!(is.concentration(), was.concentration());
+                assert_eq!(is.fitted_weights(), was.fitted_weights());
+                *rungs
+                    .entry(match was.rung() {
+                        LengthSpectrumRung::StratumsOwnFit => "its own",
+                        LengthSpectrumRung::PeriodsPooledTracts => "its period's",
+                        LengthSpectrumRung::StatedFlat => "the flat one",
+                    })
+                    .or_default() += 1;
+            }
+        }
+        // **All three rungs of the ladder are walked**, which is what stops this comparing one
+        // rung with itself thirty-six times. Measured rather than reasoned about: the 16 strata
+        // fitted on their own tracts take the top rung; the 16 of the two curved periods that
+        // were not — 8 derived and 8 refused — take their period's pool; and the 4 refused strata
+        // of the period that has no curves, and so no pool, fall to the flat one.
+        assert_eq!(
+            rungs,
+            BTreeMap::from([("its own", 16), ("its period's", 16), ("the flat one", 4)])
+        );
+        // **The counts are asserted so that a lookup answering *absent* everywhere cannot pass.**
+        // Measured on this fixture rather than reasoned about: 6 read groups × 3 periods × 14
+        // repeat counts is 252 cells, of which **108 carry numbers and 144 do not** — a third of
+        // the strata were refused, two of the fourteen repeat counts are outside the run's range
+        // altogether, and one slippage group is silent at every third stratum.
+        assert_eq!((answered, absent), (108, 144));
+        assert_eq!(
+            (
+                before.ssr_slippage_fits().strata(),
+                before.ssr_slippage_fits().strata_with_a_length_spectrum(),
+            ),
+            (24, 16),
+            "a third of the 36 strata were refused and contribute no row; of the 24 that remain, \
+             the 16 with evidence of their own were fitted and the 8 without were derived from \
+             their period's curves"
+        );
+    }
+
+    /// **What the file costs at this shape**, which spec §9 prices from rows measured on the
+    /// built shape and says nothing has counted on a real cohort.
+    ///
+    /// **This is a synthetic run and not a cohort**, so what it can say is bytes a row rather
+    /// than how many rows a cohort has. It is here because §9's two per-row figures — 146 bytes
+    /// an inbreeding row, 146 a substitution-rate row — are the numbers its 0.44 MB and 62 MB
+    /// rest on, and nothing had re-measured them since the key names changed.
+    #[test]
+    fn the_files_two_cohort_sized_rows_are_the_size_the_spec_prices_them_at() {
+        let text = written(&a_run_shaped_like_a_fits()).to_toml();
+        // **The section as well as the table**, because `by_sample` names two different tables —
+        // the batching's and the inbreeding coefficients' — and the batching's comes first.
+        let a_row_of = |section: &str, table: &str| -> usize {
+            let rows: Vec<&str> = text
+                .lines()
+                .skip_while(|line| !line.starts_with(section))
+                .skip_while(|line| !line.starts_with(table))
+                .skip(1)
+                .take_while(|line| !line.starts_with(']'))
+                // **Rows only.** A `defaulted` row carries a provenance note above it, and a
+                // "bytes a row" that averaged prose in would be a different number quietly.
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .collect();
+            assert!(!rows.is_empty(), "{section} has a {table}");
+            rows.iter().map(|row| row.len() + 1).sum::<usize>() / rows.len()
+        };
+        let inbreeding = a_row_of("[inbreeding]", "by_sample = [");
+        let substitution = a_row_of("[repeat_tracts]", "substitution_rate_by_stratum = [");
+        // **Not an assertion on the spec's own two numbers**, which were measured on a different
+        // fixture with different names: what is pinned is the order of magnitude, so that a
+        // change which doubled a row's width would be noticed here rather than at 3,000 samples.
+        assert!(
+            (100..200).contains(&inbreeding),
+            "an inbreeding row is {inbreeding} bytes, where spec §9 prices it at 146"
+        );
+        assert!(
+            (100..200).contains(&substitution),
+            "a substitution-rate row is {substitution} bytes, where spec §9 prices it at 146"
+        );
+        // **The two numbers, so a reader has them rather than the band.** ⚑ Both are larger
+        // than the 146 bytes spec §9 prices each at, and the substitution rate — the axis §9's
+        // 62 MB at 3,000 samples rests on — is larger by a quarter, which would put that figure
+        // nearer 79 MB.
+        //
+        // **The difference is what is in the rows, not the format.** No key either row carries
+        // was touched by the 2026-08-30 renames, and neither row's shape has changed since §9 was
+        // written; what differs is how wide the numbers and names inside them are. So **185 is a
+        // floor and 79 MB with it**, and two things push a real cohort above it: a `read_group`
+        // is one digit here and four at 3,000 libraries, and a `bases_compared` count is nine
+        // digits here where the fit's own per-read-group total on HG002 is 172,616,054. The
+        // inbreeding row carries a sample name as well, and this fixture's are four characters.
+        //
+        // **§9's own 146 reproduces nothing in the tree**, including the fixture that existed
+        // when it was written, so what is compared here is an order of magnitude rather than a
+        // measurement against a measurement.
+        assert_eq!(
+            (inbreeding, substitution),
+            (157, 185),
+            "the two rows the file's cohort-sized axes are made of"
+        );
+    }
+
+    /// **A run with no repeat tracts at all makes the file-to-parameters-to-file trip too**,
+    /// which is the bottom of the committed input range: `CLAUDE.md` names one sample as the case
+    /// a design has to have an answer for, and it is the case every other fixture here is
+    /// furthest from.
+    ///
+    /// **It is a shorter trip than the one above** — file → parameters → file, with no text in it
+    /// — because what it exercises is the projection's behaviour on empty tables rather than the
+    /// writer's.
+    #[test]
+    fn the_smallest_run_the_caller_commits_to_makes_the_trip_too() {
+        let file = {
+            let mut small = a_file_using_every_shape();
+            small.contamination = None;
+            small.fitted_from.samples.truncate(1);
+            small.fitted_from.read_groups.truncate(1);
+            small.base_quality_calibration.by_read_group.truncate(1);
+            small.sequencing_batches.by_read_group.truncate(1);
+            small.sequencing_batches.by_sample.truncate(1);
+            small.inbreeding.by_sample.truncate(1);
+            small.repeat_tracts.slippage_group_by_read_group.clear();
+            small.repeat_tracts.slippage_by_stratum_and_group.clear();
+            small.repeat_tracts.length_spectrum_by_stratum.clear();
+            small.repeat_tracts.length_spectrum_by_period.clear();
+            small.repeat_tracts.substitution_rate_by_stratum.clear();
+            small
+                .repeat_tracts
+                .fallback_length_spectrum_concentration
+                .warrant = super::super::Warrant::Defaulted;
+            small
+        };
+        let read_groups = ReadGroups::of_lanes(&[(
+            file.fitted_from.read_groups[0].declared_id.as_str(),
+            file.fitted_from.read_groups[0].sample.as_str(),
+            file.fitted_from.read_groups[0].library.as_str(),
+        )]);
+
+        let back = file.to_run_parameters().expect("one sample, no tracts");
+        let again = ParametersFile::of_run(
+            &back.parameters,
+            &read_groups,
+            &the_rates_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &file.fitted_from.reference_digest,
+            file.fitted_from.census.clone(),
+        );
+        assert_eq!(again, file);
+        assert_eq!(
+            back.parameters.ssr_slippage_fits().at(ReadGroupId(0), 2, 6),
+            Err(NoSlippage::UnknownReadGroup),
+            "a run that declared no slippage group says so, rather than answering under one"
+        );
     }
 }
