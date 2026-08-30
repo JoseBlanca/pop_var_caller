@@ -20,7 +20,7 @@
 //!   | what is true | how the file says it |
 //!   |---|---|
 //!   | no read group identified any contamination | no `[contamination]` section |
-//!   | a read group was measured and found clean | a row whose `measurement` has `fraction = 0` and non-zero evidence counts |
+//!   | a read group was measured and found clean | a row whose `measurement` has `share_of_reads_from_another_sample = 0` and non-zero evidence counts |
 //!   | a read group's error rate could not be fitted | a multiplier of 1.0 whose `warrant` is `defaulted` |
 //!   | a stratum was furnished from its period's curves | no row for it in `length_spectrum_by_stratum` |
 //!   | a slippage group put no read in a stratum | no row for that pair in `slippage_by_stratum_and_group` |
@@ -50,7 +50,7 @@
 //!
 //! The tree, in the one-row-a-line inline-table form **the hand-written writer of step B2 is
 //! meant to emit** — which is not what `serde`'s own serializer produces today; that writes
-//! `[[array of tables]]` headers instead, and `tests/testdata/every_shape.toml` is what it
+//! `[[array of tables]]` headers instead, and `testdata/every_shape.toml` is what it
 //! actually emits:
 //!
 //! ```toml
@@ -73,8 +73,8 @@
 //! [contamination]                  # §3.4 — the whole section absent means uncontaminated,
 //!                                  #        and a row with no `measurement` was not measured
 //! by_read_group = [ { read_group = 0, library = "lib3",
-//!                     measurement = { fraction = 0.031, markers_with_reads = 4211,
-//!                                     reads_on_markers = 90233,
+//!                     measurement = { share_of_reads_from_another_sample = 0.031,
+//!                                     markers_with_reads = 4211, reads_on_markers = 90233,
 //!                                     fitted_from_reads_of = "this_read_groups_own_reads" } } ]
 //!
 //! [sequencing_batches]             # §3.4 — declared by the run, not fitted
@@ -609,7 +609,7 @@ pub struct ContaminationRow {
 #[serde(deny_unknown_fields)]
 pub struct ContaminationMeasurement {
     /// The share of this read group's reads that came from another individual.
-    pub share_of_reads_from_elsewhere: f64,
+    pub share_of_reads_from_another_sample: f64,
     /// How many of the panel's varying positions this read group put a read on.
     pub markers_with_reads: u64,
     /// How many reads it put there.
@@ -862,12 +862,13 @@ pub struct SlippageRow {
     pub shorter_share: f64,
     /// How fast two-repeat slips fall off against one-repeat slips.
     pub fall_off: f64,
-    /// Where the level came from, and how much of this stratum's own evidence stood behind it.
-    pub level_origin: LevelOrigin,
-    /// Where the direction split and the fall-off came from. **Separate from the level's**,
-    /// because the three numbers are smoothed on their own curves and a stratum can take its
-    /// level from a curve while keeping its own shares.
-    pub shares_origin: Option<SharesOrigin>,
+    /// Where [`Self::share_of_reads_that_slip`] came from, and how much of this stratum's own
+    /// evidence stood behind it.
+    pub share_of_reads_that_slip_origin: LevelOrigin,
+    /// Where [`Self::shorter_share`] and [`Self::fall_off`] came from. **Separate from the slip
+    /// share's**, because the three numbers are smoothed on their own curves and a stratum can
+    /// take its slip share from a curve while keeping its own two shares.
+    pub shorter_share_and_fall_off_origin: Option<SharesOrigin>,
 }
 
 /// Where a stratum's slippage **level** came from — the file's spelling of
@@ -1266,7 +1267,7 @@ mod tests {
                         read_group: 0,
                         library: "lib3".into(),
                         measurement: Some(ContaminationMeasurement {
-                            share_of_reads_from_elsewhere: 0.031,
+                            share_of_reads_from_another_sample: 0.031,
                             markers_with_reads: 4211,
                             reads_on_markers: 90233,
                             fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -1287,7 +1288,7 @@ mod tests {
                         read_group: 2,
                         library: "lib5".into(),
                         measurement: Some(ContaminationMeasurement {
-                            share_of_reads_from_elsewhere: 0.0,
+                            share_of_reads_from_another_sample: 0.0,
                             markers_with_reads: 2903,
                             reads_on_markers: 64118,
                             fitted_from_reads_of: ContaminationFittedFrom::EveryReadOfThisSample,
@@ -1377,7 +1378,7 @@ mod tests {
                         share_of_reads_that_slip: 0.0421,
                         shorter_share: 0.83,
                         fall_off: 0.31,
-                        level_origin: LevelOrigin {
+                        share_of_reads_that_slip_origin: LevelOrigin {
                             smoothing: LevelSmoothing::Blend {
                                 curve_weight: 0.37,
                                 curve: a_slippage_curve_fitted_over(5, 19),
@@ -1385,7 +1386,7 @@ mod tests {
                             },
                             expected_slipped_reads: Some(8_000.5),
                         },
-                        shares_origin: Some(SharesOrigin {
+                        shorter_share_and_fall_off_origin: Some(SharesOrigin {
                             expected_slipped_reads: Some(8_000.5),
                             shorter_share_smoothing: ShareSmoothing::ThisStratum,
                             fall_off_smoothing: ShareSmoothing::ThisPeriodsCurve {
@@ -1401,7 +1402,7 @@ mod tests {
                         share_of_reads_that_slip: 0.0913,
                         shorter_share: 0.79,
                         fall_off: 0.28,
-                        level_origin: LevelOrigin {
+                        share_of_reads_that_slip_origin: LevelOrigin {
                             smoothing: LevelSmoothing::ThisPeriodsCurve {
                                 curve: a_slippage_curve_fitted_over(12, 19),
                                 reach: CurveReach::BelowTheFittedRange,
@@ -1410,7 +1411,7 @@ mod tests {
                             // own to count slipped reads against.
                             expected_slipped_reads: None,
                         },
-                        shares_origin: None,
+                        shorter_share_and_fall_off_origin: None,
                     },
                     SlippageRow {
                         period: 1,
@@ -1419,11 +1420,11 @@ mod tests {
                         share_of_reads_that_slip: 0.19,
                         shorter_share: 0.77,
                         fall_off: 0.24,
-                        level_origin: LevelOrigin {
+                        share_of_reads_that_slip_origin: LevelOrigin {
                             smoothing: LevelSmoothing::ThisStratum,
                             expected_slipped_reads: Some(12_040.25),
                         },
-                        shares_origin: Some(SharesOrigin {
+                        shorter_share_and_fall_off_origin: Some(SharesOrigin {
                             expected_slipped_reads: Some(12_040.25),
                             shorter_share_smoothing: ShareSmoothing::Blend {
                                 curve_weight: 0.61,
@@ -1694,25 +1695,25 @@ mod tests {
             .slippage_by_stratum_and_group[0]
             .clone();
 
-        row.shares_origin = None;
+        row.shorter_share_and_fall_off_origin = None;
         let value = toml::Value::try_from(&row).expect("a slippage row is a TOML value");
         assert!(
-            value.get("shares_origin").is_none(),
+            value.get("shorter_share_and_fall_off_origin").is_none(),
             "an absent shares origin leaves no key, got: {value}"
         );
         assert!(
-            value.get("level_origin").is_some(),
+            value.get("share_of_reads_that_slip_origin").is_some(),
             "the level origin is not optional and is always written"
         );
 
-        row.shares_origin = Some(SharesOrigin {
+        row.shorter_share_and_fall_off_origin = Some(SharesOrigin {
             expected_slipped_reads: None,
             shorter_share_smoothing: ShareSmoothing::ThisStratum,
             fall_off_smoothing: ShareSmoothing::ThisStratum,
         });
         let value = toml::Value::try_from(&row).expect("a slippage row is a TOML value");
         let shares = value
-            .get("shares_origin")
+            .get("shorter_share_and_fall_off_origin")
             .expect("a present shares origin writes its key");
         assert!(
             shares.get("expected_slipped_reads").is_none(),
@@ -1903,7 +1904,7 @@ mod tests {
             .find(|row| {
                 row.measurement
                     .as_ref()
-                    .is_some_and(|found| found.share_of_reads_from_elsewhere == 0.0)
+                    .is_some_and(|found| found.share_of_reads_from_another_sample == 0.0)
             })
             .expect("a read group measured and found clean");
         let unmeasured = rows
@@ -2059,7 +2060,7 @@ mod tests {
             .expect("a table")
             .by_read_group[0]
             .measurement = Some(ContaminationMeasurement {
-            share_of_reads_from_elsewhere: 0.0,
+            share_of_reads_from_another_sample: 0.0,
             markers_with_reads: 0,
             reads_on_markers: 0,
             fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -2137,7 +2138,7 @@ mod tests {
     /// **A mistyped key is refused rather than absorbed.**
     ///
     /// The hazard is the optional fields: serde's ordinary behaviour discards an unrecognised
-    /// key in silence, so `[…level_origin.smoothin]` would parse and leave `smoothing` — or, for
+    /// key in silence, so `[…share_of_reads_that_slip_origin.smoothin]` would parse and leave `smoothing` — or, for
     /// an `Option`, an absence that is data. `deny_unknown_fields` is a type attribute with no
     /// call-site knob, so this cannot be a property the reader turns on later.
     #[test]
@@ -2201,7 +2202,7 @@ mod tests {
     /// The hand-written writer of step B2 emits one row a line as an inline table; `serde`'s
     /// serializer emits `[[array of tables]]` headers instead, so every other test here parses
     /// the one shape that writer will *not* produce. The nesting this reaches is four deep —
-    /// `level_origin.smoothing.blend.curve` — which is the part worth knowing about before both
+    /// `share_of_reads_that_slip_origin.smoothing.blend.curve` — which is the part worth knowing about before both
     /// the writer and the reader are built.
     #[test]
     fn the_documented_inline_form_parses() {
@@ -2237,7 +2238,7 @@ rung = "fitted_curve"
 [repeat_tracts]
 fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
-slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, level_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
+slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
 length_spectrum_by_stratum = []
 length_spectrum_by_period = []
 substitution_rate_by_stratum = []
@@ -2248,10 +2249,13 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 
         let row = &file.repeat_tracts.slippage_by_stratum_and_group[0];
-        assert_eq!(row.level_origin.expected_slipped_reads, Some(8000.5));
+        assert_eq!(
+            row.share_of_reads_that_slip_origin.expected_slipped_reads,
+            Some(8000.5)
+        );
         assert!(
             matches!(
-                row.level_origin.smoothing,
+                row.share_of_reads_that_slip_origin.smoothing,
                 LevelSmoothing::Blend {
                     curve_weight: 0.37,
                     reach: CurveReach::InsideTheFittedRange,
@@ -2262,7 +2266,7 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
         );
         // The omitted key is absence, not a default: this row has no shares origin at all, and
         // the whole document has no contamination section.
-        assert!(row.shares_origin.is_none());
+        assert!(row.shorter_share_and_fall_off_origin.is_none());
         assert!(
             file.contamination.is_none(),
             "an omitted contamination section reads as an uncontaminated run"
@@ -2307,14 +2311,14 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
         let mut checked = 0;
         for row in &file.repeat_tracts.slippage_by_stratum_and_group {
             let mut claims: Vec<(u64, u64, CurveReach)> = Vec::new();
-            match &row.level_origin.smoothing {
+            match &row.share_of_reads_that_slip_origin.smoothing {
                 LevelSmoothing::ThisStratum => {}
                 LevelSmoothing::ThisPeriodsCurve { curve, reach }
                 | LevelSmoothing::Blend { curve, reach, .. } => {
                     claims.push((curve.fitted_from_repeats, curve.fitted_to_repeats, *reach))
                 }
             }
-            if let Some(shares) = &row.shares_origin {
+            if let Some(shares) = &row.shorter_share_and_fall_off_origin {
                 for smoothing in [&shares.shorter_share_smoothing, &shares.fall_off_smoothing] {
                     match smoothing {
                         ShareSmoothing::ThisStratum => {}

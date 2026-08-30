@@ -62,7 +62,7 @@ read_group = 0
 library = "lib3"
 
 [contamination.by_read_group.measurement]
-share_of_reads_from_elsewhere = 0.031
+share_of_reads_from_another_sample = 0.031
 markers_with_reads = 4211
 reads_on_markers = 90233
 fitted_from_reads_of = "this_read_groups_own_reads"
@@ -76,7 +76,7 @@ read_group = 2
 library = "lib5"
 
 [contamination.by_read_group.measurement]
-share_of_reads_from_elsewhere = 0.0
+share_of_reads_from_another_sample = 0.0
 markers_with_reads = 2903
 reads_on_markers = 64118
 fitted_from_reads_of = "every_read_of_this_sample"
@@ -153,14 +153,14 @@ share_of_reads_that_slip = 0.0421
 shorter_share = 0.83
 fall_off = 0.31
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
 expected_slipped_reads = 8000.5
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin.smoothing.blend]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.blend]
 curve_weight = 0.37
 reach = "inside_the_fitted_range"
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin.smoothing.blend.curve]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.blend.curve]
 rise_shape = 0.55
 intercept = 0.011
 slope = 0.004
@@ -169,14 +169,14 @@ fitted_to_repeats = 19
 held_out_error = 0.3333333333333333
 cells = 23
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 8000.5
 shorter_share_smoothing = "this_stratum"
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin.fall_off_smoothing.this_periods_curve]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.this_periods_curve]
 reach = "above_the_fitted_range"
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin.fall_off_smoothing.this_periods_curve.curve]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.this_periods_curve.curve]
 shape = "turning"
 intercept = 1.4
 slope = -0.09
@@ -196,10 +196,10 @@ share_of_reads_that_slip = 0.0913
 shorter_share = 0.79
 fall_off = 0.28
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin.smoothing.this_periods_curve]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.this_periods_curve]
 reach = "below_the_fitted_range"
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin.smoothing.this_periods_curve.curve]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.this_periods_curve.curve]
 rise_shape = 0.55
 intercept = 0.011
 slope = 0.004
@@ -216,19 +216,19 @@ share_of_reads_that_slip = 0.19
 shorter_share = 0.77
 fall_off = 0.24
 
-[repeat_tracts.slippage_by_stratum_and_group.level_origin]
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
 smoothing = "this_stratum"
 expected_slipped_reads = 12040.25
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 12040.25
 fall_off_smoothing = "this_stratum"
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin.shorter_share_smoothing.blend]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend]
 curve_weight = 0.61
 reach = "inside_the_fitted_range"
 
-[repeat_tracts.slippage_by_stratum_and_group.shares_origin.shorter_share_smoothing.blend.curve]
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend.curve]
 shape = "turning"
 intercept = 1.4
 slope = -0.09

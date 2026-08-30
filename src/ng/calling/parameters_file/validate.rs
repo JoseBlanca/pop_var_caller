@@ -308,16 +308,19 @@ impl ParametersFile {
             // another individual's DNA is not a sample of this one". A share of exactly one
             // accepted here becomes a panic several frames later, naming a read group rather than
             // a file — which is the failure this whole module exists to move earlier.
-            let share_at = format!("{at}.share_of_reads_from_elsewhere");
-            finite(share_at.clone(), measurement.share_of_reads_from_elsewhere)?;
-            if !(0.0..1.0).contains(&measurement.share_of_reads_from_elsewhere) {
+            let share_at = format!("{at}.share_of_reads_from_another_sample");
+            finite(
+                share_at.clone(),
+                measurement.share_of_reads_from_another_sample,
+            )?;
+            if !(0.0..1.0).contains(&measurement.share_of_reads_from_another_sample) {
                 return Err(refuse(
                     share_at,
                     format!(
                         "is {}, and a share of a lane's reads that came from somebody else is at \
                          or above zero and below one — a whole library of another individual is \
                          not a sample of this one",
-                        measurement.share_of_reads_from_elsewhere
+                        measurement.share_of_reads_from_another_sample
                     ),
                 ));
             }
@@ -453,20 +456,26 @@ impl ParametersFile {
                     format!("is {}, and a fall-off is not negative", row.fall_off),
                 ));
             }
-            a_level_smoothing(&at, &row.level_origin.smoothing)?;
-            if let Some(reads) = row.level_origin.expected_slipped_reads {
-                finite(format!("{at}.level_origin.expected_slipped_reads"), reads)?;
+            a_level_smoothing(&at, &row.share_of_reads_that_slip_origin.smoothing)?;
+            if let Some(reads) = row.share_of_reads_that_slip_origin.expected_slipped_reads {
+                finite(
+                    format!("{at}.share_of_reads_that_slip_origin.expected_slipped_reads"),
+                    reads,
+                )?;
             }
-            if let Some(shares) = &row.shares_origin {
+            if let Some(shares) = &row.shorter_share_and_fall_off_origin {
                 if let Some(reads) = shares.expected_slipped_reads {
-                    finite(format!("{at}.shares_origin.expected_slipped_reads"), reads)?;
+                    finite(
+                        format!("{at}.shorter_share_and_fall_off_origin.expected_slipped_reads"),
+                        reads,
+                    )?;
                 }
                 a_share_smoothing(
-                    &format!("{at}.shares_origin.shorter_share_smoothing"),
+                    &format!("{at}.shorter_share_and_fall_off_origin.shorter_share_smoothing"),
                     &shares.shorter_share_smoothing,
                 )?;
                 a_share_smoothing(
-                    &format!("{at}.shares_origin.fall_off_smoothing"),
+                    &format!("{at}.shorter_share_and_fall_off_origin.fall_off_smoothing"),
                     &shares.fall_off_smoothing,
                 )?;
             }
@@ -735,7 +744,7 @@ fn a_length_spectrum(
 /// because a run that reports where a number came from should not report `nan` as the slope of the
 /// line it came off, and because a reader who hand-edits a curve gets told rather than ignored.
 fn a_level_smoothing(at: &str, smoothing: &LevelSmoothing) -> Result<(), ParametersFileError> {
-    let at = format!("{at}.level_origin.smoothing");
+    let at = format!("{at}.share_of_reads_that_slip_origin.smoothing");
     match smoothing {
         LevelSmoothing::ThisStratum => Ok(()),
         LevelSmoothing::ThisPeriodsCurve { curve, .. } => {
@@ -1057,7 +1066,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
                 Some(ContaminationMeasurement {
-                    share_of_reads_from_elsewhere: 0.031,
+                    share_of_reads_from_another_sample: 0.031,
                     markers_with_reads: 0,
                     reads_on_markers: 90_233,
                     fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -1075,15 +1084,18 @@ mod tests {
                 .measurement
                 .as_mut()
                 .expect("read group 0 was measured")
-                .share_of_reads_from_elsewhere = 1.0;
+                .share_of_reads_from_another_sample = 1.0;
         });
-        assert!(field.ends_with("share_of_reads_from_elsewhere"), "{field}");
+        assert!(
+            field.ends_with("share_of_reads_from_another_sample"),
+            "{field}"
+        );
         assert!(problem.contains("below one"), "{problem}");
 
         let (field, problem) = refused(|file| {
             file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
                 Some(ContaminationMeasurement {
-                    share_of_reads_from_elsewhere: 0.0,
+                    share_of_reads_from_another_sample: 0.0,
                     markers_with_reads: 0,
                     reads_on_markers: 0,
                     fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -1100,7 +1112,7 @@ mod tests {
         accepted(|file| {
             file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
                 Some(ContaminationMeasurement {
-                    share_of_reads_from_elsewhere: 0.0,
+                    share_of_reads_from_another_sample: 0.0,
                     markers_with_reads: 2903,
                     reads_on_markers: 64118,
                     fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -1174,7 +1186,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             if let LevelSmoothing::Blend { curve, .. } =
                 &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                    .level_origin
+                    .share_of_reads_that_slip_origin
                     .smoothing
             {
                 curve.slope = f64::NAN;
@@ -1187,7 +1199,7 @@ mod tests {
 
         let (field, _) = refused(|file| {
             let shares = file.repeat_tracts.slippage_by_stratum_and_group[0]
-                .shares_origin
+                .shorter_share_and_fall_off_origin
                 .as_mut()
                 .expect("the fixture's first row records its shares' origin");
             if let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &mut shares.fall_off_smoothing {
@@ -1200,11 +1212,11 @@ mod tests {
 
         let (field, _) = refused(|file| {
             file.repeat_tracts.slippage_by_stratum_and_group[0]
-                .level_origin
+                .share_of_reads_that_slip_origin
                 .expected_slipped_reads = Some(f64::NAN);
         });
         assert!(
-            field.ends_with("level_origin.expected_slipped_reads"),
+            field.ends_with("share_of_reads_that_slip_origin.expected_slipped_reads"),
             "{field}"
         );
     }
@@ -1225,7 +1237,7 @@ mod tests {
         let (field, _) = refused(|file| {
             if let LevelSmoothing::Blend { curve_weight, .. } =
                 &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                    .level_origin
+                    .share_of_reads_that_slip_origin
                     .smoothing
             {
                 *curve_weight = 1.9;
@@ -1237,7 +1249,7 @@ mod tests {
 
         let (field, _) = refused(|file| {
             let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
-                .shares_origin
+                .shorter_share_and_fall_off_origin
                 .as_mut()
                 .expect("the fixture's third row records its shares' origin");
             if let ShareSmoothing::Blend { curve_weight, .. } = &mut shares.shorter_share_smoothing
@@ -1462,14 +1474,14 @@ mod tests {
             refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0),
             refused(|file| file.format_version = 9),
             // **The nested paths, which are what an earlier version of this test could not
-            // see.** It compared only the last segment, so a refusal pointing at
-            // `shares_origin.shorter_share` passed on the strength of its final
-            // `curve_weight` — while `shorter_share` is a real sibling key of that same row,
-            // holding a perfectly good number. A path that names a healthy key is worse than
-            // one that names nothing, because the reader stops there.
+            // see.** It compared only the last segment, so a refusal that named the row's
+            // `shorter_share` where the key is `shorter_share_smoothing` passed on the strength
+            // of its final `curve_weight` — and `shorter_share` is a real sibling key of that
+            // same row, holding a perfectly good number. A path that names a healthy key is
+            // worse than one that names nothing, because the reader stops there.
             refused(|file| {
                 let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
-                    .shares_origin
+                    .shorter_share_and_fall_off_origin
                     .as_mut()
                     .expect("the fixture's third row records its shares' origin");
                 if let ShareSmoothing::Blend { curve_weight, .. } =
@@ -1483,7 +1495,7 @@ mod tests {
             refused(|file| {
                 if let LevelSmoothing::Blend { curve_weight, .. } =
                     &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                        .level_origin
+                        .share_of_reads_that_slip_origin
                         .smoothing
                 {
                     *curve_weight = 1.9;

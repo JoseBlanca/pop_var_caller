@@ -315,7 +315,7 @@ fn contamination_of(
                     // reading the fraction would write that out as a measurement of zero — the
                     // one thing spec §5's second row says a reader must never do.
                     measurement: view.was_measured().then(|| ContaminationMeasurement {
-                        share_of_reads_from_elsewhere: view.fraction,
+                        share_of_reads_from_another_sample: view.fraction,
                         markers_with_reads: view.markers_with_reads,
                         reads_on_markers: view.reads_on_markers,
                         fitted_from_reads_of: view.source.into(),
@@ -444,8 +444,12 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                 share_of_reads_that_slip: fitted.slippage.level,
                 shorter_share: fitted.slippage.shorter_share,
                 fall_off: fitted.slippage.fall_off,
-                level_origin: level_origin_of(fitted.level, stratum, slippage_group),
-                shares_origin: fitted.shares.map(|shares| SharesOrigin {
+                share_of_reads_that_slip_origin: level_origin_of(
+                    fitted.level,
+                    stratum,
+                    slippage_group,
+                ),
+                shorter_share_and_fall_off_origin: fitted.shares.map(|shares| SharesOrigin {
                     expected_slipped_reads: shares.slipped_reads,
                     shorter_share_smoothing: share_smoothing_of(
                         shares.shorter_share,
@@ -940,10 +944,10 @@ mod tests {
     ///   period's curve — three different origins in one row.
     /// - period 2 at 11 repeats — **derived** from the period's curves, so it has no length
     ///   spectrum at all, and only group 1 has numbers. Its shares provenance is absent, which
-    ///   is the `shares_origin` key the file must leave out.
+    ///   is the `shorter_share_and_fall_off_origin` key the file must leave out.
     /// - period 3 at 9 repeats — **derived**, group 1 only, and its shares came off a **blend**.
     ///   Its group-0 shares are absent where its group-1 shares are not, so a reader that took
-    ///   group 0's shares for every group would write this row's `shares_origin` as missing.
+    ///   group 0's shares for every group would write this row's `shorter_share_and_fall_off_origin` as missing.
     /// - period 1 at 30 repeats — **refused**, which contributes nothing at all.
     fn the_runs_slippage() -> StratumFits {
         let fitted = StratumOutcome::Fitted(Box::new(StratumFit {
@@ -1450,7 +1454,7 @@ mod tests {
             .measurement
             .as_ref()
             .expect("read group 0 identified a fraction");
-        assert_eq!(contaminated.share_of_reads_from_elsewhere, 0.031);
+        assert_eq!(contaminated.share_of_reads_from_another_sample, 0.031);
         assert_eq!(contaminated.markers_with_reads, 4_211);
         assert_eq!(contaminated.reads_on_markers, 90_233);
         assert_eq!(
@@ -1474,7 +1478,7 @@ mod tests {
             .measurement
             .as_ref()
             .expect("read group 2 was measured and found clean");
-        assert_eq!(clean.share_of_reads_from_elsewhere, 0.0);
+        assert_eq!(clean.share_of_reads_from_another_sample, 0.0);
         assert_eq!(clean.markers_with_reads, 2_903);
         assert_eq!(clean.reads_on_markers, 64_118);
         assert_eq!(
@@ -1587,8 +1591,13 @@ mod tests {
         assert_eq!(blended.share_of_reads_that_slip, 0.0421);
         assert_eq!(blended.shorter_share, 0.83);
         assert_eq!(blended.fall_off, 0.31);
-        assert_eq!(blended.level_origin.expected_slipped_reads, Some(8_000.5));
-        match &blended.level_origin.smoothing {
+        assert_eq!(
+            blended
+                .share_of_reads_that_slip_origin
+                .expected_slipped_reads,
+            Some(8_000.5)
+        );
+        match &blended.share_of_reads_that_slip_origin.smoothing {
             LevelSmoothing::Blend {
                 curve_weight,
                 reach,
@@ -1601,7 +1610,7 @@ mod tests {
         }
 
         let shares = blended
-            .shares_origin
+            .shorter_share_and_fall_off_origin
             .as_ref()
             .expect("this stratum has a shares provenance");
         assert_eq!(shares.expected_slipped_reads, Some(8_000.5));
@@ -1618,19 +1627,22 @@ mod tests {
         }
 
         let derived = &file.repeat_tracts.slippage_by_stratum_and_group[1];
-        match &derived.level_origin.smoothing {
+        match &derived.share_of_reads_that_slip_origin.smoothing {
             LevelSmoothing::ThisPeriodsCurve { reach, .. } => {
                 assert_eq!(*reach, CurveReach::BelowTheFittedRange)
             }
             other => panic!("a derived stratum's level is its period's curve, not {other:?}"),
         }
         assert_eq!(
-            derived.level_origin.expected_slipped_reads, None,
+            derived
+                .share_of_reads_that_slip_origin
+                .expected_slipped_reads,
+            None,
             "a stratum that borrowed has reads of its own but no level of its own to say how \
              many of them slipped — and absent is not zero"
         );
         assert_eq!(
-            derived.shares_origin, None,
+            derived.shorter_share_and_fall_off_origin, None,
             "no shares provenance was recorded for this pair, so the file writes no key"
         );
 
@@ -1639,7 +1651,7 @@ mod tests {
         // as missing.
         let blended_shares = &file.repeat_tracts.slippage_by_stratum_and_group[2];
         let shares = blended_shares
-            .shares_origin
+            .shorter_share_and_fall_off_origin
             .as_ref()
             .expect("slippage group 1 has a shares provenance at this stratum");
         assert_eq!(shares.expected_slipped_reads, Some(31.0));
@@ -1671,7 +1683,9 @@ mod tests {
         let file = the_projected_file();
         let blended = &file.repeat_tracts.slippage_by_stratum_and_group[0];
 
-        let LevelSmoothing::Blend { curve, .. } = &blended.level_origin.smoothing else {
+        let LevelSmoothing::Blend { curve, .. } =
+            &blended.share_of_reads_that_slip_origin.smoothing
+        else {
             panic!("this stratum's level was blended")
         };
         assert_eq!(
@@ -1685,7 +1699,10 @@ mod tests {
         assert_eq!(curve.held_out_error, 0.077);
         assert_eq!(curve.cells, 23);
 
-        let shares = blended.shares_origin.as_ref().expect("a shares provenance");
+        let shares = blended
+            .shorter_share_and_fall_off_origin
+            .as_ref()
+            .expect("a shares provenance");
         let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &shares.fall_off_smoothing else {
             panic!("this stratum's fall-off came off its period's curve")
         };

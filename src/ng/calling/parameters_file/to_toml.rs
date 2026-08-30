@@ -261,7 +261,9 @@ impl ParametersFile {
                 "",
                 "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled.",
                 "",
-                "`level_origin` and `shares_origin` record where each came from — the first for the slip share, the second for the other two: its stratum's own fit, its period's curve, or a blend of the two, with the curve itself recorded so an interpolation can be told from a measurement. Each of the two carries its own `expected_slipped_reads`, counted separately rather than shared, so a row showing the same number twice is not a duplicate. A share curve also records `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`).",
+                "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own.",
+                "",
+                "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
             ],
         );
@@ -676,8 +678,8 @@ fn a_contamination_row(row: &ContaminationRow) -> String {
 fn a_contamination_measurement(measurement: &ContaminationMeasurement) -> String {
     an_inline_table(&[
         (
-            "share_of_reads_from_elsewhere",
-            a_toml_float(measurement.share_of_reads_from_elsewhere),
+            "share_of_reads_from_another_sample",
+            a_toml_float(measurement.share_of_reads_from_another_sample),
         ),
         (
             "markers_with_reads",
@@ -743,12 +745,15 @@ fn a_slippage_row(row: &SlippageRow) -> String {
         ),
         ("shorter_share", a_toml_float(row.shorter_share)),
         ("fall_off", a_toml_float(row.fall_off)),
-        ("level_origin", a_level_origin(&row.level_origin)),
+        (
+            "share_of_reads_that_slip_origin",
+            a_level_origin(&row.share_of_reads_that_slip_origin),
+        ),
     ];
     // **No shares origin is no key**, which is what the fit says about a pair whose shares were
     // never recorded — not a shares origin whose fields are empty.
-    if let Some(shares) = &row.shares_origin {
-        fields.push(("shares_origin", a_shares_origin(shares)));
+    if let Some(shares) = &row.shorter_share_and_fall_off_origin {
+        fields.push(("shorter_share_and_fall_off_origin", a_shares_origin(shares)));
     }
     an_inline_table(&fields)
 }
@@ -1339,7 +1344,7 @@ mod tests {
             super::super::ContaminationFittedFrom::EveryReadOfThisSample,
         ] {
             let written = a_contamination_measurement(&ContaminationMeasurement {
-                share_of_reads_from_elsewhere: 0.5,
+                share_of_reads_from_another_sample: 0.5,
                 markers_with_reads: 1,
                 reads_on_markers: 1,
                 fitted_from_reads_of: source,
@@ -1381,14 +1386,17 @@ mod tests {
     fn a_shares_origin_that_fitted_nothing_writes_no_slipped_reads_key() {
         let mut file = a_file_using_every_shape();
         file.repeat_tracts.slippage_by_stratum_and_group[0]
-            .shares_origin
+            .shorter_share_and_fall_off_origin
             .as_mut()
             .expect("the first row carries a shares origin")
             .expected_slipped_reads = None;
         let text = file.to_toml();
         let row = text
             .lines()
-            .find(|line| line.contains("shares_origin") && !line.trim_start().starts_with('#'))
+            .find(|line| {
+                line.contains("shorter_share_and_fall_off_origin")
+                    && !line.trim_start().starts_with('#')
+            })
             .expect("the row is written");
         assert_eq!(
             row.matches("expected_slipped_reads").count(),
