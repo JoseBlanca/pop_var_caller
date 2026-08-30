@@ -1253,12 +1253,25 @@ mod tests {
     // Worker-count invariance
     // -----------------------------------------------------------------
 
-    /// The genome the invariance test covers: two contigs, records every 40 bases, far enough
-    /// across the 1 kb grid that the sample cuts many blocks.
-    #[cfg(test)]
+    /// The block grid the sharded sample is written on.
+    ///
+    /// ⚠ **Named because the mid-block precondition divides by it**, and the two used to be two
+    /// literals that had to agree with nothing making them. Measured: writing the fixture on a
+    /// 40 bp grid instead gives every record its own block — 1,000 instead of 40 — so every shard
+    /// boundary lands on a grid line, the exact condition the precondition exists to refuse, **and
+    /// the test still passed**. The filter is not conservative: a position off the 1 kb grid can
+    /// sit exactly on a finer one.
+    const GRID_BP_OF_THE_SHARDED_SAMPLE: u64 = 1_000;
+
+    /// How many records each of the two contigs holds.
     const RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE: u64 = 500;
-    #[cfg(test)]
+
+    /// How far apart consecutive records sit. **Not a divisor of the grid times any small worker
+    /// count**, which is what keeps some shard boundary off the grid — see [`shard_boundaries`].
     const BASES_BETWEEN_RECORDS: u64 = 40;
+
+    /// How many contigs the sharded sample spans, which is what the fixture header declares.
+    const CONTIGS_IN_THE_SHARDED_SAMPLE: u64 = 2;
 
     /// Where one run's shards begin and end, as record ordinals into the whole sample.
     ///
@@ -1269,7 +1282,7 @@ mod tests {
     /// coordinate from one that follows the shards, which is the thing it exists to tell apart.
     /// The `+ shard` skew is what moves them off.
     fn shard_boundaries(workers: u64) -> Vec<u64> {
-        let records = 2 * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        let records = CONTIGS_IN_THE_SHARDED_SAMPLE * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
         let mut boundaries = vec![0];
         boundaries
             .extend((1..workers).map(|shard| (shard * records / workers + shard).min(records)));
@@ -1278,11 +1291,22 @@ mod tests {
         boundaries
     }
 
-    /// The position a record ordinal lands on, and its contig.
-    fn where_the_record_at(ordinal: u64) -> (u32, u64) {
+    /// The contig and position a record ordinal lands on.
+    fn the_record_ordinal_lands_at(ordinal: u64) -> (u32, u64) {
         let per_contig = RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
-        let contig = u32::try_from(ordinal / per_contig).expect("two contigs");
-        (contig, 1 + (ordinal % per_contig) * BASES_BETWEEN_RECORDS)
+        let contig = ordinal / per_contig;
+        // **Checked, rather than left to `try_from`**, which only fails past `u32::MAX`: an
+        // ordinal past the fixture would otherwise return contig 2 and surface much later, as a
+        // record naming a contig the header does not declare.
+        assert!(
+            contig < CONTIGS_IN_THE_SHARDED_SAMPLE,
+            "the fixture header declares {CONTIGS_IN_THE_SHARDED_SAMPLE} contigs, and ordinal \
+             {ordinal} is past them"
+        );
+        (
+            u32::try_from(contig).expect("a contig index fits a u32"),
+            1 + (ordinal % per_contig) * BASES_BETWEEN_RECORDS,
+        )
     }
 
     /// One sample's records, produced by `workers` threads each owning a contiguous span of the
@@ -1303,7 +1327,7 @@ mod tests {
                     threads.spawn(move || {
                         (from..to)
                             .map(|at| {
-                                let (contig, position) = where_the_record_at(at);
+                                let (contig, position) = the_record_ordinal_lands_at(at);
                                 a_record(contig, position, 1)
                             })
                             .collect::<Vec<_>>()
@@ -1312,7 +1336,7 @@ mod tests {
                 .collect();
             running
                 .into_iter()
-                .map(|thread| thread.join().expect("a worker finished"))
+                .map(|thread| thread.join().expect("a worker did not panic"))
                 .collect()
         });
         // The shards are contiguous and in order, so concatenating them *is* the coordinate-order
@@ -1320,15 +1344,20 @@ mod tests {
         gathered.into_iter().flatten().collect()
     }
 
-    /// Write a sample and give back the file's bytes.
-    fn the_file_written_from(records: &[SampleLocusObservations]) -> Vec<u8> {
+    /// Write a sample; give back the file's bytes **and how many blocks it cut**.
+    ///
+    /// **One writer, not three.** The block count used to be read by writing the same sample a
+    /// second time and throwing the bytes away, which is the drift `a_finished_psp`'s own doc
+    /// warns about — three spellings of *what a finished file looks like* in one module.
+    fn the_file_written_from(records: &[SampleLocusObservations]) -> (Vec<u8>, u64) {
         let (_dir, path) = a_file();
-        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
+        let mut writer =
+            PspWriter::create(&path, a_header(GRID_BP_OF_THE_SHARDED_SAMPLE)).expect("a header");
         for record in records {
             writer.push(record).expect("in order");
         }
-        let _ = writer.finish(b"a per-sample summary").expect("it finishes");
-        bytes_of(&path)
+        let stats = writer.finish(b"a per-sample summary").expect("it finishes");
+        (bytes_of(&path), stats.blocks)
     }
 
     /// **One sample gathered at 1, 2, 4, 8 and 16 workers gives byte-identical files** — spec §7's
@@ -1352,36 +1381,30 @@ mod tests {
     #[test]
     fn one_sample_gathered_at_any_worker_count_gives_byte_identical_files() {
         let by_one = a_sample_gathered_by(1);
-        let expected = the_file_written_from(&by_one);
+        let (expected, blocks) = the_file_written_from(&by_one);
 
         // **The fixture has to cut several blocks**, or "the cut does not follow the shards" is a
-        // claim about a file with one block in it.
-        let blocks = {
-            let (_dir, path) = a_file();
-            let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
-            for record in &by_one {
-                writer.push(record).expect("in order");
-            }
-            writer
-                .finish(b"a per-sample summary")
-                .expect("it finishes")
-                .blocks
-        };
+        // claim about a file with one block in it. It says nothing about *where* the boundaries
+        // fall — that is the per-worker-count check below, and conflating the two is how this
+        // message read before.
         assert!(
-            blocks >= 16,
-            "the sample cuts {blocks} blocks; with fewer than the largest worker count there is \
-             no shard boundary that can fall inside one"
+            blocks > 1,
+            "the sample cuts {blocks} block; a one-block file makes \"the cut does not follow \
+             the shards\" vacuous, whatever the boundaries do"
         );
 
-        for workers in [2u64, 4, 8, 16] {
+        // **Counts that do not divide the records, as well as ones that do.** 1,000 records
+        // divide evenly by 2, 4, 8 and 16, so the truncating branch of `records / workers` was
+        // never taken with a remainder; 3, 5 and 7 take it.
+        for workers in [2u64, 3, 4, 5, 7, 8, 16] {
             // **A shard boundary that falls mid-block**, without which a writer that closed a
             // block at every shard boundary would produce the same file anyway.
             let boundaries = shard_boundaries(workers);
             let mid_block_boundaries = boundaries[1..boundaries.len() - 1]
                 .iter()
                 .filter(|at| {
-                    let (_contig, position) = where_the_record_at(**at);
-                    (position - 1) % 1_000 != 0
+                    let (_contig, position) = the_record_ordinal_lands_at(**at);
+                    (position - 1) % GRID_BP_OF_THE_SHARDED_SAMPLE != 0
                 })
                 .count();
             assert!(
@@ -1401,7 +1424,7 @@ mod tests {
                 "at {workers} workers the sharding produced a different record sequence"
             );
             assert!(
-                the_file_written_from(&gathered) == expected,
+                the_file_written_from(&gathered).0 == expected,
                 "at {workers} workers the file differs from the one-worker file"
             );
         }
@@ -1424,7 +1447,7 @@ mod tests {
     fn two_runs_differing_only_in_their_timestamp_differ_only_inside_the_header() {
         let write_stamped = |created: &str| {
             let (dir, path) = a_file();
-            let mut header = a_header(1_000);
+            let mut header = a_header(GRID_BP_OF_THE_SHARDED_SAMPLE);
             header.writer.created = created.parse().expect("a valid RFC 3339 stamp");
             let mut writer = PspWriter::create(&path, header).expect("a header");
             for record in a_sample() {
@@ -1435,7 +1458,8 @@ mod tests {
             drop(dir);
             bytes
         };
-        // Two stamps of the same rendered width, which is what a real run's clock produces.
+        // Two stamps of the same rendered width — **and that is a precondition, not a
+        // description**: see the sibling test below, which measures what a wider one does.
         let early = write_stamped("2026-08-28T00:00:00Z");
         let later = write_stamped("2026-08-30T11:22:33Z");
         assert_eq!(
@@ -1472,6 +1496,96 @@ mod tests {
                 .take(8)
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// ⚠ **Spec §7's byte-identity holds only while every stamp renders to the same width, and
+    /// nothing enforces that.** This test pins the limit rather than the promise.
+    ///
+    /// `created` is a `toml::value::Datetime`, which carries an optional sub-second fraction and
+    /// an offset, so `2026-08-30T11:22:33.5Z` is two characters wider than
+    /// `2026-08-28T00:00:00Z`. The stamp goes into the header's TOML, so those two characters
+    /// move the header's length — **and with it every offset in the footer, the index, and where
+    /// the blocks sit in the file**. Measured here: the two files differ in length, and the
+    /// difference is exactly the two characters.
+    ///
+    /// **Why this matters beyond the test.** ng has no production header writer yet — every
+    /// `WriterProvenance` built under `src/ng/` is in a test. A future `pileup` rendering the
+    /// clock with `to_rfc3339`, which prints sub-second digits only when they are non-zero, would
+    /// produce stamps of *varying* width run to run, and §7's promise — the thing that lets
+    /// anything downstream compare two samples byte for byte — would quietly stop holding.
+    ///
+    /// **The fix is not this test's to make.** Either the writer normalises `created` to whole
+    /// seconds in UTC, or it refuses a stamp that does not render at a fixed width, or spec §7
+    /// gains the words "of fixed rendered width". All three are design decisions and are raised
+    /// rather than taken.
+    #[test]
+    fn a_wider_timestamp_moves_every_offset_in_the_file_and_that_is_the_limit_of_the_promise() {
+        let write_stamped = |created: &str| {
+            let (dir, path) = a_file();
+            let mut header = a_header(GRID_BP_OF_THE_SHARDED_SAMPLE);
+            header.writer.created = created.parse().expect("a valid RFC 3339 stamp");
+            let mut writer = PspWriter::create(&path, header).expect("a header");
+            for record in a_sample() {
+                writer.push(&record).expect("in order");
+            }
+            let _ = writer.finish(b"a per-sample summary").expect("it finishes");
+            let bytes = bytes_of(&path);
+            drop(dir);
+            bytes
+        };
+        let narrow = write_stamped("2026-08-28T00:00:00Z");
+        let wider = write_stamped("2026-08-30T11:22:33.5Z");
+        assert_eq!(
+            wider.len(),
+            narrow.len() + 2,
+            "the wider stamp is two characters wider, and the file grows by exactly that"
+        );
+
+        let (_header, header_bytes) = {
+            let (dir, path) = a_file();
+            rewrite(&path, &narrow);
+            let read = crate::ng::psp::read_header_and_its_length(&path).expect("the header reads");
+            drop(dir);
+            read
+        };
+        // **And the difference does not stay inside the header**, which is the whole point: the
+        // shorter file's own bytes past its header no longer match the wider file's.
+        let past_the_header = narrow
+            .iter()
+            .zip(&wider)
+            .skip(header_bytes)
+            .any(|(a, b)| a != b);
+        assert!(
+            past_the_header,
+            "a wider stamp has to move the bytes past the header — if it did not, spec §7 would \
+             hold at any width and this test would be recording a limit that is not there"
+        );
+    }
+
+    /// **The shard split never produces an empty or backwards shard**, even asked for more
+    /// workers than there are records — the case `.min` and `.dedup` in [`shard_boundaries`] exist
+    /// for and that no worker count in the sweep reaches.
+    #[test]
+    fn the_shard_split_stays_ordered_with_more_workers_than_records() {
+        let records = CONTIGS_IN_THE_SHARDED_SAMPLE * RECORDS_PER_CONTIG_IN_THE_SHARDED_SAMPLE;
+        for workers in [1u64, 2, 999, records, records + 1, 4 * records] {
+            let boundaries = shard_boundaries(workers);
+            assert!(
+                boundaries.windows(2).all(|pair| pair[0] < pair[1]),
+                "at {workers} workers a shard may be small but never empty or backwards: \
+                 {boundaries:?}"
+            );
+            assert_eq!(
+                boundaries.first(),
+                Some(&0),
+                "the split starts at the first record"
+            );
+            assert_eq!(
+                boundaries.last(),
+                Some(&records),
+                "and ends at the last, or records go unwritten"
+            );
+        }
     }
 
     /// A file with no records at all still finishes, and its index is empty rather than absent.

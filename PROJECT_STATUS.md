@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **an open sample costs 480 kB against a 500 kB budget,
+> - **Last completed task (2026-08-30):** **H3 reviewed — the precondition that says the sweep can
+> tell a coordinate cut from a shard cut was itself the thing that broke quietly** (step H3 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `fixes-applied`). Nine mutations across three checklists and the numbers pass; **one survived**.
+> The mid-block precondition divided by a literal `1_000` while the grid was supplied separately as
+> `a_header(1_000)`, and nothing made the two agree: writing the fixture on a **40 bp** grid gives
+> every record its own block — 1,000 instead of 40 — so **every** shard boundary lands on a grid
+> line, the exact condition the assertion exists to refuse, **and the test still passed**.
+> Reproduced here first; one named constant now drives both ends. **The second Major is a
+> format-level finding, and it is raised rather than taken**: spec §7's byte-identity holds only
+> while every timestamp renders to the same width, and nothing enforces that. `created` is a
+> `toml::value::Datetime`, so `…T11:22:33.5Z` is two characters wider than `…T00:00:00Z`; measured,
+> the file grows by exactly two bytes and **every offset past the header moves**. ng has no
+> production header writer yet, and a future `pileup` using `to_rfc3339` — which prints sub-second
+> digits only when non-zero — would give stamps of varying width run to run. A test pins that limit
+> now; **normalising the stamp, refusing it, or amending §7 are all the owner's call**. ⚠ **Two of
+> my own claims were wrong**: "three mutations, three killed" over a table holding two, and "no
+> mutation kills the file comparison and not one of the others" — disproved by a writer
+> nondeterminism gated at sixteen blocks, which F3's eight-block fixture passes and this one's forty
+> catches.
+> [H3](doc/devel/reports/implementations/ng_psp_h3_2026-08-30.md);
+> [the review](tmp/review_2026-08-30_ng-psp-h3/findings.md).
+>
+> - **Previously (2026-08-30):** **an open sample costs 480 kB against a 500 kB budget,
 > and three quarters of it is not the reader** (step H4 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). Measured at 1, 2, 4, 8, 16, 32, 62, 125, 250, 500, 1,000 and **5,000** open
