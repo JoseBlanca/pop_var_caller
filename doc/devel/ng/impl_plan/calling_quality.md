@@ -158,7 +158,7 @@ silently: an arm-one break is a numeric disagreement and an arm-two break is a d
 
 ### Milestone B — the types, and the tail (the numerical heart)
 
-**B1. The types and the two constants.**  ☐
+**B1. The types and the two constants.**  ✅
 In a new `src/ng/calling/quality/artifact_correction.rs`, declared from `quality/mod.rs`:
 `ArtifactPenalties { allele_balance: Phred, strand_and_read_position: Phred }` and the two
 `pub const`s `BIAS_RAMP_NO_POWER_BELOW = 3.0` / `BIAS_RAMP_FULL_POWER_AT = 7.0`, each with spec
@@ -169,6 +169,11 @@ rather than more of `quality/mod.rs`, which is at 1,061 lines and owns a differe
 `samples × genotypes` table, where everything here is nine scalars (module_layout §Organizing
 principles, rule 3's "extract a coherent chunk when it tells you to"). No logic. *Depends:* none.
 *Source:* spec §10, §6.2, §3.5.
+
+**Three constants rather than two**, because production's allele-balance guard is an inline
+`0.9` and the same rule applies to it: `ALLELE_BALANCE_SKIPPED_AT_OR_ABOVE`. And the two range
+properties are `const { assert! }` items rather than tests — they are properties of literals, so
+the compiler settles them where they are written.
 
 **B2. The two-sided binomial tail.**  ☐ **Own commit — do not bundle.**
 The regularised incomplete beta and the tail built on it, ported from

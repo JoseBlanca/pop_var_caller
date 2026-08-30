@@ -31,6 +31,8 @@
 //! [`CallingScratch`](crate::ng::calling::CallingScratch) beside the loop's own, and are
 //! sized once per locus.
 
+pub mod artifact_correction;
+
 use crate::genetics::{MIN_ALT_CONCENTRATION, lgamma};
 use crate::ng::calling::genotype_prior::SpectrumSeed;
 use crate::ng::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
