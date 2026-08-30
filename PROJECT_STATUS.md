@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **the head-driven skip is worth about 3×, and depth costs
+> - **Last completed task (2026-08-30):** **the documents said an open psp costs tens of kilobytes;
+> it costs 480 kB, and three quarters of that is the reference's contig list** (branch
+> `ng-psp-encoding`, status `implemented`). [`run_streaming.md`](doc/devel/ng/spec/run_streaming.md)
+> §7.2 was headed *an open psp costs tens of kilobytes, not megabytes* and cited again in §5.3; it
+> was written before anything had been measured. It now carries the 500 kB budget and the measured
+> split — **357 kB for the open file before a block is touched, 123 kB for the cursor walking it**
+> — on a human reference, against **7 kB and 101 kB** on tomato. The cursor costs near enough the
+> same on corpora **27× apart in depth**, which is the *does not grow with the depth* half of the
+> requirement; the header is the whole of the difference, at about **138 bytes a contig**, so 2,580
+> contigs cost 357 kB where 13 cost 7 kB. **§7.1's arithmetic moved with it**: it estimated 26 kB a
+> sample and priced three thousand samples at look-ahead 8 as 620 MB, and that run is **4.0 GB** —
+> the look-ahead is the term that decides whether psp mode fits, at **0.37 GB a unit**. §10 gains
+> the lever the owner routed to the run: one contig list per run rather than one per open sample,
+> worth 357 kB of the 480. **The psp format does not change.**
+> [`module_layout.md`](doc/devel/ng/arch/module_layout.md) said ng had no `.psp`; its tree now has
+> `psp/` and a section says what the store does, what it costs, and that nothing in `pipeline.rs`
+> writes or reads one yet. **Four further documents quoted the old sentence and now follow it** —
+> the psp format spec (goal 1, §4.4, §5.2, §7 and its deferred list), the record-encoding spec in
+> three places, the encoding-experiments plan and the psp store's own plan. Separately, the psp
+> architecture doc's question on what the record head is worth at depth is marked **narrowed**
+> rather than open — 2.40× to 3.11×, every figure an upper bound until a store written from ng's
+> own locus generation exists.
+>
+> - **Previously (2026-08-30):** **the head-driven skip is worth about 3×, and depth costs
 > it 5 %, not the collapse the architecture feared** (step H5 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `implemented`). arch §7 asked how much of the prototype's 2.06× survives at depth, because the
