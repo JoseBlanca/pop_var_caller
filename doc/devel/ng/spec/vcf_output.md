@@ -322,12 +322,41 @@ The FORMAT string is `GT:GQ:DP:AD` on a generic record and `GT:GQ:DP:AD:REPCN` o
   benchmark concordance already maps HipSTR's `GB` onto).
 - **A no-call sample writes `./.` with `.` in every other field it cannot fill** — `GQ` and
   `REPCN` always `.` (no genotype, no quality of it), `DP` and `AD` still written when the sample
-  had reads (the evidence exists; the call does not). Three ways a sample gets here, one
-  spelling: no coverage at the locus; ruled uncallable by candidate selection
-  ([`calling_em_loop.md`](calling_em_loop.md) §5.0); or — when step 11 adopts it — a per-sample
-  quality floor, the tract file's `no_call_gq` mechanism. **A sample is never force-called to
-  `0/0` for lack of evidence** — the run-streaming leaning
-  ([`run_streaming.md`](run_streaming.md) §11 Q5), made a format rule here.
+  had reads (the evidence exists; the call does not). **A sample is never force-called to `0/0`
+  for lack of evidence** — the run-streaming leaning
+  ([`run_streaming.md`](run_streaming.md) §11 Q5), made a format rule here and confirmed by the
+  owner, 2026-08-30.
+
+#### 7.1 What "for lack of evidence" means — the sample's own likelihood, not its posterior
+
+**The test is that the sample's genotype likelihoods are flat**: its reads score every candidate
+genotype alike, so nothing it showed distinguishes them. That is one test and it covers both
+routes — a sample with no reads at all, and a sample whose reads are wholly uninformative.
+
+**It must not be a test on the posterior, and the distinction is the whole of this section.** The
+calling loop deliberately *calls* a sample with no reads: with a flat likelihood the prior decides
+alone, and a genotype comes out ([`calling_em_loop.md`](calling_em_loop.md) §7). At a locus where
+the fitted frequency is low, that posterior is not merely non-empty, it is **sharply peaked on
+`0/0`** — so a rule of the form *write `./.` unless one genotype's posterior is well clear of the
+rest* would confidently emit a genotype for exactly the sample that has no evidence, and no
+threshold on the posterior can separate the two. The likelihood is what the reads said; the
+posterior is what the reads said plus what the cohort assumed.
+
+**This is also what the field does, in the two callers whose rule is legible.** `bcftools call -m`
+no-calls a sample when every genotype's likelihood is equal — its own comment says "Skip samples
+with zero depth, they have all pdg's equal to 0" — which is a flatness test rather than a depth
+test ([`mcall.c:734, :783`](../../../../bcftools/mcall.c)). GATK carries the same predicate as
+`isInformative`, `sum(log10 GL) < −0.1`
+([`GATKVariantContextUtils.java:54-58`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/utils/variant/GATKVariantContextUtils.java)),
+and GATK 3 used it inline to force the no-call. freebayes drops a sample with no observations from
+the record entirely, and both STR callers no-call on zero reads.
+
+**A third route stays, and it is not evidential:** a sample the candidate step ruled uncallable
+([`calling_em_loop.md`](calling_em_loop.md) §5.0) has evidence the locus's allele set cannot
+represent, and is written `./.` for that reason.
+
+**A per-sample quality floor is a fourth possible route and is deliberately not adopted here** —
+§14 Q4.
 
 **Not carried over:** `GP` (opt-in posterior rows — the loop's posteriors live in reused scratch
 and retaining them is a real memory decision; deferred, §13).
@@ -476,6 +505,45 @@ that one contrast suffices (§6); the June MAPQ-filter investigation used the pl
 future filter wants the variance-aware form the sums it needs (`mapq_sum_sq`) are on the
 observations and the field can return. **Settled by:** whoever builds step 11a's MAPQ filter,
 against measurements, not preference.
+
+**Q4 — should a genotype quality floor turn a called sample into `./.`, and at what value?** OPEN,
+and it is the one open question with a shipped precedent on each side. *Leaning: no floor in the
+writer; annotate `GQ` and let the emission step own an opt-in threshold, defaulted off.* Three
+reasons, and the third is the one that could bite this project specifically.
+
+**The field is unanimous, and it is not for want of computing the number.** The margin between the
+best genotype and the runner-up *is* `GQ`, and every caller surveyed computes it, writes it, and
+then emits the argmax regardless. HipSTR is the sharpest case: it publishes `GLDIFF`, documented as
+"Difference in likelihood between the reported and next best genotypes", and **nothing thresholds
+it** — not HipSTR, not its own `filter_vcf.py`, not dumpSTR. GATK has exactly one margin rule and
+it is a flatness test in disguise: the best genotype must be **hom-ref** *and* beat the runner-up by
+under one Phred
+([`GATKVariantContextUtils.java:351`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/utils/variant/GATKVariantContextUtils.java)).
+A `GQ` 3 heterozygote is emitted by all of them. Where a floor exists at all it is downstream and
+opt-in — GATK's `--genotype-filter-expression` with `--set-filtered-gt-to-nocall`, dumpSTR's
+`--hipstr-min-call-Q` / `--gangstr-min-call-Q`, HipSTR's `--min-call-qual` — and **every one of
+them defaults to off**.
+
+**A floor destroys what it filters; an annotation does not.** A `GQ` written into the file can be
+thresholded by anyone at any value afterwards. A sample no-called at `GQ` 14 by the writer cannot
+be recovered, and the run must be repeated to change the number.
+
+**And the loss would not be random, which is where it costs this project.** At equal depth a
+heterozygote's `GQ` is systematically lower than a homozygote's — it has to be told apart from two
+alternatives rather than one — so a floor removes heterozygous calls preferentially. That biases
+the panel toward apparent homozygosity, in the same direction as inbreeding, at exactly the
+three-reads-a-position corner the tomato cohort sits in. **The direction of that bias is structural;
+its size is unmeasured**, and measuring it is what should settle this question rather than a
+default chosen now.
+
+**The one caller in this survey that does floor is ours** — the production repeat-tract path
+no-calls below `GQ` 15 ([`vcf_out.rs:294`](../../../../src/ssr/cohort/vcf_out.rs)) — and it is worth
+being precise about what that is: it sits inside a false-positive-suppression pass that also scales
+`GQ` down for allele-imbalanced heterozygotes, so the floor is one term of an artifact filter rather
+than a principled statement about when a genotype is unknown. **Settled by:** running the tomato
+panel at about three reads a position and the GIAB trio with the floor at 0, 10, 15 and 20, and
+reporting what each setting does to called-genotype accuracy, to the heterozygote share, and to
+`AN`.
 
 **Q3 — `DP` for a no-call sample: evidence or `.`?** Decided as *written when reads exist* (§7),
 recorded because production's tract file answers the other way (all five fields `.`). The
