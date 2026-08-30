@@ -49,7 +49,7 @@
 
 use std::cmp::Ordering;
 
-use crate::ng::psp::record::{FieldReader, RecordDecodeError, put_varint};
+use crate::ng::psp::record::{FieldReader, RecordDecodeError, entries_to_reserve, put_varint};
 use crate::pileup_record::ChainId;
 
 // The names this module's faults are reported under, so a message says which field it was.
@@ -107,8 +107,13 @@ impl LiveSet {
 
     /// Build a set straight from ids that are already ascending and distinct.
     ///
-    /// **For a caller that has the whole set in hand** — the writer deciding which observation
-    /// it can derive — rather than one stepping through changes.
+    /// **Tests only, and it used to have a caller.** The writer deciding which observation it can
+    /// derive built one of these out of the record's own identifiers, so that
+    /// [`residual_reads`] could take a `&LiveSet`. That function takes a slice now — the writer
+    /// holds those identifiers in a buffer it reuses, and handing the buffer away to build a set
+    /// out of it was an allocation a record for a type check the sortedness already carries. What
+    /// is left is the tests, which build a set to derive against directly.
+    #[cfg(test)]
     pub(super) fn from_sorted_ids(ids: Vec<ChainId>) -> Self {
         debug_assert!(
             ids.windows(2).all(|pair| pair[0] < pair[1]),
@@ -312,6 +317,15 @@ pub(super) fn decode_read_list(
 ) -> Result<(), RecordDecodeError> {
     into.clear();
     let count = reader.read_count(field, LEAST_BYTES_PER_ENTRY)?;
+    // **Bounded by what the remaining bytes could hold, never the declared count alone** — the
+    // same guard the observation count already gets, and for the same reason: a hostile body says
+    // a million reads in eleven bytes. Without the reservation the list grows from nothing, which
+    // is five allocations for an observation naming seventy reads.
+    into.reserve(entries_to_reserve(
+        count,
+        LEAST_BYTES_PER_ENTRY,
+        reader.bytes_left(),
+    ));
     let mut previous: Option<u64> = None;
     for _ in 0..count {
         let id = read_ascending(reader, field, "id", previous)?;
@@ -323,18 +337,33 @@ pub(super) fn decode_read_list(
 
 /// The reads the residual observation names: **the live set minus every other observation's**.
 ///
-/// `named_elsewhere` is the ascending, deduplicated union of the lists the record stores
-/// explicitly. Both inputs are sorted, so this is one pass.
+/// `live` is the live set's own identifiers, ascending, and `named_elsewhere` the ascending,
+/// deduplicated union of the lists the record stores explicitly. Both inputs are sorted, so this
+/// is one pass.
+///
+/// **A slice rather than a [`LiveSet`]**, because the writer's caller holds the union of a
+/// record's own lists in a reused buffer and would otherwise have to give that buffer away to
+/// build a set out of it — for a type check that the sortedness already carries.
 ///
 /// **This is where most of the column's saving is and where it fails silently** (spec
 /// `psp_chain_id_encoding.md` §5): derive one id too many and the reference allele gains a read
 /// that does not exist, which the cohort merge composes an allele for without complaint. The
 /// guard is the caller's — an observation's derived count against its own read count — and
 /// `record.rs` applies it.
-pub(super) fn residual_reads(live: &LiveSet, named_elsewhere: &[ChainId], into: &mut Vec<ChainId>) {
+pub(super) fn residual_reads(
+    live: &[ChainId],
+    named_elsewhere: &[ChainId],
+    into: &mut Vec<ChainId>,
+) {
     into.clear();
+    // **The exact length when the record is sound, and one allocation either way.** Every
+    // identifier in `named_elsewhere` is live, so what this builds is exactly the difference of
+    // the two lengths. A record where that does not hold is one the caller's guard refuses, and
+    // the worst it costs here is a single growth. Without this the list grows from nothing:
+    // measured at 280 reads a position, eight allocations a record where one will do.
+    into.reserve(live.len().saturating_sub(named_elsewhere.len()));
     let mut elsewhere = 0usize;
-    for id in &live.ids {
+    for id in live {
         while elsewhere < named_elsewhere.len() && named_elsewhere[elsewhere] < *id {
             elsewhere += 1;
         }

@@ -727,10 +727,9 @@ fn residual_observation_of(record: &SampleLocusObservations) -> usize {
         .flat_map(|observation| observation.chain_ids.iter().copied())
         .collect();
     as_a_read_set(&mut every_read);
-    let live = LiveSet::from_sorted_ids(every_read);
 
     let mut derived = Vec::new();
-    residual_reads(&live, &named_elsewhere, &mut derived);
+    residual_reads(&every_read, &named_elsewhere, &mut derived);
     // **Two conditions, and the second is what keeps the reader's guard a guard.** The derivation
     // has to reproduce the list exactly, and it has to satisfy the inequality the reader checks it
     // against — otherwise this writer would produce a file its own reader refuses. Real evidence
@@ -954,7 +953,7 @@ pub fn decode_record_body(
     {
         as_a_read_set(&mut named_elsewhere);
         let mut derived = Vec::new();
-        residual_reads(live_reads, &named_elsewhere, &mut derived);
+        residual_reads(live_reads.ids(), &named_elsewhere, &mut derived);
         check_a_derived_read_list(
             &body,
             &derived,
@@ -1082,7 +1081,7 @@ impl<'a> FieldReader<'a> {
         self.bytes_read
     }
 
-    fn bytes_left(&self) -> usize {
+    pub(super) fn bytes_left(&self) -> usize {
         // Saturating rather than a bare subtraction: the invariant holds, and stating it here
         // costs nothing where relying on it silently would cost a panic.
         self.bytes.len().saturating_sub(self.bytes_read)
@@ -1369,7 +1368,11 @@ impl<'a> FieldReader<'a> {
 /// left of the body bounds what can really be there; and [`MOST_ENTRIES_RESERVED`] bounds that
 /// in turn, because a body is itself bounded only by a `u32`. The loop still reads the declared
 /// count and still fails when the bytes run out, which is where a wrong length is reported.
-fn entries_to_reserve(declared: u64, least_bytes_each: usize, bytes_left: usize) -> usize {
+pub(super) fn entries_to_reserve(
+    declared: u64,
+    least_bytes_each: usize,
+    bytes_left: usize,
+) -> usize {
     let could_be_there = (bytes_left / least_bytes_each).min(MOST_ENTRIES_RESERVED);
     declared.min(could_be_there as u64) as usize
 }
