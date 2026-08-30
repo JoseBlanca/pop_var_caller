@@ -179,7 +179,7 @@ part of the format (§11), so a formatting choice is a format change from here o
 exactly the spec's §4/§6–§8 set, `##parametersFile` included. Golden-file the whole header.
 *Depends:* A3, B4. *Source:* spec §4; [`header.rs:73-247`](../../../../src/vcf/header.rs).
 
-☐ **C2. The ordered writer and the sink.** Port the ordered writer and the atomic sink
+✅ **C2. The ordered writer and the sink.** Port the ordered writer and the atomic sink
 (tmp → flush → bgzf EOF → fsync file and directory → rename; bgzf by suffix). **The one change:**
 strictly-increasing POS relaxes to exactly the spec's legal tie — same POS admitted once, generic
 before tract, anything else refused ([`../spec/vcf_output.md`](../spec/vcf_output.md) §5).

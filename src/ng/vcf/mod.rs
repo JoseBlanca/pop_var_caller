@@ -38,6 +38,7 @@
 
 pub mod encode;
 pub mod header;
+pub mod writer;
 
 pub use encode::{
     FREQUENCY_DECIMALS, MAPPING_QUALITY_DECIMALS, MISSING_FIELD, PENALTY_DECIMALS,
@@ -48,6 +49,7 @@ pub use header::{
     FILE_FORMAT, HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata,
     header_text,
 };
+pub use writer::{VcfWriteError, VcfWriter};
 
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::types::{GenomeRegion, Genotype, Motif, Phred, Position};
