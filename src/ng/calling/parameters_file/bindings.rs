@@ -47,8 +47,12 @@
 
 use md5::{Digest, Md5};
 
-use super::{CensusIdentity, CensusTerm};
+use std::collections::BTreeMap;
+
+use super::{CensusIdentity, CensusTerm, ParametersFile, ParametersFileError, ReadGroupRow};
 use crate::ng::parameter_estimation::joint::census::RecordingTerms;
+use crate::ng::parameter_estimation::joint::loci::ReferenceDigest;
+use crate::ng::read::input::read_groups::{ReadGroup, ReadGroups};
 
 #[cfg(test)]
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
@@ -58,8 +62,7 @@ use crate::ng::parameter_estimation::joint::census::{
 };
 #[cfg(test)]
 use crate::ng::parameter_estimation::joint::loci::{
-    BlockDigest, CatalogBuildSettings, CensusLociDigest, ReferenceDigest, RegionSetDigest,
-    SelectionTerms,
+    BlockDigest, CatalogBuildSettings, CensusLociDigest, RegionSetDigest, SelectionTerms,
 };
 #[cfg(test)]
 use crate::ng::repeat_catalog::{StrRepeatCriteria, StratumCounts};
@@ -167,6 +170,247 @@ pub(super) fn hex_digest(digest: &[u8; 16]) -> String {
 }
 
 // ---------------------------------------------------------------------
+// The three bindings that refuse (spec §6)
+// ---------------------------------------------------------------------
+
+impl ParametersFile {
+    /// **Refuse a file whose numbers were fitted from inputs that are not this run's.**
+    ///
+    /// Spec §6's first three bindings: the reference's content digest, the sample list in order
+    /// by name, and the read-group table. Each refuses, because a file that fails one of them
+    /// cannot be *interpreted* against this run — a file fitted against another assembly has its
+    /// repeat strata cut at other tract lengths, one listing other samples has its inbreeding
+    /// coefficients against other plants, and one whose read-group table does not cover the
+    /// run's leaves a library with no calibration and no contamination row, which surfaces as a
+    /// panic at whichever locus first carries one of that library's reads.
+    ///
+    /// **The fourth binding — the census — is not here**, because it does not refuse: a file
+    /// fitted from a different census of this same cohort is still interpretable, merely less
+    /// warranted, and what a run does with one is step D3's.
+    ///
+    /// # It is handed the run, not a second file
+    ///
+    /// The two arguments are the same two `of_run` writes from, and deliberately so: the writer
+    /// and this check read one pair of inputs, so a file this run wrote is a file this run
+    /// accepts. **The sample list is not among them** — it is derived from `read_groups` exactly
+    /// as `of_run` derives it, because a run's samples *are* its read-group table's samples in
+    /// first-seen order, and a second argument for it would be a second thing to keep in step.
+    ///
+    /// # The two axes are compared differently, and neither choice is free
+    ///
+    /// **Samples by position.** Every per-sample row of the file is read *by name* into this list
+    /// and handed to calling as a *position*, so a list holding the right names in another order
+    /// is not a cohort that happens to be shuffled — it is a run that gives each plant its
+    /// neighbour's inbreeding coefficient and batch, with nothing downstream able to see it.
+    /// `validate` refuses the same disagreement inside the file for the same reason.
+    ///
+    /// **Read groups by their number.** Row *order* in `fitted_from.read_groups` carries no
+    /// meaning anywhere in this module — `validate` sorts the ids before checking they are dense,
+    /// the projection reads the table only for its length, and every other section joins on the
+    /// `read_group` key — so a file whose rows are written in another order is the same file.
+    /// **Comparing these two tables positionally refused one**: two lanes of one plant swapped
+    /// leaves the file's first-seen sample order unchanged, so it validates, projects, and is the
+    /// file this run would have written.
+    ///
+    /// # What it does not check
+    ///
+    /// **Anything about the file's agreement with itself**, which is [`Self::validate`]'s: that
+    /// the read-group ids run `0..n` with no gap, that the sample list is the file's own
+    /// read-group table's first-seen order, that every keyed table covers its axis. A caller
+    /// reading a file into a run wants both, and step D3 is where they are run together. **This
+    /// one assumes none of them** — it is a public entry point, and a file that has not been
+    /// through `validate` is compared just as soundly, because every join here is a lookup
+    /// rather than a position.
+    ///
+    /// **⚑ Two things follow from that, and both are why the two run together.** A file whose
+    /// own sample list disagrees with its own read-group table is refused here *as though the
+    /// run were wrong*, where `validate` names the file precisely; and a file with no samples
+    /// and no read groups matches a run with none, which `validate` refuses and this cannot see.
+    /// Neither is reachable once `validate` has run first.
+    ///
+    /// # Errors
+    ///
+    /// [`ParametersFileError::FittedFromOtherInputs`], naming a key of the file and both values.
+    /// **The first difference stops the walk**, in spec §6's own order — reference, then samples,
+    /// then read groups. What that order decides is which refusal a run mismatched in more than
+    /// one place hears about first, and the reference leads because its consequence is the worst
+    /// of the three: a plausible VCF whose repeat strata were cut on another assembly, where the
+    /// other two go missing loudly.
+    pub fn refuse_if_not_this_runs_inputs(
+        &self,
+        reference: &ReferenceDigest,
+        read_groups: &ReadGroups,
+    ) -> Result<(), ParametersFileError> {
+        let bound = &self.fitted_from;
+
+        let this_runs_reference = hex_digest(&reference.0);
+        if bound.reference_digest != this_runs_reference {
+            return Err(fitted_from_other_inputs(
+                "fitted_from.reference_digest",
+                &bound.reference_digest,
+                &this_runs_reference,
+            ));
+        }
+
+        // **The run's samples are its read-group table's, in first-seen order**, which is what
+        // `of_run` writes and what `validate` holds the file's own list to.
+        let this_runs_samples: Vec<&str> = read_groups
+            .read_groups_per_sample()
+            .iter()
+            .map(|of_sample| of_sample.sample.as_ref())
+            .collect();
+        for (at, (in_the_file, in_the_run)) in bound
+            .samples
+            .iter()
+            .zip(&this_runs_samples)
+            .enumerate()
+            .map(|(at, (mine, theirs))| (at, (mine.as_str(), *theirs)))
+        {
+            if in_the_file != in_the_run {
+                return Err(fitted_from_other_inputs(
+                    format!("fitted_from.samples[{at}]"),
+                    format!("{in_the_file:?}"),
+                    format!("{in_the_run:?}"),
+                ));
+            }
+        }
+        // **`zip` stops at the shorter, so this is the other half of the walk above** and not a
+        // tidier restatement of it: a cohort that gained or lost a plant agrees on every position
+        // the two lists share. **It names the plants rather than counting them**, which is what
+        // spec §6 asks for — a reader told *2 against 3* has to diff two lists by eye, and one of
+        // them is not written down anywhere they can look.
+        if bound.samples.len() != this_runs_samples.len() {
+            return Err(fitted_from_other_inputs(
+                "fitted_from.samples",
+                a_list_of(
+                    "samples",
+                    bound.samples.iter().map(|name| format!("{name:?}")),
+                ),
+                a_list_of(
+                    "samples",
+                    this_runs_samples.iter().map(|name| format!("{name:?}")),
+                ),
+            ));
+        }
+
+        // **Joined on the read group's own number, never on the row's place in the table.** The
+        // ids the file carries are `0..n` once `validate` has passed and the run's are `0..n` by
+        // construction, so equal id *sets* is the whole of spec §6's gap check — and the join is
+        // still sound on a file `validate` has not seen, since it looks each id up rather than
+        // assuming any of them.
+        let this_runs_lanes: BTreeMap<u32, &ReadGroup> = read_groups
+            .iter()
+            .map(|(id, declared)| (id.get(), declared))
+            .collect();
+        let the_files_lanes: BTreeMap<u32, &ReadGroupRow> = bound
+            .read_groups
+            .iter()
+            .map(|row| (row.read_group, row))
+            .collect();
+        if the_files_lanes.keys().ne(this_runs_lanes.keys()) {
+            // **Each lane is its number *and* its `@RG ID`.** The `@RG ID` is what the reader's
+            // alignment files call it and the number is what every other section of this file
+            // joins on, and either alone gives a message that reads as a contradiction: a file
+            // numbered `0, 1, 3` for this run's three lanes has the same three names as the run,
+            // so names alone print two identical lists beside "these differ".
+            return Err(fitted_from_other_inputs(
+                "fitted_from.read_groups",
+                a_list_of(
+                    "read groups",
+                    the_files_lanes
+                        .values()
+                        .map(|row| format!("{} {:?}", row.read_group, row.declared_id)),
+                ),
+                a_list_of(
+                    "read groups",
+                    this_runs_lanes
+                        .iter()
+                        .map(|(number, lane)| format!("{number} {:?}", lane.id)),
+                ),
+            ));
+        }
+        for (number, (row, declared)) in the_files_lanes
+            .values()
+            .zip(this_runs_lanes.values())
+            .map(|(row, lane)| (row.read_group, (*row, *lane)))
+        {
+            // **The three names a reader joins a row to a lane by.** The number itself is what
+            // the two tables were joined on, so it cannot differ here.
+            for (key, in_the_file, in_the_run) in [
+                (
+                    "declared_id",
+                    format!("{:?}", row.declared_id),
+                    format!("{:?}", declared.id),
+                ),
+                (
+                    "library",
+                    format!("{:?}", row.library),
+                    format!("{:?}", declared.library.value),
+                ),
+                (
+                    "sample",
+                    format!("{:?}", row.sample),
+                    format!("{:?}", declared.sample),
+                ),
+            ] {
+                if in_the_file != in_the_run {
+                    return Err(fitted_from_other_inputs(
+                        format!("fitted_from.read_groups[read_group = {number}].{key}"),
+                        in_the_file,
+                        in_the_run,
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// How many names a refusal spells out before it says how many more there are.
+///
+/// **Spec §9 commits this file to 3,000 samples**, and a refusal that printed three thousand
+/// names is one nobody reads. Five is enough to see which cohort is which and short enough to
+/// sit on one line beside its twin.
+const NAMES_BEFORE_A_TALLY: usize = 5;
+
+/// A list as a refusal spells it: how many there are, what they are, then the first few.
+///
+/// **The count first**, because the two lists a refusal prints differ in length by construction
+/// and that is the fact a reader acts on; the entries are what says *which*. **And the noun**,
+/// because the two lists sit inside one sentence and a bare number twice over is a sentence a
+/// reader has to parse rather than read.
+fn a_list_of(what: &str, entries: impl Iterator<Item = String>) -> String {
+    let entries: Vec<String> = entries.collect();
+    let shown = entries
+        .iter()
+        .take(NAMES_BEFORE_A_TALLY)
+        .cloned()
+        .collect::<Vec<String>>()
+        .join(", ");
+    let and_more = entries.len().saturating_sub(NAMES_BEFORE_A_TALLY);
+    let tail = if and_more == 0 {
+        String::new()
+    } else {
+        format!(" and {and_more} more")
+    };
+    format!("{} {what} ({shown}{tail})", entries.len())
+}
+
+/// One binding that does not hold, named with both values.
+fn fitted_from_other_inputs(
+    field: impl Into<String>,
+    in_the_file: impl Into<String>,
+    in_the_run: impl Into<String>,
+) -> ParametersFileError {
+    ParametersFileError::FittedFromOtherInputs {
+        field: field.into(),
+        in_the_file: in_the_file.into(),
+        in_the_run: in_the_run.into(),
+    }
+}
+
+// ---------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------
 
@@ -256,6 +500,7 @@ pub(super) fn a_censuss_recording_terms() -> RecordingTerms {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::a_file_using_every_shape;
     use super::*;
 
     /// One of the twelve values moved, and what moved.
@@ -563,6 +808,412 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 12, "a term is written twice: {names:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // The three refusals (spec §6, §13 test 4)
+    // -----------------------------------------------------------------
+
+    /// The run the module's shared file fixture was fitted by: its reference, and its lanes.
+    fn the_run_the_fixture_was_fitted_by() -> (ReferenceDigest, ReadGroups) {
+        (
+            super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            ReadGroups::of_lanes(&[
+                ("HWI.3", "TS-1", "lib3"),
+                ("HWI.4", "TS-1", "lib4"),
+                ("HWI.5", "Ailsa ‘Craig’ \"×2\"", "lib5"),
+            ]),
+        )
+    }
+
+    /// The three parts of the refusal a run gets, or a panic naming what it got instead.
+    fn refused(
+        file: &ParametersFile,
+        reference: &ReferenceDigest,
+        read_groups: &ReadGroups,
+    ) -> (String, String, String) {
+        match file.refuse_if_not_this_runs_inputs(reference, read_groups) {
+            Err(ParametersFileError::FittedFromOtherInputs {
+                field,
+                in_the_file,
+                in_the_run,
+            }) => (field, in_the_file, in_the_run),
+            Err(other) => panic!("refused, but as {other}"),
+            Ok(()) => panic!("accepted"),
+        }
+    }
+
+    /// **The file a run wrote is the file that run accepts** — the case every refusal below is a
+    /// departure from, and the one a green suite would still pass without.
+    #[test]
+    fn the_run_that_wrote_the_file_is_not_refused() {
+        let (reference, read_groups) = the_run_the_fixture_was_fitted_by();
+        a_file_using_every_shape()
+            .refuse_if_not_this_runs_inputs(&reference, &read_groups)
+            .expect("the fixture is the file this run's inputs would write");
+    }
+
+    /// **Spec §6's first binding.** A file fitted against another assembly gives a plausible VCF
+    /// with its repeat strata cut at other tract lengths, so it is refused rather than demoted.
+    #[test]
+    fn a_file_fitted_against_another_reference_is_refused() {
+        let (_, read_groups) = the_run_the_fixture_was_fitted_by();
+        let another = ReferenceDigest([0xab; 16]);
+        let (field, in_the_file, in_the_run) =
+            refused(&a_file_using_every_shape(), &another, &read_groups);
+
+        assert_eq!(field, "fitted_from.reference_digest");
+        // **Both values, which is what the ruling of 2026-08-30 asks for.** A reader with three
+        // copies of one assembly on disk cannot act on a field name alone.
+        assert_eq!(in_the_file, "0123456789abcdef0123456789abcdef");
+        assert_eq!(in_the_run, "ab".repeat(16));
+    }
+
+    /// **Spec §6's second binding**, and it names the samples.
+    #[test]
+    fn a_file_listing_samples_the_run_does_not_have_is_refused() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let another_cohort = ReadGroups::of_lanes(&[
+            ("HWI.3", "TS-1", "lib3"),
+            ("HWI.4", "TS-1", "lib4"),
+            ("HWI.5", "TS-9", "lib5"),
+        ]);
+        let (field, in_the_file, in_the_run) =
+            refused(&a_file_using_every_shape(), &reference, &another_cohort);
+
+        assert_eq!(field, "fitted_from.samples[1]");
+        assert_eq!(in_the_file, "\"Ailsa ‘Craig’ \\\"×2\\\"\"");
+        assert_eq!(in_the_run, "\"TS-9\"");
+    }
+
+    /// **A cohort of the same plants in another order is refused too**, and that is the point of
+    /// comparing by position: every per-sample row is read by name into this list and handed to
+    /// calling as a position, so a run whose order differs gives each plant its neighbour's
+    /// inbreeding coefficient. Nothing downstream could see it.
+    #[test]
+    fn the_same_samples_in_another_order_are_refused() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let reordered = ReadGroups::of_lanes(&[
+            ("HWI.5", "Ailsa ‘Craig’ \"×2\"", "lib5"),
+            ("HWI.3", "TS-1", "lib3"),
+            ("HWI.4", "TS-1", "lib4"),
+        ]);
+        let (field, in_the_file, in_the_run) =
+            refused(&a_file_using_every_shape(), &reference, &reordered);
+        assert_eq!(field, "fitted_from.samples[0]");
+        assert_eq!(in_the_file, "\"TS-1\"");
+        assert_eq!(in_the_run, "\"Ailsa ‘Craig’ \\\"×2\\\"\"");
+    }
+
+    /// A run that has a plant the file never saw, with the file's own list a prefix of it.
+    #[test]
+    fn a_cohort_with_one_more_sample_is_refused_by_its_count() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let one_more = ReadGroups::of_lanes(&[
+            ("HWI.3", "TS-1", "lib3"),
+            ("HWI.4", "TS-1", "lib4"),
+            ("HWI.5", "Ailsa ‘Craig’ \"×2\"", "lib5"),
+            ("HWI.6", "TS-4", "lib6"),
+        ]);
+        let (field, in_the_file, in_the_run) =
+            refused(&a_file_using_every_shape(), &reference, &one_more);
+
+        // **It names the plants, which is what spec §6 asks for** — a reader told *2 against
+        // 3* has to diff two lists by eye, and the run's is not written down anywhere.
+        assert_eq!(field, "fitted_from.samples");
+        assert_eq!(
+            in_the_file,
+            "2 samples (\"TS-1\", \"Ailsa ‘Craig’ \\\"×2\\\"\")"
+        );
+        assert_eq!(
+            in_the_run,
+            "3 samples (\"TS-1\", \"Ailsa ‘Craig’ \\\"×2\\\"\", \"TS-4\")"
+        );
+    }
+
+    /// **Spec §6's third binding.** A run with a library the file's table does not cover is the
+    /// gap §6 names: that library's calibration and contamination row are simply absent, and the
+    /// symptom without this check is a panic at whichever locus first carries one of its reads.
+    #[test]
+    fn a_run_whose_read_groups_the_file_does_not_cover_is_refused() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let a_fourth_lane = ReadGroups::of_lanes(&[
+            ("HWI.3", "TS-1", "lib3"),
+            ("HWI.4", "TS-1", "lib4"),
+            ("HWI.5", "Ailsa ‘Craig’ \"×2\"", "lib5"),
+            ("HWI.6", "Ailsa ‘Craig’ \"×2\"", "lib6"),
+        ]);
+        let (field, in_the_file, in_the_run) =
+            refused(&a_file_using_every_shape(), &reference, &a_fourth_lane);
+
+        // The samples still agree — both cohorts are the same two plants — so the walk reaches
+        // the read-group table, which is what this test is about. **The lane is named by its
+        // `@RG ID`**: the run's fourth is `HWI.6`, and the file has no row for it.
+        assert_eq!(field, "fitted_from.read_groups");
+        assert_eq!(
+            in_the_file,
+            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\")"
+        );
+        assert_eq!(
+            in_the_run,
+            "4 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\", 3 \"HWI.6\")"
+        );
+    }
+
+    /// **Each of the three names on a read-group row is compared, and both values are
+    /// asserted.**
+    ///
+    /// The three are what a reader joins a row to a lane by. **The values and not only the
+    /// field**: a review swapped `in_the_file` and `in_the_run` in the library arm and the whole
+    /// module stayed green, and the message that mutant produces tells a geneticist the file
+    /// says `lib9` where the file says `lib4`.
+    #[test]
+    fn a_read_group_row_that_differs_in_any_name_is_refused() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let awkward = "Ailsa ‘Craig’ \"×2\"";
+        for (key, in_the_files_row, in_the_runs_lane, lanes) in [
+            (
+                "declared_id",
+                "\"HWI.4\"",
+                "\"HWI.9\"",
+                [
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.9", "TS-1", "lib4"),
+                    ("HWI.5", awkward, "lib5"),
+                ],
+            ),
+            (
+                "library",
+                "\"lib4\"",
+                "\"lib9\"",
+                [
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.4", "TS-1", "lib9"),
+                    ("HWI.5", awkward, "lib5"),
+                ],
+            ),
+            (
+                // The plant a lane belongs to, moved without moving the sample *list*: both
+                // cohorts still hold these two plants in this order, and only which lane is
+                // whose has changed. Nothing before this check can see it.
+                "sample",
+                "\"TS-1\"",
+                "\"Ailsa ‘Craig’ \\\"×2\\\"\"",
+                [
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.4", awkward, "lib4"),
+                    ("HWI.5", awkward, "lib5"),
+                ],
+            ),
+        ] {
+            let (field, in_the_file, in_the_run) = refused(
+                &a_file_using_every_shape(),
+                &reference,
+                &ReadGroups::of_lanes(&lanes),
+            );
+            assert_eq!(
+                field,
+                format!("fitted_from.read_groups[read_group = 1].{key}")
+            );
+            assert_eq!(in_the_file, in_the_files_row);
+            assert_eq!(in_the_run, in_the_runs_lane);
+        }
+    }
+
+    /// **A file whose rows are numbered otherwise is a file for other read groups**, however
+    /// well its names match: every other section of the file joins on `read_group`, so a table
+    /// numbered `0, 1, 3` files this run's lanes under numbers the run does not use.
+    #[test]
+    fn a_read_group_table_numbered_otherwise_is_refused() {
+        let (reference, read_groups) = the_run_the_fixture_was_fitted_by();
+        let mut file = a_file_using_every_shape();
+        file.fitted_from.read_groups[2].read_group = 3;
+        let (field, in_the_file, in_the_run) = refused(&file, &reference, &read_groups);
+
+        // **The number and the `@RG ID` together**, which is what keeps this message from
+        // printing two identical lists: the three lanes are the same three lanes, and the file
+        // has filed the last of them under a number the run does not use.
+        assert_eq!(field, "fitted_from.read_groups");
+        assert_eq!(
+            in_the_file,
+            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 3 \"HWI.5\")"
+        );
+        assert_eq!(
+            in_the_run,
+            "3 read groups (0 \"HWI.3\", 1 \"HWI.4\", 2 \"HWI.5\")"
+        );
+    }
+
+    /// **⚑ A file whose rows are written in another order is the same file, and is accepted.**
+    ///
+    /// Row order in `fitted_from.read_groups` carries no meaning anywhere in this module:
+    /// `validate` sorts the ids before checking they are dense, the projection reads the table
+    /// only for its length, and every other section joins on the `read_group` key. **The first
+    /// draft of this check joined the two tables positionally and refused such a file** — two
+    /// lanes of one plant swapped, which leaves the file's own first-seen sample order unchanged,
+    /// so it validates and projects and is the file this run would have written.
+    #[test]
+    fn a_file_whose_rows_are_written_in_another_order_is_the_same_file() {
+        let (reference, read_groups) = the_run_the_fixture_was_fitted_by();
+        let mut file = a_file_using_every_shape();
+        file.fitted_from.read_groups.swap(0, 1);
+
+        file.validate()
+            .expect("row order is not the file's meaning");
+        file.refuse_if_not_this_runs_inputs(&reference, &read_groups)
+            .expect("and it is still this run's file");
+    }
+
+    /// **The three are checked in spec §6's own order**, which is what decides which refusal a
+    /// run mismatched in more than one place hears about.
+    ///
+    /// The reference leads because its consequence is the worst of the three — a plausible VCF
+    /// whose repeat strata were cut on another assembly — where the other two go missing loudly.
+    #[test]
+    fn the_reference_is_the_first_thing_checked() {
+        let another_cohort = ReadGroups::of_lanes(&[("HWI.9", "TS-9", "lib9")]);
+        let (field, ..) = refused(
+            &a_file_using_every_shape(),
+            &ReferenceDigest([0xab; 16]),
+            &another_cohort,
+        );
+        assert_eq!(field, "fitted_from.reference_digest");
+    }
+
+    /// **Every binding refusal names a key the file actually contains** — the same guarantee
+    /// `validate`'s own refusals carry, so a reader meets one vocabulary and can find what they
+    /// are told about by searching the file they have in front of them.
+    ///
+    /// **The alternative was prose**, in the shape `Freshness`'s `"the pileup's header"` uses one
+    /// level down. It was dropped because two of the three field names it produced —
+    /// *the sample in position 3*, *the library of read group 2* — appear nowhere in a produced
+    /// file, so the promise their own doc comment made was false for two cases in three.
+    #[test]
+    fn every_refusal_names_a_key_the_file_contains() {
+        let file = a_file_using_every_shape();
+        let text = file.to_toml();
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let awkward = "Ailsa ‘Craig’ \"×2\"";
+
+        let elsewhere: Vec<(ReferenceDigest, ReadGroups)> = vec![
+            (ReferenceDigest([0xab; 16]), ReadGroups::of_lanes(&[])),
+            (
+                reference,
+                ReadGroups::of_lanes(&[
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.4", "TS-1", "lib4"),
+                    ("HWI.5", "TS-9", "lib5"),
+                ]),
+            ),
+            (
+                reference,
+                ReadGroups::of_lanes(&[
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.4", "TS-1", "lib4"),
+                    ("HWI.5", awkward, "lib5"),
+                    ("HWI.6", awkward, "lib6"),
+                ]),
+            ),
+            (
+                reference,
+                ReadGroups::of_lanes(&[
+                    ("HWI.3", "TS-1", "lib3"),
+                    ("HWI.9", "TS-1", "lib4"),
+                    ("HWI.5", awkward, "lib5"),
+                ]),
+            ),
+        ];
+        assert_eq!(
+            elsewhere.len(),
+            4,
+            "one run for each shape of refusal this check can raise"
+        );
+        for (reference, lanes) in &elsewhere {
+            let (field, ..) = refused(&file, reference, lanes);
+            // **Every segment, not just the last**, and a segment carrying a row key is checked
+            // as its key name — the same walk `validate`'s own version of this test makes.
+            for segment in field.split('.') {
+                let key = segment.split(['[', '(']).next().unwrap_or(segment);
+                assert!(
+                    !key.is_empty() && text.contains(key),
+                    "the refusal names {field}, whose segment {key:?} is not a key in the file"
+                );
+            }
+        }
+    }
+
+    /// **A cohort of 3,000 is the top of the committed range, and a refusal is still one line.**
+    ///
+    /// Spec §9 prices this file at 3,000 samples; a refusal that spelled three thousand names is
+    /// one nobody reads. The names are what says *which* cohort and the count is what a reader
+    /// acts on, so both are kept and the list is cut.
+    #[test]
+    fn a_refusal_over_a_cohort_of_thousands_still_fits_on_a_line() {
+        let (reference, _) = the_run_the_fixture_was_fitted_by();
+        let named: Vec<(String, String, String)> = (0..3_000)
+            .map(|plant| {
+                (
+                    format!("HWI.{plant}"),
+                    format!("TS-{plant}"),
+                    format!("lib{plant}"),
+                )
+            })
+            .collect();
+        let lanes: Vec<(&str, &str, &str)> = named
+            .iter()
+            .map(|(id, sample, library)| (id.as_str(), sample.as_str(), library.as_str()))
+            .collect();
+
+        let (field, in_the_file, in_the_run) = refused(
+            &a_file_using_every_shape(),
+            &reference,
+            &ReadGroups::of_lanes(&lanes),
+        );
+
+        assert_eq!(field, "fitted_from.samples[0]");
+        assert_eq!(in_the_file, "\"TS-1\"");
+        assert_eq!(in_the_run, "\"TS-0\"");
+
+        // And where the two lists agree on every shared position, the tally rather than the list.
+        let mut of_three_thousand = a_file_using_every_shape();
+        of_three_thousand.fitted_from.samples =
+            named.iter().map(|(_, sample, _)| sample.clone()).collect();
+        let (field, in_the_file, in_the_run) = refused(
+            &of_three_thousand,
+            &reference,
+            &ReadGroups::of_lanes(&lanes[..2_999]),
+        );
+        assert_eq!(field, "fitted_from.samples");
+        assert_eq!(
+            in_the_file,
+            "3000 samples (\"TS-0\", \"TS-1\", \"TS-2\", \"TS-3\", \"TS-4\" and 2995 more)"
+        );
+        assert_eq!(
+            in_the_run,
+            "2999 samples (\"TS-0\", \"TS-1\", \"TS-2\", \"TS-3\", \"TS-4\" and 2994 more)"
+        );
+        // **Asserted rather than described**, so the claim cannot go stale: a cohort at the top
+        // of spec §9's committed range still names five plants and a tally, on one line.
+        assert_eq!(in_the_file.len(), 67);
+    }
+
+    /// A binding refusal has no line and no parser behind it, and both accessors say so.
+    #[test]
+    fn a_binding_refusal_has_no_line_in_the_file_to_send_anyone_to() {
+        let (_, read_groups) = the_run_the_fixture_was_fitted_by();
+        let refusal = a_file_using_every_shape()
+            .refuse_if_not_this_runs_inputs(&ReferenceDigest([0xab; 16]), &read_groups)
+            .expect_err("another reference");
+
+        assert_eq!(refusal.line(), None);
+        assert_eq!(refusal.rendered_by_the_parser(), refusal.to_string());
+        assert!(
+            refusal
+                .to_string()
+                .contains("0123456789abcdef0123456789abcdef")
+                && refusal.to_string().contains(&"ab".repeat(16)),
+            "both values reach the message a run prints: {refusal}"
+        );
     }
 
     /// **A digest is the bytes and not their rendering** — the two ends of the byte range, in

@@ -251,9 +251,27 @@ false**: the reference digest was 16 hex characters where a reference digest spe
 census carried one term where no run can produce fewer than twelve.
 *Depends:* C4. *Source:* §3.1, §6.
 
-☐ **D2. The three refusals.** A different reference, a sample list that does not match the run's,
+✅ **D2. The three refusals.** A different reference, a sample list that does not match the run's,
 a gap in the read-group ids. Each fails naming the field and the two values that differ, in the
 shape the census's own refusal uses.
+
+**Landed 2026-08-30, and the last clause of that sentence is the one that is wrong** — recorded in
+`PROJECT_STATUS.md` and ruled by the owner on 2026-08-30: the census's own refusal is
+`Freshness::{Rebuild, Refused}(&'static str)`, a field name with both compared values already
+discarded, and §13 test 4 asks for the two values. **So this exceeds the census** rather than
+matching it.
+
+`refuse_if_not_this_runs_inputs` takes the same two arguments `of_run` writes from, so a file this
+run wrote is a file this run accepts. **⚑ The review's Blocker was that it refused one anyway**:
+the first draft joined the file's read-group table to the run's *by position*, where row order in
+that table means nothing anywhere else in the module — so a file with two rows swapped validates,
+projects, and is the same file. Joined on the read group's own number now.
+
+**Three messages were rewritten because a reader could not act on them**, and one of the three was
+found only by printing every message this code can produce and reading them: naming lanes by
+`@RG ID` alone printed two identical lists beside *these differ* when only the numbering had moved.
+`field` is a key path now — `fitted_from.read_groups[read_group = 1].library` — which is the
+vocabulary `Meaningless` already uses.
 *Depends:* D1. *Source:* §6, §13 test 4.
 
 ☐ **D3. The fourth binding demotes rather than refuses. Own commit, do not bundle.** A file fitted

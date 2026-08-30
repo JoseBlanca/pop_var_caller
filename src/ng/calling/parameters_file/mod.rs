@@ -249,6 +249,37 @@ pub enum ParametersFileError {
         /// What is wrong with it, naming the offending value.
         problem: String,
     },
+    /// The file is a usable parameters file and it was fitted from something that is not this
+    /// run — spec §6's first three bindings, which refuse.
+    ///
+    /// **Nothing is wrong with the file.** [`Self::Meaningless`] says a run cannot mean this;
+    /// this says *this* run cannot use it, and another run could. Which is why it names both
+    /// values rather than one: a reader has to see what the file was fitted on **and** what they
+    /// are pointing it at before they can tell which of the two is the mistake.
+    ///
+    /// **It carries both values where the census's own refusal carries neither.** `Freshness`
+    /// one level down is `{ Rebuild, Refused }(&'static str)` — a field name, with the two
+    /// values it compared already discarded (`census_file.rs`, `freshness`). Spec §9's sentence
+    /// says this refusal is "in the shape the census's own refusal already uses", and that
+    /// sentence is wrong about the shape: §6 and §13's fourth test both ask for the field *and*
+    /// the two values that differ, and a bare field name cannot answer *which of my three
+    /// references was this fitted on*. **Owner's ruling of 2026-08-30: exceed the census.**
+    #[error(
+        "the parameters file was fitted from other inputs: {field} is {in_the_file} in the file \
+         and {in_the_run} in this run"
+    )]
+    FittedFromOtherInputs {
+        /// **The key's path as the file spells it**, the same vocabulary [`Self::Meaningless`]
+        /// names — `fitted_from.samples[1]`,
+        /// `fitted_from.read_groups[read_group = 2].library` — so that a reader meets one way of
+        /// being pointed at a line and can find it by searching the file they hold.
+        field: String,
+        /// What the file says it is, rendered — quoted where it is a name, bare where it is a
+        /// count.
+        in_the_file: String,
+        /// What this run has instead, rendered the same way.
+        in_the_run: String,
+    },
 }
 
 impl ParametersFileError {
@@ -263,7 +294,9 @@ impl ParametersFileError {
             Self::Malformed { line, .. } => *line,
             // **A refusal that walked a parsed value has no position to give**, which is why
             // this returns an `Option` rather than a `usize`. See [`ParametersFile::validate`].
-            Self::Meaningless { .. } => None,
+            // A binding refusal has none either, and for a further reason: the file is not the
+            // thing that is wrong, so there is no line in it to send anyone to.
+            Self::Meaningless { .. } | Self::FittedFromOtherInputs { .. } => None,
         }
     }
 
@@ -278,9 +311,10 @@ impl ParametersFileError {
     pub fn rendered_by_the_parser(&self) -> String {
         match self {
             Self::Malformed { source, .. } => source.to_string(),
-            // No parser was involved: this refusal is about what the file says, not how it is
-            // written, and its own `Display` carries the whole of it.
-            Self::Meaningless { .. } => self.to_string(),
+            // No parser was involved: these refusals are about what the file says and what it
+            // was fitted from, not about how it is written, and their own `Display` carries the
+            // whole of each.
+            Self::Meaningless { .. } | Self::FittedFromOtherInputs { .. } => self.to_string(),
         }
     }
 }
