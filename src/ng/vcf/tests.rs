@@ -53,11 +53,11 @@ fn a_snp_record() -> VcfRecord {
         vec![
             SampleColumn {
                 call: called(&[0, 1], 42.0),
-                read_counts: SampleReadCounts::new(vec![10, 9], 19),
+                read_counts: SampleReadCounts::new(vec![10, 9], 0),
             },
             SampleColumn {
                 call: called(&[0, 0], 60.0),
-                read_counts: SampleReadCounts::new(vec![20, 0], 20),
+                read_counts: SampleReadCounts::new(vec![20, 0], 0),
             },
         ],
         vec![pool(30, 60), pool(9, 60)],
@@ -80,7 +80,7 @@ fn a_tract_record() -> VcfRecord {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 35.0),
-            read_counts: SampleReadCounts::new(vec![12, 11], 30),
+            read_counts: SampleReadCounts::new(vec![12, 11], 7),
         }],
         vec![pool(12, 58), pool(11, 55)],
         None,
@@ -120,7 +120,7 @@ fn a_sample_can_have_reads_and_no_call() {
         vec![
             SampleColumn {
                 call: SampleCall::NoCall,
-                read_counts: SampleReadCounts::new(vec![4, 3], 7),
+                read_counts: SampleReadCounts::new(vec![4, 3], 0),
             },
             SampleColumn {
                 call: SampleCall::NoCall,
@@ -192,7 +192,7 @@ fn a_full_tract_deletion() -> VcfRecord {
         vec![0.4, 1.6],
         vec![SampleColumn {
             call: called(&[1, 1], 30.0),
-            read_counts: SampleReadCounts::new(vec![0, 14], 14),
+            read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
         vec![MapqPool::default(), pool(14, 57)],
         Some(PaddingBase::Left(b'C')),
@@ -221,7 +221,7 @@ fn a_deletion_at_the_first_base_of_a_contig_is_padded_from_the_right() {
         vec![0.5, 1.5],
         vec![SampleColumn {
             call: called(&[1, 1], 25.0),
-            read_counts: SampleReadCounts::new(vec![0, 8], 8),
+            read_counts: SampleReadCounts::new(vec![0, 8], 0),
         }],
         vec![MapqPool::default(), pool(8, 50)],
         Some(PaddingBase::Right(b'G')),
@@ -293,8 +293,31 @@ fn unexplained_reads_are_the_depth_the_alleles_do_not_account_for() {
 
 #[test]
 fn every_read_explained_leaves_nothing_unexplained() {
-    let counts = SampleReadCounts::new(vec![10, 9], 19);
+    let counts = SampleReadCounts::new(vec![10, 9], 0);
     assert_eq!(counts.unexplained_reads(), 0);
+    assert_eq!(counts.depth(), 19);
+}
+
+#[test]
+fn the_depth_is_derived_and_so_cannot_contradict_the_allele_counts() {
+    // `DP` is not stored: it is `ΣAD` plus the reads no written allele explains, so the
+    // failure the old shape allowed — a depth passed in below the counts it has to cover,
+    // which no VCF parser would reject — cannot be spelled at all.
+    let counts = SampleReadCounts::new(vec![3, 4, 5], 6);
+    assert_eq!(counts.depth(), 18);
+    assert_eq!(
+        counts.depth(),
+        counts.allele_reads().iter().sum::<u32>() + 6
+    );
+}
+
+#[test]
+fn a_sample_whose_reads_all_miss_the_written_alleles_still_has_depth() {
+    // Every read explained by an allele candidate selection dropped: `AD` is all zeroes and
+    // `DP` is not, which is the per-sample signal the difference exists to publish.
+    let counts = SampleReadCounts::new(vec![0, 0], 11);
+    assert_eq!(counts.depth(), 11);
+    assert_eq!(counts.unexplained_reads(), 11);
 }
 
 #[test]
@@ -325,7 +348,7 @@ fn a_read_count_vector_wider_than_the_allele_table_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5, 5], 15),
+            read_counts: SampleReadCounts::new(vec![5, 5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         None,
@@ -337,9 +360,11 @@ fn a_read_count_vector_wider_than_the_allele_table_is_refused() {
 }
 
 #[test]
-#[should_panic(expected = "pooled over different sets of reads")]
-fn a_depth_below_the_reads_it_splits_up_is_refused() {
-    SampleReadCounts::new(vec![10, 10], 15);
+#[should_panic(expected = "is a corrupt count rather than a deep locus")]
+fn a_read_total_too_large_for_the_depth_column_is_refused() {
+    // The one arithmetic failure the derived depth still admits: two counts that cannot both
+    // be real, caught rather than wrapped into a small depth.
+    SampleReadCounts::new(vec![u32::MAX, u32::MAX], 1);
 }
 
 #[test]
@@ -351,7 +376,7 @@ fn a_mapping_quality_pool_of_the_wrong_width_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60)],
         None,
@@ -374,7 +399,7 @@ fn mapping_qualities_pooled_over_other_reads_than_ad_counts_are_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(4, 60)],
         None,
@@ -394,7 +419,7 @@ fn expected_copies_of_the_wrong_width_are_refused() {
         vec![1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         None,
@@ -414,7 +439,7 @@ fn a_call_naming_an_allele_past_the_table_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[1, 2], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         None,
@@ -456,7 +481,7 @@ fn an_empty_reference_allele_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         Some(PaddingBase::Left(b'C')),
@@ -478,7 +503,7 @@ fn a_reference_allele_that_does_not_span_the_region_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         None,
@@ -537,7 +562,7 @@ fn an_empty_allele_without_a_padding_base_is_refused() {
         vec![0.4, 1.6],
         vec![SampleColumn {
             call: called(&[1, 1], 30.0),
-            read_counts: SampleReadCounts::new(vec![0, 14], 14),
+            read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
         vec![MapqPool::default(), pool(14, 57)],
         None,
@@ -557,7 +582,7 @@ fn a_padding_base_with_no_empty_allele_is_refused() {
         vec![1.0, 1.0],
         vec![SampleColumn {
             call: called(&[0, 1], 20.0),
-            read_counts: SampleReadCounts::new(vec![5, 5], 10),
+            read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
         vec![pool(5, 60), pool(5, 60)],
         Some(PaddingBase::Left(b'C')),
@@ -577,7 +602,7 @@ fn a_right_hand_padding_base_away_from_the_contig_start_is_refused() {
         vec![0.4, 1.6],
         vec![SampleColumn {
             call: called(&[1, 1], 30.0),
-            read_counts: SampleReadCounts::new(vec![0, 14], 14),
+            read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
         vec![MapqPool::default(), pool(14, 57)],
         Some(PaddingBase::Right(b'G')),
@@ -598,7 +623,7 @@ fn a_left_hand_padding_base_at_the_contig_start_is_refused() {
         vec![0.5, 1.5],
         vec![SampleColumn {
             call: called(&[1, 1], 25.0),
-            read_counts: SampleReadCounts::new(vec![0, 8], 8),
+            read_counts: SampleReadCounts::new(vec![0, 8], 0),
         }],
         vec![MapqPool::default(), pool(8, 50)],
         Some(PaddingBase::Left(b'C')),

@@ -496,76 +496,107 @@ impl SampleCall {
 }
 
 /// **One sample's read counts at one record: the `DP` and `AD` columns.**
+///
+/// **This type is the one place the two columns' composition is decided**, and it is decided by
+/// what the type stores rather than by a rule written beside it. `DP` is not held: it is the
+/// sum of the two fields below, so the depth cannot disagree with the counts it is supposed to
+/// cover. What that removes is a whole class of defect — two totals summed over different sets
+/// of reads, producing a `DP` under its own `AD` — which no VCF parser would reject.
+///
+/// **What each column counts** (spec §7), in the merge's own terms
+/// ([`SampleSupport`](crate::ng::run::cohort_merge::SampleSupport)):
+///
+/// | | counts | from |
+/// |---|---|---|
+/// | `AD[i]` | reads whose complete observation matched written allele `i`, summed over the sample's read groups | `supported` |
+/// | `DP − ΣAD` | reads the sample observed that no *written* allele explains | see below |
+/// | `DP` | the sum of those two |
+///
+/// **Two things are in `DP` and in no `AD` slot**, and they are why the difference is worth
+/// publishing: a read whose complete observation matched an allele **candidate selection
+/// dropped** — real evidence, against a sequence this record does not carry — and a
+/// **partial** observation, a read that ran out inside the locus and so matched nothing
+/// exactly (`partials`).
+///
+/// **Two more are in neither**, and both would be wrong to count as depth. Reads that produced
+/// **no observation at all** (`reads_without_observation` — every base masked, or an `N`) were
+/// never observed in the sense `DP` claims; that counter is also summed per record and
+/// **double-counts** a read silent at two records of one locus, so it could not be a component
+/// of a per-sample total even if the meaning fitted. And reads **removed as evidence**
+/// (`reads_removed_as_evidence` — named at some of a sample's records inside the locus and not
+/// at others, so nothing they showed reaches `supported`) yielded no usable observation either.
+/// Both are real losses of depth and both are counted by the merge; neither belongs in a column
+/// that says what the sample showed here.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SampleReadCounts {
-    /// Reads whose observed sequence matched each allele, parallel to the record's allele
-    /// table, reference first.
+    /// Reads whose observed sequence matched each written allele, parallel to the record's
+    /// allele table, reference first — the `AD` column.
     allele_reads: Vec<u32>,
-    /// Every read this sample observed at the locus, whether or not a written allele
-    /// explains it.
-    depth: u32,
+    /// Reads this sample observed here that no written allele explains: a dropped candidate's
+    /// reads, and partial observations. Published as `DP − ΣAD`.
+    reads_no_written_allele_explains: u32,
 }
 
 impl SampleReadCounts {
-    /// Build a sample's counts.
+    /// Build a sample's counts from the two things they are made of.
+    ///
+    /// **There is no `depth` parameter**, and that is the point: `DP` is derived, so it cannot
+    /// be passed in disagreeing with the `AD` it has to cover.
     ///
     /// # Panics
     ///
-    /// When the depth is below the reads attributed to alleles. `DP` counts a superset of what
-    /// `AD` splits up, so the difference is *how many of this sample's reads no written allele
-    /// explains* — a negative difference is not a thin locus, it is two counts taken from
-    /// different pools.
+    /// When the two together exceed a `u32`. A per-sample depth at one locus is bounded by real
+    /// coverage — hundreds of reads, not billions — so this is a corrupt count rather than a
+    /// deep locus, and it is caught here rather than wrapping into a small one.
     //
     // No `#[must_use]`, matching this module's other two constructors and
     // `LocusInference::new`: a test that exercises the refusal calls it for the panic alone,
     // and the attribute would make that call a lint error rather than a passing test.
-    pub fn new(allele_reads: Vec<u32>, depth: u32) -> Self {
-        let attributed = Self::attributed_reads(&allele_reads);
+    pub fn new(allele_reads: Vec<u32>, reads_no_written_allele_explains: u32) -> Self {
+        let attributed: u64 = allele_reads.iter().map(|reads| u64::from(*reads)).sum();
+        let depth = attributed + u64::from(reads_no_written_allele_explains);
         assert!(
-            u64::from(depth) >= attributed,
-            "a sample's depth is every read it showed at the locus and its allele counts \
-             split up part of that, so a depth of {depth} under {attributed} attributed reads \
-             means the two were pooled over different sets of reads"
+            u32::try_from(depth).is_ok(),
+            "a sample's depth at one locus is bounded by its coverage, so a total of {depth} \
+             reads — {attributed} on written alleles and {reads_no_written_allele_explains} on \
+             none — is a corrupt count rather than a deep locus"
         );
         Self {
             allele_reads,
-            depth,
+            reads_no_written_allele_explains,
         }
     }
 
-    /// The reads attributed to written alleles — the total `DP` has to cover.
-    ///
-    /// Summed in `u64` because it runs before [`Self::new`]'s check, where the slice is still
-    /// unvalidated and its total may exceed a `u32`.
-    fn attributed_reads(allele_reads: &[u32]) -> u64 {
-        allele_reads.iter().map(|reads| u64::from(*reads)).sum()
-    }
-
-    /// The `AD` column: reads matching each allele, reference first.
+    /// The `AD` column: reads matching each written allele, reference first.
     #[inline]
     #[must_use]
     pub fn allele_reads(&self) -> &[u32] {
         &self.allele_reads
     }
 
-    /// The `DP` column: every read the sample observed here.
+    /// The `DP` column: every read the sample observed here, explained or not.
+    ///
+    /// Derived from the two stored counts, never stored, so it cannot contradict them.
     #[inline]
     #[must_use]
     pub fn depth(&self) -> u32 {
-        self.depth
+        // PANIC-FREE: `Self::new` refused a total above `u32::MAX`, so neither the sum nor the
+        // addition below can overflow.
+        let attributed: u32 = self.allele_reads.iter().sum();
+        attributed.saturating_add(self.reads_no_written_allele_explains)
     }
 
-    /// **`DP` minus the sum of `AD`: the reads no written allele explains.** Stutter at a
-    /// tract, a candidate selection dropped, or noise at a SNP — the per-sample artifact
-    /// signal a downstream filter can read without re-running anything.
+    /// **`DP` minus the sum of `AD`: the reads no written allele explains.** A dropped
+    /// candidate's reads and partial observations — stutter at a tract, a truncated candidate
+    /// at either kind of locus — which is the per-sample artifact signal a downstream filter
+    /// can read without re-running anything.
+    ///
+    /// Stored rather than subtracted, which is why it cannot come out negative and why
+    /// [`Self::depth`] is the derived one of the pair.
     #[inline]
     #[must_use]
     pub fn unexplained_reads(&self) -> u32 {
-        // PANIC-FREE: `Self::new` refused a depth below this sum, so the sum fits a `u32` and
-        // the subtraction cannot go below zero; `saturating_sub` makes that structural rather
-        // than a claim a reader has to check.
-        let attributed: u32 = self.allele_reads.iter().sum();
-        self.depth.saturating_sub(attributed)
+        self.reads_no_written_allele_explains
     }
 }
 

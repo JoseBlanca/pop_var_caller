@@ -98,7 +98,7 @@ short vectors downstream.
 
 ### Milestone A — what a record carries (types, no I/O)
 
-☐ **A1. The written record's type.** Everything the file needs after the evidence is gone, per
+✅ **A1. The written record's type.** Everything the file needs after the evidence is gone, per
 locus: the region; the allele sequences; per sample, the call (or `Missing`), the genotype
 quality, the depth tally and per-allele counts of A2; the pooled mapq sums for `MQREF`/`MQALT`/
 `MQDIFF`; the corrected site quality and the two penalties; `converged`; and the tract
