@@ -40,6 +40,20 @@
 //! read groups and locus kinds; for record-for-record fidelity against a real corpus, see
 //! `examples/ng_psp_parity.rs`.
 //!
+//! # Two things these numbers are not
+//!
+//! **Every walk arm re-opens one store that criterion has already walked, so the file is in the
+//! page cache from the second iteration on.** These are decode costs, not end-to-end read costs;
+//! a figure from here may not be quoted as what a cohort pays to read a store off a disk.
+//!
+//! **A `--release` profile of these arms cannot say whether the head or the body holds the time.**
+//! `lto = "fat"` with `codegen-units = 1` inlines `read_record_head`, `decode_record_body` and
+//! `BlockStream::next_record_where` into `RecordIter::next`, which then shows up as one large
+//! entry. Take the breakdown under `--profile profiling` instead (release codegen, no fat LTO,
+//! full debug info) and the shares under `--release` for what the shipped binary does — the two
+//! builds are 1.48× apart on this walk, so never compare a timing from one with a timing from the
+//! other.
+//!
 //! ⚠ **The heads here are ng-shaped, not production-shaped.** The stores under `tmp/` that the
 //! milestone harnesses walk are built from a production `.psp`, which names about 3.4 % of the
 //! reads ng will name (the owner's ruling of 2026-08-17), so their heads carry a small fraction of
@@ -47,8 +61,15 @@
 //! will write — so a profile taken here weights the head the way the shipped run will, and a
 //! walk timed here is **not** comparable with one timed on a `tmp/` store.
 
-// Opt-in mimalloc global allocator (cargo bench --features alloc-mimalloc ...).
-#[cfg(feature = "alloc-mimalloc")]
+// **The allocator every shipped binary links, and it has to be asked for in each one.**
+// `alloc-mimalloc` is a *default* feature, so this is opt-out (`--no-default-features`) and not
+// opt-in — but a `#[global_allocator]` is resolved per **binary**, so a bench or example without
+// this declaration links the system allocator whatever the feature says. Measured on
+// `examples/ng_psp_skip_value.rs`, two builds of one source differing only in this declaration,
+// over 7,687,686 tomato records: the full walk took 2.594 s under the system allocator against
+// 1.837 s under mimalloc, while the body-skipping walk moved from 0.649 s to 0.628 s — so the
+// ratio that harness prints came out 3.99 instead of 2.93.
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -114,10 +135,20 @@ const DEEP: CorpusShape = CorpusShape {
     genomic_block_size_bp: 20_000,
 };
 
-/// The write workloads use fewer records than the walk ones: zstd at level 9 is most of a write,
-/// and a criterion sample that compresses 300,000 records takes long enough to make the bench
-/// unusable in a review loop.
-const RECORDS_WRITTEN: u64 = 60_000;
+/// How many records a write workload pushes, for a shape that cuts a block every
+/// `genomic_block_size_bp` records.
+///
+/// **Three and a half blocks' worth, and it has to be a function of the shape.** Blocks are cut on
+/// the genomic grid alone, so at one record a reference position a shape cuts a block every
+/// `genomic_block_size_bp` records. An earlier version of this file pushed a flat 60,000 records
+/// in both arms; against the shallow shape's 100 kb grid that is **one block**, and
+/// [`PspWriter::push`] only compresses and writes when a block closes — so the arm named `write`
+/// never once ran the writer's compress-and-put path, and did all of its compression inside
+/// `finish`. Its number was 15.02 ms against the deep arm's 125.2 ms, and the two were not
+/// measuring the same program.
+fn records_written(shape: &CorpusShape) -> u64 {
+    shape.genomic_block_size_bp * 7 / 2
+}
 
 // ---------------------------------------------------------------------
 // The corpus
@@ -294,14 +325,34 @@ fn ng_psp_walks(c: &mut Criterion) {
         group.throughput(Throughput::Elements(shape.records));
         group.measurement_time(Duration::from_secs(10));
 
+        // **Each arm's name is a claim about how many bodies were built, and each arm checks
+        // its own.** A predicate that silently stopped being consulted would leave `walk_heads`
+        // and `walk_full` timing the same work with nothing in the output to say so.
+        let every_record = shape.records;
+        let one_in_a_hundred = shape.records.div_ceil(SECOND_OBSERVATION_ONE_IN);
         group.bench_function(format!("walk_full/{}", shape.name), |b| {
-            b.iter(|| black_box(walk_full(&path)));
+            b.iter(|| {
+                let built = walk_full(&path);
+                assert_eq!(built, every_record, "a full walk builds every body");
+                black_box(built)
+            });
         });
         group.bench_function(format!("walk_heads/{}", shape.name), |b| {
-            b.iter(|| black_box(walk_building_one_in(&path, u64::MAX)));
+            b.iter(|| {
+                let built = walk_building_one_in(&path, u64::MAX);
+                assert_eq!(built, 0, "a head-only walk builds no body at all");
+                black_box(built)
+            });
         });
         group.bench_function(format!("walk_one_in_100/{}", shape.name), |b| {
-            b.iter(|| black_box(walk_building_one_in(&path, SECOND_OBSERVATION_ONE_IN)));
+            b.iter(|| {
+                let built = walk_building_one_in(&path, SECOND_OBSERVATION_ONE_IN);
+                assert_eq!(
+                    built, one_in_a_hundred,
+                    "one body in a hundred, and no more"
+                );
+                black_box(built)
+            });
         });
 
         group.finish();
@@ -311,20 +362,28 @@ fn ng_psp_walks(c: &mut Criterion) {
 fn ng_psp_writes(c: &mut Criterion) {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     for shape in [&SHALLOW, &DEEP] {
-        let records = a_corpus(shape, RECORDS_WRITTEN);
+        let pushed = records_written(shape);
+        let records = a_corpus(shape, pushed);
         let path = scratch.path().join(format!("write_{}.ngpsp", shape.name));
 
         let mut group = c.benchmark_group("ng_psp");
-        group.throughput(Throughput::Elements(RECORDS_WRITTEN));
+        group.throughput(Throughput::Elements(pushed));
         group.sample_size(10);
         group.measurement_time(Duration::from_secs(10));
         group.bench_function(format!("write/{}", shape.name), |b| {
             b.iter(|| {
-                black_box(write_a_store(
-                    &path,
-                    a_header(shape, RECORDS_WRITTEN),
-                    &records,
-                ))
+                let blocks = write_a_store(&path, a_header(shape, pushed), &records);
+                // **The arm's name is a claim about what ran, so it is checked here.** A write
+                // that cuts one block compresses once, inside `finish`, and never reaches the
+                // branch of `PspWriter::push` that closes a block — which is what this arm exists
+                // to time. See `records_written`.
+                assert!(
+                    blocks >= 3,
+                    "{} wrote {blocks} block(s); a write arm that cuts fewer than three never \
+                     pays for a block boundary",
+                    shape.name
+                );
+                black_box(blocks)
             });
         });
         group.finish();
