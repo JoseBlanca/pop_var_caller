@@ -186,7 +186,7 @@ before tract, anything else refused ([`../spec/vcf_output.md`](../spec/vcf_outpu
 *Depends:* C1. *Source:* spec §5, §11; [`writer.rs`](../../../../src/vcf/writer.rs),
 [`sink.rs`](../../../../src/vcf/sink.rs).
 
-☐ **C3. The strict-parser gate.** A fixture file holding every golden case interleaved — generic
+✅ **C3. The strict-parser gate.** A fixture file holding every golden case interleaved — generic
 and tract records, the POS tie, the filtered locus — parses under `bcftools view` in the dev
 container with **zero warnings**, plain and bgzf both. This is spec §15 test 1 and it runs here,
 before any real data, because an encoding defect found later costs a re-run of everything after
