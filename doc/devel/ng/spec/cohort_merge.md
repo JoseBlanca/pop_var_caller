@@ -5,8 +5,8 @@ incorporates the owner's 2026-08-17 ruling: a cohort locus wider than `max_cohor
 cannot be built — it is counted as a failed locus, never built, never sent downstream (§3.2).
 This is the home [`run_streaming.md`](run_streaming.md) §10 promised for "the cohort merge's
 reconciliation", and it also discharges the confirmation §10 demanded — that the merge frontier
-stays bounded while spans are reconciled (§4.5 here). That document's §10 entry predates this one
-and should be repointed here; that edit is not made here. Companion architecture doc:
+stays bounded while spans are reconciled (§4.5 here). **That document's §1.2 and §10 entries were
+repointed here on 2026-08-28**, having outlived this spec by eleven days. Companion architecture doc:
 [`../arch/cohort_merge.md`](../arch/cohort_merge.md) (the types and interfaces). Reads on
 [`locus_generation.md`](locus_generation.md) (what a per-sample observation is),
 [`typed_regions.md`](typed_regions.md) (what a segment is), and

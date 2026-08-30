@@ -91,10 +91,31 @@ by document kind:
     reference.
     Companions: [`arch/repeat_catalog.md`](arch/repeat_catalog.md) (types & interfaces) and
     [`impl_plan/repeat_catalog.md`](impl_plan/repeat_catalog.md) (the build order).
+  - [`candidate_alleles.md`](spec/candidate_alleles.md) — **step 6**: which sequences a locus is
+    called over. The rules both paths share (the per-sample support bar, the cap of six with
+    truncation ranked by within-sample share, the pooled leftover the SNP/indel likelihood needs,
+    the verdicts, why the placement commutes) **and** the ordinary SNP/indel path. Clearing this
+    is what unblocks an end-to-end run on real data.
+  - [`candidate_alleles_ssr.md`](spec/candidate_alleles_ssr.md) — step 6 at a repeat tract: the
+    rung ladder, the nomination rule that replaces production's clear-peak test, both spellings of
+    one repeat length, and the three cohort-denominated gates that are not ported. **Blocked**:
+    the merge's `CohortObservation` carries no motif.
+  - [`parameters_file.md`](spec/parameters_file.md) — **the run's parameters as a file**: the TOML
+    artefact carrying every number calling runs on, each beside its warrant (fitted here, borrowed,
+    supplied, defaulted). It is what makes a run possible without a fit — the alignment files
+    straight to a VCF — and every run writes one beside its VCF whatever the numbers came from, so
+    a run is reproducible from its own output. The defaults live in the binary, not in a shipped
+    file. **Settled, no code yet.**
   - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling
     steps are graded against.
 - **`research/`** — measurements, kept apart from the designs they settled so a spec can point at
   a number rather than repeat it.
+  - [`cohort_merge_parallel_cost_plan.md`](research/cohort_merge_parallel_cost_plan.md) — **a plan,
+    not a finding**: why the parallel cohort merge gives back so little speed, and the four
+    candidate fixes, in the order they should be tried. Its first step is a profile, because the
+    round barrier is only one of three suspects already on the record — the other two are a fixed
+    per-region cost that walks the whole cohort, and a 39% allocator share. Answers
+    [`run_streaming.md`](spec/run_streaming.md) §11 question 7.
   - [`parameter_estimator_experiments_2026-08-06.md`](research/parameter_estimator_experiments_2026-08-06.md)
     — what step 4's estimators actually do, from three harnesses in `examples/`. Bias computed
     **exactly** rather than simulated, so "unbiased" is decided rather than estimated. It carries
@@ -153,6 +174,14 @@ by document kind:
     [`parameter_prepass_joint_fit.md`](arch/parameter_prepass_joint_fit.md) (`JointFit`, the
     three site classes, `HomozygoteExcess` beside `InbreedingF`, contamination as a value or a
     stated reason there is none). All three land in `src/ng/parameter_estimation/joint/`.
+  - [`candidate_alleles.md`](arch/candidate_alleles.md) — **step 6's real interface**, which
+    `ng_step_interfaces.md` deferred: `CandidateSelectionConfig`, `SelectionVerdict`,
+    `UnmatchedSupport`, `AlleleRemap` and `LocusSelection`, plus `select_generic`. No trait — two
+    paths with different inputs are two functions. Companion to `spec/candidate_alleles.md`.
+  - [`candidate_alleles_ssr.md`](arch/candidate_alleles_ssr.md) — the repeat-tract half:
+    `RepeatLadder`, `SsrSelectionConfig`, `SsrLocusSelection` (which carries the repeat counts and
+    the mode the genotype prior's seed takes) and `select_ssr`. Companion to
+    `spec/candidate_alleles_ssr.md`.
 - **`impl_plan/`** — step-by-step implementation plans (build order, not new design).
   - [`foundations.md`](impl_plan/foundations.md) — the first ng code: skeleton,
     `types.rs` seed, and the `RefSeq` accessor (three impls).
@@ -197,6 +226,16 @@ by document kind:
     milestone is proven against the two research harnesses in `examples/` or against an
     identity. The STR half's plan follows its architecture doc settling; the two censuses and
     the cohort gather still need one.
+  - [`candidate_alleles.md`](impl_plan/candidate_alleles.md) — **step 6**, the shared module and
+    the ordinary path: the vocabulary, the per-sample fold, admission and the remapping, the cap,
+    the leftover, then the two external checks. Four steps are marked *own commit, do not bundle*
+    because they fail silently rather than crashing. **Clearing it clears the end-to-end blocker
+    [`calling_loop.md`](impl_plan/calling_loop.md) records.**
+  - [`candidate_alleles_ssr.md`](impl_plan/candidate_alleles_ssr.md) — step 6 at a repeat tract.
+    Milestone A is a change to the merge — `CohortObservation` carries the locus kind — and lands
+    alone before any calling code, because without the motif there is no ladder. Its oracle is a
+    differential with a failing state at both ends: production's candidate set reproduced with its
+    three replaced rules switched in, and the measured improvement with them switched out.
 
 This mirrors the repo-wide `doc/devel/{specs,architecture,implementation_plans}`
 convention but scoped to ng, so the growing set of ng docs stays together.

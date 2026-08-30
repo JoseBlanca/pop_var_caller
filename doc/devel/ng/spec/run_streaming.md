@@ -1,12 +1,17 @@
 # ng — how a run is driven: three iterators, two modes
 
-*Status: design spec, 2026-08-16. No code yet — this settles the design. It replaces the
-2026-08-14 draft, which drove a run through three public size choices — the walk unit, the psp
-block, the calling range — and the machinery that kept them apart. The public shape is now three
-objects, each an iterator, and every division of work is internal to one of them. One consequence
-of the new shape is argued in §6.3 and **flagged there for the owner to rule on: the psp header's
-block-boundary digest is dropped**, and its `writer_version` field with it. Companion architecture
-doc: [`../arch/run_streaming.md`](../arch/run_streaming.md) (the types and interfaces). Reads on
+*Status: design spec, 2026-08-16, **amended 2026-08-28**. No code yet — this settles the design.
+The 2026-08-28 amendment changes where the parallelism is and nothing else: the walk goes several
+samples at a time with each sample serial inside (§5.2), and the two callers stop cutting the
+genome into segments for workers and instead call the merge's loci from a pool (§3.1, §3.5). §7.1's
+memory bounds and §11's questions follow from that; **every concurrency default is now unset on
+purpose**, because the psp format's cost, the calling loop's cost and both of their memory
+footprints are unmeasured. The public shape is three objects, each an iterator, and every division
+of work is internal to one of them. **One thing waits on the owner: §6.3 drops the psp header's
+block-boundary digest**, and its `writer_version` field with it. **⚠ The companion architecture doc has not been amended and now specifies the deleted design**:
+[`../arch/run_streaming.md`](../arch/run_streaming.md) still gives `call_vars_in_segment`, a
+`LookAhead` knob, a segment pool, and per-segment per-sample walkers, all of which §3.1 and §3.5
+retire. Read it for the types it names and not for the shape; amending it is owed. Reads on
 [`locus_generation.md`](locus_generation.md) (what an observation is),
 [`typed_regions.md`](typed_regions.md) (what a segment is), and
 [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) (the census — the
@@ -44,14 +49,18 @@ these objects ever names a work unit, a block, or a range.
    production grew a second, separate driver for its no-file path and deleted it on 2026-06-01
    rather than keep maintaining two.
 2. **Degrade across the committed range** — one sample to several thousand, a few reads a position
-   to several hundred (`CLAUDE.md`, *What this caller has to work on*). Every memory bound in §7
-   is a formula in the sample count, so the large end has an answer rather than an omission.
-3. **Parallelism inside one sample as well as across samples.** Production's single-sample pileup
-   reaches 1.81× at four threads and gets *worse* at eight (59.2 s → 32.7 s → 34.4 s), because
-   only its BAQ stage threads while reading, walking and writing stay serial — about 40% of that
-   run cannot be sped up
+   to several hundred (`CLAUDE.md`, *What this caller has to work on*). Every memory bound in §7 is
+   a formula whose terms are stated, so the large end has an answer rather than an omission. **The
+   walk stage's bound is in *samples in flight* rather than in cohort size** (§7.1), which is what
+   makes it the one stage whose peak does not grow with the cohort.
+3. **A single sample must be able to use the machine.** Production's single-sample pileup reaches
+   1.81× at four threads and gets *worse* at eight (59.2 s → 32.7 s → 34.4 s), because only its
+   BAQ stage threads while reading, walking and writing stay serial — about 40% of that run cannot
+   be sped up
    ([`pileup_thread_scaling_2026-06-11.md`](../../reports/pileup_thread_scaling_2026-06-11.md)).
-   A single sample must be able to use the machine.
+   **This goal is not met today.** The walk runs several samples at once with each sample serial
+   inside (§5.2), which is right for a cohort and gives a lone sample nothing. **Question 8 (§11)
+   owns what to do about it** and is the only place this document argues it.
 4. **The output must not depend on how the work was divided.** The same VCF at one thread and at
    sixteen; the same VCF from direct mode and from psp mode with the parameters held fixed. This
    is the oracle for everything below (§12).
@@ -62,10 +71,11 @@ these objects ever names a work unit, a block, or a range.
   checksums, format versioning, the index. It fixes only the contract the file's reader must
   answer (§3.3), what the header must record (§6), and the resident-state budget an open file
   must meet (§7.2). The encoding is deferred with a home (§10).
-- **It does not define the cohort merge's reconciliation** — how observations whose spans differ
-  between samples, because each sample's generic observations are cut from its own data, become
-  one cohort observation. Deferred with a home (§10). This document fixes that the merge keys on
-  coordinates and that it streams (§3.2).
+- **It does not define the cohort merge itself** — how the samples' streams become one stream of
+  cohort loci, including how observations whose spans differ between samples become one
+  cohort locus. That is [`cohort_merge.md`](cohort_merge.md), written the day after this
+  document and built since. What this document fixes about the merge is only what the run needs
+  from it: that it keys on coordinates and that it streams (§3.2).
 - **It does not define the caller** (steps 6–13 of the proposal) or the parameters file's format.
   Both sit downstream of the objects named here; the parameters file is deferred with a home and
   is on direct mode's critical path (§10).
@@ -87,21 +97,34 @@ these objects ever names a work unit, a block, or a range.
   `SampleLocusObservations` ([`locus_generation.md`](locus_generation.md) §3). The locus-generation
   documents call this a *locus*; this document says *observation* throughout, because what matters
   here is the item flowing between objects, and every observation is minted inside one segment.
-- **cohort observation** — every sample's observations over one stretch of genome, brought
-  together by the merge. How overlapping spans are reconciled inside one is the deferred merge
-  spec's question (§10); that it is the unit the caller consumes is this document's.
+- **cohort locus** — every sample's observations over one stretch of genome, brought together by
+  the merge; the unit the caller consumes. How overlapping spans are reconciled inside one is
+  [`cohort_merge.md`](cohort_merge.md)'s. **This is the only name this document uses for it**, and
+  it is the merge's spec's and the code's.
 - **census** — a sample's evidence at a scattered subset of the analysed positions, chosen in
   advance and identical in every sample, which is all the parameters fit reads. About one
   analysed position in 390 on tomato.
 - **psp** — the per-sample file holding all of one sample's observations, in genome order.
-- **block** — the psp's unit of compression: a run of observations compressed as one payload and
-  decoded as one payload. Named here only so this document can say where it lives: **inside the
-  psp writer and reader, and nowhere above them** (§3.3, §6.3).
-- **source** — the object that answers one question: *one sample's observations in one segment, as
-  an iterator, in coordinate order.* Two exist — a walker over alignment files, a psp reader
-  (§3.3).
-- **look-ahead** — how many segments an object may hold in flight beyond the one it must yield
-  next (§3.5). The memory knob.
+- **block** — how far back the psp's compressor is allowed to look for a repeat. **A reader can
+  decode less than a whole one before handing out a record**, and the
+  encoding work since 2026-08-19 is trying to make it much larger than that. Decompressing a block
+  incrementally separates *how far back the compressor may look* from *how much memory a reader
+  spends*, so a block may be a megabyte while a reader holds far less
+  ([`../impl_plan/psp_encoding_experiments.md`](../impl_plan/psp_encoding_experiments.md), the
+  first of the three things it measures). Production couples the two, and that coupling is what
+  ng is trying not to inherit ([`psp_record_encoding.md`](psp_record_encoding.md) §1.1).
+- **a reader's working set** — what one open psp costs while it is being read. **This, not the
+  block size, is the quantity every memory bound in this document multiplies by the sample
+  count.** How the encoding keeps it small is the encoding's business; that it must fit §7.2's
+  budget is the only thing this document asks of any shape it chooses.
+- **source** — one sample's whole run of observations, in coordinate order, as an iterator that
+  only moves forward. It is *asked for* one segment at a time (§3.4), but it is not rebuilt per
+  segment and not held per worker: a caller has exactly one per sample for the whole run (§3.5).
+  Two exist — a walker over the sample's alignment files, and a reader over its psp (§3.3).
+- **samples in flight** — how many samples the walk stage walks at once (§5.2). The walk's memory
+  knob.
+- **callers in flight** — how many cohort loci the two callers may have out with workers at once
+  (§3.5). Small, and the only concurrency setting on the calling side.
 
 ---
 
@@ -151,60 +174,59 @@ everything calling needs (§12).
 
 ## 3. The calling function, the merge, and the shape all three objects share
 
-### 3.1 One segment at a time, through one function
+### 3.1 One locus at a time, through one function
 
 Both variant callers — the one reading alignment files and the one reading psp files — drive one
-function. Given one segment and one source per sample, it merges the
-samples' observations and calls variants over that segment:
+merge and one calling function:
 
 ```
-# a "source" answers one question: this sample's observations in this segment,
-# as an iterator, in coordinate order.
+# a "source" answers one question: this sample's observations, as an iterator,
+# in coordinate order, advancing forward only, for the whole run.
 #   the walker      – reads the sample's alignment files
-#   the psp reader  – decodes whichever blocks overlap, keeping the one it is in
+#   the psp reader  – decodes the block it is in, and the next when it passes the end
 
-call_vars_in_segment(segment, sources):
-    per_sample = [source.observations_in(segment) for source in sources]
-    for cohort_observation in k_way_merge(per_sample):
-        yield each variant of call_vars_from_observation(cohort_observation)
-```
-
-and each caller's `next()` is, in its serial skeleton:
-
-```
 next():
     while pending is empty:
-        segment = segments.next()          # no more segments → iteration ends
-        pending = collect(call_vars_in_segment(segment, sources))
+        cohort_observation = merge.next()   # merge exhausted → iteration ends
+        pending = collect(call_vars_from_observation(cohort_observation, parameters))
     return pending.pop_front()
 ```
 
-`call_vars_in_segment` takes **one** segment, deliberately. The loop over segments is what gets
-parallelised, so it belongs where the in-flight bookkeeping is — inside the iterator — and not
-inside the calling function, which stays a straight-line pipeline anyone can read or test on one
-segment. The two callers keep their own `next()` — they differ in what they hold and how they
-parallelise (§5) — while `k_way_merge` and `call_vars_from_observation` are written once. That is
-the whole of goal 1: nothing inside the merge or the caller can tell a walker from a file reader.
+where `merge` is the k-way merge over the sources (§3.2), yielding one cohort locus at a
+time in genome order.
 
-The serial skeleton above is the **contract** — what the iterator yields and in what order. §3.5
-says how the same yield sequence is produced in parallel.
+**The two callers differ only in what a source is.** `k_way_merge` and
+`call_vars_from_observation` are written once and neither can tell a walker from a file reader,
+which is the whole of goal 1.
+
+**The skeleton above is the contract** — what the iterator yields, and in what order. §3.5 says
+how the same yield sequence is produced with a pool of callers, and the sequence is required to be
+identical either way (§12).
 
 ### 3.2 The merge is streaming
 
-`k_way_merge` consumes the per-sample iterators and yields one cohort observation at a time. Its
+`k_way_merge` consumes the per-sample iterators and yields one cohort locus at a time. Its
 resident set is its **frontier** — the head observation of each sample's iterator, so about one
 observation per sample — never a whole segment's observations per sample. Nothing accumulates a
-segment before merging it; the merge pulls, the sources produce lazily, and a cohort observation is
+segment before merging it; the merge pulls, the sources produce lazily, and a cohort locus is
 dropped the moment the caller has consumed it.
 
-The repo already has this shape in its read layer: `MergedRegionReads` is an argmin k-way merge
-over per-file read streams, holding one head per stream with the sort keys beside the heads —
-[`sample_reads.md`](../arch/sample_reads.md) §4 describes it, and it is the model for
-`k_way_merge`. The differences are the item (observations, not reads) and the yield (a cohort
-observation groups every sample's entries at one stretch of genome rather than interleaving
+The repo already has this shape in its read layer: `MergedCursors`
+([`src/ng/read/input/sample_cursor.rs:178`](../../../../src/ng/read/input/sample_cursor.rs)) is an
+argmin k-way merge over a sample's per-file cursors, holding one head per stream with the sort keys
+beside the heads, and it is the model for `k_way_merge`. *(The architecture doc calls this shape
+`MergedRegionReads` ([`sample_reads.md`](../arch/sample_reads.md) §4); that name is from a
+superseded per-region design and is not in the tree.)* The differences are the item (observations, not reads) and the yield (a cohort locus
+groups every sample's entries at one stretch of genome rather than interleaving
 them); where two samples' generic observations overlap without coinciding, the frontier may
-briefly hold a few observations of one sample while spans are reconciled — the deferred merge
-spec (§10) owns that reconciliation and must confirm the frontier stays bounded by it.
+briefly hold a few observations of one sample while spans are reconciled —
+[`cohort_merge.md`](cohort_merge.md) §4.2 owns that reconciliation and its §4.5 confirms the
+frontier stays bounded through it.
+
+**⚑ "About one observation per sample" describes the merge this document imagined, not the one that
+was built.** The built merge reads through an observation cache spanning the ground its builders
+cover, and `cohort_merge.md` §8 measures **33 records held per sample** at 1,000 samples on the
+shipped defaults. §7.1 carries the consequence.
 
 **The consequence: segment size is not a memory knob.** A segment's cost while being called is its
 merge frontier plus the sources' own working state, not its length. Segments can therefore be
@@ -216,13 +238,15 @@ of each sample's own data, so they do not line up between samples. A merge keyed
 positional-within-a-file — a block number, an index within a decoded payload — would be wrong;
 coordinates are the only key all producers share.
 
-### 3.3 Almost every position is never built, and the saving lands in two different places
+### 3.3 Most positions produce no cohort locus at all, and the saving lands in two different places
 
-**A psp holds every locus, because no sample knows which positions another sample varies at.** What
-is skipped is not the storing and not the visiting — it is the *building*. A position where every
-sample's reads matched the reference produces no cohort observation and no call at all, and an
-earlier measurement of exactly this question on the cohort reader materialised **28,718 loci
-instead of 2.83 million**, about one position in a hundred.
+**A psp holds every position, because no sample knows which positions another sample varies at.**
+What is skipped is not the storing and not the visiting — it is the *building*. A position where
+every sample's reads matched the reference produces no cohort locus and no call. Measured on 10
+tomato bench samples over 300 BED regions: **3,060 of 309,018 covered positions varied — one
+position in 101**
+([`../research/experiments/locus_stream_shape/sketch4_columnar_producer_plus_fold.md`](../research/experiments/locus_stream_shape/sketch4_columnar_producer_plus_fold.md)
+§2).
 
 **The decision is a cohort one and cannot be taken per sample.** A position where *this* sample saw
 only reference reads may be a variant site in another, and there this sample's evidence is still
@@ -234,35 +258,102 @@ position is dropped on its own account; what is dropped is a position no sample 
 
 - **Direct mode: at the merge.** The walker has already read the reads, so its observations exist
   whatever happens next. The saving is downstream — where the cohort's non-reference evidence at a
-  position is nothing, `k_way_merge` builds no cohort observation and `call_vars_from_observation`
+  position is nothing, `k_way_merge` builds no cohort locus and `call_vars_from_observation`
   is never entered.
-- **psp mode: during decompression**, which is the production shape and worth copying rather than
-  re-inventing. `TwoPhaseSegment`
-  ([`var_calling/sample_reader.rs:698-712`](../../../../src/var_calling/sample_reader.rs)) decodes
-  a block's **light** columns for every row — the positions, the reference span, and the sum of
-  non-reference observations — while leaving the heavy columns compressed. The cohort fold sums the
-  light column across samples and decides which rows are variable; only then does
-  `set_variable_rows` ([`:789`](../../../../src/var_calling/sample_reader.rs)) inflate the heavy
-  columns of the kept rows, in every sample. A quiet sample at a kept position is therefore fully
-  present, and a position nobody varied at costs one integer per sample.
+- **psp mode: while reading the file.** The evidence a sample stored is not all equally expensive
+  to get at. Deciding *whether a position is worth calling* needs two small numbers from each
+  sample — how many of its reads were non-reference there, and how many of its reads were
+  **compared against the reference** over the whole locus. That second one is neither read depth
+  nor the count of reads that covered the ground: a read whose bases stop inside the locus is in
+  neither number ([`cohort_merge.md`](cohort_merge.md) §4.3). A file that cheaply stored *depth*
+  would not answer the rule.
+  Reconstructing *what that sample actually saw* needs everything else: the sequences, the
+  qualities, the read names. **So the file is written so the small numbers can be read without
+  reconstructing the rest**, and a run reads them for every position but reconstructs the rest only
+  where the cohort decided to call.
 
-**This makes a source's answer two-phase rather than one call**, and the same two phases in both
-modes:
+  **This is production's one good idea here, and its layout is not being copied.** Production does
+  the same trick over a transposed block — the cheap fields decoded for every row, the expensive
+  ones left compressed, then inflated for the rows that were kept (`TwoPhaseSegment` and
+  `set_variable_rows`,
+  [`var_calling/sample_reader.rs:698-712,789`](../../../../src/var_calling/sample_reader.rs)).
+  **How ng's file is cut up so the same saving is available is not settled** — the encoding work is
+  sweeping it, because the cheaper the cut is in bytes the more a reader must hold to use it, and
+  the two pull against each other ([`../impl_plan/psp_encoding_experiments.md`](../impl_plan/psp_encoding_experiments.md),
+  its milestone B0). **What this document requires is only that the saving survives whatever wins**,
+  and that the two small numbers above are among what a run can read cheaply. That second half is a
+  requirement the encoding did not have written down: the rule that admits a position asks each
+  sample for a *share* of its own reads as well as a flat count
+  ([`cohort_merge.md`](cohort_merge.md) §4.3), so the read count is not optional.
+
+**And there is a cheaper step in front of that one.** For each stretch of genome
+the file stores together, it also records **the most non-reference reads any position in that
+stretch carried, readable without decompressing anything**. A reader can compare that against the
+bar a position must clear to be worth calling and, when no position in the stretch could have
+cleared it, move on without reading the stretch at all.
+
+**The test is the admission bar and not "any non-reference read at all" — the difference decides
+whether this is worth having.** Sequencing error alone puts a non-reference read somewhere in any
+substantial stretch: at 3 reads a position over 5,000 positions with Q30 bases, about fifteen
+erroneous bases are expected, so a test of *any* would answer "no" almost never and the step would
+save nothing. The bar — two non-reference reads, or two in a hundred of that sample's reads,
+whichever is larger ([`cohort_merge.md`](cohort_merge.md) §4.3) — is cleared by error alone far more
+rarely, and **the share half is what keeps that true at depth**: at 300 reads a position two
+non-reference reads is noise, six in three hundred is not. **A stored summary that cannot be
+compared against the share half makes this step inert at exactly the depths where a heavy record is
+largest** — the same requirement the ⚑ below states for step 2, and one number serves both.
+
+**Passing over a sample is not the same as leaving it out, and confusing the two is the trap.** Two
+different questions get asked at a genomic position, and they need different things:
+
+- **Is this position worth calling at all?** One sample showing enough non-reference reads admits
+  it for everybody ([`cohort_merge.md`](cohort_merge.md) §4.3). A sample that showed no
+  non-reference read anywhere in the stretch cannot be the one that admits it, so passing over that
+  sample cannot change this answer.
+- **What is each sample's genotype at that position?** This needs *every* sample's evidence, the
+  quiet ones included. Thirty reads that all match the reference is a confident homozygous
+  reference; no reads at all is a no-call. A sample left out entirely makes those two
+  indistinguishable.
+
+**So the shortcut may excuse a sample from the first question and never from the second.** A reader
+that passed over a stretch must still be asked for it, in full, at every position the cohort ended
+up keeping — and must answer.
+
+**Passing over is one sample's decision, never the cohort's.** Each sample's file is cut into
+stretches by its own data, and those cuts do not coincide between samples (§6.3). One sample can
+skip ground another is reading in full. There is no cohort-wide skip and none is needed: the saving
+is already taken sample by sample.
+
+**So reading one sample's evidence happens in three steps.** The first exists only when the
+evidence comes from a psp; a walker over alignment files starts at the second, because it is
+holding the reads already.
 
 ```
-# phase 1 — cheap, every position in the segment
-source.light_column(segment)     -> per position: depth, and whether any read was non-reference
+# step 1 — psp only, and it reads nothing but a stored summary
+did this sample show a non-reference read anywhere in this stretch?
+#   "no" excuses the sample from step 2 over that stretch. It is still asked in
+#   step 3 at every position the cohort kept, and must answer there in full.
 
-#   the merge folds phase 1 across the samples and decides which positions are variable
+# step 2 — cheap, at every position of the segment
+how many non-reference reads, and how many reads in total, did this sample have here?
+#   the merge puts every sample's answers together and decides which positions are
+#   worth calling
 
-# phase 2 — expensive, only at the positions the fold kept
-source.build(kept_positions)    -> the full observations there
+# step 3 — expensive, only at the positions the merge kept
+everything the sample saw there — sequences, qualities, read names
 ```
 
-The walker's phase 1 costs a walk and its phase 2 is free, because it is holding the reads already;
-the psp reader's phase 1 is a light decode and its phase 2 is the deferred inflation. **One
-interface, two cost profiles** — and the merge, which cannot tell them apart, is where the decision
-is made in both.
+**Step 2 costs the two sources completely different things, and the merge cannot tell.** A walker
+has the reads in hand, so step 2 costs it a walk and step 3 is free; a psp reader pays a cheap read
+for step 2 and a dear one for step 3. **One interface, two cost profiles** — and the merge, which
+sees only the answers, is where the decision is taken either way.
+
+**⚑ The read count in step 2 is a requirement the encoding did not have written down.** The rule
+that admits a position asks each sample for a *share* of its own reads as well as a flat count —
+`max(floor reads, share × that sample's reads compared against the reference over the locus)`
+([`src/ng/run/cohort_merge/mod.rs`](../../../../src/ng/run/cohort_merge/mod.rs)) — so a cheap read
+that returns only the non-reference count cannot answer it. Named here because this document is
+where the requirement comes from; the encoding is where it has to be met.
 
 *The production path also ships its own oracle, which is worth carrying: an eager whole-segment
 decode used only by tests, as the byte-identity check the two-phase path is measured against
@@ -278,33 +369,88 @@ place the two callers differ.
   they are minted. It is the same machinery the gatherer uses (§5.2); direct mode is that
   machinery driven by the calling loop instead of by a file-writing loop.
 - **The psp reader** wraps one sample's open psp. **It serves segments, not blocks**: asked for a
-  segment, it decides internally which blocks overlap, decodes them one at a time, and yields the
-  observations inside the segment. It keeps the block it is currently in, so successive segments
-  inside the same block cost no further decode. The block never surfaces above the reader — no
-  caller mentions one, the two of them loop over the same segments, and there is no "line the segment
-  up with a block" problem: any segment is servable, and the segments they loop over are
-  simply the common case its cache is warmest for.
+  segment, it works out internally where in the file that ground lies, decodes what it needs, and
+  yields the observations inside the segment. It keeps its place in the file, so a segment
+  following the one it just served costs no fresh seek and no re-decode. The block never surfaces
+  above the reader — no caller mentions one, and there is no "line the segment up with a block"
+  problem: any segment is servable, and consecutive segments are simply the case the reader is
+  warmest for. **How much it holds while doing this is §7.2's budget, not a block's size** (§1.3,
+  *a reader's working set*).
 
 Both sources are cursors: asked for ascending segments they stream forward; a backward jump is
-legal and costs a seek (§8). A source serves one consumer at a time, so a parallel loop gives
-each in-flight segment its own source per sample, over the sample's one open file (§5, §7).
+legal and costs a seek (§8). A source serves one consumer at a time. **In a caller there is one
+source per sample for the whole run** and it only ever moves forward, because the single merge is
+its only consumer (§3.5) — so each stretch of the file is decoded once, by one cursor, and the
+backward jump never happens. In a gatherer splitting one sample across workers, each worker needs its own source over
+that sample's one open file (§5.2).
 
-### 3.5 Out-of-order work, in-order output: bounded look-ahead
+### 3.5 Where the parallelism is
 
-All three objects share one internal skeleton. The segments — the segments, in genome order — are
-handed to a pool of workers; workers finish out of order; the iterator yields in genome order, so
-a finished segment waits until every earlier segment has been yielded. The number of segments in
-flight — being worked on, or finished and waiting — is bounded: the **look-ahead**. When the
-segment at the yield frontier is slow, up to `look-ahead` later segments may complete and be held;
-then the pool idles rather than pull further ahead.
+**Everything in this section is provisional until §11's measurements exist** — the psp format's
+cost, the calling loop's cost and the memory of both are unknown, and no arrangement here should be
+improved on before they are known.
 
-With a streaming merge, the look-ahead is the objects' only real memory knob: peak resident is
-`look-ahead × one segment's in-flight cost`, plus per-sample open-file state (§7.1). One knob per
-object, spent the same way in all three; at look-ahead 1 each object degrades to its serial
-skeleton and its minimum memory.
+**The two stages parallelise along different axes, because their work has different shapes.**
 
-What differs per object is only what a segment's in-flight cost *is* — a walking working set, a
-decoded block per sample, or one segment's observations — and §5 prices each.
+**The walk: one worker per sample.** Samples are independent — nothing one sample's walk computes
+is read by another's — so the pool is over samples and each sample's walk is serial inside. §5.2
+gives the reasoning and what it costs.
+
+**The two callers: a serial merge feeding a pool of loci.** The merge produces cohort loci one at
+a time in genome order on a single thread; each locus is handed to a free worker as it appears;
+the called results are released in genome order. Nothing is decided in advance and no line is
+drawn through the genome.
+
+**Why the genome is not cut for calling, and this is the part that is easy to get wrong.** Two
+reasons. **The first carries the argument on its own**; the second is a guess until §11's question 1
+measures it, and is here because it says what would go wrong if the first were somehow solved:
+
+- **The loci are not known until the merge has made them.** A cohort locus is not a position: a
+  deletion joins consecutive positions into one locus, so where one begins and ends is an output
+  of the merge and not an input to it. Anything that hands out loci in advance has to have merged
+  them first.
+- **The one genome cut that respects loci — the segment — is wildly uneven.** An STR tract is tens
+  of bases; a generic stretch between tracts is unmeasured and probably far longer (§4.4 gives the
+  arithmetic and says why it is a guess). Give segments to a pool and one enormous generic segment both
+  starves the pool, since only one worker is inside it, and forces every other worker's finished
+  output to wait behind it — which is the memory the ordered release then has to hold.
+
+**What is in flight, and it is small.** `callers in flight × one cohort locus`, plus whatever the
+sources hold at the merge frontier (§3.2) and the merge's own observation cache (§7.1). A locus is the same size whether it came from a kilobase of
+quiet generic ground or from a tract, so the bound does not depend on how the genome is shaped —
+which is exactly what the segment pool could not promise.
+
+**The merge has its own parallelism, and it is off unless measured to pay.** `merge_cohort_in_parallel`
+([`src/ng/run/cohort_merge/parallel.rs`](../../../../src/ng/run/cohort_merge/parallel.rs)) cuts
+each analysed region into fixed-width **building regions** — 200 bases by default — works a round
+of them concurrently, and releases their loci by region index. It is byte-identical to the
+single-threaded merge at any region width and any number in flight. **Its measured gain is poor,
+and its own design says why:** the organiser draws the readers forward while no builder runs, then
+a round of builders runs, and nothing is released until every builder in that round has finished —
+so a barrier fires every `regions_in_flight × regions_len` bases — 3,200 on a sixteen-thread
+machine at the 200-base default width, because regions-in-flight has **no constant default** and
+takes one per worker thread
+([`cohort_merge/mod.rs:592`](../../../../src/ng/run/cohort_merge/mod.rs)) — with a serial phase
+between rounds. It stays available and off; §11 question 7 names what would turn it
+on and what to try first.
+
+**⚑ This arrangement puts the largest known cost on one thread, and that is the risk §11's
+question 7 exists to check.** Everything each sample's source does — opening its data, decoding it,
+minting observations — happens where the merge pulls, which is one thread; the pool gets only the
+genotype arithmetic. The merge's own assembly is on that thread too, and it is not small:
+`cohort_merge.md` §4.3 measures projecting and assembling a locus at **170 ms of a 425 ms
+single-threaded merge** over 100 kb at 63 samples. **Nothing here is defended as optimal** — it is
+the simplest arrangement that is obviously correct, chosen so that the measurement decides the rest
+rather than an argument.
+
+**Which of the two stages is even worth a pool is not yet known.** Production's cohort
+variant-calling profile put its EM at about 3% against roughly 30% for the producer's decode
+([`cohort_varcalling_perf_2026-07-03.md`](../../reports/cohort_varcalling_perf_2026-07-03.md)) — CPU
+shares, and that report warns in the same passage that a 30% CPU share was "real but not
+wall-relevant". So it is a reason to suspect that in the psp-to-VCF path the work is mostly
+*decoding k psp files* rather than calling loci, and not a reason to believe it. ng's calling loop is heavier than production's — several passes, a
+genotype table per locus — so that is a reason to measure the split before building either pool,
+not a reason to assume it carries over (§11, question 7).
 
 ---
 
@@ -357,18 +503,24 @@ between in-flight segments. The residue is measured and small: three sites on on
 where a read's deletion starts in one generic segment, jumps a repeat tract, and ends in a later
 one — a few tens of positions in 7.4 million.
 
-### 4.4 The loop unit is one segment — decided
+### 4.4 The segment is the unit of *observation generation* — decided
 
-Each caller's loop, and the gatherer's, advances one segment per iteration. No grouping of
-segments into larger hand-out units exists in this design.
+Locus generation advances one segment at a time: the gatherer's loop, and each source inside a
+caller, produce a segment's observations before moving to the next. No grouping of segments into
+larger hand-out units exists in this design.
 
-The previous draft argued a lone segment was too small a unit of work, from a measured average of
-391 bases (613,682 generic segments on human chromosome 1). **Owner's ruling: that average does
-not apply, and the mechanism built on it goes.** The 391-base figure was taken at the *catalog's*
+**It is not the unit of parallel work** (§3.5). The argument below is about a segment being too
+small a *step*, which holds whether the loop is serial or not.
+
+**A measured average of 391 bases (613,682 generic segments on human chromosome 1) does not apply
+here, and the owner ruled so.** That figure was taken at the *catalog's*
 admission floor, `CATALOG_MIN_COPIES = [5, 5, 4, 4, 4, 3]`
 ([`src/ng/repeat_catalog/criteria.rs:16`](../../../../src/ng/repeat_catalog/criteria.rs)), which
 admits a five-base homopolymer — in random sequence a run of five or more identical bases begins
-about one position in 341, which matches the average. At the floor a caller actually routes on —
+about one position in 341, against a measured 391. **That is agreement in the wrong direction and
+should not be read as confirmation**: the calculation counts homopolymers only, while the catalog
+admits periods 2 to 6, all of which also cut generic ground — so it should over-predict cuts and
+under-predict segment length, not the reverse. At the floor a caller actually routes on —
 the copy number at which a repeat starts to stutter, `[8, 6, 6, 6, 5, 4]`, measured over 2,457
 tomato libraries
 ([`src/ng/region_typing/segment_criteria.rs:402-414`](../../../../src/ng/region_typing/segment_criteria.rs))
@@ -396,17 +548,16 @@ live heap per open alignment file (measured slope 12.0 MiB per file, 10.8 under 
 allocator — [`examples/dhat_ng_open_files.rs`](../../../../examples/dhat_ng_open_files.rs)) —
 plus the shared read-only state (§9).
 
-**How it parallelises:** the segment loop of §3.5. One in-flight segment is one task: every
-sample's walker over that segment, the merge, the calls. Within a segment the merge is one
-consumer, so the parallelism is across segments — which serves both ends of the cohort range: at
-one sample only the segment axis exists, and at a thousand samples the segments are still millions.
-Each in-flight segment's task owns its own per-sample cursors and generators (the traps of §8 make
-sharing them wrong); a worker that processes consecutive segments keeps each cursor's movement
-forward-only, the fast path (§8).
+**How it parallelises:** the merge runs on one thread and its cohort loci go to a pool of callers
+(§3.5). Every sample's walker advances at the merge frontier, in one place; the walkers are not a
+pool here, because a walker only produces what the merge is about to consume and running them
+ahead would buffer observations nobody has asked for. Each walker keeps its cursors and
+generators for the whole run, which is what keeps every cursor's movement forward-only — the fast
+path (§8), and the traps there are why cursors are never shared.
 
-**What bounds it:** `look-ahead × samples × one segment's walking set` +
-`samples × 11–15 MiB` of open files. A segment's walking set is the active reads and generator
-state at the merge frontier, not the segment's length (§3.2).
+**What bounds it:** `callers in flight × one cohort locus` + the merge frontier (about one
+observation per sample, §3.2) + `samples × 11–15 MiB` of open files. **The open files are the
+whole bill**: everything else is small and does not grow with the genome's shape.
 
 **Where the mode stops fitting.** Direct mode is for the run that has the memory, already has the
 parameters, and is not coming back to these samples in another cohort. Needing every sample open
@@ -422,30 +573,47 @@ census configuration. **Yields:** the sample's observations, in genome order, re
 to a psp. **`finish()`** — called after the iterator is exhausted — hands over the census the
 gatherer accumulated: concretely, `CensusWriter::finish()` returning the sample's
 `SampleCensusEvidence`
-([`src/ng/parameter_estimation/joint/census.rs:1806,2252,1349`](../../../../src/ng/parameter_estimation/joint/census.rs)).
+([`src/ng/parameter_estimation/joint/census.rs:1928,2378,1378`](../../../../src/ng/parameter_estimation/joint/census.rs)).
 
-**The walk stage is a loop over samples**, one gatherer each, default one at a time:
+**The walk stage is a loop over samples**, one gatherer each. **Several samples are walked at
+once, one worker each, and each sample's own walk is serial** (owner's decision). The loop below is that loop with its concurrency set to one:
 
 ```
 for each sample:
     gatherer = SampleObservationGatherer::new(sample's files, ...)
     psp writer consumes the gatherer            # blocks, header, trailer: the writer's business
-    census file written from gatherer.finish()  # write_census — census_file.rs:195
+    census file written from gatherer.finish()  # write_census — census_file.rs:200
 ```
 
-One sample at a time keeps this stage's peak memory independent of the cohort size — the property
-psp mode exists for — and holds one alignment file open. Samples-in-flight is a knob, raised only
-when one sample's segments cannot fill the pool (a small genome, a very high worker count); each
-extra sample in flight costs another open file at 11–15 MiB plus its workers' working sets. Never
-a thread per sample, which at a thousand samples is a thousand threads.
+**Why across samples rather than within one.** One worker per sample buys three things that
+splitting a sample would cost back. Each psp is written from one deterministic stream, so the
+writer never has to reassemble out-of-order work and §12.1's worker-count invariance comes for free
+instead of being designed for. The census accumulator is fed from one thread. And the read-filter
+tallies cannot under-report by the worker count (§8). Against those: within-sample scaling in ng is
+unmeasured, and the only measurement anybody has is production's, which gets worse past four
+threads (goal 3).
+
+**Samples in flight is bounded and small, and it is not a thread per sample** — at a thousand
+samples that would be a thousand open alignment files. Each sample in flight costs one open file
+at 11–15 MiB plus its census accumulator at about 6 MB per read group. **At one read group a
+sample** — every sample of both benchmark cohorts — six at once is under 150 MB. **The read-group
+count is a real multiplier, not a formality**: the 300-reads-a-position end of the committed range
+is reached by sequencing one sample over many lanes, and each lane is a read group, so the same six
+samples at sixteen read groups each is closer to 700 MB. Whoever sets this knob must be told the
+read-group count, not only the sample count. **Peak memory is a function of samples *in flight*, not of cohort size**, which is
+the property psp mode exists for and which survives this change.
+
+**A run of one sample gets one worker here, which is goal 3 unmet** — §11's question 8 owns it.
+The one consequence to carry meanwhile: **the psp writer must keep honouring §12.1's worker-count
+invariance**, because splitting one sample's walk is still on the table, and it is the only thing
+that would ever make a sample's observations arrive out of order.
 
 **The census is fed from inside the gatherer, on the same stream it yields.** Every observation
 the gatherer yields passes the census accumulator (`CensusWriter::add_locus`,
-[`census.rs:1965`](../../../../src/ng/parameter_estimation/joint/census.rs)) at the ordered yield
+[`census.rs:2087`](../../../../src/ng/parameter_estimation/joint/census.rs)) at the ordered yield
 point, and every segment the loop completes is marked walked (`mark_walked`,
-[`census.rs:1984`](../../../../src/ng/parameter_estimation/joint/census.rs)) whether or not it
-produced observations. Two consequences, each closing a defect the previous draft closed by
-contract:
+[`census.rs:2106`](../../../../src/ng/parameter_estimation/joint/census.rs)) whether or not it
+produced observations. Two consequences:
 
 - **The psp and the census cannot see different evidence.** There is one stream: what the
   iterator yields is what the census counted. No delivery discipline between two sinks is needed,
@@ -464,19 +632,15 @@ positions depend on a per-run budget and a seed, so "rebuild it" must mean delet
 not rewriting a large one — decided 2026-08-13
 ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1).
 
-**How it parallelises: over the segments of the one sample it was constructed from**, never across
-samples — the sample loop above is serial by default and a gatherer only ever sees one sample's
-files. Within that sample it is the same skeleton (§3.5) — its segments to workers, each with its own
-cursor, reference accessor and generators, observations drained in genome order. Read-filter
-tallies live in each worker's cursor and are summed when the gatherer finishes, or drop rates
-under-report by the worker count (§8). Whether a within-sample walk scales is the open question
-that can invalidate this schedule — production's equivalent tops out at 1.81× on four threads
-(goal 3); ng starts from a better position because its per-segment work is independent, but that
-is a leaning, not a measurement (open question 3, §11). If it fails, the fallback is several
-samples at once with few workers each; nothing else in this document changes.
+**A gatherer never sees more than one sample's files**, whichever way the stage is parallelised.
+The pool is outside it, over samples; the knob is inside it, over that sample's segments — its
+segments to workers, each with its own cursor, reference accessor and generators, observations
+drained in genome order. Read-filter tallies then live in each worker's cursor and are summed when
+the gatherer finishes, or drop rates under-report by the worker count (§8).
 
-**What bounds it:** `look-ahead × one segment's observations and working set` + the census
-accumulator. Nothing crosses samples.
+**What bounds one gatherer:** its own segment concurrency × one segment's observations and working
+set, plus the census accumulator. At the default that concurrency is one. Nothing crosses samples
+at any setting.
 
 ### 5.3 `PspVariantCaller` — psp mode's calling
 
@@ -485,27 +649,27 @@ Construction opens every file, reads every header, and runs the checks of §6.2 
 is decoded; the analysed regions come from the headers, not from a flag — the files know what
 ground they cover. **Yields:** variants, in genome order.
 
-**How it parallelises:** the segment loop of §3.5, one source per sample per in-flight segment.
-Each source is a psp reader's cursor over the sample's one open file; the open file's resident
-state — required to be tens of kilobytes (§7.2) — is paid once per sample, and each cursor holds
-its own current decoded block. Successive segments in one worker land in the block its cursor
-already holds far more often than not, which is what makes segment-grained segments cheap here;
-two workers whose segments share a block each decode it, a duplication bounded by the look-ahead
-and paid in time, not correctness.
+**How it parallelises:** the merge on one thread, its cohort loci to a pool of callers (§3.5).
+There is **one source per sample for the whole run**, not one per sample per in-flight unit: a psp
+reader's cursor over that sample's one open file, advancing only forward, at the merge frontier.
+So each stretch of the file is decoded once, by one cursor.
 
-**What bounds it:** `look-ahead × samples × one decoded block` + `samples × per-open-file state`.
-Both multiplicands are priced in §7. At look-ahead 1 this collapses to `samples × one decoded
-block` paid once — which is the low-memory shape the previous draft deferred as a separate
-"lockstep fallback" driver. It is no longer a separate anything: it is this object at its
-smallest setting.
+**What bounds it:** `samples × one reader's working set` + `callers in flight × one cohort locus`.
+The first term is the run's floor and is paid whatever the concurrency; §7 prices it, and §7.2's
+requirement is what keeps it affordable at three thousand samples. The second is small and is the
+only part a concurrency setting moves.
+
+**If this stage needs more parallelism than a pool of callers gives it, the next axis is the
+decode** — every sample's cursor inflating its next block at the same time, still feeding one
+merge — and not a second cut through the genome. Which axis is worth building is §11's question 7.
 
 ---
 
-## 6. What a psp header records — **changed from the previous draft**
+## 6. What a psp header records
 
 ### 6.1 The fields
 
-- **The analysed regions.** The one field compared across the cohort (§6.2). Recording the set
+- **The analysed regions.** Compared across the cohort (§6.2). Recording the set
   buys two more things: a reader can tell an *unanalysed* position from an analysed position that
   had *no coverage*, which are different facts (the same distinction the census draws per
   position — [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §1.1);
@@ -517,6 +681,25 @@ smallest setting.
   reporting only that two things disagree — the same shape as the parameters fit's own
   compatibility check
   ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §5).
+- **The sample's name.** Without it a calling run has only the order its psp files were named on
+  the command line, and the per-sample parameters — the inbreeding coefficient above all — are
+  keyed by name ([`parameters_file.md`](parameters_file.md) §3.5). A reordered file list would then
+  give every sample another sample's coefficient and put the wrong name on every VCF column, with
+  nothing failing. The calling stage matches on this name and refuses a set it cannot match (§6.2).
+- **The sample's read groups: each one's `@RG ID`, its library, and the identifier this walk gave
+  it.** **Without this, no cohort can be assembled from separately-walked samples at all.** A
+  gatherer sees one sample's files, so it numbers that sample's read groups from zero, and every
+  sample's first read group comes back as identifier `0`
+  ([`read_groups.md`](read_groups.md) §4). The parameters fit keys its per-library error rates on
+  that identifier, so it refuses a cohort whose samples collide — which is every psp-mode cohort of
+  two or more.
+
+  **The fix is to renumber at the calling stage rather than at the walk.** Each psp carries its own
+  table; the calling run reads them all at open and builds the run-wide numbering by merging them.
+  *The alternative — numbering across the whole cohort before any sample is walked — was rejected
+  because it destroys the property psp mode exists for*: the numbering would depend on the file
+  list, so adding one sample later would renumber every psp already written and force a re-walk
+  (§2).
 - **The read filters the walk applied, and the command line that produced the file.** Not compared
   by anything in this document — they are here because **the psp header already has a consumer in
   the code, and that consumer fixes part of its contents.** A census file names the psp it was
@@ -538,10 +721,11 @@ takes the psp header's bytes and a record count and says only this: two psps wit
 and the same record count get the same identity and no others do — *"which bytes exactly is the
 pileup writer's business"*
 ([`census_file.rs:91-98`](../../../../src/ng/parameter_estimation/joint/census_file.rs)). So the
-encoding spec (§10) is free to lay the header out as it likes, and is not free to leave any of the
-four values out.
+encoding spec (§10) is free to lay the header out as it likes, and is not free to leave out any of
+what §6.1 lists: the analysed regions, the catalog identity, the routing criteria, the read filters
+and the command line.
 
-### 6.2 The two refusals
+### 6.2 The refusals
 
 - **Across the cohort: the analysed regions must be equal.** Two samples analysed over different
   segments are not comparable outside the ground they share — a sample has no records over ground
@@ -557,49 +741,54 @@ four values out.
   a calling segment, and the independence argument of §4.3 fails. So a psp whose recorded catalog
   identity or routing criteria differ from the run's is refused, and the refusal names the first
   field that differs.
+- **Across the cohort: two psps may not name the same sample.** Two files for one sample is either
+  a duplicated argument or a cohort that would call one individual twice and weight the allele
+  frequencies by it. The refusal names the sample and both files.
+- **Each file against the parameters: every sample the parameters name must be present, and the
+  reverse.** The per-sample values are keyed by name, not by position
+  ([`parameters_file.md`](parameters_file.md) §6), so the match is by name and a gap either way is
+  refused naming the samples. **This is what makes the file order irrelevant**, which is the point
+  of recording the name at all.
 
-### 6.3 Dropped: the block-boundary digest, and its `writer_version` field
+**The read-group tables are merged rather than compared.** Two samples that numbered their read
+groups from zero are the normal case, not an error (§6.1), so the calling stage builds one run-wide
+numbering from the tables it read and every sample's identifiers are remapped into it. What *is*
+refused is a table that cannot be merged — two read groups in one sample sharing an `@RG ID`, or a
+sample whose table is absent — because neither can be renumbered without guessing.
 
-> **Flagged for the owner — this reverses the previous draft, which the owner has not ruled on.**
-> The 2026-08-14 draft's §3.4 made every psp header carry a digest of the file's block boundaries,
-> checked for equality across the cohort at open, plus a `writer_version` field so that the one
-> mismatch the digest could not otherwise explain — equal inputs, unequal boundaries, therefore
-> different writer code — could be named in the refusal.
+### 6.3 The header does not describe where the psp's blocks fall — **owner's ruling wanted**
 
-**Decision: both fields are dropped.** The digest existed for one consumer: a calling stage that
-merged the cohort in lockstep, block *k* of every sample covering the same stretch, so that no
-sample's data ever waited for another's. In this design that consumer does not exist. No code
-path ever looks at two samples' blocks together: each sample's psp reader independently serves
-segments, decoding whichever of its own blocks overlap (§3.3), and the cohort merge is a streaming
-merge keyed on coordinates whose resident set is its frontier (§3.2). Whether two files' blocks
-line up changes nothing the run can observe — each reader holds one decoded block per cursor
-either way. A check that guards nothing is a refusal waiting to fire on a harmless difference —
-two writer versions in one cohort, say — and the previous draft itself classified the mismatch as
-a performance matter, refused only "as a simplicity choice". The simplicity now runs the other
-way: no digest, no comparison, no refusal to explain.
+**Decision: the header carries no digest of the file's block boundaries, and no `writer_version`
+field.** This is the one decision in this document nobody has ruled on, and it is flagged here
+because it gives something up.
 
-Two knock-on consequences, each following from the same removal:
+**What such a digest would be for.** If the calling stage merged the cohort in lockstep — block *k*
+of every sample covering the same stretch of genome, so no sample's data ever waited for another's
+— then two psps whose blocks fell in different places could not be merged, and a check at open
+would catch it. **This design has no such consumer.** Each sample's reader independently serves the
+segments it is asked for (§3.3), and the merge is keyed on coordinates with its own frontier
+(§3.2); no code path ever looks at two samples' blocks together. Whether two files' blocks line up
+changes nothing a run can observe.
 
-- **`writer_version` goes with it.** Its stated purpose was to let a boundary-mismatch refusal
-  name its cause; with no boundary check there is no such refusal. Versioning the psp *format* —
-  so a reader can refuse bytes it does not understand — is a different job the encoding spec
-  (§10) owns as a matter of course; nothing at the run level requires a writer-version field.
-- **"Nothing about a sample's own data may move a block boundary" lapses.** The previous draft's
-  rule, and its argument was cross-sample boundary equality alone: a data-dependent flush would
-  cut a deep sample's blocks where its cohort's are not cut, and the digest would then refuse
-  exactly the sample that most needed the run. With no equality to preserve, the rule has no
-  remaining justification, and block sizing becomes wholly the encoding spec's trade — including
-  a cap on a block's decoded size, which production's 1 MiB mid-window force-flush
-  ([`src/psp/writer.rs:72,289-296`](../../../../src/psp/writer.rs)) shows the shape of and which
-  the previous draft had to forbid. The pathological-block question (the densest stretch of a
-  300× sample decoding to an unbounded payload) thereby gets its natural fix back. One property
-  survives the hand-over because an oracle depends on it: block cuts must be a function of the
-  observation stream alone — a stream that is identical at every worker count — so that the psp
-  stays byte-identical across worker counts (§12.1). A cut that depended on scheduling would
-  break that; a cut that depends on the observations does not.
+**A check that guards nothing is a refusal waiting to fire on a harmless difference** — two writer
+versions in one cohort, say — so it is not kept for safety's sake.
 
-If the digest is ever wanted again, the argument for it will have to name a consumer of boundary
-equality, and this design has none.
+Three things follow:
+
+- **`writer_version` goes with it.** Its only stated job was to explain a boundary-mismatch
+  refusal. Versioning the psp *format*, so a reader can refuse bytes it does not understand, is a
+  different job and the encoding spec (§10) owns it.
+- **Block sizing becomes wholly the encoding spec's trade** — including a cap on how much a block
+  decodes to, which matters at the top of the depth range: the densest stretch of a 300× sample
+  would otherwise decode to an unbounded payload. Production's 1 MiB mid-window force-flush
+  ([`src/psp/writer.rs:72,289-296`](../../../../src/psp/writer.rs)) shows the shape of that cap.
+- **One property survives the hand-over, because an oracle depends on it:** where a block is cut
+  must be a function of the observation stream alone — a stream that is identical at every worker
+  count — so that the psp stays byte-identical across worker counts (§12.1). A cut that depended on
+  scheduling would break that; a cut that depends on the sample's own data does not.
+
+**If a digest is ever wanted back, the case for it has to name a consumer of boundary equality**,
+and this design has none.
 
 ---
 
@@ -607,37 +796,82 @@ equality, and this design has none.
 
 ### 7.1 The three bounds
 
+*Every row is arithmetic over estimates; §11's question 2 is the measurement that replaces them.*
+
 | object | peak resident |
 |---|---|
-| `SampleObservationGatherer` | `look-ahead × one segment's observations + working set` + census accumulator (~6 MB per read group) |
-| `PspVariantCaller` | `look-ahead × samples × one decoded block` + `samples × per-open-file state` |
-| `AlignedFilesVariantCaller` | `look-ahead × samples × one segment's walking set` + `samples × 11–15 MiB` open alignment files |
+| the walk stage | `samples in flight × (one open alignment file at 11–15 MiB + census accumulator at ~6 MB per read group + one sample's walking set)` |
+| `PspVariantCaller` | `samples × one reader's working set` + **the merge's observation cache** + `callers in flight × one cohort locus` |
+| `AlignedFilesVariantCaller` | `samples × 11–15 MiB` open alignment files + the merge frontier + `callers in flight × one cohort locus` |
 
-Only the first is independent of the cohort size, which is the reason psp mode exists.
+**Only the first is independent of the cohort size**, which is the reason psp mode exists — and it
+now depends on *samples in flight* rather than on walking one sample at a time, so the property
+survives the change of default but is bought with a knob rather than for free.
 
-Pricing the `PspVariantCaller` row at the far end of the committed range — three thousand
-samples, look-ahead 8, and per sample a 16 kB read buffer plus roughly 10 kB of decoded
-observations per block (both estimates, not measurements): `8 × 3,000 × 26 kB ≈ 620 MB`.
-Workable — but only because a sample costs 26 kB. At a megabyte per sample the same run needs
-24 GB. That arithmetic is what turns "keep per-sample state small" from a preference into the
-requirement below, and re-running it on real files once the encoding exists is part of open
-question 2 (§11).
+**⚑ The observation cache is the term this table cannot price, and §3.2 understates it.** That
+section says the merge's resident set is "about one observation per sample". The built merge holds
+more: the cache spans the ground the builders in flight cover, and
+[`cohort_merge.md`](cohort_merge.md) §8 measures **33 records held per sample** at 1,000 samples and
+16 regions in flight on the 200-base default — against 4 at the old 20-base one. That document
+declines to give a total, and gives its reason: **what one record costs in bytes is unmeasured**,
+and at 300 reads a position a record is at its largest. So this row is a lower bound until that
+number exists, and §11's question 2 owes it.
 
-### 7.2 Requirement: an open psp costs tens of kilobytes, not megabytes
+Pricing the `PspVariantCaller` row at the far end of the committed range — three thousand samples
+at §7.2's budget of 500 kB per open psp: **1.5 GB**, plus a caller pool's loci, which are
+negligible beside it.
 
-Everything in the calling stage multiplies by the sample count, and the per-open-file state is
-the easiest cost to get wrong because it looks like bookkeeping. Production's psp index is the
-counter-example ng would otherwise copy: a flat vector of one 24-byte entry per block
-(`BlockIndexEntry`, [`src/psp/index.rs:42`](../../../../src/psp/index.rs)), decoded whole at open
-(`decode_index`, [`:110`](../../../../src/psp/index.rs)). At a 5 kb block over an 800 Mb genome
-that is 160,000 entries — **3.8 MB per open file, 11.5 GB across three thousand samples** —
-before any data is read.
+### 7.1a Memory is not the only per-open-file resource
 
-The shape of the fix: index at a much coarser grain and chain blocks within it — each block
-carrying enough to reach the next — so a reader seeks once and then streams. A few hundred to a
-few thousand index entries per file is kilobytes. This constrains the psp encoding without
-specifying it; the encoding spec (§10) inherits the requirement, together with the reader
-contract of §3.3.
+**Three thousand open files is a file-descriptor limit before it is a memory bill**, and nothing
+else in this document says so. Linux commonly ships `RLIMIT_NOFILE` at 1,024 and macOS at 256, so
+the calling stage hits `EMFILE` around the thousandth sample whatever §7.2's budget says. Direct
+mode reaches it sooner: a CRAM and its index are two descriptors each, so three thousand samples is
+six thousand.
+
+**What a run must do about it is refuse with a message that names the limit and the sample count**,
+in the same shape §5.1 asks for when the memory bill does not fit — not die at file 1,020 with an
+operating-system error. Raising the limit is the operator's to do, and the message should say so.
+**This constrains nothing about the encoding**; it is a check at construction, beside the header
+checks of §6.2.
+
+### 7.2 Requirement: 500 kB resident per open psp — **reset 2026-08-25**
+
+*This section asked for "tens of kilobytes, not megabytes" until the owner reset it on 2026-08-25.
+The change is recorded rather than edited away because the encoding work was already running
+against the old figure and one of its design choices turns on which number applies
+([`../impl_plan/psp_encoding_experiments.md`](../impl_plan/psp_encoding_experiments.md), its
+milestone B0).*
+
+**The budget: 500 kB resident per open sample** — 500 MB across a thousand, 1.5 GB across three
+thousand. *(The plan that records the reset says the owner priced "450 MB across a thousand samples"
+as comfortable, which is 450 kB a sample; the 10% gap between the two figures is unexplained and
+neither document resolves it. Treat 500 kB as the budget and 450 MB as the comfort the owner
+actually expressed.)* **It is a working figure, not a ruling**: the encoding's sweeps
+report the whole curve of file size against reader memory, so the point on that curve can be moved
+without re-running anything.
+
+**Why there is a budget at all.** Everything in the calling stage multiplies by the sample count,
+and the per-open-file state is the easiest cost to get wrong because it looks like bookkeeping.
+Production's psp index is the counter-example ng would otherwise copy: a flat vector of one 24-byte
+entry per block (`BlockIndexEntry`, [`src/psp/index.rs:42`](../../../../src/psp/index.rs)), decoded
+whole at open (`decode_index`, [`:110`](../../../../src/psp/index.rs)). At a 5 kb block over an
+800 Mb genome that is 160,000 entries — **3.8 MB per open file, 11.5 GB across three thousand
+samples** — before any data is read. That is over budget by sevenfold even at the looser figure.
+
+**The shape of the fix is now contingent, not settled.** A coarse index with the blocks chained
+within it — each carrying enough to reach the next — is what this section used to prescribe. The
+encoding plan declines to build it on speculation: how many blocks a file has at each block size is
+being measured first, and *"if large blocks make it small enough, the coarse-index-and-chain scheme
+`run_streaming.md` §7.2 asks for is not needed and should not be built"*
+([`../impl_plan/psp_encoding_experiments.md`](../impl_plan/psp_encoding_experiments.md)). So this
+section asks for the budget and no longer names the mechanism.
+
+**What the reset changed is not this requirement but a choice underneath it.** At tens of kilobytes,
+writing each record's fields together was the only shape that fitted; at 500 kB, gathering like
+fields together is affordable again and is smaller on the measurements taken so far. Which shape
+wins is the encoding's to settle and this document does not care, provided the budget holds and the
+cheap read of §3.3 survives.
 
 ---
 
@@ -646,11 +880,24 @@ contract of §3.3.
 Each is a property of code that exists today, and each produces a wrong answer or a silent
 under-count rather than a crash.
 
+- **The calling scratch is per worker and reused across loci, and a pool of per-locus callers makes
+  a missed reset non-deterministic.** `CallingScratch`
+  ([`src/ng/calling/mod.rs`](../../../../src/ng/calling/mod.rs)) is every buffer a locus's calling
+  fills, allocated once per worker and cleared between loci. The code already records that a
+  dropped `clear()` is invisible to the existing tests because it only shows in one locus order
+  ([`inference/repeat_tract_parameters.rs`](../../../../src/ng/calling/inference/repeat_tract_parameters.rs),
+  [`inference/summarise_condition.rs`](../../../../src/ng/calling/inference/summarise_condition.rs)).
+  **With a pool of per-locus callers the order a given scratch sees is a scheduling artefact**, so
+  a missed reset makes the VCF depend on the worker count — and only sometimes, which is worse than
+  always. §12.2's invariance oracle is what
+  must catch this, and it must therefore be run at more than one worker count on a fixture whose
+  loci differ in kind.
 - **A locus generator holds state across segments, so it cannot be shared between workers.** The
   iterator that owns the generators documents a load-bearing drop order
-  ([`src/ng/locus_generation/mod.rs:706-737`](../../../../src/ng/locus_generation/mod.rs)). Each
-  in-flight segment's task builds its own generator set — or a worker reuses one set across *its
-  own* consecutive segments, never across workers.
+  ([`src/ng/locus_generation/mod.rs:917-942`](../../../../src/ng/locus_generation/mod.rs)). One
+  generator set per source, and a source belongs to one worker: in a caller that is one set per
+  sample for the run, and in a gatherer splitting one sample across workers, one set per worker,
+  reused across *its own* consecutive segments and never shared.
 - **The reference accessor is `Send` but deliberately not `Sync`.** `WindowedRefSeq` holds an
   open per-contig reader; the input layer takes a *factory* rather than a shared accessor for
   exactly this reason
@@ -670,7 +917,7 @@ under-count rather than a crash.
 - **Dropping the walk's pieces in the wrong order loses the tallies too.**
   `SampleLocusObservationsIterator` releases its generators before its reads, and the comment
   records that no test can fail if that breaks
-  ([`src/ng/locus_generation/mod.rs:707-737`](../../../../src/ng/locus_generation/mod.rs)). A
+  ([`src/ng/locus_generation/mod.rs:917-942`](../../../../src/ng/locus_generation/mod.rs)). A
   task that dismantles the pieces itself must keep the order.
 - **A backward jump is legal and costs a seek plus a block decode.** The read cursor answers
   segments in any order, and a test asserts backwards-walked segments return what a linear scan
@@ -678,12 +925,18 @@ under-count rather than a crash.
   at [`:1207`](../../../../src/ng/read/input/cursor.rs)); the psp reader's coarse index (§7.2)
   has the same character. So a work-stealing pool is correct however it steals, and slow unless
   each worker's own sequence of segments stays monotonic — schedule for that.
-- **Chain ids are already omitted for reads that agree with the reference**, in both generic
-  paths
-  ([`src/ng/locus_generation/pileup/fast_column.rs:312`](../../../../src/ng/locus_generation/pileup/fast_column.rs),
-  [`src/ng/locus_generation/pileup/open_record.rs:472`](../../../../src/ng/locus_generation/pileup/open_record.rs)).
-  Recorded so nobody re-adds them when the psp writer is built: production's reference-side
-  equivalents were about 31% of its peak live heap.
+- **Every read is named at every position it covers, reference-matching reads included — and the
+  psp writer must not "optimise" that away.** The opposite is what a coder would reach for: production's reference-side read names were
+  about 31% of its peak live heap, so dropping them looks like free money. **They are not
+  droppable.** Both generic paths record the ids of every read folded at a position, whether it
+  departed from the reference or agreed with it — the owner's ruling of 2026-08-17
+  ([`open_record.rs:472-473`](../../../../src/ng/locus_generation/pileup/open_record.rs),
+  [`fast_column.rs:120-126`](../../../../src/ng/locus_generation/pileup/fast_column.rs)) — because
+  a cohort locus can span several of one sample's records and the merge needs to know which reads
+  are the same read across them. The psp encoding plan lists this under *"one thing that is settled
+  and must not be reopened"*
+  ([`../impl_plan/psp_encoding_experiments.md`](../impl_plan/psp_encoding_experiments.md)); what it
+  does instead is encode the names as arrivals and departures rather than repeating them.
 - **An analysed stretch with no reads must read back as analysed-and-empty, not as unknown.**
   Inside a run the gatherer closes this itself (§5.2). Across the files it survives through the
   header's analysed regions plus the trailer: a psp with a valid trailer covers everything its
@@ -704,14 +957,20 @@ reports where it stopped.
 **Concurrency.** Shared and read-only: the reference bases, the repeat catalog, the segments,
 the read-group table, the model parameters, and each sample's open file (`SampleReads` or psp —
 the former's `Sync` to be confirmed, §8). Mutable and per worker: cursors, reference accessors,
-generator sets, decoded blocks. Single-threaded by construction: the yield point — each object
+generator sets, and each reader's own working set. Single-threaded by construction: the yield point — each object
 is an iterator, so its consumer (the VCF writer, the psp writer, the census accumulator) runs on
 the consuming thread and needs no lock.
 
-**Performance.** The knobs are the look-ahead and the worker count, per object, plus
-samples-in-flight in the walk stage (§5.2). Block size is the encoding spec's trade (§6.3) —
-it reaches this design only as "one decoded block", the multiplicand in §7.1. Any other tuning
-constant that appears in the implementation is a defect, not a lever.
+**Performance.** Three knobs at this level: **samples in flight** in the walk stage (§5.2),
+**callers in flight** on the calling side (§3.5), and the within-sample walk's worker count, which
+is off by default (§5.2). **The cohort merge owns two more of its own** — the building region's
+width and how many are in flight
+([`cohort_merge/mod.rs:531,592`](../../../../src/ng/run/cohort_merge/mod.rs)) — which §3.5 and
+§12.2 both treat as settings, so five in total and not three. Block size is the encoding spec's trade (§6.3) — it reaches this design
+only as one reader's working set, the multiplicand in §7.1. Any other tuning constant that appears in
+the implementation is a defect, not a lever. **None of the three has a proposed default**, because
+nothing about the psp format's cost, the calling loop's cost, or either one's memory has been
+measured yet (§11, questions 2 and 7).
 
 ---
 
@@ -726,14 +985,28 @@ constant that appears in the implementation is a defect, not a lever.
   rule: whatever target the writer cuts toward must count the segments' own bases, not the
   chromosome span — under a BED the gaps belong to no segment, and a span-counted target would
   make blocks over sparse ground nearly empty payloads that cost their framing and carry little.
-- **The cohort merge's reconciliation** — how per-sample observations whose spans differ become
-  one cohort observation, and the confirmation that the merge frontier stays bounded while doing
-  it (§3.2). Its own spec; production's cohort variant grouping and genotype joining are the
-  reuse candidates; `MergedRegionReads` ([`sample_reads.md`](../arch/sample_reads.md) §4) is the
-  streaming shape to keep.
-- **The parameters file's format** — what the user supplies in direct mode and the fit writes in
-  psp mode. Its own spec, **on direct mode's critical path** (§2): the mode cannot run without
-  it.
+- **A way to ask a source the cheap question.** §3.3's whole saving rests on reading two small
+  numbers per position and inflating the rest only where the cohort kept something. **The built
+  merge cannot express that**: `ObservationSource` has one method, which returns a whole inflated
+  observation ([`cohort_merge/observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs)),
+  so a psp reader behind it would decode everything for every position. The shape of the fix is a
+  second method — *the cheap numbers over this range* — with the existing one becoming *now inflate
+  these positions*; the alternative is a scan pass ahead of the build pass, which costs a second
+  traversal. **It belongs with the psp reader**, since a walker's cheap answer is free and only a
+  file reader has anything to gain, and it cannot be settled before the encoding is.
+- ~~**The cohort merge's reconciliation**~~ — **written, 2026-08-17:
+  [`cohort_merge.md`](cohort_merge.md), and built since** (`src/ng/run/cohort_merge/`). It settles
+  how per-sample observations whose spans differ become one cohort locus — every member
+  projected onto the locus span and unified into one allele table (its §4.2) — and discharges the
+  confirmation this entry asked for, that the merge frontier stays bounded while spans are
+  reconciled (its §4.5). It adds one rule this document should know about: **a cohort locus wider
+  than `max_cohort_locus_span` is never built**, and is counted as a failed locus rather than sent
+  downstream.
+- ~~**The parameters file's format**~~ — **written, 2026-08-28:
+  [`parameters_file.md`](parameters_file.md).** A TOML file carrying every number calling runs on,
+  each with its warrant. Two things in it change this document: **every run writes one beside its
+  VCF**, whatever the numbers came from (that spec §7), and **the defaults live in the binary
+  rather than in a shipped file**, so "run without a fit" is a flag and not a path (§8 there).
 - **The VCF writer** — consumes a caller's iterator; the variants arrive in genome order, so it
   writes as it reads. Its shape, and the `Variant` record's, belong to the emission step's
   document.
@@ -746,21 +1019,15 @@ constant that appears in the implementation is a defect, not a lever.
    391 bases average (§4.4). *Leaning:* kilobases at the routing floor. **Settled by:** counting
    segments and their length distribution over the existing catalog file at both floors, tomato
    and human — a filter over a stored file, not a genome scan.
-2. **The look-ahead's default, per object.** — OPEN; no value proposed. The gatherer's and the
-   callers' cost per unit of look-ahead differ by a factor of the sample count, so one default
-   will not serve all three; the `PspVariantCaller`'s should come from the cohort size, not the
-   core count. **Settled by:** sweeping look-ahead on one tomato sample (gatherer) and on the
-   tomato cohort, in both modes — wall time and peak resident — and, for the psp caller,
-   re-running §7.1's arithmetic with the two per-sample costs measured on real files.
-3. **Does a within-sample segment loop scale, and what does per-segment fetching cost when
-   segments are short?** — OPEN, and the first half can invalidate §5.2's schedule (production:
-   1.81× at four threads, worse at eight). **Settled by:** driving the gatherer at 1, 2, 4, 8, 16
-   workers on a tomato sample and HG002 — wall time, peak resident, observations identical to
-   serial. The second half needs its own run: how often a segment's fetch lands in the
-   already-decoded block, on a whole-genome walk and on a fragmented BED over a full, un-sliced
-   CRAM. The nearest measurement — production's `--regions` costs a flat ~14% (24.7 s → 28.2 s)
-   and does not grow from 80 to 4,000 intervals (29.0 / 28.8 / 28.5 s) — does not cover that
-   shape.
+2. **The two concurrency defaults: samples in flight for the walk, callers in flight for the two
+   callers.** — OPEN; no value proposed. They buy different things and cost differently — a sample
+   in flight costs tens of megabytes (§7.1), a caller in flight costs one locus — so one default
+   will not serve both. **Settled by:** sweeping each on the tomato slices and on HG002, wall time
+   and peak resident, with the output required identical at every setting.
+3. **Does splitting one sample's walk across workers scale?** — OPEN. It is not on the default
+   path, and it is the measurement question 8 turns on. **Settled by:** driving one gatherer at 1, 2, 4, 8, 16 workers on a tomato slice
+   and HG002 — wall time, peak resident, observations identical to serial. Production's is 1.81×
+   at four threads and worse at eight.
 4. **Should an observation's reference bases be stored in the psp?** — OPEN.
    `SampleLocusObservations::reference_bases` is a `Box<[u8]>` per observation
    ([`src/ng/locus_generation/mod.rs:44-46`](../../../../src/ng/locus_generation/mod.rs));
@@ -780,6 +1047,54 @@ constant that appears in the implementation is a defect, not a lever.
    the in-flight walking sets are not, and they depend on depth. *Leaning:* low hundreds of
    samples at ordinary depth. **Settled by:** running direct mode at 1, 10, 50 and 200 samples on
    the tomato cohort, peak resident against sample count.
+7. **Which stage of the psp-to-VCF path is worth a pool at all?** — OPEN, and it comes before any
+   of the improvements below. The candidates are decoding the psps, merging, and calling. **Settled
+   by:** a profile of one cohort run over a handful of tomato slices, wall time split three ways.
+   Production's shape — posterior engine about 3%, producer decode about 30% — suggests decode
+   rather than calling, but production's engine is not ng's loop.
+
+   **The merge half of this question has its own plan**, and that plan is authoritative over the
+   sketch below:
+   [`../research/cohort_merge_parallel_cost_plan.md`](../research/cohort_merge_parallel_cost_plan.md).
+   It begins with a profile before any change is made, and its first cheap move — taking the
+   allocations out of the per-region path — is not in the sketch at all. Its headline measurement:
+   **eight threads give 1.4× on 63 tomato accessions**, and a narrow enough region makes threading
+   *slower* than not threading
+   ([`cohort_merge/mod.rs:545-571`](../../../../src/ng/run/cohort_merge/mod.rs)), which is why the
+   width sweep is to be extended rather than repeated. In outline, if the merge turns out to be the
+   serial share that caps the run:
+
+   - **Extend the building-region width sweep** past eight threads and toward the far end of the
+     cohort range; it is a run parameter, so it costs no code, and it has already been swept at one
+     and eight threads on 63 samples, where 100–200 bases was the optimum and 200 is the shipped
+     default. What is untested is whether that optimum holds past eight threads, and whether it
+     moves as the cohort grows — the organiser's per-region work walks the whole cohort, so its
+     share should grow with sample count.
+   - **Overlap the reader advance with the building.** The organiser draws the readers forward
+     while no builder runs, and that phase is I/O and decode — exactly the work worth hiding
+     behind compute. Filling the next round's ground into a second buffer while the current
+     round's builders run removes the serial phase; the cost is holding two rounds of observations
+     instead of one, and the released order is unchanged because release is still by region index.
+   - **Drop the rounds for a sliding window.** The barrier exists because builders read the
+     observation cache while the organiser writes it, not because of ordering — the organiser
+     already releases along a gapless run of region indexes, which supports arbitrary out-of-order
+     completion. A cache that is extended ahead of the claim frontier and evicted behind the
+     release frontier, with a published "covered to here" mark that builders never read past,
+     removes the barrier entirely. It is the largest of the three and should not be attempted
+     before the first two have said whether it is needed.
+8. **How does a run of one sample use the machine?** — OPEN, and it is goal 3 unmet. Walking
+   several samples at once gives a lone sample one worker. The only candidate anybody has is
+   question 3's — split that sample's walk across its segments — and if that does not scale there
+   is no second idea on the table, so the honest state is *goal accepted, mechanism unknown*.
+   **Settled by:** question 3's sweep, which decides between the candidate working and the
+   question being genuinely open.
+
+   **Two things follow from the answer, which is why this is not idle.** If the split works, the
+   psp writer must go on honouring §12.1's worker-count invariance, because observations then
+   arrive out of order within one sample. If it does not, that requirement has no remaining
+   consumer and the writer gets simpler. **Nothing about the writer should be simplified on the
+   strength of the current default alone** — the default is a schedule, and the requirement is
+   about what schedules must remain possible.
 
 ---
 
@@ -788,10 +1103,17 @@ constant that appears in the implementation is a defect, not a lever.
 Each oracle is a property of the run, not of one type — which is why they live here.
 
 1. **Worker-count invariance of the psp.** One sample gathered at 1, 2, 4, 8, 16 workers gives
-   byte-identical psps apart from the header's timestamp. Production already holds this for its
-   own pileup output across thread counts, so it is a reachable bar — and it is what §6.3's
+   byte-identical psps apart from the header's timestamp. **Production already holds this** — its
+   `.psp` bodies are byte-identical across every thread count, the `created` timestamp being the
+   only difference
+   ([`pileup_thread_scaling_2026-06-11.md`](../../reports/pileup_thread_scaling_2026-06-11.md)) —
+   so it is a reachable bar — and it is what §6.3's
    restriction on block cuts preserves.
-2. **Worker-count and look-ahead invariance of the VCF**, from each of the two callers.
+2. **Concurrency invariance of the VCF**, from each of the two callers: the same VCF at any number
+   of callers in flight, and — where the merge's own region parallelism is switched on — at any
+   building-region width and any number of regions in flight. The merge already holds the second
+   half against its single-threaded oracle
+   ([`parallel.rs`](../../../../src/ng/run/cohort_merge/parallel.rs)).
 3. **Mode equivalence — the oracle that justifies the design.** The same cohort and the same
    parameters, run through `AlignedFilesVariantCaller` and through the psp route, give the same
    VCF. This is simultaneously the proof that the calling function is mode-blind (goal 1) and the
@@ -801,15 +1123,23 @@ Each oracle is a property of the run, not of one type — which is why they live
    observations the same span emits inside a whole-genome, single-threaded walk. This asserts
    §4.3 is honoured; the thirds-chopping test that lost 17 positions is the failure shape it
    catches.
-5. **The two refusals stay two.** Unequal analysed regions refuse naming both samples; a psp
-   whose segmentation inputs differ from the run's refuses naming the first differing field.
-   Both fire at construction, before any block is decoded (§6.2).
-6. **The census built during the walk equals the census built from the psp.** Specified already
+5. **Every refusal fires at construction, and names what differs.** Unequal analysed regions name
+   both samples; differing segmentation inputs name the first differing field; two psps for one
+   sample name the sample and both files; a parameters file whose sample list does not match names
+   the samples missing from each side (§6.2). None of them may wait for a locus.
+6. **The file order does not matter.** The same cohort called with its psp arguments in any order
+   gives the same VCF, sample for sample — the test that the name-keyed join of §6.2 is real and
+   that nothing joins by position.
+7. **A cohort of separately-walked samples is callable.** Every sample walked in its own
+   invocation, each numbering its read groups from zero, merges into one run-wide numbering and
+   calls (§6.1, §6.2). Without this the ordinary psp-mode run does not work at all, and the failure
+   is a refusal at the fit rather than anything visible in the walk.
+8. **The census built during the walk equals the census built from the psp.** Specified already
    as a byte-for-byte comparison
    ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §7.12) and named
    here because this document is what puts the two producers in one run: it is the sharpest test
    that a psp holds everything a census needs.
-7. **Analysed-but-empty survives a round trip.** A stretch a sample analysed and found no reads
+9. **Analysed-but-empty survives a round trip.** A stretch a sample analysed and found no reads
    in reads back as analysed and empty — distinguishable, via the header's analysed regions, from
    a stretch the sample never looked at (§8, last trap).
 
@@ -819,15 +1149,15 @@ Each oracle is a property of the run, not of one type — which is why they live
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the segments the loops run over | `TypedRegion`, `RegionKind` ([`src/ng/region_typing/mod.rs:144,168`](../../../../src/ng/region_typing/mod.rs)) | consumed as-is; a segment handed to `call_vars_in_segment` is one of them |
+| the segments the loops run over | `TypedRegion`, `RegionKind` ([`src/ng/region_typing/mod.rs:144,168`](../../../../src/ng/region_typing/mod.rs)) | consumed as-is; the segments a source is asked for, one at a time, are these |
 | the analysed regions | `GenomeRegions` ([`src/ng/region_typing/mod.rs:77,87,100`](../../../../src/ng/region_typing/mod.rs)) | reused whole — it wraps production's `RegionSet`, so ng and production agree on what a BED means; its value is recorded in the psp header |
 | what a BED edge does to a segment | `clips_at_a_bed_edge` and the emission rule ([`src/ng/region_typing/mod.rs:471,482-488`](../../../../src/ng/region_typing/mod.rs)) | taken as given — findings whole, generic clipped; nothing here re-decides it |
 | one sample's observations | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | the item of every stream in §3, unchanged |
-| the walker behind a source | `SampleLocusObservationsIterator` ([`src/ng/locus_generation/mod.rs:706`](../../../../src/ng/locus_generation/mod.rs)) | one per task, fed that segment's segments |
+| the walker behind a source | `SampleLocusObservationsIterator` ([`src/ng/locus_generation/mod.rs:915`](../../../../src/ng/locus_generation/mod.rs)) | one per task, fed that segment's segments |
 | per-segment reads | `SampleReads` and `cursor()` ([`src/ng/read/input/mod.rs:398,623`](../../../../src/ng/read/input/mod.rs)) | one shared `SampleReads` per sample, one owned cursor per worker (`Send` proven; `Sync` to confirm — §8) |
-| the streaming merge's shape | `MergedRegionReads` ([`sample_reads.md`](../arch/sample_reads.md) §4) | the model for `k_way_merge`: argmin over per-stream heads, keys beside the heads, frontier-sized residency |
-| the census accumulator | `CensusWriter::add_locus`, `mark_walked`, `finish` ([`src/ng/parameter_estimation/joint/census.rs:1965,1984,2252`](../../../../src/ng/parameter_estimation/joint/census.rs)) | fed inside the gatherer, at the ordered yield point (§5.2) |
-| the census file | `write_census`, `open_census` ([`src/ng/parameter_estimation/joint/census_file.rs:195,421`](../../../../src/ng/parameter_estimation/joint/census_file.rs)) | written by the walk stage's per-sample loop from `finish()`'s result |
+| the streaming merge's shape | `MergedCursors` ([`src/ng/read/input/sample_cursor.rs:178`](../../../../src/ng/read/input/sample_cursor.rs)) | the model for `k_way_merge`: argmin over per-stream heads, keys beside the heads, frontier-sized residency. *(`arch/sample_reads.md` §4 calls this `MergedRegionReads`, a name from a superseded design that is not in the tree.)* |
+| the census accumulator | `CensusWriter::add_locus`, `mark_walked`, `finish` ([`src/ng/parameter_estimation/joint/census.rs:2087,2106,2378`](../../../../src/ng/parameter_estimation/joint/census.rs)) | fed inside the gatherer, at the ordered yield point (§5.2) |
+| the census file | `write_census`, `open_census` ([`src/ng/parameter_estimation/joint/census_file.rs:200,426`](../../../../src/ng/parameter_estimation/joint/census_file.rs)) | written by the walk stage's per-sample loop from `finish()`'s result |
 | psp block index | `BlockIndexEntry`, `decode_index` ([`src/psp/index.rs:42,110`](../../../../src/psp/index.rs)) | **a model of what not to build** — §7.2 rejects the flat per-block index at ng's sample counts |
 | block cutting | `PspWriter`'s grid and force-flush ([`src/psp/writer.rs:297-301,72,289-296`](../../../../src/psp/writer.rs)) | neither carries as a rule: block sizing is wholly the encoding spec's, and the force-flush is now a legal shape for capping a block's decoded size (§6.3) |
 

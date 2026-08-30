@@ -720,6 +720,23 @@ history:
    have since changed, and — the case that justifies writing the code — **wanting a larger census than
    the one on disk**, without going back to the alignments.
 
+**The second path is a command the user runs, decided 2026-08-28**, and not an internal repair the
+run performs. It takes the pileups and the selection terms and writes the records files, as a
+subcommand beside the rest of ng's command surface
+([`typed_regions_cli.md`](typed_regions_cli.md) names that binary).
+
+**Its real job is migration, not repair.** The records file holds exactly what the fit currently
+asks for, so every time the fit learns to ask a new question — another stratification, another
+per-read-group term — every records file in existence goes stale at once. With this command the
+answer is *re-run it over the pileups*; without it the answer is *re-walk every alignment file*.
+That makes it a command for an ordinary working day rather than a rescue, and it is the reason the
+"they are a cache" claim above is worth anything: a cache with no rebuilder is just a file you
+cannot afford to lose.
+
+**It also makes §7.12 an oracle rather than an assertion.** Two builders that must produce
+byte-identical files are a strong check on the *pileup*: it proves the pileup preserved everything
+the fit needs. Nothing else tests that.
+
 **Reading a pileup back immediately after writing it is not one of the two.** It costs a full
 decompression pass over a file the genome walk has just finished producing, and buys nothing.
 
@@ -774,7 +791,8 @@ which point a run reading a file has quietly reassembled the whole file in memor
 section exists to prevent, arrived at without anybody deciding to. So a section is lent for the length
 of a call and cannot be retained; the architecture document carries the shape
 ([`../arch/parameter_prepass_joint_records.md`](../arch/parameter_prepass_joint_records.md) §2.2), and
-§7.16 is the test. **The unit lent is one band of strata across *every* sample**, because a tract's
+§7.16 is the test. **"Cannot be retained" is not "one at a time" — §6.3 lends several at once, to
+different workers.** The unit lent is one band of strata across *every* sample, because a tract's
 length frequencies are fitted from every sample with reads there — per-sample access would be the wrong
 grain — and a *band* rather than a single stratum because 68 of tomato's 141 strata hold fewer than a
 hundred tracts and are fitted by borrowing from their neighbouring repeat counts
@@ -818,6 +836,47 @@ and fitting on a subsample of samples bounds *how many samples* are
 ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §11, question 10). A cohort of
 thousands needs all three; a cohort of fifty needs none of them, and can take the run that never
 writes a file at all.
+
+### 6.3 The sections are read in parallel, not merely one at a time — DECIDED 2026-08-28
+
+**Decision (owner): the layout and the reader must let several sections be read at once, on
+different threads, so the fit can work on them in parallel.** §6.2 settled that a section can be
+read on its own; this settles that *independently* means *concurrently*, which is a stronger claim
+about the file and about the reader.
+
+**Why it is available.** The independence §6.2 establishes for memory is the same independence that
+makes parallelism safe, and it was established from the estimator rather than from convenience: the
+generic half is fitted before any repeat-tract record is read, and within the repeat-tract half a
+stratum is fitted on its own, with only sums crossing strata. Two workers on two bands of strata
+therefore share nothing but those sums, which are accumulated at the end.
+
+**What it asks of the file.** Nothing that §6.2 did not already ask, and this is why it costs
+nothing to adopt now rather than later:
+
+- **the directory gives absolute byte extents**, so a reader seeks to a section without walking the
+  ones before it. Already the layout
+  ([`census_file.rs`](../../../../src/ng/parameter_estimation/joint/census_file.rs), the directory
+  written before the sections precisely so it can hold absolute offsets);
+- **a section decodes with no state carried from any other section.** Anything shared between
+  sections — a compression dictionary, a running base — must live in the header, where every worker
+  reads it once, and not in a neighbouring section.
+
+**What it asks of the reader.** Concurrent lending, still without retention: several sections lent
+at once, each for the length of one call, on one open file per sample. The refusal §6.2 designs
+against — a caller that accumulates every section it ever asked for — is unchanged, because a
+borrow that ends when the call ends cannot accumulate however many are outstanding.
+
+**What it costs, and it is the only cost.** The peak §6.2 prices as *the largest single section*
+becomes *the workers × the largest single section*. At tomato's worst stratum — period 1 at 8
+repeats, 217,812 of 462,701 kept tracts — that multiplies a real number rather than a small one, so
+**the number of concurrent section readers is a run knob and not the worker count by default**.
+The per-stratum cap named in §6.2 is the other lever and bounds it directly.
+
+**Open: whether the fit is worth parallelising at this grain.** The sections are unequal by a
+factor of about two hundred in tract count, so a worker per band leaves the largest stratum on one
+thread with everything else finished — the classic straggler. **Leaning: parallelise, because the
+alternative is that the fit's wall time is that stratum's fit whatever the machine.** What settles
+it is a measurement of the fit's own profile, which does not exist yet; confirm before code.
 
 ---
 
