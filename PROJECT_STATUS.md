@@ -19,7 +19,36 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **H3 reviewed — the precondition that says the sweep can
+> - **Last completed task (2026-08-30):** **the head-driven skip is worth about 3×, and depth costs
+> it 5 %, not the collapse the architecture feared** (step H5 of
+> [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
+> `implemented`). arch §7 asked how much of the prototype's 2.06× survives at depth, because the
+> chain-id changes ride in the head — 0.432 bytes a position at 11.4 reads, **6.42 at 293** — so
+> the head grows while the body the skip avoids does not. Confirmed in the encoder: the changes sit
+> **after** `body_bytes`, so a skipping reader never avoids them. Measured on the spec's own two
+> corners, checked rather than taken from a filename — **10.3 and 280.0 reads a record**, against
+> the spec's 11.4 and 293:
+>
+> | keeping one record in | tomato, 10.3 reads | HG002, 280.0 reads | depth costs |
+> |---|---:|---:|---:|
+> | 10 | 2.513× | 2.399× | −4.5 % |
+> | 100 | 3.038× | 2.869× | −5.6 % |
+> | 1,000 | 3.111× | 2.927× | −5.9 % |
+>
+> Every reading is above the prototype's 2.06×, and the flat end says **decoding heads is about a
+> third of a full walk** at both depths. ⚠ **These corpora cannot close arch §7, and the reason is
+> exact**: they are built from a production `.psp`, which names about **3.4 %** of the reads ng
+> will name, so these heads are far lighter than ng's. The bias is one-directional — a bigger head
+> makes the skip worth *less*, never more — so **every figure above is an upper bound**, and the
+> question stays open until an ng-written store exists. **No projection is offered**, because
+> turning the spec's 6.42 bytes into a predicted ratio would need the head's decode *time*, and an
+> arithmetic guess would read like a measurement. ⚠ **The number moved under me twice before it
+> settled**: three timing rounds gave an 8 % spread where seven give 3 %, and running the two arms
+> in separate phases rather than interleaved shifted the centre from 2.84 to 3.25 under a
+> background build. Both are designed out of the harness and written into its own doc.
+> [H5](doc/devel/reports/implementations/ng_psp_h5_2026-08-30.md).
+>
+> - **Previously (2026-08-30):** **H3 reviewed — the precondition that says the sweep can
 > tell a coordinate cut from a shard cut was itself the thing that broke quietly** (step H3 of
 > [the psp store](doc/devel/ng/impl_plan/psp_file_format.md), branch `ng-psp-encoding`, status
 > `fixes-applied`). Nine mutations across three checklists and the numbers pass; **one survived**.

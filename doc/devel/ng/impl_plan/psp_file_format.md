@@ -338,7 +338,7 @@ byte-identical files apart from the header's timestamp.
 not one point** — the budget is about the slope.
 ***Depends:*** G2. ***Source:*** [spec §5.2](../spec/psp_file_format.md).
 
-☐ **H5 — what the head is worth at depth, which nobody knows.** A walk keeping one record in a
+✅ **H5 — what the head is worth at depth, which nobody knows.** A walk keeping one record in a
 hundred against one keeping all, on tomato at 3 reads a position **and on the 279-reads-a-position
 sample**. The chain-id changes ride in the head and grow with depth — 0.432 bytes a position at 11.4
 reads, 6.42 at 293 — so the head grows while the skip's value shrinks, and **how much of the 2.06×

@@ -345,6 +345,13 @@ test = true
 name = "ng_psp_open_cost"
 test = true
 
+# The skip-value harness carries a test on its one piece of logic: that a reading is the cheapest
+# of its rounds rather than the first or the mean. A noisy round would otherwise move the ratio
+# the whole step turns on.
+[[example]]
+name = "ng_psp_skip_value"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.
