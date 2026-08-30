@@ -293,8 +293,32 @@ Q1 will ask later — whether a cohort's pooled alternative-read count crosses t
 reasons that have nothing to do with one sample's power — and it costs one example program.
 Records the numbers; changes no constant. *Depends:* D1. *Source:* spec §13 Q1.
 
-> **Checkpoint D:** ng's corrected quality reproduces production's on the same inputs, and what the
-> two penalties charge on this repository's own cohorts is written down. Pause for review.
+**⛦ BLOCKED, and the blocker is a sentence in this plan that was not true when it was written.**
+There is no *"tomato-panel and HG002 fixture locus set the calling loop already produces"*: no
+example program drives the calling loop over real reads, and `examples/` has none that mentions
+`call_locus`, `summarise_final_pass` or `LocusInference`. The loop is exercised by unit fixtures
+only, which is what step E3a's own status says — *nothing can reach either case until the loop is
+wired into a run*.
+
+**Half of it is blocked by more than a missing driver.** The allele-balance penalty reads
+`genotype_expected_alternative_reads`, which is a sum over the samples' **called genotypes**; there
+is no way to have it without running the loop. The strand and read-position penalty needs only the
+six pooled read counts, which the merge produces with no genotypes at all — so that half is
+reachable, and it is the half Q1's ramp question lives in.
+
+**What it would cost.** A new example that walks the benchmark alignments (present on this
+machine, untracked, under the main checkout's `benchmarks/`), assembles loci through the merge and
+candidate selection the way `examples/ng_candidate_selection_probe.rs` does at 758 lines, pools the
+six counts per locus and reports the strand penalty's distribution and how often the ramp binds.
+Reusing that probe's walk, roughly 250 lines. **Recommendation: do it, because the ramp endpoints
+are the one shipped constant with no cohort-scale evidence behind them and this is the only
+measurement available before step 11 exists** — but it is a scope call, since the plan priced D2 at
+"one example program" over data that turned out not to exist. **Home if not done here:** step 11's
+plan, beside the depth-ladder measurement it already owns.
+
+> **Checkpoint D:** ng's corrected quality reproduces production's on the same inputs. What the two
+> penalties charge on this repository's own cohorts is **not** written down — see D2's blocker.
+> Pause for review.
 
 ---
 
