@@ -37,6 +37,7 @@
 //! neither of them.
 
 use super::ContaminationView;
+use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::ng::read::input::read_groups::NameWithOrigin;
 use crate::ng::types::ReadGroupId;
 
@@ -54,7 +55,7 @@ use crate::ng::types::ReadGroupId;
 pub struct RunParameterReport {
     contamination: ContaminationUsed,
     sequencing_batching: SequencingBatchingUsed,
-    inherited_repeat_tract_outlier_weight: f64,
+    repeat_tract_outlier_weight: RepeatTractOutlierWeight,
 }
 
 impl RunParameterReport {
@@ -69,12 +70,12 @@ impl RunParameterReport {
     pub(crate) fn new(
         contamination: ContaminationUsed,
         sequencing_batching: SequencingBatchingUsed,
-        inherited_repeat_tract_outlier_weight: f64,
+        repeat_tract_outlier_weight: RepeatTractOutlierWeight,
     ) -> Self {
         Self {
             contamination,
             sequencing_batching,
-            inherited_repeat_tract_outlier_weight,
+            repeat_tract_outlier_weight,
         }
     }
 
@@ -105,18 +106,22 @@ impl RunParameterReport {
     /// which is somebody else's DNA and has a term of its own; §4.5.1 keeps the two apart
     /// precisely because both are ways of a read not coming from this individual's two copies.
     ///
-    /// The name says the rest: this number is inherited from the existing caller at 0.01 and
-    /// **nothing in the parameter fit measures it**.
+    /// **Nothing in the parameter fit measures it**, so it carries its warrant rather than a
+    /// bare number: `Defaulted` where the run took the inherited 0.01, and `Supplied` where a
+    /// parameters file gave it one (`doc/devel/ng/spec/parameters_file.md` §3.8, which puts it
+    /// in that file so a person can change it). Those two are the only states it reaches.
     ///
     /// **Reported at the run rather than at the cell, and that is a ruling rather than a
-    /// convenience.** It is one run-wide constant, so folding it into a repeat tract's
+    /// convenience.** It is one run-wide number, so folding it into a repeat tract's
     /// per-`(read group, candidate)` warrant would mark **every** tract of every run as resting
-    /// on a defaulted parameter and erase the fitted-against-borrowed distinction that warrant
-    /// exists to carry. Stating it once per run says the same true thing and costs nothing.
+    /// on a defaulted parameter — or, where a file supplied it, on a supplied one, which the
+    /// ladder ranks only a rung above — and erase the fitted-against-borrowed distinction that
+    /// warrant exists to carry. Stating it once per run says the same true thing and costs
+    /// nothing.
     #[inline]
     #[must_use]
-    pub fn inherited_repeat_tract_outlier_weight(&self) -> f64 {
-        self.inherited_repeat_tract_outlier_weight
+    pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
+        self.repeat_tract_outlier_weight
     }
 }
 

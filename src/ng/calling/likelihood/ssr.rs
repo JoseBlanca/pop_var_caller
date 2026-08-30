@@ -70,6 +70,7 @@ use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext};
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::ng::calling::GenotypeTableView;
 use crate::ng::locus_generation::{ReadWitness, SequenceObservation};
+use crate::ng::parameter_estimation::Provenance;
 use crate::ng::types::{LogProb, ReadGroupId};
 
 /// How often a read at a repeat tract came from somewhere other than this individual's copies
@@ -80,6 +81,97 @@ use crate::ng::types::{LogProb, ReadGroupId};
 /// requires that be said rather than left blank, so this is a named constant awaiting a
 /// measurement rather than a finding.
 pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.01;
+
+/// **The outlier weight this run scored with, and whether the run was handed it or inherited
+/// it.**
+///
+/// **Two states and no more.** Nothing fits this number, so [`Provenance::FittedHere`] and
+/// [`Provenance::Borrowed`] are unreachable for it: either the run read a value out of a
+/// parameters file, which is `Supplied`, or it took [`DEFAULT_OUTLIER_WEIGHT`], which is
+/// `Defaulted`. **Both fields are private and the two constructors below set them together**,
+/// so no caller outside this module can write the unreachable pair, and neither constructor
+/// can be given half of one — [`Self::defaulted`] fixes the value as well as the warrant.
+///
+/// **The file can spell the other two and the reader refuses them.** `Warrant` in the
+/// parameters file has all four states because most of its numbers need all four, so
+/// `ParametersFile::validate` is what keeps this key to the two — including a `defaulted`
+/// value that is not the compiled-in constant, which is what a person who edits the number
+/// and leaves the warrant alone produces.
+///
+/// **Why it is a pair rather than an `f64`.** `doc/devel/ng/spec/parameters_file.md` §3.8 puts
+/// this number in the file *so that a person can change it* — "marking it soft is the point of
+/// writing it down" — and a run that kept only the number could not tell an edited 0.01 from
+/// the compiled-in one. The file it writes afterwards would then mark a supplied value
+/// `defaulted`, which is the file, the report and the score disagreeing while looking wired up.
+///
+/// **It is reported once for the run and never folded into a repeat tract's per-cell warrant**
+/// ([`RunParameterReport::repeat_tract_outlier_weight`](crate::ng::calling::run_report::RunParameterReport::repeat_tract_outlier_weight)):
+/// it is one run-wide number, so folding it in would mark *every* tract of every run as
+/// resting on a defaulted parameter — or, under a supplied weight, on a supplied one, which the
+/// ladder ranks only a rung above — and erase the fitted-against-borrowed distinction the
+/// per-cell warrant exists to carry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RepeatTractOutlierWeight {
+    value: f64,
+    provenance: Provenance,
+}
+
+impl RepeatTractOutlierWeight {
+    /// [`DEFAULT_OUTLIER_WEIGHT`], marked `Defaulted` — what a run that was handed no value gets.
+    #[must_use]
+    pub const fn defaulted() -> Self {
+        Self {
+            value: DEFAULT_OUTLIER_WEIGHT,
+            provenance: Provenance::Defaulted,
+        }
+    }
+
+    /// A value the run was handed — from a parameters file — marked `Supplied`.
+    ///
+    /// # Panics
+    ///
+    /// Unless `value` is finite and strictly inside 0 and 1, which is the range
+    /// [`SsrLocusParameters`] already refuses outside of, several frames later and naming a
+    /// locus rather than the file the number came from. A weight of zero says no read at a
+    /// repeat tract can have come from anywhere but this individual's two copies; a weight of
+    /// one says none of them came from there.
+    ///
+    /// **A caller reading a validated parameters file does not reach this panic**:
+    /// `ParametersFile::validate` refuses this key outside the same open interval, naming it.
+    /// This is the guard for a caller that did not validate.
+    ///
+    /// **One narrower check is still the scoring row's and cannot move here.** That row also
+    /// asserts `weight + contamination fraction < 1` per read group, and the fractions are
+    /// the fit's rather than the file's, so a weight of 0.9 passes both this and validation
+    /// and fails at the first locus of a contaminated run.
+    #[must_use]
+    pub fn supplied(value: f64) -> Self {
+        assert!(
+            value.is_finite() && value > 0.0 && value < 1.0,
+            "a repeat-tract outlier weight is a share of reads strictly inside 0 and 1, and \
+             {value} was supplied; a zero says no read at a tract can have come from anywhere \
+             but this individual's copies of it, and a one says none of them did"
+        );
+        Self {
+            value,
+            provenance: Provenance::Supplied,
+        }
+    }
+
+    /// The number itself — what a scoring row charges the junk term.
+    #[inline]
+    #[must_use]
+    pub fn value(self) -> f64 {
+        self.value
+    }
+
+    /// Whether the run was handed it or inherited it.
+    #[inline]
+    #[must_use]
+    pub fn provenance(self) -> Provenance {
+        self.provenance
+    }
+}
 
 /// The smallest share of a read the row will leave to this individual's own copies.
 ///
@@ -284,7 +376,11 @@ pub struct SsrLocusParameters<'a> {
     /// out of the candidate loop (spec §4.4).
     pub contexts: SsrScoringContextTable<'a>,
     /// How often a read came from somewhere other than this individual's copies of the tract.
-    /// [`DEFAULT_OUTLIER_WEIGHT`] is the value to pass.
+    ///
+    /// **The run's own value**, which is
+    /// [`FrozenParameters::repeat_tract_outlier_weight`](crate::ng::calling::FrozenParameters::repeat_tract_outlier_weight)
+    /// stripped of its warrant — [`DEFAULT_OUTLIER_WEIGHT`] where the run was handed none, and
+    /// whatever a parameters file supplied where it was.
     pub outlier_weight: f64,
     /// The tract lengths the outlier weight is spread over — **a property of the candidate set
     /// and the two cutoffs, with no cohort in it** (spec §4.5), built by

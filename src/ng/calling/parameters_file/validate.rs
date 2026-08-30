@@ -63,8 +63,9 @@
 
 use super::{
     ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError,
-    ShareCurve, ShareSmoothing, SlippageCurve, WarrantedValue,
+    ShareCurve, ShareSmoothing, SlippageCurve, Warrant, WarrantedValue,
 };
+use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 
 /// How far a length spectrum's shares may sum from one and still be a distribution.
 ///
@@ -520,8 +521,71 @@ impl ParametersFile {
 
     fn every_stated_constant_is_in_range(&self) -> Result<(), ParametersFileError> {
         let at = "stated_constants.repeat_tract_outlier_weight";
-        a_warranted_value(at, &self.stated_constants.repeat_tract_outlier_weight)?;
-        a_share(at, self.stated_constants.repeat_tract_outlier_weight.value)
+        let weight = &self.stated_constants.repeat_tract_outlier_weight;
+        a_warranted_value(at, weight)?;
+        // **Open at both ends, where every other share here is closed.** The scoring row asserts
+        // `0 < weight < 1` (`likelihood::ssr`'s `genotype_log_likelihood_row`), so a zero or a
+        // one accepted here becomes a panic several frames later naming a locus rather than the
+        // file the number came from — the same shape as the contamination share of exactly one
+        // this module already refuses. It is the one number in this file a person is *invited*
+        // to edit (spec §3.8), so the ends are the values most worth catching here.
+        if !(weight.value > 0.0 && weight.value < 1.0) {
+            return Err(refuse(
+                at,
+                format!(
+                    "is {}, and the share of a repeat tract's reads the model cannot explain is \
+                     strictly inside zero and one — a zero says no read at a tract can have come \
+                     from anywhere but this sample's own copies of it, and a one says none of \
+                     them did",
+                    weight.value
+                ),
+            ));
+        }
+        // **Two of the four warrants, and a `defaulted` one has to be the constant.** Nothing
+        // fits this number, so `fitted_here` and `borrowed` are claims about it that no run
+        // could make, and the in-memory shape it projects onto
+        // ([`RepeatTractOutlierWeight`](crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight))
+        // has nowhere to put them. **The state worth catching is the third one**: a person who
+        // takes spec §1.2 goal 3 at its word — copy the file your run wrote and change one line
+        // — changes the number and leaves `warrant = "defaulted"` above it. That says *this run
+        // inherited 0.01* beside a number that is not 0.01, and the file's own header names the
+        // fix ("change its warrant to supplied and delete its observations"), so the refusal
+        // says it too.
+        match weight.warrant {
+            Warrant::Supplied => Ok(()),
+            Warrant::Defaulted if weight.value == DEFAULT_OUTLIER_WEIGHT => Ok(()),
+            Warrant::Defaulted => Err(refuse(
+                at,
+                format!(
+                    "is {}, and its warrant is `defaulted`, which says this run inherited the \
+                     compiled-in {DEFAULT_OUTLIER_WEIGHT}; a number you changed is one the run \
+                     was handed, so change the warrant beside it to `supplied`",
+                    weight.value
+                ),
+            )),
+            other => Err(refuse(
+                at,
+                format!(
+                    "has the warrant `{}`, and nothing fits this number: it is either the \
+                     compiled-in {DEFAULT_OUTLIER_WEIGHT}, which is `defaulted`, or one you \
+                     wrote here, which is `supplied`",
+                    the_word_for(other)
+                ),
+            )),
+        }
+    }
+}
+
+/// The file's own spelling of a warrant, for a refusal that has to quote one back.
+///
+/// **The `serde` spelling rather than `{:?}`**, which would print the Rust variant name — a
+/// word that appears nowhere in the file the reader is being sent to edit.
+fn the_word_for(warrant: Warrant) -> &'static str {
+    match warrant {
+        Warrant::FittedHere => "fitted_here",
+        Warrant::Borrowed => "borrowed",
+        Warrant::Supplied => "supplied",
+        Warrant::Defaulted => "defaulted",
     }
 }
 
@@ -1367,6 +1431,72 @@ mod tests {
                 .0
                 .ends_with("repeat_tract_outlier_weight")
         );
+        // **And both ends of its range, which no other share in this file refuses.** The scoring
+        // row asserts `0 < weight < 1`, so a zero or a one that got past here would panic at
+        // whichever repeat tract came first, naming a locus rather than the file. It is also the
+        // one number spec §3.8 invites a person to edit, so the ends are what a typo reaches.
+        for edge in [0.0, 1.0] {
+            let (field, problem) =
+                refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = edge);
+            assert!(field.ends_with("repeat_tract_outlier_weight"), "{field}");
+            assert!(
+                problem.contains("strictly inside zero and one"),
+                "{problem}"
+            );
+        }
+        // A weight the scorer would accept is accepted.
+        accepted(|file| {
+            file.stated_constants.repeat_tract_outlier_weight = WarrantedValue {
+                value: 0.5,
+                warrant: Warrant::Supplied,
+                observations: None,
+            };
+        });
+    }
+
+    /// **The outlier weight is the one key held to two of the four warrants, and the state
+    /// worth catching is an edited number under a `defaulted` label.**
+    ///
+    /// Nothing fits this number (spec §3.8), so `fitted_here` and `borrowed` are claims about
+    /// it no run could make and the shape it projects onto has nowhere to put them. The third
+    /// refusal is the one a person reaches: spec §1.2 goal 3 invites them to copy the file
+    /// their run wrote and change one line, and the line they change is the number — leaving
+    /// `warrant = "defaulted"`, which then says the run inherited a constant it did not.
+    #[test]
+    fn an_outlier_weight_whose_warrant_no_run_could_mean_is_refused() {
+        for unfittable in [Warrant::FittedHere, Warrant::Borrowed] {
+            let (field, problem) = refused(|file| {
+                file.stated_constants.repeat_tract_outlier_weight.warrant = unfittable;
+            });
+            assert!(field.ends_with("repeat_tract_outlier_weight"), "{field}");
+            assert!(problem.contains("nothing fits this number"), "{problem}");
+        }
+
+        let (field, problem) = refused(|file| {
+            file.stated_constants.repeat_tract_outlier_weight.value = 0.05;
+        });
+        assert!(field.ends_with("repeat_tract_outlier_weight"), "{field}");
+        assert!(
+            problem.contains("change the warrant beside it to `supplied`"),
+            "an edited number under a defaulted warrant is told what to change: {problem}"
+        );
+
+        // The two states a run can mean are both accepted: the constant it inherited, and a
+        // number somebody wrote in.
+        accepted(|file| {
+            file.stated_constants.repeat_tract_outlier_weight = WarrantedValue {
+                value: DEFAULT_OUTLIER_WEIGHT,
+                warrant: Warrant::Defaulted,
+                observations: None,
+            };
+        });
+        accepted(|file| {
+            file.stated_constants.repeat_tract_outlier_weight = WarrantedValue {
+                value: 0.05,
+                warrant: Warrant::Supplied,
+                observations: None,
+            };
+        });
         assert!(
             refused(|file| file
                 .repeat_tracts

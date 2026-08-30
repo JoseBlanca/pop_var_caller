@@ -38,16 +38,21 @@
 //!   all, so there is *"no rung below it for this parameter"*; this module is that rung, and a
 //!   cell that reaches it takes [`DEFAULT_SSR_SUBSTITUTION_RATE`] and
 //!   [`Provenance::Defaulted`].
-//! - **The outlier weight**, which no fit produces anywhere: [`DEFAULT_OUTLIER_WEIGHT`],
-//!   inherited from production at 0.01 and declared inherited (spec §4.5).
+//! - **The outlier weight**, which no fit produces anywhere. It is read once a locus off
+//!   [`FrozenParameters`], which carries either
+//!   [`DEFAULT_OUTLIER_WEIGHT`](crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT)
+//!   — inherited from production at 0.01 and declared inherited (spec §4.5) — or whatever a
+//!   parameters file supplied (`doc/devel/ng/spec/parameters_file.md` §3.8).
 //!
 //! # Why the outlier weight is not in any context's warrant
 //!
 //! **It is one run-wide constant and a warrant is per `(read group, candidate)`.** Folding a
-//! constant that is defaulted everywhere into the per-cell warrant would make *every* repeat
-//! tract's call [`Provenance::Defaulted`], and the distinction spec §4.4 says the warrant
-//! exists to carry — a genotype resting on a fitted direction split against one resting on a
-//! borrowed one — would be gone at every tract in every run. The same line is already drawn
+//! constant that is the same everywhere in the run into the per-cell warrant would make
+//! *every* repeat tract's call [`Provenance::Defaulted`] — or, where a parameters file
+//! supplied the weight, [`Provenance::Supplied`], which the ladder ranks only one rung above
+//! it — and the distinction spec §4.4 says the warrant exists to carry, a genotype resting on
+//! a fitted direction split against one resting on a borrowed one, would be gone at every
+//! tract in every run. The same line is already drawn
 //! one level down:
 //! [`PART_REPEAT_SHARE_OF_WHOLE`](crate::ng::calling::likelihood::stutter_rates::PART_REPEAT_SHARE_OF_WHOLE)
 //! is a placeholder inside every stutter model this module builds **from a fit** — the
@@ -80,7 +85,7 @@
 use crate::ng::alignment::StutterModel;
 use crate::ng::calling::genotype_prior::fill_seed_share_per_candidate;
 use crate::ng::calling::likelihood::ssr::{
-    DEFAULT_OUTLIER_WEIGHT, SsrContaminationMixture, SsrLocusParameters, SsrScoringContextTable,
+    RepeatTractOutlierWeight, SsrContaminationMixture, SsrLocusParameters, SsrScoringContextTable,
 };
 use crate::ng::calling::likelihood::ssr_emission::{
     SsrCandidate, SsrScoringContext, fill_reachable_lengths,
@@ -228,6 +233,16 @@ pub struct TractScoringFits {
     /// The prior's share for each candidate, summing to one, before it is scattered onto the
     /// length support. Empty on an uncontaminated run, which has no third term to spread.
     share_of_each_candidate: Vec<f64>,
+    /// **The run's outlier weight, taken at the gather** — **`None` until a tract has been
+    /// gathered**, exactly as [`Self::motif`] is, and for the same reason: a bare `f64` here
+    /// would default to zero, and a zero outlier weight is the claim that no read at a tract can
+    /// have come from anywhere but this individual's copies of it.
+    ///
+    /// **Held rather than read from the constant at the row**, which is what it was until
+    /// 2026-08-30. `doc/devel/ng/spec/parameters_file.md` §3.8 puts this number in the
+    /// parameters file so that a person can change it, and a row reading the compiled-in
+    /// constant made an edited file round-trip and change nothing.
+    outlier_weight: Option<RepeatTractOutlierWeight>,
 }
 
 impl TractScoringFits {
@@ -297,6 +312,7 @@ impl TractScoringFits {
         self.warrant.clear();
         self.motif = Some(*motif);
         self.run_fitted_contamination = !parameters.contamination_is_absent();
+        self.outlier_weight = Some(parameters.repeat_tract_outlier_weight());
         self.candidates = candidates.len();
         self.read_groups = read_groups;
         self.slippage_defaulted = 0;
@@ -605,7 +621,10 @@ impl TractScoringFits {
         SsrLocusParameters {
             candidates,
             contexts: SsrScoringContextTable::new(contexts, self.candidates),
-            outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+            outlier_weight: self
+                .outlier_weight
+                .expect("a tract's fits were gathered before its row was built")
+                .value(),
             reachable_lengths: &self.reachable_lengths,
             contamination: self
                 .run_fitted_contamination
@@ -858,7 +877,9 @@ mod tests {
     use crate::ng::calling::SsrSampleEvidence;
     use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
     use crate::ng::calling::likelihood::SsrRowScratch;
-    use crate::ng::calling::likelihood::ssr::genotype_log_likelihood_row;
+    use crate::ng::calling::likelihood::ssr::{
+        DEFAULT_OUTLIER_WEIGHT, genotype_log_likelihood_row,
+    };
     use crate::ng::calling::likelihood::ssr_emission::{
         StutterSubstitutionEmission, StutterSubstitutionScratch,
     };
@@ -1854,6 +1875,36 @@ mod tests {
         assert_eq!(locus.outlier_weight, 0.01);
         assert!(locus.contamination.is_none());
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
+
+        // **And a supplied weight reaches the row.** `parameters_file.md` §3.8 puts this number
+        // in the file so a person can change it; until 2026-08-30 the row read the compiled-in
+        // constant, so an edited file round-tripped and changed nothing. Asserted here because
+        // this is the one line that decides which of the two a tract is scored under.
+        let supplied =
+            parameters.with_repeat_tract_outlier_weight(RepeatTractOutlierWeight::supplied(0.07));
+        // **Re-gathered into the same scratch rather than a fresh one**, because that is how a
+        // worker uses it: one `TractScoringFits` serves every locus of a shard
+        // (`calling::LocusScratch::tract_fits_mut`). A fresh value would pass even if the field
+        // were only ever written when empty.
+        gathered.gather_for_locus(
+            motif(),
+            &alleles,
+            tract_prior(reference_repeats(), &supplied),
+            &supplied,
+        );
+        let contexts = gathered.scoring_contexts(&alleles);
+        assert_eq!(
+            gathered
+                .locus_parameters(&alleles, &contexts, &[])
+                .outlier_weight,
+            0.07
+        );
+        assert_eq!(
+            gathered.weakest_warrant(),
+            Provenance::FittedHere,
+            "the weight is reported at the run and stays out of the per-cell warrant, \
+             whether it was supplied or inherited"
+        );
     }
 
     /// **A tract of another period reaches both lookups with its own period** — and this test

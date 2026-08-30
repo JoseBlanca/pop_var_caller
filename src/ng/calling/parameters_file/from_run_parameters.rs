@@ -22,7 +22,6 @@ use super::{
     StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant, WarrantedValue,
 };
 use crate::ng::calling::genotype_prior::SeedRegime;
-use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::ng::calling::likelihood::{ContaminationView, ReadGroupCalibration};
 use crate::ng::calling::run_parameters::RunParameters;
 use crate::ng::parameter_estimation::joint::census::Stratum;
@@ -213,15 +212,19 @@ impl ParametersFile {
             },
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
-                // **The compiled-in constant, and nothing in `RunParameters` can say otherwise.**
-                // The outlier weight reaches calling from `likelihood/ssr.rs` rather than from
-                // the run's parameters, so a run this build can assemble has no other value to
-                // write. A file whose weight a person edited is `supplied` and needs somewhere
-                // in memory to live — a gap that belongs to the reader's projection (step C2),
-                // not to this one.
+                // **Whatever this run scored under, and its warrant with it.** Until 2026-08-30
+                // `RunParameters` had no field for this number and the projection wrote the
+                // compiled-in constant marked `defaulted`, so a file whose weight a person had
+                // edited round-tripped back to the default. The weight now rides on the run
+                // (`RunParameters::repeat_tract_outlier_weight`), and its two reachable
+                // warrants are `supplied` — read out of a parameters file — and `defaulted`.
+                //
+                // **No evidence count either way**, which is the projection's rule for a
+                // defaulted value and true here of a supplied one too: nothing counted anything
+                // to arrive at it.
                 repeat_tract_outlier_weight: WarrantedValue {
-                    value: DEFAULT_OUTLIER_WEIGHT,
-                    warrant: Warrant::Defaulted,
+                    value: run.repeat_tract_outlier_weight().value(),
+                    warrant: run.repeat_tract_outlier_weight().provenance().into(),
                     observations: None,
                 },
             },
@@ -749,6 +752,7 @@ impl From<FittedShape> for ShareShape {
 mod tests {
     use super::*;
     use crate::ng::calling::genotype_prior::SpectrumSeed;
+    use crate::ng::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
     use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
     use crate::ng::parameter_estimation::joint::contamination::{
         ContaminationEstimate, NotIdentifiedReason,
@@ -1944,7 +1948,13 @@ mod tests {
         }
     }
 
-    /// **The repeat-tract outlier weight is written out, marked as the guess it is.**
+    /// **The repeat-tract outlier weight is written out, marked as the guess it is — and a
+    /// supplied one is written as supplied.**
+    ///
+    /// The second half is what stops the round trip losing an edit. Spec §3.8 puts this number
+    /// in the file so that a person can change it, and until 2026-08-30 the projection wrote the
+    /// compiled-in constant whatever the run held, so an edited file came back `defaulted` at
+    /// 0.01.
     #[test]
     fn the_outlier_weight_is_written_as_the_inherited_guess_it_is() {
         let file = the_projected_file();
@@ -1963,6 +1973,28 @@ mod tests {
                 .repeat_tract_outlier_weight
                 .observations,
             None
+        );
+
+        let read_groups = a_runs_read_groups();
+        let supplied = a_fitted_run(&read_groups, &the_runs_contamination())
+            .with_repeat_tract_outlier_weight(RepeatTractOutlierWeight::supplied(0.04));
+        let file = projected(&supplied, &read_groups);
+        assert_eq!(
+            file.stated_constants.repeat_tract_outlier_weight.value,
+            0.04
+        );
+        assert_eq!(
+            file.stated_constants.repeat_tract_outlier_weight.warrant,
+            Warrant::Supplied,
+            "a weight the run was handed is not one it inherited, and the file is where that \
+             difference has to survive"
+        );
+        assert_eq!(
+            file.stated_constants
+                .repeat_tract_outlier_weight
+                .observations,
+            None,
+            "nothing counted anything to arrive at it, whichever way it got here"
         );
     }
 

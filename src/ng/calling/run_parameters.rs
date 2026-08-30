@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 
 use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
-use super::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use super::likelihood::ssr::RepeatTractOutlierWeight;
 use super::run_report::{
     ContaminationUsed, ReadGroupContamination, RunParameterReport, SequencingBatchingUsed,
 };
@@ -108,6 +108,15 @@ pub struct RunParameters {
     ssr_slippage_fits: StratumFits,
     ssr_substitution_rate: BTreeMap<StratumKey, Estimate<ErrorRate>>,
     ploidy: Ploidy,
+    /// **How often a read at a repeat tract came from somewhere the model cannot explain**, and
+    /// whether the run was handed that number or inherited it.
+    ///
+    /// **The one parameter here no fit produces.** Everything else on this type arrives from the
+    /// pre-pass; this arrives from the binary, unless a parameters file supplied one
+    /// (`doc/devel/ng/spec/parameters_file.md` §3.8, which puts it in the file precisely so that
+    /// a person can change it). [`Self::assemble`] takes the default and
+    /// [`Self::with_repeat_tract_outlier_weight`] is how a supplied one gets in.
+    repeat_tract_outlier_weight: RepeatTractOutlierWeight,
 }
 
 impl RunParameters {
@@ -276,7 +285,33 @@ impl RunParameters {
             ssr_slippage_fits,
             ssr_substitution_rate,
             ploidy,
+            // **The compiled-in constant, because a fit has no other answer.** Nothing in the
+            // parameter pre-pass measures this number, so the only value assembly can put here
+            // is the inherited one; a run handed a parameters file replaces it through
+            // [`Self::with_repeat_tract_outlier_weight`].
+            repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
         }
+    }
+
+    /// **Score repeat tracts under a supplied outlier weight rather than the inherited one.**
+    ///
+    /// **A builder rather than a tenth argument to [`Self::assemble`]**, because assembly takes
+    /// the *fit's* outputs and no fit produces this number: every one of assembly's callers
+    /// would have to pass the same constant.
+    ///
+    /// **Nothing calls it outside this module's tests yet.** The caller it exists for is the
+    /// projection back from a parameters file, which reads the value out of
+    /// `[stated_constants]` — the other half of step C2, not yet written. So this change
+    /// carries a value the first half of the pipe cannot yet produce, deliberately: the
+    /// alternative was landing the projection with nowhere for the number to go.
+    ///
+    /// **Nothing that skips this call is silently wrong** — it keeps
+    /// [`RepeatTractOutlierWeight::defaulted`], which is what the run would have scored with
+    /// anyway, and what [`Self::report`] then states.
+    #[must_use]
+    pub fn with_repeat_tract_outlier_weight(mut self, weight: RepeatTractOutlierWeight) -> Self {
+        self.repeat_tract_outlier_weight = weight;
+        self
     }
 
     /// What calling borrows for the whole run.
@@ -291,6 +326,7 @@ impl RunParameters {
                 &self.ssr_substitution_rate,
                 self.ploidy,
             )
+            .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
         } else {
             FrozenParameters::new(
                 &self.calibration_by_read_group,
@@ -302,6 +338,7 @@ impl RunParameters {
                 &self.ssr_substitution_rate,
                 self.ploidy,
             )
+            .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
         }
     }
 
@@ -382,6 +419,16 @@ impl RunParameters {
         &self,
     ) -> impl Iterator<Item = (&StratumKey, &Estimate<ErrorRate>)> {
         self.ssr_substitution_rate.iter()
+    }
+
+    /// **The share of repeat-tract reads the model does not explain**, and whether the run was
+    /// handed it or inherited it.
+    ///
+    /// **The one number here that is not the pre-pass's.** Nothing fits it, so its two reachable
+    /// warrants are `Supplied` and `Defaulted` (`doc/devel/ng/spec/parameters_file.md` §3.8).
+    #[must_use]
+    pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
+        self.repeat_tract_outlier_weight
     }
 
     /// **What this run scored its reads under, in a form an output can print** — the
@@ -466,7 +513,11 @@ impl RunParameters {
             }
         };
 
-        RunParameterReport::new(contamination, sequencing_batching, DEFAULT_OUTLIER_WEIGHT)
+        RunParameterReport::new(
+            contamination,
+            sequencing_batching,
+            self.repeat_tract_outlier_weight,
+        )
     }
 
     /// Who was sequenced beside whom, as the run was told.
@@ -1908,10 +1959,70 @@ mod tests {
 
         let report = run.report(&groups);
         assert_eq!(
-            report.inherited_repeat_tract_outlier_weight(),
-            DEFAULT_OUTLIER_WEIGHT
+            report.repeat_tract_outlier_weight(),
+            RepeatTractOutlierWeight::defaulted()
         );
-        assert_eq!(report.inherited_repeat_tract_outlier_weight(), 0.01);
+        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.01);
+        assert_eq!(
+            report.repeat_tract_outlier_weight().provenance(),
+            Provenance::Defaulted,
+            "no fit produces this number, so a run that was handed none inherited it"
+        );
+
+        // **And a supplied one reaches both the report and the scoring path.** Spec §3.8 puts
+        // this number in the parameters file so that a person can change it, and a run that
+        // reported the constant while scoring under an edited value — or the reverse — would be
+        // the file, the report and the score disagreeing while looking wired up.
+        let supplied = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        )
+        .with_repeat_tract_outlier_weight(RepeatTractOutlierWeight::supplied(0.04));
+        let report = supplied.report(&groups);
+        assert_eq!(report.repeat_tract_outlier_weight().value(), 0.04);
+        assert_eq!(
+            report.repeat_tract_outlier_weight().provenance(),
+            Provenance::Supplied
+        );
+        assert_eq!(
+            supplied.view().repeat_tract_outlier_weight().value(),
+            0.04,
+            "the view calling borrows is what carries it to a tract's scoring row"
+        );
+
+        // **Both arms of `view`, because they are two constructors and only one was covered.**
+        // The run above has an empty contamination map, so it takes
+        // `FrozenParameters::uncontaminated`; deleting the forwarding call from the *other*
+        // arm left every test in the library green, and every run whose fit found a
+        // contamination fraction would then have scored under 0.01 while its report and its
+        // file said otherwise.
+        let contaminated = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::from([(ReadGroupId(0), estimated(0.02, 4_000))]),
+            SequencingBatches::all_together(&groups),
+            vec![outbred(), outbred()],
+            human_like_seed(),
+            no_strata(),
+            BTreeMap::new(),
+            diploid(),
+        )
+        .with_repeat_tract_outlier_weight(RepeatTractOutlierWeight::supplied(0.04));
+        assert!(
+            !contaminated.view().contamination_is_absent(),
+            "this run takes the other arm of `view`"
+        );
+        assert_eq!(
+            contaminated.view().repeat_tract_outlier_weight().value(),
+            0.04
+        );
     }
 
     /// **A read-group table that does not describe this run is refused**, because the join is

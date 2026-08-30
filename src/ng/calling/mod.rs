@@ -86,6 +86,7 @@ pub use likelihood::{
 };
 
 use crate::ng::calling::genotype_prior::SpectrumSeed;
+use crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::ng::calling::quality::{ArtifactTestCounts, SiteQualityBuffers};
 use crate::ng::locus_generation::{LocusKind, SsrDetail};
 use crate::ng::parameter_estimation::Estimate;
@@ -659,6 +660,16 @@ pub struct FrozenParameters<'a> {
     /// length.
     ssr_substitution_rate: &'a BTreeMap<StratumKey, Estimate<ErrorRate>>,
     ploidy: Ploidy,
+    /// **How often a read at a repeat tract came from somewhere the model cannot explain** —
+    /// the one number here that no fit produces, so it carries its warrant rather than being a
+    /// bare share (`doc/devel/ng/spec/parameters_file.md` §3.8).
+    ///
+    /// **Defaulted unless a constructor is told otherwise** ([`Self::with_repeat_tract_outlier_weight`]),
+    /// and the value a run gets that way is the inherited constant it would have scored under
+    /// anyway. The one caller with another value is
+    /// [`RunParameters::view`](run_parameters::RunParameters::view), which passes on whatever
+    /// its own parameters hold.
+    repeat_tract_outlier_weight: RepeatTractOutlierWeight,
 }
 
 impl<'a> FrozenParameters<'a> {
@@ -877,6 +888,7 @@ impl<'a> FrozenParameters<'a> {
             ssr_slippage_fits,
             ssr_substitution_rate,
             ploidy,
+            repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
         }
     }
 
@@ -886,6 +898,35 @@ impl<'a> FrozenParameters<'a> {
     #[must_use]
     pub fn calibration_by_read_group(&self) -> &'a [ReadGroupCalibration] {
         self.calibration_by_read_group
+    }
+
+    /// **Score repeat tracts under a supplied outlier weight rather than the inherited one.**
+    ///
+    /// **A builder rather than an eleventh argument to the two constructors**, because no fit
+    /// produces this number and almost every call site wants the compiled-in value. The
+    /// exception is [`RunParameters::view`](run_parameters::RunParameters::view), whose two
+    /// arms pass on what a parameters file supplied; the other **25** call sites in this
+    /// repository — 27 in all, counted with
+    /// `grep -rn "FrozenParameters::new(\|FrozenParameters::uncontaminated("` — would each
+    /// have gained an argument naming the same constant.
+    ///
+    /// **A caller that omits it is not silently wrong**: it gets the inherited constant, which
+    /// is what the run would have scored under.
+    #[inline]
+    #[must_use]
+    pub fn with_repeat_tract_outlier_weight(mut self, weight: RepeatTractOutlierWeight) -> Self {
+        self.repeat_tract_outlier_weight = weight;
+        self
+    }
+
+    /// **The share of a repeat tract's reads charged to none of its candidate alleles**, with
+    /// its warrant — what
+    /// [`TractScoringFits`](inference::repeat_tract_parameters::TractScoringFits) reads once a
+    /// locus and hands the scoring row.
+    #[inline]
+    #[must_use]
+    pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
+        self.repeat_tract_outlier_weight
     }
 
     /// One contamination view per read group, or empty where the fit identified none —

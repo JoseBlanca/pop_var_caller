@@ -1152,12 +1152,13 @@ pub struct StatedConstants {
     /// from the existing caller and never measured here.
     ///
     /// **It carries a warrant because it has two reachable states and spec §8 requires them
-    /// apart.** The run's own value is `defaulted` — 0.01, from `likelihood/ssr.rs`. A value a
-    /// person typed into the file is `supplied`, and spec §3.8 says a person editing it is the
+    /// apart.** `defaulted` says the run inherited 0.01 from `likelihood/ssr.rs`; `supplied`
+    /// says somebody wrote a number here and the run scored under it, which spec §3.8 calls the
     /// whole point of writing it down. Without the warrant a run reports an edited guess as the
     /// project's own constant, and spec §2.1's wholesale demotion of a mismatched file has
-    /// nowhere to write itself for this one number. Its evidence count is absent: no fit
-    /// produced it.
+    /// nowhere to write itself for this one number. **The other two warrants are refusals** —
+    /// nothing fits this number, so [`Self::repeat_tract_outlier_weight`] is the one key
+    /// `validate` holds to two of the four. Its evidence count is absent: no fit produced it.
     pub repeat_tract_outlier_weight: WarrantedValue,
 }
 
