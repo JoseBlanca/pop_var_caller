@@ -34,11 +34,14 @@
 //!
 //! **These are synthesised, not real records**, so that the bench is reproducible from the
 //! repository alone and does not need a corpus under `tmp/`. What they reproduce is the *shape*:
-//! one record a position, a live set of about `depth` reads sliding forward as 150-base reads
-//! start and end, one observation carrying nearly all of them, and a second observation at one
-//! record in a hundred. What they do **not** reproduce is a real sample's variety of witnesses,
-//! read groups and locus kinds; for record-for-record fidelity against a real corpus, see
-//! `examples/ng_psp_parity.rs`.
+//! one record a position, a live set of about `depth` reads sliding forward as paired 150-base
+//! reads start and end, one observation carrying nearly all of them, and a second observation at
+//! one record in a hundred. **The reads are paired and their two mates are 200 positions apart**,
+//! so an identifier goes absent and comes back — which spec `psp_record_encoding.md` §6 measures
+//! at 83 % of identifiers on the human sample and 91 % on tomato, and which is the case the
+//! reader's live-set merge cannot take its cheap path on. What they do **not** reproduce is a real
+//! sample's variety of witnesses, read groups and locus kinds; for record-for-record fidelity
+//! against a real corpus, see `examples/ng_psp_parity.rs`.
 //!
 //! # Two things these numbers are not
 //!
@@ -92,10 +95,17 @@ use pop_var_caller::ng::types::{
 };
 use pop_var_caller::pileup_record::ChainId;
 
-/// How many reference positions a read covers. **150, the Illumina read this project's corpora
-/// are** — it is what sets how fast the live set turns over: `depth / 150` reads start at each
-/// position, and that arrival rate is what the head has to encode.
-const READ_LENGTH_POSITIONS: u64 = 150;
+/// How many reference positions one mate covers. **150, the Illumina read this project's corpora
+/// are.**
+const MATE_LENGTH_POSITIONS: u64 = 150;
+
+/// How many positions separate a pair's two mates — the unsequenced middle of the fragment.
+///
+/// **200, so a fragment spans 500 positions**, which is the ordinary shape of a paired library.
+const INNER_GAP_POSITIONS: u64 = 200;
+
+/// A whole fragment: first mate, gap, second mate.
+const FRAGMENT_SPAN_POSITIONS: u64 = 2 * MATE_LENGTH_POSITIONS + INNER_GAP_POSITIONS;
 
 /// One record in this many carries a second observation, so the residual derivation has something
 /// to subtract. **A hundred**, matching `cohort_merge.md`'s measured corner: roughly one position
@@ -154,15 +164,41 @@ fn records_written(shape: &CorpusShape) -> u64 {
 // The corpus
 // ---------------------------------------------------------------------
 
-/// The identifiers live at `position`: a sliding window of about `depth` reads.
+/// The identifiers live at `position`, ascending — **two stretches, because a chain id names a
+/// read pair and a pair covers the reference twice with a gap between**.
 ///
-/// `depth / READ_LENGTH_POSITIONS` reads start at each position and one ends, so the set turns
-/// over completely every 150 positions — which is what puts arrivals and departures in every
-/// record's head at 280 reads and in one record in fifteen at 10.
-fn live_at(position: u64, depth: u64) -> std::ops::RangeInclusive<u64> {
-    let started = position * depth / READ_LENGTH_POSITIONS;
-    let oldest_still_live = started.saturating_sub(depth.saturating_sub(1));
-    oldest_still_live..=started
+/// **The two stretches are the whole point, and an earlier version of this file got it wrong.** It
+/// returned one contiguous range, so every identifier that arrived sorted *above* every identifier
+/// already live and the reader's merge could always append. That is the easy case, and it is not
+/// the one the data has: spec `psp_record_encoding.md` §6 measures **83 % of identifiers on the
+/// human sample and 91 % on tomato covering two stretches**. A benchmark that never makes an
+/// identifier come back exercises none of the merging that costs, and reports a saving on the
+/// merge that the real shape would not give. Caught by the data-layout review, 2026-08-30.
+///
+/// The model: identifiers start at a steady rate, each covers `MATE_LENGTH_POSITIONS`, goes absent
+/// for `INNER_GAP_POSITIONS`, and covers `MATE_LENGTH_POSITIONS` again. So at any position two
+/// bands of identifiers are live — the pairs showing their second mate, and the younger pairs
+/// showing their first — and every second-mate arrival sorts **below** every identifier in the
+/// younger band. At 280 reads a position that is 0.93 returning identifiers a record, against the
+/// 0.8 implied by the spec's 83–91 %; at 10 reads a position it is 0.033.
+///
+/// A pair covers `2 * MATE_LENGTH_POSITIONS` reference positions in all, so holding `depth` reads
+/// live at every position needs `depth / (2 * MATE_LENGTH_POSITIONS)` pairs starting at each.
+fn live_at(position: u64, depth: u64, into: &mut Vec<ChainId>) {
+    into.clear();
+    // `first_starting_after(p)` is the lowest identifier whose pair starts after position `p`,
+    // scaled so that `depth / (2 * MATE_LENGTH_POSITIONS)` of them start at every position. The
+    // arithmetic is done on the numerator to keep it in integers.
+    let first_starting_after = |p: u64| p * depth / (2 * MATE_LENGTH_POSITIONS);
+    // The older band: pairs showing their **second** mate here.
+    let second_mate_from = first_starting_after(position.saturating_sub(FRAGMENT_SPAN_POSITIONS));
+    let second_mate_to =
+        first_starting_after(position.saturating_sub(MATE_LENGTH_POSITIONS + INNER_GAP_POSITIONS));
+    // The younger band: pairs showing their **first** mate here.
+    let first_mate_from = first_starting_after(position.saturating_sub(MATE_LENGTH_POSITIONS));
+    let first_mate_to = first_starting_after(position);
+    into.extend(second_mate_from..second_mate_to);
+    into.extend(first_mate_from..first_mate_to);
 }
 
 /// One record: one reference position, one observation holding nearly every live read, and — at
@@ -172,15 +208,14 @@ fn live_at(position: u64, depth: u64) -> std::ops::RangeInclusive<u64> {
 /// it refuses to derive a list whose length does not sit between half the read count and the read
 /// count (`record.rs::check_a_read_list_against_its_read_count`), and a record it refuses stores
 /// every list instead, which is not the shape a real one has.
-fn a_record(position: u64, depth: u64) -> SampleLocusObservations {
-    let live = live_at(position, depth);
-    let ids: Vec<ChainId> = live.collect();
-    let split = if position.is_multiple_of(SECOND_OBSERVATION_ONE_IN) && ids.len() >= 4 {
-        ids.len() - ids.len() / 4
+fn a_record(position: u64, depth: u64, live: &mut Vec<ChainId>) -> SampleLocusObservations {
+    live_at(position, depth, live);
+    let split = if position.is_multiple_of(SECOND_OBSERVATION_ONE_IN) && live.len() >= 4 {
+        live.len() - live.len() / 4
     } else {
-        ids.len()
+        live.len()
     };
-    let (reference_reads, alternative_reads) = ids.split_at(split);
+    let (reference_reads, alternative_reads) = live.split_at(split);
 
     let mut observations = Vec::with_capacity(2);
     observations.push(an_observation(b"A", reference_reads, 0));
@@ -225,7 +260,71 @@ fn an_observation(bases: &[u8], reads: &[ChainId], group: u32) -> SequenceObserv
 /// times `push` and building a record is not part of what a writer costs.
 fn a_corpus(shape: &CorpusShape, records: u64) -> Vec<SampleLocusObservations> {
     let depth = u64::from(shape.reads_a_position);
-    (0..records).map(|at| a_record(at, depth)).collect()
+    // One scratch buffer for the whole corpus rather than one allocation a record: the corpus is
+    // built outside every timed region, but a 300,000-record build is still worth not making slow.
+    let mut live = Vec::new();
+    let built: Vec<SampleLocusObservations> = (0..records)
+        .map(|at| a_record(at, depth, &mut live))
+        .collect();
+    check_the_corpus_is_the_shape_it_claims(shape, &built);
+    built
+}
+
+/// **The corpus's depth and its returning identifiers are load-bearing claims, so they are checked
+/// here rather than in a comment.** Both were wrong once: an earlier `live_at` returned one
+/// contiguous range, which held the depth right and made every arrival sort above the whole live
+/// set, so the reader's merge never once took the branch the real data makes it take.
+fn check_the_corpus_is_the_shape_it_claims(shape: &CorpusShape, built: &[SampleLocusObservations]) {
+    let depth = u64::from(shape.reads_a_position);
+    let mut live_ids = 0u64;
+    let mut returning = 0u64;
+    // The identifiers live at the record before this one, to see which arrivals sort below them.
+    let mut was_live: Vec<ChainId> = Vec::new();
+    let mut now_live: Vec<ChainId> = Vec::new();
+    // The first records of the corpus are still filling their first fragment span, so the live set
+    // has not reached its steady size; they are built but not counted.
+    let warm = (FRAGMENT_SPAN_POSITIONS as usize).min(built.len() / 2);
+    for (at, record) in built.iter().enumerate() {
+        now_live.clear();
+        for observation in &record.observations {
+            now_live.extend_from_slice(&observation.chain_ids);
+        }
+        if at >= warm {
+            live_ids += now_live.len() as u64;
+            // **An arrival the reader's merge cannot simply append is one that sorts below an
+            // identifier already live** — that is, below the highest of them, since both lists are
+            // ascending. `binary_search` rather than `contains`, because a linear membership test
+            // over 280 identifiers a record for 60,000 records is 4.7 billion comparisons at bench
+            // setup.
+            let highest_live = was_live.last().copied();
+            returning += now_live
+                .iter()
+                .filter(|id| was_live.binary_search(id).is_err())
+                .filter(|id| highest_live.is_some_and(|highest| **id < highest))
+                .count() as u64;
+        }
+        std::mem::swap(&mut was_live, &mut now_live);
+    }
+    let counted = (built.len() - warm) as u64;
+    let mean_live = live_ids as f64 / counted as f64;
+    assert!(
+        (mean_live - depth as f64).abs() < depth as f64 * 0.1,
+        "{} holds {mean_live:.1} identifiers a record where it claims {depth}",
+        shape.name
+    );
+    assert!(
+        returning > 0,
+        "{} has no identifier that goes absent and comes back, so the reader's merge only ever \
+         appends — which is the case spec psp_record_encoding.md §6 says 83 % to 91 % of \
+         identifiers are not",
+        shape.name
+    );
+    eprintln!(
+        "corpus {}: {mean_live:.1} identifiers a record, {:.3} of them a record arriving below \
+         one already live",
+        shape.name,
+        returning as f64 / counted as f64
+    );
 }
 
 /// The header these stores carry: one contig long enough for the corpus, and the grid this shape
