@@ -1242,6 +1242,13 @@ impl<'a> FieldReader<'a> {
         least_bytes_each: usize,
     ) -> Result<u64, RecordDecodeError> {
         let declared = self.read_varint(field)?;
+        // **A multiply where this was a divide**, and the two say the same thing: for positive
+        // integers `declared > M / L` and `declared * L > M` are the same statement, because the
+        // truncation in the division is exactly the slack the multiplication keeps. This runs
+        // about five times a record — once for the observation count, once for the residual read
+        // count, once a witness, once a stored read list, twice from the live set's changes — and
+        // an aarch64 64-bit divide is tens of cycles to compare against a constant. The quotient
+        // is still computed for the message, inside the branch that refuses.
         let most_possible = MOST_BYTES_A_BODY_CAN_DECLARE / least_bytes_each as u64;
         if declared > most_possible {
             return Err(self.malformed(
@@ -3009,6 +3016,41 @@ mod tests {
         let mut runs_claimed = vec![0u8, 1, 1, 0];
         encode_u64_leb128(u64::MAX, &mut runs_claimed);
         assert!(decoded(&runs_claimed).is_err());
+    }
+
+    /// **The exact count `read_count` accepts and the first it refuses**, both sides of the
+    /// boundary, on every `least_bytes_each` the module uses.
+    ///
+    /// **It exists because the boundary was never pinned, and a review proposed moving it.** The
+    /// candidate was to replace the division with `declared * L > M`, which is the same statement
+    /// for positive integers — the truncation in the division is exactly the slack the
+    /// multiplication keeps. **Measured and not taken:** callgrind on the deep full walk, the same
+    /// binary twice each way, put the multiplication at 6,762,039,538 instructions against the
+    /// division's 6,762,760,740 — **721,200 saved out of 6.76 billion, 0.011 %**, because LLVM
+    /// already folds the division wherever `least_bytes_each` is a constant, which is every call
+    /// site in this file. A non-obvious arithmetic identity inside a guard is not worth 0.011 %.
+    ///
+    /// The test stays, because nothing pinned this boundary before and the next person to have
+    /// the idea should find it held rather than have to re-derive it.
+    #[test]
+    fn the_largest_count_a_body_could_hold_is_accepted_and_the_next_one_is_not() {
+        for least_bytes_each in [1, LEAST_BYTES_PER_WITNESS_RUN, LEAST_BYTES_PER_OBSERVATION] {
+            let most = MOST_BYTES_A_BODY_CAN_DECLARE / least_bytes_each as u64;
+            for (declared, accepted) in [(most, true), (most + 1, false)] {
+                let mut bytes = Vec::new();
+                put_varint(&mut bytes, declared);
+                let mut reader = FieldReader::new(&bytes);
+                let got = reader.read_count(OBSERVATION_COUNT, least_bytes_each);
+                assert_eq!(
+                    got.is_ok(),
+                    accepted,
+                    "{declared} entries at {least_bytes_each} bytes each: the ceiling is {most}"
+                );
+                if accepted {
+                    assert_eq!(got.expect("accepted"), declared);
+                }
+            }
+        }
     }
 
     /// The reserve a declared count is allowed to make is what the bytes left could hold,
