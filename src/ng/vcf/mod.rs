@@ -44,7 +44,10 @@ pub use encode::{
     QUALITY_DECIMALS, fixed_columns, format_keys, frequency_text, info_column,
     mapping_quality_text, penalty_text, quality_text, record_line, sample_columns,
 };
-pub use header::{HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata};
+pub use header::{
+    FILE_FORMAT, HeaderContig, HeaderMetadataError, MAX_CONTIG_LENGTH, VcfHeaderMetadata,
+    header_text,
+};
 
 use crate::ng::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::ng::types::{GenomeRegion, Genotype, Motif, Phred, Position};

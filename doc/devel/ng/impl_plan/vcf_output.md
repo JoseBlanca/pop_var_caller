@@ -175,7 +175,7 @@ part of the format (§11), so a formatting choice is a format change from here o
 
 ### Milestone C — the header, the writer, and a strict parser
 
-☐ **C1. The header.** A3's metadata rendered through the ported noodles path, declarations
+✅ **C1. The header.** A3's metadata rendered through the ported noodles path, declarations
 exactly the spec's §4/§6–§8 set, `##parametersFile` included. Golden-file the whole header.
 *Depends:* A3, B4. *Source:* spec §4; [`header.rs:73-247`](../../../../src/vcf/header.rs).
 
