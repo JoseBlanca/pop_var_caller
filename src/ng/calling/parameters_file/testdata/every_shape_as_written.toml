@@ -3,11 +3,14 @@
 # A number that could be fitted carries a `warrant`: fitted_here, borrowed,
 # supplied or defaulted. **If you edit one, change its warrant to "supplied" and
 # delete its `observations`** — otherwise this file says a number you typed was
-# measured, and the run that reads it will report it that way.
+# measured, and the run that reads it will report it that way. A `supplied`
+# number that still carries `observations` came that way from another run's
+# file, and those counts are that run's.
 #
-# The slippage numbers, the prior's two concentrations and the length spectra
-# carry no warrant — they say where they came from another way, and there is
-# nowhere in them to record that you changed one. Note such an edit elsewhere.
+# The slippage numbers, the prior's two concentrations and the length spectrum
+# rows carry no warrant — they say where they came from another way, and there
+# is nowhere in them to record that you changed one. Note such an edit
+# elsewhere.
 #
 # An absent key is not a zero. A missing section, a missing row and a missing
 # key each mean the thing was not measured; a zero means it was measured and
@@ -54,22 +57,22 @@ by_read_group = [
 # flowcell, not in a tube. Three states, three different claims:
 #   - this whole section absent  -> nobody identified any contamination
 #   - a row with no `measurement` -> this lane could not be measured
-#   - `fraction = 0.0` with non-zero counts -> measured, and found clean
+#   - a zero share with non-zero counts -> measured, and found clean
 # To stop correcting one lane, delete its `measurement = { ... }` and leave the
-# row; a library sequenced over several lanes has a row for each. Setting a
-# fraction to zero says something else: that it was measured and found clean.
+# row; a library sequenced over several lanes has a row for each. Setting that
+# share to zero says something else: that it was measured and found clean.
 by_read_group = [
-    { read_group = 0, library = "lib3", measurement = { fraction = 0.031, markers_with_reads = 4211, reads_on_markers = 90233, fitted_from_reads_of = "this_read_groups_own_reads" } },
+    { read_group = 0, library = "lib3", measurement = { share_of_reads_from_elsewhere = 0.031, markers_with_reads = 4211, reads_on_markers = 90233, fitted_from_reads_of = "this_read_groups_own_reads" } },
     { read_group = 1, library = "lib4" },
-    { read_group = 2, library = "lib5", measurement = { fraction = 0.0, markers_with_reads = 2903, reads_on_markers = 64118, fitted_from_reads_of = "every_read_of_this_sample" } },
+    { read_group = 2, library = "lib5", measurement = { share_of_reads_from_elsewhere = 0.0, markers_with_reads = 2903, reads_on_markers = 64118, fitted_from_reads_of = "every_read_of_this_sample" } },
 ]
 
 [sequencing_batches]
 # Who was sequenced beside whom — the population a contaminating read is drawn
-# from. `was_declared_by_the_run = false` means nobody said, so everything went
-# in one batch. A declared batching that happens to have one batch writes
-# identical rows, and this flag is the only thing that tells those two apart.
-was_declared_by_the_run = true
+# from. `batching_was_declared = false` means nobody said, so everything went in
+# one batch. A declared batching that happens to have one batch writes identical
+# rows, and this flag is the only thing that tells those two apart.
+batching_was_declared = true
 by_read_group = [
     { read_group = 0, batch = 0 },
     { read_group = 1, batch = 1 },
@@ -102,39 +105,50 @@ rung = "fitted_curve"
 
 [repeat_tracts]
 # Everything about repeat tracts. A **stratum** is a class of tract, and every
-# row here spells it as `period` — how many bases one repeat unit is — and
-# `reference_repeats` — how many copies of it the reference carries.
+# row keyed by one spells it as `period` — how many bases one repeat unit is —
+# and `reference_repeats` — how many copies of it the reference carries. A
+# **slippage group** is a set of read groups whose reads are taken to slip
+# alike; the run declares it, and `slippage_group_by_read_group` below is that
+# declaration.
 #
 # A pair with no row put no read there; a stratum with no row in
 # `length_spectrum_by_stratum` was never fitted on its own tracts and falls to
 # its period's pooled one, or to the flat shape below. Neither absence is a
 # zero.
 #
-# Three numbers a stratum: `level` — how often a read reports a tract length
-# other than its allele's; `shorter_share` — of the reads that slip, the share
-# showing a shorter tract; `fall_off` — how fast two-repeat slips fall off
-# against one-repeat slips. `slipped_reads` is fractional because it is how many
-# reads the fitted level says slipped, not a count anybody labelled.
+# Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports
+# a tract length other than its allele's; `shorter_share` — of the reads that
+# slip, the share showing a shorter tract; `fall_off` — how fast two-repeat
+# slips fall off against one-repeat slips. `expected_slipped_reads` is
+# fractional because it is how many reads the fitted share says slipped, not a
+# count anybody labelled.
 #
-# Where each of those came from is in `level_origin` and `shares_origin` beside
-# it: its stratum's own fit, its period's curve, or a blend of the two, with the
-# curve itself recorded so an interpolation can be told from a measurement. A
-# `rung` inside one of those curves is not the `rung` in [ordinary_site_prior]:
-# here it says what the curve itself was fitted on — this period's own strata,
-# the other periods pooled, or a stated constant.
-# stated rather than fitted: this many chromosomes' worth of belief, spread flat
-# over whatever lengths a tract offers. A run that fitted any stratum states the
-# median of its own instead, and says so with a warrant of fitted_here
-stated_length_spectrum_concentration = { value = 1.25, warrant = "defaulted" }
+# `level_origin` and `shares_origin` record where each came from — the first for
+# the slip share, the second for the other two: its stratum's own fit, its
+# period's curve, or a blend of the two, with the curve itself recorded so an
+# interpolation can be told from a measurement. Each of the two carries its own
+# `expected_slipped_reads`, counted separately rather than shared, so a row
+# showing the same number twice is not a duplicate. A share curve also records
+# `curve_fitted_on`, which says what that curve itself was fitted on: this
+# period's own strata (`this_period`), or those same strata where there were too
+# few to score the shape (`this_period_unscored`), or the other periods pooled
+# (`other_periods`), or a stated constant where no period had anything to fit
+# (`built_in_default`).
+#
+# the fallback, used where neither this stratum nor its period was fitted: this
+# many chromosomes' worth of belief, spread flat over whatever lengths a tract
+# offers. A run that fitted any stratum states the median of its own instead,
+# and says so with a warrant of fitted_here
+fallback_length_spectrum_concentration = { value = 1.25, warrant = "defaulted" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },
     { read_group = 1, slippage_group = 0 },
     { read_group = 2, slippage_group = 1 },
 ]
 slippage_by_stratum_and_group = [
-    { period = 2, reference_repeats = 6, slippage_group = 0, level = 0.0421, shorter_share = 0.83, fall_off = 0.31, level_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "inside" } }, slipped_reads = 8000.5 }, shares_origin = { slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.167, strata = 12, rung = "this_period" }, reach = "above_fitted" } } } },
-    { period = 2, reference_repeats = 11, slippage_group = 1, level = 0.0913, shorter_share = 0.79, fall_off = 0.28, level_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "below_fitted" } } } },
-    { period = 1, reference_repeats = 30, slippage_group = 0, level = 0.19, shorter_share = 0.77, fall_off = 0.24, level_origin = { smoothing = "this_stratum", slipped_reads = 12040.25 }, shares_origin = { slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.167, strata = 12, rung = "this_period" }, reach = "inside" } }, fall_off_smoothing = "this_stratum" } },
+    { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, level_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shares_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 12, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } } } },
+    { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, level_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 23 }, reach = "below_the_fitted_range" } } } },
+    { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, level_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25 }, shares_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 11.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 12, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum" } },
 ]
 # `shares_by_repeat_offset` runs from -span to +span in whole repeat units from
 # the **reference** tract length, so the middle entry is the reference length

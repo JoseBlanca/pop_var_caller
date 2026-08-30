@@ -78,7 +78,7 @@
 //!                                     fitted_from_reads_of = "this_read_groups_own_reads" } } ]
 //!
 //! [sequencing_batches]             # §3.4 — declared by the run, not fitted
-//! was_declared_by_the_run = false
+//! batching_was_declared = false
 //! by_read_group = [ { read_group = 0, batch = 0 } ]
 //! by_sample = [ { sample = "TS-1", batch = 0 } ]
 //!
@@ -91,7 +91,7 @@
 //! rung = "fitted_curve"
 //!
 //! [repeat_tracts]                  # §3.7
-//! stated_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
+//! fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 //! slippage_by_stratum_and_group = [ … one row a (stratum × slippage group) … ]
 //! length_spectrum_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
@@ -151,7 +151,7 @@
 //! - **`serde` emits a struct's table-valued fields after its scalar ones**, whatever the
 //!   declared order. So `format_version` and `ploidy` open the file because they are the only
 //!   scalars at the top level, not because they are declared first; and in a `Blend` row
-//!   `smoothing` is emitted *last*, after `slipped_reads`, because it became a table. A
+//!   `smoothing` is emitted *last*, after `expected_slipped_reads`, because it became a table. A
 //!   hand-written writer that means to match serde's bytes has to do the same — or, better,
 //!   choose its own order and pin it with its own golden file.
 
@@ -589,7 +589,7 @@ pub struct ContaminationRow {
 #[serde(deny_unknown_fields)]
 pub struct ContaminationMeasurement {
     /// The share of this read group's reads that came from another individual.
-    pub fraction: f64,
+    pub share_of_reads_from_elsewhere: f64,
     /// How many of the panel's varying positions this read group put a read on.
     pub markers_with_reads: u64,
     /// How many reads it put there.
@@ -628,7 +628,7 @@ pub struct SequencingBatches {
     /// Whether the run declared this batching, or it defaulted to one batch holding everything.
     /// **Two runs under different batchings produce fractions that are not comparable**, and
     /// this is the only thing that can tell a declared batching from an assumed one.
-    pub was_declared_by_the_run: bool,
+    pub batching_was_declared: bool,
     /// One row a read group.
     pub by_read_group: Vec<ReadGroupBatchRow>,
     /// One row a sample.
@@ -792,7 +792,7 @@ pub struct RepeatTracts {
     /// [`LengthSpectrumRung`](crate::ng::parameter_estimation::joint::stratum_fits::LengthSpectrumRung),
     /// carried per locus; this warrant answers the different question of whether the number in
     /// the file came out of this run's data or out of the binary.
-    pub stated_length_spectrum_concentration: WarrantedValue,
+    pub fallback_length_spectrum_concentration: WarrantedValue,
     /// Which set of slippage numbers each read group's reads are drawn under. **The run's own
     /// declaration, not something inferred.**
     pub slippage_group_by_read_group: Vec<SlippageGroupRow>,
@@ -837,7 +837,7 @@ pub struct SlippageRow {
     /// Which slippage group these numbers are for.
     pub slippage_group: u32,
     /// How often a read reports a tract length other than its allele's.
-    pub level: f64,
+    pub share_of_reads_that_slip: f64,
     /// Of the reads that slip, the share showing a **shorter** tract.
     pub shorter_share: f64,
     /// How fast two-repeat slips fall off against one-repeat slips.
@@ -860,7 +860,7 @@ pub struct LevelOrigin {
     pub smoothing: LevelSmoothing,
     /// How many of this stratum's own reads **its own fitted level** said slipped, and absent
     /// where the stratum has no level of its own because it borrowed. **Absent is not zero.**
-    pub slipped_reads: Option<f64>,
+    pub expected_slipped_reads: Option<f64>,
 }
 
 /// Where a stratum's direction split and fall-off came from — the file's spelling of
@@ -872,12 +872,12 @@ pub struct SharesOrigin {
     /// nothing was fitted here. **Both shares are proportions over the reads that slipped**, so
     /// this one count sets how precisely the stratum holds either of them.
     ///
-    /// **Written separately from [`LevelOrigin::slipped_reads`] and not yet known to be the same
+    /// **Written separately from [`LevelOrigin::expected_slipped_reads`] and not yet known to be the same
     /// number.** Upstream the two fields carry near-identical documentation but state their
     /// absence conditions differently, and nothing here can settle which. Step C4's round trip
     /// on a real fit is where to compare them across every stratum: if they never differ, one of
     /// these belongs on [`SlippageRow`] instead of two here.
-    pub slipped_reads: Option<f64>,
+    pub expected_slipped_reads: Option<f64>,
     /// Where the share of slipped reads showing a shorter tract came from.
     pub shorter_share_smoothing: ShareSmoothing,
     /// Where the fall-off came from.
@@ -964,11 +964,11 @@ pub enum ShareSmoothing {
 #[serde(rename_all = "snake_case")]
 pub enum CurveReach {
     /// Inside the fitted range.
-    Inside,
+    InsideTheFittedRange,
     /// Below the shortest stratum the curve was fitted on.
-    BelowFitted,
+    BelowTheFittedRange,
     /// Above the longest.
-    AboveFitted,
+    AboveTheFittedRange,
 }
 
 /// **One motif period's slippage-level curve** — the file's spelling of
@@ -1030,7 +1030,7 @@ pub struct ShareCurve {
     /// Which rung of the fallback ladder produced this curve. **Not the same question as
     /// [`LevelSmoothing`]'s or [`ShareSmoothing`]'s**: those say how much curve went into a
     /// stratum's number, this says what the curve itself was fitted on.
-    pub rung: ShareCurveRung,
+    pub curve_fitted_on: ShareCurveRung,
 }
 
 /// Which rung of the fallback ladder a share curve came from — the file's spelling of
@@ -1246,7 +1246,7 @@ mod tests {
                         read_group: 0,
                         library: "lib3".into(),
                         measurement: Some(ContaminationMeasurement {
-                            fraction: 0.031,
+                            share_of_reads_from_elsewhere: 0.031,
                             markers_with_reads: 4211,
                             reads_on_markers: 90233,
                             fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -1267,7 +1267,7 @@ mod tests {
                         read_group: 2,
                         library: "lib5".into(),
                         measurement: Some(ContaminationMeasurement {
-                            fraction: 0.0,
+                            share_of_reads_from_elsewhere: 0.0,
                             markers_with_reads: 2903,
                             reads_on_markers: 64118,
                             fitted_from_reads_of: ContaminationFittedFrom::EveryReadOfThisSample,
@@ -1276,7 +1276,7 @@ mod tests {
                 ],
             }),
             sequencing_batches: SequencingBatches {
-                was_declared_by_the_run: true,
+                batching_was_declared: true,
                 by_read_group: vec![
                     ReadGroupBatchRow {
                         read_group: 0,
@@ -1328,7 +1328,7 @@ mod tests {
                 rung: SeedRung::FittedCurve,
             },
             repeat_tracts: RepeatTracts {
-                stated_length_spectrum_concentration: WarrantedValue {
+                fallback_length_spectrum_concentration: WarrantedValue {
                     value: 1.25,
                     warrant: Warrant::Defaulted,
                     observations: None,
@@ -1354,23 +1354,23 @@ mod tests {
                         period: 2,
                         reference_repeats: 6,
                         slippage_group: 0,
-                        level: 0.0421,
+                        share_of_reads_that_slip: 0.0421,
                         shorter_share: 0.83,
                         fall_off: 0.31,
                         level_origin: LevelOrigin {
                             smoothing: LevelSmoothing::Blend {
                                 curve_weight: 0.37,
-                                curve: a_slippage_curve(),
-                                reach: CurveReach::Inside,
+                                curve: a_slippage_curve_fitted_over(5, 19),
+                                reach: CurveReach::InsideTheFittedRange,
                             },
-                            slipped_reads: Some(8_000.5),
+                            expected_slipped_reads: Some(8_000.5),
                         },
                         shares_origin: Some(SharesOrigin {
-                            slipped_reads: Some(8_000.5),
+                            expected_slipped_reads: Some(8_000.5),
                             shorter_share_smoothing: ShareSmoothing::ThisStratum,
                             fall_off_smoothing: ShareSmoothing::ThisPeriodsCurve {
-                                curve: a_share_curve(),
-                                reach: CurveReach::AboveFitted,
+                                curve: a_share_curve_fitted_over(2, 4),
+                                reach: CurveReach::AboveTheFittedRange,
                             },
                         }),
                     },
@@ -1378,17 +1378,17 @@ mod tests {
                         period: 2,
                         reference_repeats: 11,
                         slippage_group: 1,
-                        level: 0.0913,
+                        share_of_reads_that_slip: 0.0913,
                         shorter_share: 0.79,
                         fall_off: 0.28,
                         level_origin: LevelOrigin {
                             smoothing: LevelSmoothing::ThisPeriodsCurve {
-                                curve: a_slippage_curve(),
-                                reach: CurveReach::BelowFitted,
+                                curve: a_slippage_curve_fitted_over(12, 19),
+                                reach: CurveReach::BelowTheFittedRange,
                             },
                             // Absent, not zero: this stratum borrowed and has no level of its
                             // own to count slipped reads against.
-                            slipped_reads: None,
+                            expected_slipped_reads: None,
                         },
                         shares_origin: None,
                     },
@@ -1396,19 +1396,19 @@ mod tests {
                         period: 1,
                         reference_repeats: 30,
                         slippage_group: 0,
-                        level: 0.19,
+                        share_of_reads_that_slip: 0.19,
                         shorter_share: 0.77,
                         fall_off: 0.24,
                         level_origin: LevelOrigin {
                             smoothing: LevelSmoothing::ThisStratum,
-                            slipped_reads: Some(12_040.25),
+                            expected_slipped_reads: Some(12_040.25),
                         },
                         shares_origin: Some(SharesOrigin {
-                            slipped_reads: Some(12_040.25),
+                            expected_slipped_reads: Some(12_040.25),
                             shorter_share_smoothing: ShareSmoothing::Blend {
                                 curve_weight: 0.61,
-                                curve: a_share_curve(),
-                                reach: CurveReach::Inside,
+                                curve: a_share_curve_fitted_over(5, 40),
+                                reach: CurveReach::InsideTheFittedRange,
                             },
                             fall_off_smoothing: ShareSmoothing::ThisStratum,
                         }),
@@ -1447,30 +1447,38 @@ mod tests {
         }
     }
 
-    fn a_slippage_curve() -> SlippageCurve {
+    /// A level curve fitted over `from..=to` repeats.
+    ///
+    /// **The range is a parameter because `reach` is a claim about it.** A row says whether its
+    /// own `reference_repeats` sat inside the curve's fitted range, and the file prints both
+    /// three keys apart — so a fixture whose range contradicts its reach teaches a reader of the
+    /// produced file that the two are unrelated. Each call site below picks a range that makes
+    /// its own reach true.
+    fn a_slippage_curve_fitted_over(from: u64, to: u64) -> SlippageCurve {
         SlippageCurve {
             rise_shape: 0.55,
             intercept: 0.011,
             slope: 0.004,
-            fitted_from_repeats: 5,
-            fitted_to_repeats: 19,
+            fitted_from_repeats: from,
+            fitted_to_repeats: to,
             held_out_error: FULL_PRECISION,
             cells: 23,
         }
     }
 
-    fn a_share_curve() -> ShareCurve {
+    /// A share curve fitted over `from..=to` repeats — see [`a_slippage_curve_fitted_over`].
+    fn a_share_curve_fitted_over(from: u64, to: u64) -> ShareCurve {
         ShareCurve {
             shape: ShareShape::Turning,
             intercept: 1.4,
             slope: -0.09,
             bend: 0.006,
             centre_repeats: 11.5,
-            fitted_from_repeats: 5,
-            fitted_to_repeats: 19,
+            fitted_from_repeats: from,
+            fitted_to_repeats: to,
             held_out_error: 0.167,
             strata: 12,
-            rung: ShareCurveRung::ThisPeriod,
+            curve_fitted_on: ShareCurveRung::ThisPeriod,
         }
     }
 
@@ -1583,9 +1591,18 @@ mod tests {
             "stated_heterozygosity"
         );
 
-        assert_eq!(spelling(CurveReach::Inside), "inside");
-        assert_eq!(spelling(CurveReach::BelowFitted), "below_fitted");
-        assert_eq!(spelling(CurveReach::AboveFitted), "above_fitted");
+        assert_eq!(
+            spelling(CurveReach::InsideTheFittedRange),
+            "inside_the_fitted_range"
+        );
+        assert_eq!(
+            spelling(CurveReach::BelowTheFittedRange),
+            "below_the_fitted_range"
+        );
+        assert_eq!(
+            spelling(CurveReach::AboveTheFittedRange),
+            "above_the_fitted_range"
+        );
 
         assert_eq!(spelling(ShareCurveRung::ThisPeriod), "this_period");
         assert_eq!(
@@ -1621,8 +1638,8 @@ mod tests {
 
         let blended = toml::Value::try_from(LevelSmoothing::Blend {
             curve_weight: 0.37,
-            curve: a_slippage_curve(),
-            reach: CurveReach::Inside,
+            curve: a_slippage_curve_fitted_over(5, 19),
+            reach: CurveReach::InsideTheFittedRange,
         })
         .expect("a blended smoothing");
         let blend = blended.get("blend").expect("a blend writes one key");
@@ -1632,7 +1649,7 @@ mod tests {
         );
         assert_eq!(
             blend.get("reach").and_then(toml::Value::as_str),
-            Some("inside")
+            Some("inside_the_fitted_range")
         );
         assert_eq!(
             blend
@@ -1669,7 +1686,7 @@ mod tests {
         );
 
         row.shares_origin = Some(SharesOrigin {
-            slipped_reads: None,
+            expected_slipped_reads: None,
             shorter_share_smoothing: ShareSmoothing::ThisStratum,
             fall_off_smoothing: ShareSmoothing::ThisStratum,
         });
@@ -1678,7 +1695,7 @@ mod tests {
             .get("shares_origin")
             .expect("a present shares origin writes its key");
         assert!(
-            shares.get("slipped_reads").is_none(),
+            shares.get("expected_slipped_reads").is_none(),
             "and its own absent count leaves no key, got: {shares}"
         );
         assert_eq!(
@@ -1755,7 +1772,7 @@ mod tests {
             [
                 ".base_quality_calibration.by_read_group.error_probability_multiplier",
                 ".inbreeding.by_sample.inbreeding_coefficient",
-                ".repeat_tracts.stated_length_spectrum_concentration",
+                ".repeat_tracts.fallback_length_spectrum_concentration",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
@@ -1825,7 +1842,7 @@ mod tests {
         );
 
         // Absent, not zero: neither of these came from a fit with a sample size.
-        assert_eq!(unit_of("stated_length_spectrum_concentration"), None);
+        assert_eq!(unit_of("fallback_length_spectrum_concentration"), None);
         assert_eq!(unit_of("repeat_tract_outlier_weight"), None);
     }
 
@@ -1866,7 +1883,7 @@ mod tests {
             .find(|row| {
                 row.measurement
                     .as_ref()
-                    .is_some_and(|found| found.fraction == 0.0)
+                    .is_some_and(|found| found.share_of_reads_from_elsewhere == 0.0)
             })
             .expect("a read group measured and found clean");
         let unmeasured = rows
@@ -2016,7 +2033,7 @@ mod tests {
             .expect("a table")
             .by_read_group[0]
             .measurement = Some(ContaminationMeasurement {
-            fraction: 0.0,
+            share_of_reads_from_elsewhere: 0.0,
             markers_with_reads: 0,
             reads_on_markers: 0,
             fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
@@ -2068,7 +2085,7 @@ mod tests {
     fn a_stated_concentration_of_one_reads_back_saying_whether_it_was_fitted() {
         for warrant in [Warrant::FittedHere, Warrant::Defaulted] {
             let mut file = a_file_using_every_shape();
-            file.repeat_tracts.stated_length_spectrum_concentration = WarrantedValue {
+            file.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
                 value: 1.0,
                 warrant,
                 observations: None,
@@ -2077,7 +2094,7 @@ mod tests {
             let read: ParametersFile = toml::from_str(&text).expect("parses");
             assert_eq!(
                 read.repeat_tracts
-                    .stated_length_spectrum_concentration
+                    .fallback_length_spectrum_concentration
                     .warrant,
                 warrant,
                 "a concentration of exactly 1.0 must not lose which of the two it was"
@@ -2113,7 +2130,7 @@ mod tests {
             "and the refusal names the key it did not know, got: {refusal}"
         );
 
-        let typoed = text.replace("slipped_reads", "sliped_reads");
+        let typoed = text.replace("expected_slipped_reads", "sliped_reads");
         assert!(
             typoed != text,
             "the fixture writes a slipped-read count for this test to misspell"
@@ -2173,7 +2190,7 @@ by_read_group = [ { read_group = 0, error_probability_multiplier = { value = 1.0
 # and a different claim from a table of zeros.
 
 [sequencing_batches]
-was_declared_by_the_run = false
+batching_was_declared = false
 by_read_group = [ { read_group = 0, batch = 0 } ]
 by_sample = [ { sample = "TS-1", batch = 0 } ]
 
@@ -2186,9 +2203,9 @@ alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
 [repeat_tracts]
-stated_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
+fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
-slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, level = 0.04, shorter_share = 0.8, fall_off = 0.3, level_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, slipped_reads = 8000.5 } } ]
+slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, level_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
 length_spectrum_by_stratum = []
 length_spectrum_by_period = []
 substitution_rate_by_stratum = []
@@ -2199,13 +2216,13 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
         let file: ParametersFile = toml::from_str(text).expect("the documented inline form parses");
 
         let row = &file.repeat_tracts.slippage_by_stratum_and_group[0];
-        assert_eq!(row.level_origin.slipped_reads, Some(8000.5));
+        assert_eq!(row.level_origin.expected_slipped_reads, Some(8000.5));
         assert!(
             matches!(
                 row.level_origin.smoothing,
                 LevelSmoothing::Blend {
                     curve_weight: 0.37,
-                    reach: CurveReach::Inside,
+                    reach: CurveReach::InsideTheFittedRange,
                     ..
                 }
             ),
@@ -2228,5 +2245,70 @@ repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
     fn the_format_version_this_build_writes_is_one() {
         assert_eq!(FORMAT_VERSION, 1);
         assert_eq!(a_file_using_every_shape().format_version, 1);
+    }
+
+    /// **Every `reach` in the fixture is true of the repeat count printed beside it.**
+    ///
+    /// `reach` says whether a stratum's own `reference_repeats` fell inside the range the curve
+    /// was fitted over, and the produced file prints both — three keys apart, on the same line.
+    /// **A fixture that disagrees with itself teaches the reader of that file that the two are
+    /// unrelated**, which is worse than teaching them nothing: the file is the worked example a
+    /// person reads before editing one.
+    ///
+    /// Nothing asserted this until a reader of the produced file checked the three rows by hand
+    /// and found that three of the four pairs contradicted their own numbers — the fixture's
+    /// curves all shared one fitted range, chosen for variant coverage, while the reaches were
+    /// chosen for variant coverage separately.
+    #[test]
+    fn every_reach_in_the_fixture_agrees_with_the_repeats_beside_it() {
+        fn the_reach_of(repeats: u64, from: u64, to: u64) -> CurveReach {
+            if repeats < from {
+                CurveReach::BelowTheFittedRange
+            } else if repeats > to {
+                CurveReach::AboveTheFittedRange
+            } else {
+                CurveReach::InsideTheFittedRange
+            }
+        }
+
+        let file = a_file_using_every_shape();
+        let mut checked = 0;
+        for row in &file.repeat_tracts.slippage_by_stratum_and_group {
+            let mut claims: Vec<(u64, u64, CurveReach)> = Vec::new();
+            match &row.level_origin.smoothing {
+                LevelSmoothing::ThisStratum => {}
+                LevelSmoothing::ThisPeriodsCurve { curve, reach }
+                | LevelSmoothing::Blend { curve, reach, .. } => {
+                    claims.push((curve.fitted_from_repeats, curve.fitted_to_repeats, *reach))
+                }
+            }
+            if let Some(shares) = &row.shares_origin {
+                for smoothing in [&shares.shorter_share_smoothing, &shares.fall_off_smoothing] {
+                    match smoothing {
+                        ShareSmoothing::ThisStratum => {}
+                        ShareSmoothing::ThisPeriodsCurve { curve, reach }
+                        | ShareSmoothing::Blend { curve, reach, .. } => claims.push((
+                            curve.fitted_from_repeats,
+                            curve.fitted_to_repeats,
+                            *reach,
+                        )),
+                    }
+                }
+            }
+            for (from, to, reach) in claims {
+                assert_eq!(
+                    reach,
+                    the_reach_of(row.reference_repeats, from, to),
+                    "a stratum at {} repeats against a curve fitted over {from}..={to} says \
+                     {reach:?}",
+                    row.reference_repeats
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 4,
+            "the fixture carries four curves, and every one of them is checked"
+        );
     }
 }

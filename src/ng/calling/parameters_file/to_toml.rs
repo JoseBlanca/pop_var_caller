@@ -87,9 +87,9 @@ impl ParametersFile {
             &[
                 "Every number this run scored its reads under, and what each one rests on.",
                 "",
-                "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way.",
+                "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
                 "",
-                "The slippage numbers, the prior's two concentrations and the length spectra carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
+                "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
                 "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured; a zero means it was measured and found to be zero. The sections below say which is which where it matters.",
             ],
@@ -162,8 +162,8 @@ impl ParametersFile {
                     "How much of each read group's reads came from somebody else — one row a lane, because two lanes of one library can differ: index hopping happens on a flowcell, not in a tube. Three states, three different claims:",
                     "  - this whole section absent  -> nobody identified any contamination",
                     "  - a row with no `measurement` -> this lane could not be measured",
-                    "  - `fraction = 0.0` with non-zero counts -> measured, and found clean",
-                    "To stop correcting one lane, delete its `measurement = { ... }` and leave the row; a library sequenced over several lanes has a row for each. Setting a fraction to zero says something else: that it was measured and found clean.",
+                    "  - a zero share with non-zero counts -> measured, and found clean",
+                    "To stop correcting one lane, delete its `measurement = { ... }` and leave the row; a library sequenced over several lanes has a row for each. Setting that share to zero says something else: that it was measured and found clean.",
                 ],
             );
             one_a_line(
@@ -177,13 +177,13 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "Who was sequenced beside whom — the population a contaminating read is drawn from. `was_declared_by_the_run = false` means nobody said, so everything went in one batch. A declared batching that happens to have one batch writes identical rows, and this flag is the only thing that tells those two apart.",
+                "Who was sequenced beside whom — the population a contaminating read is drawn from. `batching_was_declared = false` means nobody said, so everything went in one batch. A declared batching that happens to have one batch writes identical rows, and this flag is the only thing that tells those two apart.",
             ],
         );
         scalar(
             &mut out,
-            "was_declared_by_the_run",
-            if self.sequencing_batches.was_declared_by_the_run {
+            "batching_was_declared",
+            if self.sequencing_batches.batching_was_declared {
                 "true"
             } else {
                 "false"
@@ -255,21 +255,22 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "Everything about repeat tracts. A **stratum** is a class of tract, and every row here spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries.",
+                "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
                 "",
                 "A pair with no row put no read there; a stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
                 "",
-                "Three numbers a stratum: `level` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `slipped_reads` is fractional because it is how many reads the fitted level says slipped, not a count anybody labelled.",
+                "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled.",
                 "",
-                "Where each of those came from is in `level_origin` and `shares_origin` beside it: its stratum's own fit, its period's curve, or a blend of the two, with the curve itself recorded so an interpolation can be told from a measurement. A `rung` inside one of those curves is not the `rung` in [ordinary_site_prior]: here it says what the curve itself was fitted on — this period's own strata, the other periods pooled, or a stated constant.",
+                "`level_origin` and `shares_origin` record where each came from — the first for the slip share, the second for the other two: its stratum's own fit, its period's curve, or a blend of the two, with the curve itself recorded so an interpolation can be told from a measurement. Each of the two carries its own `expected_slipped_reads`, counted separately rather than shared, so a row showing the same number twice is not a duplicate. A share curve also records `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`).",
+                "",
             ],
         );
         scalar_with_note(
             &mut out,
-            "stated_length_spectrum_concentration",
-            &a_warranted_value(&tracts.stated_length_spectrum_concentration),
+            "fallback_length_spectrum_concentration",
+            &a_warranted_value(&tracts.fallback_length_spectrum_concentration),
             where_it_came_from(
-                &tracts.stated_length_spectrum_concentration,
+                &tracts.fallback_length_spectrum_concentration,
                 origins::FLAT_CONCENTRATION,
             ),
         );
@@ -491,9 +492,10 @@ mod origins {
         "came, because no usable error rate could be fitted for it"
     );
 
-    /// The tract ladder's bottom rung, which a run states rather than fits.
+    /// The tract ladder's bottom rung — what a run falls back to where nothing was fitted.
     pub const FLAT_CONCENTRATION: &str = concat!(
-        "stated rather than fitted: this many chromosomes' worth of belief, spread flat ",
+        "the fallback, used where neither this stratum nor its period was fitted: this ",
+        "many chromosomes' worth of belief, spread flat ",
         "over whatever lengths a tract offers. A run that fitted any stratum states the ",
         "median of its own instead, and says so with a warrant of fitted_here"
     );
@@ -673,7 +675,10 @@ fn a_contamination_row(row: &ContaminationRow) -> String {
 
 fn a_contamination_measurement(measurement: &ContaminationMeasurement) -> String {
     an_inline_table(&[
-        ("fraction", a_toml_float(measurement.fraction)),
+        (
+            "share_of_reads_from_elsewhere",
+            a_toml_float(measurement.share_of_reads_from_elsewhere),
+        ),
         (
             "markers_with_reads",
             a_toml_integer(measurement.markers_with_reads),
@@ -732,7 +737,10 @@ fn a_slippage_row(row: &SlippageRow) -> String {
         ("period", row.period.to_string()),
         ("reference_repeats", a_toml_integer(row.reference_repeats)),
         ("slippage_group", row.slippage_group.to_string()),
-        ("level", a_toml_float(row.level)),
+        (
+            "share_of_reads_that_slip",
+            a_toml_float(row.share_of_reads_that_slip),
+        ),
         ("shorter_share", a_toml_float(row.shorter_share)),
         ("fall_off", a_toml_float(row.fall_off)),
         ("level_origin", a_level_origin(&row.level_origin)),
@@ -747,16 +755,22 @@ fn a_slippage_row(row: &SlippageRow) -> String {
 
 fn a_level_origin(origin: &LevelOrigin) -> String {
     let mut fields = vec![("smoothing", a_level_smoothing(&origin.smoothing))];
-    if let Some(slipped_reads) = origin.slipped_reads {
-        fields.push(("slipped_reads", a_toml_float(slipped_reads)));
+    if let Some(expected_slipped_reads) = origin.expected_slipped_reads {
+        fields.push((
+            "expected_slipped_reads",
+            a_toml_float(expected_slipped_reads),
+        ));
     }
     an_inline_table(&fields)
 }
 
 fn a_shares_origin(origin: &SharesOrigin) -> String {
     let mut fields = Vec::new();
-    if let Some(slipped_reads) = origin.slipped_reads {
-        fields.push(("slipped_reads", a_toml_float(slipped_reads)));
+    if let Some(expected_slipped_reads) = origin.expected_slipped_reads {
+        fields.push((
+            "expected_slipped_reads",
+            a_toml_float(expected_slipped_reads),
+        ));
     }
     fields.push((
         "shorter_share_smoothing",
@@ -855,8 +869,8 @@ fn a_share_curve(curve: &ShareCurve) -> String {
         ("held_out_error", a_toml_float(curve.held_out_error)),
         ("strata", a_toml_integer(curve.strata)),
         (
-            "rung",
-            a_toml_string(the_word_for_share_curve_rung(curve.rung)),
+            "curve_fitted_on",
+            a_toml_string(the_word_for_share_curve_rung(curve.curve_fitted_on)),
         ),
     ])
 }
@@ -966,9 +980,9 @@ fn the_word_for_seed_rung(rung: SeedRung) -> &'static str {
 
 fn the_word_for_reach(reach: CurveReach) -> &'static str {
     match reach {
-        CurveReach::Inside => "inside",
-        CurveReach::BelowFitted => "below_fitted",
-        CurveReach::AboveFitted => "above_fitted",
+        CurveReach::InsideTheFittedRange => "inside_the_fitted_range",
+        CurveReach::BelowTheFittedRange => "below_the_fitted_range",
+        CurveReach::AboveTheFittedRange => "above_the_fitted_range",
     }
 }
 
@@ -1295,9 +1309,9 @@ mod tests {
             assert_eq!(the_word_for_seed_rung(rung), serdes_word(rung), "{rung:?}");
         }
         for reach in [
-            CurveReach::Inside,
-            CurveReach::BelowFitted,
-            CurveReach::AboveFitted,
+            CurveReach::InsideTheFittedRange,
+            CurveReach::BelowTheFittedRange,
+            CurveReach::AboveTheFittedRange,
         ] {
             assert_eq!(the_word_for_reach(reach), serdes_word(reach), "{reach:?}");
         }
@@ -1325,7 +1339,7 @@ mod tests {
             super::super::ContaminationFittedFrom::EveryReadOfThisSample,
         ] {
             let written = a_contamination_measurement(&ContaminationMeasurement {
-                fraction: 0.5,
+                share_of_reads_from_elsewhere: 0.5,
                 markers_with_reads: 1,
                 reads_on_markers: 1,
                 fitted_from_reads_of: source,
@@ -1346,10 +1360,10 @@ mod tests {
     #[test]
     fn a_run_that_declared_no_batching_writes_the_flag_as_false() {
         let mut file = a_file_using_every_shape();
-        file.sequencing_batches.was_declared_by_the_run = false;
+        file.sequencing_batches.batching_was_declared = false;
         let text = file.to_toml();
         assert!(
-            text.contains("was_declared_by_the_run = false"),
+            text.contains("batching_was_declared = false"),
             "an undeclared batching says so:\n{text}"
         );
         let read: ParametersFile =
@@ -1357,7 +1371,7 @@ mod tests {
         assert_eq!(read, file);
     }
 
-    /// **A shares origin whose stratum fitted nothing writes no `slipped_reads` key** — spec §5's
+    /// **A shares origin whose stratum fitted nothing writes no `expected_slipped_reads` key** — spec §5's
     /// "absence, never a sentinel", on the one `Option<f64>` both fixtures always fill.
     ///
     /// A stratum that borrowed has reads of its own and no level of its own to say how many of
@@ -1370,14 +1384,14 @@ mod tests {
             .shares_origin
             .as_mut()
             .expect("the first row carries a shares origin")
-            .slipped_reads = None;
+            .expected_slipped_reads = None;
         let text = file.to_toml();
         let row = text
             .lines()
             .find(|line| line.contains("shares_origin") && !line.trim_start().starts_with('#'))
             .expect("the row is written");
         assert_eq!(
-            row.matches("slipped_reads").count(),
+            row.matches("expected_slipped_reads").count(),
             1,
             "the level origin's count stays and the shares origin's is absent, not zero: {row}"
         );
@@ -1480,8 +1494,8 @@ mod tests {
         // both texts present and both wrong.
         for (key, note) in [
             (
-                "stated_length_spectrum_concentration",
-                "stated rather than fitted",
+                "fallback_length_spectrum_concentration",
+                "the fallback, used where neither",
             ),
             (
                 "repeat_tract_outlier_weight",
@@ -1549,7 +1563,7 @@ mod tests {
             row.rate.warrant = Warrant::FittedHere;
         }
         file.repeat_tracts
-            .stated_length_spectrum_concentration
+            .fallback_length_spectrum_concentration
             .warrant = Warrant::FittedHere;
         file.stated_constants.repeat_tract_outlier_weight.warrant = Warrant::Supplied;
 
@@ -1557,7 +1571,7 @@ mod tests {
         for note in [
             "no calibration:",
             "inherited from the existing",
-            "stated rather than fitted",
+            "the fallback, used where neither",
             "nothing was fitted for this read group",
             "inbreeding has no default",
         ] {
@@ -1714,7 +1728,7 @@ mod tests {
 
         let defaulted = with_rows
             .lines()
-            .find(|line| line.starts_with("stated_length_spectrum_concentration"))
+            .find(|line| line.starts_with("fallback_length_spectrum_concentration"))
             .expect("the stated concentration is written");
         assert!(
             defaulted.contains("warrant = \"defaulted\"") && !defaulted.contains("observations"),

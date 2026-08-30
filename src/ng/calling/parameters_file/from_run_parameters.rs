@@ -315,7 +315,7 @@ fn contamination_of(
                     // reading the fraction would write that out as a measurement of zero — the
                     // one thing spec §5's second row says a reader must never do.
                     measurement: view.was_measured().then(|| ContaminationMeasurement {
-                        fraction: view.fraction,
+                        share_of_reads_from_elsewhere: view.fraction,
                         markers_with_reads: view.markers_with_reads,
                         reads_on_markers: view.reads_on_markers,
                         fitted_from_reads_of: view.source.into(),
@@ -332,7 +332,7 @@ fn sequencing_batches_of(batches: &DeclaredBatches, read_groups: &ReadGroups) ->
         // **The only thing that tells a declared batching from an assumed one.** The dense rows a
         // run that declared nothing writes and the rows a run that declared one batch holding
         // every library writes are the same rows.
-        was_declared_by_the_run: !batches.is_default(),
+        batching_was_declared: !batches.is_default(),
         by_read_group: read_groups
             .iter()
             .zip(batches.of_each_read_group().0)
@@ -410,7 +410,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
         // **Fitted where the run had a stratum to take a median over, defaulted where it did
         // not** — and the two can be the same number, since a median over fitted strata can land
         // on exactly the stated 1.0. That is why the warrant is here at all.
-        stated_length_spectrum_concentration: WarrantedValue {
+        fallback_length_spectrum_concentration: WarrantedValue {
             value: fits.stated_concentration(),
             warrant: if fits.strata_with_a_length_spectrum() == 0 {
                 Warrant::Defaulted
@@ -441,12 +441,12 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                 period: stratum.period,
                 reference_repeats: stratum.reference_repeats,
                 slippage_group,
-                level: fitted.slippage.level,
+                share_of_reads_that_slip: fitted.slippage.level,
                 shorter_share: fitted.slippage.shorter_share,
                 fall_off: fitted.slippage.fall_off,
                 level_origin: level_origin_of(fitted.level, stratum, slippage_group),
                 shares_origin: fitted.shares.map(|shares| SharesOrigin {
-                    slipped_reads: shares.slipped_reads,
+                    expected_slipped_reads: shares.slipped_reads,
                     shorter_share_smoothing: share_smoothing_of(
                         shares.shorter_share,
                         stratum,
@@ -566,7 +566,7 @@ fn level_origin_of(
                 reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
             },
         },
-        slipped_reads: provenance.slipped_reads,
+        expected_slipped_reads: provenance.slipped_reads,
     }
 }
 
@@ -682,9 +682,9 @@ impl From<SeedRegime> for SeedRung {
 impl From<FittedCurveReach> for CurveReach {
     fn from(reach: FittedCurveReach) -> Self {
         match reach {
-            FittedCurveReach::Inside => Self::Inside,
-            FittedCurveReach::BelowFitted => Self::BelowFitted,
-            FittedCurveReach::AboveFitted => Self::AboveFitted,
+            FittedCurveReach::Inside => Self::InsideTheFittedRange,
+            FittedCurveReach::BelowFitted => Self::BelowTheFittedRange,
+            FittedCurveReach::AboveFitted => Self::AboveTheFittedRange,
         }
     }
 }
@@ -715,7 +715,7 @@ impl From<FittedShareCurve> for ShareCurve {
             fitted_to_repeats: curve.fitted_to,
             held_out_error: curve.held_out_error,
             strata: curve.strata as u64,
-            rung: curve.source.into(),
+            curve_fitted_on: curve.source.into(),
         }
     }
 }
@@ -1250,7 +1250,7 @@ mod tests {
              so an exchange of the two cannot go unnoticed"
         );
         assert!(
-            file.sequencing_batches.was_declared_by_the_run,
+            file.sequencing_batches.batching_was_declared,
             "this run declared its batching"
         );
     }
@@ -1270,7 +1270,7 @@ mod tests {
         );
         let file = projected(&run, &read_groups);
 
-        assert!(!file.sequencing_batches.was_declared_by_the_run);
+        assert!(!file.sequencing_batches.batching_was_declared);
         assert_eq!(
             file.sequencing_batches
                 .by_read_group
@@ -1450,7 +1450,7 @@ mod tests {
             .measurement
             .as_ref()
             .expect("read group 0 identified a fraction");
-        assert_eq!(contaminated.fraction, 0.031);
+        assert_eq!(contaminated.share_of_reads_from_elsewhere, 0.031);
         assert_eq!(contaminated.markers_with_reads, 4_211);
         assert_eq!(contaminated.reads_on_markers, 90_233);
         assert_eq!(
@@ -1474,7 +1474,7 @@ mod tests {
             .measurement
             .as_ref()
             .expect("read group 2 was measured and found clean");
-        assert_eq!(clean.fraction, 0.0);
+        assert_eq!(clean.share_of_reads_from_elsewhere, 0.0);
         assert_eq!(clean.markers_with_reads, 2_903);
         assert_eq!(clean.reads_on_markers, 64_118);
         assert_eq!(
@@ -1584,10 +1584,10 @@ mod tests {
         let file = the_projected_file();
         let blended = &file.repeat_tracts.slippage_by_stratum_and_group[0];
 
-        assert_eq!(blended.level, 0.0421);
+        assert_eq!(blended.share_of_reads_that_slip, 0.0421);
         assert_eq!(blended.shorter_share, 0.83);
         assert_eq!(blended.fall_off, 0.31);
-        assert_eq!(blended.level_origin.slipped_reads, Some(8_000.5));
+        assert_eq!(blended.level_origin.expected_slipped_reads, Some(8_000.5));
         match &blended.level_origin.smoothing {
             LevelSmoothing::Blend {
                 curve_weight,
@@ -1595,7 +1595,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*curve_weight, 0.37);
-                assert_eq!(*reach, CurveReach::Inside);
+                assert_eq!(*reach, CurveReach::InsideTheFittedRange);
             }
             other => panic!("this stratum's level was blended, not {other:?}"),
         }
@@ -1604,7 +1604,7 @@ mod tests {
             .shares_origin
             .as_ref()
             .expect("this stratum has a shares provenance");
-        assert_eq!(shares.slipped_reads, Some(8_000.5));
+        assert_eq!(shares.expected_slipped_reads, Some(8_000.5));
         assert_eq!(
             shares.shorter_share_smoothing,
             ShareSmoothing::ThisStratum,
@@ -1612,7 +1612,7 @@ mod tests {
         );
         match &shares.fall_off_smoothing {
             ShareSmoothing::ThisPeriodsCurve { reach, .. } => {
-                assert_eq!(*reach, CurveReach::AboveFitted);
+                assert_eq!(*reach, CurveReach::AboveTheFittedRange);
             }
             other => panic!("this stratum's fall-off came off its period's curve, not {other:?}"),
         }
@@ -1620,12 +1620,12 @@ mod tests {
         let derived = &file.repeat_tracts.slippage_by_stratum_and_group[1];
         match &derived.level_origin.smoothing {
             LevelSmoothing::ThisPeriodsCurve { reach, .. } => {
-                assert_eq!(*reach, CurveReach::BelowFitted)
+                assert_eq!(*reach, CurveReach::BelowTheFittedRange)
             }
             other => panic!("a derived stratum's level is its period's curve, not {other:?}"),
         }
         assert_eq!(
-            derived.level_origin.slipped_reads, None,
+            derived.level_origin.expected_slipped_reads, None,
             "a stratum that borrowed has reads of its own but no level of its own to say how \
              many of them slipped — and absent is not zero"
         );
@@ -1642,7 +1642,7 @@ mod tests {
             .shares_origin
             .as_ref()
             .expect("slippage group 1 has a shares provenance at this stratum");
-        assert_eq!(shares.slipped_reads, Some(31.0));
+        assert_eq!(shares.expected_slipped_reads, Some(31.0));
         match &shares.shorter_share_smoothing {
             ShareSmoothing::Blend {
                 curve_weight,
@@ -1653,7 +1653,7 @@ mod tests {
                     *curve_weight, 0.6,
                     "the weight is the share the curve carried, not the stratum's"
                 );
-                assert_eq!(*reach, CurveReach::Inside);
+                assert_eq!(*reach, CurveReach::InsideTheFittedRange);
             }
             other => panic!("this share was blended, not {other:?}"),
         }
@@ -1702,7 +1702,7 @@ mod tests {
         );
         assert_eq!(curve.held_out_error, 0.167);
         assert_eq!(curve.strata, 12);
-        assert_eq!(curve.rung, ShareCurveRung::ThisPeriod);
+        assert_eq!(curve.curve_fitted_on, ShareCurveRung::ThisPeriod);
     }
 
     /// **A level that is the stratum's own carries no curve** — the arm reached at a motif period
@@ -1724,7 +1724,7 @@ mod tests {
             0,
         );
         assert_eq!(origin.smoothing, LevelSmoothing::ThisStratum);
-        assert_eq!(origin.slipped_reads, Some(412.0));
+        assert_eq!(origin.expected_slipped_reads, Some(412.0));
     }
 
     /// **The stated concentration says whether the run fitted it**, which is the only thing that
@@ -1734,20 +1734,20 @@ mod tests {
         let file = the_projected_file();
         assert_eq!(
             file.repeat_tracts
-                .stated_length_spectrum_concentration
+                .fallback_length_spectrum_concentration
                 .value,
             3.5,
             "one stratum was fitted, so the run's median is that stratum's own concentration"
         );
         assert_eq!(
             file.repeat_tracts
-                .stated_length_spectrum_concentration
+                .fallback_length_spectrum_concentration
                 .warrant,
             Warrant::FittedHere
         );
         assert_eq!(
             file.repeat_tracts
-                .stated_length_spectrum_concentration
+                .fallback_length_spectrum_concentration
                 .observations,
             None,
             "a median over strata is not an estimate with a sample size, so no count stands \
@@ -1765,7 +1765,7 @@ mod tests {
         let nothing_fitted = projected(&with_no_strata, &read_groups);
         let stated = &nothing_fitted
             .repeat_tracts
-            .stated_length_spectrum_concentration;
+            .fallback_length_spectrum_concentration;
         assert_eq!(
             stated.warrant,
             Warrant::Defaulted,
@@ -1892,9 +1892,15 @@ mod tests {
             );
         }
         for (upstream, in_the_file) in [
-            (FittedCurveReach::Inside, CurveReach::Inside),
-            (FittedCurveReach::BelowFitted, CurveReach::BelowFitted),
-            (FittedCurveReach::AboveFitted, CurveReach::AboveFitted),
+            (FittedCurveReach::Inside, CurveReach::InsideTheFittedRange),
+            (
+                FittedCurveReach::BelowFitted,
+                CurveReach::BelowTheFittedRange,
+            ),
+            (
+                FittedCurveReach::AboveFitted,
+                CurveReach::AboveTheFittedRange,
+            ),
         ] {
             assert_eq!(CurveReach::from(upstream), in_the_file, "{upstream:?}");
         }
@@ -1991,10 +1997,10 @@ mod tests {
             file.contamination, None,
             "one sample has no panel to be surprised by, so contamination is not estimable at all"
         );
-        assert!(!file.sequencing_batches.was_declared_by_the_run);
+        assert!(!file.sequencing_batches.batching_was_declared);
         assert_eq!(
             file.repeat_tracts
-                .stated_length_spectrum_concentration
+                .fallback_length_spectrum_concentration
                 .warrant,
             Warrant::Defaulted,
             "a run with no repeat tract fitted states the compiled-in concentration"

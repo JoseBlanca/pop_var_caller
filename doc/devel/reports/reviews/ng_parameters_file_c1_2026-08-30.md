@@ -123,3 +123,105 @@ no behaviour today.
 
 Eight mutations, six killed and two proved equivalent. The table is in the implementation report
 §10. Two of the six survived a first pass and drove the two fixtures that now kill them.
+
+---
+
+# Addendum — the key-name revision, 2026-08-30
+
+**Owner's decision**, taken after C1 landed: rename the six keys two readers guessed wrongly, plus
+one value set. The plan made this revision the owner's and set its trigger as "the first time a
+person reads a file this writer produced and has to ask what a key means"; that had happened twice.
+
+| was | is |
+|---|---|
+| `level` | `share_of_reads_that_slip` |
+| `fraction` (contamination) | `share_of_reads_from_elsewhere` |
+| `stated_length_spectrum_concentration` | `fallback_length_spectrum_concentration` |
+| `was_declared_by_the_run` | `batching_was_declared` |
+| `slipped_reads` | `expected_slipped_reads` |
+| `rung` (repeat-tract curves only) | `curve_fitted_on` |
+| `reach` values `inside` / `below_fitted` / `above_fitted` | `inside_the_fitted_range` / `below_the_fitted_range` / `above_the_fitted_range` |
+
+`rung` in `[ordinary_site_prior]` keeps its name and is now the only one in the file.
+
+## What the rename cost, beyond the renaming
+
+- **Eleven fixture sites broke against the pre-pass's own types.** The fit's `Slippage` and
+  `LevelProvenance` have fields called `level` and `slipped_reads`, and a blanket rename rewrote
+  the constructions of those upstream structs too. The compiler caught all eleven. The file's names
+  and the fit's are now deliberately different, which is the same separation the module already
+  keeps between the file's `Warrant` words and the pre-pass's `Provenance`.
+- **One comment line went over the file's 80-character width**, because the new contamination key
+  is nine characters longer. The bullet was rewritten to describe the shape rather than quote the
+  key, which is what the other two bullets in that block already do.
+
+## What a reader pass over the renamed file then found
+
+One agent read the produced file as the geneticist. Five of the seven renames worked outright.
+Beyond those, **one Major and five Minors were applied**:
+
+- **The note above the renamed fallback concentration still opened "stated rather than fitted"** —
+  a word the key no longer carries and that the note's own next sentence withdraws — and ran into
+  the paragraph above it with no blank line, so it read as a continuation of a sentence ending in
+  "or a stated constant". Reworded and separated.
+- **`curve_fitted_on` was offered three values in prose and can write four**, and the one called "a
+  stated constant" is spelled `built_in_default`, so a reader editing that line would have typed a
+  word the parser refuses. All four now named as the file spells them.
+- **The header's one editing instruction was contradicted by a row beneath it**: a `supplied` value
+  that still carries `observations`. Widened to say that such a value came from another run's file
+  and those counts are that run's.
+- **"every row here spells it as `period`"** was false — `slippage_group_by_read_group` is a row in
+  that section and has neither key. Narrowed, and **"slippage group" is now defined in the file**,
+  which it never was.
+- **The warrant exemption said "the length spectra carry no warrant"** where the fallback
+  concentration is by its name a length-spectrum number and does carry one. Narrowed to the rows.
+- **The two `expected_slipped_reads` in one row read as a duplicate somebody could delete.** The
+  code knows they are not yet known to be the same number and defers that to C4; the file now says
+  they are counted separately.
+
+## ⚑ And one defect the rename made visible rather than caused
+
+**Three of the four `reach` values in the worked example contradicted the repeat counts printed
+beside them.** `reach` says whether a stratum's own `reference_repeats` fell inside the range its
+curve was fitted over, and the file prints both, three keys apart on one line. The fixture's curves
+all shared one fitted range of 5–19, picked for variant coverage, while the reaches were picked for
+variant coverage separately: a stratum at 6 repeats claimed to be *above* 5–19, one at 11 claimed
+*below*, and one at 30 claimed *inside*.
+
+Nothing asserted the relationship, so nothing caught it; under the old bare token `reach = "inside"`
+there was nothing to check it against, and the longer names are what made it legible. **This is the
+file a person is shown as the worked example**, so it was teaching them that `reach` is unrelated to
+the numbers next to it. Each curve now carries a range that makes its own reach true, and
+`every_reach_in_the_fixture_agrees_with_the_repeats_beside_it` holds it — reverting one range to the
+old shared value fails five tests.
+
+## Raised, not taken
+
+- **`level_origin` is now orphaned.** It records where `share_of_reads_that_slip` came from, and is
+  the only "level" left in the file; its own section comment has to translate it. The reader pass
+  recommends renaming the pair together — `share_of_reads_that_slip_origin` and
+  `shorter_share_and_fall_off_origin`, on the ground that `shares_origin` also covers `fall_off`,
+  which is not a share — and argues against the cheap `slip_share_origin`, which would sit four
+  letters from `shares_origin` on the longest lines in the file. **Owner's call; not in the seven.**
+- **`share_of_reads_from_elsewhere` could be `..._from_another_sample`.** "Elsewhere" could be read
+  as another lane or another part of the genome; the row beside it already uses sample language
+  (`fitted_from_reads_of = "every_read_of_this_sample"`). **Owner's call; the approved name stands.**
+
+## Recorded, not fixed
+
+- The curve fields — `rise_shape`, `bend`, `centre_repeats`, `held_out_error`, `cells`, `strata` —
+  carry no explanation anywhere in the file, and they are the densest text in it. The reader called
+  this the largest remaining hole.
+- `ploidy` appears at two scales, and the row-level one is unexplained.
+- `held_out_error = 0.3333333333333333` beside `held_out_error = 0.167` reads as two precisions of
+  measurement rather than one float printed in full.
+
+## Validation
+
+- `cargo test --lib ng::calling::parameters_file` — **79 passed, 0 failed, 2 ignored**.
+- `cargo test --all-features --lib --tests` — **5,002 lib tests plus every integration binary, 0
+  failed**.
+- clippy and `fmt --check` clean; `cargo doc --no-deps` still 25 unresolved links, the pre-existing
+  baseline.
+- Both golden files regenerated and their diffs read line by line: the first contained the seven
+  renames and nothing else.
