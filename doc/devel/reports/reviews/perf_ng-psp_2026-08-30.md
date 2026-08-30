@@ -685,12 +685,79 @@ production at 10 reads a position.
 
 ---
 
+## Author response — applied 2026-08-30, same branch
+
+| finding | outcome |
+|---|---|
+| H1 — the live set rewritten end to end | **applied**, `1fda32e2`, after a three-arm head-to-head |
+| H2 — the writer's one-observation record | **applied**, `be9955b5` |
+| H3 — the residual list grown from nothing | **applied**, `7715bb92` |
+| H4 — the writer's three per-record lists | **applied**, `be9955b5`, together with H2 |
+| L1 — the error type's width | **experiment shows no gain — closing**, see below |
+| L2 — the division in `read_count` | **experiment shows no gain — closing**, `830344fa` |
+| L3 — `decode_read_list` not reserving | **applied**, `7715bb92` |
+| L4–L7, S1–S4 | **deferred** — each needs a workload or a corpus the bench still lacks |
+
+**H1 was two designs and neither had been compared.** Both were built into one binary with the
+shipped pair, all three arms rotating round by round inside one process, cheapest round of each,
+three repeats, every arm asserted to read identical identifiers. At 280 reads a position the
+in-place design took the head-only walk to **0.567×** and the full walk to 0.762×, against the
+single-merged-pass design's 0.851× and 0.920×; at 10 reads both were within 1 % of the shipped
+pair. The in-place design also deletes the scratch buffer, giving **2,264 bytes an open sample**
+back. It is the one that shipped.
+
+**What the three applied fixes are worth**, against this report's own baseline, cheapest of three
+complete passes either side, on an otherwise idle machine:
+
+| workload | before | after | |
+|---|---:|---:|---:|
+| head-only walk, 280 reads | 19.935 ms | 11.030 ms | **0.553×** |
+| one body in a hundred, 280 reads | 20.187 ms | 11.338 ms | **0.562×** |
+| write, 280 reads | 101.419 ms | 57.700 ms | **0.569×** |
+| full walk, 280 reads | 36.571 ms | 26.356 ms | 0.721× |
+| write, 10 reads | 38.795 ms | 26.320 ms | 0.678× |
+| full walk, 10 reads | 33.561 ms | 30.501 ms | 0.909× |
+| head-only walk, 10 reads | 7.769 ms | 7.936 ms | 1.021× |
+| one body in a hundred, 10 reads | 8.318 ms | 8.349 ms | 1.004× |
+
+Allocator calls a record fell from 11.04 to 4.13 on the deep full walk and from 8.97 to **0.09** on
+the deep write — a writer now calls the allocator about once every eleven records.
+
+**And the headline comparison did not move, exactly as section 2 predicted.** Re-run after all
+three fixes: tomato **0.452×** against 0.450× before, HG002 1.96× against 1.84×. The corpora are
+built from a production `.psp` whose live set averages 0.1 identifiers a record on tomato, so there
+was never anything on that path for these fixes to save. **The 2.2× gap at 10 reads a position is
+untouched and remains the open question.**
+
+**L1 was the one candidate aimed at that gap, and it fails.** Splitting the varint fault into a
+`#[cold] #[inline(never)]` constructor does exactly what was predicted structurally — `read_varint`
+loses its out-of-line copy entirely and only the cold handler remains — but the trade is bad. Two
+binaries differing only in that split, run alternately, three paired rounds each:
+
+| arm | shipped | cold-fault split | |
+|---|---:|---:|---|
+| full walk, 10 reads | 30.247 ms | 29.557 ms | 0.977×, ahead in 3 of 3 |
+| **head-only walk, 10 reads** | **8.351 ms** | **8.738 ms** | **1.046×, behind in 3 of 3** |
+| full walk, 280 reads | 27.236 ms | 28.395 ms | no clean signal |
+
+Inlining sixteen field reads into the body path bloats code that the head path pays for and does
+not use — and the head-only walk is the cohort's first pass and the whole point of the format's
+head design. **Regressing it 5 % to gain 2.3 % on the full walk is the wrong way round**, so the
+split was reverted.
+
+**One methodological result worth keeping from L1 and L2.** Instruction count was the wrong gate
+for both. L1 executed **0.073 % more** instructions and ran **2.3 % faster** on the full walk — the
+frame's loads and stores are what cost, and callgrind counts them without weighting them. L2 saved
+721,200 instructions out of 6,762,760,740 — 0.011 % — and was not worth the arithmetic identity it
+put inside a guard. **Gate on a count when the mechanism is a count (allocator calls, syscalls);
+gate on interleaved wall clock when the mechanism is the shape of a frame.**
+
 ## Author response convention
 
 Address each finding by its identifier (H1, L2, …) with one of: `applied in <commit>` /
 `experiment shows no gain — closing` / `disputed because …` / `deferred to <issue>` /
-`won't fix because …`. The "experiment shows no gain" path is expected and welcome — the varint Note
-above is this review's own example of it.
+`won't fix because …`. The "experiment shows no gain" path is expected and welcome — three of this
+review's own findings closed that way.
 
 ---
 
