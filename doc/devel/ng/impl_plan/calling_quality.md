@@ -320,6 +320,63 @@ plan, beside the depth-ladder measurement it already owns.
 > penalties charge on this repository's own cohorts is **not** written down — see D2's blocker.
 > Pause for review.
 
+### Milestone E — the two things that can be settled before anything calls a variant
+
+**Added 2026-08-30, at the owner's direction**, after D2 turned out to need a run. Both steps below
+need no reads, no truth set and no output stream.
+
+**E1. What the site quality costs across the committed cohort range.**  ✅
+`benches/ng_site_quality_perf.rs`, which is the benchmark spec §13's Q3 names in its own
+*settled by* line: one locus's site quality at 63, 200, 1,000 and 3,000 diploid samples over a
+synthesised likelihood table. A second axis sweeps 2, 4 and 6 alleles at a fixed 1,000 samples, to
+say which of the calculation's two halves the cost is in — the collapse, which reads the whole
+`samples × genotypes` table, or the fold, which is the quadratic one. Three items of ng's own move
+from `pub(crate)` to `pub` for it; nothing outside ng changes. *Depends:* none. *Source:* spec §13
+Q3, §9.
+
+**Measured** (container, release, one locus a call):
+
+| diploid samples | one locus | against the previous row |
+|---:|---:|---:|
+| 63 | 16.6 µs | — |
+| 200 | 69.2 µs | 4.2× for 3.2× the samples |
+| 1,000 | 1.78 ms | 25.7× for 5× the samples |
+| 3,000 | 20.6 ms | 11.6× for 3× the samples |
+
+**The quadratic is real from 200 samples up** — 5× the samples costs 25.7× and 3× costs 11.6×,
+against 25 and 9 for an exact square. Below 200 it is cheaper than quadratic, which is the fixed
+cost of the collapse still showing.
+
+**The cost is in the fold and not the collapse**, which is what decides whether §13's proposed
+lever points at anything. At 1,000 samples, going from 2 alleles to 6 — seven times the genotypes,
+so seven times the collapse — costs **+33%** (2.17 ms against 2.88 ms). Truncating the allele-count
+axis attacks the fold, and the fold is where the time is.
+
+**⚠ A caveat on reading the two groups together.** The 1,000-sample, 2-allele cell appears in both
+sweeps and they disagree by 22% (1.78 ms against 2.17 ms), with non-overlapping confidence
+intervals — a systematic difference between the groups, not noise. Ratios **within** a group are
+sound; a number carried from one group to the other is good to about a fifth.
+
+**⛦ What this does not settle, and it is the owner's call.** *Affordable* needs a denominator, and
+there is none: no per-locus cost for the rest of a called locus — the frequency loop, the
+likelihood assembly, the merge — has been measured in this repository. What the shape does say is
+that **the site quality is quadratic in cohort size where the loop is linear** (the loop's E-step
+is `samples × genotypes` emission evaluations a pass), so the site quality must dominate eventually
+and the only question is where. **Recommendation: do not build the truncation yet.** Measure the
+loop's own per-locus cost on the same axis first — it is the same shape of benchmark and it turns
+this table into a share. Until then, 20.6 ms a locus at 3,000 samples is **5.7 CPU-hours per
+million loci**, against 4.6 CPU-seconds per million at 63.
+
+**E2. A mutation battery over the correction.**  ☐
+`cargo mutants` over `src/ng/calling/quality/`, per the repository's review convention: every
+surviving mutant is either killed by a new test or written down as semantically equivalent.
+D1 already produced one instance of the failure this catches — a grid test that compared tail
+probabilities to an absolute tolerance and passed while the far flank was computed the wrong way.
+*Depends:* C3, D1. *Source:* `ai/skills/rust-code-review/code_review/extras.md`.
+
+> **Checkpoint E:** the site quality's cost across the committed range is written down, and the
+> correction's tests have been attacked rather than trusted. Pause for review.
+
 ---
 
 ## Verification summary

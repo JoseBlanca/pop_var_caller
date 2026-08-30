@@ -202,7 +202,11 @@ pub(crate) fn score_best_genotype(posterior_row: &[f64]) -> (GenotypeIdx, Phred)
 /// **A bundle for the same reason the loop's two halves have one**: every field below is a
 /// different field of one scratch, and reaching for them an accessor at a time does not
 /// compile. Nothing here can alias.
-pub(crate) struct SiteQualityBuffers<'a> {
+/// **`pub` for one reader outside the crate: `benches/ng_site_quality_perf.rs`**, which times
+/// the fold this bundle feeds across the cohort sizes the caller commits to
+/// (`doc/devel/ng/spec/calling_quality.md` §13's Q3). The fields stay `pub(crate)` — a
+/// benchmark passes the bundle on, it does not build one.
+pub struct SiteQualityBuffers<'a> {
     /// How many samples the locus was called on.
     pub(crate) sample_count: usize,
     /// `samples × genotypes`, sample-major — the table the loop already built and never
@@ -307,7 +311,7 @@ pub(crate) struct SiteQualityBuffers<'a> {
 /// and the quality that comes out must not be a `NaN`, which is the only outcome of this
 /// arithmetic that is a bug in it rather than an answer.
 #[must_use]
-pub(crate) fn score_uncorrected_site_quality(
+pub fn score_uncorrected_site_quality(
     buffers: SiteQualityBuffers<'_>,
     genotypes: &GenotypeTableView<'_>,
     seed: SpectrumSeed,
