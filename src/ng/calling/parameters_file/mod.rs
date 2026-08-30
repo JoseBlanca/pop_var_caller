@@ -158,6 +158,7 @@
 mod from_run_parameters;
 mod from_toml;
 mod to_toml;
+mod validate;
 
 use serde::{Deserialize, Serialize};
 
@@ -207,6 +208,19 @@ pub enum ParametersFileError {
         #[source]
         source: toml::de::Error,
     },
+    /// The file parses, spells this shape, and says something no run can mean.
+    ///
+    /// **A different failure from [`Self::Malformed`], and it carries no line.** That one comes
+    /// from a parser holding a byte span; this one comes from walking a value that no longer
+    /// remembers where it was written. What it carries instead is the key's full path in the
+    /// file's own spelling, which a reader can search for. See [`ParametersFile::validate`].
+    #[error("the parameters file cannot be used: {field} {problem}")]
+    Meaningless {
+        /// The key's path as the file spells it — `inbreeding.by_sample["TS-1"]`.
+        field: String,
+        /// What is wrong with it, naming the offending value.
+        problem: String,
+    },
 }
 
 impl ParametersFileError {
@@ -219,6 +233,9 @@ impl ParametersFileError {
     pub fn line(&self) -> Option<usize> {
         match self {
             Self::Malformed { line, .. } => *line,
+            // **A refusal that walked a parsed value has no position to give**, which is why
+            // this returns an `Option` rather than a `usize`. See [`ParametersFile::validate`].
+            Self::Meaningless { .. } => None,
         }
     }
 
@@ -233,6 +250,9 @@ impl ParametersFileError {
     pub fn rendered_by_the_parser(&self) -> String {
         match self {
             Self::Malformed { source, .. } => source.to_string(),
+            // No parser was involved: this refusal is about what the file says, not how it is
+            // written, and its own `Display` carries the whole of it.
+            Self::Meaningless { .. } => self.to_string(),
         }
     }
 }
@@ -2001,10 +2021,13 @@ mod tests {
     /// might legitimately produce. So they are step C2's to refuse — the step that takes the file
     /// to `RunParameters` and meets the run's dense read-group axis.
     ///
-    /// **This test exists so the gap is visible rather than implied.** When C2 lands, these
-    /// assertions invert: what round-trips today must then fail, naming the field.
+    /// **Inverted at step C2, which landed the refusal.** Both now fail
+    /// [`ParametersFile::validate`], naming the field — and both still *parse*, which is the half
+    /// this test is now for. `validate` runs on a parsed value, so a reader that rejected these
+    /// earlier, at the text, would make the refusal unreachable and its message never seen; the
+    /// two halves have to fail in that order to fail with the message that explains them.
     #[test]
-    fn the_shape_accepts_two_things_step_c2_must_refuse() {
+    fn the_two_things_the_shape_accepts_parse_and_are_then_refused() {
         // A contamination table in which nobody was measured — the uncontaminated run, written
         // longhand. Read literally it takes the mixture path with every fraction zero, where
         // absence takes the read likelihood's plain formula.
@@ -2018,10 +2041,13 @@ mod tests {
             row.measurement = None;
         }
         let text = toml::to_string(&longhand).expect("serialises");
-        assert!(
-            toml::from_str::<ParametersFile>(&text).is_ok(),
-            "if this now fails, step C2's refusal has landed — invert this half"
-        );
+        let parsed = toml::from_str::<ParametersFile>(&text)
+            .expect("it parses: the shape cannot say a table has a measured row");
+        let refusal = parsed
+            .validate()
+            .expect_err("and validate refuses it")
+            .to_string();
+        assert!(refusal.contains("longhand"), "{refusal}");
 
         // A measurement carrying the evidence of not being measured: the in-memory
         // `UNMEASURED_READ_GROUP` shape, which a projection written from the view rather than
@@ -2039,9 +2065,15 @@ mod tests {
             fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
         });
         let text = toml::to_string(&evidenceless).expect("serialises");
+        let parsed = toml::from_str::<ParametersFile>(&text)
+            .expect("it parses: the shape cannot say two counts are not both zero");
+        let refusal = parsed
+            .validate()
+            .expect_err("and validate refuses it")
+            .to_string();
         assert!(
-            toml::from_str::<ParametersFile>(&text).is_ok(),
-            "if this now fails, step C2's refusal has landed — invert this half"
+            refusal.contains("evidence of not being measured"),
+            "{refusal}"
         );
     }
 

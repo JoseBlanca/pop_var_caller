@@ -1,0 +1,1528 @@
+//! **Refusing a file that parses and means nothing** — the constraints no shape can state.
+//!
+//! Step C1's reader answers one question: is this text TOML that spells this shape? A file can
+//! pass that and still say something no run can mean — an inbreeding coefficient of 1.7, a length
+//! spectrum whose shares sum to 1.4, a contamination table in which nobody was measured. **Owner's
+//! decision of 2026-08-28**, because no step of the plan owned it. Spec §9's own sentence is about
+//! the other half — "a **malformed** file fails at read **with a line number**, which is what using
+//! an existing parser buys" — and neither clause fits here: these files are well formed, and this
+//! walk has no line to give (below).
+//!
+//! # Where this runs, and why it is not the reader
+//!
+//! After parsing and before the projection back to `RunParameters`. It is deliberately **not**
+//! folded into [`ParametersFile::from_toml`](super::ParametersFile::from_toml): that entry point
+//! answers a question about the *text*, and a caller that wants to read a file and inspect it —
+//! this module's own tests among them — should not have to satisfy the run's constraints to do so.
+//!
+//! **⚑ Nothing in a run calls this yet.** The projection back to `RunParameters` is the caller
+//! that must run it first, and that is the other half of step C2; until it lands, reading a
+//! parameters file through this module's public entry point does not validate it.
+//!
+//! # What it cannot give, and says so rather than pretending
+//!
+//! **No line number.** The refusals of C1 come from a parser holding a byte span; these come from
+//! walking a value that no longer remembers where it was written. What is given instead is **the
+//! key's full path in the file's own spelling** — `inbreeding.by_sample["TS-1"]` — which a reader
+//! can search for, and which survives the file being reformatted.
+//!
+//! **A line is available and was not taken.** The `toml` crate re-exports `serde_spanned::Spanned`,
+//! so a field wrapped in `Spanned<T>` carries a byte range out of the parse this module's caller
+//! already ran — no second pass. It was rejected because the wrapper would have to sit on the
+//! *shape*, where it reaches `Serialize`, `PartialEq` and the round-trip equality the whole design
+//! rests on (spec §1.2 goal 1), to improve a message on a file that is well formed. If the paths
+//! below turn out not to be enough, that is the route.
+//!
+//! # Three kinds of refusal, and the third is the one that costs a day
+//!
+//! - **A value outside its documented range.** An inbreeding coefficient is a fraction in `[0, 1)`,
+//!   a curve weight a share in `[0, 1]`, a substitution rate a probability. Also, for every float
+//!   this walk reaches, a value that is not finite — which no range contains and which propagates
+//!   silently through every score it touches.
+//! - **A shape that is internally impossible.** A length spectrum with an even number of shares has
+//!   no middle entry to be the reference length; one with fewer than three cannot express a slip in
+//!   either direction; one whose shares do not sum to one is not a distribution.
+//! - **A shape that says the opposite of what it means.** These are spec §5's states written
+//!   longhand, and they are the expensive ones because they parse, project, and produce a plausible
+//!   VCF. A contamination table in which no row was measured is an *uncontaminated run* written as
+//!   a mixture with every fraction zero — the read likelihood then takes its mixture path instead
+//!   of its plain one. A measurement missing either of its evidence counts is the in-memory *not
+//!   measured* shape, which this file expresses by having no `measurement` key at all: it projects
+//!   to the same value the absent key gives, so nothing downstream computes differently — what
+//!   goes wrong is that the file claims a measurement, carries a `fitted_from_reads_of` true of
+//!   nothing, and the run reports a lane as uncorrected while the file says it was measured.
+//!
+//! # And one refusal that is about this writer rather than about runs
+//!
+//! **An evidence count of exactly `i64::MAX` is the writer's saturation marker, not a
+//! measurement.** TOML's integers are signed and 64-bit, so a `u64` count above `2^63 − 1` has no
+//! representation; the writer saturates rather than emitting a number three different readers gave
+//! three different answers to (step B2). A count arriving back at exactly that value is therefore
+//! either a saturated write or a number nobody could have counted — 9.2 quintillion reads — and
+//! reading it as evidence would put a number the writer knows it lost into a run's report.
+
+use super::{
+    ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError,
+    ShareCurve, ShareSmoothing, SlippageCurve, WarrantedValue,
+};
+
+/// How far a length spectrum's shares may sum from one and still be a distribution.
+///
+/// **Wide enough for the rounding a normalised vector carries, narrow enough to catch a hand
+/// edit.** The miss is in the *summation*, not in the round trip: a float written by this writer
+/// and read back is the same double, but a spectrum the fit normalised is a division followed by
+/// an addition of many terms, and those do not land on one.
+///
+/// **Measured, over geometric spectra normalised to one:** 3, 5, 9 and 41 offsets summed to
+/// exactly one; 21 offsets missed by 1.1e-16 and 101 offsets by 6.7e-16. So the worst seen is
+/// about seven parts in ten quadrillion, and this tolerance is 1.5 million times that — while the
+/// smallest edit a person would make to one share, a hundredth, is ten million times larger than
+/// the tolerance. **Thirteen orders of magnitude separate the two**, and anything from about
+/// 1e-14 to 1e-4 would divide them equally well; this is not a tuned number and nothing here
+/// depends on its exact value.
+const SHARES_MAY_MISS_ONE_BY: f64 = 1e-9;
+
+/// The largest integer TOML can hold, which is what the writer saturates a `u64` count to.
+const A_SATURATED_COUNT: u64 = i64::MAX as u64;
+
+impl ParametersFile {
+    /// **Refuse a file that parses and says something no run can mean.**
+    ///
+    /// Runs after [`from_toml`](Self::from_toml) and before the projection back to
+    /// `RunParameters`. See this module's header for the three kinds of refusal and for why no
+    /// line number is given.
+    ///
+    /// # Errors
+    ///
+    /// [`ParametersFileError::Meaningless`], naming the key's full path in the file's own
+    /// spelling and what is wrong with it. The first failure stops the walk: a file with two bad
+    /// values is reported one at a time, because a reader fixing them will re-run anyway and a
+    /// list of every fault in a hand-edited file is mostly one fault's consequences.
+    pub fn validate(&self) -> Result<(), ParametersFileError> {
+        self.the_version_is_one_this_build_reads()?;
+        self.the_identity_names_a_cohort()?;
+        self.every_axis_covers_what_it_is_keyed_by()?;
+        self.every_calibration_is_a_multiplier()?;
+        self.contamination_is_absent_or_measured()?;
+        self.every_inbreeding_coefficient_is_a_fraction()?;
+        self.the_prior_seed_is_a_pair_of_concentrations()?;
+        self.the_repeat_tract_numbers_are_what_they_claim()?;
+        self.every_stated_constant_is_in_range()?;
+        Ok(())
+    }
+
+    fn the_version_is_one_this_build_reads(&self) -> Result<(), ParametersFileError> {
+        // **Both a zero and a future version are refused**, which is the shape the project's other
+        // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). Spec §11 defers
+        // what a reader *does* with an older file until there is one; refusing a version this
+        // build cannot know the meaning of is not that policy, it is the guard that makes the
+        // policy possible later.
+        if self.format_version == 0 || self.format_version > super::FORMAT_VERSION {
+            return Err(refuse(
+                "format_version",
+                format!(
+                    "is {}, and this build reads versions 1 to {}; a higher number means the file was written by a newer build of this caller, so run that build or refit",
+                    self.format_version,
+                    super::FORMAT_VERSION
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn the_identity_names_a_cohort(&self) -> Result<(), ParametersFileError> {
+        if self.ploidy == 0 {
+            return Err(refuse("ploidy", "is 0, and a run calls at least one copy"));
+        }
+        if self.fitted_from.samples.is_empty() {
+            return Err(refuse(
+                "fitted_from.samples",
+                "is empty, and every per-sample number in the file is keyed by a name in it",
+            ));
+        }
+        if self.fitted_from.read_groups.is_empty() {
+            return Err(refuse(
+                "fitted_from.read_groups",
+                "is empty, and every read of a run belongs to a read group",
+            ));
+        }
+
+        // **The axis has to be dense over `0..n`.** `RunParameters` indexes calibration and
+        // contamination by read-group id, so a gap drops the highest read group entirely and
+        // surfaces as a panic at whichever locus first carries one of that library's reads
+        // (`run_parameters.rs`, module documentation). Checked here so the message is about the
+        // file. **Whether these ids are the *run's* ids is a different question** — that is one of
+        // spec §6's bindings and belongs to step D2; this only asks whether the file is coherent
+        // with itself.
+        let mut seen: Vec<u32> = self
+            .fitted_from
+            .read_groups
+            .iter()
+            .map(|row| row.read_group)
+            .collect();
+        seen.sort_unstable();
+        for (expected, found) in seen.iter().enumerate() {
+            if *found as usize != expected {
+                return Err(refuse(
+                    "fitted_from.read_groups",
+                    format!(
+                        "has no read group {expected}: it names {}, and a run's read groups are \
+                         numbered from zero with none missing. A gap silently drops the highest \
+                         read group",
+                        a_list_of(&seen)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// **Every table keyed by the read-group axis covers it, and every per-sample table names
+    /// samples the file declares.**
+    ///
+    /// The check above says the *declaration* runs `0..n`; this says the four tables written
+    /// against that declaration agree with it. **The gap between the two is a hand edit**, which is
+    /// the only way such a file arises — this writer builds all four from the dense vector itself.
+    ///
+    /// **And its symptom is spec §5's third row with no message.** The projection builds its
+    /// vectors over `0..count` by *keyed lookup*, so a deleted calibration row does not shift the
+    /// others: the missing id's slot becomes `ReadGroupCalibration::defaulted` — scale one, warrant
+    /// `Defaulted`. The file's claim that this library was fitted disappears, the run reports it as
+    /// a library nothing could be fitted for, and nothing anywhere says a row went missing.
+    ///
+    /// **A duplicate is refused for the same reason**: two rows for one read group means a keyed
+    /// lookup discards one of them, and which one is an accident of order.
+    fn every_axis_covers_what_it_is_keyed_by(&self) -> Result<(), ParametersFileError> {
+        let read_groups = self.fitted_from.read_groups.len();
+        covers_the_read_groups(
+            "base_quality_calibration.by_read_group",
+            self.base_quality_calibration
+                .by_read_group
+                .iter()
+                .map(|row| row.read_group),
+            read_groups,
+        )?;
+        if let Some(table) = &self.contamination {
+            covers_the_read_groups(
+                "contamination.by_read_group",
+                table.by_read_group.iter().map(|row| row.read_group),
+                read_groups,
+            )?;
+        }
+        covers_the_read_groups(
+            "sequencing_batches.by_read_group",
+            self.sequencing_batches
+                .by_read_group
+                .iter()
+                .map(|row| row.read_group),
+            read_groups,
+        )?;
+        covers_the_read_groups(
+            "repeat_tracts.slippage_group_by_read_group",
+            self.repeat_tracts
+                .slippage_group_by_read_group
+                .iter()
+                .map(|row| row.read_group),
+            read_groups,
+        )?;
+        names_the_samples(
+            "inbreeding.by_sample",
+            self.inbreeding
+                .by_sample
+                .iter()
+                .map(|row| row.sample.as_str()),
+            &self.fitted_from.samples,
+        )?;
+        names_the_samples(
+            "sequencing_batches.by_sample",
+            self.sequencing_batches
+                .by_sample
+                .iter()
+                .map(|row| row.sample.as_str()),
+            &self.fitted_from.samples,
+        )
+    }
+
+    fn every_calibration_is_a_multiplier(&self) -> Result<(), ParametersFileError> {
+        for row in &self.base_quality_calibration.by_read_group {
+            let at = format!(
+                "base_quality_calibration.by_read_group[read_group = {}].error_probability_multiplier",
+                row.read_group
+            );
+            a_warranted_value(&at, &row.error_probability_multiplier)?;
+            // **Strictly above zero, and no upper bound.** A zero multiplies every read's error
+            // probability to nothing, which charges the whole library the error floor — maximal
+            // confidence about every base, from a number that says the fit found no errors at all;
+            // `ReadGroupCalibration::from_fitted_rate` refuses it on the way in for that reason.
+            // Above one is legitimate and common: it says the instrument was optimistic.
+            if row.error_probability_multiplier.value <= 0.0 {
+                return Err(refuse(
+                    at,
+                    format!(
+                        "is {}, and a multiplier on an error probability is above zero — a zero \
+                         charges every read of the library the error floor",
+                        row.error_probability_multiplier.value
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn contamination_is_absent_or_measured(&self) -> Result<(), ParametersFileError> {
+        let Some(table) = &self.contamination else {
+            // **Absence is the uncontaminated run**, and it is a real model state rather than a
+            // gap (spec §3.4). Nothing to check.
+            return Ok(());
+        };
+        if table.by_read_group.is_empty() {
+            return Err(refuse(
+                "contamination.by_read_group",
+                "is empty; an uncontaminated run has no [contamination] section at all, and an \
+                 empty table says the section was written and then emptied",
+            ));
+        }
+        if table
+            .by_read_group
+            .iter()
+            .all(|row| row.measurement.is_none())
+        {
+            return Err(refuse(
+                "contamination",
+                "has a row for every read group and a measurement for none of them, which is the \
+                 uncontaminated run written longhand; leave the section out instead, because a \
+                 table of unmeasured rows takes the read likelihood's mixture path with every \
+                 fraction zero where absence takes its plain one",
+            ));
+        }
+        for row in &table.by_read_group {
+            let Some(measurement) = &row.measurement else {
+                continue;
+            };
+            let at = format!(
+                "contamination.by_read_group[read_group = {}].measurement",
+                row.read_group
+            );
+            // **Half-open at one, which is where the consumer's own bound is.**
+            // `FrozenContamination::new` asserts `(0.0..1.0)` and says why: "a whole library of
+            // another individual's DNA is not a sample of this one". A share of exactly one
+            // accepted here becomes a panic several frames later, naming a read group rather than
+            // a file — which is the failure this whole module exists to move earlier.
+            let share_at = format!("{at}.share_of_reads_from_elsewhere");
+            finite(share_at.clone(), measurement.share_of_reads_from_elsewhere)?;
+            if !(0.0..1.0).contains(&measurement.share_of_reads_from_elsewhere) {
+                return Err(refuse(
+                    share_at,
+                    format!(
+                        "is {}, and a share of a lane's reads that came from somebody else is at \
+                         or above zero and below one — a whole library of another individual is \
+                         not a sample of this one",
+                        measurement.share_of_reads_from_elsewhere
+                    ),
+                ));
+            }
+            no_count_is_a_saturation(&at, measurement)?;
+            // **Either count zero is the in-memory *not measured* shape**, and it is *either*
+            // rather than *both* because that is what the predicate says:
+            // `ContaminationView::was_measured` is `markers_with_reads > 0 && reads_on_markers >
+            // 0` (`likelihood/mod.rs`), so its negation is a disjunction. A row with markers zero
+            // and 90,233 reads is the worse of the two — it says *measured, 3.1%* in the file and
+            // reads back in memory as never measured at all.
+            //
+            // **What such a row projects to is `UNMEASURED_READ_GROUP`**, the same value the
+            // absent key gives, so nothing downstream computes differently; what goes wrong is
+            // upstream of that. The file asserts a measurement, carries a
+            // `fitted_from_reads_of` that is true of nothing, and the run reports a library as
+            // uncorrected while the file says it was measured.
+            if measurement.markers_with_reads == 0 || measurement.reads_on_markers == 0 {
+                return Err(refuse(
+                    at,
+                    format!(
+                        "says it was measured and carries the evidence of not being measured — \
+                         markers_with_reads {} and reads_on_markers {}, where a measurement needs \
+                         both above zero. Delete the whole `measurement` key instead: that is how \
+                         this file says a lane could not be measured, and it is what this row \
+                         already means to whatever reads it",
+                        measurement.markers_with_reads, measurement.reads_on_markers
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn every_inbreeding_coefficient_is_a_fraction(&self) -> Result<(), ParametersFileError> {
+        if self.inbreeding.by_sample.is_empty() {
+            return Err(refuse(
+                "inbreeding.by_sample",
+                "is empty, and every sample of a run carries a coefficient",
+            ));
+        }
+        for row in &self.inbreeding.by_sample {
+            let at = format!(
+                "inbreeding.by_sample[sample = {:?}].inbreeding_coefficient",
+                row.sample
+            );
+            a_warranted_value(&at, &row.inbreeding_coefficient)?;
+            // **Half-open at one**, which is the range the type upstream states: a coefficient of
+            // one is a sample with no heterozygous site anywhere, and the genotype prior it
+            // produces has a zero where a likelihood is multiplied.
+            let value = row.inbreeding_coefficient.value;
+            if !(0.0..1.0).contains(&value) {
+                return Err(refuse(
+                    at,
+                    format!(
+                        "is {value}; an inbreeding coefficient is at or above zero and strictly \
+                         below one — at one every heterozygote becomes impossible, and a fitted \
+                         estimate should sit well below it"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn the_prior_seed_is_a_pair_of_concentrations(&self) -> Result<(), ParametersFileError> {
+        let seed = &self.ordinary_site_prior;
+        finite(
+            "ordinary_site_prior.reference_concentration",
+            seed.reference_concentration,
+        )?;
+        finite(
+            "ordinary_site_prior.alternative_concentration_total",
+            seed.alternative_concentration_total,
+        )?;
+        if seed.reference_concentration <= 0.0 {
+            return Err(refuse(
+                "ordinary_site_prior.reference_concentration",
+                format!(
+                    "is {}, and the reference allele carries some belief at every position",
+                    seed.reference_concentration
+                ),
+            ));
+        }
+        // **Zero is a real answer here and is not floored** — a cohort with no variation at all
+        // (spec §3.6) — so this refuses only a negative total.
+        if seed.alternative_concentration_total < 0.0 {
+            return Err(refuse(
+                "ordinary_site_prior.alternative_concentration_total",
+                format!(
+                    "is {}, and a concentration is not negative; zero is a real answer and means \
+                     a cohort with no variation",
+                    seed.alternative_concentration_total
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn the_repeat_tract_numbers_are_what_they_claim(&self) -> Result<(), ParametersFileError> {
+        let tracts = &self.repeat_tracts;
+        let at = "repeat_tracts.fallback_length_spectrum_concentration";
+        a_warranted_value(at, &tracts.fallback_length_spectrum_concentration)?;
+        if tracts.fallback_length_spectrum_concentration.value <= 0.0 {
+            return Err(refuse(
+                at,
+                format!(
+                    "is {}, and a concentration is above zero",
+                    tracts.fallback_length_spectrum_concentration.value
+                ),
+            ));
+        }
+
+        for row in &tracts.slippage_by_stratum_and_group {
+            let at = format!(
+                "repeat_tracts.slippage_by_stratum_and_group[period = {}, reference_repeats = {}, \
+                 slippage_group = {}]",
+                row.period, row.reference_repeats, row.slippage_group
+            );
+            a_share(
+                &format!("{at}.share_of_reads_that_slip"),
+                row.share_of_reads_that_slip,
+            )?;
+            a_share(&format!("{at}.shorter_share"), row.shorter_share)?;
+            // **`fall_off` is checked for being a number and not for an upper bound**, because
+            // neither this file's shape nor the fit that produces it documents one. It is how fast
+            // two-repeat slips fall off against one-repeat slips, so a value above one would mean
+            // the larger slip is the likelier — implausible, but nothing here has established that
+            // it is impossible, and refusing a fit nobody has bounded is worse than passing one.
+            finite(format!("{at}.fall_off"), row.fall_off)?;
+            if row.fall_off < 0.0 {
+                return Err(refuse(
+                    format!("{at}.fall_off"),
+                    format!("is {}, and a fall-off is not negative", row.fall_off),
+                ));
+            }
+            a_level_smoothing(&at, &row.level_origin.smoothing)?;
+            if let Some(reads) = row.level_origin.expected_slipped_reads {
+                finite(format!("{at}.level_origin.expected_slipped_reads"), reads)?;
+            }
+            if let Some(shares) = &row.shares_origin {
+                if let Some(reads) = shares.expected_slipped_reads {
+                    finite(format!("{at}.shares_origin.expected_slipped_reads"), reads)?;
+                }
+                a_share_smoothing(
+                    &format!("{at}.shares_origin.shorter_share_smoothing"),
+                    &shares.shorter_share_smoothing,
+                )?;
+                a_share_smoothing(
+                    &format!("{at}.shares_origin.fall_off_smoothing"),
+                    &shares.fall_off_smoothing,
+                )?;
+            }
+        }
+
+        for row in &tracts.length_spectrum_by_stratum {
+            let at = format!(
+                "repeat_tracts.length_spectrum_by_stratum[period = {}, reference_repeats = {}]",
+                row.period, row.reference_repeats
+            );
+            a_length_spectrum(&at, row.concentration, &row.shares_by_repeat_offset)?;
+        }
+        for row in &tracts.length_spectrum_by_period {
+            let at = format!(
+                "repeat_tracts.length_spectrum_by_period[period = {}]",
+                row.period
+            );
+            a_length_spectrum(&at, row.concentration, &row.shares_by_repeat_offset)?;
+        }
+
+        for row in &tracts.substitution_rate_by_stratum {
+            let at = format!(
+                "repeat_tracts.substitution_rate_by_stratum[read_group = {}, period = {}, \
+                 reference_repeats = {}, ploidy = {}].rate",
+                row.read_group, row.period, row.reference_repeats, row.ploidy
+            );
+            a_warranted_value(&at, &row.rate)?;
+            finite(at.clone(), row.rate.value)?;
+            if !(0.0..=1.0).contains(&row.rate.value) {
+                return Err(refuse(
+                    at,
+                    format!(
+                        "is {}, and a substitution rate is a probability — the chance one base \
+                         inside a tract reads wrong — so it lies between zero and one",
+                        row.rate.value
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn every_stated_constant_is_in_range(&self) -> Result<(), ParametersFileError> {
+        let at = "stated_constants.repeat_tract_outlier_weight";
+        a_warranted_value(at, &self.stated_constants.repeat_tract_outlier_weight)?;
+        a_share(at, self.stated_constants.repeat_tract_outlier_weight.value)
+    }
+}
+
+/// One table keyed by the read-group axis: every id from `0..axis_length`, once each.
+fn covers_the_read_groups(
+    at: &str,
+    ids: impl Iterator<Item = u32>,
+    axis_length: usize,
+) -> Result<(), ParametersFileError> {
+    let mut seen: Vec<u32> = ids.collect();
+    seen.sort_unstable();
+    if seen.len() != axis_length {
+        return Err(refuse(
+            at.to_string(),
+            format!(
+                "holds {} rows where fitted_from.read_groups declares {axis_length}; every table \
+                 keyed by a read group carries one row for each, because the run reads them by id \
+                 and a missing row is silently a defaulted one",
+                seen.len()
+            ),
+        ));
+    }
+    for (expected, found) in seen.iter().enumerate() {
+        if *found as usize != expected {
+            return Err(refuse(
+                at.to_string(),
+                format!(
+                    "names read group {found} where {expected} should be, so it either repeats one \
+                     or skips one; the run reads these by id",
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One table keyed by sample name: every declared sample, once each, and no others.
+fn names_the_samples<'a>(
+    at: &str,
+    names: impl Iterator<Item = &'a str>,
+    declared: &[String],
+) -> Result<(), ParametersFileError> {
+    let mut seen: Vec<&str> = names.collect();
+    seen.sort_unstable();
+    let mut want: Vec<&str> = declared.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    if seen == want {
+        return Ok(());
+    }
+    // **Name the one that differs rather than printing both lists.** At the top of the committed
+    // range a cohort has 3,000 samples, and two 3,000-name lists in an error message is not a
+    // message. The first name in one list and not the other is what a reader needs.
+    let odd_one_out = seen
+        .iter()
+        .find(|name| !want.contains(name))
+        .or_else(|| want.iter().find(|name| !seen.contains(name)));
+    Err(refuse(
+        at.to_string(),
+        match odd_one_out {
+            Some(name) => format!(
+                "does not name the same samples as fitted_from.samples: {name:?} is in one and \
+                 not the other",
+            ),
+            // Same set, different multiplicity — a duplicated row.
+            None => format!(
+                "holds {} rows for {} samples, so it names one of them twice",
+                seen.len(),
+                want.len()
+            ),
+        },
+    ))
+}
+
+/// A short list of read-group ids for a message — `0, 2, 3`.
+///
+/// **Capped, because the axis is one of the file's cohort-sized ones.** At the top of the
+/// committed input range a run has 3,000 read groups (`CLAUDE.md`), and a message that printed all
+/// of them would bury the id that is missing under the 2,999 that are not.
+fn a_list_of(ids: &[u32]) -> String {
+    const AT_MOST: usize = 12;
+    let shown: Vec<String> = ids.iter().take(AT_MOST).map(u32::to_string).collect();
+    if ids.len() > AT_MOST {
+        format!("{} and {} more", shown.join(", "), ids.len() - AT_MOST)
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// The refusal, with the key's path in the file's own spelling.
+fn refuse(field: impl Into<String>, problem: impl Into<String>) -> ParametersFileError {
+    ParametersFileError::Meaningless {
+        field: field.into(),
+        problem: problem.into(),
+    }
+}
+
+/// A number that is a number — refusing `NaN` and both infinities.
+///
+/// **Its own check rather than a corollary of the range tests**, because `NaN` fails every
+/// comparison, so `!(0.0..=1.0).contains(&f64::NAN)` is true and would report a `NaN` as *outside
+/// [0, 1]* — which sends a reader looking for a value they will not find in the file.
+fn finite(at: impl Into<String>, value: f64) -> Result<(), ParametersFileError> {
+    if value.is_finite() {
+        return Ok(());
+    }
+    Err(refuse(
+        at,
+        format!("is {value}, which is not a number a score can be computed from"),
+    ))
+}
+
+/// A number that is a share of something: finite, and within `[0, 1]`.
+fn a_share(at: &str, value: f64) -> Result<(), ParametersFileError> {
+    finite(at, value)?;
+    if (0.0..=1.0).contains(&value) {
+        return Ok(());
+    }
+    Err(refuse(
+        at.to_string(),
+        format!("is {value}, and a share is in [0, 1]"),
+    ))
+}
+
+/// A value and its warrant: the number is a number, and its evidence count is a count.
+fn a_warranted_value(at: &str, value: &WarrantedValue) -> Result<(), ParametersFileError> {
+    finite(at, value.value)?;
+    let Some(observations) = value.observations else {
+        return Ok(());
+    };
+    let (unit, count) = match observations {
+        EvidenceCount::Reads(count) => ("reads", count),
+        EvidenceCount::CoveredPositions(count) => ("covered_positions", count),
+        EvidenceCount::BasesCompared(count) => ("bases_compared", count),
+    };
+    if count == A_SATURATED_COUNT {
+        return Err(refuse(
+            format!("{at}.observations.{unit}"),
+            format!(
+                "is {A_SATURATED_COUNT}, which is the largest integer TOML holds and is what this \
+                 writer saturates a count to rather than emit one no reader agrees on; it is a \
+                 lost number and not a measurement"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Neither of a measurement's two counts is a saturation marker.
+fn no_count_is_a_saturation(
+    at: &str,
+    measurement: &ContaminationMeasurement,
+) -> Result<(), ParametersFileError> {
+    for (key, count) in [
+        ("markers_with_reads", measurement.markers_with_reads),
+        ("reads_on_markers", measurement.reads_on_markers),
+    ] {
+        if count == A_SATURATED_COUNT {
+            return Err(refuse(
+                format!("{at}.{key}"),
+                format!(
+                    "is {A_SATURATED_COUNT}, which is this writer's saturation marker and not a \
+                     count"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A length spectrum: a positive concentration, and shares that are a distribution over an odd
+/// number of offsets with a middle.
+fn a_length_spectrum(
+    at: &str,
+    concentration: f64,
+    shares: &[f64],
+) -> Result<(), ParametersFileError> {
+    finite(format!("{at}.concentration"), concentration)?;
+    if concentration <= 0.0 {
+        return Err(refuse(
+            format!("{at}.concentration"),
+            format!("is {concentration}, and a concentration is above zero"),
+        ));
+    }
+
+    // **Odd, and at least three.** The array runs from `-span` to `+span` in whole repeat units
+    // from the reference length, so the middle entry *is* the reference length; an even count has
+    // no middle, and a count below three cannot express a slip in both directions.
+    if shares.len() < 3 || shares.len().is_multiple_of(2) {
+        return Err(refuse(
+            format!("{at}.shares_by_repeat_offset"),
+            format!(
+                "holds {} shares; it runs from -span to +span in whole repeats, so the count is \
+                 odd and at least three — the middle entry is the reference length itself",
+                shares.len()
+            ),
+        ));
+    }
+    let mut total = 0.0;
+    for (offset, share) in shares.iter().enumerate() {
+        a_share(&format!("{at}.shares_by_repeat_offset[{offset}]"), *share)?;
+        total += *share;
+    }
+    if (total - 1.0).abs() > SHARES_MAY_MISS_ONE_BY {
+        return Err(refuse(
+            format!("{at}.shares_by_repeat_offset"),
+            format!(
+                "sums to {total}, and a length spectrum is a distribution over the lengths a \
+                 tract can take; if you edited one share, the others have to give up what it took"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A level's smoothing: the weight a curve carried is a share, and the curve's own numbers are
+/// numbers.
+///
+/// **The curve is provenance rather than a term in a score** — it is recorded so an interpolation
+/// can be told from a measurement — so a `NaN` in it changes no genotype. It is still refused,
+/// because a run that reports where a number came from should not report `nan` as the slope of the
+/// line it came off, and because a reader who hand-edits a curve gets told rather than ignored.
+fn a_level_smoothing(at: &str, smoothing: &LevelSmoothing) -> Result<(), ParametersFileError> {
+    let at = format!("{at}.level_origin.smoothing");
+    match smoothing {
+        LevelSmoothing::ThisStratum => Ok(()),
+        LevelSmoothing::ThisPeriodsCurve { curve, .. } => {
+            a_slippage_curve(&format!("{at}.this_periods_curve.curve"), curve)
+        }
+        LevelSmoothing::Blend {
+            curve_weight,
+            curve,
+            ..
+        } => {
+            a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
+            a_slippage_curve(&format!("{at}.blend.curve"), curve)
+        }
+    }
+}
+
+/// The same, for a share's smoothing.
+fn a_share_smoothing(at: &str, smoothing: &ShareSmoothing) -> Result<(), ParametersFileError> {
+    match smoothing {
+        ShareSmoothing::ThisStratum => Ok(()),
+        ShareSmoothing::ThisPeriodsCurve { curve, .. } => {
+            a_share_curve(&format!("{at}.this_periods_curve.curve"), curve)
+        }
+        ShareSmoothing::Blend {
+            curve_weight,
+            curve,
+            ..
+        } => {
+            a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
+            a_share_curve(&format!("{at}.blend.curve"), curve)
+        }
+    }
+}
+
+/// Every number a level curve records is a number.
+fn a_slippage_curve(at: &str, curve: &SlippageCurve) -> Result<(), ParametersFileError> {
+    for (key, value) in [
+        ("rise_shape", curve.rise_shape),
+        ("intercept", curve.intercept),
+        ("slope", curve.slope),
+        ("held_out_error", curve.held_out_error),
+    ] {
+        finite(format!("{at}.{key}"), value)?;
+    }
+    Ok(())
+}
+
+/// Every number a share curve records is a number.
+fn a_share_curve(at: &str, curve: &ShareCurve) -> Result<(), ParametersFileError> {
+    for (key, value) in [
+        ("intercept", curve.intercept),
+        ("slope", curve.slope),
+        ("bend", curve.bend),
+        ("centre_repeats", curve.centre_repeats),
+        ("held_out_error", curve.held_out_error),
+    ] {
+        finite(format!("{at}.{key}"), value)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::a_file_using_every_shape;
+    use super::super::{
+        ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
+        ShareSmoothing, Warrant, WarrantedValue,
+    };
+    use super::*;
+
+    /// The fixture with one edit, refused — returning the refusal so a test can read its field.
+    #[track_caller]
+    fn refused(edit: impl FnOnce(&mut ParametersFile)) -> (String, String) {
+        let mut file = a_file_using_every_shape();
+        edit(&mut file);
+        match file.validate() {
+            Ok(()) => panic!("this edit was accepted and should have been refused"),
+            Err(ParametersFileError::Meaningless { field, problem }) => (field, problem),
+            Err(other) => panic!("refused for the wrong reason: {other}"),
+        }
+    }
+
+    /// The fixture with one edit, accepted.
+    #[track_caller]
+    fn accepted(edit: impl FnOnce(&mut ParametersFile)) {
+        let mut file = a_file_using_every_shape();
+        edit(&mut file);
+        file.validate()
+            .expect("this edit is legitimate and must be accepted");
+    }
+
+    /// **The file this project writes passes its own reader**, which is the check every refusal
+    /// below is only meaningful against.
+    #[test]
+    fn the_file_a_run_writes_is_accepted() {
+        a_file_using_every_shape()
+            .validate()
+            .expect("the writer's own fixture is a file a run can use");
+    }
+
+    /// **And so is the smallest file that still says something** — one sample, one read group,
+    /// no repeat tracts, no contamination.
+    ///
+    /// The committed input range starts at a single sample (`CLAUDE.md`), and a `validate` written
+    /// against the full fixture alone would happily refuse the bottom of that range by requiring
+    /// a table that a one-sample run legitimately leaves empty.
+    #[test]
+    fn the_smallest_file_that_says_anything_is_accepted() {
+        let mut small = a_file_using_every_shape();
+        small.contamination = None;
+        small.fitted_from.samples.truncate(1);
+        small.fitted_from.read_groups.truncate(1);
+        small.base_quality_calibration.by_read_group.truncate(1);
+        small.sequencing_batches.by_read_group.truncate(1);
+        small.sequencing_batches.by_sample.truncate(1);
+        small.inbreeding.by_sample.truncate(1);
+        small.repeat_tracts.slippage_group_by_read_group.truncate(1);
+        small.repeat_tracts.slippage_by_stratum_and_group.clear();
+        small.repeat_tracts.length_spectrum_by_stratum.clear();
+        small.repeat_tracts.length_spectrum_by_period.clear();
+        small.repeat_tracts.substitution_rate_by_stratum.clear();
+        small
+            .validate()
+            .expect("one sample with no repeat tracts is the bottom of the committed range");
+    }
+
+    #[test]
+    fn a_version_this_build_does_not_read_is_refused() {
+        let (field, problem) = refused(|file| file.format_version = 0);
+        assert_eq!(field, "format_version");
+        assert!(problem.contains("written by a newer build"), "{problem}");
+        let (field, _) = refused(|file| file.format_version = 2);
+        assert_eq!(field, "format_version");
+    }
+
+    #[test]
+    fn a_run_that_calls_no_copies_and_a_cohort_with_no_samples_are_refused() {
+        assert_eq!(refused(|file| file.ploidy = 0).0, "ploidy");
+        assert_eq!(
+            refused(|file| file.fitted_from.samples.clear()).0,
+            "fitted_from.samples"
+        );
+        assert_eq!(
+            refused(|file| file.fitted_from.read_groups.clear()).0,
+            "fitted_from.read_groups"
+        );
+        assert_eq!(
+            refused(|file| file.inbreeding.by_sample.clear()).0,
+            "inbreeding.by_sample"
+        );
+    }
+
+    /// **A gap in the read-group ids is refused here rather than at a locus.**
+    ///
+    /// `RunParameters` indexes the calibration and contamination axes by read-group id, so a gap
+    /// drops the highest read group entirely; its symptom is a panic at whichever locus first
+    /// carries one of that library's reads, which names a locus and arrives after the pre-pass is
+    /// long finished.
+    #[test]
+    fn a_gap_in_the_read_group_ids_is_refused() {
+        let (field, problem) = refused(|file| file.fitted_from.read_groups[1].read_group = 3);
+        assert_eq!(field, "fitted_from.read_groups");
+        assert!(problem.contains("has no read group 1"), "{problem}");
+    }
+
+    /// **A table that does not cover the read-group axis is refused, and that is a hand edit's
+    /// failure rather than a writer's.**
+    ///
+    /// This writer builds all four of these tables from the dense vector itself, so it cannot
+    /// produce a gap. A person deleting one row can, and the symptom is silent: the projection
+    /// reads these by id, so a missing calibration row does not shift the others — it becomes a
+    /// defaulted scale of one, and the file's claim that the library was fitted is gone with no
+    /// message. That is spec §5's third row arriving through the back door.
+    #[test]
+    fn a_table_that_does_not_cover_the_read_groups_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.base_quality_calibration.by_read_group.remove(1);
+        });
+        assert_eq!(field, "base_quality_calibration.by_read_group");
+        assert!(problem.contains("silently a defaulted one"), "{problem}");
+
+        assert_eq!(
+            refused(|file| {
+                file.contamination
+                    .as_mut()
+                    .expect("a table")
+                    .by_read_group
+                    .remove(2);
+            })
+            .0,
+            "contamination.by_read_group"
+        );
+        assert_eq!(
+            refused(|file| {
+                file.sequencing_batches.by_read_group.remove(0);
+            })
+            .0,
+            "sequencing_batches.by_read_group"
+        );
+        assert_eq!(
+            refused(|file| {
+                file.repeat_tracts.slippage_group_by_read_group.remove(0);
+            })
+            .0,
+            "repeat_tracts.slippage_group_by_read_group"
+        );
+
+        // **A duplicate is the same defect wearing the right row count**, so the length check
+        // cannot catch it and the ordering check has to.
+        let (field, problem) = refused(|file| {
+            file.base_quality_calibration.by_read_group[2].read_group = 0;
+        });
+        assert_eq!(field, "base_quality_calibration.by_read_group");
+        assert!(problem.contains("repeats one or skips one"), "{problem}");
+    }
+
+    /// **A per-sample table that names a sample the file does not declare is refused**, and the
+    /// message names the one that differs rather than printing both lists.
+    ///
+    /// At the top of the committed input range a cohort is 3,000 samples (`CLAUDE.md`), and an
+    /// error carrying two 3,000-name lists is not a message.
+    #[test]
+    fn a_per_sample_table_that_names_a_stranger_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.inbreeding.by_sample[0].sample = "a plant this run never had".into();
+        });
+        assert_eq!(field, "inbreeding.by_sample");
+        assert!(problem.contains("a plant this run never had"), "{problem}");
+        assert!(
+            !problem.contains("Ailsa"),
+            "and it does not print the whole cohort: {problem}"
+        );
+
+        assert_eq!(
+            refused(|file| file.sequencing_batches.by_sample.truncate(1)).0,
+            "sequencing_batches.by_sample"
+        );
+
+        // **A duplicated name surfaces as the missing one**, which is the more useful half: a
+        // reader told "TS-1 appears twice" still has to work out whose row was overwritten, where
+        // one told the name that vanished can go and look at it.
+        let (_, problem) = refused(|file| {
+            file.inbreeding.by_sample[1].sample = file.inbreeding.by_sample[0].sample.clone();
+        });
+        assert!(
+            problem.contains("Ailsa"),
+            "the name that went missing is the one to report: {problem}"
+        );
+    }
+
+    /// **A zero multiplier is refused and a multiplier above one is not.**
+    ///
+    /// Above one is the ordinary case — it says the instrument was optimistic about its own
+    /// qualities. Zero multiplies every read's error probability to nothing, which charges the
+    /// whole library the error floor from a number that says the fit found no errors at all.
+    #[test]
+    fn a_calibration_that_would_charge_every_read_the_error_floor_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.base_quality_calibration.by_read_group[0]
+                .error_probability_multiplier
+                .value = 0.0;
+        });
+        assert!(field.ends_with("error_probability_multiplier"), "{field}");
+        assert!(problem.contains("error floor"), "{problem}");
+        accepted(|file| {
+            file.base_quality_calibration.by_read_group[0]
+                .error_probability_multiplier
+                .value = 4.5;
+        });
+    }
+
+    /// **The uncontaminated run written longhand is refused** — the first half of what the shape
+    /// used to accept.
+    ///
+    /// Read literally, a table whose every row is unmeasured takes the read likelihood's mixture
+    /// path with every fraction zero, where absence takes its plain formula. The two are different
+    /// computations over the same reads (spec §5, first row).
+    #[test]
+    fn a_contamination_table_nobody_was_measured_in_is_refused() {
+        let (field, problem) = refused(|file| {
+            for row in &mut file
+                .contamination
+                .as_mut()
+                .expect("the fixture has a table")
+                .by_read_group
+            {
+                row.measurement = None;
+            }
+        });
+        assert_eq!(field, "contamination");
+        assert!(problem.contains("longhand"), "{problem}");
+
+        assert_eq!(
+            refused(|file| file
+                .contamination
+                .as_mut()
+                .expect("a table")
+                .by_read_group
+                .clear())
+            .0,
+            "contamination.by_read_group"
+        );
+
+        // And absence itself is the legitimate way to say it.
+        accepted(|file| file.contamination = None);
+    }
+
+    /// **A measurement with no evidence behind it is refused** — the second half.
+    ///
+    /// Both counts zero is how the *in-memory* view spells *not measured*; this file spells it by
+    /// having no `measurement` key. Carried across, it reads back as *measured and found clean*,
+    /// and only the counts can tell those two apart.
+    #[test]
+    fn a_measurement_with_no_evidence_behind_it_is_refused() {
+        // **One count zero is refused as well as both**, because the predicate that decides this
+        // in memory is a conjunction: `ContaminationView::was_measured` is `markers > 0 && reads
+        // > 0`, so its negation is a disjunction. This row is the worse of the two — it says
+        // *measured, 3.1 in 100* in the file and reads back as never measured at all.
+        let (field, problem) = refused(|file| {
+            file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
+                Some(ContaminationMeasurement {
+                    share_of_reads_from_elsewhere: 0.031,
+                    markers_with_reads: 0,
+                    reads_on_markers: 90_233,
+                    fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                });
+        });
+        assert!(field.ends_with(".measurement"), "{field}");
+        assert!(problem.contains("markers_with_reads 0"), "{problem}");
+
+        // **And a share of exactly one is refused here rather than panicking later.**
+        // `FrozenContamination::new` asserts a half-open `[0, 1)` — "a whole library of another
+        // individual's DNA is not a sample of this one" — several frames after this point, in a
+        // message about a read group rather than about a file.
+        let (field, problem) = refused(|file| {
+            file.contamination.as_mut().expect("a table").by_read_group[0]
+                .measurement
+                .as_mut()
+                .expect("read group 0 was measured")
+                .share_of_reads_from_elsewhere = 1.0;
+        });
+        assert!(field.ends_with("share_of_reads_from_elsewhere"), "{field}");
+        assert!(problem.contains("below one"), "{problem}");
+
+        let (field, problem) = refused(|file| {
+            file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
+                Some(ContaminationMeasurement {
+                    share_of_reads_from_elsewhere: 0.0,
+                    markers_with_reads: 0,
+                    reads_on_markers: 0,
+                    fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                });
+        });
+        assert!(field.ends_with(".measurement"), "{field}");
+        assert!(
+            problem.contains("evidence of not being measured"),
+            "{problem}"
+        );
+
+        // **Measured and found clean stays legitimate**, which is the distinction being kept: a
+        // zero share with counts behind it is a real answer about a real library.
+        accepted(|file| {
+            file.contamination.as_mut().expect("a table").by_read_group[0].measurement =
+                Some(ContaminationMeasurement {
+                    share_of_reads_from_elsewhere: 0.0,
+                    markers_with_reads: 2903,
+                    reads_on_markers: 64118,
+                    fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
+                });
+        });
+    }
+
+    #[test]
+    fn an_inbreeding_coefficient_outside_its_range_is_refused() {
+        for value in [1.7, 1.0, -0.1] {
+            let (field, problem) =
+                refused(|file| file.inbreeding.by_sample[0].inbreeding_coefficient.value = value);
+            assert!(field.ends_with("inbreeding_coefficient"), "{field}");
+            assert!(
+                problem.contains("strictly below one"),
+                "at {value}: {problem}"
+            );
+        }
+        accepted(|file| file.inbreeding.by_sample[0].inbreeding_coefficient.value = 0.999);
+    }
+
+    /// **A cohort with no variation at all is a real answer and is not refused.**
+    ///
+    /// Spec §3.6: an alternative total of exactly zero is a fully invariant cohort, and the
+    /// flooring belongs to the per-locus expansion rather than here. A `validate` that required
+    /// both concentrations positive would refuse it.
+    #[test]
+    fn the_priors_two_concentrations_are_checked_without_flooring_the_invariant_cohort() {
+        accepted(|file| {
+            file.ordinary_site_prior.alternative_concentration_total = 0.0;
+            file.ordinary_site_prior.rung = SeedRung::ZeroDiversity;
+        });
+        assert!(
+            refused(|file| file.ordinary_site_prior.alternative_concentration_total = -1.0)
+                .1
+                .contains("not negative")
+        );
+        assert!(
+            refused(|file| file.ordinary_site_prior.reference_concentration = 0.0)
+                .0
+                .ends_with("reference_concentration")
+        );
+    }
+
+    #[test]
+    fn a_slippage_number_outside_its_range_is_refused() {
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].share_of_reads_that_slip = 1.4
+        });
+        assert!(field.ends_with("share_of_reads_that_slip"), "{field}");
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].shorter_share = -0.2
+        });
+        assert!(field.ends_with("shorter_share"), "{field}");
+        let (field, problem) =
+            refused(|file| file.repeat_tracts.slippage_by_stratum_and_group[0].fall_off = -0.1);
+        assert!(field.ends_with("fall_off"), "{field}");
+        assert!(problem.contains("not negative"), "{problem}");
+    }
+
+    /// **A number that is not a number is refused wherever the walk reaches one**, including in
+    /// the curves, which are provenance rather than terms in a score.
+    ///
+    /// A `NaN` in a curve changes no genotype — the curve records where a slippage number came
+    /// from, not what it is — but the writer can emit `nan` and the reader takes it back, so
+    /// without this a run would report `nan` as the slope of the line one of its numbers came off.
+    /// **These were unchecked until review**, which is how a claim of "every float" gets made about
+    /// a walk that reached the row's three numbers and stopped.
+    #[test]
+    fn a_curve_carrying_something_that_is_not_a_number_is_refused() {
+        let (field, problem) = refused(|file| {
+            if let LevelSmoothing::Blend { curve, .. } =
+                &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
+                    .level_origin
+                    .smoothing
+            {
+                curve.slope = f64::NAN;
+            } else {
+                panic!("the fixture's first row blends its level");
+            }
+        });
+        assert!(field.ends_with("blend.curve.slope"), "{field}");
+        assert!(problem.contains("not a number"), "{problem}");
+
+        let (field, _) = refused(|file| {
+            let shares = file.repeat_tracts.slippage_by_stratum_and_group[0]
+                .shares_origin
+                .as_mut()
+                .expect("the fixture's first row records its shares' origin");
+            if let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &mut shares.fall_off_smoothing {
+                curve.centre_repeats = f64::INFINITY;
+            } else {
+                panic!("the fixture's first row takes its fall-off from a period curve");
+            }
+        });
+        assert!(field.ends_with("curve.centre_repeats"), "{field}");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0]
+                .level_origin
+                .expected_slipped_reads = Some(f64::NAN);
+        });
+        assert!(
+            field.ends_with("level_origin.expected_slipped_reads"),
+            "{field}"
+        );
+    }
+
+    /// **`fall_off` is not bounded above, and that is a decision rather than an oversight.**
+    ///
+    /// Neither this file's shape nor the fit that produces it documents an upper bound for it.
+    /// A value above one would say a two-repeat slip is likelier than a one-repeat slip, which is
+    /// implausible — but nothing has established it is impossible, and refusing a fit nobody has
+    /// bounded would reject real data to enforce a guess.
+    #[test]
+    fn a_fall_off_above_one_is_accepted_because_nothing_documents_a_bound() {
+        accepted(|file| file.repeat_tracts.slippage_by_stratum_and_group[0].fall_off = 1.5);
+    }
+
+    #[test]
+    fn a_curve_weight_outside_zero_to_one_is_refused() {
+        let (field, _) = refused(|file| {
+            if let LevelSmoothing::Blend { curve_weight, .. } =
+                &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
+                    .level_origin
+                    .smoothing
+            {
+                *curve_weight = 1.9;
+            } else {
+                panic!("the fixture's first row blends its level");
+            }
+        });
+        assert!(field.ends_with("blend.curve_weight"), "{field}");
+
+        let (field, _) = refused(|file| {
+            let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
+                .shares_origin
+                .as_mut()
+                .expect("the fixture's third row records its shares' origin");
+            if let ShareSmoothing::Blend { curve_weight, .. } = &mut shares.shorter_share_smoothing
+            {
+                *curve_weight = -0.5;
+            } else {
+                panic!("the fixture's third row blends its shorter share");
+            }
+        });
+        assert!(field.ends_with("blend.curve_weight"), "{field}");
+    }
+
+    /// **A length spectrum that is not a distribution over an odd span is refused.**
+    ///
+    /// The array runs from `-span` to `+span` in whole repeats, so the middle entry *is* the
+    /// reference length. An even count has no middle; fewer than three cannot express a slip in
+    /// both directions; and shares that do not sum to one are not a distribution — which is what
+    /// a person who edits one share and does not rebalance the rest produces.
+    #[test]
+    fn a_length_spectrum_that_is_not_a_distribution_is_refused() {
+        // **Even and long enough**, which is what tests the parity rule rather than the length
+        // rule. A two-share spectrum is refused either way — it is also below three — so a
+        // fixture of two would leave a reader believing the parity check is exercised when
+        // deleting it changes nothing. Measured: with `[0.5, 0.5]` here, removing the parity
+        // clause left all 100 tests green.
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+                vec![0.25, 0.25, 0.25, 0.25];
+        });
+        assert!(field.ends_with("shares_by_repeat_offset"), "{field}");
+        assert!(problem.contains("odd and at least three"), "{problem}");
+
+        // And the short case, which is the other half of the same rule.
+        let (_, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+                vec![0.5, 0.5];
+        });
+        assert!(problem.contains("odd and at least three"), "{problem}");
+
+        let (_, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset = vec![1.0];
+        });
+        assert!(problem.contains("odd and at least three"), "{problem}");
+
+        let (_, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+                vec![0.1, 0.9, 0.1];
+        });
+        assert!(problem.contains("sums to"), "{problem}");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_period[0].shares_by_repeat_offset =
+                vec![0.2, 0.2, 0.2];
+        });
+        assert!(
+            field.starts_with("repeat_tracts.length_spectrum_by_period"),
+            "{field}"
+        );
+
+        assert!(
+            refused(|file| file.repeat_tracts.length_spectrum_by_stratum[0].concentration = 0.0)
+                .0
+                .ends_with("concentration")
+        );
+    }
+
+    /// **A normalised spectrum sits inside the tolerance and a hand edit outside it, with six
+    /// orders of magnitude of daylight on each side.**
+    ///
+    /// The fixture's own three-offset spectra sum to **exactly** one, so they do not exercise this
+    /// at all — an earlier version of this comment claimed they missed by one unit in the last
+    /// place, and that was recalled rather than measured. What does exercise it is a spectrum over
+    /// many offsets, where the fit's own division and addition leave a residue.
+    #[test]
+    fn the_tolerance_admits_a_normalised_spectrum_and_not_an_edit() {
+        fn normalised(offsets: usize) -> Vec<f64> {
+            let middle = offsets / 2;
+            let raw: Vec<f64> = (0..offsets)
+                .map(|at| 0.6_f64.powi((at as i32 - middle as i32).abs()))
+                .collect();
+            let total: f64 = raw.iter().sum();
+            raw.iter().map(|share| share / total).collect()
+        }
+
+        let mut worst: f64 = 0.0;
+        for offsets in [3, 5, 9, 21, 41, 101] {
+            let total: f64 = normalised(offsets).iter().sum();
+            worst = worst.max((total - 1.0).abs());
+        }
+        assert!(
+            worst < SHARES_MAY_MISS_ONE_BY / 1e6,
+            "a normalised spectrum misses one by at most {worst:e}, which should sit a million \
+             times inside the tolerance of {SHARES_MAY_MISS_ONE_BY:e}"
+        );
+
+        // The smallest edit a person makes to a share — a hundredth — is as far outside.
+        let edited: f64 = [0.1, 0.81, 0.1].iter().sum();
+        assert!(
+            (edited - 1.0).abs() > SHARES_MAY_MISS_ONE_BY * 1e6,
+            "and a hundredth moves the sum by {:e}",
+            (edited - 1.0).abs()
+        );
+    }
+
+    #[test]
+    fn a_substitution_rate_that_is_not_a_probability_is_refused() {
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.substitution_rate_by_stratum[0]
+                .rate
+                .value = 1.2
+        });
+        assert!(field.ends_with(".rate"), "{field}");
+        assert!(
+            refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0)
+                .0
+                .ends_with("repeat_tract_outlier_weight")
+        );
+        assert!(
+            refused(|file| file
+                .repeat_tracts
+                .fallback_length_spectrum_concentration
+                .value = 0.0)
+            .0
+            .ends_with("fallback_length_spectrum_concentration")
+        );
+    }
+
+    /// **A count at exactly the largest integer TOML holds is the writer's saturation marker.**
+    ///
+    /// Step B2 measured that a `u64` above `2^63 − 1` gave three different answers from three
+    /// readers, so every integer this writer emits saturates rather than emitting one nobody
+    /// agrees on. A count arriving back at exactly that value is a number the writer knows it
+    /// lost; read as evidence it would put 9.2 quintillion reads into a run's report.
+    #[test]
+    fn an_evidence_count_at_the_saturation_marker_is_refused() {
+        let saturated = i64::MAX as u64;
+        let (field, problem) = refused(|file| {
+            file.inbreeding.by_sample[0]
+                .inbreeding_coefficient
+                .observations = Some(EvidenceCount::CoveredPositions(saturated));
+        });
+        assert!(field.ends_with("observations.covered_positions"), "{field}");
+        assert!(problem.contains("saturates"), "{problem}");
+
+        let (field, _) = refused(|file| {
+            file.base_quality_calibration.by_read_group[0]
+                .error_probability_multiplier
+                .observations = Some(EvidenceCount::Reads(saturated));
+        });
+        assert!(field.ends_with("observations.reads"), "{field}");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.substitution_rate_by_stratum[0]
+                .rate
+                .observations = Some(EvidenceCount::BasesCompared(saturated));
+        });
+        assert!(field.ends_with("observations.bases_compared"), "{field}");
+
+        // One below it is a legitimate, if enormous, count.
+        accepted(|file| {
+            file.inbreeding.by_sample[0]
+                .inbreeding_coefficient
+                .observations = Some(EvidenceCount::CoveredPositions(saturated - 1));
+        });
+    }
+
+    /// **A contamination measurement's counts carry the same marker**, and they are not
+    /// `EvidenceCount`s, so they need their own check.
+    #[test]
+    fn a_contamination_count_at_the_saturation_marker_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.contamination.as_mut().expect("a table").by_read_group[0]
+                .measurement
+                .as_mut()
+                .expect("read group 0 was measured")
+                .reads_on_markers = i64::MAX as u64;
+        });
+        assert!(field.ends_with("measurement.reads_on_markers"), "{field}");
+        assert!(problem.contains("saturation marker"), "{problem}");
+    }
+
+    /// **A value that is not a number is reported as not a number**, not as out of range.
+    ///
+    /// `NaN` fails every comparison, so a range test written as `!(0.0..=1.0).contains(&value)`
+    /// calls it *outside [0, 1]* — which sends a reader looking through their file for a number
+    /// that is out of range, and every number they find is in range.
+    #[test]
+    fn a_value_that_is_not_a_number_says_so_rather_than_reporting_a_range() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (_, problem) =
+                refused(|file| file.inbreeding.by_sample[0].inbreeding_coefficient.value = value);
+            assert!(
+                problem.contains("not a number a score can be computed from"),
+                "at {value}: {problem}"
+            );
+            assert!(
+                !problem.contains("strictly below one"),
+                "and it does not claim a range instead: {problem}"
+            );
+        }
+    }
+
+    /// **Every refusal names a path that occurs in the file it refuses.**
+    ///
+    /// A path a reader cannot find is worse than no path: it sends them looking. This walks the
+    /// refusals whose field is a literal key rather than an indexed row and checks each appears
+    /// in the written text.
+    #[test]
+    fn every_refusal_names_a_key_the_file_actually_contains() {
+        let text = a_file_using_every_shape().to_toml();
+        for (field, _) in [
+            refused(|file| file.ploidy = 0),
+            refused(|file| file.fitted_from.samples.clear()),
+            refused(|file| file.fitted_from.read_groups.clear()),
+            refused(|file| file.inbreeding.by_sample.clear()),
+            refused(|file| file.ordinary_site_prior.reference_concentration = 0.0),
+            refused(|file| {
+                file.repeat_tracts
+                    .fallback_length_spectrum_concentration
+                    .value = 0.0
+            }),
+            refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0),
+            refused(|file| file.format_version = 9),
+            // **The nested paths, which are what an earlier version of this test could not
+            // see.** It compared only the last segment, so a refusal pointing at
+            // `shares_origin.shorter_share` passed on the strength of its final
+            // `curve_weight` — while `shorter_share` is a real sibling key of that same row,
+            // holding a perfectly good number. A path that names a healthy key is worse than
+            // one that names nothing, because the reader stops there.
+            refused(|file| {
+                let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
+                    .shares_origin
+                    .as_mut()
+                    .expect("the fixture's third row records its shares' origin");
+                if let ShareSmoothing::Blend { curve_weight, .. } =
+                    &mut shares.shorter_share_smoothing
+                {
+                    *curve_weight = -0.5;
+                } else {
+                    panic!("the fixture's third row blends its shorter share");
+                }
+            }),
+            refused(|file| {
+                if let LevelSmoothing::Blend { curve_weight, .. } =
+                    &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
+                        .level_origin
+                        .smoothing
+                {
+                    *curve_weight = 1.9;
+                } else {
+                    panic!("the fixture's first row blends its level");
+                }
+            }),
+        ] {
+            // **Every segment, not just the last.** A dotted path is only as good as its
+            // weakest link, and the segments that carry a row index are checked as their key
+            // name — `by_read_group[0]` against `by_read_group` — because the file writes its
+            // rows as inline tables inside an array and has no literal index anywhere.
+            for segment in field.split('.') {
+                let key = segment.split(['[', '(']).next().unwrap_or(segment);
+                if key.is_empty() {
+                    continue;
+                }
+                assert!(
+                    text.contains(key),
+                    "the refusal names {field}, whose segment {key} is not a key in the file"
+                );
+            }
+        }
+    }
+
+    /// **A warrant of `supplied` is not itself grounds for refusal.**
+    ///
+    /// Spec §1.2 goal 3 is a person editing one line, and the file's own header tells them to mark
+    /// what they changed as `supplied`. A `validate` that treated a hand-typed number as suspect
+    /// would refuse the file the instructions produce.
+    #[test]
+    fn a_hand_edited_value_marked_supplied_is_accepted() {
+        accepted(|file| {
+            file.base_quality_calibration.by_read_group[0].error_probability_multiplier =
+                WarrantedValue {
+                    value: 1.4,
+                    warrant: Warrant::Supplied,
+                    observations: None,
+                };
+        });
+    }
+}
