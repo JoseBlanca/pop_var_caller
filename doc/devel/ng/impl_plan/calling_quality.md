@@ -233,7 +233,7 @@ pile-up at 3 reads pays exactly zero and at 5 reads pays half**, which is the pr
 added for and the one that a transcription error in the ramp leaves silently missing. *Depends:*
 B2. *Source:* spec §6.2.
 
-**C3. The corrected quality.**  ☐
+**C3. The corrected quality.**  ✅
 One function: baseline `Phred` and `ArtifactTestCounts` in, `(Phred, ArtifactPenalties)` out, the
 quality being `baseline − allele_balance − strand_and_read_position` floored at zero. `None` counts
 never reach it — `LocusInference` already carries `Option<ArtifactTestCounts>` and returns `None`

@@ -530,6 +530,54 @@ const REFERENCE_SHARE_FLOOR: f64 = 0.01;
 /// The other end of [`REFERENCE_SHARE_FLOOR`]'s clamp.
 const REFERENCE_SHARE_CEILING: f64 = 0.99;
 
+// ---------------------------------------------------------------------------------------
+// The subtraction
+// ---------------------------------------------------------------------------------------
+
+/// **The site quality a file carries** — the worker's baseline, less what the shape of the
+/// variant reads does not support.
+///
+/// The two penalties are summed as **independent** evidence that the site is an artifact: one
+/// asks whether there are as many alternative reads as the calls imply, the other whether the
+/// ones there are came from everywhere they should have, and a site can fail either without
+/// telling you anything about the other.
+///
+/// **Floored at zero**, because a Phred is not negative — and a site whose penalties exceed its
+/// baseline is one no threshold would keep, so the arithmetic lost below the floor is exactly the
+/// arithmetic nobody needs.
+///
+/// # The one rule about the caller, and it is why the penalties come back
+///
+/// **A called locus carries exactly one quality at every moment** (§3.5). The worker writes the
+/// baseline into it and the output stage overwrites that with what this returns; the penalties
+/// travel *beside* the corrected quality rather than the baseline travelling beside it, so there
+/// is never a second quality field for a threshold to read by mistake. Production kept no
+/// corrected value at all and recomputed it at write time, and for sixteen days its emission gate
+/// compared the baseline while the corrected number went into the file — 40 sites emitted `PASS`
+/// with a written `QUAL` of 0 at 30× on GIAB HG002, and 64 at 50×.
+///
+/// **A locus with no summary never reaches here.** The worker hands back `None` where the
+/// candidate table is the reference alone, or where no read reached an alternative — a quarter of
+/// built loci on both benchmarks — and such a locus keeps its baseline unchanged. That branch is
+/// the output stage's, which is why this takes the summary by value rather than an `Option`.
+pub fn correct_site_quality(
+    baseline: Phred,
+    counts: &ArtifactTestCounts,
+) -> (Phred, ArtifactPenalties) {
+    let penalties = ArtifactPenalties {
+        allele_balance: allele_balance_penalty(counts),
+        strand_and_read_position: strand_and_read_position_penalty(counts),
+    };
+    let charged = f64::from(penalties.allele_balance.get())
+        + f64::from(penalties.strand_and_read_position.get());
+    let corrected = (f64::from(baseline.get()) - charged).max(0.0);
+    (
+        Phred::try_new(corrected as f32)
+            .expect("a difference of two finite non-negative Phreds, floored at zero"),
+        penalties,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,6 +1027,105 @@ mod tests {
         assert_eq!(
             strand_and_read_position_penalty(&strand_counts(60.0, 0.0, 0.0, 0.0)).get(),
             0.0
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The subtraction
+    // -----------------------------------------------------------------------------------
+
+    /// **A clean locus keeps its quality exactly.** Forty alternative reads where the genotypes
+    /// expect forty, drawn as evenly as the reference reads: both tests charge nothing and the
+    /// baseline comes back unchanged. This is the ordinary case, and *unchanged* has to mean the
+    /// same bits rather than nearly — a correction that shaved a fraction of a Phred off every
+    /// clean site would move a genome's worth of calls across a threshold.
+    #[test]
+    fn a_clean_locus_keeps_its_quality_exactly() {
+        let baseline = Phred::try_new(742.5).expect("a quality");
+        let (corrected, penalties) =
+            correct_site_quality(baseline, &strand_counts(60.0, 40.0, 20.0, 20.0));
+        assert_eq!(corrected, baseline);
+        assert_eq!(penalties.allele_balance.get(), 0.0);
+        assert_eq!(penalties.strand_and_read_position.get(), 0.0);
+    }
+
+    /// **The two penalties are summed, and the baseline is recoverable from what comes back.**
+    /// A locus failing both tests — one read in five carrying the alternative where the
+    /// genotypes say half should, *and* every one of them on the same strand — is charged both,
+    /// and `corrected + balance + strand` returns the baseline.
+    ///
+    /// That recoverability is the reason nothing needs a second quality field to hold the
+    /// baseline in (§3.5).
+    #[test]
+    fn a_locus_failing_both_tests_is_charged_both_and_the_baseline_is_recoverable() {
+        let counts = ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: 400.0,
+            reference_forward_reads: 200.0,
+            reference_placed_left_reads: 200.0,
+            alternative_reads: 100.0,
+            alternative_forward_reads: 100.0,
+            alternative_placed_left_reads: 50.0,
+            total_reads: 500.0,
+            genotype_expected_alternative_reads: 250.0,
+        };
+        let baseline = Phred::try_new(900.0).expect("a quality");
+        let (corrected, penalties) = correct_site_quality(baseline, &counts);
+        assert!(penalties.allele_balance.get() > 0.0);
+        assert!(penalties.strand_and_read_position.get() > 0.0);
+
+        let recovered = f64::from(corrected.get())
+            + f64::from(penalties.allele_balance.get())
+            + f64::from(penalties.strand_and_read_position.get());
+        assert!(
+            (recovered - 900.0).abs() < 0.01,
+            "the baseline is the corrected quality plus the two penalties: {recovered}"
+        );
+    }
+
+    /// **Penalties larger than the baseline floor at zero rather than going negative.** A
+    /// low-quality site that also fails both tests is the case, and a [`Phred`] has no negative
+    /// value to give it — so the subtraction is floored where it is done rather than where it is
+    /// read.
+    ///
+    /// The baseline is *not* recoverable here, and that is the deliberate exception: a site whose
+    /// penalties exceed its baseline is one no threshold would keep.
+    #[test]
+    fn penalties_larger_than_the_baseline_floor_at_zero() {
+        let counts = ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: 400.0,
+            reference_forward_reads: 200.0,
+            reference_placed_left_reads: 200.0,
+            alternative_reads: 100.0,
+            alternative_forward_reads: 100.0,
+            alternative_placed_left_reads: 50.0,
+            total_reads: 500.0,
+            genotype_expected_alternative_reads: 250.0,
+        };
+        let (corrected, penalties) =
+            correct_site_quality(Phred::try_new(30.0).expect("a weak quality"), &counts);
+        assert_eq!(corrected.get(), 0.0);
+        assert!(
+            f64::from(penalties.allele_balance.get())
+                + f64::from(penalties.strand_and_read_position.get())
+                > 30.0,
+            "the fixture has to charge more than the baseline for this to be about the floor"
+        );
+    }
+
+    /// **What comes back is what the two tests give, not a second computation of them.** A
+    /// correction that re-derived either penalty could drift from the function that names it;
+    /// this pins that the pair is assembled from the two published functions.
+    #[test]
+    fn the_pair_that_comes_back_is_what_the_two_tests_charge() {
+        let counts = strand_counts(60.0, 40.0, 38.0, 20.0);
+        let (_, penalties) =
+            correct_site_quality(Phred::try_new(500.0).expect("a quality"), &counts);
+        assert_eq!(penalties.allele_balance, allele_balance_penalty(&counts));
+        assert_eq!(
+            penalties.strand_and_read_position,
+            strand_and_read_position_penalty(&counts)
         );
     }
 
