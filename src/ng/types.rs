@@ -429,6 +429,14 @@ impl AlleleId {
 pub struct Phred(f32);
 
 impl Phred {
+    /// **Certainty on this scale, and the one value that needs no check.**
+    ///
+    /// Zero Phred is a probability of one — nothing charged, nothing ruled out. It is
+    /// [`try_new`](Self::try_new)'s answer for `0.0` written as a constant, so a caller
+    /// with nothing to say does not have to `expect` its way past a `Result` that
+    /// cannot fail.
+    pub const ZERO: Self = Self(0.0);
+
     /// The one check, and every constructor goes through it. A quality below
     /// zero or a `NaN` says the caller's arithmetic went wrong; an infinite one
     /// says the scored probability is exactly zero, which is a different event

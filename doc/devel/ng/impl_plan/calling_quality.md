@@ -202,7 +202,7 @@ D1's to measure.
 
 ### Milestone C — the two tests, and the subtraction
 
-**C1. The allele-balance penalty.**  ☐
+**C1. The allele-balance penalty.**  ✅
 A function of `ArtifactTestCounts`: the expected alternative-read fraction is
 `genotype_expected_alternative_reads / total_reads`, clamped as production clamps it, and the
 penalty is the tail of the observed split against it. **Both guards, and both are load-bearing
@@ -213,6 +213,13 @@ error and a binomial against a probability near one reads them as a deficit. Uni
 well-balanced heterozygote pays about nothing; a 20%-of-50% split at depth pays and pays more at
 twice the depth; an excess pays zero; a cohort at 0.95 expected pays zero. *Depends:* B2.
 *Source:* spec §6.2, §6.3.
+
+**Measured, and the ratio is the point:** one read in five where the genotypes say half should
+costs **46.2** Phred at 50 reads and **430.8** at 500. A penalty that did not grow with depth
+would be swamped by a site quality that does. **And neither end of the expected-share clamp can
+bind** while the deficit rule and the 0.9 guard stand — the first puts the share above
+`1 / total_reads` wherever the tail is reached, the second returns before the ceiling. Both are
+kept as production has them, as the net under two constants somebody may move.
 
 **C2. The strand and read-position penalty, with its ramp.**  ☐
 The larger of two tails — the alternative reads' forward-strand fraction, and their placed-left

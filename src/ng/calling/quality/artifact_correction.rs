@@ -28,6 +28,7 @@
 //! is unwritten. This module supplies the arithmetic and nothing else.
 
 use crate::genetics::lgamma;
+use crate::ng::calling::quality::ArtifactTestCounts;
 use crate::ng::types::Phred;
 
 /// **How much the site quality each artifact test took away.**
@@ -360,9 +361,111 @@ fn incomplete_beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
     fraction
 }
 
+// ---------------------------------------------------------------------------------------
+// The first test: does the split match what the called genotypes imply?
+// ---------------------------------------------------------------------------------------
+
+/// **How much of the site quality the alternative reads' *share* does not support.**
+///
+/// A single heterozygote should show about half its reads carrying the alternative; a cohort
+/// where two samples in sixty carry one copy each should show about that fraction overall. The
+/// penalty is the two-sided binomial improbability of the observed split against that
+/// expectation.
+///
+/// **The expectation comes from the called genotypes and never from the fitted allele
+/// frequency.** The frequency adapts to the artifact and would excuse it; the genotypes do not
+/// (§6.2). It arrives already summed, as
+/// [`genotype_expected_alternative_reads`](super::ArtifactTestCounts::genotype_expected_alternative_reads).
+///
+/// # Two guards, both inherited and both load-bearing
+///
+/// **Only a deficit is charged.** These artifacts present *fewer* alternative reads than a real
+/// call at that frequency would. An excess is a different phenomenon and this test says nothing
+/// about it.
+///
+/// **The test is skipped where the genotypes expect nearly all the reads to be alternative**
+/// ([`ALLELE_BALANCE_SKIPPED_AT_OR_ABOVE`]). A homozygous-variant sample's handful of reference
+/// reads is sequencing error; a binomial against a probability near one reads that as a deficit
+/// and charges for it.
+///
+/// **No ramp, and that is a measurement rather than a symmetry.** Production's per-record
+/// decomposition found this test at zero for true heterozygotes at every depth while growing with
+/// depth for false positives; it is the strand test next door that had the power problem (§6.2).
+///
+/// Production's, inline in [`refine_qual`](../../../../src/vcf/qual_refine.rs).
+pub fn allele_balance_penalty(counts: &ArtifactTestCounts) -> Phred {
+    // A locus with no alternative reads has nothing to weigh. It cannot arise from a run — the
+    // worker hands back no summary at all in that case — but this is where a division by zero
+    // would be, and two comparisons are cheaper than the argument that it cannot happen.
+    if counts.total_reads < 1.0 || counts.alternative_reads < 1.0 {
+        return NO_PENALTY;
+    }
+    let expected_share = (counts.genotype_expected_alternative_reads / counts.total_reads)
+        .clamp(EXPECTED_SHARE_FLOOR, EXPECTED_SHARE_CEILING);
+    if expected_share >= ALLELE_BALANCE_SKIPPED_AT_OR_ABOVE {
+        return NO_PENALTY;
+    }
+    if counts.alternative_reads >= expected_share * counts.total_reads {
+        return NO_PENALTY;
+    }
+    as_penalty(two_sided_binomial_tail_phred(
+        counts.alternative_reads,
+        counts.total_reads,
+        expected_share,
+    ))
+}
+
+/// **The expected alternative share is held strictly inside `(0, 1)`**, because the binomial
+/// tail takes a logarithm at both ends.
+///
+/// **Neither end can bind while the two guards above stand**, and saying so is worth more than
+/// the clamp: the deficit rule reaches the tail only where `alternative_reads` is below
+/// `expected_share × total_reads` with at least one alternative read, which puts the share above
+/// `1 / total_reads` — never at the floor; and [`ALLELE_BALANCE_SKIPPED_AT_OR_ABOVE`] returns
+/// before any share reaches [`EXPECTED_SHARE_CEILING`]. Both are production's and both are kept,
+/// as the net under two constants somebody may move.
+const EXPECTED_SHARE_FLOOR: f64 = 1e-6;
+
+/// The other end of [`EXPECTED_SHARE_FLOOR`]'s clamp, which carries the reasoning for both.
+const EXPECTED_SHARE_CEILING: f64 = 0.999;
+
+/// Zero Phred — what both tests return where they have nothing to weigh.
+const NO_PENALTY: Phred = Phred::ZERO;
+
+/// A finite non-negative Phred from the tail, which is what
+/// [`two_sided_binomial_tail_phred`] always returns: it floors its probability at `1e-300`, so
+/// the largest penalty expressible is about 3,000, and it takes `max(0.0)` at the end.
+fn as_penalty(phred: f64) -> Phred {
+    Phred::try_new(phred as f32).expect(
+        "a two-sided binomial tail is a finite non-negative Phred: its probability is floored \
+         at 1e-300 before the logarithm and the result takes max(0.0)",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::types::AlleleId;
+
+    /// A locus's pooled counts, with the two the allele-balance test reads spelled out and the
+    /// strand ones set to a fair split so they charge nothing.
+    fn balanced_counts(
+        reference_reads: f64,
+        alternative_reads: f64,
+        genotype_expected_alternative_reads: f64,
+    ) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads,
+            reference_forward_reads: reference_reads / 2.0,
+            reference_placed_left_reads: reference_reads / 2.0,
+            alternative_reads,
+            alternative_forward_reads: alternative_reads / 2.0,
+            alternative_placed_left_reads: alternative_reads / 2.0,
+            total_reads: reference_reads + alternative_reads,
+            genotype_expected_alternative_reads,
+        }
+    }
 
     /// **The exact discrete sum, which is what the closed form above is checked against.**
     ///
@@ -502,6 +605,114 @@ mod tests {
             deep > shallow,
             "the same four-in-ten split costs more when it is seen four hundred times in a \
              thousand: {deep} against {shallow}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The allele-balance test
+    // -----------------------------------------------------------------------------------
+
+    /// **A heterozygote showing half its reads costs nothing.** Twenty reference reads and
+    /// twenty alternative, at genotypes expecting twenty — the ordinary case, and the one the
+    /// whole genome spends its life in.
+    #[test]
+    fn a_split_the_genotypes_predict_costs_nothing() {
+        let counts = balanced_counts(20.0, 20.0, 20.0);
+        assert_eq!(allele_balance_penalty(&counts).get(), 0.0);
+    }
+
+    /// **A deficit costs, and costs about ten times more when the depth is ten times greater.**
+    /// One read in five carries the alternative where the called genotypes say half should —
+    /// the shape of an artifact that recurs at a steady fraction of the depth. At 50 reads that
+    /// is charged **46.2** Phred and at 500 it is **430.8**.
+    ///
+    /// **That ratio is the whole point of the correction** (§6.1). The site quality this is
+    /// subtracted from also grows about linearly with the variant-read count, so a penalty that
+    /// did *not* grow with depth would be swamped at 500 reads and the caller would go on
+    /// getting more confident about a false site the deeper it was sequenced.
+    #[test]
+    fn a_deficit_costs_and_costs_more_at_depth() {
+        let shallow = f64::from(allele_balance_penalty(&balanced_counts(40.0, 10.0, 25.0)).get());
+        let deep = f64::from(allele_balance_penalty(&balanced_counts(400.0, 100.0, 250.0)).get());
+        assert!(
+            (shallow - 46.22).abs() < 0.01,
+            "fifty reads at one in five against a half: {shallow}"
+        );
+        assert!(
+            (deep - 430.81).abs() < 0.01,
+            "five hundred reads at one in five against a half: {deep}"
+        );
+        assert!(
+            deep / shallow > 8.0,
+            "ten times the depth at the same split has to cost close to ten times as much, or \
+             the penalty is swamped by a site quality that does grow with depth: {deep} against \
+             {shallow}"
+        );
+    }
+
+    /// **An excess is charged nothing, and that is a rule rather than an oversight.** These
+    /// artifacts present *fewer* alternative reads than a real call at that frequency would; an
+    /// excess is a different phenomenon this test says nothing about (§6.2). Thirty-five of
+    /// fifty reads where the genotypes expect twenty-five is as far from the expectation as the
+    /// charged fixture above, in the other direction, and it costs zero.
+    #[test]
+    fn an_excess_of_alternative_reads_is_charged_nothing() {
+        let counts = balanced_counts(15.0, 35.0, 25.0);
+        assert_eq!(allele_balance_penalty(&counts).get(), 0.0);
+        // The mirror image is charged, so the fixture is not simply too mild to register.
+        assert!(allele_balance_penalty(&balanced_counts(35.0, 15.0, 25.0)).get() > 0.0);
+    }
+
+    /// **A cohort of homozygous-variant samples is skipped rather than charged.** Its handful of
+    /// reference reads is sequencing error, and a binomial against a probability near one reads
+    /// that as a deficit. Ninety-six of a hundred reads carry the alternative where the
+    /// genotypes expect all hundred: without the guard that is charged 12.7 Phred, with it
+    /// nothing.
+    #[test]
+    fn a_cohort_the_genotypes_call_homozygous_variant_is_skipped() {
+        let counts = balanced_counts(4.0, 96.0, 100.0);
+        assert_eq!(allele_balance_penalty(&counts).get(), 0.0);
+        // What the guard is worth: the same split weighed at the highest share the guard still
+        // lets through.
+        let just_under_the_guard = two_sided_binomial_tail_phred(96.0, 100.0, 0.89);
+        assert!(
+            just_under_the_guard > 10.0,
+            "the skipped fixture would be charged {just_under_the_guard} Phred just below the \
+             guard, so the guard is doing work"
+        );
+    }
+
+    /// **Reads nobody's genotype expects are charged nothing, and that is the deficit rule
+    /// rather than a gap.**
+    ///
+    /// Ten alternative reads where every called genotype is homozygous reference looks like the
+    /// worst artifact there is, and this test says nothing about it — because *more* alternative
+    /// reads than expected is an excess, and only a deficit is charged (§6.2). What catches that
+    /// site is the strand test beside this one, or nothing.
+    ///
+    /// **It also means neither end of the expected-share clamp can bind.** The deficit branch
+    /// needs `alternative_reads < expected_share × total_reads` with at least one alternative
+    /// read, so the share is above `1 / total_reads` wherever the tail is reached — never at the
+    /// floor — and the guard above returns before any share reaches the ceiling. Both are kept
+    /// as production has them, as the net under two constants somebody may move.
+    #[test]
+    fn reads_nobodys_genotype_expects_are_an_excess_and_charged_nothing() {
+        let counts = balanced_counts(90.0, 10.0, 0.0);
+        assert_eq!(allele_balance_penalty(&counts).get(), 0.0);
+    }
+
+    /// **A locus with nothing to weigh is charged nothing.** No summary like this reaches the
+    /// test from a run — the worker hands back `None` where no read reached an alternative —
+    /// but the guard is where a division by zero would be.
+    #[test]
+    fn a_locus_with_no_reads_is_charged_nothing() {
+        assert_eq!(
+            allele_balance_penalty(&balanced_counts(0.0, 0.0, 0.0)).get(),
+            0.0
+        );
+        assert_eq!(
+            allele_balance_penalty(&balanced_counts(10.0, 0.0, 5.0)).get(),
+            0.0
         );
     }
 
