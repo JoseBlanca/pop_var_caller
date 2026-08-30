@@ -374,8 +374,12 @@ survives is an open question the arch doc records** (arch §7).
 > 2. ✅ **Spec §7's byte-identity holds only while every timestamp renders to the same width**, and
 >    nothing enforces it. **Ruled 2026-08-30: not worth chasing.** The writer is unchanged and §7
 >    keeps its wording; a test records where the promise stops.
-> 3. ⏳ **Spec §6.7's table and §7's instruction list are short seven error classes, not three** —
->    the count in the first version of this checkpoint was wrong. With the owner for a ruling.
+> 3. ✅ **Spec §6.7 was short seven error classes, not the three this checkpoint first claimed.**
+>    **Ruled 2026-08-30: §6.7 lists all thirteen and §7 stays at five**, with a sentence saying why
+>    — its column is *what the user has to do*, and it loses its point once *fix your own code* is
+>    in it. Four of the seven needed no new instruction (a malformed header and a self-disagreeing
+>    file are both *rebuild it*; an unknown field encoding is *upgrade the reader*); the other
+>    three are a programmer's mistake or the machine's.
 >
 > **What Milestone H leaves owed** is arch §7's question, now much narrower. The skip's value is
 > measured on stores built from a production `.psp`, which names about 3.4 % of the reads ng will

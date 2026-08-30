@@ -809,7 +809,9 @@ before committing to a run.
 
 ### 6.7 What the caller sees when something is wrong
 
-The five error classes of §7, and which operation raises each:
+**Every class a caller can meet, and which operation raises each.** §7's five are the ones an
+*operator* acts on; this list is longer because it also names the ones a *programmer* or the
+machine causes.
 
 | | raised by |
 |---|---|
@@ -819,9 +821,28 @@ The five error classes of §7, and which operation raises each:
 | a record needs more of the reader's buffer than it allows one to hold | any record walk |
 | a block fails to decompress, or a record runs past its block | any record walk |
 | a record out of coordinate order | `push` |
+| **not an ng psp at all** — the first bytes are not this format's magic | `open`, `read_header`, `append`, `replace_trailer` |
+| **the header is an ng psp's and does not parse** | `open`, `read_header`, `append`, `replace_trailer` |
+| **the file disagrees with itself outside its blocks** — the footer's offsets, the index's checksum | `open`, `append`, `replace_trailer`, any record walk |
+| **a record's field encoding is one this reader does not know** | any record walk |
+| **a record-buffer ceiling at or under the buffer it caps** | setting that ceiling |
+| **a block asked for by an ordinal the file does not have** | `records_from_block` |
+| **the read itself failed** | any operation that touches the file |
 
 **None of these may reach a caller as a half-built record**, and none is a panic: a corrupt file is
 an input, not a bug.
+
+**Four of the seven added rows need no new instruction**, which is why §7 stays at five: a
+malformed header and a file that disagrees with itself are both *rebuild it*, like a corrupt block;
+an unknown field encoding is *upgrade the reader*, like an unknown format version. What they earn
+is a row saying **which operation** raises them, which is this section's job and not §7's.
+
+**⚠ The first of them is about a foreign file and never a damaged one.** A *truncated* ng psp is
+never reported as *not an ng psp*: the magic is compared only after a twelve-byte read of the magic
+and the declared body length has succeeded, so a file cut inside its own magic is refused for being
+too short before its first four bytes are looked at. Measured over every cut of a finished psp: **0
+of 3,136 cuts below the header** came back as the wrong kind of file. That is the right answer —
+*you handed me the wrong file* would send its owner looking for a file that is not missing.
 
 **⚠ `replace_trailer` joined the second row on 2026-08-28 (the owner), and it is a correction the
 implementation earned.** This section originally gave that operation two refusals — no valid
@@ -843,6 +864,12 @@ to 346 kB depending on the reader's buffer choices, and the budget is 500 kB.**
 
 **Errors.** Five classes, and they want to be distinguishable because they mean different things to
 whoever sees them:
+
+**These five are what an *operator* has to act on**, which is what the second column is for. The
+module distinguishes more than five — §6.7 lists them all — and the rest are a programmer's mistake
+(a block ordinal the file does not have, a buffer ceiling under its own buffer) or the machine's (a
+failed read). They are deliberately not here: a table whose column is *what the user has to do*
+loses its point once *fix your own code* is in it.
 
 | what happened | what the user has to do |
 |---|---|
