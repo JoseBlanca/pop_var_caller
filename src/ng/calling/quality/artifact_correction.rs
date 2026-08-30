@@ -242,12 +242,32 @@ fn binomial_at_most(at_most: u64, total: u64, share: f64) -> f64 {
     regularised_incomplete_beta((total - at_most) as f64, (at_most + 1) as f64, 1.0 - share)
 }
 
-/// `P(X ≥ at_least)` for `X` binomial on `total` reads at `share`.
+/// `P(X ≥ at_least)` for `X` binomial on `total` reads at `share` — exact, through the same
+/// incomplete beta from the other side: `P(X ≥ k) = I_p(k, n − k + 1)`.
+///
+/// **Not `1 − P(X ≤ k − 1)`, which is what production writes and what this did until the
+/// differential caught it.** Both are the same quantity in exact arithmetic. In `f64` they are
+/// not: where the answer is a deep tail — say `1e-14`, which is an ordinary artifact site at 60
+/// reads — the cumulative it is subtracted from is `1 − 1e-14`, and the subtraction throws away
+/// fourteen of the sixteen digits it had. The identity above computes the small number directly
+/// and keeps them.
+///
+/// **Measured, on the locus that found it:** three alternative reads of 63 against an expected
+/// half. Through the subtraction ng corrected a 900-Phred baseline to 759.5790 where production's
+/// exact enumeration gives 759.5657 — a **0.013 Phred** disagreement, from a tail whose two
+/// flanks are each about `1e-14`. Through the identity the two agree to `4.6e-6` Phred on that
+/// locus, and to `7.7e-12` across the whole grid the tests below sweep.
+///
+/// This is the one place ng's arithmetic departs from the code it was ported from, and it
+/// departs toward the answer production's own exact path gives.
 fn binomial_at_least(at_least: u64, total: u64, share: f64) -> f64 {
     if at_least == 0 {
         return 1.0;
     }
-    1.0 - binomial_at_most(at_least - 1, total, share)
+    if at_least > total {
+        return 0.0;
+    }
+    regularised_incomplete_beta(at_least as f64, (total - at_least + 1) as f64, share)
 }
 
 /// The log of the binomial probability of exactly `count` of `total` at `share`.
@@ -637,10 +657,21 @@ mod tests {
     /// ninety-nine in a hundred — both wider than what the two artifact tests will ask for,
     /// which is the point — and **every** outcome from none to all: 8,155 comparisons.
     ///
-    /// **Measured: they agree to `7.0e-13` in the tail probability**, at 746 of 999 reads
-    /// against an expected three in four. That is three orders of magnitude below what this
-    /// asserts, and on the Phred scale the whole disagreement is `3e-12` — nothing a quality
-    /// column could show.
+    /// # It is compared on the Phred scale, and the first version of this test was not
+    ///
+    /// Comparing the two *probabilities* to an absolute tolerance says nothing about a deep
+    /// tail. An artifact site's tail is `1e-14`; two answers that differ by half of it are
+    /// `5e-15` apart, which passes any absolute bound a well-behaved locus would need — and
+    /// they differ by 1.5 Phred, which is a number in a file. **The Phred scale is the relative
+    /// comparison written in the units the answer is used in**, and it is what a tolerance here
+    /// has to be in.
+    ///
+    /// That is not hypothetical: the absolute version of this test passed while the far flank
+    /// was computed as `1 − cumulative`, and what caught that was the differential against
+    /// production two milestones later. See [`binomial_at_least`].
+    ///
+    /// **Measured: the two agree to `7.7e-12` Phred**, at 243 reads of 999 against an expected
+    /// three in four.
     #[test]
     fn the_closed_form_agrees_with_the_exact_sum_across_the_grid() {
         let mut worst = 0.0_f64;
@@ -648,8 +679,11 @@ mod tests {
         for &total in &[1_u64, 2, 3, 5, 10, 37, 100, 999] {
             for &share in &[0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
                 for observed in 0..=total {
-                    let closed = two_sided_binomial_tail(observed as f64, total as f64, share);
-                    let exact = exact_two_sided_binomial_tail(observed as f64, total as f64, share);
+                    let closed = -10.0
+                        * two_sided_binomial_tail(observed as f64, total as f64, share).log10();
+                    let exact = -10.0
+                        * exact_two_sided_binomial_tail(observed as f64, total as f64, share)
+                            .log10();
                     let difference = (closed - exact).abs();
                     if difference > worst {
                         worst = difference;
@@ -660,7 +694,7 @@ mod tests {
         }
         assert!(
             worst < 1e-9,
-            "the closed form and the exact sum disagree by {worst} at {worst_case:?}"
+            "the closed form and the exact sum disagree by {worst} Phred at {worst_case:?}"
         );
     }
 
@@ -760,7 +794,7 @@ mod tests {
     /// **A deficit costs, and costs about ten times more when the depth is ten times greater.**
     /// One read in five carries the alternative where the called genotypes say half should —
     /// the shape of an artifact that recurs at a steady fraction of the depth. At 50 reads that
-    /// is charged **46.2** Phred and at 500 it is **430.8**.
+    /// is charged **46.2** Phred and at 500 it is **427.8**.
     ///
     /// **That ratio is the whole point of the correction** (§6.1). The site quality this is
     /// subtracted from also grows about linearly with the variant-read count, so a penalty that
@@ -775,7 +809,7 @@ mod tests {
             "fifty reads at one in five against a half: {shallow}"
         );
         assert!(
-            (deep - 430.81).abs() < 0.01,
+            (deep - 427.80).abs() < 0.01,
             "five hundred reads at one in five against a half: {deep}"
         );
         assert!(

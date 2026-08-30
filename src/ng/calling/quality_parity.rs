@@ -65,10 +65,12 @@
 //! [`loop_parity`](super::loop_parity) found.
 
 use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
+use crate::ng::calling::quality::ArtifactTestCounts;
+use crate::ng::calling::quality::artifact_correction::correct_site_quality;
 use crate::ng::calling::quality::score_uncorrected_site_quality;
 use crate::ng::calling::{CallingScratch, CandidateAlleles, GenotypeTable};
 use crate::ng::locus_generation::LocusKind;
-use crate::ng::types::{LogProb, Ploidy};
+use crate::ng::types::{AlleleId, LogProb, Phred, Ploidy};
 use crate::pileup_record::AlleleSupportStats;
 use crate::var_calling::per_group_merger::MergedAllele;
 use crate::var_calling::posterior_engine::backends::InterpUnivariateSimdMath;
@@ -76,6 +78,8 @@ use crate::var_calling::posterior_engine::{
     DEFAULT_REF_PSEUDOCOUNT, DEFAULT_SNP_ALT_PSEUDOCOUNT, EmInputs, MergedAllelesView,
     PosteriorEngineConfig, RecordLocus, RecordScratch, run_em_columnar,
 };
+use crate::var_calling::posterior_engine::{EmDiagnostics, PosteriorRecord};
+use crate::vcf::qual_refine::refine_qual;
 
 /// The four bases, so that each allele of a fixture is a different one byte long.
 const BASES: &[u8] = b"ACGT";
@@ -510,5 +514,286 @@ mod tests {
             (ng - f64::from(MAX_SITE_QUALITY)).abs() < TOLERANCE,
             "ng caps at its ceiling rather than following production upward: {ng}"
         );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // The artifact correction, against the code it was ported from
+    // -----------------------------------------------------------------------------------
+
+    /// **One sample's reads at a biallelic locus**, as both corrections are handed them: how
+    /// many reads showed each allele, how many of those were on the forward strand, how many
+    /// were placed left, and which genotype the sample was called.
+    struct SampleReads {
+        /// `(reads, forward, placed left)` for the reference allele.
+        reference: (u32, u32, u32),
+        /// The same three for the alternative.
+        alternative: (u32, u32, u32),
+        /// Index into [`GENOTYPES`].
+        genotype: usize,
+    }
+
+    /// The three diploid genotypes of a biallelic locus, as allele indices — the table
+    /// production's correction reads a sample's called genotype out of. **Supplied by the
+    /// fixture rather than borrowed from either side's enumeration**, so a difference between
+    /// the two corrections cannot be a difference between two genotype orders; that agreement is
+    /// [`genotype_table_parity`](super::genotype_table_parity)'s to pin, and it does.
+    const GENOTYPES: [[u8; 2]; 3] = [[0, 0], [0, 1], [1, 1]];
+
+    fn stats((reads, forward, placed_left): (u32, u32, u32)) -> AlleleSupportStats {
+        AlleleSupportStats {
+            num_obs: reads,
+            // The three moments below reach the VCF's annotations and neither correction reads
+            // them; one plausible shape keeps the record well-formed.
+            q_sum: -3.0 * f64::from(reads),
+            fwd: forward,
+            placed_left,
+            placed_start: 0,
+            mapq_sum: reads * 60,
+            mapq_sum_sq: u64::from(reads) * 3_600,
+        }
+    }
+
+    /// **The corrected quality production computes** from these reads and this baseline.
+    fn production_corrected_quality(samples: &[SampleReads], baseline: f64) -> f64 {
+        let alleles: Vec<MergedAllele> = b"AT"
+            .iter()
+            .map(|&base| MergedAllele {
+                seq: vec![base],
+                is_compound: false,
+                constituents: Vec::new(),
+            })
+            .collect();
+        let scalars: Vec<AlleleSupportStats> = samples
+            .iter()
+            .flat_map(|sample| [stats(sample.reference), stats(sample.alternative)])
+            .collect();
+        let record = PosteriorRecord {
+            locus: RecordLocus {
+                chrom_id: 1,
+                start: 1_000,
+                end: 1_000,
+            },
+            alleles,
+            ploidy: 2,
+            n_samples: samples.len(),
+            n_genotypes: GENOTYPES.len(),
+            allele_frequencies: vec![0.5, 0.5],
+            compound_frequencies: vec![None, None],
+            posteriors: vec![1.0 / 3.0; samples.len() * GENOTYPES.len()],
+            best_genotype: samples.iter().map(|sample| sample.genotype).collect(),
+            gq_phred: vec![30.0; samples.len()],
+            qual_phred: baseline,
+            scalars,
+            other_scalars: Vec::new(),
+            chain_anchor_flags: vec![false; samples.len() * 2],
+            diagnostics: EmDiagnostics {
+                iterations: 3,
+                final_max_delta_p: 1e-5,
+                converged: true,
+            },
+            paralog_posterior: None,
+        };
+        let table: Vec<Vec<u8>> = GENOTYPES.iter().map(|genotype| genotype.to_vec()).collect();
+        refine_qual(&record, &table, baseline)
+    }
+
+    /// **The nine numbers ng's correction reads**, pooled from the same samples.
+    ///
+    /// This repeats the definition rather than calling the worker that fills it in a run
+    /// ([`summarise_condition`](super::inference::summarise_condition)), because that function
+    /// needs a whole locus of evidence and a finished frequency loop to reach. What it pools is
+    /// pinned by its own tests; **what this fixture has to get right is only that both sides are
+    /// given the same locus**, and a disagreement caused by pooling it differently shows up here
+    /// as a difference between the two corrections, which is exactly what the test is watching
+    /// for.
+    fn ng_summary(samples: &[SampleReads]) -> ArtifactTestCounts {
+        let mut counts = ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: 0.0,
+            reference_forward_reads: 0.0,
+            reference_placed_left_reads: 0.0,
+            alternative_reads: 0.0,
+            alternative_forward_reads: 0.0,
+            alternative_placed_left_reads: 0.0,
+            total_reads: 0.0,
+            genotype_expected_alternative_reads: 0.0,
+        };
+        for sample in samples {
+            let (reference_reads, reference_forward, reference_placed_left) = sample.reference;
+            let (alternative_reads, alternative_forward, alternative_placed_left) =
+                sample.alternative;
+            counts.reference_reads += f64::from(reference_reads);
+            counts.reference_forward_reads += f64::from(reference_forward);
+            counts.reference_placed_left_reads += f64::from(reference_placed_left);
+            counts.alternative_reads += f64::from(alternative_reads);
+            counts.alternative_forward_reads += f64::from(alternative_forward);
+            counts.alternative_placed_left_reads += f64::from(alternative_placed_left);
+            let depth = f64::from(reference_reads) + f64::from(alternative_reads);
+            counts.total_reads += depth;
+            let alternative_copies = GENOTYPES[sample.genotype]
+                .iter()
+                .filter(|&&allele| allele == 1)
+                .count();
+            counts.genotype_expected_alternative_reads += (alternative_copies as f64 / 2.0) * depth;
+        }
+        counts
+    }
+
+    /// **The tolerance the two corrections are compared to.** ng's answer crosses into a
+    /// `Phred`, whose unit in the last place at the 900 Phred these fixtures start from is about
+    /// `6e-5`. **Measured: the largest disagreement across the six loci below is `2.5e-5` Phred**,
+    /// at one thin heterozygote among ten at the deeper of that fixture's two scales.
+    const CORRECTION_TOLERANCE: f64 = 1e-3;
+
+    fn assert_corrections_agree(samples: &[SampleReads], baseline: f64, what: &str) {
+        let production = production_corrected_quality(samples, baseline);
+        let (ng, _) = correct_site_quality(
+            Phred::try_new(baseline as f32).expect("a baseline quality"),
+            &ng_summary(samples),
+        );
+        let ng = f64::from(ng.get());
+        assert!(
+            (production - ng).abs() < CORRECTION_TOLERANCE,
+            "{what}: ng corrects to {ng} where production corrects to {production}, a \
+             difference of {}",
+            (production - ng).abs()
+        );
+    }
+
+    /// **Production's ramp endpoints must be the compiled-in ones for any of this to mean
+    /// anything.** It reads `PVC_BIAS_RAMP` once into a `OnceLock`, so a value set in the
+    /// environment would silently give the two sides different ramps and every comparison below
+    /// would be measuring that instead. ng has no such knob — its endpoints are typed constants,
+    /// which is the point of §3.5 — so the check has only one side to make.
+    #[test]
+    fn productions_ramp_is_not_overridden_from_the_environment() {
+        assert!(
+            std::env::var("PVC_BIAS_RAMP").is_err(),
+            "PVC_BIAS_RAMP is set, so production's strand ramp is not the (3, 7) ng compiles \
+             in and the differential below is comparing two different tests"
+        );
+    }
+
+    /// **A clean heterozygote: both sides take nothing off.** Ten samples, each half reference
+    /// and half alternative reads, evenly drawn on both axes, every one called heterozygous.
+    #[test]
+    fn a_clean_cohort_is_corrected_the_same_by_both() {
+        let samples: Vec<SampleReads> = (0..10)
+            .map(|_| SampleReads {
+                reference: (20, 10, 10),
+                alternative: (20, 10, 10),
+                genotype: 1,
+            })
+            .collect();
+        assert_corrections_agree(&samples, 900.0, "ten clean heterozygotes");
+    }
+
+    /// **An allele-balance deficit, at two depths.** One sample in ten is called heterozygous
+    /// and the alternative reads are a fifth of what that implies — the artifact shape — and the
+    /// same locus again at ten times the depth, where the penalty is an order of magnitude
+    /// larger and any disagreement in the tail would be too.
+    #[test]
+    fn an_allele_balance_deficit_is_corrected_the_same_at_two_depths() {
+        for scale in [1_u32, 10] {
+            let mut samples: Vec<SampleReads> = (0..9)
+                .map(|_| SampleReads {
+                    reference: (20 * scale, 10 * scale, 10 * scale),
+                    alternative: (0, 0, 0),
+                    genotype: 0,
+                })
+                .collect();
+            samples.push(SampleReads {
+                reference: (16 * scale, 8 * scale, 8 * scale),
+                alternative: (4 * scale, 2 * scale, 2 * scale),
+                genotype: 1,
+            });
+            assert_corrections_agree(&samples, 900.0, "one thin heterozygote among ten");
+        }
+    }
+
+    /// **A strand-piled artifact above the ramp and below it**, which is the one place the two
+    /// corrections could differ by a whole penalty rather than by a last bit. Forty alternative
+    /// reads all on one strand is the full charge; three is charged nothing, and a ramp
+    /// transcribed with its endpoints the other way round would give that locus the full charge
+    /// on one side and nothing on the other.
+    #[test]
+    fn a_strand_piled_artifact_is_corrected_the_same_above_and_below_the_ramp() {
+        let deep = vec![SampleReads {
+            reference: (60, 30, 30),
+            alternative: (40, 40, 20),
+            genotype: 1,
+        }];
+        assert_corrections_agree(&deep, 900.0, "forty alternative reads on one strand");
+
+        let thin = vec![SampleReads {
+            reference: (60, 30, 30),
+            alternative: (3, 3, 2),
+            genotype: 1,
+        }];
+        assert_corrections_agree(&thin, 900.0, "three alternative reads on one strand");
+
+        let midway = vec![SampleReads {
+            reference: (60, 30, 30),
+            alternative: (5, 5, 3),
+            genotype: 1,
+        }];
+        assert_corrections_agree(
+            &midway,
+            900.0,
+            "five alternative reads, halfway up the ramp",
+        );
+    }
+
+    /// **A homozygous-variant cohort, which the allele-balance guard skips on both sides.** Its
+    /// few reference reads are sequencing error, and a correction that had transcribed the 0.9
+    /// guard as a strict inequality the other way would charge this locus where the other does
+    /// not.
+    #[test]
+    fn a_homozygous_variant_cohort_is_skipped_by_both() {
+        let samples: Vec<SampleReads> = (0..10)
+            .map(|_| SampleReads {
+                reference: (1, 1, 0),
+                alternative: (39, 20, 19),
+                genotype: 2,
+            })
+            .collect();
+        assert_corrections_agree(&samples, 900.0, "ten homozygous-variant samples");
+    }
+
+    /// **A weak baseline that both corrections floor at zero.** The penalties exceed what there
+    /// is to take them from, and neither side goes negative.
+    #[test]
+    fn a_baseline_smaller_than_its_penalties_floors_at_zero_on_both_sides() {
+        let samples = vec![SampleReads {
+            reference: (400, 200, 200),
+            alternative: (100, 100, 50),
+            genotype: 1,
+        }];
+        assert_corrections_agree(
+            &samples,
+            20.0,
+            "a weak baseline against two large penalties",
+        );
+        assert_eq!(production_corrected_quality(&samples, 20.0), 0.0);
+    }
+
+    /// **A locus no read reached an alternative at keeps its baseline**, which is production's
+    /// early return and ng's `None` — the two spellings of the same answer.
+    ///
+    /// ng's correction is never called here: the worker hands the output stage no summary at
+    /// all, and that stage passes the baseline through (§3.4). So what this asserts is the half
+    /// that can be asserted — that production agrees there is nothing to charge — and that ng's
+    /// producer returns `None` is [`summarise_condition`](super::inference::summarise_condition)'s
+    /// own test.
+    #[test]
+    fn a_locus_with_no_alternative_reads_keeps_its_baseline_on_both_sides() {
+        let samples: Vec<SampleReads> = (0..10)
+            .map(|_| SampleReads {
+                reference: (20, 10, 10),
+                alternative: (0, 0, 0),
+                genotype: 0,
+            })
+            .collect();
+        assert_eq!(production_corrected_quality(&samples, 743.25), 743.25);
     }
 }

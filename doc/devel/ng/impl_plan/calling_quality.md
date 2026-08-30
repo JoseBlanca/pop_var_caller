@@ -250,7 +250,7 @@ claim and the reason there is no second quality field. *Depends:* C1, C2. *Sourc
 
 ### Milestone D — the differential against production
 
-**D1. ng's correction against `refine_qual`, over the same nine numbers.**  ☐
+**D1. ng's correction against `refine_qual`, over the same nine numbers.**  ✅
 In `quality_parity.rs`. Build a `PosteriorRecord` whose per-sample `scalars` and `best_genotype`
 pool to a chosen `ArtifactTestCounts`, hand it and a baseline to production's `refine_qual`, hand
 the same summary and the same baseline to C3, and require the two corrected qualities to agree.
@@ -261,6 +261,28 @@ locus with no alternative reads at all — where production returns the baseline
 caller passes `None`. **`PVC_BIAS_RAMP` must be unset for the run**, since production reads it once
 into a `OnceLock` and a set value would silently make the two ramps different; the test asserts
 that rather than assuming it. *Depends:* C3, A2. *Source:* spec §11, §14 test 2.
+
+**⛦ It failed, and the defect was ng's.** At three alternative reads of 63 against an expected
+half, ng corrected a 900-Phred baseline to 759.5790 where production's exact enumeration gives
+759.5657 — **0.013 Phred apart**. The cause: the far flank of the two-sided tail was computed as
+`1 − cumulative`, which is production's own spelling and is fine at the depths production uses it
+at. At a tail of `1e-14` the cumulative is `1 − 1e-14` and the subtraction throws away fourteen of
+its sixteen digits. Replaced by the direct identity `P(X ≥ k) = I_p(k, n − k + 1)`, which computes
+the small number without the cancellation. **ng's arithmetic now departs from the code it was
+ported from in exactly one place, and it departs toward the answer production's own exact path
+gives.** One pinned figure in C1 moved with it: a deficit at 500 reads was 430.8 Phred and is
+427.8.
+
+**⛦ And B2's grid test could not have caught it, because it compared probabilities.** Two tail
+probabilities of `1e-14` that differ by half of each other are `5e-15` apart — inside any absolute
+bound — and 1.5 Phred apart, which is a number in a file. That test now compares on the Phred
+scale, which is the relative comparison written in the units the answer is used in; the worst
+disagreement across its 8,155 cells is `7.7e-12` Phred. **The lesson is not about this tail:
+an absolute tolerance on a quantity used logarithmically tests nothing where the quantity is
+small.**
+
+**Measured after the fix:** the largest disagreement across the six loci is `2.5e-5` Phred,
+against an `f32` unit in the last place of about `6e-5` at these baselines.
 
 **D2. What the correction charges, on a real cohort's numbers.**  ☐
 Not a benchmark and not a measurement of recall — those are out of scope above, and need a run that
