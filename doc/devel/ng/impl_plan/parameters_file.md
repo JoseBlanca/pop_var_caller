@@ -131,16 +131,20 @@ default came from — for the repeat-tract slippage numbers, which alignments an
 ✅ **C1. TOML text → the file shape.** Parsing, with a malformed file failing at a line number.
 *Depends:* B2. *Source:* §4, §9.
 
-◐ **C2. The file shape → `RunParameters`, and the reader's `validate`.** The reverse of B1,
+✅ **C2. The file shape → `RunParameters`, and the reader's `validate`.** The reverse of B1,
 including the dense read-group axis over `0..n` that `RunParameters` requires.
 
-**Progress: the `validate` half landed 2026-08-30 (`6d67dc43`); the projection has not.** The two
-were split because the projection needs constructors that do not exist on two types outside this
-module — `RunParameters`, whose fields are private and whose only constructor (`assemble`) takes
-the *fit's raw inputs* rather than assembled values, and `StratumFits`, whose `over` likewise takes
-the fit's own outcome types. Building the file→memory direction means adding a constructor to each,
-mirroring the accessors B1 added for the memory→file direction. **Nothing in a run calls `validate`
-until the projection does**, which is what makes the split visible rather than silent.
+**Landed as two commits, 2026-08-30**: the `validate` half (`6d67dc43`) and the projection. The
+split was because the projection needed constructors that did not exist on types outside this
+module — **three of them, not the two predicted**: `RunParameters`, whose only constructor takes
+the *fit's raw inputs* rather than assembled values; `StratumFits`, whose `over` likewise takes the
+fit's own outcome types; and `SequencingBatches`, whose `declared` takes sets of read groups plus
+the run's `ReadGroups` table and derives the sample column from it, which a file has already been
+through once. **`validate` had no caller in a run until the projection became one.**
+
+**The dense `0..n` axis turned out to be three tables of five, not five.** The slippage-group
+declaration and the substitution rate are sparse by the writer's own rule — a row exists only where
+the run had something to say — and requiring a cover there refused the file a defaults run writes.
 
 **C2 also owns refusing a file that parses and means nothing** — owner's decision, 2026-08-28,
 because no step owned it and §9 promises "a malformed file fails at read with a line number".

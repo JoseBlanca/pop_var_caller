@@ -157,8 +157,11 @@
 
 mod from_run_parameters;
 mod from_toml;
+mod to_run_parameters;
 mod to_toml;
 mod validate;
+
+pub use to_run_parameters::RunParametersFromFile;
 
 use serde::{Deserialize, Serialize};
 
@@ -1182,6 +1185,21 @@ mod tests {
     /// narrowing one of them from `f64` to `f32` left the emitted file byte-identical.
     const FULL_PRECISION: f64 = 1.0 / 3.0;
 
+    /// **Where each of the fixture's three slippage rows sits.**
+    ///
+    /// **Named because the order moved once**, and eight tests indexed it by number. The writer
+    /// emits these rows in the stratum key's own order — period first, then reference repeat
+    /// count — and the fixture listed them in another until 2026-08-30, when the round trip
+    /// through memory found it. `the_named_slippage_rows_are_the_rows_they_name` is what keeps
+    /// these three honest, so a future reorder fails one test rather than eight.
+    pub(super) const THE_ROW_WHOSE_SHARES_BLEND: usize = 0;
+    /// Period 2 at 6 repeats: its slip share is a blend of its own fit and its period's curve,
+    /// and its fall-off came whole off a curve.
+    pub(super) const THE_ROW_WHOSE_SLIP_SHARE_BLENDS: usize = 1;
+    /// Period 2 at 11 repeats: everything came off a curve, so it records no shares origin and
+    /// no expected slipped reads at all.
+    pub(super) const THE_ROW_THAT_BORROWED_EVERYTHING: usize = 2;
+
     /// A file with **every section non-empty and every shape used at least once**.
     ///
     /// What a shape fixture can be wrong about is leaving a variant or a row kind unexercised, so
@@ -1242,14 +1260,20 @@ mod tests {
                         },
                     },
                     // A multiplier of exactly one that was *not* fitted — the state the warrant
-                    // exists to keep apart from a fitted one, and the read count says why: four
-                    // reads is no rate to fit.
+                    // exists to keep apart from a fitted one.
+                    //
+                    // **And it carries no evidence count**, which is not an omission: a stated
+                    // constant has nothing behind it, and a count beside it would say the one
+                    // rests on those reads. The projection out applies that rule to every
+                    // warranted number and `validate` refuses a file that breaks it. Until
+                    // 2026-08-30 this row said `reads = 4` — a count the writer would never have
+                    // produced — and the round trip through memory is what found it.
                     BaseQualityCalibrationRow {
                         read_group: 1,
                         error_probability_multiplier: WarrantedValue {
                             value: 1.0,
                             warrant: Warrant::Defaulted,
-                            observations: Some(EvidenceCount::Reads(4)),
+                            observations: None,
                         },
                     },
                     BaseQualityCalibrationRow {
@@ -1297,6 +1321,14 @@ mod tests {
                     },
                 ],
             }),
+            // **A batching a run could actually have declared**, which this fixture's was not
+            // until 2026-08-30: read groups 0 and 1 are the two lanes of TS-1 and it put them in
+            // different batches while the per-sample row put TS-1 in one of the two.
+            // `SequencingBatches::declared` refuses that — a sample's libraries all ran in one
+            // batch, because the batch is the population a contaminating read is drawn from —
+            // so the file said something no run could have produced and the projection back
+            // could not have carried. `the_batching_puts_each_sample_in_one_batch` refuses it
+            // now, and this is the state it refuses inverted.
             sequencing_batches: SequencingBatches {
                 batching_was_declared: true,
                 by_read_group: vec![
@@ -1304,9 +1336,11 @@ mod tests {
                         read_group: 0,
                         batch: 0,
                     },
+                    // The second lane of TS-1, in TS-1's batch — the one thing the two columns
+                    // cannot disagree about.
                     ReadGroupBatchRow {
                         read_group: 1,
-                        batch: 1,
+                        batch: 0,
                     },
                     ReadGroupBatchRow {
                         read_group: 2,
@@ -1350,9 +1384,17 @@ mod tests {
                 rung: SeedRung::FittedCurve,
             },
             repeat_tracts: RepeatTracts {
+                // **`fitted_here`, and the value is the median it says it is.** This fixture
+                // has one stratum with a length spectrum of its own, at a concentration of 3.5,
+                // and the bottom rung states the median of the run's fitted concentrations
+                // wherever there is one to take — so a `defaulted` warrant here is a state the
+                // writer cannot produce beside `length_spectrum_by_stratum`. It said
+                // `1.25, defaulted` until 2026-08-30, which is what the round trip through
+                // memory found: the projection out re-derives this warrant from whether any
+                // stratum was fitted, and re-derived it as `fitted_here` every time.
                 fallback_length_spectrum_concentration: WarrantedValue {
-                    value: 1.25,
-                    warrant: Warrant::Defaulted,
+                    value: 3.5,
+                    warrant: Warrant::FittedHere,
                     observations: None,
                 },
                 slippage_group_by_read_group: vec![
@@ -1371,7 +1413,32 @@ mod tests {
                         slippage_group: 1,
                     },
                 ],
+                // **In the order the writer emits, which is the stratum key's own** — period
+                // first, then reference repeat count. The projection out walks a `BTreeMap` keyed
+                // by stratum, so a fixture in any other order is a file no run produces, and the
+                // round trip through memory is what found this one out of order.
                 slippage_by_stratum_and_group: vec![
+                    SlippageRow {
+                        period: 1,
+                        reference_repeats: 30,
+                        slippage_group: 0,
+                        share_of_reads_that_slip: 0.19,
+                        shorter_share: 0.77,
+                        fall_off: 0.24,
+                        share_of_reads_that_slip_origin: LevelOrigin {
+                            smoothing: LevelSmoothing::ThisStratum,
+                            expected_slipped_reads: Some(12_040.25),
+                        },
+                        shorter_share_and_fall_off_origin: Some(SharesOrigin {
+                            expected_slipped_reads: Some(12_040.25),
+                            shorter_share_smoothing: ShareSmoothing::Blend {
+                                curve_weight: 0.61,
+                                curve: a_share_curve_fitted_over(5, 40),
+                                reach: CurveReach::InsideTheFittedRange,
+                            },
+                            fall_off_smoothing: ShareSmoothing::ThisStratum,
+                        }),
+                    },
                     SlippageRow {
                         period: 2,
                         reference_repeats: 6,
@@ -1414,27 +1481,6 @@ mod tests {
                         },
                         shorter_share_and_fall_off_origin: None,
                     },
-                    SlippageRow {
-                        period: 1,
-                        reference_repeats: 30,
-                        slippage_group: 0,
-                        share_of_reads_that_slip: 0.19,
-                        shorter_share: 0.77,
-                        fall_off: 0.24,
-                        share_of_reads_that_slip_origin: LevelOrigin {
-                            smoothing: LevelSmoothing::ThisStratum,
-                            expected_slipped_reads: Some(12_040.25),
-                        },
-                        shorter_share_and_fall_off_origin: Some(SharesOrigin {
-                            expected_slipped_reads: Some(12_040.25),
-                            shorter_share_smoothing: ShareSmoothing::Blend {
-                                curve_weight: 0.61,
-                                curve: a_share_curve_fitted_over(5, 40),
-                                reach: CurveReach::InsideTheFittedRange,
-                            },
-                            fall_off_smoothing: ShareSmoothing::ThisStratum,
-                        }),
-                    },
                 ],
                 length_spectrum_by_stratum: vec![StratumLengthSpectrumRow {
                     period: 2,
@@ -1476,6 +1522,9 @@ mod tests {
     /// three keys apart — so a fixture whose range contradicts its reach teaches a reader of the
     /// produced file that the two are unrelated. Each call site below picks a range that makes
     /// its own reach true.
+    /// **`cells` follows the fitted range too**, for the reason above: a level curve is fitted
+    /// through `(stratum × slippage group)` cells, so a curve over four repeat counts cannot
+    /// stand on twenty-three of them at one slippage group.
     fn a_slippage_curve_fitted_over(from: u64, to: u64) -> SlippageCurve {
         SlippageCurve {
             rise_shape: 0.55,
@@ -1484,22 +1533,30 @@ mod tests {
             fitted_from_repeats: from,
             fitted_to_repeats: to,
             held_out_error: FULL_PRECISION,
-            cells: 23,
+            cells: to - from + 1,
         }
     }
 
     /// A share curve fitted over `from..=to` repeats — see [`a_slippage_curve_fitted_over`].
+    /// **`strata` and `centre_repeats` follow the fitted range**, because both are claims about
+    /// it that a reader can check against the two numbers beside them.
+    ///
+    /// A curve `curve_fitted_on = "this_period"` was fitted through that period's own strata, and
+    /// a period has one stratum per reference repeat count — so a curve fitted from 2 to 4
+    /// repeats stood on at most three of them, and the fixture said twelve until 2026-08-30.
+    /// `centre_repeats` sat at 11.5 on that same 2-to-4 curve. Neither number changes what any
+    /// test asserts; both were read off the produced file and disbelieved.
     fn a_share_curve_fitted_over(from: u64, to: u64) -> ShareCurve {
         ShareCurve {
             shape: ShareShape::Turning,
             intercept: 1.4,
             slope: -0.09,
             bend: 0.006,
-            centre_repeats: 11.5,
+            centre_repeats: (from + to) as f64 / 2.0,
             fitted_from_repeats: from,
             fitted_to_repeats: to,
             held_out_error: 0.167,
-            strata: 12,
+            strata: to - from + 1,
             curve_fitted_on: ShareCurveRung::ThisPeriod,
         }
     }
@@ -1548,6 +1605,56 @@ mod tests {
             "the emitted file no longer matches testdata/every_shape.toml; if the change is \
              intended, regenerate that file from this fixture"
         );
+    }
+
+    /// **The three named rows are the rows they name**, so a reorder of the fixture fails here
+    /// rather than in whichever of the tests that use them happens to run first.
+    #[test]
+    fn the_named_slippage_rows_are_the_rows_they_name() {
+        let rows = a_file_using_every_shape()
+            .repeat_tracts
+            .slippage_by_stratum_and_group;
+        assert_eq!(rows.len(), 3);
+
+        let shares = &rows[THE_ROW_WHOSE_SHARES_BLEND];
+        assert_eq!((shares.period, shares.reference_repeats), (1, 30));
+        assert!(matches!(
+            shares
+                .shorter_share_and_fall_off_origin
+                .as_ref()
+                .expect("it records where its two shares came from")
+                .shorter_share_smoothing,
+            ShareSmoothing::Blend { .. }
+        ));
+
+        let slip = &rows[THE_ROW_WHOSE_SLIP_SHARE_BLENDS];
+        assert_eq!((slip.period, slip.reference_repeats), (2, 6));
+        assert!(matches!(
+            slip.share_of_reads_that_slip_origin.smoothing,
+            LevelSmoothing::Blend { .. }
+        ));
+
+        let borrowed = &rows[THE_ROW_THAT_BORROWED_EVERYTHING];
+        assert_eq!((borrowed.period, borrowed.reference_repeats), (2, 11));
+        assert!(borrowed.shorter_share_and_fall_off_origin.is_none());
+        assert!(
+            borrowed
+                .share_of_reads_that_slip_origin
+                .expected_slipped_reads
+                .is_none(),
+            "a row that borrowed everything counts no slipped reads of its own"
+        );
+
+        // **And they are in the order the writer emits**, which is the stratum key's: period
+        // first, then reference repeat count. The projection back out walks a map keyed by that
+        // pair, so any other order is a file no run produces.
+        let mut keys: Vec<(u8, u64)> = rows
+            .iter()
+            .map(|row| (row.period, row.reference_repeats))
+            .collect();
+        let written = keys.clone();
+        keys.sort_unstable();
+        assert_eq!(keys, written);
     }
 
     /// **Rewrite `testdata/every_shape.toml` from the fixture.**
@@ -1678,7 +1785,8 @@ mod tests {
                 .get("curve")
                 .and_then(|curve| curve.get("cells"))
                 .and_then(toml::Value::as_integer),
-            Some(23)
+            Some(15),
+            "the cells a curve stood on follow its fitted range — 5 to 19 repeats is fifteen"
         );
     }
 

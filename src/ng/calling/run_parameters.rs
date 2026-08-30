@@ -293,6 +293,98 @@ impl RunParameters {
         }
     }
 
+    /// **The same parameters read back out of a run's parameters file**, already in the shape
+    /// this type holds rather than in the shape the fit emits.
+    ///
+    /// **Why not [`Self::assemble`].** That one takes the fit's *raw* outputs — per-read-group
+    /// maps of fitted error rates and minted error totals, contamination estimates carrying
+    /// their own reasons for absence — and applies the four rules that turn them into what
+    /// calling reads: refusing a zero rate, densifying the contamination axis, deciding whether
+    /// there is a mixture at all. **A parameters file is the output of those rules, not their
+    /// input.** Re-running them here would need inputs the file does not carry, and would let a
+    /// file's stated calibration be silently replaced by one derived from something else.
+    ///
+    /// `contamination_by_read_group` keeps the same two-state contract [`Self::view`] reads:
+    /// **empty is the uncontaminated run**, and anything else is one entry per read group —
+    /// never a short list, and never a list of zeros standing in for absence (spec §5).
+    ///
+    /// # Panics
+    ///
+    /// Held in release, as [`Self::assemble`]'s are, and for the same reason: each is a run
+    /// whose axes were minted from different inputs, whose symptom is a wrong genotype rather
+    /// than a crash.
+    ///
+    /// - **the run has at least one read group and at least one sample.**
+    /// - **the contamination axis is empty or one entry per read group.**
+    /// - **the declared batching covers both axes**, which [`Self::view`] would otherwise refuse
+    ///   one frame later, at a point that no longer knows the numbers came from a file.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fields of the type itself, which is the point: this is the door for values \
+                  that are already assembled, so a bundle naming the same nine things would be a \
+                  second shape for one object"
+    )]
+    #[must_use]
+    pub fn of_gathered_values(
+        calibration_by_read_group: Vec<ReadGroupCalibration>,
+        contamination_by_read_group: Vec<ContaminationView>,
+        sequencing_batches: SequencingBatches,
+        inbreeding_coefficient_by_sample: Vec<InbreedingF>,
+        prior_seed: SpectrumSeed,
+        ssr_slippage_fits: StratumFits,
+        ssr_substitution_rate: BTreeMap<StratumKey, Estimate<ErrorRate>>,
+        ploidy: Ploidy,
+        repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    ) -> Self {
+        assert!(
+            !calibration_by_read_group.is_empty(),
+            "every read of a run belongs to a read group and a run has at least one, so a set of \
+             parameters covering none is one whose read-group axis went missing"
+        );
+        assert!(
+            !inbreeding_coefficient_by_sample.is_empty(),
+            "every sample of the run carries an inbreeding coefficient and a run has at least \
+             one sample, so an empty list is a run whose sample order went missing"
+        );
+        assert!(
+            contamination_by_read_group.is_empty()
+                || contamination_by_read_group.len() == calibration_by_read_group.len(),
+            "the run covers {} read groups and {} of them carry a contamination view; a run is \
+             uncontaminated — no views at all — or carries one view a read group, because a \
+             short list drops the highest library out of the mixture in silence",
+            calibration_by_read_group.len(),
+            contamination_by_read_group.len()
+        );
+        assert_eq!(
+            sequencing_batches.read_group_count(),
+            calibration_by_read_group.len(),
+            "the batching covers {} read groups and the parameters cover {}; a batching minted \
+             over a different read-group set would score some library against the neighbours of \
+             another",
+            sequencing_batches.read_group_count(),
+            calibration_by_read_group.len()
+        );
+        assert_eq!(
+            sequencing_batches.sample_count(),
+            inbreeding_coefficient_by_sample.len(),
+            "the batching covers {} samples and the parameters cover {}; the sample-keyed \
+             batching is read by the run's own sample index",
+            sequencing_batches.sample_count(),
+            inbreeding_coefficient_by_sample.len()
+        );
+        Self {
+            calibration_by_read_group,
+            contamination_by_read_group,
+            sequencing_batches,
+            inbreeding_coefficient_by_sample,
+            prior_seed,
+            ssr_slippage_fits,
+            ssr_substitution_rate,
+            ploidy,
+            repeat_tract_outlier_weight,
+        }
+    }
+
     /// **Score repeat tracts under a supplied outlier weight rather than the inherited one.**
     ///
     /// **A builder rather than a tenth argument to [`Self::assemble`]**, because assembly takes
@@ -535,10 +627,14 @@ impl RunParameters {
 
 /// A read group that identified no contamination, inside a run where some group did.
 ///
+/// **`pub(crate)` so that the projection back from a parameters file uses this one** rather than
+/// a copy: a row with no `measurement` and a read group whose fraction the fit could not identify
+/// are the same state written two ways, and two constants would let one of them move.
+///
 /// **Zero evidence rather than a zero fraction with evidence behind it**, which is the whole of
 /// the distinction: `was_measured` reads the counts, and a group that touched no marker was not
 /// measured whatever its fraction says.
-const UNMEASURED_READ_GROUP: ContaminationView = ContaminationView {
+pub(crate) const UNMEASURED_READ_GROUP: ContaminationView = ContaminationView {
     fraction: 0.0,
     markers_with_reads: 0,
     reads_on_markers: 0,

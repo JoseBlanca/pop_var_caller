@@ -311,10 +311,19 @@ pub enum LengthSpectrumRung {
 ///
 /// Both a stratum's own fit and a period's pool produce exactly this, which is why the two
 /// rungs are one type here and two variants at the lookup.
+///
+/// **Public, and its fields with it, so that [`StratumFits::of_gathered_rows`] has a named pair
+/// to take** — the alternative was a bare `(Vec<f64>, f64)` in that signature, where the two
+/// halves are told apart only by their types. Nothing is weakened by it: the checks that make a
+/// spectrum a distribution live in the constructors that take one, not in this type, exactly as
+/// they did while it was private.
 #[derive(Debug, Clone, PartialEq)]
-struct FittedLengthSpectrum {
-    weights: Vec<f64>,
-    concentration: f64,
+pub struct FittedLengthSpectrum {
+    /// The share of this stratum's chromosomes at each whole-repeat offset from the reference
+    /// length, running from `-span` to `+span` — an odd count, summing to one.
+    pub weights: Vec<f64>,
+    /// How many chromosomes' worth of belief the shares are held with.
+    pub concentration: f64,
 }
 
 /// **The concentration the tract ladder's bottom rung states where the run fitted no stratum
@@ -482,6 +491,86 @@ impl StratumFits {
             length_spectrum_by_stratum,
             length_spectrum_by_period: BTreeMap::new(),
             stated_concentration,
+        }
+    }
+
+    /// **The same numbers read back out of a run's parameters file**, row by row, rather than
+    /// harvested from the fit's own outcomes.
+    ///
+    /// **Why not [`Self::over`].** That one takes [`StratumOutcome`]s — the fit's raw output,
+    /// which carries a refusal, a length spectrum, a log likelihood and a convergence flag
+    /// beside the numbers a lookup answers with. A parameters file carries the answers and not
+    /// the fitting: a refused stratum is simply a stratum with no rows, and the median that seeds
+    /// the ladder's bottom rung was computed when the fit ran and is written down
+    /// ([`Self::stated_concentration`]) rather than recomputed here. Recomputing it would make a
+    /// file that was hand-edited disagree with itself in a way no reader could see.
+    ///
+    /// `slippage_by_stratum` is one entry per stratum the file names, holding that stratum's
+    /// slippage groups **densely from zero** — `None` where the pair has no row, which is spec
+    /// §5's fifth state and never a zero slip rate.
+    ///
+    /// # Panics
+    ///
+    /// On a stratum whose row is empty, which is a stratum no lookup can answer for — the file
+    /// writes no row for such a pair rather than an empty one. On a length spectrum that is not
+    /// a distribution, and on a concentration that is not finite and positive: the same checks
+    /// [`Self::over`] runs, for the same reason, and here they also stand behind
+    /// `ParametersFile::validate`, which refuses the same shapes earlier and naming the key.
+    #[must_use]
+    pub fn of_gathered_rows(
+        slippage_group_of: BTreeMap<ReadGroupId, u32>,
+        slippage_by_stratum: BTreeMap<Stratum, Vec<Option<FittedSlippage>>>,
+        length_spectrum_by_stratum: BTreeMap<Stratum, FittedLengthSpectrum>,
+        length_spectrum_by_period: BTreeMap<u8, FittedLengthSpectrum>,
+        stated_concentration: f64,
+    ) -> Self {
+        let by_stratum = slippage_by_stratum
+            .into_iter()
+            .map(|(stratum, groups)| {
+                assert!(
+                    !groups.is_empty(),
+                    "the row for period {}, {} repeats holds no slippage group at all; a stratum \
+                     nothing was fitted for has no row rather than an empty one, and an empty \
+                     one answers every read group with `GroupPutNoReadHere` — a library reported \
+                     silent where the truth is that the stratum has no answer for anybody",
+                    stratum.period,
+                    stratum.reference_repeats
+                );
+                let mut row = StratumRow {
+                    slippage: Vec::with_capacity(groups.len()),
+                    level: Vec::with_capacity(groups.len()),
+                    shares: Vec::with_capacity(groups.len()),
+                };
+                for fitted in groups {
+                    row.slippage.push(fitted.map(|fitted| fitted.slippage));
+                    row.level.push(fitted.map(|fitted| fitted.level));
+                    row.shares.push(fitted.and_then(|fitted| fitted.shares));
+                }
+                (stratum, row)
+            })
+            .collect();
+        fn checked<K: std::fmt::Debug + Ord>(
+            spectra: BTreeMap<K, FittedLengthSpectrum>,
+            what: &str,
+        ) -> BTreeMap<K, FittedLengthSpectrum> {
+            spectra
+                .into_iter()
+                .map(|(key, spectrum)| {
+                    let checked = checked_length_spectrum(
+                        &spectrum.weights,
+                        spectrum.concentration,
+                        &format_args!("the {what} length spectrum filed under {key:?}"),
+                    );
+                    (key, checked)
+                })
+                .collect()
+        }
+        Self {
+            slippage_group_of,
+            by_stratum,
+            length_spectrum_by_stratum: checked(length_spectrum_by_stratum, "stratum's own"),
+            length_spectrum_by_period: checked(length_spectrum_by_period, "period's pooled"),
+            stated_concentration: checked_stated_concentration(stated_concentration),
         }
     }
 
@@ -740,6 +829,23 @@ impl StratumFits {
     pub fn strata(&self) -> usize {
         self.by_stratum.len()
     }
+}
+
+/// The bottom rung's concentration, refused where it is not a Dirichlet total.
+///
+/// **`over` cannot reach this** — its median is taken over concentrations each of which
+/// [`checked_length_spectrum`] has already passed — but [`StratumFits::of_gathered_rows`] takes
+/// the number straight from a file, where it is one line a person can edit and where a run that
+/// fitted no stratum at all still has one. A zero has no mean to be the shape of, and every
+/// tract of every stratum that falls to the bottom rung would take it.
+fn checked_stated_concentration(concentration: f64) -> f64 {
+    assert!(
+        concentration.is_finite() && concentration > 0.0,
+        "the tract ladder's bottom rung states {concentration} chromosomes' worth of belief; a \
+         Dirichlet total is finite and strictly positive, and every tract of every stratum with \
+         no fit of its own and no pool for its period is seeded from it"
+    );
+    concentration
 }
 
 /// Check one fitted length spectrum and its concentration, and own them.

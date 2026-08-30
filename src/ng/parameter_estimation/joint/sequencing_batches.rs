@@ -309,6 +309,72 @@ impl SequencingBatches {
         })
     }
 
+    /// **The batching read back out of a run's parameters file**, as the two dense columns the
+    /// file writes rather than as a declaration to be resolved.
+    ///
+    /// **Why not [`Self::declared`].** That one takes the batches as sets of read groups and the
+    /// run's own [`ReadGroups`] table, from which it derives the sample column — it is the door a
+    /// *user's declaration* comes through, and it is where a declaration that does not describe
+    /// the run is refused. A parameters file has already been through that door once: it carries
+    /// both columns, written from a batching that was resolved when the fit ran. Re-deriving the
+    /// sample column here would need the run's read-group table, which is what step D2 compares
+    /// the file against rather than what this projection may assume.
+    ///
+    /// `defaulted` is the file's own `batching_was_declared`, negated: it is the one thing the
+    /// two columns cannot say, because a run that declared nothing and a run that declared one
+    /// batch holding every library write identical rows ([`Self::is_default`]).
+    ///
+    /// # Panics
+    ///
+    /// On an empty axis, as [`Self::all_together`], and on a batch id at or above `batch_count`
+    /// — the columns are read by index into a table of that many rows, so an id past its end is
+    /// an out-of-range read at whichever locus first carries one of that library's reads.
+    ///
+    /// **It does not check that a sample's read groups share a batch**, which [`Self::declared`]
+    /// refuses: this constructor has no read-group table to join the two columns through, so
+    /// that is the file reader's to check against the file's own table
+    /// (`ParametersFile::validate`).
+    #[must_use]
+    pub fn of_gathered_columns(
+        of_each_read_group: Vec<BatchId>,
+        of_each_sample: Vec<BatchId>,
+        batch_count: usize,
+        defaulted: bool,
+    ) -> Self {
+        assert!(
+            !of_each_read_group.is_empty() && !of_each_sample.is_empty(),
+            "a batching covers {} read groups and {} samples, and a run has at least one of \
+             each — an empty column is an axis that went missing rather than a run with none",
+            of_each_read_group.len(),
+            of_each_sample.len()
+        );
+        assert!(
+            batch_count > 0,
+            "a run has at least one sequencing batch, since every read group is in one"
+        );
+        for (axis, column) in [
+            ("read group", &of_each_read_group),
+            ("sample", &of_each_sample),
+        ] {
+            for (index, batch) in column.iter().enumerate() {
+                assert!(
+                    (batch.get() as usize) < batch_count,
+                    "{axis} {index} is in batch {} of a batching that declares {batch_count}; \
+                     the contaminant frequency table has one row a batch, so an id past its end \
+                     is a read off the end of that table at whichever locus first carries one of \
+                     that library's reads",
+                    batch.get()
+                );
+            }
+        }
+        Self {
+            of_each_read_group,
+            of_each_sample,
+            batch_count,
+            defaulted,
+        }
+    }
+
     /// Which batch each read group ran in, in read-group id order.
     #[inline]
     #[must_use]

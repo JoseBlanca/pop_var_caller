@@ -132,7 +132,7 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "What each read's own reported error probability is multiplied by, per read group. Above one says the instrument was optimistic and the reads are worse than it claimed; one leaves the qualities exactly as reported. It is not a multiplier on the Phred score, which moves the other way.",
+                "What each read's own reported error probability is multiplied by, per read group. Above one says the instrument was optimistic and the reads are worse than it claimed; below one says they are better; one leaves the qualities exactly as reported. It is not a multiplier on the Phred score, which moves the other way.",
             ],
         );
         one_a_line_with_notes(
@@ -178,6 +178,8 @@ impl ParametersFile {
             &mut out,
             &[
                 "Who was sequenced beside whom — the population a contaminating read is drawn from. `batching_was_declared = false` means nobody said, so everything went in one batch. A declared batching that happens to have one batch writes identical rows, and this flag is the only thing that tells those two apart.",
+                "",
+                "**A sample's read groups all go in one batch**, and it is the batch its own row names — the two tables below say the same thing about a sample twice, and a file in which they disagree is refused. The grain is a lane everywhere else in this file precisely because two lanes of one plant can differ; here they cannot, because a contaminating read is drawn against one set of neighbours and a sample has one genotype to draw.",
             ],
         );
         scalar(
@@ -231,7 +233,7 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "What the SNP and indel prior starts from at an ordinary position: how much belief the reference allele carries, and how much is shared out across whatever alternative alleles a position turns out to have. `rung` says which measurement the pair came off — a fitted population curve, the neutral shape at a fitted heterozygosity, a cohort with no variation at all, or a stated heterozygosity taken from human data, which is the one that rests on nothing this run measured.",
+                "What the SNP and indel prior starts from at an ordinary position: how much belief the reference allele carries, and how much is shared out across whatever alternative alleles a position turns out to have. `rung` says which measurement the pair came off: a fitted population curve (`fitted_curve`), the neutral shape at a fitted heterozygosity (`neutral_shape`), a cohort with no variation at all (`zero_diversity`), or a stated heterozygosity taken from human data (`stated_heterozygosity`), which is the one that rests on nothing this run measured.",
             ],
         );
         scalar(
@@ -257,7 +259,7 @@ impl ParametersFile {
             &[
                 "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
                 "",
-                "A pair with no row put no read there; a stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
+                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
                 "",
                 "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled.",
                 "",
@@ -265,6 +267,7 @@ impl ParametersFile {
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
+                "`fallback_length_spectrum_concentration` is what a tract falls back to where neither its own stratum nor its period was fitted: this many chromosomes' worth of belief, spread flat over whatever lengths the tract offers, so a larger number moves the prior less. A run that fitted any stratum states the median of the concentrations those fits produced and marks it `fitted_here`; a run that fitted none states a built-in constant and marks it `defaulted`. It carries no `observations` either way — a median over strata is not a measurement with a sample size.",
             ],
         );
         scalar_with_note(
@@ -317,7 +320,7 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "How often a base reads wrong inside a tract — per read group as well as per stratum, because that is a property of the chemistry. Counted in bases compared, not reads: a read crossing a tract contributes as many bases as it crosses.",
+                "How often a base reads wrong inside a tract — per read group as well as per stratum, because that is a property of the chemistry, and per `ploidy` as well, because that is the set of genotypes the fit scored these tracts against. That third key is why a row repeats the number at the top of the file: a cohort called at two ploidies carries a row for each. Counted in bases compared, not reads: a read crossing a tract contributes as many bases as it crosses.",
             ],
         );
         one_a_line_with_notes(
@@ -496,13 +499,11 @@ mod origins {
 
     /// The tract ladder's bottom rung — what a run falls back to where nothing was fitted.
     pub const FLAT_CONCENTRATION: &str = concat!(
-        "the fallback, used where neither this stratum nor its period was fitted: this ",
-        "many chromosomes' worth of belief, spread flat ",
-        "over whatever lengths a tract offers. A run that fitted any stratum states the ",
-        "median of its own instead, and says so with a warrant of fitted_here"
+        "this run fitted no stratum on its own tracts, so there was no median to take and ",
+        "this is the caller's own constant"
     );
 
-    /// The repeat-tract outlier weight — always defaulted as this build stands.
+    /// The repeat-tract outlier weight, where a run inherited it rather than being handed one.
     pub const OUTLIER_WEIGHT: &str = concat!(
         "inherited from the existing caller and never measured here: the share of ",
         "repeat-tract reads that came from nowhere the model can explain"
@@ -1497,23 +1498,44 @@ mod tests {
             "the note is on the lines above the row it is about, and they say: {note_above}"
         );
 
-        // **Each note above its own key, not merely somewhere in the file.** Two defaulted
+        // **Each note above its own key, not merely somewhere in the file.** The two defaulted
         // scalars sit six lines apart, and swapping the two origins at their call sites leaves
         // both texts present and both wrong.
-        for (key, note) in [
+        //
+        // **The fallback concentration is defaulted in a file of its own here**, because it
+        // cannot be in this fixture: that one fits a stratum, and the ladder's bottom rung then
+        // states the median of the run's own concentrations rather than the compiled-in flat
+        // one. A run that fitted nothing is the run that writes it defaulted.
+        let mut nothing_to_fit = a_file_using_every_shape();
+        nothing_to_fit
+            .repeat_tracts
+            .length_spectrum_by_stratum
+            .clear();
+        nothing_to_fit
+            .repeat_tracts
+            .fallback_length_spectrum_concentration = WarrantedValue {
+            value: 1.0,
+            warrant: Warrant::Defaulted,
+            observations: None,
+        };
+        let flat = nothing_to_fit.to_toml();
+        for (key, note, in_this_text) in [
             (
                 "fallback_length_spectrum_concentration",
-                "the fallback, used where neither",
+                "this run fitted no stratum on its own tracts",
+                &flat,
             ),
             (
                 "repeat_tract_outlier_weight",
                 "inherited from the existing caller and never measured here",
+                &text,
             ),
         ] {
+            let lines: Vec<&str> = in_this_text.lines().collect();
             let at = lines
                 .iter()
                 .position(|line| line.starts_with(key))
-                .unwrap_or_else(|| panic!("`{key}` is written:\n{text}"));
+                .unwrap_or_else(|| panic!("`{key}` is written:\n{in_this_text}"));
             let above: String = lines[..at]
                 .iter()
                 .rev()
@@ -1579,7 +1601,7 @@ mod tests {
         for note in [
             "no calibration:",
             "inherited from the existing",
-            "the fallback, used where neither",
+            "this run fitted no stratum on its own tracts",
             "nothing was fitted for this read group",
             "inbreeding has no default",
         ] {
@@ -1734,13 +1756,38 @@ mod tests {
             "a read group that identified nothing writes no measurement key: {unmeasured}"
         );
 
+        // **The outlier weight rather than the fallback concentration**, which this fixture
+        // cannot carry as `defaulted`: it fits a stratum, and the bottom rung then states the
+        // median of the run's own concentrations. The one number in the file that is defaulted
+        // in every run this build can assemble is this one.
         let defaulted = with_rows
             .lines()
-            .find(|line| line.starts_with("fallback_length_spectrum_concentration"))
-            .expect("the stated concentration is written");
+            .find(|line| line.starts_with("repeat_tract_outlier_weight"))
+            .expect("the stated constant is written");
         assert!(
             defaulted.contains("warrant = \"defaulted\"") && !defaulted.contains("observations"),
             "a defaulted number carries its warrant and no count: {defaulted}"
+        );
+
+        // **And a run that fitted no stratum at all does write a defaulted fallback**, with the
+        // note saying where the constant came from — the state this fixture cannot show beside
+        // its own fitted stratum.
+        let mut nothing_fitted = a_file_using_every_shape();
+        nothing_fitted
+            .repeat_tracts
+            .length_spectrum_by_stratum
+            .clear();
+        nothing_fitted
+            .repeat_tracts
+            .fallback_length_spectrum_concentration = WarrantedValue {
+            value: 1.0,
+            warrant: Warrant::Defaulted,
+            observations: None,
+        };
+        let text = nothing_fitted.to_toml();
+        assert!(
+            text.contains("this run fitted no stratum on its own tracts"),
+            "a defaulted fallback says where the constant came from:\n{text}"
         );
     }
 }

@@ -66,6 +66,7 @@ use super::{
     ShareCurve, ShareSmoothing, SlippageCurve, Warrant, WarrantedValue,
 };
 use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How far a length spectrum's shares may sum from one and still be a distribution.
 ///
@@ -103,6 +104,7 @@ impl ParametersFile {
         self.the_version_is_one_this_build_reads()?;
         self.the_identity_names_a_cohort()?;
         self.every_axis_covers_what_it_is_keyed_by()?;
+        self.the_batching_puts_each_sample_in_one_batch()?;
         self.every_calibration_is_a_multiplier()?;
         self.contamination_is_absent_or_measured()?;
         self.every_inbreeding_coefficient_is_a_fraction()?;
@@ -175,6 +177,52 @@ impl ParametersFile {
                 ));
             }
         }
+
+        // **`fitted_from.samples` is the read-group table's own first-seen sample order, exactly
+        // once each.** Two separate failures, and both are silent.
+        //
+        // A **repeat** in the list gives two per-sample rows the same index: the projection
+        // resolves both to the first slot and the second sample's coefficient and batch never
+        // land anywhere, so a run scores one plant's reads under another's inbreeding.
+        //
+        // A **different order** is worse, because nothing anywhere would notice. The projection
+        // reads the per-sample tables by *name* into this list and hands calling a vector indexed
+        // by its position, while the writer writes them in the run's own sample order, which is
+        // the read-group table's first-seen order. A file whose two orders disagree validates,
+        // projects, and gives every sample its neighbour's inbreeding coefficient and batch.
+        //
+        // **This is the file's agreement with itself, not with the run** — whether these are the
+        // *run's* samples is spec §6's second binding and step D2's.
+        let mut first_seen: Vec<&str> = Vec::with_capacity(self.fitted_from.samples.len());
+        for row in &self.fitted_from.read_groups {
+            if !first_seen.contains(&row.sample.as_str()) {
+                first_seen.push(row.sample.as_str());
+            }
+        }
+        if first_seen != self.fitted_from.samples {
+            let odd = first_seen
+                .iter()
+                .zip(&self.fitted_from.samples)
+                .position(|(from_the_table, listed)| from_the_table != listed);
+            return Err(refuse(
+                "fitted_from.samples",
+                match odd {
+                    Some(at) => format!(
+                        "names {:?} in position {at} where the read-group table's samples, in the \
+                         order they first appear, have {:?}; every per-sample row is read by name \
+                         into this list and handed to the run as a position, so a list in another \
+                         order gives each sample its neighbour's numbers",
+                        self.fitted_from.samples[at], first_seen[at]
+                    ),
+                    None => format!(
+                        "holds {} names and the read-group table names {} distinct samples; the \
+                         list is that table's samples, in the order they first appear, once each",
+                        self.fitted_from.samples.len(),
+                        first_seen.len()
+                    ),
+                },
+            ));
+        }
         Ok(())
     }
 
@@ -218,7 +266,15 @@ impl ParametersFile {
                 .map(|row| row.read_group),
             read_groups,
         )?;
-        covers_the_read_groups(
+        // **This one names read groups rather than covering them**, and that is the writer's
+        // own rule: it writes a row only for a read group the run declared a slippage group for
+        // (`from_run_parameters`'s `repeat_tracts_of`), because a read group the declaration does
+        // not name has no slippage group — `StratumFits::at` answers `UnknownReadGroup` for it and
+        // no slippage number is ever looked up under it. **A run with no repeat tracts at all
+        // declares none**, which is Milestone E's defaults run and the single-sample case
+        // `CLAUDE.md` puts first; requiring density here refused a file this caller had just
+        // written.
+        names_only_the_read_groups(
             "repeat_tracts.slippage_group_by_read_group",
             self.repeat_tracts
                 .slippage_group_by_read_group
@@ -226,6 +282,20 @@ impl ParametersFile {
                 .map(|row| row.read_group),
             read_groups,
         )?;
+        // **The substitution rate is keyed by a read group too, and is likewise sparse** — a row
+        // exists only where a rate was fitted for that `(read group × stratum × ploidy)`. What it
+        // may not do is name a read group the identity block does not list, which is the mirror
+        // of the gap refused above: the projection keys the map by that id, so a stray one is a
+        // rate no locus can ever read.
+        names_only_the_read_groups(
+            "repeat_tracts.substitution_rate_by_stratum",
+            self.repeat_tracts
+                .substitution_rate_by_stratum
+                .iter()
+                .map(|row| row.read_group),
+            read_groups,
+        )?;
+        self.no_repeat_tract_table_names_one_thing_twice()?;
         names_the_samples(
             "inbreeding.by_sample",
             self.inbreeding
@@ -244,13 +314,142 @@ impl ParametersFile {
         )
     }
 
+    /// **No repeat-tract table names one thing twice.**
+    ///
+    /// **A duplicate here is silent in a way a gap is not.** Each of these four tables becomes a
+    /// map keyed by the row's own fields, so a second row for one key overwrites the first and
+    /// nothing says which of the two the run scored under — the order the rows happen to sit in
+    /// decides it. `StratumFits::over`, which builds the same map from the *fit's* outcomes,
+    /// carries a release-level assert against exactly this, on the stated grounds that "the two
+    /// levels can differ by a factor of five".
+    ///
+    /// **And this is the input path where it is plausible.** The fit cannot produce a duplicate;
+    /// a person copying a `slippage_by_stratum_and_group` row to edit it and forgetting to change
+    /// the stratum can. The refusal names the key, which the projection could not.
+    fn no_repeat_tract_table_names_one_thing_twice(&self) -> Result<(), ParametersFileError> {
+        let tracts = &self.repeat_tracts;
+        names_each_key_once(
+            "repeat_tracts.slippage_group_by_read_group",
+            tracts
+                .slippage_group_by_read_group
+                .iter()
+                .map(|row| format!("read_group = {}", row.read_group)),
+        )?;
+        names_each_key_once(
+            "repeat_tracts.slippage_by_stratum_and_group",
+            tracts.slippage_by_stratum_and_group.iter().map(|row| {
+                format!(
+                    "period = {}, reference_repeats = {}, slippage_group = {}",
+                    row.period, row.reference_repeats, row.slippage_group
+                )
+            }),
+        )?;
+        names_each_key_once(
+            "repeat_tracts.length_spectrum_by_stratum",
+            tracts.length_spectrum_by_stratum.iter().map(|row| {
+                format!(
+                    "period = {}, reference_repeats = {}",
+                    row.period, row.reference_repeats
+                )
+            }),
+        )?;
+        names_each_key_once(
+            "repeat_tracts.length_spectrum_by_period",
+            tracts
+                .length_spectrum_by_period
+                .iter()
+                .map(|row| format!("period = {}", row.period)),
+        )?;
+        names_each_key_once(
+            "repeat_tracts.substitution_rate_by_stratum",
+            tracts.substitution_rate_by_stratum.iter().map(|row| {
+                format!(
+                    "read_group = {}, period = {}, reference_repeats = {}, ploidy = {}",
+                    row.read_group, row.period, row.reference_repeats, row.ploidy
+                )
+            }),
+        )
+    }
+
+    /// **A sample's libraries all ran in one batch, and it is the batch its own row names.**
+    ///
+    /// The batch is the population a contaminating read is drawn from (spec §3.4), and the file
+    /// writes it twice — once a read group and once a sample — because the mixture reads both
+    /// axes. **The two can disagree in a file and cannot in memory**:
+    /// `SequencingBatches::declared` refuses a declaration in which one sample's libraries ran in
+    /// two batches, naming the sample, so a file saying that is one no run could have produced
+    /// and one the projection could not carry.
+    ///
+    /// **Its symptom is not a crash but a wrong neighbour.** A sample whose row says batch 0
+    /// while its second library's row says batch 1 has its contaminant genotype drawn against one
+    /// batch's frequencies and that library's reads scored against another's — two different
+    /// populations, both plausible, in one sample.
+    fn the_batching_puts_each_sample_in_one_batch(&self) -> Result<(), ParametersFileError> {
+        let batch_of_read_group: BTreeMap<u32, u32> = self
+            .sequencing_batches
+            .by_read_group
+            .iter()
+            .map(|row| (row.read_group, row.batch))
+            .collect();
+        let batch_of_sample: BTreeMap<&str, u32> = self
+            .sequencing_batches
+            .by_sample
+            .iter()
+            .map(|row| (row.sample.as_str(), row.batch))
+            .collect();
+        for row in &self.fitted_from.read_groups {
+            // **Both lookups are total** by the time this runs, and each rests on a check above:
+            // the read-group one on the axis check, which refuses a batch table that does not
+            // cover `0..n` once each, and the sample one on the identity check, which refuses a
+            // sample list that is not the read-group table's own samples in first-seen order. The
+            // second was not true until 2026-08-30, and a read-group row naming a sample the list
+            // did not hold — a typo — slipped past this whole comparison. So it refuses rather
+            // than skipping, and says which of the two is missing.
+            let (Some(&of_read_group), Some(&of_sample)) = (
+                batch_of_read_group.get(&row.read_group),
+                batch_of_sample.get(row.sample.as_str()),
+            ) else {
+                return Err(refuse(
+                    "sequencing_batches",
+                    format!(
+                        "does not batch read group {} and its sample {:?}: one of the two has no \
+                         row, so nothing says which population that library's contaminating reads \
+                         are drawn from",
+                        row.read_group, row.sample
+                    ),
+                ));
+            };
+            if of_read_group != of_sample {
+                return Err(refuse(
+                    format!(
+                        "sequencing_batches.by_read_group[read_group = {}]",
+                        row.read_group
+                    ),
+                    format!(
+                        "puts read group {} in batch {of_read_group} and \
+                         `sequencing_batches.by_sample` puts its sample {:?} in batch \
+                         {of_sample}; a sample's libraries all ran in one batch, because the \
+                         batch is the population a contaminating read is drawn from and a sample \
+                         has one",
+                        row.read_group, row.sample
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn every_calibration_is_a_multiplier(&self) -> Result<(), ParametersFileError> {
         for row in &self.base_quality_calibration.by_read_group {
             let at = format!(
                 "base_quality_calibration.by_read_group[read_group = {}].error_probability_multiplier",
                 row.read_group
             );
-            a_warranted_value(&at, &row.error_probability_multiplier)?;
+            a_warranted_value(
+                &at,
+                &row.error_probability_multiplier,
+                EvidenceCount::Reads(0),
+            )?;
             // **Strictly above zero, and no upper bound.** A zero multiplies every read's error
             // probability to nothing, which charges the whole library the error floor — maximal
             // confidence about every base, from a number that says the fit found no errors at all;
@@ -367,7 +566,11 @@ impl ParametersFile {
                 "inbreeding.by_sample[sample = {:?}].inbreeding_coefficient",
                 row.sample
             );
-            a_warranted_value(&at, &row.inbreeding_coefficient)?;
+            a_warranted_value(
+                &at,
+                &row.inbreeding_coefficient,
+                EvidenceCount::CoveredPositions(0),
+            )?;
             // **Half-open at one**, which is the range the type upstream states: a coefficient of
             // one is a sample with no heterozygous site anywhere, and the genotype prior it
             // produces has a zero where a likelihood is multiplied.
@@ -423,7 +626,44 @@ impl ParametersFile {
     fn the_repeat_tract_numbers_are_what_they_claim(&self) -> Result<(), ParametersFileError> {
         let tracts = &self.repeat_tracts;
         let at = "repeat_tracts.fallback_length_spectrum_concentration";
-        a_warranted_value(at, &tracts.fallback_length_spectrum_concentration)?;
+        // **A median over strata has no count of its own**, so any unit here is wrong; the
+        // `defaulted` rule above already refuses one on the flat rung, and `reads` is named only
+        // because the check needs a word and this key should carry no `observations` at all.
+        a_warranted_value(
+            at,
+            &tracts.fallback_length_spectrum_concentration,
+            EvidenceCount::Reads(0),
+        )?;
+        // **Its warrant is not free: the file's own strata decide it.** The bottom rung states
+        // the median of the concentrations this run's strata fitted wherever any was fitted, and
+        // the compiled-in flat constant only where none was — so `defaulted` beside a non-empty
+        // `length_spectrum_by_stratum`, or `fitted_here` beside an empty one, is a claim the
+        // file's own rows refute. **It is refused here because nothing downstream can**: the
+        // projection carries only the number, and the writer re-derives the warrant from the same
+        // strata, so a contradiction is rewritten on the way out rather than reported.
+        let fitted_any = !tracts.length_spectrum_by_stratum.is_empty();
+        let warrant = tracts.fallback_length_spectrum_concentration.warrant;
+        if fitted_any != (warrant == Warrant::FittedHere) {
+            return Err(refuse(
+                at,
+                if fitted_any {
+                    format!(
+                        "is `{}`, and `length_spectrum_by_stratum` holds {} fitted stratum \
+                         spectra; the bottom rung states the median of those, so its warrant is \
+                         `fitted_here` — it is `defaulted` only where no stratum was fitted at all",
+                        the_word_for(warrant),
+                        tracts.length_spectrum_by_stratum.len()
+                    )
+                } else {
+                    format!(
+                        "is `{}`, and no stratum in this file was fitted on its own tracts, so \
+                         there is no median to take; a run with nothing fitted states the \
+                         compiled-in flat concentration and marks it `defaulted`",
+                        the_word_for(warrant)
+                    )
+                },
+            ));
+        }
         if tracts.fallback_length_spectrum_concentration.value <= 0.0 {
             return Err(refuse(
                 at,
@@ -503,7 +743,7 @@ impl ParametersFile {
                  reference_repeats = {}, ploidy = {}].rate",
                 row.read_group, row.period, row.reference_repeats, row.ploidy
             );
-            a_warranted_value(&at, &row.rate)?;
+            a_warranted_value(&at, &row.rate, EvidenceCount::BasesCompared(0))?;
             finite(at.clone(), row.rate.value)?;
             if !(0.0..=1.0).contains(&row.rate.value) {
                 return Err(refuse(
@@ -522,7 +762,7 @@ impl ParametersFile {
     fn every_stated_constant_is_in_range(&self) -> Result<(), ParametersFileError> {
         let at = "stated_constants.repeat_tract_outlier_weight";
         let weight = &self.stated_constants.repeat_tract_outlier_weight;
-        a_warranted_value(at, weight)?;
+        a_warranted_value(at, weight, EvidenceCount::Reads(0))?;
         // **Open at both ends, where every other share here is closed.** The scoring row asserts
         // `0 < weight < 1` (`likelihood::ssr`'s `genotype_log_likelihood_row`), so a zero or a
         // one accepted here becomes a panic several frames later naming a locus rather than the
@@ -674,8 +914,74 @@ fn a_list_of(ids: &[u32]) -> String {
     }
 }
 
+/// **One table keyed by the read-group axis whose rows are a subset of it**, rather than a cover.
+///
+/// **Two tables of the file are sparse by construction** — the slippage-group declaration and the
+/// repeat-tract substitution rate — because a row exists only where the run had something to say.
+/// What neither may do is name a read group the identity block does not list: the projection keys
+/// its map by that id, so a stray one is a number no locus can ever reach, and it is the mirror of
+/// the gap [`covers_the_read_groups`] refuses.
+fn names_only_the_read_groups(
+    at: &str,
+    ids: impl Iterator<Item = u32>,
+    read_groups: usize,
+) -> Result<(), ParametersFileError> {
+    for id in ids {
+        if id as usize >= read_groups {
+            return Err(refuse(
+                at.to_string(),
+                format!(
+                    "names read group {id} and this run has {read_groups}, numbered from zero; a \
+                     row keyed to a library the identity block does not list is one nothing can \
+                     ever read"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// **One table whose rows each name a different thing.**
+///
+/// The keys arrive already spelled the way the file spells them, so the refusal can quote the
+/// repeated one back — which is what a reader needs and what the projection, having already lost
+/// one of the two rows into a map, could not give.
+fn names_each_key_once(
+    at: &str,
+    keys: impl Iterator<Item = String>,
+) -> Result<(), ParametersFileError> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for key in keys {
+        if !seen.insert(key.clone()) {
+            return Err(refuse(
+                at.to_string(),
+                format!(
+                    "holds two rows for `{key}`; each row of this table becomes one entry of a \
+                     map keyed by exactly those fields, so the second silently replaces the first \
+                     and which one a run scored under is the order they happen to sit in"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The file's own word for a count's unit, for a refusal that has to name one.
+fn the_unit_of(count: EvidenceCount) -> &'static str {
+    match count {
+        EvidenceCount::Reads(_) => "reads",
+        EvidenceCount::CoveredPositions(_) => "covered_positions",
+        EvidenceCount::BasesCompared(_) => "bases_compared",
+    }
+}
+
 /// The refusal, with the key's path in the file's own spelling.
-fn refuse(field: impl Into<String>, problem: impl Into<String>) -> ParametersFileError {
+///
+/// **Shared with the projection** (`to_run_parameters`), which refuses in the same words where a
+/// value passes every check here and a newtype's own constructor still turns it down — a motif
+/// period past the longest this build indexes, say. Two spellings of one refusal is what having
+/// one function stops.
+pub(super) fn refuse(field: impl Into<String>, problem: impl Into<String>) -> ParametersFileError {
     ParametersFileError::Meaningless {
         field: field.into(),
         problem: problem.into(),
@@ -709,12 +1015,53 @@ fn a_share(at: &str, value: f64) -> Result<(), ParametersFileError> {
     ))
 }
 
-/// A value and its warrant: the number is a number, and its evidence count is a count.
-fn a_warranted_value(at: &str, value: &WarrantedValue) -> Result<(), ParametersFileError> {
+/// A value and its warrant: the number is a number, its evidence count is a count, and a
+/// defaulted number has no count at all.
+///
+/// **That last one is the writer's own rule, enforced on the way back in.** A stated constant has
+/// nothing behind it, and a count beside one would say that the constant rests on those reads —
+/// so the projection out writes no `observations` for a `defaulted` value, of any quantity. A
+/// file that carries one is either hand-edited or from another writer, and reading it would put
+/// evidence behind a number that has none. **The fix is the one the file's own header teaches**:
+/// a number you changed is `supplied`, and a supplied number keeps its count precisely because it
+/// was fitted on *some* cohort.
+fn a_warranted_value(
+    at: &str,
+    value: &WarrantedValue,
+    counted_in: EvidenceCount,
+) -> Result<(), ParametersFileError> {
     finite(at, value.value)?;
     let Some(observations) = value.observations else {
         return Ok(());
     };
+    if value.warrant == Warrant::Defaulted {
+        return Err(refuse(
+            format!("{at}.observations"),
+            "is written beside a `defaulted` warrant, and a stated constant has nothing behind \
+             it; delete the `observations` table, or — if you changed the number — set the \
+             warrant to `supplied`, which keeps its count",
+        ));
+    }
+    // **The unit has to be the one this quantity is fitted over**, and this is the only thing
+    // that says so. The projection *in* drops the unit — `Estimate<T>`'s count is a bare `u64`
+    // whose unit follows the quantity — and the projection out mints it back from the call site.
+    // So a calibration row that says `covered_positions = 812344` reads back as 812,344 reads and
+    // is written out under a key the user did not type: a change of meaning, silently, in the one
+    // direction spec §1.2 goal 1 forbids. An inbreeding coefficient is fitted over covered
+    // reference positions and a repeat-tract substitution rate over bases compared; neither is a
+    // read.
+    if std::mem::discriminant(&observations) != std::mem::discriminant(&counted_in) {
+        return Err(refuse(
+            format!("{at}.observations"),
+            format!(
+                "counts {}, and this number is fitted over {}; the unit is not decoration — the \
+                 three differ by orders of magnitude on one cohort, and a run reading this would \
+                 report the count under the other name",
+                the_unit_of(observations),
+                the_unit_of(counted_in)
+            ),
+        ));
+    }
     let (unit, count) = match observations {
         EvidenceCount::Reads(count) => ("reads", count),
         EvidenceCount::CoveredPositions(count) => ("covered_positions", count),
@@ -872,7 +1219,9 @@ fn a_share_curve(at: &str, curve: &ShareCurve) -> Result<(), ParametersFileError
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::a_file_using_every_shape;
+    use super::super::tests::{
+        THE_ROW_WHOSE_SHARES_BLEND, THE_ROW_WHOSE_SLIP_SHARE_BLENDS, a_file_using_every_shape,
+    };
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
         ShareSmoothing, Warrant, WarrantedValue,
@@ -925,14 +1274,183 @@ mod tests {
         small.sequencing_batches.by_read_group.truncate(1);
         small.sequencing_batches.by_sample.truncate(1);
         small.inbreeding.by_sample.truncate(1);
-        small.repeat_tracts.slippage_group_by_read_group.truncate(1);
+        small.repeat_tracts.slippage_group_by_read_group.clear();
         small.repeat_tracts.slippage_by_stratum_and_group.clear();
         small.repeat_tracts.length_spectrum_by_stratum.clear();
         small.repeat_tracts.length_spectrum_by_period.clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
+        // **A run that fitted no stratum takes the compiled-in flat concentration**, which is
+        // what `defaulted` says; the fixture's `fitted_here` is a claim about a median over
+        // strata this file has none of.
+        small.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
+            value: 1.0,
+            warrant: Warrant::Defaulted,
+            observations: None,
+        };
         small
             .validate()
             .expect("one sample with no repeat tracts is the bottom of the committed range");
+    }
+
+    /// **The sample list is the read-group table's own samples, in first-seen order, once each.**
+    ///
+    /// Two failures, and neither has a symptom the reader would recognise. A **repeat** gives two
+    /// per-sample rows one index, so the second sample's coefficient never lands and the
+    /// projection panics several frames from the key. A **different order** does not panic at
+    /// all: the projection reads the per-sample tables by name into this list and hands calling a
+    /// vector indexed by its position, while the writer writes them in the run's own order, so a
+    /// file whose two orders disagree gives every sample its neighbour's inbreeding coefficient
+    /// and its neighbour's sequencing batch, silently.
+    #[test]
+    fn a_sample_list_that_is_not_the_read_group_tables_own_is_refused() {
+        let (field, problem) = refused(|file| file.fitted_from.samples.swap(0, 1));
+        assert_eq!(field, "fitted_from.samples");
+        assert!(problem.contains("its neighbour's numbers"), "{problem}");
+
+        let (field, problem) = refused(|file| {
+            let repeated = file.fitted_from.samples[0].clone();
+            file.fitted_from.samples.push(repeated);
+        });
+        assert_eq!(field, "fitted_from.samples");
+        assert!(problem.contains("distinct samples"), "{problem}");
+
+        // **A read group naming a sample the list does not hold** — a typo — used to slip past
+        // the batching comparison, because the sample side of that lookup simply found nothing
+        // and the row was skipped.
+        let (field, _) = refused(|file| {
+            file.fitted_from.read_groups[1].sample = "TS-l".into();
+        });
+        assert_eq!(field, "fitted_from.samples");
+    }
+
+    /// **A repeat-tract table that names one thing twice is refused, naming the key.**
+    ///
+    /// Each of these five tables becomes a map keyed by the row's own fields, so a second row for
+    /// one key silently replaces the first and which of the two a run scored under is the order
+    /// they sit in. `StratumFits::over` carries a release-level assert against exactly this on the
+    /// fit's side; a file is the input path where a person copying a row to edit it can produce
+    /// one.
+    #[test]
+    fn a_repeat_tract_table_that_names_one_thing_twice_is_refused() {
+        let (field, problem) = refused(|file| {
+            let row = file.repeat_tracts.slippage_by_stratum_and_group[0].clone();
+            file.repeat_tracts.slippage_by_stratum_and_group.push(row);
+        });
+        assert_eq!(field, "repeat_tracts.slippage_by_stratum_and_group");
+        assert!(
+            problem.contains("period = 1, reference_repeats = 30, slippage_group = 0"),
+            "the refusal quotes the repeated key back: {problem}"
+        );
+
+        for (table, at) in [
+            (
+                "repeat_tracts.length_spectrum_by_stratum",
+                refused(|file| {
+                    let row = file.repeat_tracts.length_spectrum_by_stratum[0].clone();
+                    file.repeat_tracts.length_spectrum_by_stratum.push(row);
+                }),
+            ),
+            (
+                "repeat_tracts.length_spectrum_by_period",
+                refused(|file| {
+                    let row = file.repeat_tracts.length_spectrum_by_period[0].clone();
+                    file.repeat_tracts.length_spectrum_by_period.push(row);
+                }),
+            ),
+            (
+                "repeat_tracts.substitution_rate_by_stratum",
+                refused(|file| {
+                    let row = file.repeat_tracts.substitution_rate_by_stratum[0].clone();
+                    file.repeat_tracts.substitution_rate_by_stratum.push(row);
+                }),
+            ),
+            (
+                "repeat_tracts.slippage_group_by_read_group",
+                refused(|file| {
+                    let row = file.repeat_tracts.slippage_group_by_read_group[0];
+                    file.repeat_tracts.slippage_group_by_read_group.push(row);
+                }),
+            ),
+        ] {
+            assert_eq!(at.0, table);
+        }
+    }
+
+    /// **An evidence count spelled in another quantity's unit is refused.**
+    ///
+    /// The three units differ by orders of magnitude on one cohort, and the projection drops the
+    /// unit on the way in — `Estimate<T>`'s count is a bare number whose unit follows the
+    /// quantity — so a calibration row counting `covered_positions` reads back as that many
+    /// *reads* and is written out under a key the user did not type. This is the only thing that
+    /// stops it.
+    #[test]
+    fn an_evidence_count_in_another_quantitys_unit_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.base_quality_calibration.by_read_group[0]
+                .error_probability_multiplier
+                .observations = Some(EvidenceCount::CoveredPositions(812_344));
+        });
+        assert!(field.ends_with(".observations"), "{field}");
+        assert!(
+            problem.contains("counts covered_positions") && problem.contains("over reads"),
+            "{problem}"
+        );
+
+        let (field, _) = refused(|file| {
+            file.inbreeding.by_sample[0]
+                .inbreeding_coefficient
+                .observations = Some(EvidenceCount::Reads(180_600_412));
+        });
+        assert!(field.starts_with("inbreeding.by_sample"), "{field}");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.substitution_rate_by_stratum[0]
+                .rate
+                .observations = Some(EvidenceCount::Reads(40_122));
+        });
+        assert!(field.ends_with(".observations"), "{field}");
+    }
+
+    /// **A defaulted value carrying an evidence count is refused**, which is the writer's own
+    /// rule read back in: a stated constant has nothing behind it, and a count beside one says
+    /// the constant rests on those reads.
+    #[test]
+    fn a_defaulted_value_that_claims_evidence_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.base_quality_calibration.by_read_group[1]
+                .error_probability_multiplier
+                .observations = Some(EvidenceCount::Reads(4));
+        });
+        assert!(field.ends_with(".observations"), "{field}");
+        assert!(
+            problem.contains("set the warrant to `supplied`"),
+            "{problem}"
+        );
+    }
+
+    /// **The fallback concentration's warrant is decided by the file's own strata**, so a claim
+    /// its rows refute is refused rather than silently rewritten on the way out.
+    #[test]
+    fn a_fallback_warrant_the_files_own_strata_refute_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts
+                .fallback_length_spectrum_concentration
+                .warrant = Warrant::Defaulted;
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts.fallback_length_spectrum_concentration"
+        );
+        assert!(problem.contains("median of those"), "{problem}");
+
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.length_spectrum_by_stratum.clear();
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts.fallback_length_spectrum_concentration"
+        );
+        assert!(problem.contains("no median to take"), "{problem}");
     }
 
     #[test]
@@ -1008,13 +1526,23 @@ mod tests {
             .0,
             "sequencing_batches.by_read_group"
         );
-        assert_eq!(
-            refused(|file| {
-                file.repeat_tracts.slippage_group_by_read_group.remove(0);
-            })
-            .0,
-            "repeat_tracts.slippage_group_by_read_group"
-        );
+        // **The slippage-group declaration is the one read-group table that is *not* dense**,
+        // and this is where that is pinned. The writer names a read group there only where the
+        // run declared a slippage group for it — a run with no repeat tracts declares none at all
+        // — so requiring a cover here refused a file this caller had just written. What is still
+        // refused is a row naming a library the identity block does not list.
+        accepted(|file| {
+            file.repeat_tracts.slippage_group_by_read_group.remove(0);
+        });
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.slippage_group_by_read_group[0].read_group = 9;
+        });
+        assert_eq!(field, "repeat_tracts.slippage_group_by_read_group");
+        assert!(problem.contains("nothing can ever read"), "{problem}");
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.substitution_rate_by_stratum[0].read_group = 9;
+        });
+        assert_eq!(field, "repeat_tracts.substitution_rate_by_stratum");
 
         // **A duplicate is the same defect wearing the right row count**, so the length check
         // cannot catch it and the ordering check has to.
@@ -1248,34 +1776,36 @@ mod tests {
     #[test]
     fn a_curve_carrying_something_that_is_not_a_number_is_refused() {
         let (field, problem) = refused(|file| {
-            if let LevelSmoothing::Blend { curve, .. } =
-                &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                    .share_of_reads_that_slip_origin
-                    .smoothing
+            if let LevelSmoothing::Blend { curve, .. } = &mut file
+                .repeat_tracts
+                .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+                .share_of_reads_that_slip_origin
+                .smoothing
             {
                 curve.slope = f64::NAN;
             } else {
-                panic!("the fixture's first row blends its level");
+                panic!("that row blends its slip share");
             }
         });
         assert!(field.ends_with("blend.curve.slope"), "{field}");
         assert!(problem.contains("not a number"), "{problem}");
 
         let (field, _) = refused(|file| {
-            let shares = file.repeat_tracts.slippage_by_stratum_and_group[0]
+            let shares = file.repeat_tracts.slippage_by_stratum_and_group
+                [THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
                 .shorter_share_and_fall_off_origin
                 .as_mut()
-                .expect("the fixture's first row records its shares' origin");
+                .expect("that row records its shares' origin");
             if let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &mut shares.fall_off_smoothing {
                 curve.centre_repeats = f64::INFINITY;
             } else {
-                panic!("the fixture's first row takes its fall-off from a period curve");
+                panic!("that row takes its fall-off from a period curve");
             }
         });
         assert!(field.ends_with("curve.centre_repeats"), "{field}");
 
         let (field, _) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[0]
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
                 .share_of_reads_that_slip_origin
                 .expected_slipped_reads = Some(f64::NAN);
         });
@@ -1299,23 +1829,25 @@ mod tests {
     #[test]
     fn a_curve_weight_outside_zero_to_one_is_refused() {
         let (field, _) = refused(|file| {
-            if let LevelSmoothing::Blend { curve_weight, .. } =
-                &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                    .share_of_reads_that_slip_origin
-                    .smoothing
+            if let LevelSmoothing::Blend { curve_weight, .. } = &mut file
+                .repeat_tracts
+                .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+                .share_of_reads_that_slip_origin
+                .smoothing
             {
                 *curve_weight = 1.9;
             } else {
-                panic!("the fixture's first row blends its level");
+                panic!("that row blends its slip share");
             }
         });
         assert!(field.ends_with("blend.curve_weight"), "{field}");
 
         let (field, _) = refused(|file| {
-            let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
+            let shares = file.repeat_tracts.slippage_by_stratum_and_group
+                [THE_ROW_WHOSE_SHARES_BLEND]
                 .shorter_share_and_fall_off_origin
                 .as_mut()
-                .expect("the fixture's third row records its shares' origin");
+                .expect("that row records its shares' origin");
             if let ShareSmoothing::Blend { curve_weight, .. } = &mut shares.shorter_share_smoothing
             {
                 *curve_weight = -0.5;
@@ -1610,27 +2142,29 @@ mod tests {
             // same row, holding a perfectly good number. A path that names a healthy key is
             // worse than one that names nothing, because the reader stops there.
             refused(|file| {
-                let shares = file.repeat_tracts.slippage_by_stratum_and_group[2]
+                let shares = file.repeat_tracts.slippage_by_stratum_and_group
+                    [THE_ROW_WHOSE_SHARES_BLEND]
                     .shorter_share_and_fall_off_origin
                     .as_mut()
-                    .expect("the fixture's third row records its shares' origin");
+                    .expect("that row records its shares' origin");
                 if let ShareSmoothing::Blend { curve_weight, .. } =
                     &mut shares.shorter_share_smoothing
                 {
                     *curve_weight = -0.5;
                 } else {
-                    panic!("the fixture's third row blends its shorter share");
+                    panic!("that row blends its shorter share");
                 }
             }),
             refused(|file| {
-                if let LevelSmoothing::Blend { curve_weight, .. } =
-                    &mut file.repeat_tracts.slippage_by_stratum_and_group[0]
-                        .share_of_reads_that_slip_origin
-                        .smoothing
+                if let LevelSmoothing::Blend { curve_weight, .. } = &mut file
+                    .repeat_tracts
+                    .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+                    .share_of_reads_that_slip_origin
+                    .smoothing
                 {
                     *curve_weight = 1.9;
                 } else {
-                    panic!("the fixture's first row blends its level");
+                    panic!("that row blends its slip share");
                 }
             }),
         ] {
