@@ -228,42 +228,74 @@ fn apply_departures(live: &mut LiveSet, departed: &[ChainId]) {
     if departed.is_empty() {
         return;
     }
-    let mut departing = departed.iter().peekable();
-    live.ids.retain(|id| match departing.peek() {
-        Some(next) if *next == id => {
-            departing.next();
-            false
+    // **Only the stretch from the first departure onward moves.** Everything below it keeps both
+    // its value and its index, so the compaction starts there rather than at zero; and once the
+    // last departure has been passed, the rest moves in one block copy rather than one predicate
+    // call each. This was `Vec::retain`, which evaluates a closure over every identifier live —
+    // 280 of them at 280 reads a position, to remove about two.
+    let ids = &mut live.ids;
+    let from = ids.partition_point(|id| *id < departed[0]);
+    let len = ids.len();
+    let (mut write, mut read, mut leaving) = (from, from, 0usize);
+    while read < len {
+        if leaving == departed.len() {
+            ids.copy_within(read..len, write);
+            write += len - read;
+            break;
         }
-        _ => true,
-    });
+        let id = ids[read];
+        if departed[leaving] == id {
+            leaving += 1;
+        } else {
+            ids[write] = id;
+            write += 1;
+        }
+        read += 1;
+    }
+    ids.truncate(write);
 }
 
 /// Put `arrived` into `live`, keeping it ascending.
 ///
-/// **A merge rather than an append and a sort**: both sides are already ascending, and at depth
-/// the live set is hundreds of ids where the arrivals are a handful, so re-sorting the whole set
-/// once a record would be the expensive part of the walk.
-fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId], merged_ids: &mut Vec<ChainId>) {
+/// **In place, and it never reads what sits below the lowest arrival**: those identifiers keep
+/// their value and their index whatever arrives above them. When every arrival is newer than the
+/// whole set — which is what a read not seen before gives — that is the entire set, and the merge
+/// becomes an append that does not read it at all.
+///
+/// This rebuilt the whole set into a scratch buffer and swapped it in. At 280 reads a position
+/// about two identifiers arrive at every record, so 280 were read and 280 written to insert two;
+/// the scratch buffer that made that possible is gone, and with it 2,264 bytes an open sample.
+fn apply_arrivals(live: &mut LiveSet, arrived: &[ChainId]) {
     if arrived.is_empty() {
         return;
     }
-    merged_ids.clear();
-    merged_ids.reserve(live.ids.len() + arrived.len());
-    let (mut was, mut arriving) = (0usize, 0usize);
-    while was < live.ids.len() && arriving < arrived.len() {
-        if live.ids[was] < arrived[arriving] {
-            merged_ids.push(live.ids[was]);
-            was += 1;
+    let ids = &mut live.ids;
+    let from = ids.partition_point(|id| *id < arrived[0]);
+    if from == ids.len() {
+        ids.extend_from_slice(arrived);
+        return;
+    }
+    // **The interleaving case**, reached when an arrival sorts below an identifier already live —
+    // a returning read, which spec `psp_record_encoding.md` §6 measures at 83 % of identifiers on
+    // the human sample and 91 % on tomato, because a chain id names a read *pair* and a pair
+    // covers the reference twice.
+    //
+    // Merged from the back, so a value is only ever written to a slot whose own value has already
+    // moved: `slot` is always `unmoved + still_to_place - 1`, one past the highest index either
+    // source will still be read from, which is why the two never collide.
+    let was = ids.len();
+    ids.resize(was + arrived.len(), 0);
+    let (mut unmoved, mut still_to_place) = (was, arrived.len());
+    while still_to_place > 0 {
+        let slot = unmoved + still_to_place - 1;
+        if unmoved > from && ids[unmoved - 1] > arrived[still_to_place - 1] {
+            ids[slot] = ids[unmoved - 1];
+            unmoved -= 1;
         } else {
-            // **The interleaving arm**, reached when an arrival sorts below an id already live —
-            // a returning read, which is most of them. `derive_changes` says why.
-            merged_ids.push(arrived[arriving]);
-            arriving += 1;
+            ids[slot] = arrived[still_to_place - 1];
+            still_to_place -= 1;
         }
     }
-    merged_ids.extend_from_slice(&live.ids[was..]);
-    merged_ids.extend_from_slice(&arrived[arriving..]);
-    std::mem::swap(&mut live.ids, merged_ids);
 }
 
 /// Write one observation's own list of reads: a count, then the identifiers as ascending gaps.
@@ -397,10 +429,6 @@ pub struct LiveSetWriter {
     now_live: Vec<ChainId>,
     /// This record's changes.
     changes: LiveSetChanges,
-    /// Where the live set is rebuilt when arrivals are merged into it. Swapped with the set's own
-    /// vector rather than copied back, so the two trade places and neither reallocates.
-    merged_ids: Vec<ChainId>,
-
     // ---- what lives for one block, and is replaced whole at every boundary ----
     //
     // **Nothing per-block goes beside `block`.** A field here is initialised once and never
@@ -488,11 +516,7 @@ impl LiveSetWriter {
         derive_changes(&self.block.live, &self.now_live, &mut self.changes);
         encode_changes(&self.changes, &self.block.live, out);
         apply_departures(&mut self.block.live, &self.changes.departed);
-        apply_arrivals(
-            &mut self.block.live,
-            &self.changes.arrived,
-            &mut self.merged_ids,
-        );
+        apply_arrivals(&mut self.block.live, &self.changes.arrived);
     }
 }
 
@@ -576,9 +600,6 @@ pub struct LiveSetReader {
     /// early is a `Truncated` whose contract is *fetch more bytes and re-parse this record from
     /// its first byte* — so a set already moved would meet those bytes a second time.
     parsed_but_not_applied: bool,
-    /// Scratch for the arrival merge — see [`LiveSetWriter`]'s field of the same name.
-    merged_ids: Vec<ChainId>,
-
     // ---- what lives for one block, and is replaced whole at every boundary ----
     block: PerBlockState,
 }
@@ -704,11 +725,7 @@ impl LiveSetReader {
         // record that only departs reads retried to `Ok` with `[1, 2]` where the truth was
         // `[1, 2, 4]`.
         apply_departures(&mut self.block.live, &self.changes.departed);
-        apply_arrivals(
-            &mut self.block.live,
-            &self.changes.arrived,
-            &mut self.merged_ids,
-        );
+        apply_arrivals(&mut self.block.live, &self.changes.arrived);
     }
 
     /// The departures, each a position in the live set as it stands, resolved back to the
