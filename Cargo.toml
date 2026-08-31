@@ -310,6 +310,11 @@ harness = false
 name = "ng_generic_pileup_perf"
 harness = false
 
+# ng's psp store: a full walk, a head-only walk, a one-in-a-hundred walk, and a write.
+[[bench]]
+name = "ng_psp_perf"
+harness = false
+
 # The joint parameters fit. Needs `--features bench-fixtures` to measure anything;
 # without it the target still builds (so `cargo bench --no-run` covers it) and
 # refuses at startup rather than reporting a time for a fixture it could not draw.

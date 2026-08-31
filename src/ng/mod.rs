@@ -71,6 +71,7 @@ pub mod repeat_catalog;
 pub mod run;
 pub mod tandem_repeat;
 pub mod types;
+pub mod vcf;
 
 pub use ref_seq::{
     ContigTable, EvictableRefSeq, InMemoryRefSeq, RawRefSeq, RefSeq, RefSeqError, ResidentRefSeq,

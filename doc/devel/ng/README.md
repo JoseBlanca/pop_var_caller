@@ -105,7 +105,14 @@ by document kind:
     supplied, defaulted). It is what makes a run possible without a fit — the alignment files
     straight to a VCF — and every run writes one beside its VCF whatever the numbers came from, so
     a run is reproducible from its own output. The defaults live in the binary, not in a shipped
-    file. **Settled, no code yet.**
+    file. **Built through Milestone F1** — the shape, the writer, the reader, the four bindings,
+    the compiled-in defaults, and all three of §7's sources writing the file the run used.
+  - [`vcf_output.md`](spec/vcf_output.md) — **the VCF a run writes**: one file for SNPs, indels
+    and repeat tracts, where production writes two. One record shape — sequence alleles over a
+    span — with tract records marked by an `STR` flag beside `RU`/`PERIOD`; every disagreement
+    between the two production formats resolved by a stated rule (no-calls, what `DP` counts,
+    the anchor rule, filtered loci, provenance). The format only; what is dropped is steps
+    11a/11b's. **Settled, no code yet.**
   - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling
     steps are graded against.
 - **`research/`** — measurements, kept apart from the designs they settled so a spec can point at
@@ -236,6 +243,13 @@ by document kind:
     alone before any calling code, because without the motif there is no ladder. Its oracle is a
     differential with a failing state at both ends: production's candidate set reproduced with its
     three replaced rules switched in, and the measured improvement with them switched out.
+  - [`vcf_output.md`](impl_plan/vcf_output.md) — the `src/ng/vcf/` module: the written record's
+    carrier type (the one join nothing holds today — per-sample depths, allele counts and mapq
+    pools summed in the worker before the evidence is released), encoding on golden files, the
+    header, the ordered writer with the one legal POS tie, a `bcftools` strict-parse gate before
+    any real data, then the differential against production's generic file with every divergence
+    in a named class. Tract *encoding* built on fixtures; real tract records wait on the merge's
+    motif and the tract quality spec.
 
 This mirrors the repo-wide `doc/devel/{specs,architecture,implementation_plans}`
 convention but scoped to ng, so the growing set of ng docs stays together.
