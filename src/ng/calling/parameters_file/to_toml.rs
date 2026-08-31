@@ -91,7 +91,7 @@ impl ParametersFile {
                 "",
                 "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
-                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing. On most of them there is no built-in number for it to be, so writing one is a claim about this caller that no build makes — do not mark an inbreeding coefficient or a substitution rate `defaulted`. On `base_quality_calibration.by_read_group[...].error_probability_multiplier` there is a built-in number, 1.0, and the key still is not checked: `defaulted` there is copied from the error rate the multiplier was built from, and a run whose rate itself was defaulted writes a `defaulted` multiplier that is not 1.0.",
+                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the two where this caller does hold a built-in number, the base-quality multiplier at 1.0 and the inbreeding coefficient at 0.0. A `defaulted` substitution rate is the one to avoid writing by hand: nothing here defaults that number in this file, so the warrant would be a claim about this caller that no build makes.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
@@ -534,11 +534,20 @@ mod origins {
     pub const SUBSTITUTION_RATE: &str =
         "nothing was fitted for this read group at this stratum, and nothing was supplied";
 
-    /// An inbreeding coefficient nothing could be fitted for — **which the pre-pass has no
-    /// default for**, so a run should never write one.
+    /// An inbreeding coefficient nobody stated and nothing fitted.
+    ///
+    /// **Rewritten 2026-08-31, and the sentence it replaced was read by a geneticist as a bug
+    /// report.** It said "inbreeding has no default: a run should not be able to write this
+    /// line", which was true of the *fit* and became false of the *run* when the owner ruled that
+    /// a coefficient nobody states is zero. A reader whose cohort selfs met it on the one row
+    /// they most needed to change and stopped to report a defect instead of changing it.
     pub const INBREEDING_COEFFICIENT: &str = concat!(
-        "no coefficient was fitted for this sample, and inbreeding has no default: a run ",
-        "should not be able to write this line"
+        "nobody said how inbred this sample is, so it is scored as an outcrosser: the ",
+        "genotype prior multiplies its heterozygote branch by 1 - F, and at zero that ",
+        "branch is left alone. If your cohort selfs, say so — a landrace near F = 0.9 ",
+        "scored at zero has every homozygous stretch of its genome treated as a ",
+        "surprise. Set the value here and change the warrant beside it to \"supplied\", ",
+        "or declare it when you run"
     );
 }
 
@@ -1584,8 +1593,13 @@ mod tests {
             "a defaulted substitution rate says so:\n{text}"
         );
         assert!(
-            text.contains("inbreeding has no default"),
-            "a defaulted inbreeding coefficient says a run should not be able to write it:\n{text}"
+            text.contains("nobody said how inbred this sample is"),
+            "a defaulted inbreeding coefficient says nobody stated one:\n{text}"
+        );
+        assert!(
+            text.contains("scored as an outcrosser"),
+            "and says what taking the default costs, which is what a reader of a selfing \
+             cohort's file has to act on:\n{text}"
         );
 
         // And the two fitted rows above and below it carry no note of their own.

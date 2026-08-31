@@ -20,11 +20,14 @@
 # `fitted_here` or `borrowed`: nothing in this file can tell your value from a
 # fitted one, so the run will report it as measured, with the old `observations`
 # count still beside it. And on every other key a `defaulted` warrant is checked
-# against nothing — including the two where this caller does hold a built-in
-# number, the base-quality multiplier at 1.0 and the inbreeding coefficient at
-# 0.0. A `defaulted` substitution rate is the one to avoid writing by hand:
-# nothing here defaults that number in this file, so the warrant would be a
-# claim about this caller that no build makes.
+# against nothing. On most of them there is no built-in number for it to be, so
+# writing one is a claim about this caller that no build makes — do not mark an
+# inbreeding coefficient or a substitution rate `defaulted`. On
+# `base_quality_calibration.by_read_group[...].error_probability_multiplier`
+# there is a built-in number, 1.0, and the key still is not checked: `defaulted`
+# there is copied from the error rate the multiplier was built from, and a run
+# whose rate itself was defaulted writes a `defaulted` multiplier that is not
+# 1.0.
 #
 # The slippage numbers, the prior's two concentrations and the length spectrum
 # rows carry no warrant — they say where they came from another way, and there
@@ -51,12 +54,12 @@ ploidy = 2
 reference_digest = "0123456789abcdef0123456789abcdef"
 samples = [
     "TS-1",
-    "Ailsa ‘Craig’ \"×2\"",
+    "Ailsa Craig",
 ]
 read_groups = [
     { read_group = 0, declared_id = "HWI.3", library = "lib3", sample = "TS-1" },
     { read_group = 1, declared_id = "HWI.4", library = "lib4", sample = "TS-1" },
-    { read_group = 2, declared_id = "HWI.5", library = "lib5", sample = "Ailsa ‘Craig’ \"×2\"" },
+    { read_group = 2, declared_id = "HWI.5", library = "lib5", sample = "Ailsa Craig" },
 ]
 
 [fitted_from.census]
@@ -99,27 +102,15 @@ terms = [
 # exactly as reported. It is not a multiplier on the Phred score, which moves
 # the other way.
 by_read_group = [
-    { read_group = 0, error_probability_multiplier = { value = 1.0324, warrant = "fitted_here", observations = { reads = 812344 } } },
+    # not calibrated: this read group's reported qualities are taken at face
+    # value, because no usable error rate could be fitted for it
+    { read_group = 0, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
     # not calibrated: this read group's reported qualities are taken at face
     # value, because no usable error rate could be fitted for it
     { read_group = 1, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
-    { read_group = 2, error_probability_multiplier = { value = 0.87, warrant = "supplied", observations = { reads = 640918 } } },
-]
-
-[contamination]
-# How much of each read group's reads came from somebody else — one row a lane,
-# because two lanes of one library can differ: index hopping happens on a
-# flowcell, not in a tube. Three states, three different claims:
-#   - this whole section absent  -> nobody identified any contamination
-#   - a row with no `measurement` -> this lane could not be measured
-#   - a zero share with non-zero counts -> measured, and found clean
-# To stop correcting one lane, delete its `measurement = { ... }` and leave the
-# row; a library sequenced over several lanes has a row for each. Setting that
-# share to zero says something else: that it was measured and found clean.
-by_read_group = [
-    { read_group = 0, library = "lib3", measurement = { share_of_reads_from_another_sample = 0.031, markers_with_reads = 4211, reads_on_markers = 90233, fitted_from_reads_of = "this_read_groups_own_reads" } },
-    { read_group = 1, library = "lib4" },
-    { read_group = 2, library = "lib5", measurement = { share_of_reads_from_another_sample = 0.0, markers_with_reads = 2903, reads_on_markers = 64118, fitted_from_reads_of = "every_read_of_this_sample" } },
+    # not calibrated: this read group's reported qualities are taken at face
+    # value, because no usable error rate could be fitted for it
+    { read_group = 2, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
 ]
 
 [sequencing_batches]
@@ -134,23 +125,27 @@ by_read_group = [
 # in this file precisely because two lanes of one plant can differ; here they
 # cannot, because a contaminating read is drawn against one set of neighbours
 # and a sample has one genotype to draw.
-batching_was_declared = true
+batching_was_declared = false
 by_read_group = [
     { read_group = 0, batch = 0 },
     { read_group = 1, batch = 0 },
-    { read_group = 2, batch = 1 },
+    { read_group = 2, batch = 0 },
 ]
 by_sample = [
     { sample = "TS-1", batch = 0 },
-    { sample = "Ailsa ‘Craig’ \"×2\"", batch = 1 },
+    { sample = "Ailsa Craig", batch = 0 },
 ]
 
 [inbreeding]
 # How inbred each sample is, as a fraction in [0, 1) — one row a sample, counted
 # over the reference positions that sample's reads covered.
 by_sample = [
-    { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } },
-    { sample = "Ailsa ‘Craig’ \"×2\"", inbreeding_coefficient = { value = 0.17, warrant = "borrowed", observations = { covered_positions = 9411027 } } },
+    # no coefficient was fitted for this sample, and inbreeding has no default:
+    # a run should not be able to write this line
+    { sample = "TS-1", inbreeding_coefficient = { value = 0.0, warrant = "defaulted" } },
+    # no coefficient was fitted for this sample, and inbreeding has no default:
+    # a run should not be able to write this line
+    { sample = "Ailsa Craig", inbreeding_coefficient = { value = 0.0, warrant = "defaulted" } },
 ]
 
 [ordinary_site_prior]
@@ -163,8 +158,8 @@ by_sample = [
 # human data (`stated_heterozygosity`), which is the one that rests on nothing
 # this run measured.
 reference_concentration = 1.0
-alternative_concentration_total = 0.0006
-rung = "fitted_curve"
+alternative_concentration_total = 0.001
+rung = "stated_heterozygosity"
 
 [repeat_tracts]
 # Everything about repeat tracts. A **stratum** is a class of tract, and every
@@ -217,27 +212,21 @@ rung = "fitted_curve"
 # `supplied`, and so should you if you change it. It carries no `observations`
 # in any of those cases — a median over strata is not a measurement with a
 # sample size.
-fallback_length_spectrum_concentration = { value = 3.5, warrant = "fitted_here" }
+# this run fitted no stratum on its own tracts, so there was no median to take
+# and this is the caller's own constant
+fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },
     { read_group = 1, slippage_group = 0 },
-    { read_group = 2, slippage_group = 1 },
+    { read_group = 2, slippage_group = 0 },
 ]
-slippage_by_stratum_and_group = [
-    { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum" } },
-    { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } } } },
-    { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, share_of_reads_that_slip_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 8 }, reach = "below_the_fitted_range" } } } },
-]
+slippage_by_stratum_and_group = []
 # `shares_by_repeat_offset` runs from -span to +span in whole repeat units from
 # the **reference** tract length, so the middle entry is the reference length
 # itself, the count is odd, and the shares sum to one. An array read as starting
 # at zero shifts every length this stratum expects by one repeat.
-length_spectrum_by_stratum = [
-    { period = 2, reference_repeats = 6, concentration = 3.5, shares_by_repeat_offset = [0.1, 0.8, 0.1] },
-]
-length_spectrum_by_period = [
-    { period = 2, concentration = 2.75, shares_by_repeat_offset = [0.15, 0.7, 0.15] },
-]
+length_spectrum_by_stratum = []
+length_spectrum_by_period = []
 # How often a base reads wrong inside a tract — per read group as well as per
 # stratum, because that is a property of the chemistry, and per `ploidy` as
 # well, because that is the set of genotypes the fit scored these tracts
@@ -245,9 +234,7 @@ length_spectrum_by_period = [
 # file: a cohort called at two ploidies carries a row for each. Counted in bases
 # compared, not reads: a read crossing a tract contributes as many bases as it
 # crosses.
-substitution_rate_by_stratum = [
-    { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, warrant = "borrowed", observations = { bases_compared = 40122 } } },
-]
+substitution_rate_by_stratum = []
 
 [stated_constants]
 # The numbers no fit produces, written out so that what a run inherited is
@@ -255,3 +242,4 @@ substitution_rate_by_stratum = [
 # inherited from the existing caller and never measured here: the share of
 # repeat-tract reads that came from nowhere the model can explain
 repeat_tract_outlier_weight = { value = 0.01, warrant = "defaulted" }
+

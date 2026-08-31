@@ -177,12 +177,18 @@ impl ParametersFile {
             samples.len(),
             run.inbreeding_coefficient_by_sample().len()
         );
-        assert_eq!(
-            base_quality_rate_by_read_group.len(),
-            read_group_count,
+        // **A rate for every read group, or none at all** — the same two-state contract the
+        // contamination axis carries one level down, and for the same reason: a *short* list is
+        // the failure worth refusing, because it writes some other read group's count beside a
+        // multiplier. **Empty is the run with no fit** (spec §8), whose calibrations are all
+        // `Defaulted` and so write no count; `calibration_rows` refuses a missing rate under any
+        // other warrant, read group by read group.
+        assert!(
+            base_quality_rate_by_read_group.is_empty()
+                || base_quality_rate_by_read_group.len() == read_group_count,
             "the fit supplied base-quality rates for {} read groups and the run has {}; the count \
-             written beside each multiplier comes from these rates, so a set covering a different \
-             set of read groups is a different fit",
+             written beside each multiplier comes from these rates, so a set covering some of \
+             them is a different fit — a run that fitted none supplies none",
             base_quality_rate_by_read_group.len(),
             read_group_count
         );
@@ -260,33 +266,53 @@ fn calibration_rows(
             let id = ReadGroupId(
                 u32::try_from(read_group).expect("a run's read-group axis fits in a u32"),
             );
-            let rate = rate_by_read_group.get(&id).unwrap_or_else(|| {
-                panic!(
-                    "read group {read_group} has a calibration and no fitted rate; the run's \
-                     rates are 0..n with nothing missing, because the calibration axis was built \
-                     from them — so a rate set that is missing one was fitted over a different \
-                     set of read groups than the run has"
-                )
-            });
+            // **A read group with no rate at all is legal exactly where its calibration is
+            // `Defaulted`, and nowhere else.** That is the run with no fit (spec §8): nothing was
+            // fitted for anybody, so there are no rates to offer, and a `Defaulted` calibration
+            // writes no `observations` anyway — the projection's rule that a stated constant has
+            // nothing behind it. So the row this builds is the same row whether a rate was
+            // offered or not, and requiring one would mean a caller inventing an `Estimate` to
+            // satisfy a lookup whose value is then dropped.
+            //
+            // **The panic stays for every other warrant**, and it is the one worth keeping: a
+            // *fitted* calibration whose rate is missing means the rate set and the calibration
+            // axis came from different fits, and the count that row is about to write is then
+            // the other fit's.
+            let rate = rate_by_read_group.get(&id);
+            assert!(
+                rate.is_some() || calibration.provenance == Provenance::Defaulted,
+                "read group {read_group}'s calibration is {:?} and no rate was offered for it; \
+                 only a `Defaulted` calibration can have none, because it is the one that writes \
+                 no count — so a rate set missing a fitted read group's entry was fitted over a \
+                 different set of read groups than the run has",
+                calibration.provenance
+            );
             // **The scale carries the rate's own warrant** — `from_fitted_rate` copies it — with
             // one legitimate disagreement: a rate assembly *refused* leaves the calibration
             // `Defaulted` beside a rate that is not. Anything else means the two came from
             // different fits, and the count this row is about to write is then the other fit's.
             assert!(
                 calibration.provenance == Provenance::Defaulted
-                    || calibration.provenance == rate.provenance,
+                    || rate.is_none_or(|rate| calibration.provenance == rate.provenance),
                 "read group {read_group}'s calibration is {:?} and the rate offered for it is \
                  {:?}; the scale carries the rate's own warrant and the count beside it comes \
                  from that rate, so two that disagree are two different fits",
                 calibration.provenance,
-                rate.provenance
+                rate.map(|rate| rate.provenance)
             );
             BaseQualityCalibrationRow {
                 read_group: id.get(),
                 error_probability_multiplier: warranted_value(
                     calibration.scale,
                     calibration.provenance,
-                    EvidenceCount::Reads(rate.observations),
+                    // **The count on the no-rate arm is never read, and the two lines that make
+                    // that true are both above.** The assertion admits a missing rate only under
+                    // `Defaulted`, and `warranted_value` writes no `observations` at all under
+                    // `Defaulted` — so any number here produces the same row. Measured: putting
+                    // 7 in its place passes all 184 tests of `ng::calling::parameters_file`,
+                    // this module's 33 among them, which is an equivalent mutant rather than a
+                    // hole. Zero is written because it is the true count.
+                    EvidenceCount::Reads(rate.map_or(0, |rate| rate.observations)),
                 ),
             }
         })
@@ -563,7 +589,25 @@ fn warranted_value(
         // whose fitted rate was refused still has a count of reads on that rate; writing it here
         // would say the multiplier of one rests on them, and it rests on nothing. `Supplied` is
         // deliberately *not* treated this way — see `of_run`'s three rules.
-        observations: (warrant != Warrant::Defaulted).then_some(observations),
+        //
+        // **A `supplied` number with nothing behind it writes no count either**, which is a
+        // narrower rule than the one above and was added at step E2. `Supplied` keeps its count
+        // in general, and must: a file demoted under spec §2.1 marks every number `supplied`,
+        // and those numbers were fitted on some cohort. But a coefficient an operator typed
+        // (`parameters_file::DeclaredInbreeding`) is `Supplied` with a count of **zero**, and
+        // writing `observations = { covered_positions = 0 }` then says the number was measured
+        // over no genome at all — while the file's own editing rule, three lines from the top,
+        // tells the reader to *delete* `observations` on a value they supplied. A geneticist
+        // reading a produced file could not tell whether that row was correct or their own
+        // mistake.
+        //
+        // **A *fitted* count of zero is still written**, and deliberately: *this fit produced a
+        // number from no reads at all* is an alarming state and the count is what says so.
+        // **The trip stays lossless** — the projection back reads an absent count as zero
+        // (`to_run_parameters`'s `an_evidence_count`), which is the number it came from.
+        observations: (warrant != Warrant::Defaulted
+            && !(warrant == Warrant::Supplied && observations.count() == 0))
+            .then_some(observations),
     }
 }
 
@@ -1393,10 +1437,20 @@ mod tests {
         );
     }
 
-    /// **A count of zero is a count, and only the warrant makes one absent.**
+    /// **A *fitted* count of zero is a count, and the warrant is what makes one absent** — with
+    /// the one exception step E2 added.
     ///
     /// *Fitted from nothing* and *a stated constant* are two different claims, and a rule that
-    /// dropped the count whenever it was zero would collapse them.
+    /// dropped every zero count would collapse them: a fit that produced a number from no reads
+    /// at all is alarming, and the count is what says so.
+    ///
+    /// **The exception is a `supplied` number with nothing behind it**, which is what an operator
+    /// who declares an inbreeding coefficient produces. Writing
+    /// `observations = { covered_positions = 0 }` beside it says the number was measured over no
+    /// genome, while the file's own editing rule tells that same reader to delete `observations`
+    /// on a value they supplied — so a produced file contradicted its own instructions. A
+    /// `supplied` number with a real count still keeps it, which is the demoted-file case spec
+    /// §2.1 creates.
     #[test]
     fn an_evidence_count_of_zero_is_written_and_is_not_absence() {
         assert_eq!(
@@ -1413,6 +1467,17 @@ mod tests {
             Some(EvidenceCount::CoveredPositions(u64::MAX)),
             "a supplied number keeps its count: spec §2.1 demotes a whole mismatched file to \
              supplied, and those numbers were fitted on some cohort"
+        );
+        assert_eq!(
+            warranted_value(
+                0.9,
+                Provenance::Supplied,
+                EvidenceCount::CoveredPositions(0)
+            )
+            .observations,
+            None,
+            "a coefficient an operator typed has nothing behind it, and a zero count beside it \
+             claims a measurement over no genome"
         );
         assert_eq!(
             warranted_value(1.0, Provenance::Defaulted, EvidenceCount::Reads(4_242)).observations,
@@ -2266,8 +2331,14 @@ mod tests {
         let _ = projected(&run, &three_plants);
     }
 
+    /// **The read group whose rate went missing is `Borrowed`, and that is now what makes this
+    /// refuse.** Step E2 made a missing rate legal where the calibration is `Defaulted` — the run
+    /// with no fit, which has no rates for anybody and writes no counts — so the message this
+    /// pins moved with it, from *has a calibration and no fitted rate* to one that names the
+    /// warrant. A rate set missing a **fitted or borrowed** read group's entry is still the two
+    /// fits coming apart, which is what the refusal is for.
     #[test]
-    #[should_panic(expected = "has a calibration and no fitted rate")]
+    #[should_panic(expected = "and no rate was offered for it")]
     fn a_rate_set_missing_one_of_the_runs_read_groups_is_refused() {
         let read_groups = a_runs_read_groups();
         let run = a_fitted_run(&read_groups, &the_runs_contamination());
@@ -2303,6 +2374,29 @@ mod tests {
             &run,
             &read_groups,
             &a_wider_fit,
+            &the_runs_inbreeding(),
+            &A_REFERENCE,
+            a_census(),
+        );
+    }
+
+    /// **A rate set covering *some* of the run's read groups is refused at the door, not at the
+    /// row.** Step E2 turned that guard from `==` into *empty or complete*, and only the wide case
+    /// above pinned it: with the guard relaxed to `<=`, a short set slips past the door and is
+    /// caught one frame later by the per-row rule instead, under a message about one read group
+    /// rather than about the fit. Both refuse, and which one speaks is the difference between
+    /// *this rate set is not this run's* and *read group 2 is missing*.
+    #[test]
+    #[should_panic(expected = "rates for 2 read groups and the run has 3")]
+    fn a_rate_set_covering_some_of_the_runs_read_groups_is_refused_at_the_door() {
+        let read_groups = a_runs_read_groups();
+        let run = a_fitted_run(&read_groups, &the_runs_contamination());
+        let mut one_short = the_runs_fitted_rates();
+        one_short.remove(&ReadGroupId(2));
+        let _ = ParametersFile::of_run(
+            &run,
+            &read_groups,
+            &one_short,
             &the_runs_inbreeding(),
             &A_REFERENCE,
             a_census(),

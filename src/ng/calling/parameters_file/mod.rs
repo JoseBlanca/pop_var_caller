@@ -172,6 +172,7 @@ mod to_toml;
 mod validate;
 
 pub use bindings::ParametersForThisRun;
+pub use defaults::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
 pub use to_run_parameters::RunParametersFromFile;
 
 use serde::{Deserialize, Serialize};
@@ -441,6 +442,23 @@ pub enum EvidenceCount {
     /// Bases inside repeat tracts that were compared against the reference — what a repeat-tract
     /// substitution rate is fitted over (`parameter_estimation::ssr`).
     BasesCompared(u64),
+}
+
+impl EvidenceCount {
+    /// How much evidence, with the unit dropped — for the one caller that has to ask *is there
+    /// any* rather than *how much of what*.
+    ///
+    /// **A count of zero is not a small measurement**, and that is what the caller uses this for:
+    /// the writer leaves the key out entirely rather than writing `{ covered_positions = 0 }`,
+    /// which this file's own header would have a reader take as *measured over no genome at all*.
+    #[must_use]
+    pub fn count(self) -> u64 {
+        match self {
+            Self::Reads(count) | Self::CoveredPositions(count) | Self::BasesCompared(count) => {
+                count
+            }
+        }
+    }
 }
 
 /// **Every number calling runs on, as one file.**

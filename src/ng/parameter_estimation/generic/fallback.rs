@@ -11,12 +11,23 @@
 //! - **The genotype frequencies have no rung at all.** A sample has one heterozygosity, so
 //!   there is no sibling to borrow it from, and no constant is worth inventing because it
 //!   is the biology. Too few sites is an error, raised by the coupled fit.
-//! - **The inbreeding coefficient has one rung and it is not a default.** It may be
+//! - **The inbreeding coefficient has one rung here and it is not a default.** It may be
 //!   *supplied* — which is what [`InbreedingMode::Supplied`] carries, and it changes what
 //!   is accumulated rather than only what is reported — and otherwise it is fitted or it
 //!   fails. It is the parameter that differs most between an outcrosser and a selfing
 //!   landrace, and a cohort's diversity divides by `1 − F`, so a wrong constant would be
 //!   amplified rather than absorbed.
+//!
+//!   **⚑ This is the rule for the *fit*, and calling has a different one.** A run that
+//!   fitted nothing still has to put some coefficient into the genotype prior, and by the
+//!   owner's ruling of 2026-08-31 it takes zero, marked `Defaulted` and written into the
+//!   run's parameters file where an operator can see it and change it
+//!   (`calling::parameters_file::DEFAULT_INBREEDING_COEFFICIENT`). **What separates the two
+//!   is how far a wrong constant travels**: a fitted diversity divides by `1 − F` and
+//!   carries the mistake into every number this module goes on to emit, where a defaulted
+//!   coefficient at calling time reaches the calls and stops. Zero is not harmless there
+//!   either — it is Hardy–Weinberg, so a selfing cohort's heterozygotes are over-called —
+//!   which is why the file marks it and says what it costs.
 //!
 //! Every value carries its [`Provenance`], because a consumer that treats a measurement and
 //! a guess alike is the failure that record exists to prevent.

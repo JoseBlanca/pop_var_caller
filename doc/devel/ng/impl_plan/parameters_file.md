@@ -312,8 +312,9 @@ contamination's absence. Each marked `Defaulted` when used.
 [`to_toml.rs`](../../../../src/ng/calling/parameters_file/to_toml.rs)'s own `origins` module —
 written at B3 "so that step E1 has one list to reconcile against" — already carried the repeat-tract
 substitution rate, the slippage numbers and the inbreeding coefficient. The last of those is the one
-that matters: it is **forbidden** a default rather than owed a measurement, and it is what step E2
-turns on. The prior's seed is outside the table because what marks its fallback is
+that mattered: the *fit* is forbidden a default for it, so a defaults run had nothing to write —
+**the owner ruled on 2026-08-31 that the run takes zero**, which is what unblocked step E2. The
+prior's seed is outside the table because what marks its fallback is
 `SeedRegime::FallbackDiversity` and not a warrant, so no `validate` rung is possible for it.
 
 **⚑ The step added a `validate` rung and had to take it out again**, and that is its most useful
@@ -335,7 +336,30 @@ on a real library that is the conservative direction: at HG002's measured mean m
 `PROJECT_STATUS.md`; the spec is untouched.
 *Depends:* C4. *Source:* §8.
 
-☐ **E2. A run with no fit and no supplied file assembles `RunParameters` from the defaults.**
+✅ **E2. A run with no fit and no supplied file assembles `RunParameters` from the defaults.**
+
+**Landed 2026-08-31.** `RunParameters::of_defaults` is the third door, beside `assemble` — which
+takes the fit's raw outputs and derives the run's read-group axis from them, so a run with no fit
+hands it empty maps and gets the wrong complaint — and `of_gathered_values`, whose nine arguments
+are nine chances to leave a default out. It takes what a run with no fit has: its read groups, its
+ploidy, and what it was told about inbreeding.
+
+**The step turned on the owner's ruling of 2026-08-31**: a coefficient nobody stated is zero, and a
+user may state one value for the whole run or a different value for any sample (`DeclaredInbreeding`,
+joined by name). The *fit* is still forbidden a default for it; what separates the two is how far a
+wrong constant travels — a fitted diversity divides by `1 − F` and carries the mistake into every
+number the fit emits, where a defaulted coefficient reaches the calls and stops.
+
+**The slippage group is declared and empty, which are two different things.** `StratumFits::at`
+looks the read group up *before* the stratum, so declaring nothing would make every cell of every
+tract answer `UnknownReadGroup` — *the run is not what it claims*, counted apart by
+`TractScoringFits` — where a defaults run is exactly what it claims.
+
+**⚑ The writer could not write such a run at all**, so two of its assertions were relaxed, narrowly:
+the rates map covers every read group or is empty, and a missing rate is legal exactly where that
+read group's calibration is `Defaulted`. **F1 inherits the third source** — a run scoring from a
+supplied file has `Supplied` calibrations and no rate map, and `of_run` panics on it. Recorded in
+`PROJECT_STATUS.md`.
 *Depends:* E1. *Source:* §8.
 
 ☐ **E3. The slippage slot, and what a run does without it.** The per-(stratum × slippage group)
