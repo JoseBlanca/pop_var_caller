@@ -44,6 +44,12 @@ pub mod timing;
 /// The fixtures the module's test suites share — the coordinates every test writes and the
 /// failure every fake source yields.
 ///
+/// **Two of these are read from outside the merge**, and deliberately: `render` and
+/// `refuse_any_difference` are what "the same answer" means for a `RegionOutcome`, and the run
+/// driver's own differential asks the same question of the same type. A second spelling of it
+/// there is exactly what `render`'s destructuring exists to prevent — a field the outcome gains
+/// would have to be answered for twice, and would silently drop out of one.
+///
 /// **One home, because the copies had started to multiply.** `region` and `region_on` are
 /// written out in all four of this module's files, and D2's review found `SourceFailed`
 /// becoming the fifth such copy. [`organise`] and [`serial`] read them from here; [`build`] and
@@ -183,7 +189,7 @@ pub(super) mod fixtures {
     /// a comparison written field by field would silently stop covering a field added later,
     /// and two distinct `f64` sums render as distinct strings, so a quality divided differently
     /// shows.
-    pub(super) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
+    pub(in crate::ng::run) fn render(outcome: &super::build::RegionOutcome) -> Vec<String> {
         // Destructured, not field-accessed: this function is what "the same answer" means for
         // every comparison in the module, so a field `RegionOutcome` gains has to be answered
         // for here or it silently drops out of all of them.
@@ -208,7 +214,7 @@ pub(super) mod fixtures {
     /// **Entry by entry rather than whole**: the widest fixture in this module renders as 26 kB,
     /// and two of those inside one `assert_eq!` message is not something a reader can diff by
     /// eye.
-    pub(super) fn refuse_any_difference(
+    pub(in crate::ng::run) fn refuse_any_difference(
         what_changed: &str,
         expected: &super::build::RegionOutcome,
         actual: &super::build::RegionOutcome,

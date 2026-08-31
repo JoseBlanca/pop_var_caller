@@ -219,6 +219,46 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, OpenReference) 
     )
 }
 
+/// The reference **as a real run's ordinary path holds it**: the geometry read from the `.fai`,
+/// and the FASTA remembered.
+///
+/// [`fixture_reference`]`(false)` models nothing a run holds. Reading a bare
+/// [`ReferenceSource::Fai`] gives an `OpenReference` with **no `fasta_path`**, so nothing can go
+/// back to the bases — and no run holds one: the batteries-included read
+/// ([`read_reference_verifying_or_creating_fai`](crate::ng::reference_info::read_reference_verifying_or_creating_fai))
+/// reads the index for speed and keeps the FASTA's path beside it, verifying on a background
+/// thread. So the ordinary run has the geometry at once, **no digests until it joins that
+/// thread**, and its bases reachable throughout.
+///
+/// That third property is what this fixture adds, and it is the one a walk needs: every locus
+/// carries the reference bases over its span. Use this wherever a test drives something that
+/// reads the reference; `fixture_reference(false)` remains right for tests about a reference that
+/// genuinely has nothing behind it.
+pub(crate) fn fixture_reference_from_its_index() -> (TempDir, OpenReference) {
+    let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
+        .iter()
+        .map(|(name, length)| ContigSpec {
+            name: (*name).to_string(),
+            length: *length as u64,
+        })
+        .collect();
+    let (dir, fasta) = build_fasta(&specs).expect("build fasta");
+    let from_the_index = read_reference_info(ReferenceSource::Fai(
+        crate::ng::reference_info::sibling_fai_path(&fasta),
+    ))
+    .expect("read reference");
+    (
+        dir,
+        OpenReference::new(std::sync::Arc::new(
+            crate::ng::reference_info::ReferenceInfo {
+                fasta_path: Some(fasta),
+                md5: from_the_index.md5,
+                contigs: from_the_index.contigs.clone(),
+            },
+        )),
+    )
+}
+
 /// **A contig long enough that the index has resolution**, for the tests that need it.
 ///
 /// BAI's finest bins are 16 kb and a BGZF block is 64 kB, so a fixture smaller than that

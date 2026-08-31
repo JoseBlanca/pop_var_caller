@@ -47,11 +47,15 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use crate::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use crate::ng::locus_generation::{
-    GeneratorSet, LocusCounts, LocusGenerationError, SampleLocusObservations,
-    SampleLocusObservationsIterator,
+    GeneratorSet, GeneratorSlot, LocusCounts, LocusGenerationError, SampleLocusObservations,
+    SampleLocusObservationsIterator, UnhandledReason,
 };
 use crate::ng::read::input::SampleReads;
+use crate::ng::read::input::reference::OpenReference;
+use crate::ng::read::left_align::LeftAlignPreparer;
+use crate::ng::ref_seq::WindowedRefSeq;
 use crate::ng::region_typing::TypedRegion;
 
 use super::cohort_merge::observation_cache::ObservationSource;
@@ -307,7 +311,8 @@ mod tests {
     use crate::ng::locus_generation::{GeneratorSlot, LocusGenerator, LocusKind, UnhandledReason};
     use crate::ng::read::filtering::ReadFilterConfig;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, header, indexed_bam, matching_contigs, read_named_with_length,
+        fixture_reference_from_its_index, header, indexed_bam, matching_contigs,
+        read_named_with_length,
     };
     use crate::ng::region_typing::{GenomeRegions, RegionKind};
     use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
@@ -331,7 +336,7 @@ mod tests {
     ///
     /// The temp dirs come back because they must outlive the reads.
     fn reads_named(sample: &str) -> (tempfile::TempDir, tempfile::TempDir, SampleReads) {
-        let (reference_dir, reference) = fixture_reference(false);
+        let (reference_dir, reference) = fixture_reference_from_its_index();
         let records = vec![read_named_with_length("r0", 0, 1, 30)];
         let (bam_dir, bam_path) = indexed_bam(
             &header(
@@ -1071,8 +1076,8 @@ mod walking_the_real_generator {
     };
     use crate::ng::read::filtering::ReadFilterConfig;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, fixture_reference_bases, header, indexed_bam, matching_contigs,
-        read_named_with_length,
+        fixture_reference_bases, fixture_reference_from_its_index, header, indexed_bam,
+        matching_contigs, read_named_with_length,
     };
     use crate::ng::read::left_align::LeftAlignPreparer;
     use crate::ng::region_typing::RegionKind;
@@ -1155,7 +1160,7 @@ mod walking_the_real_generator {
         SampleReads,
         GeneratorSet,
     ) {
-        let (reference_dir, reference) = fixture_reference(false);
+        let (reference_dir, reference) = fixture_reference_from_its_index();
         let (bam_dir, bam) = indexed_bam(
             &header(
                 Some("coordinate"),
@@ -1475,4 +1480,129 @@ mod walking_the_real_generator {
             "an unfilled slot counts nothing"
         );
     }
+}
+
+/// The reference the walk fetches its bases from, opened once for the whole run.
+///
+/// **Two accessors are held per sample, a third is minted per file per chromosome, and none of
+/// them may be shared.** The locus generator keeps one for the walk's own REF fetches and the
+/// read preparer keeps a second — neither rebuilt per segment, because a fresh accessor at every
+/// boundary throws away the sliding buffer and re-pays the `.fai` parse. The third is a
+/// *factory*: each of a sample's files gets its own accessor every time a cursor is made, which
+/// is once per file per chromosome. `WindowedRefSeq` holds an open per-contig reader and is
+/// `Send` but deliberately not `Sync`, and the input layer takes a factory for exactly that
+/// reason (spec §8) — sharing one accessor across cursors would collapse them onto one file
+/// position and one window.
+///
+/// **What is shared instead is the index and the contig table.** An accessor that parses the
+/// `.fai` for itself costs about 189 µs on a GRCh38-shaped reference of 2,580 records; sharing
+/// the index brings that to 52 µs, of which 34 is cloning the contig table; sharing the table
+/// too leaves about 18 µs, which is the `open(2)` that giving each reader its own cursor
+/// actually means (measured, [`WindowedRefSeq::with_shared_index`]). **And the parse is paid at
+/// every contig open, not once per accessor** ([`WindowedRefSeq::new`]) — so on a 63-sample
+/// cohort over a dozen contigs, sharing is the difference between one parse and several hundred.
+pub(crate) struct WalkReference {
+    fasta: std::path::PathBuf,
+    contigs: Arc<crate::fasta::ContigList>,
+    index: Arc<noodles_fasta::fai::Index>,
+}
+
+impl WalkReference {
+    /// Open the run's reference for walking, parsing its index once.
+    ///
+    /// **Refuses a reference that has no bases.** A reference read from a `.fai` alone describes
+    /// a genome's geometry and holds no sequence, so the walk has nothing to fetch REF bases
+    /// from — and the refusal belongs here rather than at the first locus, where it would arrive
+    /// after every file was opened and a genome's worth of setup was done.
+    pub(crate) fn of(reference: &OpenReference) -> Result<Self, RunError> {
+        let fasta = reference
+            .info()
+            .fasta_path
+            .clone()
+            .ok_or(RunError::ReferenceHasNoBases)?;
+        let index = WindowedRefSeq::read_index(&fasta).map_err(|source| {
+            RunError::ReferenceIndexUnreadable {
+                reference: fasta.clone(),
+                source,
+            }
+        })?;
+        Ok(Self {
+            fasta,
+            contigs: Arc::new(reference.info().contig_list()),
+            index,
+        })
+    }
+
+    /// One accessor of its own, over the shared index and contig table.
+    #[must_use]
+    pub(crate) fn accessor(&self) -> WindowedRefSeq {
+        WindowedRefSeq::with_shared_index(
+            self.fasta.clone(),
+            Arc::clone(&self.contigs),
+            Arc::clone(&self.index),
+        )
+    }
+}
+
+/// **The sizes and the path, not the bases.** A derived `Debug` would print a contig table.
+impl std::fmt::Debug for WalkReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WalkReference")
+            .field("fasta", &self.fasta)
+            .field("contigs", &self.contigs.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The generator set a run builds today: **the generic path filled, and both repeat-tract slots
+/// refused as unbuilt**.
+///
+/// A segment routed to an unfilled slot emits no locus and is counted against
+/// `unhandled_not_implemented`, which is how a run says *this ground was analysed and this
+/// caller cannot yet speak for it* — as opposed to the satellite's permanent refusal. **So a run
+/// over ground with repeat tracts in it is not wrong, it is short**, and the tally says by how
+/// much. Candidate selection at a tract is specified and unbuilt
+/// (`doc/devel/ng/impl_plan/candidate_alleles_ssr.md`); this is where the second slot is filled
+/// when it exists.
+///
+/// One set per sample: a locus generator carries state across segments and cannot be shared
+/// (spec §8).
+pub(crate) fn generic_path_generators(
+    reference: &WalkReference,
+    config: PileupGeneratorConfig,
+) -> Result<GeneratorSet, RunError> {
+    let make_reference = {
+        let reference = WalkReference {
+            fasta: reference.fasta.clone(),
+            contigs: Arc::clone(&reference.contigs),
+            index: Arc::clone(&reference.index),
+        };
+        move || reference.accessor()
+    };
+    // **The `Arc` is the generator's constructor asking for one, over an accessor that is
+    // `Send` and deliberately not `Sync`** — a `WindowedRefSeq` holds an open per-contig reader,
+    // which is exactly why the input layer takes a factory and why each of these three accessors
+    // is its own. So the lint is right about the type and wrong about the risk: nothing shares
+    // this handle, and a walker is single-threaded (see [`AlignmentFilesWalker`]). The waiver is
+    // the one every other site that builds a generator over a file-backed accessor carries; the
+    // differential's fixture, which builds one over an in-memory accessor, must **not** carry it,
+    // because there the lint does not fire at all.
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "PileupGenerator::new takes an Arc; WindowedRefSeq is Send and deliberately not Sync, and this one is never shared"
+    )]
+    let shared = Arc::new(reference.accessor());
+    let generator = PileupGenerator::new(
+        shared,
+        make_reference,
+        LeftAlignPreparer::with_default_normalizer(reference.accessor()),
+        config,
+    )
+    .map_err(|source| RunError::LocusGeneratorSettings { source })?;
+    Ok(GeneratorSet::new(
+        GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        GeneratorSlot::Generator(Box::new(generator)),
+        GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+    ))
 }

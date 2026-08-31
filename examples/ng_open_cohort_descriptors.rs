@@ -61,7 +61,7 @@ use pop_var_caller::ng::calling::run_parameters::RunParameters;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::read::input::reference::OpenReference;
-use pop_var_caller::ng::ref_seq::WindowedRefSeq;
+use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
@@ -214,7 +214,15 @@ fn run(
         .first()
         .copied()
         .ok_or("the BED gave no regions to walk")?;
-    let make_reference = || WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
+    let shared_contigs = Arc::new(contigs.clone());
+    let shared_index = WindowedRefSeq::read_index(fasta)?;
+    let make_reference = || {
+        WindowedRefSeq::with_shared_index(
+            fasta.to_path_buf(),
+            Arc::clone(&shared_contigs),
+            Arc::clone(&shared_index),
+        )
+    };
     let mut cursors = Vec::with_capacity(caller.sample_count());
     for sample in caller.samples() {
         let mut cursor = sample.cursor(first.contig, make_reference)?;
@@ -231,14 +239,56 @@ fn run(
         while_walking,
     );
 
-    if let (Some(before), Some(open), Some(walking)) =
-        (before_opening, after_opening, while_walking)
-    {
+    // **And the two accessors a locus generator holds per sample**, which the cursor count above
+    // does not include and which a run holds for its whole walk. `PileupGenerator` keeps one for
+    // the walk's own REF fetches and the read preparer keeps a second; both are
+    // `WindowedRefSeq`s, and each opens a reader on the FASTA at its first fetch and keeps it.
+    // They are per *sample*, not per file, so they are a second term in the arithmetic and not a
+    // correction to the first.
+    let mut held_by_generators = Vec::with_capacity(caller.sample_count() * 2);
+    for _ in 0..caller.sample_count() {
+        for _ in 0..2 {
+            let accessor = WindowedRefSeq::with_shared_index(
+                fasta.to_path_buf(),
+                Arc::clone(&shared_contigs),
+                Arc::clone(&shared_index),
+            );
+            // Fetch, because the reader is opened lazily: an accessor nobody has asked for holds
+            // nothing, and counting before the first fetch would report zero.
+            accessor
+                .fetch(first.contig, first.start.get(), 1)
+                .map_err(|error| format!("the reference fetches: {error}"))?;
+            held_by_generators.push(accessor);
+        }
+    }
+
+    let while_generating = open_descriptors();
+    report(
+        "and the two accessors a generator holds per sample",
+        while_generating,
+    );
+
+    if let (Some(before), Some(open), Some(walking), Some(generating)) = (
+        before_opening,
+        after_opening,
+        while_walking,
+        while_generating,
+    ) {
         let files = alignment_files as f64;
+        let samples = caller.sample_count() as f64;
         println!(
             "per alignment file: {:.2} descriptors when open, {:.2} with a cursor on it",
             (open.saturating_sub(before)) as f64 / files,
             (walking.saturating_sub(before)) as f64 / files,
+        );
+        println!(
+            "per sample, on top of that: {:.2} descriptors for the generator's own accessors",
+            (generating.saturating_sub(walking)) as f64 / samples,
+        );
+        println!(
+            "a walking run therefore holds {} descriptors for {alignment_files} files over {} samples",
+            generating.saturating_sub(before),
+            caller.sample_count(),
         );
     }
 

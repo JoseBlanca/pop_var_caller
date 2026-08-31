@@ -206,7 +206,7 @@ which inherits the problem once chain ids are written to a file.
 
 ### Milestone C — the merge, fed by walkers
 
-☐ **C1. The merge driven over walker sources.** The single-threaded merge (`merge_cohort_through_cache`)
+✅ **C1. The merge driven over walker sources.** The single-threaded merge (`merge_cohort_through_cache`)
 reading k walkers instead of the in-memory sources its tests use, yielding cohort loci in genome
 order.
 
@@ -219,13 +219,24 @@ no lifetime. `a_run_can_hold_its_walkers_beside_the_segmentation_they_read` is t
 fails at the compiler if anyone changes it back.
 *Depends:* B2. *Source:* §3.2; [`cohort_merge.md`](../spec/cohort_merge.md).
 
-☐ **C2. Cohort loci from reads match cohort loci from records.** Walk a small cohort, capture its
+✅ **C2. Cohort loci from reads match cohort loci from records.** Walk a small cohort, capture its
 observations, feed the same observations to the merge from memory, compare. **Oracle:** the merge's
 own in-memory driver, which is already the reference for its parallel one.
 *Depends:* C1. *Source:* §12.
 
-> **Checkpoint C:** alignment files to cohort loci, single-threaded, against an oracle.
-> Pause for review.
+> **Checkpoint C: met 2026-08-31.** Alignment files to cohort loci, single-threaded, against two
+> of the merge's own oracles — the same observations fed from memory, and the undivided
+> `merge_cohort_serially`. 361 tests in `ng::run`.
+>
+> **⚑ The descriptor refusal was wrong in the unsafe direction and this milestone is what made it
+> so.** A locus generator holds two reference accessors per sample on top of what its files cost;
+> re-measured, a walking run holds **253** descriptors for 63 files over 63 samples where the
+> refusal budgeted **158**, so a run could pass the check and die at `EMFILE`. The arithmetic now
+> has a per-file and a per-sample term.
+>
+> **Two things wait on the owner**: `merge_cohort` drops every walker's tallies and the
+> assembly-check outcome that the run report will need, and a run still cannot set its locus
+> generator's settings — the depth caps among them. Pause for review.
 
 ### Milestone D — calling, joined to the merge
 

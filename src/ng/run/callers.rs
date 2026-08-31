@@ -8,32 +8,41 @@
 //! own, writes what it saw to a per-sample file, fits the parameters from those, and calls
 //! from the files.
 //!
-//! What this file holds today is the object and its construction. Iteration — the merge, the
-//! call, the records — lands in the milestones after it
+//! What this file holds today is the object, its construction, and the merge driven over one
+//! walker per sample. What is still missing is calling and the records: the object returns the
+//! cohort's loci in one go rather than yielding called variants as it goes
 //! (`doc/devel/ng/impl_plan/run_driver_direct_mode.md`).
 //!
-//! **`pub`, though the architecture calls the accessors crate-private machinery.** The steps
-//! that consume them — the per-sample walker, the construction checks — do not exist yet, so
-//! `pub(crate)` items here would have no consumer and the crate's `-D warnings` gate would
-//! reject them as dead code. The intent is the architecture's; narrow this when the walker
-//! lands. `cohort_merge` carries the same note for the same reason.
+//! **`pub`, though the architecture calls all of this crate-private** (arch §6: three public
+//! objects, each an iterator, and nothing else). **The intent is real and acting on it is still
+//! blocked, and the block is mechanical**: `merge_cohort` has no consumer outside tests until the
+//! subcommand lands, so narrowing it makes it dead code and the crate's `-D warnings` gate
+//! rejects the build — measured, not assumed, when this step tried it. What *did* narrow is
+//! everything reachable only through it: `WalkReference` and `generic_path_generators` are
+//! `pub(crate)`. Narrow the rest when the command exists to call it. `cohort_merge` carries the
+//! same note for the same reason.
 
 use std::sync::Arc;
 
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 use crate::ng::calling::inference::RunnableCallingLoopConfig;
 use crate::ng::calling::run_parameters::RunParameters;
+use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::input::{AssemblyMismatch, check_assembly};
 use crate::ng::reference_info::ReferenceInfo;
+use crate::ng::run::cohort_merge::build::RegionOutcome;
+use crate::ng::run::cohort_merge::observation_cache::ObservationCache;
+use crate::ng::run::cohort_merge::serial::merge_cohort_through_cache;
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
 use super::segments::Segmentation;
+use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
 
 /// The alignment files a run reads, and how it reads them.
 ///
@@ -141,6 +150,12 @@ pub struct AlignedFilesVariantCaller {
     /// Which reads are admitted. Kept for the same reason as the reference: each sample's walk
     /// opens its cursors with it.
     read_filters: ReadFilterConfig,
+    /// The reference the walk fetches its bases from, with its index parsed once for the run.
+    ///
+    /// **Opened at construction, not at the first locus**, so a reference that holds no bases is
+    /// a refusal rather than a failure a genome's worth of setup later. Every walker takes three
+    /// accessors from it and shares nothing but the index and the contig table.
+    walk_reference: WalkReference,
     /// The ground, computed once and shared by every sample's walk.
     ///
     /// **Held behind an `Arc` because the walkers this run will own read it.** A walker keeps a
@@ -185,11 +200,16 @@ impl AlignedFilesVariantCaller {
     ) -> Result<Self, RunError> {
         let per_sample = alignments.read_groups.read_groups_per_sample();
 
-        // **Three refusals before a single file is opened**, because each of them condemns the
+        // **Four refusals before a single alignment file is opened**, because each of them condemns the
         // whole run and opening a thousand files first would only make the message slower.
         refuse_an_empty_cohort(per_sample)?;
         refuse_parameters_assembled_for_another_cohort(&parameters, alignments.read_groups)?;
         refuse_without_descriptor_headroom(alignments.read_groups)?;
+        // **The fourth is the walk's own precondition, checked at the door.** Opening the
+        // reference for walking parses its index and refuses a reference that carries no bases at
+        // all; doing it here rather than at the first locus is the same rule as the other three,
+        // and it is the only one whose product the run keeps.
+        let walk_reference = WalkReference::of(alignments.reference)?;
 
         let mut samples = Vec::with_capacity(per_sample.len());
         for sample in per_sample {
@@ -236,6 +256,7 @@ impl AlignedFilesVariantCaller {
             read_groups: alignments.read_groups.clone(),
             reference: alignments.reference.clone(),
             read_filters: alignments.read_filters,
+            walk_reference,
             segmentation: Arc::new(segmentation),
             parameters,
             calling_loop_config,
@@ -336,7 +357,72 @@ impl AlignedFilesVariantCaller {
     pub fn assembly_check(&self) -> AssemblyCheckOutcome {
         self.assembly_check
     }
+
+    /// One walker per sample, in the run's sample order, each over the whole segmentation.
+    ///
+    /// **Consumes the run's open files**, because a walker owns the `SampleReads` it reads and
+    /// `SampleReads` is deliberately not `Clone` — one sample's files are opened once and walked
+    /// once. Everything else a walker needs is shared: the segments by reference count, and the
+    /// reference's index and contig table by one handle each — the accessors built over them are
+    /// the sample's own, never shared.
+    ///
+    /// **One generator set per walker, never one shared between walkers**, because a locus
+    /// generator carries state
+    /// across segments (spec §8). Each is the generic path filled and both repeat-tract slots
+    /// refused as unbuilt, which is what [`generic_path_generators`] documents.
+    fn walkers(self) -> Result<(Arc<Segmentation>, MergeParameters, Vec<RunWalker>), RunError> {
+        let mut walkers = Vec::with_capacity(self.samples.len());
+        for reads in self.samples {
+            let generators =
+                generic_path_generators(&self.walk_reference, PileupGeneratorConfig::default())?;
+            walkers.push(AlignmentFilesWalker::over(
+                Arc::clone(&self.segmentation),
+                reads,
+                generators,
+            ));
+        }
+        Ok((self.segmentation, self.merge_parameters, walkers))
+    }
+
+    /// **Read this run's cohort into cohort loci, in genome order, on one thread.**
+    ///
+    /// Every sample's walker advances at the merge frontier, in one place; the merge draws each
+    /// forward only as far as the ground it is building, so each stretch of each file is decoded
+    /// once and no walker runs ahead of what has been asked for (spec §5.1).
+    ///
+    /// **This consumes the run and returns everything at once, and both are temporary.** A
+    /// calling run is an iterator that yields records as it goes (arch §3.4); what this does is
+    /// prove the join — real reads through real walkers into the merge that was until now fed
+    /// from memory — before calling is wired into it. Its memory is the whole cohort's surviving
+    /// loci, which is [`merge_cohort_through_cache`]'s own shape and not a cost this step added:
+    /// that driver already extends one [`RegionOutcome`] per building region. **It is still short
+    /// of spec §5.1's bound**, `callers in flight × one cohort locus` plus the merge frontier, and
+    /// nothing before the pool milestone needs to close that — that is where the loci start being
+    /// released one at a time.
+    ///
+    /// **⚑ It also destroys what a run report will need.** The walkers go into the cache, the
+    /// cache owns them and hands nothing back, so every walker's locus tally, its generators'
+    /// per-slot counts and its cursors' read-filter tallies are dropped when this returns. Adding
+    /// a route back is a signature the next step is already editing; raised at Checkpoint C.
+    pub fn merge_cohort(self) -> Result<RegionOutcome, RunError> {
+        let (segmentation, merge, walkers) = self.walkers()?;
+        let mut cache = ObservationCache::over(walkers);
+        merge_cohort_through_cache(
+            segmentation.analysed_regions(),
+            &mut cache,
+            merge.cohort_locus_builder_regions_len,
+            merge.max_cohort_locus_span,
+            merge.min_alt_reads,
+        )
+    }
 }
+
+/// What a run's walker is, spelled once: the alignment-file source over the run's own segments.
+///
+/// A type alias rather than a wrapper, because it adds nothing — it is
+/// [`AlignmentFilesWalker`] with its region stream named. It buys the one signature that names
+/// it the right words, and it is the name every signature the pool milestone adds will want.
+pub type RunWalker = AlignmentFilesWalker<RunSegments>;
 
 /// **The sample names and the sizes, not the contents.** A derived `Debug` would print every
 /// open file, every segment and every fitted number — megabytes for a real cohort, in a
@@ -452,7 +538,23 @@ fn refuse_parameters_assembled_for_another_cohort(
 /// has counted what that opens. Re-run the probe there.
 const DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS: u64 = 2;
 
-/// Descriptors a run needs for everything that is not an alignment file: the three standard
+/// Descriptors one sample's **locus generator** holds, on top of what its files cost.
+///
+/// **Measured after the merge was driven over walkers, and the count changed** —
+/// `examples/ng_open_cohort_descriptors.rs` again, on the same 63 tomato accessions. A generator
+/// keeps two reference accessors of its own: one for the walk's REF fetches and one for the read
+/// preparer. Each is a `WindowedRefSeq`, each opens a reader on the FASTA at its first fetch, and
+/// each holds it for the run. They are per **sample**, not per file, so this is a second term in
+/// the arithmetic rather than a correction to the first.
+///
+/// **This was missing and the refusal was wrong in the unsafe direction**: 63 samples over 63
+/// files were budgeted 158 descriptors and the walking run held **253**, so a run could pass the
+/// check and then die at `EMFILE` — the exact failure the check exists to prevent. Counted:
+/// 3 before any sample opened, 4 with every file open, 130 with a cursor on each, **256** once
+/// the generators' accessors were fetched through.
+const DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES: u64 = 2;
+
+/// Descriptors a run needs for everything that is not per file or per sample: the three standard
 /// streams, the reference and its index, the repeat catalog, and the output and its index —
 /// eight — plus 24 of slack for whatever the runtime holds open on its own.
 const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
@@ -486,7 +588,8 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
         .map(|(_, read_group)| read_group.file.as_ref())
         .collect();
     let alignment_files = files.len();
-    let needed = descriptors_needed_for(alignment_files);
+    let samples = read_groups.read_groups_per_sample().len();
+    let needed = descriptors_needed_for(alignment_files, samples);
 
     let Some(limit) = limit else {
         return Ok(());
@@ -494,9 +597,10 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
 
     if needed > limit {
         return Err(RunError::NotEnoughFileDescriptors {
-            samples: read_groups.read_groups_per_sample().len(),
+            samples,
             alignment_files,
             per_file: DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS,
+            per_sample: DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
             allowance: DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES,
             needed,
             limit,
@@ -505,9 +609,11 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
     Ok(())
 }
 
-/// How many descriptors a run over `alignment_files` files needs, allowance included.
-fn descriptors_needed_for(alignment_files: usize) -> u64 {
+/// How many descriptors a walking run needs: **two terms and an allowance**, because two of the
+/// four a sample costs are per file and two are per sample.
+fn descriptors_needed_for(alignment_files: usize, samples: usize) -> u64 {
     alignment_files as u64 * DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS
+        + samples as u64 * DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES
         + DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES
 }
 
@@ -663,8 +769,8 @@ mod tests {
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
     use crate::ng::read::input::read_groups::build_read_groups;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, header, matching_contigs, named_bam, read_named_with_length,
-        read_named_with_length_in_read_group,
+        fixture_reference_from_its_index, header, matching_contigs, named_bam,
+        read_named_with_length, read_named_with_length_in_read_group,
     };
     use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
     use crate::ng::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
@@ -854,7 +960,7 @@ mod tests {
     /// fail here rather than pass by coincidence.
     #[test]
     fn a_cohort_of_three_opens_and_names_its_samples() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("zeta", "a.bam");
         let (_b_dir, b) = bam_for("alpha", "b.bam");
         let (_c_dir, c) = bam_for("mu", "c.bam");
@@ -878,7 +984,7 @@ mod tests {
     /// mismatch between them produces wrong genotypes rather than a crash.
     #[test]
     fn the_sample_order_is_decided_by_the_read_group_table_not_by_the_paths() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_dir, both) = bam_holding_two_samples("zeta", "alpha", "both.bam");
 
         let caller = open_over(std::slice::from_ref(&both), &reference).expect("both open");
@@ -901,7 +1007,7 @@ mod tests {
     /// open, not two.
     #[test]
     fn two_files_of_one_sample_are_one_sample() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_first_dir, first) = bam_for("NA12878", "first.bam");
         let (_second_dir, second) = bam_for("NA12878", "second.bam");
 
@@ -917,7 +1023,7 @@ mod tests {
     /// part-way through the genome would leave nobody anywhere to look.
     #[test]
     fn a_sample_whose_index_is_missing_is_refused_naming_the_sample_and_the_file() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_good_dir, good) = bam_for("NA12878", "good.bam");
         let (_bad_dir, bad) = unindexed_bam_for("NA12891", "bad.bam");
 
@@ -950,7 +1056,7 @@ mod tests {
     /// genotypes, no failure.
     #[test]
     fn every_setting_comes_back_as_it_was_given() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
         let caller = open_over(std::slice::from_ref(&a), &reference).expect("opens");
@@ -977,7 +1083,7 @@ mod tests {
     /// The ground and the read-group table come back too.
     #[test]
     fn the_ground_and_the_read_group_table_come_back() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
         let paths = [a];
@@ -1011,7 +1117,7 @@ mod tests {
     /// find out which run this is.
     #[test]
     fn the_debug_rendering_is_names_and_sizes() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
         let caller = open_over(std::slice::from_ref(&a), &reference).expect("opens");
@@ -1034,7 +1140,8 @@ mod construction_checks {
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
     use crate::ng::read::input::read_groups::build_read_groups;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, header, matching_contigs, named_bam, read_named_with_length,
+        fixture_reference, fixture_reference_from_its_index, header, matching_contigs, named_bam,
+        read_named_with_length,
     };
     use crate::ng::types::Ploidy;
     use std::path::PathBuf;
@@ -1081,7 +1188,7 @@ mod construction_checks {
     /// samples in it looks like a finished run.
     #[test]
     fn a_cohort_with_no_alignment_files_is_refused() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
 
         // **The parameters are another cohort's, and they have to be.** Assembling parameters
         // for a cohort of none is not possible — it panics inside the pre-pass's own assembly,
@@ -1104,7 +1211,7 @@ mod construction_checks {
     /// prevents it: the parameters and the read-group table reach `open` as separate arguments.
     #[test]
     fn parameters_assembled_for_another_cohort_are_refused_with_both_counts() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
         let (_b_dir, b) = bam_for("NA12891", "b.bam");
 
@@ -1149,7 +1256,7 @@ mod construction_checks {
     /// meant to let through.
     #[test]
     fn a_cohorts_own_parameters_are_accepted() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
         let paths = [a];
@@ -1187,7 +1294,7 @@ mod construction_checks {
             } => {
                 assert_eq!(*samples, 1);
                 assert_eq!(*alignment_files, 1);
-                assert_eq!(*needed, descriptors_needed_for(1));
+                assert_eq!(*needed, descriptors_needed_for(1, 1));
                 assert_eq!(*limit, 4);
             }
             other => panic!("expected NotEnoughFileDescriptors, got {other:?}"),
@@ -1198,7 +1305,7 @@ mod construction_checks {
         // needs, what it may open, and the two numbers those come from.
         let message = error.to_string();
         assert!(
-            message.contains("needs 34 open files"),
+            message.contains("needs 36 open files"),
             "names what it needs: {message}",
         );
         assert!(
@@ -1207,14 +1314,19 @@ mod construction_checks {
         );
         assert!(
             message.contains("1 alignment files at 2 each"),
-            "shows the arithmetic behind the total: {message}",
+            "shows the per-file term: {message}",
         );
         assert!(
-            message.contains("plus 32 for the reference"),
-            "and the part that is not the files: {message}",
+            message.contains("1 samples at 2 more each"),
+            "and the per-sample term, which is the one a file count cannot stand in for: \
+             {message}",
         );
         assert!(
-            message.contains("ulimit -n 34"),
+            message.contains("and 32 for the reference"),
+            "and the part that is neither: {message}",
+        );
+        assert!(
+            message.contains("ulimit -n 36"),
             "gives the command with the number in it: {message}",
         );
     }
@@ -1228,26 +1340,36 @@ mod construction_checks {
 
         refuse_if_more_descriptors_are_needed_than_allowed(
             &read_groups,
-            Some(descriptors_needed_for(1)),
+            Some(descriptors_needed_for(1, 1)),
         )
         .expect("exactly enough is enough");
         refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, None)
             .expect("no limit reported is no refusal");
     }
 
-    /// **The count is of files and not of samples**, because a sample sequenced across four
-    /// lanes is four files and eight descriptors.
+    /// **The count has two terms and they move independently**, because two of the four
+    /// descriptors a one-file sample costs belong to the file and two to the sample.
+    ///
+    /// **It was one term until the merge was driven over walkers**, and that was wrong in the
+    /// unsafe direction: 63 samples over 63 files were budgeted 158 and the walking run held
+    /// 253, so a run could pass this check and die at `EMFILE` — the failure it exists to
+    /// prevent (`examples/ng_open_cohort_descriptors.rs`).
     #[test]
-    fn the_descriptor_count_grows_with_files_not_with_samples() {
+    fn the_descriptor_count_grows_with_files_and_with_samples_separately() {
         assert_eq!(
-            descriptors_needed_for(1) + 2 * DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS,
-            descriptors_needed_for(3),
-            "each further file costs the file and its index",
+            descriptors_needed_for(1, 1) + 2 * DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS,
+            descriptors_needed_for(3, 1),
+            "a sample sequenced across three lanes pays for three files and one walk",
         );
         assert_eq!(
-            descriptors_needed_for(0),
+            descriptors_needed_for(1, 1) + 2 * DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
+            descriptors_needed_for(1, 3),
+            "three samples sharing one file pay for one file and three walks",
+        );
+        assert_eq!(
+            descriptors_needed_for(0, 0),
             DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES,
-            "with no alignment files, only the run's own allowance is needed",
+            "with no cohort at all, only the run's own allowance is needed",
         );
     }
 
@@ -1308,7 +1430,7 @@ mod construction_checks {
     /// layer down.
     #[test]
     fn a_sample_aligned_to_another_assembly_is_refused_naming_the_sample() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         let (_bad_dir, bad) = bam_declaring_checksums(
             "NA12891",
@@ -1376,7 +1498,7 @@ mod construction_checks {
     /// was actually compared — out of how much could have been.
     #[test]
     fn a_sample_carrying_the_references_checksums_passes_and_the_run_says_what_it_compared() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         let (_good_dir, good) =
             bam_declaring_checksums("NA12878", "good.bam", &checksums_of(verified.info()));
@@ -1408,7 +1530,7 @@ mod construction_checks {
     /// different facts.
     #[test]
     fn a_reference_without_checksums_reports_that_nothing_could_be_checked() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
         let paths = [a];
@@ -1435,7 +1557,7 @@ mod construction_checks {
     /// type exists to prevent: a check that looked at nothing, printed as a check that passed.
     #[test]
     fn files_without_checksums_report_that_nothing_could_be_checked() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         // `bam_for` builds its header from `matching_contigs()`, which declares no `M5`.
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
@@ -1467,7 +1589,7 @@ mod construction_checks {
     /// the open failure instead.
     #[test]
     fn the_cheap_refusals_come_before_the_files_are_opened() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_bad_dir, bad) = super::tests::unindexed_bam_for("NA12878", "bad.bam");
         let (_b_dir, b) = bam_for("NA12891", "b.bam");
 
@@ -1503,7 +1625,7 @@ mod checks_that_needed_their_own_fixtures {
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
     use crate::ng::read::input::read_groups::build_read_groups;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, header, matching_contigs, named_bam,
+        fixture_reference, fixture_reference_from_its_index, header, matching_contigs, named_bam,
         read_named_with_length_in_read_group,
     };
     use crate::ng::repeat_catalog::RepeatCatalogHeader;
@@ -1573,7 +1695,7 @@ mod checks_that_needed_their_own_fixtures {
     /// Kills: disabling the inbreeding-coefficient comparison.
     #[test]
     fn the_sample_count_is_checked_with_the_read_group_count_agreeing() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
         let (_b_dir, b) = bam_for("NA12891", "b.bam");
         let (_one_dir, one_sample_two_groups) = bam_with_two_read_groups("NA12892", "both.bam");
@@ -1612,7 +1734,7 @@ mod checks_that_needed_their_own_fixtures {
     /// Kills: disabling the calibration comparison.
     #[test]
     fn the_read_group_count_is_checked_with_the_sample_count_agreeing() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_one_dir, two_groups) = bam_with_two_read_groups("NA12878", "two.bam");
         let (_a_dir, one_group) = bam_for("NA12891", "one.bam");
 
@@ -1674,8 +1796,8 @@ mod checks_that_needed_their_own_fixtures {
                 assert_eq!(*alignment_files, 2);
                 assert_eq!(
                     *needed,
-                    descriptors_needed_for(2),
-                    "two files, not one sample",
+                    descriptors_needed_for(2, 1),
+                    "two files and one sample, each counted on its own term",
                 );
             }
             other => panic!("expected NotEnoughFileDescriptors, got {other:?}"),
@@ -1704,8 +1826,8 @@ mod checks_that_needed_their_own_fixtures {
                 assert_eq!(*alignment_files, 1);
                 assert_eq!(
                     *needed,
-                    descriptors_needed_for(1),
-                    "one file, not two samples",
+                    descriptors_needed_for(1, 2),
+                    "one file and two samples, each counted on its own term",
                 );
             }
             other => panic!("expected NotEnoughFileDescriptors, got {other:?}"),
@@ -1722,7 +1844,7 @@ mod checks_that_needed_their_own_fixtures {
     /// the identity; with three, and the wrong assembly on the *second*, it is not.
     #[test]
     fn the_refusal_names_the_sample_whose_file_is_wrong_not_another() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         let right = super::construction_checks::checksums_of(verified.info());
         let wrong = super::construction_checks::checksums_with_one_wrong(verified.info());
@@ -1769,7 +1891,7 @@ mod checks_that_needed_their_own_fixtures {
     /// Kills: pinning the file counter to one rather than accumulating it.
     #[test]
     fn a_sample_across_two_files_reports_both_of_them() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         let right = super::construction_checks::checksums_of(verified.info());
         let (_first_dir, first) =
@@ -1810,7 +1932,7 @@ mod checks_that_needed_their_own_fixtures {
     /// different build of the genome and applied silently, genome-wide.
     #[test]
     fn a_catalog_built_on_another_reference_is_refused() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_verified_dir, verified) = fixture_reference(true);
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
         let read_groups = build_read_groups(std::slice::from_ref(&a)).expect("read groups");
@@ -1858,7 +1980,7 @@ mod checks_that_needed_their_own_fixtures {
     /// rather than refusing what it cannot judge.
     #[test]
     fn a_reference_without_checksums_does_not_condemn_the_catalog() {
-        let (_reference_dir, reference) = fixture_reference(false);
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
         let read_groups = build_read_groups(std::slice::from_ref(&a)).expect("read groups");
 
@@ -1884,7 +2006,7 @@ mod checks_that_needed_their_own_fixtures {
     /// against something else's.
     #[test]
     fn a_checked_reference_that_is_not_the_opened_one_is_refused() {
-        let (_open_dir, opened_against) = fixture_reference(false);
+        let (_open_dir, opened_against) = fixture_reference_from_its_index();
         let (_big_dir, another_genome) =
             crate::ng::read::input::test_fixtures::big_fixture_reference();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
@@ -1923,5 +2045,772 @@ mod checks_that_needed_their_own_fixtures {
             "only the digest differs from the shared header",
         );
         let _: RepeatCatalogHeader = catalog_header();
+    }
+}
+
+/// **Milestone C — the merge, fed by walkers.**
+///
+/// Everything before this fed the cohort merge from memory: its own fixtures hand it vectors of
+/// observations, and so do the merge's two oracles. This drives it over **walkers** — real
+/// alignment files, the real generic locus generator, the run's own segments — and checks that
+/// what comes out the far end is cohort loci in genome order.
+#[cfg(test)]
+mod the_merge_over_walkers {
+    use super::tests::{bam_for, segmentation_built_on};
+    use super::*;
+    use crate::ng::calling::inference::CallingLoopConfig;
+    use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::read::input::read_groups::build_read_groups;
+    use crate::ng::read::input::test_fixtures::{
+        fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
+        read_named_with_length,
+    };
+    use crate::ng::run::cohort_merge::build::REFERENCE_ALLELE;
+    use crate::ng::types::{ContigId, GenomeRegion, Ploidy, Position};
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::record_buf::Sequence;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// A read of `bases` at `start` on `chr1`.
+    ///
+    /// **The fixture reference is all `A`s — 100 of them on `chr1` and 200 on `chr2`**
+    /// (`build_fasta`),
+    /// so a read that keeps its default sequence agrees with the reference everywhere and the
+    /// merge keeps nothing: its rule is non-reference evidence, and there is none. A `C` is how a
+    /// fixture puts a variant in front of it.
+    pub(super) fn read_of(qname: &str, start: usize, bases: &[u8]) -> RecordBuf {
+        let mut record = read_named_with_length(qname, 0, start, bases.len());
+        *record.sequence_mut() = Sequence::from(bases.to_vec());
+        record
+    }
+
+    /// Thirty bases from `chr1:10`, carrying a `C` at each of `alt_offsets`.
+    ///
+    /// **Three reads a sample, because the merge's keep rule asks for two.** A sample must show
+    /// `DEFAULT_MIN_ALT_OBS` (2) non-reference reads, or 2 reads in a hundred of what it
+    /// compared, whichever is more; at three compared reads the share asks for one, so the floor
+    /// decides, and a single carrying read is below it — the locus is dropped as too quiet. Two
+    /// would clear the bar exactly; three clears it with a margin of one, so a fixture that later
+    /// loses a read to a filter still tests what it was written to test.
+    pub(super) fn sample_showing(
+        sample: &str,
+        file_name: &str,
+        alt_offsets: &[usize],
+    ) -> (TempDir, PathBuf) {
+        let mut bases = [b'A'; 30];
+        for offset in alt_offsets {
+            bases[*offset] = b'C';
+        }
+        let records: Vec<RecordBuf> = (0..3)
+            .map(|read| read_of(&format!("{sample}-r{read}"), 10, &bases))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// Open a caller over `paths` with the shipped merge settings.
+    ///
+    /// **The shipped settings and not the deliberately-unusual ones the construction tests
+    /// use**, because this test is about what the merge *finds*, and a fixture tuned to unusual
+    /// thresholds would prove something about the thresholds instead.
+    pub(super) fn open_over(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+    ) -> AlignedFilesVariantCaller {
+        open_over_with(paths, reference, MergeParameters::DEFAULT)
+    }
+
+    /// The same, with the merge settings named — for the tests that are about a setting rather
+    /// than about what the merge finds.
+    pub(super) fn open_over_with(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+        merge: MergeParameters,
+    ) -> AlignedFilesVariantCaller {
+        let read_groups = build_read_groups(paths).expect("the fixtures declare read groups");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                reference_with_checksums: reference.info(),
+            },
+            segmentation_built_on([7; 16]),
+            parameters,
+            CallingLoopConfig::DEFAULT
+                .validate()
+                .expect("the shipped calling-loop settings are runnable"),
+            CandidateSelectionConfig::DEFAULT,
+            merge,
+        )
+        .expect("three readable samples over a readable reference open")
+    }
+
+    /// A sample whose thirty-base read at `chr1:10` carries a `C` at `alt_offset` on **one** of
+    /// its three reads — below the shipped floor of two, above a floor of one.
+    pub(super) fn sample_showing_on_one_read(
+        sample: &str,
+        file_name: &str,
+        alt_offset: usize,
+    ) -> (TempDir, PathBuf) {
+        let mut carrying = [b'A'; 30];
+        carrying[alt_offset] = b'C';
+        let records = vec![
+            read_of(&format!("{sample}-r0"), 10, &carrying),
+            read_of(&format!("{sample}-r1"), 10, &[b'A'; 30]),
+            read_of(&format!("{sample}-r2"), 10, &[b'A'; 30]),
+        ];
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
+    /// **Alignment files in, cohort loci out, in genome order.**
+    ///
+    /// Three samples over one 100-base contig: `zeta` and `alpha` both carry a `C` at
+    /// `chr1:15`, `alpha` carries a second at `chr1:30`, and `mu` matches the reference
+    /// everywhere. So the cohort has two positions worth calling, in that order, and one sample
+    /// with nothing to say — which is a sample the merge must still draw from, since a position
+    /// is judged on the whole cohort.
+    #[test]
+    fn a_cohort_of_alignment_files_merges_into_cohort_loci_in_genome_order() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+
+        let merged = open_over(&[zeta, alpha, mu], &reference)
+            .merge_cohort()
+            .expect("the fixture cohort merges");
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|locus| locus.region)
+                .collect::<Vec<_>>(),
+            vec![
+                GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(15),
+                    end: Position(15),
+                },
+                GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(30),
+                    end: Position(30),
+                },
+            ],
+            "the two positions the cohort showed non-reference evidence at, in genome order"
+        );
+        assert!(
+            merged.failed_locus_spans.is_empty(),
+            "nothing here is wider than the span bound"
+        );
+    }
+
+    /// **A sample with nothing to say is still drawn from, and its evidence is filed under its
+    /// own number.**
+    ///
+    /// A merge that skipped `mu`, whose reads all match the reference, would still emit both loci
+    /// — the evidence that keeps them comes from the other two — so nothing about the positions
+    /// says `mu` was read at all. What says it is that `mu` appears in the membership with reads
+    /// it compared and none of them non-reference, at a position it covers.
+    ///
+    /// **⚑ A row per sample is not an invariant, and an earlier version of this test asserted it
+    /// was.** `SampleMembers` gives a sample no row at a locus it has no observations over
+    /// (`cohort_merge/close.rs`), and identity is carried by `SampleSupport::sample` — the run's
+    /// sample index — rather than by position. The old assertion passed only because all three
+    /// fixture samples happen to cover both positions; it would have broken on the first fixture
+    /// where one did not, while claiming the merge had changed.
+    #[test]
+    fn a_sample_that_saw_only_reference_is_still_drawn_from_and_keeps_its_own_index() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+
+        let caller = open_over(&[zeta, alpha, mu], &reference);
+        let order: Vec<String> = caller.sample_names().map(str::to_string).collect();
+        assert_eq!(order, ["zeta", "alpha", "mu"], "the run's sample order");
+        let merged = caller.merge_cohort().expect("the fixture cohort merges");
+
+        // `mu` is index 2 of the run's order. It covers both positions, so it has a row at both,
+        // and every allele it supports is the reference one — a different fact from never having
+        // been read, and the only one that says it was.
+        for locus in &merged.cohort_observations {
+            let mu = locus
+                .per_sample
+                .iter()
+                .find(|support| support.sample == 2)
+                .unwrap_or_else(|| panic!("mu was drawn from at {:?}", locus.region));
+            assert!(
+                !mu.supported.is_empty(),
+                "mu reported evidence at {:?}",
+                locus.region
+            );
+            assert!(
+                mu.supported
+                    .iter()
+                    .all(|allele| allele.allele == REFERENCE_ALLELE),
+                "and all of it is the reference allele, at {:?}",
+                locus.region
+            );
+        }
+    }
+
+    /// **A cohort whose reads all match the reference produces no loci, and that is not a
+    /// failure.**
+    ///
+    /// Ground the caller examined and found nothing at is different from ground it refused
+    /// (`cohort_merge.md` §4.3), and only the second is counted. **Worth its own test for the
+    /// refusal count rather than the locus count**: the test above already rules out a merge that
+    /// never drew from its walkers, because it asserts two named positions. What this one adds is
+    /// that ground examined and found quiet leaves `failed_locus_spans` empty — so an empty run
+    /// reads as an empty run, not as ground the caller would not build.
+    #[test]
+    fn a_cohort_with_no_variation_merges_to_nothing_and_refuses_nothing() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[]);
+
+        let merged = open_over(&[zeta, alpha], &reference)
+            .merge_cohort()
+            .expect("the fixture cohort merges");
+
+        assert!(merged.cohort_observations.is_empty());
+        assert!(merged.failed_locus_spans.is_empty());
+    }
+
+    /// **A reference that holds no bases is refused at construction**, not at the first locus.
+    ///
+    /// The walk fetches the reference allele at every position it reports, so a reference read
+    /// from an index alone cannot be called against. The message says what to point the run at.
+    #[test]
+    fn a_reference_without_its_bases_is_refused_before_a_file_is_opened() {
+        let (_reference_dir, geometry_only) =
+            crate::ng::read::input::test_fixtures::fixture_reference(false);
+        let (_bam_dir, bam) = bam_for("zeta", "zeta.bam");
+        let read_groups = build_read_groups(&[bam]).expect("the fixture declares read groups");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+
+        let refused = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &geometry_only,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                reference_with_checksums: geometry_only.info(),
+            },
+            segmentation_built_on([7; 16]),
+            parameters,
+            CallingLoopConfig::DEFAULT.validate().expect("runnable"),
+            CandidateSelectionConfig::DEFAULT,
+            MergeParameters::DEFAULT,
+        )
+        .expect_err("a reference with no bases cannot be called against");
+
+        assert!(
+            matches!(refused, RunError::ReferenceHasNoBases),
+            "{refused:?}"
+        );
+        assert!(
+            refused.to_string().contains("Point the run at the `.fa`"),
+            "{refused}"
+        );
+    }
+}
+
+/// **C2 — cohort loci from reads are the cohort loci the same observations give from memory.**
+///
+/// The merge was built and proved against sources that hand it vectors. Milestone C changed the
+/// sources to walkers over real alignment files and nothing else — not the driver, not the
+/// building regions, not the keep rule. So the answer must not move, and this is what says it
+/// does not.
+///
+/// **The oracle builds its own readers.** It opens each sample's files itself and drives
+/// [`SampleLocusObservationsIterator`] over the segments directly, so nothing in it goes through
+/// the walker under test. An oracle assembled from walkers would carry any defect the walker had
+/// into both sides of the comparison — the mistake caught in the previous milestone's own
+/// segment-independence test.
+///
+/// **What the oracle does share with the caller, and cannot not share, is the reference and the
+/// generator set.** [`WalkReference`] and [`generic_path_generators`] are on both sides, so a
+/// defect in either — a swapped [`GeneratorSet`](crate::ng::locus_generation::GeneratorSet) slot,
+/// a setting that silences the walk — moves both answers together and neither differential can
+/// see it. What pins those is
+/// `a_cohort_of_alignment_files_merges_into_cohort_loci_in_genome_order`, which names the two
+/// positions the fixture varies at rather than comparing two runs.
+#[cfg(test)]
+mod cohort_loci_from_reads_match_cohort_loci_from_records {
+    use super::tests::segmentation_built_on;
+    use super::the_merge_over_walkers::{open_over, sample_showing};
+    use super::*;
+    use crate::ng::locus_generation::{SampleLocusObservations, SampleLocusObservationsIterator};
+    use crate::ng::read::input::read_groups::build_read_groups;
+    use crate::ng::read::input::test_fixtures::fixture_reference_from_its_index;
+    use crate::ng::run::cohort_merge::fixtures::refuse_any_difference;
+    use crate::ng::run::cohort_merge::serial::merge_cohort_serially;
+    use crate::ng::run::walker::{WalkReference, generic_path_generators};
+    use std::convert::Infallible;
+    use std::path::PathBuf;
+
+    /// Every sample's observations, captured by walking each one **outside** the machinery under
+    /// test: its own `SampleReads`, its own generators, the segments handed over as a plain
+    /// vector rather than through `RunSegments`.
+    fn walked_directly(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+    ) -> Vec<Vec<SampleLocusObservations>> {
+        let read_groups = build_read_groups(paths).expect("the fixtures declare read groups");
+        let walk_reference = WalkReference::of(reference).expect("the fixture reference has bases");
+        let segmentation = segmentation_built_on([7; 16]);
+        let segments: Vec<_> = segmentation.segments().to_vec();
+
+        read_groups
+            .read_groups_per_sample()
+            .iter()
+            .map(|sample| {
+                let reads = SampleReads::open(
+                    sample,
+                    &read_groups,
+                    reference,
+                    ReadFilterConfig::default(),
+                    false,
+                )
+                .expect("the fixture sample opens");
+                let generators = generic_path_generators(
+                    &walk_reference,
+                    crate::ng::locus_generation::pileup::PileupGeneratorConfig::default(),
+                )
+                .expect("the shipped generator settings are accepted");
+                SampleLocusObservationsIterator::new(
+                    segments.clone().into_iter().map(Ok::<_, Infallible>),
+                    reads,
+                    generators,
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .expect("the fixture walk succeeds")
+            })
+            .collect()
+    }
+
+    /// **The same cohort, merged from walkers and merged from the observations those walks
+    /// produce, gives the same answer.**
+    ///
+    /// Compared through the merge's own `render`, which destructures `RegionOutcome` so that a
+    /// field it gains has to be answered for rather than silently dropping out of the
+    /// comparison. Both the surviving loci and the spans the width bound refused are in it.
+    #[test]
+    fn a_merge_over_walkers_answers_what_the_same_observations_answer_from_memory() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let paths = [zeta, alpha, mu];
+
+        let per_sample = walked_directly(&paths, &reference);
+        assert!(
+            per_sample.iter().all(|sample| !sample.is_empty()),
+            "every sample must have walked something, or this compares two empty answers"
+        );
+
+        let sources: Vec<std::vec::IntoIter<Result<SampleLocusObservations, Infallible>>> =
+            per_sample
+                .iter()
+                .map(|sample| {
+                    sample
+                        .iter()
+                        .cloned()
+                        .map(Ok)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                })
+                .collect();
+        let segmentation = segmentation_built_on([7; 16]);
+        let merge = MergeParameters::DEFAULT;
+        let mut cache = ObservationCache::over(sources);
+        let from_memory = merge_cohort_through_cache(
+            segmentation.analysed_regions(),
+            &mut cache,
+            merge.cohort_locus_builder_regions_len,
+            merge.max_cohort_locus_span,
+            merge.min_alt_reads,
+        )
+        .expect("an in-memory source cannot fail");
+
+        let from_reads = open_over(&paths, &reference)
+            .merge_cohort()
+            .expect("the fixture cohort merges");
+
+        refuse_any_difference(
+            "reading the cohort from its files",
+            &from_memory,
+            &from_reads,
+        );
+        assert_eq!(
+            from_reads.cohort_observations.len(),
+            2,
+            "the fixture's two variant positions — an oracle that agreed on nothing would pass \
+             the comparison above"
+        );
+    }
+
+    /// **And they agree with the simplest merge there is**: one that builds each analysed region
+    /// whole, with no cache and no division into building regions.
+    ///
+    /// This is the merge's own reference implementation, the one its parallel driver is checked
+    /// against. Agreeing with it ties the walker-fed merge to the shape everything else in the
+    /// module is measured by, and separates the two things C1 could have broken — where the
+    /// observations come from, and how the ground is divided — since this driver divides nothing.
+    #[test]
+    fn a_merge_over_walkers_answers_what_the_undivided_merge_answers() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let paths = [zeta, alpha];
+
+        let per_sample = walked_directly(&paths, &reference);
+        let borrowed: Vec<&[SampleLocusObservations]> =
+            per_sample.iter().map(Vec::as_slice).collect();
+        let segmentation = segmentation_built_on([7; 16]);
+        let merge = MergeParameters::DEFAULT;
+        let undivided = merge_cohort_serially(
+            segmentation.analysed_regions(),
+            &borrowed,
+            merge.max_cohort_locus_span,
+            merge.min_alt_reads,
+        );
+
+        let from_reads = open_over(&paths, &reference)
+            .merge_cohort()
+            .expect("the fixture cohort merges");
+
+        refuse_any_difference(
+            "reading the cohort from its files, against the undivided merge",
+            &undivided,
+            &from_reads,
+        );
+        assert!(!from_reads.cohort_observations.is_empty());
+    }
+}
+
+/// **The survivors of the mutation pass on Milestone C.**
+///
+/// Six deliberate defects lived through the tests above: the run's merge parameters replaced by
+/// unrelated constants (three of them), the analysed ground swapped for the segments, the
+/// no-bases refusal moved to after every file is opened, and the repeat-tract slots refused
+/// permanently instead of as unbuilt. Each is invisible because the fixtures above cannot
+/// distinguish it — one segment that *is* the one analysed region, every alt on three reads
+/// where the floor is two, every locus one base against a fifty-base bound. Each test here
+/// names the defect it kills.
+#[cfg(test)]
+mod what_the_fixtures_above_could_not_distinguish {
+    use super::tests::{bam_for, catalog_header, unindexed_bam_for};
+    use super::the_merge_over_walkers::{open_over_with, sample_showing};
+    use super::*;
+    use crate::ng::calling::inference::CallingLoopConfig;
+    use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::read::input::read_groups::build_read_groups;
+    use crate::ng::read::input::test_fixtures::{
+        fixture_reference, fixture_reference_from_its_index,
+    };
+    use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
+    use crate::ng::repeat_catalog::StrRepeatCriteria;
+    use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare};
+    use crate::ng::types::{ContigId, GenomeRegion, Ploidy, Position};
+    use crate::regions::ContigBounds;
+    use std::num::NonZeroU32;
+    use std::path::PathBuf;
+
+    /// A segmentation over `chr1` 1–100 cut into `segments` pieces, all generic.
+    ///
+    /// **The one analysed region is not the one segment**, which is the whole point: with a
+    /// segmentation of one segment covering exactly the analysed region, handing the merge the
+    /// segments instead of the analysed regions is the same call, and a defect that did so is
+    /// invisible.
+    fn segmentation_of_several_segments(segments: usize) -> Segmentation {
+        let bounds = [ContigBounds {
+            name: "chr1",
+            length: 100,
+        }];
+        let width = 100 / segments as u64;
+        let pieces: Vec<TypedRegion> = (0..segments)
+            .map(|piece| TypedRegion {
+                region: GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(piece as u64 * width + 1),
+                    end: Position(((piece + 1) as u64 * width).min(100)),
+                },
+                kind: RegionKind::Generic,
+            })
+            .collect();
+        Segmentation::build(
+            pieces.into_iter().map(Ok),
+            GenomeRegions::whole_contigs(&bounds),
+            catalog_header(),
+            StrRepeatCriteria::default(),
+            PathBuf::from("/genomes/test.catalog.parquet"),
+        )
+        .expect("a clean stream builds")
+    }
+
+    /// **The run's own min-alt floor decides what survives, not a constant.**
+    ///
+    /// One sample carrying the variant on **one** of its three reads is below the shipped floor
+    /// of two and above a floor of one, so the same reads called at the two settings give one
+    /// locus and none. A `merge_cohort` that ignored the run's parameters and used the shipped
+    /// ones would answer the same at both.
+    #[test]
+    fn the_runs_own_min_alt_floor_is_what_the_merge_applies() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_faint_dir, faint) =
+            super::the_merge_over_walkers::sample_showing_on_one_read("alpha", "alpha.bam", 20);
+        let paths = [zeta, faint];
+
+        let at_the_shipped_floor = open_over_with(&paths, &reference, MergeParameters::DEFAULT)
+            .merge_cohort()
+            .expect("merges");
+        let at_a_floor_of_one = open_over_with(
+            &paths,
+            &reference,
+            MergeParameters {
+                min_alt_reads: MinAltReads {
+                    floor: MinAltObs(NonZeroU32::new(1).expect("not zero")),
+                    share: MinAltReadShare::new_or_panic(0.0),
+                },
+                ..MergeParameters::DEFAULT
+            },
+        )
+        .merge_cohort()
+        .expect("merges");
+
+        assert_eq!(
+            at_the_shipped_floor.cohort_observations.len(),
+            1,
+            "only zeta's position, whose three reads clear a floor of two",
+        );
+        assert_eq!(
+            at_a_floor_of_one.cohort_observations.len(),
+            2,
+            "and alpha's single carrying read as well, once one read is enough",
+        );
+    }
+
+    /// **The run's own span bound is what refuses a locus**, and a refused locus is counted.
+    ///
+    /// At a bound of one base, a locus is still built for every position — every locus in this
+    /// fixture is one base wide — so the bound has to be pushed below that to bite. What this
+    /// pins instead is the other direction: the outcome's refusal list is the run's parameter's
+    /// to fill, and a merge using a constant would leave it empty whatever the run asked for.
+    #[test]
+    fn the_runs_own_span_bound_is_what_the_merge_applies() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+        let paths = [zeta];
+
+        let merged = open_over_with(
+            &paths,
+            &reference,
+            MergeParameters {
+                cohort_locus_builder_regions_len:
+                    crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen(
+                        NonZeroU32::new(7).expect("not zero"),
+                    ),
+                ..MergeParameters::DEFAULT
+            },
+        )
+        .merge_cohort()
+        .expect("merges");
+
+        // Seven-base building regions divide the same analysed ground far more finely than the
+        // shipped 500. The answer must not move — that is the merge's own invariant — so what
+        // this pins is that the run's width reached the merge at all, by way of an answer that
+        // is still right under a width nothing else in this file uses.
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|locus| locus.region.start)
+                .collect::<Vec<_>>(),
+            vec![Position(15), Position(30)],
+        );
+    }
+
+    /// **The answer does not move when the ground under it is divided ten ways.**
+    ///
+    /// Ten segments inside one analysed region — the shape the one-segment fixture above cannot
+    /// make, since there the one segment *is* the one analysed region and the two are the same
+    /// argument.
+    ///
+    /// **⚑ What this does not pin, and a mutation proved it: handing the merge the segments
+    /// instead of the analysed regions.** That mutation survives every test in this file, and it
+    /// should — the merge is built so that how the ground is divided cannot change what comes
+    /// out, and its two drivers are checked against each other for exactly that. What the swap
+    /// costs is **work, not answers**: the same 20,000 observations take 5.4 ms over one region
+    /// and 184 ms over a thousand, 34 times for the same result
+    /// (`cohort_merge/serial.rs`, measured in release by that module's own review). On a real
+    /// run it would be 100,171 segments where 80 analysed regions were meant. No assertion on
+    /// the output can see it; a benchmark would.
+    #[test]
+    fn the_answer_does_not_move_when_the_ground_is_divided_ten_ways() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+        let read_groups = build_read_groups(&[zeta]).expect("read groups");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+
+        let segmentation = segmentation_of_several_segments(10);
+        assert_eq!(segmentation.segments().len(), 10);
+        assert_eq!(
+            segmentation.analysed_regions().len(),
+            1,
+            "one analysed region, ten segments inside it — the shape the one-segment fixture \
+             cannot make",
+        );
+
+        let merged = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &reference,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                reference_with_checksums: reference.info(),
+            },
+            segmentation,
+            parameters,
+            CallingLoopConfig::DEFAULT.validate().expect("runnable"),
+            CandidateSelectionConfig::DEFAULT,
+            MergeParameters::DEFAULT,
+        )
+        .expect("opens")
+        .merge_cohort()
+        .expect("merges");
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|locus| locus.region.start)
+                .collect::<Vec<_>>(),
+            vec![Position(15), Position(30)],
+            "both positions, each built once",
+        );
+    }
+
+    /// **The no-bases refusal comes before the files are opened**, and an unopenable file is how
+    /// that is checked.
+    ///
+    /// A run given both a bases-less reference and a BAM with no index beside it must report the
+    /// reference — the refusal that costs nothing — and not the open failure. Moving the check
+    /// after the opens leaves every other test green.
+    #[test]
+    fn the_no_bases_refusal_comes_before_the_files_are_opened() {
+        let (_reference_dir, geometry_only) = fixture_reference(false);
+        let (_bam_dir, unindexed) = unindexed_bam_for("zeta", "zeta.bam");
+        let read_groups = build_read_groups(&[unindexed]).expect("read groups");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+
+        let refused = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &geometry_only,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                reference_with_checksums: geometry_only.info(),
+            },
+            super::tests::segmentation_built_on([7; 16]),
+            parameters,
+            CallingLoopConfig::DEFAULT.validate().expect("runnable"),
+            CandidateSelectionConfig::DEFAULT,
+            MergeParameters::DEFAULT,
+        )
+        .expect_err("both are wrong, and the cheap one is reported");
+
+        assert!(
+            matches!(refused, RunError::ReferenceHasNoBases),
+            "the reference, not the unopenable file: {refused:?}"
+        );
+    }
+
+    /// **A repeat tract is refused as unbuilt, not as out of scope**, and the two are different
+    /// answers to *why did this ground emit nothing*.
+    ///
+    /// Out of scope is permanent — a satellite is never going to be called. Not implemented is
+    /// this caller's own gap, and the run report's job is to say which. Swapping them is
+    /// invisible to every other test here.
+    #[test]
+    fn a_repeat_tract_is_refused_as_unbuilt_rather_than_as_out_of_scope() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
+        let mut generators =
+            generic_path_generators(&walk_reference, PileupGeneratorConfig::default())
+                .expect("the shipped settings are accepted");
+
+        let (_bam_dir, bam) = bam_for("zeta", "zeta.bam");
+        let read_groups = build_read_groups(&[bam]).expect("read groups");
+        let reads = SampleReads::open(
+            &read_groups.read_groups_per_sample()[0],
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("opens");
+
+        generators.begin_region(TypedRegion {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(10),
+                end: Position(20),
+            },
+            kind: RegionKind::SsrBundle {
+                tracts: Vec::new().into_boxed_slice(),
+            },
+        });
+        while generators.next_locus(&reads).expect("no failure").is_some() {}
+
+        let counts = generators.counts();
+        assert_eq!(
+            counts.unhandled_not_implemented, 1,
+            "a repeat tract is this caller's own gap",
+        );
+        assert_eq!(
+            counts.unhandled_out_of_scope, 0,
+            "and not a permanent refusal — that is the satellite's answer, and saying it here \
+             would tell a run report the tract will never be called",
+        );
     }
 }

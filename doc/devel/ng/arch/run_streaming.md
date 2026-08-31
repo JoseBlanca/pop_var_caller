@@ -487,6 +487,9 @@ pub struct AlignedFilesVariantCaller { /* SampleReads per sample, read groups, r
 impl AlignedFilesVariantCaller {
     /// Opens every sample's files — and, from A2, runs spec §6.2's and §7.1a's checks —
     /// before a read is decoded. Named `open` because that is what it does.
+    ///
+    /// **A fourth refusal came with the merge (2026-08-31)**: the reference is opened for
+    /// walking here too, and one that holds no bases is refused before a file opens.
     pub fn open(
         alignments: AlignmentInputs<'_>,
         segmentation: Segmentation,
@@ -524,6 +527,16 @@ exist and are separate types
 ([`cohort_merge/mod.rs:269,314,367,465,532`](../../../../src/ng/run/cohort_merge/mod.rs)); passing
 them one by one alongside four other arguments is what the grouping avoids. Whether it is worth a
 struct is the constructor's to settle when it is coded.
+
+**⛦ Direct mode drives the merge but does not yet yield one record at a time (2026-08-31).**
+`AlignedFilesVariantCaller::merge_cohort` builds one walker per sample and runs the
+single-threaded merge over them, returning the whole cohort's loci as one `RegionOutcome`. That is
+not spec §5.1's bound — `callers in flight × one cohort locus` plus the frontier — and it is not a
+cost the step added: `merge_cohort_through_cache` already accumulates one outcome per building
+region. Calling lands inside that driver, so the shape survives the next step; the pool milestone
+is where loci start being released one at a time. **Two things it consumes and does not give
+back**, both wanted by the run report: every walker's tallies, and the assembly-check outcome. The
+cache owns the walkers and has no `into_sources`.
 
 **Contract, both callers.** Records in genome order, identical at every number of callers in flight
 (spec §12.2), and identical between the two callers on one cohort with fixed parameters (spec §12.3
@@ -619,6 +632,24 @@ pub enum RunError {
          check the paths or the pattern it was given"
     )]
     NoAlignmentFiles,
+    /// **Built 2026-08-31.** The run's reference was opened from a `.fai` alone, so it holds no
+    /// bases and no locus can carry a reference allele. **Refused before a single alignment file
+    /// is opened**, and it refuses nothing a real run does: every arm of
+    /// `read_reference_verifying_or_creating_fai` keeps the FASTA's path beside the geometry it
+    /// read from the index.
+    #[error("this run's reference was opened from a `.fai` index alone, which holds no bases: …")]
+    ReferenceHasNoBases,
+    /// **Built 2026-08-31.** The `<reference>.fai` beside an otherwise-right FASTA is missing or
+    /// damaged — `samtools faidx` rebuilds it. Named apart from the one above because the two ask
+    /// for different things: a different argument, against a repair of the one already given.
+    #[error("the index beside this run's reference {} could not be read", reference.display())]
+    ReferenceIndexUnreadable { reference: PathBuf, #[source] source: std::io::Error },
+    /// **Built 2026-08-31, and unreachable today**: nothing yet lets a run choose its locus
+    /// generator's settings, so every run builds with the shipped defaults. It exists because the
+    /// settings are an argument, and an argument nobody can pass today is one somebody passes
+    /// tomorrow — spec §11 and the plan's Checkpoint C ask whether they should be run parameters.
+    #[error("this run's locus generator would not accept its settings")]
+    LocusGeneratorSettings { #[source] source: PileupGeneratorConfigError },
     /// **Built.** The parameters were not assembled for this cohort.
     ///
     /// **An arity check and not a match by name.** The assembled parameters carry no sample

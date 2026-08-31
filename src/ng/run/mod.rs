@@ -8,9 +8,9 @@
 //!
 //! **Landed so far:** [`cohort_merge`], which turns k samples' observations into one stream of
 //! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
-//! walks; [`callers`]'s [`AlignedFilesVariantCaller`], constructed and checked but not yet
-//! iterating; and [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the
-//! merge's source interface.
+//! walks; [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the merge's
+//! source interface; and [`callers`]'s [`AlignedFilesVariantCaller`], which now drives that merge
+//! over one walker per sample and returns the cohort's loci — though not yet one at a time.
 
 pub mod callers;
 pub mod cohort_merge;
@@ -122,6 +122,55 @@ pub enum RunError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// The run's reference describes a genome's geometry but holds none of its bases.
+    ///
+    /// **A `.fai` is a table of contig names, lengths and offsets, and nothing else.** A run
+    /// needs the sequence itself: every locus the walk emits carries the reference bases over its
+    /// span, and the read preparer left-aligns against them. So a reference opened from an index
+    /// alone can be checked against a cohort's headers and cannot be called against.
+    ///
+    /// **Refused before a single file is opened**, because it condemns the whole run and nothing
+    /// about it improves by discovering it at the first locus, a genome's worth of setup later.
+    #[error(
+        "this run's reference was opened from a `.fai` index alone, which holds no bases: a run \
+         needs the FASTA itself, both for the reference allele at every locus and to left-align \
+         the reads. Point the run at the `.fa` beside that index"
+    )]
+    ReferenceHasNoBases,
+
+    /// The reference's `.fai` index could not be read.
+    ///
+    /// **Named apart from the reference having no bases at all**: that one is a wrong argument — a
+    /// `.fai` handed in where a FASTA was needed — while this is a missing or damaged
+    /// `<reference>.fai` beside a FASTA that is otherwise right, which `samtools faidx
+    /// <reference>` rebuilds.
+    ///
+    /// **The instruction is not on this line, and that is the chain's shape rather than an
+    /// omission** — the same reason [`SourceFailed`](Self::SourceFailed) carries none: a cause is
+    /// appended after a colon, so advice here would sit in front of the thing it is telling the
+    /// reader to act on.
+    #[error("the index beside this run's reference {} could not be read", reference.display())]
+    ReferenceIndexUnreadable {
+        /// The FASTA whose `.fai` would not read.
+        reference: PathBuf,
+        /// What reading it hit.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A locus generator would not accept the settings it was built with.
+    ///
+    /// **A caller mistake rather than a user's, today**: nothing yet lets a run choose these, so
+    /// every run builds its generators with the shipped defaults and this cannot fire. It exists
+    /// because the settings are an argument, and an argument nobody can pass today is one
+    /// somebody passes tomorrow.
+    #[error("this run's locus generator would not accept its settings")]
+    LocusGeneratorSettings {
+        /// Which setting, and why it was refused.
+        #[source]
+        source: crate::ng::locus_generation::pileup::PileupGeneratorConfigError,
+    },
+
     /// The parameters were assembled for a different cohort from the one this run opened.
     ///
     /// **A count, not a name.** The assembled parameters carry no sample names — one number
@@ -178,8 +227,9 @@ pub enum RunError {
     /// besides them, and the command that raises it (spec §7.1a).
     #[error(
         "this run needs {needed} open files and this process may open {limit}: \
-         {alignment_files} alignment files at {per_file} each, plus {allowance} for the \
-         reference, the repeat catalog and the output ({samples} samples). \
+         {alignment_files} alignment files at {per_file} each, {samples} samples at \
+         {per_sample} more each for the reference bases their walks read, and {allowance} for \
+         the reference, the repeat catalog and the output. \
          Raise the limit with: ulimit -n {needed}, or call fewer samples at once"
     )]
     NotEnoughFileDescriptors {
@@ -188,11 +238,15 @@ pub enum RunError {
         /// How many alignment files those samples are spread over. **This is what the
         /// arithmetic is over**: a sample sequenced across four lanes is four files.
         alignment_files: usize,
-        /// Descriptors one alignment file needs.
+        /// Descriptors one alignment file needs: its reader, and the reference accessor the
+        /// cursor over it holds.
         per_file: u64,
-        /// Descriptors the run needs besides its alignment files.
+        /// Descriptors one **sample** needs on top of its files: the two reference accessors
+        /// its locus generator holds for the run.
+        per_sample: u64,
+        /// Descriptors the run needs besides those two terms.
         allowance: u64,
-        /// The two above, combined.
+        /// The three above, combined.
         needed: u64,
         /// What this process may open — the soft `RLIMIT_NOFILE`.
         limit: u64,

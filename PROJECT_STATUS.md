@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-31):** **Milestone B of the run driver — a walker is
+> - **Last completed task (2026-08-31):** **Milestone C of the run driver — alignment files to
+> cohort loci**, at Checkpoint C (steps C1 and C2 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_c_2026-08-31.md)).
+> `AlignedFilesVariantCaller::merge_cohort` drives the single-threaded merge over one walker per
+> sample; until now the merge had only ever been fed vectors. Checked against two of its own
+> oracles — the same observations fed from memory, and the undivided `merge_cohort_serially`.
+> 361 tests in `ng::run`, 5,801 in the lib.
+> **⚑ The descriptor refusal was wrong in the unsafe direction, and this milestone is what made it
+> so.** A locus generator holds two reference accessors per sample on top of what its files cost —
+> one for the walk's REF fetches, one for the read preparer, each opening a FASTA reader it keeps.
+> Re-measured on the 63 tomato accessions: a walking run holds **253** descriptors for 63 files
+> where the refusal budgeted **158**, so a run could pass the check and die at `EMFILE`, which is
+> the failure the check exists to prevent. The arithmetic now has a per-file and a per-sample term.
+> **⛦ And the fixture the run's tests were built on modelled a reference shape no run holds** — a
+> bare `.fai` read with no `fasta_path`, so it could be checked against a cohort's headers and
+> never read from. **⛦ The mutation pass left six survivors and five now die**: nothing pinned that
+> the run's own merge parameters were used at all (a user's threshold could have been silently
+> ignored), nothing pinned the refusal ordering, and the two kinds of refusal — *not built yet* and
+> *never will be* — were interchangeable. The sixth is not a defect: swapping the analysed regions
+> for the segments changes no answer, by design, and costs 34× the work; recorded rather than
+> papered over. **⛦ And a test asserted an invariant the merge does not hold** — one row per sample
+> per locus, where a sample with no observations over a locus gets no row at all.
+> **⚑ Two things wait on the owner**: `merge_cohort` drops every walker's tallies and the
+> assembly-check outcome the run report will need, and a run still cannot set its locus generator's
+> settings, the depth caps among them.
+>
+> - **Previously (2026-08-31):** **Milestone B of the run driver — a walker is
 > indistinguishable from any other source**, at Checkpoint B (steps B1 and B2 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_b2_2026-08-31.md)). B2 is the
