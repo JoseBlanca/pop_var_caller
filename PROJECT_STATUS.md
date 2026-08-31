@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-30):** **ng writes a VCF, and bcftools reads it** (Milestones
+> - **Last completed task (2026-08-31):** **the object a direct-mode run is** — step A1 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md). Every sample's
+> alignment files open at once, the ground to analyse, the numbers to call with; no iteration
+> yet. **The architecture document had to be amended before any code could be written**: it
+> still specified the pool of per-segment workers that spec §3.5 retired, and two later
+> documents had recorded that divergence on their own pages while nobody came back to the
+> original. **⛦ The review then found a test suite that could not fail** — six deliberate defects
+> survived it, every one the same shape, a fixture that passed a default and asserted the default
+> back. The worst of them raised neither a test failure nor a compiler warning: a run would have
+> called every position under the shipped thresholds while a person read their own numbers off
+> the command line. Every fixture now differs from its type's default and all seven re-injected
+> defects are caught. **⛦ And a doc comment carried a wrong number** — 11–15 MiB of live heap is
+> per open alignment *file*, not per sample, so a cohort sequenced across lanes costs a multiple
+> of what it claimed. **The one decision A1 makes** is that the run's sample order is the
+> read-group table's first-seen order, defined in exactly one place, which is what step D2 exists
+> to protect. 19 tests; `ng::run` at 308 passing.
+>
+> - **Previously (2026-08-30):** **ng writes a VCF, and bcftools reads it** (Milestones
 > A, B and C of [the VCF module's plan](doc/devel/ng/impl_plan/vcf_output.md), merged to `main`;
 > the format is settled in [vcf_output.md](doc/devel/ng/spec/vcf_output.md), written the same
 > day). `src/ng/vcf/` turns a called locus into a record, a record into a line, and a stream of
@@ -2240,6 +2257,59 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   - ~~The key names are provisional; the revision's trigger is the first person who reads a produced file and has to ask what a key means.~~ **The trigger fired twice and both revisions have landed** (`fa293d2a`, and the two names it left orphaned).
   - `cargo doc --no-deps` fails on this tree, on 25 unresolved intra-doc links in other modules, none of them this feature's. Pre-existing; worth a sweep of its own.
   - **⚠ `cargo test --all-targets --all-features` exits 101 on a pre-existing panic in `benches/psp_writer_perf.rs:386`** — an index-out-of-bounds in the bench's own priming loop, in production's psp writer path. Nothing outside `src/ng/calling/mod.rs`'s one `pub mod` line references this feature's module.
+
+---
+
+#### Direct mode — alignment files to called loci, in one process
+- **Status:** **A1 shipped; A2 next, then Checkpoint A.** The object a direct-mode run *is* —
+  every sample's alignment files open at once, the ground to analyse, the numbers to call with —
+  constructed and inert. No iteration: no merge is driven, no locus called, no record written.
+- **Plan:** [run_driver_direct_mode.md](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+  **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §5.1;
+  **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §1, §3.4, §5.
+- **Code:** [src/ng/run/segments.rs](src/ng/run/segments.rs) (`Segmentation`,
+  `SegmentationInputs`), [src/ng/run/callers.rs](src/ng/run/callers.rs)
+  (`AlignmentInputs`, `MergeParameters`, `AlignedFilesVariantCaller`),
+  [src/ng/run/mod.rs](src/ng/run/mod.rs) (`RunError`). 19 tests; `ng::run` at 308 passing.
+- **Impl report:** [A1](doc/devel/reports/implementations/ng_run_driver_a1_2026-08-31.md).
+- **⚑ The architecture document was stale and was amended first, before any code.** It still
+  specified a pool of workers each owning a stretch of genome, a look-ahead knob, and a source
+  interface handing back a per-segment iterator — all retired by spec §3.5 and by the merge as
+  built. Two later documents had recorded the divergence on their own pages and nobody came back
+  to the original. Amended 2026-08-31 (`92d903d3`), then again to record what A1 landed.
+- **The one decision A1 makes: the run's sample order is the read-group table's first-seen
+  order, defined in one place.** `open` iterates `ReadGroups::read_groups_per_sample` and never
+  sorts, deduplicates or re-derives. This is what step D2 exists to protect — three sample
+  numberings meet in the calling loop and a mismatch produces wrong genotypes rather than a
+  crash — so a second ordering minted here would be building that accident.
+- **⚑ The review found a suite that could not fail.** Six deliberate defects survived the first
+  draft, every one the same shape: a fixture that passed a default and asserted the default
+  back, which cannot tell *held what it was given* from *replaced with the default*. The worst
+  produced neither a test failure nor a compiler warning — a run would have called every position
+  under the shipped thresholds while a person read their own numbers off the command line. Every
+  fixture now differs from its type's default, and all seven re-injected defects are caught.
+- **⚑ And a wrong number in a doc comment**: 11–15 MiB of live heap is **per open alignment
+  file**, not per sample (spec §5.1's own measurement, slope 12.0 MiB a file), so the 0.9 GB at
+  63 samples it quoted holds only at one file a sample.
+- **Owner's rulings, 2026-08-31:** A2's middle check is each sample's alignment header against
+  the segmentation's reference, **not** the analysed regions — those cannot differ in direct
+  mode, where one segmentation serves every sample, so the check as planned would have been
+  built vacuous. And **Milestones A to D build against the single-threaded merge**; what
+  Milestone E becomes is decided from D3's measurement of where the time goes, and whether the
+  merge's own region batching survives at all is part of that question.
+- **Open:**
+  - **A2 gained a fourth check from A1's review, and it is the owner's to keep or strike at
+    Checkpoint A:** a run whose file glob matched nothing opens a caller over zero samples and
+    dies later inside the parameter assembly — a panic rather than a message.
+  - **The subcommand names are agreed and written nowhere** — `generate-psps`,
+    `generate-census`, `call-from-psps`, `call-from-alignments` (owner, 2026-08-28). They belong
+    in [typed_regions_cli.md](doc/devel/ng/spec/typed_regions_cli.md), which mentions none of
+    them. Needed before F1, not before A2.
+  - **This plan's Milestone D and the VCF plan's Milestones D and E interlock**, and the
+    sequencing is the owner's: this plan's D produces called loci, and the VCF plan's D1 maps a
+    called locus to a record while its E1 drives merge → loop → assembly → writer.
+  - Which threads do the genotype arithmetic once several loci are called at once — arch §8,
+    owed by the step that adds the concurrency.
 
 ---
 

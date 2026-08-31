@@ -119,6 +119,11 @@ across samples", which is a psp fact: two files can record different ground, but
 computes one segmentation from its own inputs and hands the same one to every sample, so that
 comparison cannot differ. The contig agreement is the mistake direct mode can actually make, and it
 refuses for the same reason — a sample whose reads are against another assembly is not comparable.
+**⛦ A fourth check, from A1's review: a cohort of no samples.** `build_read_groups` over an empty
+path list is not a failure by design, so a run whose file glob matched nothing opens a caller over
+zero samples and dies later inside the parameter assembly — a panic rather than a message. The
+range this caller commits to starts at one sample. **Raised at Checkpoint A; strike it if you would
+rather the command line refuse an empty list.**
 *Depends:* A1. *Source:* §6.2, §7.1a; [`parameters_file.md`](../spec/parameters_file.md) §6;
 [`../arch/run_streaming.md`](../arch/run_streaming.md) §5 (`SampleAlignedToAnotherReference`).
 

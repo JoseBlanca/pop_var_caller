@@ -83,30 +83,50 @@ shared read-only by every worker (spec §4.2, §9). No grouping routine exists: 
 *observation generation* is one segment (spec §4.4), so `Segmentation` is a list plus the record of
 its inputs — the previous draft's `group_toward` is retired with the size choices it served.
 
+**Built 2026-08-31**; the block below is the landed shape, and three things in it differ from
+the sketch this document carried. It is neither `Clone` nor deriving `Debug` — a clone would
+deep-copy the genome-sized list for a holder the design says should not exist, and a derived
+`Debug` would print every segment. `build` takes the catalog's path, because four of the
+catalog's own failures describe the file without naming it and a person with several catalogs
+cannot act on that. And the analysed regions are held twice on purpose, in the two shapes their
+two consumers take.
+
 ```rust
 /// The run's segments, in genome order, plus the values they were computed from. A function of
-/// the reference, the catalog, the routing criteria and the analysed regions — no sample's
-/// reads — so it is identical in every sample of the run (spec §4.2).
+/// the reference, the catalog, the repeat-tract criteria and the analysed regions — no
+/// sample's reads — so it is identical in every sample of the run (spec §4.2).
 pub struct Segmentation {
     inputs: SegmentationInputs,
     segments: Vec<TypedRegion>,
+    /// What the merge takes, where `inputs.analysed_regions` is what the checks compare.
+    analysed_regions: Vec<GenomeRegion>,
 }
 
 impl Segmentation {
-    /// Consumes the typed-region generator's stream once. The inputs record is assembled here,
-    /// so the values a segmentation was built from and the values it reports cannot disagree.
+    /// Consumes the typed-region generator's stream once. `analysed` is both recorded and
+    /// used here, so what this reports and what the merge walks are one value; the catalog
+    /// and the criteria are recorded as given, so reading the stream and building the record
+    /// belong in one call site.
     pub fn build(
         segments: impl Iterator<Item = Result<TypedRegion, RepeatCatalogError>>,
         analysed: GenomeRegions,
         catalog: RepeatCatalogHeader,
-        routing: StrRepeatCriteria,
+        repeat_tract_criteria: StrRepeatCriteria,
+        catalog_path: PathBuf,
     ) -> Result<Self, RunError>;
 
     pub fn inputs(&self) -> &SegmentationInputs;
     /// In genome order; a segment never crosses a contig and is never cut (spec §4.3).
     pub fn segments(&self) -> &[TypedRegion];
+    /// The ground the merge advances over.
+    pub fn analysed_regions(&self) -> &[GenomeRegion];
 }
 ```
+
+**What holding the segments whole costs is unmeasured, and it is the one term of a run that
+grows with the genome rather than with the cohort.** How many segments a genome has at the
+criteria a run asks with has never been counted — spec §11's question 1 is that measurement.
+Beside 63 open alignment files it is small; at one sample it may not be.
 
 `SegmentationInputs` is both the psp header's core (§4) and the operand of the file-against-run
 check (spec §6.2). The parameters fit holds the equivalent object for its own compatibility
@@ -121,18 +141,24 @@ pub struct SegmentationInputs {
     /// the tool version (`repeat_catalog/mod.rs:283`).
     pub catalog: RepeatCatalogHeader,
     /// The criteria the *reader* asked with. Not the same value as `catalog.built_under` — the
-    /// catalog is built below every routing floor so a reader filters rather than re-scans —
-    /// and it is this one that decides where a segment ends.
-    pub routing: StrRepeatCriteria,
+    /// catalog is built below every floor a reader might ask with, so a reader filters rather
+    /// than re-scans — and it is this one that decides where a segment ends.
+    pub repeat_tract_criteria: StrRepeatCriteria,
     /// The regions the run was asked to analyse (`region_typing/mod.rs:77`). The field a user
     /// actually changes between runs, and the one compared across the cohort (spec §6.2).
-    pub analysed: GenomeRegions,
+    pub analysed_regions: GenomeRegions,
 }
 
 impl SegmentationInputs {
     /// The name of the first field that differs, for the error message; `None` when they
     /// agree. **A name rather than a `bool`**: "these two segmentations differ" leaves the
-    /// user nothing to fix (spec §6.1).
+    /// user nothing to fix (spec §6.1). The names are noun phrases that read inside §5's
+    /// "written under a different {field}" — *repeat catalog*, *set of repeat-tract
+    /// criteria*, *set of analysed regions* — never field identifiers.
+    ///
+    /// **The order is the order a person should fix them in**, and it is checked: the catalog
+    /// carries the reference's identity, so under a different catalog the other two
+    /// comparisons are about different genomes.
     pub fn first_difference(&self, other: &Self) -> Option<&'static str>;
 }
 ```
@@ -362,23 +388,40 @@ default of one there is no inside pool at all.
 
 ### 3.4 The two variant callers
 
+**Direct mode's construction is built (2026-08-31) and the block below is the landed shape.**
+Two things in it differ from the sketch this document carried, and both remove something. There
+is **no `SampleInput` type**: a run builds one read-group table from its file paths and opens one
+`SampleReads` per entry of `ReadGroups::read_groups_per_sample`, which is the rule
+`SampleReads::open_only_sample` states for every tool that is not single-sample — and it is what
+fixes the run's sample order in one place rather than two. And the constructor takes **no
+concurrency knob**, under the ruling recorded in §8.
+
 ```rust
+/// What a run opens and how it filters, grouped because the four travel together into every
+/// sample's open. The read-group table's order is the run's sample order.
+pub struct AlignmentInputs<'a> {
+    pub read_groups: &'a ReadGroups,
+    pub reference: &'a OpenReference,
+    pub read_filters: ReadFilterConfig,
+    pub build_index_if_missing: bool,
+}
+
 /// Direct mode (spec §5.1). Holds every sample's SampleReads open for the whole run —
-/// 11–15 MiB each — plus the shared read-only state, and one walker per sample advancing at
-/// the merge frontier.
-pub struct AlignedFilesVariantCaller { /* segmentation, SampleReads + walker per sample, params, pool */ }
+/// 11–15 MiB **per open alignment file** — plus the shared read-only state, and from B1 one
+/// walker per sample advancing at the merge frontier.
+pub struct AlignedFilesVariantCaller { /* SampleReads per sample, read groups, reference,
+                                          filters, segmentation, params, configs */ }
 
 impl AlignedFilesVariantCaller {
-    /// Opens every sample's files and runs spec §6.2's and §7.1a's checks before a read is
-    /// decoded.
-    pub fn new(
-        samples: &[SampleInput],
+    /// Opens every sample's files — and, from A2, runs spec §6.2's and §7.1a's checks —
+    /// before a read is decoded. Named `open` because that is what it does.
+    pub fn open(
+        alignments: AlignmentInputs<'_>,
         segmentation: Segmentation,
         parameters: RunParameters,
-        loop_config: RunnableCallingLoopConfig,
-        selection: CandidateSelectionConfig,
-        merge: MergeParameters,
-        callers_in_flight: CallersInFlight,
+        calling_loop_config: RunnableCallingLoopConfig,
+        candidate_selection: CandidateSelectionConfig,
+        merge_parameters: MergeParameters,
     ) -> Result<Self, RunError>;
 }
 
@@ -450,10 +493,29 @@ across worker counts (spec §6.3, §12.1).
 
 ## 5. Errors (`mod.rs`)
 
+**The reason comes from the cause, not from the top line.** Every variant here names the sample
+or the file the trouble is in; what is wrong with it arrives through the wrapped cause, so a
+command reporting one of these renders the whole chain with `format_error_chain`
+([`src/error_render.rs`](../../../../src/error_render.rs)) and never `Display` alone. A bare
+`Display` says which sample would not open; the chain says its index is missing and where it was
+looked for. **Two of the variants below are built (2026-08-31); the rest arrive with A2 and psp
+mode.**
+
 ```rust
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    /// **Built.** The run's segments could not be read out of the repeat catalog. The path is
+    /// carried here because the catalog's own error often does not have it: a digest mismatch,
+    /// over-permissive criteria, differing scan weights and a differing tool version all
+    /// describe the file without naming it.
+    #[error("the run's segments could not be read from the repeat catalog {}", path.display())]
+    Catalog { path: PathBuf, #[source] source: RepeatCatalogError },
+    /// **Built.** One sample's alignment files could not be opened. The sample's name is a
+    /// field of its own because the wrapped error does not carry it — an open failure knows
+    /// which file it was, not which individual the file holds. Boxed to keep this type small.
+    #[error("sample {sample}: its alignment files could not be opened")]
+    OpeningSample { sample: String, source: Box<IngestError> },
     /// One sample's source failed. **Both the sample and where it had reached** — neither alone
     /// locates a failure in a run over thousands of samples (spec §9).
     #[error("sample {sample}: failed at {at}")]
@@ -551,7 +613,15 @@ the merge, and §8 below records them as still owed.
   is the cohort check direct mode can fail; `AnalysedRegionsDiffer` compares two psps' recorded
   ground to each other, which only psp mode can; `SegmentationInputsDiffer` compares a psp to the
   run; `ParameterSamplesDiffer` compares the parameters to the run; `NotEnoughFileDescriptors`
-  compares the run to the process — spec §6.2, §7.1a.
+  compares the run to the process — spec §6.2, §7.1a. **`SampleAppearsTwice` is not among them
+  and is psp mode's alone**: in direct mode several files naming one individual are one sample by
+  construction, since the read-group table groups them (`callers.rs`, built 2026-08-31), and a
+  cohort that opens the same individual twice is a thing only two files can express.
+- **The refusals are refusals; the two built variants are failures.** `Catalog` and
+  `OpeningSample` say a run could not read something it was handed, where the five above say a
+  run was handed things that do not go together. They live in one enum because a caller has one
+  `Result` either way, and they are told apart by what a person does next: fetch the file, or fix
+  the arguments.
 - **`CallersInFlight`, `SamplesInFlight`, `Workers` are newtypes over `NonZeroUsize`**, and
   **none of them is given a default here** — spec §11 questions 2 and 3 own the sweeps that set
   the first two, and the third is not on the default path.
