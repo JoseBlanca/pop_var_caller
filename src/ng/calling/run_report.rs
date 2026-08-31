@@ -1,6 +1,7 @@
 //! **What the run scored its reads under, in a form an output can print** — the contamination
 //! fraction each read group was corrected for, the batching those fractions were drawn against,
-//! and the one repeat-tract constant nothing measured.
+//! the one repeat-tract constant nothing measured, and whether the run fitted any repeat-tract
+//! slippage at all.
 //!
 //! # Why this exists at all
 //!
@@ -11,9 +12,16 @@
 //! locus's own record. So the run carries what it used beside what it called, and this is the
 //! type that carries it.
 //!
-//! Every number here is read off [`RunParameters`](super::run_parameters::RunParameters)
-//! unchanged. **Nothing is computed and nothing is summarised**: a report that averaged two of a
-//! sample's fractions would erase the one distinction the finer grain exists to express.
+//! **No value here is computed from another, and none is averaged**: a report that took the mean
+//! of two of a sample's fractions would erase the one distinction the finer grain exists to
+//! express, which is what this rule is against. Every fitted number is read off
+//! [`RunParameters`](super::run_parameters::RunParameters) unchanged.
+//!
+//! **[`RepeatTractFitsUsed`] counts rather than copies, and that is the one exception.** How many
+//! strata carry slippage is not a number the parameters hold; it is a fact about them, and a fact
+//! no per-locus record can state. Counting is not averaging — nothing is collapsed and no two
+//! values that differ are made to look alike — but it is worth naming as a departure rather than
+//! leaving a reader to notice the module doc is no longer true of one of its four parts.
 //!
 //! # The grain: one row per read group, listed under its sample
 //!
@@ -56,27 +64,39 @@ pub struct RunParameterReport {
     contamination: ContaminationUsed,
     sequencing_batching: SequencingBatchingUsed,
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    repeat_tract_fits: RepeatTractFitsUsed,
 }
 
 impl RunParameterReport {
-    /// Build the report from its three parts.
+    /// Build the report from its four parts.
     ///
-    /// **Plain data with no arithmetic**, so the only thing to get wrong is the pairing — three
-    /// parts read off three different runs. That is why this is `pub(crate)`:
+    /// **Three parts are plain data and the fourth counts**, so the only thing to get wrong is
+    /// the pairing — four parts read off four different runs. That is why this is `pub(crate)`:
     /// [`RunParameters::report`](super::run_parameters::RunParameters::report) is the only
-    /// builder that can exist, and it reads all three off one run. A consumer reads a report; it
+    /// builder that can exist, and it reads all four off one run. A consumer reads a report; it
     /// does not assemble one.
     #[must_use]
     pub(crate) fn new(
         contamination: ContaminationUsed,
         sequencing_batching: SequencingBatchingUsed,
         repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+        repeat_tract_fits: RepeatTractFitsUsed,
     ) -> Self {
         Self {
             contamination,
             sequencing_batching,
             repeat_tract_outlier_weight,
+            repeat_tract_fits,
         }
+    }
+
+    /// **What the run's repeat-tract fits hold, and whether every tract falls back to another
+    /// caller's shipped constants** — see [`RepeatTractFitsUsed`] for why a run has to say this
+    /// once rather than leaving it to the per-locus counts.
+    #[inline]
+    #[must_use]
+    pub fn repeat_tract_fits(&self) -> &RepeatTractFitsUsed {
+        &self.repeat_tract_fits
     }
 
     /// The contamination fraction every read group was corrected for, or that none was fitted.
@@ -230,6 +250,84 @@ impl ReadGroupContamination {
     #[must_use]
     pub fn was_measured(&self) -> bool {
         self.estimate.was_measured()
+    }
+}
+
+/// **What the run's repeat-tract fits hold, and what a tract is scored under where they hold
+/// nothing.**
+///
+/// # Why this is in the run's report at all
+///
+/// **The two numbers a repeat tract is scored under can both be missing on a run that is working
+/// perfectly, and both fall back in silence.** A candidate whose stratum the slippage fit never
+/// saw takes [`StutterModel::hipstr_shipped`](crate::ng::alignment::StutterModel::hipstr_shipped);
+/// a `(read group, stratum)` the substitution-rate fit never accumulated takes
+/// [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::ng::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE).
+/// Both are marked `Defaulted` on the cell's warrant and both are counted per locus
+/// ([`TractScoringFits`](crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits)),
+/// which is the right grain for *how much of this tract fell back* and the wrong grain for *did
+/// this run fit any slippage at all*.
+///
+/// **A run that fitted none is the case worth stating once, before any locus is called**
+/// (`doc/devel/ng/spec/parameters_file.md` §8, §12 question 1): the per-(stratum × slippage group)
+/// numbers are to be fitted from GIAB HG002 and compiled in, that measurement does not exist, and
+/// so a run with no fit has nothing to fall back *to* except another caller's shipped constants.
+///
+/// **The parameters file says the same thing in prose and this says it as data.** Until step E3
+/// the file did not: an empty `slippage_by_stratum_and_group` and a missing row look alike, and a
+/// geneticist reading a produced file took the empty table for *no read group put a read in that
+/// stratum*. The file carries a note now (`parameters_file::to_toml`), which is what a person
+/// reads; this is what an output stage prints beside a call, and what a caller can branch on.
+///
+/// **What the shipped model claims, so a reader can argue with it:** one read in twenty comes back
+/// a whole repeat short, one in twenty a whole repeat long, and one in a hundred each way for a
+/// part-repeat slip. It is **symmetric**, where `StutterModel::hipstr_shipped`'s own documentation
+/// records that HipSTR's *fitted* values are contraction-biased — so on a PCR library, which slips
+/// more than a PCR-free one and slips short more often than long, it is wrong in both magnitude
+/// and shape.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RepeatTractFitsUsed {
+    /// **How many strata carry slippage numbers.** Zero is the state this type exists for: every
+    /// repeat tract of the run is then scored under the shipped stutter model, whatever its
+    /// period or length.
+    pub strata_with_slippage: usize,
+    /// How many `(read group × stratum × ploidy)` cells carry a fitted substitution rate. Zero
+    /// means every tract's cells take the stated 0.001.
+    pub fitted_substitution_rates: usize,
+    /// **Read groups the run's slippage declaration does not name** — a library present at calling
+    /// time that the pre-pass did not know existed, which is why
+    /// [`NoSlippage`](crate::ng::parameter_estimation::joint::stratum_fits::NoSlippage) gives it a
+    /// variant of its own
+    /// ([`UnknownReadGroup`](crate::ng::parameter_estimation::joint::stratum_fits::NoSlippage::UnknownReadGroup))
+    /// and the locus counts it apart from the ordinary absences.
+    ///
+    /// **Empty on a run that fitted nothing**, which declares every read group into one group and
+    /// simply has no strata — being told nothing about slippage and being unable to look it up are
+    /// different failures.
+    ///
+    /// **⚑ It is one of the two absences that mean *the run is not what it claims*, and the other
+    /// is not reported here.**
+    /// [`GroupNotInTheFit`](crate::ng::parameter_estimation::joint::stratum_fits::NoSlippage::GroupNotInTheFit)
+    /// is a read group declared into a slippage group past the end of the fit's own rows — the map
+    /// and the fit assembled from different runs — and `TractScoringFits` counts the two together
+    /// for exactly that reason. A run-level field cannot answer it as cheaply: it is a property of
+    /// each `(read group, stratum)` row rather than of the declaration, so finding it means walking
+    /// the strata. **Neither production path can produce it** — the file's reader densifies every
+    /// stratum row to `max(slippage group) + 1` (`parameters_file::to_run_parameters`) and
+    /// `gather_strata` sizes its groups from the same map it is handed — so what is missing here is
+    /// a report of a state only a hand-built `StratumFits` reaches. Recorded rather than covered.
+    pub read_groups_with_no_slippage_group: Vec<ReadGroupId>,
+}
+
+impl RepeatTractFitsUsed {
+    /// **Whether every repeat tract of this run is scored under the shipped stutter model** —
+    /// true exactly where no stratum carries numbers.
+    ///
+    /// **Not the same question as "did any cell fall back"**, which is per locus and which a
+    /// partially-fitted run answers yes to all the time. This one is about the run.
+    #[must_use]
+    pub fn every_tract_falls_back(&self) -> bool {
+        self.strata_with_slippage == 0
     }
 }
 

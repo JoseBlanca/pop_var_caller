@@ -362,12 +362,30 @@ supplied file has `Supplied` calibrations and no rate map, and `of_run` panics o
 `PROJECT_STATUS.md`.
 *Depends:* E1. *Source:* §8.
 
-☐ **E3. The slippage slot, and what a run does without it.** The per-(stratum × slippage group)
+✅ **E3. The slippage slot, and what a run does without it.** The per-(stratum × slippage group)
 numbers have no compiled default until the GIAB measurement exists. **Trace what `StratumFits`
 already does with a missing row** — the behaviour exists for partially-fitted runs and nobody has
 looked — and make the gap visible in the run's report rather than silent. **Do not invent a
 fallback**; if the traced behaviour scores a tract rather than refusing it, say so and stop for a
 ruling.
+
+**Landed 2026-08-31, and the traced behaviour does score the tract.** `StratumFits::at` answers
+`NoSlippage`, and `inference::repeat_tract_parameters` gives that cell `StutterModel::hipstr_shipped`
+with `Provenance::Defaulted` and counts it. **The owner's ruling of 2026-08-31** — reasonable numbers
+stand until the GIAB fit exists — is what lets the step proceed to making the gap visible rather than
+stopping; it is recorded in `PROJECT_STATUS.md` because the code cites it and a reader could not
+otherwise check it.
+
+**The gap is visible in two places, because they answer different questions.** `RepeatTractFitsUsed`
+on `RunParameterReport` states at the run what no locus can — how many strata carry slippage, how
+many substitution rates are fitted, and which read groups the declaration does not name. And the
+**file** says it in prose: an empty `slippage_by_stratum_and_group` and a missing row look alike, and
+a geneticist reading a produced file took the empty table for *my reads never landed on a repeat
+tract*. **The note is derived from the model and written in the section's own three words**, so it
+cannot come to disagree with what the tracts were scored under.
+
+**⚑ Two of the three things that reader could not see are F1's** and are recorded as deferred:
+`[fitted_from]` still heads a file where nothing was fitted, and no line says no fit ran.
 *Depends:* E2. *Source:* §8, §12 question 1.
 
 > **Checkpoint E:** a defaults run produces parameters, and says which of them were guessed.

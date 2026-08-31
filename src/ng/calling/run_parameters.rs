@@ -54,7 +54,8 @@ use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
 use super::likelihood::ssr::RepeatTractOutlierWeight;
 use super::run_report::{
-    ContaminationUsed, ReadGroupContamination, RunParameterReport, SequencingBatchingUsed,
+    ContaminationUsed, ReadGroupContamination, RepeatTractFitsUsed, RunParameterReport,
+    SequencingBatchingUsed,
 };
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
 use crate::ng::parameter_estimation::Estimate;
@@ -605,10 +606,28 @@ impl RunParameters {
             }
         };
 
+        // **What the run holds for repeat tracts, said once before any locus is called.** The
+        // per-locus counts answer *how much of this tract fell back*; this answers *did this run
+        // fit any slippage at all*, which no locus can, and which is the difference between a
+        // tract whose stratum happened to be thin and a run scoring every tract of every locus
+        // under another caller's shipped constants.
+        let repeat_tract_fits = RepeatTractFitsUsed {
+            strata_with_slippage: self.ssr_slippage_fits.strata(),
+            fitted_substitution_rates: self.ssr_substitution_rate.len(),
+            // **Walked over the run's own read-group axis rather than over the fit's map**, which
+            // is the only way round that can find a read group the fit does not name — asking the
+            // map which read groups it holds can never report one it is missing.
+            read_groups_with_no_slippage_group: (0..self.calibration_by_read_group.len())
+                .map(|group| ReadGroupId(group as u32))
+                .filter(|&group| self.ssr_slippage_fits.slippage_group_of(group).is_none())
+                .collect(),
+        };
+
         RunParameterReport::new(
             contamination,
             sequencing_batching,
             self.repeat_tract_outlier_weight,
+            repeat_tract_fits,
         )
     }
 

@@ -59,6 +59,9 @@
 
 use std::fmt::Write as _;
 
+use crate::ng::alignment::StutterModel;
+use crate::ng::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE;
+
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
@@ -91,7 +94,7 @@ impl ParametersFile {
                 "",
                 "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
-                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the two where this caller does hold a built-in number, the base-quality multiplier at 1.0 and the inbreeding coefficient at 0.0. A `defaulted` substitution rate is the one to avoid writing by hand: nothing here defaults that number in this file, so the warrant would be a claim about this caller that no build makes.",
+                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the two where this caller does hold a built-in number, the base-quality multiplier at 1.0 and the inbreeding coefficient at 0.0. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
@@ -191,6 +194,18 @@ impl ParametersFile {
                 &mut out,
                 "by_read_group",
                 contamination.by_read_group.iter().map(a_contamination_row),
+            );
+        } else {
+            // **⚑ The explanation of what an absent section means used to be inside the section.**
+            // So the one reader who most needed it — the one holding a file with no
+            // `[contamination]` — was the only reader who never saw it, and the word
+            // *contamination* appeared nowhere in a defaults run's whole file. Found by a
+            // geneticist reading one (step E3); the fix is that absence says its own name.
+            note(
+                &mut out,
+                &[
+                    "**Contamination: no `[contamination]` section, which means nobody identified any.** That is not the same as *measured and found clean* — nothing was measured. Your reads are scored as though none of them came from another individual, which is the read likelihood's plain formula rather than a correction of size zero. A run that fitted contamination writes a section here with one row a lane.",
+                ],
             );
         }
 
@@ -308,6 +323,27 @@ impl ParametersFile {
                 .iter()
                 .map(a_slippage_group_row),
         );
+        // **An empty table and a missing row are two different claims, and the section's own
+        // paragraph above covers only the second.** A *missing row* means that slippage group put
+        // no read in that stratum. An *empty table* means no stratum was fitted at all, and then
+        // every repeat tract of the run falls through to another caller's shipped constants —
+        // which is a stronger claim about the reads than "nothing happened here", and the one a
+        // geneticist reading a defaults run's file took for the weaker (step E3).
+        //
+        // **So the note is for the empty table only, and a partially fitted run gets none.** That
+        // is not an omission: where *some* strata were fitted, how much of a given tract fell back
+        // is a property of that tract and rides on its own record
+        // (`TractScoringFits::cells_with_no_fitted_slippage`). A note here saying "some tracts
+        // fell back" would be true of almost every run and would tell a reader nothing about
+        // theirs.
+        if tracts.slippage_by_stratum_and_group.is_empty() {
+            for (at, paragraph) in no_stratum_was_fitted().iter().enumerate() {
+                if at > 0 {
+                    writeln!(out, "#").expect("a string never fails");
+                }
+                note_lines(&mut out, &wrapped(paragraph, ROOM_AT_THE_MARGIN));
+            }
+        }
         one_a_line(
             &mut out,
             "slippage_by_stratum_and_group",
@@ -344,6 +380,13 @@ impl ParametersFile {
                 "How often a base reads wrong inside a tract — per read group as well as per stratum, because that is a property of the chemistry, and per `ploidy` as well, because that is the set of genotypes the fit scored these tracts against. That third key is why a row repeats the number at the top of the file: a cohort called at two ploidies carries a row for each. Counted in bases compared, not reads: a read crossing a tract contributes as many bases as it crosses.",
             ],
         );
+        // The same distinction one table down, and the same reason.
+        if tracts.substitution_rate_by_stratum.is_empty() {
+            note_lines(
+                &mut out,
+                &wrapped(&no_substitution_rate_was_fitted(), ROOM_AT_THE_MARGIN),
+            );
+        }
         one_a_line_with_notes(
             &mut out,
             "substitution_rate_by_stratum",
@@ -433,6 +476,101 @@ const COMMENT_WIDTH: usize = 80;
 
 /// What a note at the left margin has room for, after its `# `.
 const ROOM_AT_THE_MARGIN: usize = COMMENT_WIDTH - 2;
+
+/// **What an empty `slippage_by_stratum_and_group` means**, written above it because the section's
+/// own paragraph describes a *missing row* and a reader takes the empty table for the same thing.
+///
+/// **Every number is read off [`StutterModel::hipstr_shipped`] rather than typed here**, so the
+/// sentence a user is shown cannot come to disagree with the model their tracts were actually
+/// scored under.
+///
+/// **And it is written in the three words the table above uses**, which is what a geneticist
+/// reading a produced file asked for: the section teaches
+/// `share_of_reads_that_slip` / `shorter_share` / `fall_off` forty lines earlier, and a note
+/// quoting four direction shares instead cannot be lined up either against that table or against
+/// a later fitted run's rows — which is the comparison the reader wants.
+///
+/// **The inversion, and the one place the shipped model is not a point the fit could produce.**
+/// [`stutter_rates_for`](crate::ng::calling::likelihood::stutter_rates::stutter_rates_for) splits
+/// `share_of_reads_that_slip` — the *whole-repeat* mass — by `shorter_share`, and adds a
+/// part-repeat mass of
+/// [`PART_REPEAT_SHARE_OF_WHOLE`](crate::ng::calling::likelihood::stutter_rates::PART_REPEAT_SHARE_OF_WHOLE)
+/// times it on top; the one-step share is the *complement* of `fall_off`. So the shipped model's
+/// whole-repeat pair inverts cleanly, and its part-repeat pair does not: at a slip share of 0.10 a
+/// fitted row would carry 0.005 of part-repeat mass and the shipped model carries **0.02**, four
+/// times as much. That is stated rather than smoothed over, because a reader comparing the
+/// defaults against their own fitted rows would otherwise find a term that does not add up.
+///
+/// **What the note has to say and an earlier draft did not**, all from that reader: that **one**
+/// pair of numbers stands in for every stratum, so a long mononucleotide run and a short
+/// tetranucleotide are scored alike where real slippage differs several-fold across that range;
+/// what a *part repeat* is, a word that appeared once in the whole file and was defined nowhere;
+/// and that a direction share covers slips of any size, so *a whole repeat short* means one repeat
+/// **or more**.
+fn no_stratum_was_fitted() -> [String; 2] {
+    let shipped = StutterModel::hipstr_shipped();
+    // The fit's three numbers, recovered from the model's seven — see this function's doc for the
+    // arithmetic and for the one term that does not invert.
+    let slips = shipped.whole_repeat_shorter_share() + shipped.whole_repeat_longer_share();
+    let shorter_share = shipped.whole_repeat_shorter_share() / slips;
+    let fall_off = 1.0 - shipped.whole_repeat_one_step_share();
+    let part_repeat = shipped.part_repeat_shorter_share() + shipped.part_repeat_longer_share();
+    // Whole percents: these are the shares a reader argues with, and none of the shipped four is a
+    // fraction of a percent (`every_share_the_note_quotes_is_a_whole_percent`).
+    let in_a_hundred = |share: f64| (share * 100.0).round() as u32;
+    // **Two decimals, and the file's own `{:?}` would be wrong here.** `fall_off` is derived as
+    // `1 - 0.95` and comes out 0.050000000000000044; the writer prints values with `Debug` so that
+    // a *value* round-trips, and this is prose re-expressing a model rather than a value to copy.
+    let rounded = |share: f64| format!("{share:.2}");
+    [
+        format!(
+            "This table is empty, which is not the same as a missing row: **no stratum was \
+             fitted at all**, so every repeat tract in this run was scored under the stutter \
+             model this caller ships. In this section's own three numbers that is \
+             `share_of_reads_that_slip` = {slips}, `shorter_share` = {shorter_share}, `fall_off` \
+             = {fall_off} — so {slips_in_a_hundred} reads in 100 misreport the tract length by a \
+             whole number of repeats, half of them short and half long, and \
+             {fall_off_in_a_hundred} in 100 of those misreports are by more than one repeat. A \
+             further {part_repeat_in_a_hundred} in 100 change the tract by a part of a repeat: an \
+             insertion or deletion inside it that is not a whole number of units, so a sequencing \
+             indel or an interruption rather than slippage.",
+            slips = rounded(slips),
+            shorter_share = rounded(shorter_share),
+            fall_off = rounded(fall_off),
+            slips_in_a_hundred = in_a_hundred(slips),
+            fall_off_in_a_hundred = in_a_hundred(fall_off),
+            part_repeat_in_a_hundred = in_a_hundred(part_repeat),
+        ),
+        format!(
+            "**One pair of numbers stands in for every stratum.** A 20-base mononucleotide run \
+             and a 5-copy tetranucleotide are scored identically here, where real slippage rises \
+             steeply as the period falls and as the tract lengthens — short-period long tracts \
+             are where this is furthest wrong, and are where to distrust a call first. And a \
+             `shorter_share` of {shorter_share} is dead even, where real slippage usually favours \
+             the shorter tract; these are HipSTR's shipped starting values, which HipSTR itself \
+             replaces by fitting, and they were fitted on no organism in particular. A PCR \
+             preparation generally slips more than a PCR-free one, by an amount that depends on \
+             how many cycles it ran. There is nothing here to change, only rows to add: the \
+             paragraphs above say what a `slippage_by_stratum_and_group` row holds, and one \
+             written by hand is read back like any other. Fitting the run is the better answer, \
+             and until then the calls at repeat tracts rest on somebody else's chemistry.",
+            shorter_share = rounded(shorter_share),
+        ),
+    ]
+}
+
+/// **What an empty `substitution_rate_by_stratum` means.** Same shape as
+/// [`no_stratum_was_fitted`], smaller stakes, the same reader mistake, and the number likewise
+/// read off the constant a cell actually takes.
+fn no_substitution_rate_was_fitted() -> String {
+    format!(
+        "This table is empty, which is not the same as a missing row: nothing was fitted for any \
+         read group at any stratum, so every tract's cells took the caller's stated \
+         {DEFAULT_SSR_SUBSTITUTION_RATE} — about one base in a thousand read wrong inside a \
+         tract. Base quality inside tracts is usually worse than outside them, so on real reads \
+         that number is likely optimistic."
+    )
+}
 
 /// What a note indented with the row it is about has room for, after four spaces and its `# `.
 const ROOM_BESIDE_A_ROW: usize = COMMENT_WIDTH - 6;
@@ -1770,9 +1908,29 @@ mod tests {
         let mut file = a_file_using_every_shape();
         file.contamination = None;
         let text = file.to_toml();
+        // **The section header, not the word.** Since step E3 an uncontaminated run writes a
+        // *comment* in place of the section — the explanation of what the absence means used to
+        // live inside the section it explains, so the reader holding such a file never saw it —
+        // and that comment names the key it is about. What must not appear is the header itself,
+        // which is a line of TOML rather than of prose.
         assert!(
-            !text.contains("[contamination]"),
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .all(|line| !line.contains("[contamination]")),
             "an uncontaminated run writes no contamination section at all:\n{text}"
+        );
+        // Joined back into sentences first: the writer wraps a note to the file's comment width,
+        // so a phrase this long is split across `# ` lines and a reader reads the sentence.
+        let prose: String = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix('#'))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains("no `[contamination]` section, which means nobody identified any"),
+            "and says so where the section would have been, because the note explaining the \
+             absence used to be inside the section:\n{prose}"
         );
         assert!(
             text.lines()
@@ -1824,6 +1982,33 @@ mod tests {
             text.contains("this run fitted no stratum on its own tracts"),
             "a defaulted fallback says where the constant came from:\n{text}"
         );
+    }
+
+    /// **Every share the empty-slippage note quotes is a whole percent**, which is the assumption
+    /// `no_stratum_was_fitted` renders under: it prints `(share * 100).round()` and drops whatever
+    /// is left, so a shipped share of, say, 0.035 would be shown to a user as "4 in 100".
+    ///
+    /// **Held rather than assumed, because the note is derived and the model is not this file's.**
+    /// If `StutterModel::hipstr_shipped` ever moves to a value that is not a whole percent, this
+    /// fails and the renderer needs a decimal — which is better than a file quietly rounding a
+    /// number a reader is being invited to argue with.
+    #[test]
+    fn every_share_the_note_quotes_is_a_whole_percent() {
+        let shipped = StutterModel::hipstr_shipped();
+        for (what, share) in [
+            ("whole repeat shorter", shipped.whole_repeat_shorter_share()),
+            ("whole repeat longer", shipped.whole_repeat_longer_share()),
+            ("part repeat shorter", shipped.part_repeat_shorter_share()),
+            ("part repeat longer", shipped.part_repeat_longer_share()),
+        ] {
+            let in_a_hundred = share * 100.0;
+            assert!(
+                (in_a_hundred - in_a_hundred.round()).abs() < 1e-9,
+                "the shipped {what} share is {share}, which is {in_a_hundred} in 100 and not a \
+                 whole percent; the note rounds it and would show a reader a number the model \
+                 does not hold"
+            );
+        }
     }
 }
 

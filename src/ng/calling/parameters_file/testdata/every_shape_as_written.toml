@@ -22,9 +22,12 @@
 # count still beside it. And on every other key a `defaulted` warrant is checked
 # against nothing — including the two where this caller does hold a built-in
 # number, the base-quality multiplier at 1.0 and the inbreeding coefficient at
-# 0.0. A `defaulted` substitution rate is the one to avoid writing by hand:
-# nothing here defaults that number in this file, so the warrant would be a
-# claim about this caller that no build makes.
+# 0.0. A `defaulted` substitution rate is the one to avoid writing by hand, and
+# the reason is worth stating because a note further down looks like it
+# contradicts this: the caller **does** default that number, at the tract and
+# for the cells that need it, but it never writes one as a row here — so a
+# `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no
+# build makes.
 #
 # The slippage numbers, the prior's two concentrations and the length spectrum
 # rows carry no warrant — they say where they came from another way, and there

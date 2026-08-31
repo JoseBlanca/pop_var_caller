@@ -428,6 +428,7 @@ impl RunParameters {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
+    use crate::ng::alignment::StutterModel;
     use crate::ng::calling::genotype_prior::SeedRegime;
     use crate::ng::calling::likelihood::ssr::{DEFAULT_OUTLIER_WEIGHT, RepeatTractOutlierWeight};
     use crate::ng::calling::likelihood::{
@@ -440,12 +441,20 @@ mod tests {
         a_file_using_every_shape,
     };
     use crate::ng::calling::run_parameters::RunParameters;
+    use crate::ng::parameter_estimation::Estimate;
     use crate::ng::parameter_estimation::Provenance;
+    use crate::ng::parameter_estimation::joint::census::Stratum as CensusStratum;
+    use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+    use crate::ng::parameter_estimation::joint::slippage_curve::LevelSource;
+    use crate::ng::parameter_estimation::joint::ssr_fit::{LevelProvenance, Slippage};
     use crate::ng::parameter_estimation::joint::stratum_fits::{
-        LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION, StratumFits,
+        FittedSlippage, LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION, StratumFits,
     };
+    use crate::ng::parameter_estimation::ssr::{RepeatCount, Stratum as SsrStratum, StratumKey};
     use crate::ng::read::input::read_groups::ReadGroups;
-    use crate::ng::types::{ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId};
+    use crate::ng::types::{
+        ErrorRate, ExpectedHeterozygosity, InbreedingF, Ploidy, ReadGroupId, SsrPeriod,
+    };
     use std::collections::BTreeMap;
 
     /// The cohort every `of_defaults` test below assembles over: **two lanes of one plant and one
@@ -461,6 +470,14 @@ mod tests {
 
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("two copies is a ploidy")
+    }
+
+    /// One repeat-tract stratum: a motif period and the reference's repeat count.
+    fn an_ssr_stratum(period: u8, repeats: u32) -> SsrStratum {
+        SsrStratum::new(
+            SsrPeriod::try_new(usize::from(period)).expect("a motif period"),
+            RepeatCount(repeats),
+        )
     }
 
     fn a_coefficient(value: f64) -> InbreedingF {
@@ -1010,6 +1027,352 @@ mod tests {
                 .iter()
                 .all(Option::is_none),
             "a defaulted multiplier has no count, and the file must not invent one"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // E3 — the slippage slot, and what a run does without it
+    // -----------------------------------------------------------------
+
+    /// **A defaults run's report says every repeat tract falls back**, which no per-locus count
+    /// can say and which the parameters file's empty table does not distinguish from *nobody put
+    /// a read there*.
+    ///
+    /// The traced behaviour is that such a cell is **scored**, not refused:
+    /// `inference::repeat_tract_parameters` gives it `StutterModel::hipstr_shipped` and
+    /// `Provenance::Defaulted`. Step E3's brief said to stop for a ruling if the trace scored the
+    /// tract; the owner's ruling of 2026-08-31 is that reasonable numbers stand until the GIAB
+    /// measurement exists, so what is owed is that the run says so — this is where it does.
+    #[test]
+    fn a_defaults_runs_report_says_every_tract_falls_back() {
+        let read_groups = a_runs_read_groups();
+        let run = RunParameters::of_defaults(
+            &read_groups,
+            diploid(),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        let fits = run.report(&read_groups).repeat_tract_fits().clone();
+
+        assert!(fits.every_tract_falls_back());
+        assert_eq!(fits.strata_with_slippage, 0);
+        assert_eq!(fits.fitted_substitution_rates, 0);
+        // **Empty, and that is the point of the field.** A defaults run declares every read group
+        // into one slippage group, so none of them is one the fit "does not name" — being told
+        // nothing about slippage and being unable to look it up are different failures, and only
+        // the second means the parameters and the reads came from different runs.
+        assert!(fits.read_groups_with_no_slippage_group.is_empty());
+    }
+
+    /// **The lookup a defaults run's tract makes, and the model it then falls to** — the trace
+    /// step E3 owed, run rather than read.
+    ///
+    /// **This asks `StratumFits::at` directly rather than through the caller.** That is the
+    /// question worth pinning here — every `(read group, candidate)` of a defaults run gets
+    /// `NoSuchStratum`, the *ordinary* absence — and it is deliberately not the whole path: what
+    /// [`gather_for_locus`](crate::ng::calling::inference::repeat_tract_parameters::TractScoringFits::gather_for_locus)
+    /// does with that answer, which is take `StutterModel::hipstr_shipped` with
+    /// `Provenance::Defaulted` and count the cell, is that module's own to test and it does —
+    /// `gathering_a_second_tract_leaves_nothing_of_the_first` gathers a tract no stratum covers
+    /// and asserts `cells_with_no_fitted_slippage() == READ_GROUPS`. Asserting it again from here
+    /// would be a second copy of a rule that can then disagree with itself.
+    #[test]
+    fn a_defaults_runs_tract_finds_no_stratum_and_falls_to_the_shipped_model() {
+        let read_groups = a_runs_read_groups();
+        let run = RunParameters::of_defaults(
+            &read_groups,
+            diploid(),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        let fits = run.ssr_slippage_fits();
+
+        // Every candidate of every read group lands on the ordinary absence.
+        for group in 0..3 {
+            for repeats in [4_u64, 11, 30] {
+                assert_eq!(
+                    fits.at(ReadGroupId(group), 2, repeats),
+                    Err(NoSlippage::NoSuchStratum)
+                );
+            }
+        }
+        // And what a cell then takes is the shipped model, whose whole-repeat shares are 5 in 100
+        // each way — quoted here so the file's own note has something in the tree to agree with.
+        let shipped = StutterModel::hipstr_shipped();
+        assert_eq!(shipped.whole_repeat_shorter_share(), 0.05);
+        assert_eq!(shipped.whole_repeat_longer_share(), 0.05);
+        assert_eq!(shipped.part_repeat_shorter_share(), 0.01);
+        assert_eq!(shipped.part_repeat_longer_share(), 0.01);
+    }
+
+    /// **The file a defaults run writes says what its empty tables mean**, in the reader's own
+    /// language and beside the tables themselves.
+    ///
+    /// **What this guards is a reading, not a value.** A geneticist read the produced file and
+    /// took `slippage_by_stratum_and_group = []` for *my reads never landed on a repeat tract*,
+    /// because the section's paragraph describes a missing *row*. The truth is the stronger
+    /// claim: every tract was scored under another caller's constants.
+    #[test]
+    fn a_defaults_runs_file_says_what_its_empty_repeat_tract_tables_mean() {
+        let read_groups = a_runs_read_groups();
+        let declared = DeclaredInbreeding::nothing_said();
+        let run = RunParameters::of_defaults(&read_groups, diploid(), &declared);
+        let text = ParametersFile::of_run(
+            &run,
+            &read_groups,
+            &BTreeMap::new(),
+            &declared.of_each_sample(&read_groups),
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            a_census_a_run_could_have_fitted_under(),
+        )
+        .to_toml();
+
+        // **Searched on the sentence and not on the line.** The writer wraps a note to the file's
+        // comment width, so any phrase longer than a few words is split across `# ` lines — and a
+        // reader reads the sentence. This puts the comment text back together the way they do.
+        let prose = unwrapped_comments(&text);
+        for owed in [
+            // That the table is empty is *not* the same claim as a missing row.
+            "no stratum was fitted at all",
+            // In the section's own three words, so it lines up with the table it sits on and
+            // with a later fitted run's rows.
+            "`share_of_reads_that_slip` = 0.10, `shorter_share` = 0.50, `fall_off` = 0.05",
+            "10 reads in 100 misreport the tract length by a whole number of repeats",
+            // A part repeat is named exactly once in this file, so it is defined where it is used.
+            "an insertion or deletion inside it that is not a whole number of units",
+            // The finding that changes what a reader does with a mononucleotide call.
+            "One pair of numbers stands in for every stratum",
+            "real slippage rises steeply as the period falls and as the tract lengthens",
+            "HipSTR's shipped starting values, which HipSTR itself replaces by fitting",
+            // And the sibling table.
+            "nothing was fitted for any read group at any stratum",
+            "the caller's stated 0.001",
+        ] {
+            assert!(
+                prose.contains(owed),
+                "a defaults run's file must say {owed:?}; its comments say:\n{prose}"
+            );
+        }
+    }
+
+    /// Every comment line of a written file, stripped of its `# ` and joined back into the
+    /// sentences a reader sees rather than the lines the wrapper emits.
+    fn unwrapped_comments(text: &str) -> String {
+        text.lines()
+            .filter_map(|line| line.trim_start().strip_prefix('#'))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// **A file that fitted something says none of it**, so the note is about the state and not a
+    /// paragraph the writer always emits.
+    #[test]
+    fn a_fitted_runs_file_carries_no_such_note() {
+        let prose = unwrapped_comments(&a_file_using_every_shape().to_toml());
+        assert!(!prose.contains("no stratum was fitted at all"), "{prose}");
+        assert!(
+            !prose.contains("nothing was fitted for any read group at any stratum"),
+            "{prose}"
+        );
+    }
+
+    /// **A read group the slippage fit does not name is reported, and it is a different state
+    /// from having nothing fitted.**
+    ///
+    /// `NoSlippage` gives it a variant of its own because it means *the run is not what it
+    /// claims* — a library present at calling time the pre-pass never saw — and
+    /// `TractScoringFits` counts those cells apart from the ordinary absences. The run can say it
+    /// once, before any locus, which is what this reads.
+    #[test]
+    fn a_read_group_the_slippage_fit_does_not_name_is_named_in_the_report() {
+        let read_groups = a_runs_read_groups();
+        let run = RunParameters::of_defaults(
+            &read_groups,
+            diploid(),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        // **The same run with read groups 0 and 2 dropped from the declaration** — libraries the
+        // fit never saw. Everything else is the defaults run above. **Both ends, on purpose**: a
+        // walk that started at read group 1 rather than 0 would find the second and miss the
+        // first, and a fixture dropping only the last read group cannot see the difference
+        // (measured — `(1..len)` survived the whole library suite until this line named group 0).
+        let short_declaration = StratumFits::over(&[], BTreeMap::from([(ReadGroupId(1), 0)]));
+        let run = RunParameters::of_gathered_values(
+            run.calibration_by_read_group().to_vec(),
+            Vec::new(),
+            SequencingBatches::all_together(&read_groups),
+            run.inbreeding_coefficient_by_sample().to_vec(),
+            run.prior_seed(),
+            short_declaration,
+            BTreeMap::new(),
+            diploid(),
+            RepeatTractOutlierWeight::defaulted(),
+        );
+
+        let fits = run.report(&read_groups).repeat_tract_fits().clone();
+        assert_eq!(
+            fits.read_groups_with_no_slippage_group,
+            vec![ReadGroupId(0), ReadGroupId(2)],
+            "the walk is over the run's read-group axis, so it can find one the fit is missing — \
+             at either end of it"
+        );
+        assert!(
+            fits.every_tract_falls_back(),
+            "and it fitted no stratum either"
+        );
+        for undeclared in [ReadGroupId(0), ReadGroupId(2)] {
+            assert_eq!(
+                run.ssr_slippage_fits().at(undeclared, 2, 11),
+                Err(NoSlippage::UnknownReadGroup),
+                "which is the absence that says the run is not what it claims"
+            );
+        }
+    }
+
+    /// **The count of fitted substitution rates is the run's own, and a run can hold rates
+    /// without holding any slippage.**
+    ///
+    /// The two are fitted separately — slippage per `(stratum × slippage group)`, the rate per
+    /// `(read group × stratum × ploidy)` — so a partially-fitted run reaches this state, and the
+    /// report has to keep the two counts apart. **Measured, and the reason this test exists**:
+    /// reporting a constant zero there passed every other test in `ng::calling`, because every
+    /// other fixture that reads this field is a run with nothing fitted at all.
+    #[test]
+    fn a_run_holding_substitution_rates_and_no_slippage_reports_both() {
+        let read_groups = a_runs_read_groups();
+        let two_rates = BTreeMap::from([
+            (
+                StratumKey {
+                    read_group: ReadGroupId(0),
+                    stratum: an_ssr_stratum(2, 6),
+                    ploidy: diploid(),
+                },
+                Estimate {
+                    value: ErrorRate::try_new(0.0012).expect("a probability"),
+                    provenance: Provenance::FittedHere,
+                    observations: 40_122,
+                },
+            ),
+            (
+                StratumKey {
+                    read_group: ReadGroupId(2),
+                    stratum: an_ssr_stratum(3, 9),
+                    ploidy: diploid(),
+                },
+                Estimate {
+                    value: ErrorRate::try_new(0.0007).expect("a probability"),
+                    provenance: Provenance::FittedHere,
+                    observations: 5_000,
+                },
+            ),
+        ]);
+        let declared = DeclaredInbreeding::nothing_said();
+        let defaults = RunParameters::of_defaults(&read_groups, diploid(), &declared);
+        let run = RunParameters::of_gathered_values(
+            defaults.calibration_by_read_group().to_vec(),
+            Vec::new(),
+            SequencingBatches::all_together(&read_groups),
+            defaults.inbreeding_coefficient_by_sample().to_vec(),
+            defaults.prior_seed(),
+            StratumFits::over(&[], (0..3).map(|group| (ReadGroupId(group), 0)).collect()),
+            two_rates,
+            diploid(),
+            RepeatTractOutlierWeight::defaulted(),
+        );
+
+        let fits = run.report(&read_groups).repeat_tract_fits().clone();
+        assert_eq!(fits.fitted_substitution_rates, 2);
+        assert!(
+            fits.every_tract_falls_back(),
+            "the two are fitted separately, so rates without strata is a state a run reaches"
+        );
+    }
+
+    /// **A run that fitted a stratum says so, and that is what makes
+    /// [`RepeatTractFitsUsed::every_tract_falls_back`] a question rather than an announcement.**
+    ///
+    /// **Measured, and the reason this test exists**: hard-coding `strata_with_slippage: 0` — which
+    /// makes the predicate answer *true* for every run in the project — passed all 5,563 library
+    /// tests. Three tests asserted it true and none asserted it false, so the field said nothing.
+    #[test]
+    fn a_run_that_fitted_a_stratum_does_not_report_every_tract_falling_back() {
+        let read_groups = a_runs_read_groups();
+        let one_stratum_fitted = StratumFits::of_gathered_rows(
+            (0..3).map(|group| (ReadGroupId(group), 0)).collect(),
+            BTreeMap::from([(
+                CensusStratum {
+                    period: 2,
+                    reference_repeats: 6,
+                },
+                vec![Some(FittedSlippage {
+                    slippage: Slippage {
+                        level: 0.04,
+                        shorter_share: 0.83,
+                        fall_off: 0.3,
+                    },
+                    level: LevelProvenance {
+                        source: LevelSource::Cell,
+                        curve: None,
+                        reach: None,
+                        slipped_reads: Some(120.0),
+                    },
+                    shares: None,
+                })],
+            )]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            STATED_FLAT_CONCENTRATION,
+            Provenance::Defaulted,
+        );
+        let declared = DeclaredInbreeding::nothing_said();
+        let defaults = RunParameters::of_defaults(&read_groups, diploid(), &declared);
+        let run = RunParameters::of_gathered_values(
+            defaults.calibration_by_read_group().to_vec(),
+            Vec::new(),
+            SequencingBatches::all_together(&read_groups),
+            defaults.inbreeding_coefficient_by_sample().to_vec(),
+            defaults.prior_seed(),
+            one_stratum_fitted,
+            BTreeMap::new(),
+            diploid(),
+            RepeatTractOutlierWeight::defaulted(),
+        );
+
+        let fits = run.report(&read_groups).repeat_tract_fits().clone();
+        assert_eq!(fits.strata_with_slippage, 1);
+        assert!(
+            !fits.every_tract_falls_back(),
+            "one fitted stratum is enough: the predicate is about the run holding nothing at all"
+        );
+        // And the tract of that stratum really is answered from the fit, where its neighbours are
+        // not — which is what makes the run-level statement worth having beside the per-locus one.
+        assert!(run.ssr_slippage_fits().at(ReadGroupId(0), 2, 6).is_ok());
+        assert_eq!(
+            run.ssr_slippage_fits().at(ReadGroupId(0), 2, 7),
+            Err(NoSlippage::NoSuchStratum)
+        );
+    }
+
+    /// **Each note answers for its own table.** A file with slippage rows and no substitution
+    /// rates gets the second note and not the first.
+    ///
+    /// **Measured**: pointing the substitution-rate note's guard at the *slippage* table passed all
+    /// 192 tests of this module, because every other fixture has both tables empty or both full.
+    #[test]
+    fn each_empty_table_note_answers_for_its_own_table() {
+        let mut only_the_rates_are_missing = a_file_using_every_shape();
+        only_the_rates_are_missing
+            .repeat_tracts
+            .substitution_rate_by_stratum
+            .clear();
+        let prose = unwrapped_comments(&only_the_rates_are_missing.to_toml());
+
+        assert!(
+            prose.contains("nothing was fitted for any read group at any stratum"),
+            "the substitution-rate note fires on its own table being empty: {prose}"
+        );
+        assert!(
+            !prose.contains("no stratum was fitted at all"),
+            "and the slippage note does not, because that table has rows: {prose}"
         );
     }
 }
