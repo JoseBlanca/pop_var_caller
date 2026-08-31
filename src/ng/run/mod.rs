@@ -8,22 +8,26 @@
 //!
 //! **Landed so far:** [`cohort_merge`], which turns k samples' observations into one stream of
 //! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
-//! walks; and [`callers`]'s [`AlignedFilesVariantCaller`], constructed and checked but not yet
-//! iterating.
+//! walks; [`callers`]'s [`AlignedFilesVariantCaller`], constructed and checked but not yet
+//! iterating; and [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the
+//! merge's source interface.
 
 pub mod callers;
 pub mod cohort_merge;
 pub mod segments;
+pub mod walker;
 
 pub use callers::{
     AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, MergeParameters,
 };
 pub use segments::{Segmentation, SegmentationInputs};
+pub use walker::{AlignmentFilesWalker, RunSegments};
 
 use std::path::PathBuf;
 
 use crate::ng::read::input::{AssemblyMismatch, IngestError};
 use crate::ng::repeat_catalog::RepeatCatalogError;
+use crate::ng::types::GenomePosition;
 
 /// What can go wrong driving a run.
 ///
@@ -77,6 +81,46 @@ pub enum RunError {
          check the paths or the pattern it was given"
     )]
     NoAlignmentFiles,
+
+    /// One sample's source could not produce its next observation.
+    ///
+    /// **Which sample, and how far it had got.** Neither alone locates a failure in a run over
+    /// thousands of samples: the sample without the position says nothing about where to look,
+    /// and the position without the sample says nothing about which file to look in (spec §9).
+    /// What went wrong arrives through the cause — a read query that would not open, a
+    /// reference fetch past a contig's end — which names the region it failed on in every case
+    /// but one, a failure of the region *stream* itself having no region to name
+    /// ([`LocusGenerationError::region`](crate::ng::locus_generation::LocusGenerationError::region)).
+    ///
+    /// **The cause is a boxed trait object because the two modes fail differently**: a walker
+    /// fails at reading alignment files
+    /// ([`LocusGenerationError`](crate::ng::locus_generation::LocusGenerationError)) and a psp
+    /// reader at decoding a file. The merge adds nothing to either and passes it through, so
+    /// this variant is where they meet.
+    ///
+    /// **Two genome coordinates appear in the rendered chain and they mean different things**,
+    /// so each says which it is: this line's is how far the sample *succeeded*, and the cause's
+    /// is the region that *failed*. Without the distinction a reader sees "…ended at contig 0
+    /// position 13: reference fetch over contig 0:10-20 failed" and reasonably takes it for one
+    /// fact said twice.
+    ///
+    /// **It carries no "what to do next", unlike its neighbours here**, and that is the error
+    /// chain's shape rather than an omission: [`format_error_chain`](crate::error_render::format_error_chain)
+    /// appends each cause after a colon, so an instruction on this line would be buried in the
+    /// middle of the sentence, ahead of the thing it is telling the reader to act on. The
+    /// variants that end with an instruction — [`NoAlignmentFiles`](Self::NoAlignmentFiles),
+    /// [`NotEnoughFileDescriptors`](Self::NotEnoughFileDescriptors) — all have no cause beneath
+    /// them. Whatever reports a run is where the advice belongs.
+    #[error("sample {sample}: reading its observations failed; {reached}")]
+    SourceFailed {
+        /// The sample as its read groups name it.
+        sample: String,
+        /// How far that sample's walk had got before it failed.
+        reached: WalkProgress,
+        /// What the source hit.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// The parameters were assembled for a different cohort from the one this run opened.
     ///
@@ -195,4 +239,55 @@ pub enum RunError {
         /// The first contig that differs, and how.
         difference: String,
     },
+}
+
+/// How far a sample's source had got when something went wrong.
+///
+/// **The second half of locating a failure** (spec §9), and an enum rather than a position
+/// because a source that fails on its very first draw has no position to report and must not
+/// invent one. A run that said "failed at contig 0:1" when nothing had been read would send an
+/// operator to a locus that is innocent.
+///
+/// The position is the **last base the last observation covers** — `SampleLocusObservations::reach_position`,
+/// which is the same value the merge orders on — and not where the source was decoding: a source
+/// is ahead of what it has yielded, and how far ahead is the generators' business and nobody
+/// else's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkProgress {
+    /// Nothing had been yielded yet, so the failure is on the first draw.
+    NothingYet,
+    /// The last observation yielded ended here.
+    After(GenomePosition),
+}
+
+/// **Written as a clause that names its own role**, because [`RunError::SourceFailed`] renders
+/// it beside a second genome coordinate — the region the cause failed on — and a bare "after
+/// contig 0:13" beside "over contig 0:10-20" reads as one fact in two notations. Saying *last
+/// complete observation* is what tells the two apart.
+///
+/// **The contig is printed by index, not by name, and that is a real cost to the reader**:
+/// someone whose genome is `SL4.0ch01`…`SL4.0ch13` has to count from zero in the `.fai` to use
+/// it. It is not that the names are unreachable — a run's [`Segmentation`] carries the catalog's
+/// contig table, [`ContigInfo::name`](crate::ng::reference_info::ContigInfo) and all — but that
+/// this type is a position with no reference beside it, so it cannot spend them alone. The place
+/// to spend them is wherever a [`RunError`] is rendered for a person, which has the run's
+/// reference in hand.
+///
+/// The spelling is `contig {n} position {p}`, which is what ng's other genome *positions* print
+/// ([`vcf::writer`](crate::ng::vcf::writer), [`psp::index`](crate::ng::psp::index)).
+/// [`GenomeRegion`](crate::ng::types::GenomeRegion)'s `contig {n}:{start}-{end}` is the spelling
+/// for a *region*, and keeping the two apart is what stops this line and the cause's from
+/// looking like the same kind of thing.
+impl std::fmt::Display for WalkProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NothingYet => write!(formatter, "it had produced no observations yet"),
+            Self::After(position) => write!(
+                formatter,
+                "its last complete observation ended at contig {} position {}",
+                position.contig.get(),
+                position.position.get(),
+            ),
+        }
+    }
 }

@@ -19,7 +19,30 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-31):** **Milestone A of the run driver — the object a
+> - **Last completed task (2026-08-31):** **B1 of the run driver — one sample's alignment files
+> behind the cohort merge's source interface** (step B1 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_b1_2026-08-31.md)).
+> `AlignmentFilesWalker` wraps the existing `SampleLocusObservationsIterator` and adds the two
+> things the trait asks for that a plain iterator cannot give: a failure naming the sample and how
+> far the walk got (`RunError::SourceFailed`), and an implementation of the reuse hook that a later
+> step can specialise — the blanket implementation covers every iterator, so it can never be
+> specialised for one. The spare is taken and dropped, which the trait permits. 14 tests;
+> `ng::run` at 343. **⛦ The mutation pass killed 20 of 21 defects, and the survivor is the one
+> this step cannot pin**: a walker that stashed every offered record for ever passes all fourteen
+> tests, because what they assert is that the spare does not come back out *as an observation*,
+> not that it is released. There is no pool to count while the walker drops, so the test is
+> recorded against G1, where one first exists. **⛦ And the reviews found three wrong claims in the
+> prose**, one of them wrong three times over: the justification for printing contigs by index said
+> the names were unreachable (a run's `Segmentation` carries the catalog's contig table), that a
+> lookup would cost a table per walker (one `&Segmentation` is shared by all of them), and that
+> `contig 0:13` is ng's usual spelling (ng prints a *position* as `contig N position P`; that form
+> is a *region*). **⚑ One finding is the owner's and lands on C1**: `RunSegments` borrows the
+> segmentation and `AlignedFilesVariantCaller` owns one, so holding a walker per sample for the run
+> would be a self-referential struct. An owned `Arc<Segmentation>` is the shape that resolves it;
+> not taken here because it changes A1's ownership.
+>
+> - **Previously (2026-08-31):** **Milestone A of the run driver — the object a
 > direct-mode run is, constructed and checked** (steps A1 and A2 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md)), at Checkpoint A.
 > **⛦ A2 found two of its three planned checks already answered elsewhere.** The sample-name

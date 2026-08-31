@@ -176,7 +176,7 @@ handed to a caller opened over another; A2 catches that on the counts.
 
 ### Milestone B — one sample's walk, behind the merge's interface
 
-☐ **B1. The walker as an `ObservationSource`.** Adapt `SampleLocusObservationsIterator` to the
+✅ **B1. The walker as an `ObservationSource`.** Adapt `SampleLocusObservationsIterator` to the
 merge's trait: forward-only, one observation at a time, offering the spare record back for reuse.
 One source per sample for the whole run — not one per worker, not one per segment.
 *Depends:* A1. *Source:* §3.4; [`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs).
@@ -294,6 +294,13 @@ walker nothing it was not already doing: it fills a record either way.
 next observation into the returned record where its buffers are the right size, and allocates only
 what it must grow. **Oracle:** B2 — the observations a source yields must not change, and a refilled
 record that kept a stale field would show there.
+
+**⛦ And it owes a test B1 could not write.** B1's suite pins that the spare does not come back out
+as an observation; it cannot pin that the spare is *released*, because the dropping walker has no
+pool to count. A walker that stashed every offered record for ever passed all fourteen of B1's
+tests — the one survivor of a 21-mutation pass that killed the other twenty. **At 63 samples that
+is unbounded growth of exactly the records this step exists to stop allocating**, so the step that
+starts keeping records must bound how many it keeps and assert the bound.
 *Depends:* B1, C1. *Source:* §3.4; [`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs)'s `spare` list.
 
 ☐ **G2. What it was worth, on real reads.** The merge's wall time with the walker leasing against

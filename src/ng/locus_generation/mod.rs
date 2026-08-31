@@ -654,6 +654,20 @@ pub enum LocusGenerationError {
     },
 }
 
+/// **A region stream that cannot fail is still a fallible stream to this iterator**, and this
+/// is what lets one be handed over without inventing an error it will never raise.
+///
+/// [`SampleLocusObservationsIterator`] takes `Result<TypedRegion, E>` because the catalog's own
+/// reader is fallible. A stream read out of an already-built list is not: the failures were
+/// reported when the list was built. Such a stream says so by using
+/// [`Infallible`](std::convert::Infallible) as its error, and this impl is what admits it — the
+/// run's `RunSegments` is the first (`src/ng/run/walker.rs`).
+impl From<std::convert::Infallible> for LocusGenerationError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}
+
 impl LocusGenerationError {
     /// The region the failure is attributed to, or `None` for a failure of the region
     /// *stream* itself.

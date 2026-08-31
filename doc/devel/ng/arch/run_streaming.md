@@ -232,16 +232,51 @@ pub trait ObservationSource {
 
 **Two implementations:**
 
-- **The walker** (`walker.rs`): owns a `SampleCursor` (`SampleReads::cursor` takes `&self` and
-  returns an owned, `Send` cursor — [`read/input/mod.rs:623`](../../../../src/ng/read/input/mod.rs),
-  test [`:1441`](../../../../src/ng/read/input/mod.rs)), a reference accessor from the factory
+- **The walker** — **built 2026-08-31 as `AlignmentFilesWalker`**
+  ([`run/walker.rs`](../../../../src/ng/run/walker.rs)). It is
+  `SampleLocusObservationsIterator` ([`locus_generation/mod.rs:921`](../../../../src/ng/locus_generation/mod.rs))
+  driven over the run's segments and made to answer the trait, and it is **a wrapper rather than
+  a re-implementation**: everything the ownership shape this paragraph described — the
+  `SampleCursor` (`SampleReads::cursor` takes `&self` and returns an owned, `Send` cursor —
+  [`read/input/mod.rs:623`](../../../../src/ng/read/input/mod.rs), test
+  [`:1441`](../../../../src/ng/read/input/mod.rs)), the reference accessor from the factory
   (`WindowedRefSeq` is `Send` and deliberately not `Sync` —
-  [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)), and a generator set, whose
+  [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)), and the generator set whose
   drop order is load-bearing
-  ([`locus_generation/mod.rs:1028-1040`](../../../../src/ng/locus_generation/mod.rs)). It is
-  `SampleLocusObservationsIterator`
-  ([`:921`](../../../../src/ng/locus_generation/mod.rs)) driven over the run's segments and made to
-  answer the trait. Spec §8 is the trap list this ownership shape honours.
+  ([`locus_generation/mod.rs:1028-1040`](../../../../src/ng/locus_generation/mod.rs)) — is held by
+  that iterator, so the walker inherits it including the `Drop` impl that guards the order. Spec
+  §8 is the trap list this shape honours.
+
+  **What the wrapper adds is the two things the trait asks for that a plain iterator cannot
+  give.** A failure that names the sample and how far the walk had got (`RunError::SourceFailed`,
+  §5), and the spare-record hook — taken, and **dropped**, which the trait's own contract permits;
+  filling it is the plan's step G1 and this is what gives G1 something to change, since the
+  blanket implementation is not editable for one source.
+
+  **⚑ It does not honour one clause of the contract above, and the deviation is recorded rather
+  than fixed.** *A failure leaves the source live* is what lets a cover be made again; the wrapped
+  iterator latches `done` on an error, so a failed walk is **spent** and a consumer that swallowed
+  the error and asked again would be told the sample is exhausted. Nothing does that today —
+  `ObservationCache::draw_next` propagates without marking the source spent, and both drivers
+  abandon the cache — so it is unreachable. It is written down because the failure it would cause
+  is silent: cohort loci built without that sample, wrong genotypes rather than an error. **Any
+  change that adds a retry has to fix this first.**
+
+  **It is neither `Send` nor `Sync`, and not by its own choice.** `GeneratorSlot::Generator` holds
+  a `Box<dyn LocusGenerator<S>>` with no auto-trait bound — deliberate, and recorded at that type.
+  So a walker cannot go under `merge_cohort_in_parallel` without widening that trait object, and a
+  walker and the merge drawing from it stay on one thread. E1 has to plan around it.
+
+  **The walker is deliberately not an `Iterator`.** It could not be: the blanket implementation
+  at [`observation_cache.rs:98`](../../../../src/ng/run/cohort_merge/observation_cache.rs) already
+  makes every iterator of observations a source, so a type that was both would implement the trait
+  twice and Rust refuses the overlap. The walk stays reachable as an iterator one level down,
+  which is what the observations-equal-the-walk oracle (spec §12, plan step B2) drives.
+
+  **Its region stream is a borrow of the segmentation, `RunSegments`**, whose item is
+  `Result<TypedRegion, Infallible>`: a run's segments were read out of the catalog once, at
+  `Segmentation::build`, so this stream has nothing left to fail at and says so in its type.
+  `locus_generation` carries one `From<Infallible>` impl to admit it.
 - **The psp reader** (`src/ng/psp/`, built): a cursor over one open psp that decodes whichever
   blocks it needs and keeps the one it is in. Its resident state is the file's coarse index plus one
   decoded block; measured, that is **123 kB a cursor**, on top of **357 kB** for the open file
@@ -539,12 +574,27 @@ pub enum RunError {
     /// which file it was, not which individual the file holds. Boxed to keep this type small.
     #[error("sample {sample}: its alignment files could not be opened")]
     OpeningSample { sample: String, source: Box<IngestError> },
-    /// One sample's source failed. **Both the sample and where it had reached** — neither alone
-    /// locates a failure in a run over thousands of samples (spec §9).
-    #[error("sample {sample}: failed at {at}")]
+    /// **Built 2026-08-31.** One sample's source failed. **Both the sample and where it had
+    /// reached** — neither alone locates a failure in a run over thousands of samples (spec §9).
+    ///
+    /// **`reached` is an enum and not a bare position**, which is the one thing the landed
+    /// shape changes: a source that fails on its very first draw has no position, and a run
+    /// that said "failed at contig 0:1" when nothing had been read would send an operator to an
+    /// innocent locus.
+    ///
+    /// **⚑ And this line carries no instruction, unlike the four refusals that do.** A cause is
+    /// appended after a colon (`format_error_chain`), so an instruction here would land in the
+    /// middle of the sentence, ahead of the thing it tells the reader to act on. Every variant
+    /// that ends with one has no cause beneath it. Advice on a source failure belongs to
+    /// whatever reports the run.
+    #[error("sample {sample}: reading its observations failed; {reached}")]
     SourceFailed {
         sample: String,
-        at: GenomePosition,
+        // NothingYet renders "it had produced no observations yet"; After(GenomePosition)
+        // renders "its last complete observation ended at contig N position P". Both name
+        // their own role, because the cause carries a SECOND genome coordinate — the region
+        // that failed — and a bare position beside it reads as one fact said twice.
+        reached: WalkProgress,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// **Built.** The run was given no alignment files, so there is no cohort to call.
