@@ -64,7 +64,7 @@ use crate::ng::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITU
 
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
-    EvidenceCount, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
+    EvidenceCount, GroupOfNumbers, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
     PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve,
     ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
     SlippageRow, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant, WarrantedValue,
@@ -85,6 +85,16 @@ impl ParametersFile {
     pub fn to_toml(&self) -> String {
         let mut out = String::new();
 
+        // **The first thing a reader meets, and it is derived from the numbers below.** A
+        // defaults run's file and a fit's are the same shape by design (spec §7), so nothing on
+        // the page told them apart: measured on this module's fixtures, the two opened with the
+        // same 39 lines of prose and the first thing in either that said which run it was is the
+        // `warrant` on line 105.
+        a_derived_note(&mut out, &how_much_was_fitted(self));
+        // A `#` on its own, so the derived paragraph and the written one below do not run
+        // together into one block of prose.
+        a_derived_note(&mut out, &[String::new()]);
+
         note(
             &mut out,
             &[
@@ -94,11 +104,11 @@ impl ParametersFile {
                 "",
                 "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
-                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the two where this caller does hold a built-in number, the base-quality multiplier at 1.0 and the inbreeding coefficient at 0.0. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
+                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the inbreeding coefficient, whose built-in number is 0.0. The base-quality multiplier is not one of them: a `defaulted` multiplier is **not** fixed at 1.0, and the note beside `base_quality_calibration` says what it is instead. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
-                "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured; a zero means it was measured and found to be zero. The sections below say which is which where it matters.",
+                "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured. A zero is not automatically the opposite: a zero **under a `fitted_here` or `borrowed` warrant** was measured and found to be zero, and a zero under any other warrant is a stated number — the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`. The sections below say which is which where it matters.",
             ],
         );
 
@@ -106,17 +116,16 @@ impl ParametersFile {
         writeln!(out, "ploidy = {}", self.ploidy).expect("a string never fails");
 
         section(&mut out, "fitted_from");
-        note(
-            &mut out,
-            &[
-                "What these numbers were fitted from. A run whose reference, samples or read groups do not match these is refused; one whose census does not match keeps the numbers and reports every one of them as supplied rather than fitted.",
-            ],
-        );
+        // **The section's own heading says *fitted*, and on a defaults run nothing was.** A
+        // geneticist reading such a file read `[fitted_from]` as a claim that the numbers under
+        // it had been. The key name is the format and does not move; what it means is said here,
+        // derived so that the two cannot come apart.
+        a_derived_note(&mut out, &what_the_bindings_are_for(self));
         note(
             &mut out,
             &[
                 "",
-                "The MD5 of the reference these numbers were fitted against: every contig's bases, uppercased, run together in the order the FASTA holds them. So soft-masking and line width do not change it and contig order does. `[fitted_from.census]` below has a `reference digest` line of its own — that is this same reference seen from the evidence's side, and the key that turns a run away from the wrong reference is this one.",
+                "The MD5 of the reference this run ran against: every contig's bases, uppercased, run together in the order the FASTA holds them. So soft-masking and line width do not change it and contig order does. `[fitted_from.census]` below has a `reference digest` line of its own — that is this same reference seen from the evidence's side, and the key that turns a run away from the wrong reference is this one.",
             ],
         );
         scalar(
@@ -136,6 +145,9 @@ impl ParametersFile {
         );
 
         section(&mut out, "fitted_from.census");
+        if self.fitted_from.census.terms.is_empty() {
+            a_derived_note(&mut out, &this_run_had_no_census(self));
+        }
         note(
             &mut out,
             &[
@@ -157,6 +169,8 @@ impl ParametersFile {
             &mut out,
             &[
                 "What each read's own reported error probability is multiplied by, per read group. Above one says the instrument was optimistic and the reads are worse than it claimed; below one says they are better; one leaves the qualities exactly as reported. It is not a multiplier on the Phred score, which moves the other way.",
+                "",
+                "**A `defaulted` multiplier is not 1.0 in general**, and the rows below say `not calibrated` where it applies. A read group no error rate could be fitted for is *charged the caller's stated rate of one error in a thousand* rather than taken at the quality it reported — so its multiplier is that stated rate divided by this library's own mean reported error, and rises above one wherever the instrument claimed better than one in a thousand. A library averaging Q36 gets 4.0: every base of it is scored four times likelier to be wrong than the file it came in said. **The exception is a run that fitted nothing at all**, which read nothing to take a mean over and writes 1.0.",
             ],
         );
         one_a_line_with_notes(
@@ -196,6 +210,12 @@ impl ParametersFile {
                 contamination.by_read_group.iter().map(a_contamination_row),
             );
         } else {
+            // **A blank line first**, so the note does not read as a remark about the calibration
+            // table it follows: a reader scanning section by section met it under
+            // `[base_quality_calibration]` and either mis-attributed it or skipped it looking for
+            // a `[contamination]` heading that is not there. TOML has no way to head an absent
+            // section, so the separation is all this can do.
+            out.push('\n');
             // **⚑ The explanation of what an absent section means used to be inside the section.**
             // So the one reader who most needed it — the one holding a file with no
             // `[contamination]` — was the only reader who never saw it, and the word
@@ -622,6 +642,163 @@ fn note(out: &mut String, paragraphs: &[&str]) {
     }
 }
 
+/// **A note whose words were computed rather than typed** — wrapped and laid out exactly like a
+/// written one, so a reader cannot tell which is which and neither can go stale against the
+/// other.
+fn a_derived_note(out: &mut String, paragraphs: &[String]) {
+    let paragraphs: Vec<&str> = paragraphs.iter().map(String::as_str).collect();
+    note(out, &paragraphs);
+}
+
+/// **How much of this file rests on a measurement of the run's own reads**, written above
+/// `format_version` so that it is the first thing a reader meets.
+///
+/// **The question a geneticist asks first of a file they did not watch being produced**, and
+/// until step F1 the file did not answer it anywhere: spec §7 makes the three sources produce
+/// the same shape on purpose, and the cost is that a run that guessed every number and a run
+/// that fitted every number open identically. The answer *is* in the file — one `warrant` a
+/// number — but as a hundred-odd separate answers a reader has to gather, and one who does not
+/// know to gather them reads a defaults run's file as a fit's.
+///
+/// **Derived from the numbers, never recorded beside them** ([`ParametersFile::what_the_run_fitted`]),
+/// which is the rule step E3 set for the missing-slippage note and holds here for a sharper
+/// reason: this file invites its reader to edit a value and its warrant (spec §1.2 goal 3), and a
+/// recorded count would then be a sentence at the top contradicting the numbers below it.
+fn how_much_was_fitted(file: &ParametersFile) -> Vec<String> {
+    let what = file.what_the_run_fitted();
+    let groups = what.groups();
+    let mut note = if what.nothing_was_fitted() {
+        vec![
+            format!(
+                "**Nothing in this file was fitted from reads** — 0 of its {groups} groups of numbers. Every number here is a constant compiled into this caller or a value somebody handed it, and your reads were all scored under them."
+            ),
+            String::new(),
+            format!(
+                "The {groups} groups: {}.",
+                a_list_of_groups(&GroupOfNumbers::EVERY)
+            ),
+        ]
+    } else if what.not_fitted().is_empty() {
+        vec![format!(
+            "**All {groups} groups of numbers in this file were fitted from reads**: {}.",
+            a_list_of_groups(what.fitted())
+        )]
+    } else {
+        vec![format!(
+            "**{} of the {groups} groups of numbers in this file were fitted from reads**, and {} were not: {}. What a group that was not fitted holds instead is said in its own section below.",
+            what.fitted().len(),
+            what.not_fitted().len(),
+            a_list_of_groups(what.not_fitted()),
+        )]
+    };
+
+    // **⚑ *Whose* reads is a second question and the file can only half answer it**, so the half
+    // it cannot answer is stated rather than left for a reader to discover. Four of the seven
+    // groups carry no `warrant`, so spec §2.1's demotion cannot reach them and a file fitted over
+    // another cohort still shows them as fitted. Derived from
+    // `GroupOfNumbers::states_whose_reads` so that a group that gains a warrant moves out of this
+    // sentence by itself.
+    let (with_a_warrant, without): (Vec<_>, Vec<_>) = GroupOfNumbers::EVERY
+        .into_iter()
+        .partition(|group: &GroupOfNumbers| group.states_whose_reads());
+    note.push(String::new());
+    note.push(format!(
+        "**Whose reads is a second question, and only {} of the {groups} groups answer it.** {} carry a `warrant` on every number: `fitted_here` means it was estimated from that read group's or that sample's own reads; `borrowed` means there was too little of them, so the mean of the sample's other read groups was taken; `supplied` means the run was handed the number rather than fitting it; `defaulted` means nothing could be fitted and nothing was supplied, so a stated constant was used.",
+        with_a_warrant.len(),
+        a_capitalised_list_of_groups(&with_a_warrant),
+    ));
+    note.push(String::new());
+    note.push(format!(
+        "The other {} — {} — say how a number was arrived at and not whose reads it came from: a smoothing origin, a rung, or which reads a contamination fraction was fitted from. **So in a file whose numbers were fitted over a different cohort those {} still read as fitted**, and only the {} above are marked down to `supplied`.",
+        without.len(),
+        a_list_of_groups(&without),
+        without.len(),
+        with_a_warrant.len(),
+    ));
+    note.push(String::new());
+    note.push(
+        "A group counts as fitted where any part of it was; within one, each number's own `warrant` or origin says which."
+            .to_owned(),
+    );
+    note
+}
+
+/// **What `[fitted_from]` is for**, which is not the same sentence on a run that fitted nothing.
+///
+/// The heading is the format's and does not move; a geneticist reading a defaults run's file took
+/// it for a claim that the numbers under it had been fitted from the inputs it names. **What the
+/// four bindings do is the same either way** — they are what stops a file being paired with the
+/// wrong cohort — so only the first clause is conditional.
+fn what_the_bindings_are_for(file: &ParametersFile) -> Vec<String> {
+    let what_they_do = "A run whose reference, samples or read groups do not match these is refused; one whose census does not match keeps the numbers and reports every one of them as supplied rather than fitted.";
+    vec![if file.what_the_run_fitted().nothing_was_fitted() {
+        format!(
+            "What this run ran against. **Nothing in this file was fitted from it** — this run fitted nothing — but these lines still bind the file. {what_they_do}"
+        )
+    } else {
+        format!("What these numbers were fitted from. {what_they_do}")
+    }]
+}
+
+/// **What an empty list of census terms means**, written above it because the section's own
+/// paragraphs describe a census that exists and a reader takes the empty list for a fit whose
+/// evidence went unrecorded.
+///
+/// Two runs reach it and both are ordinary (`run_streaming.md` §2): the run that fitted nothing,
+/// and any direct-mode run, which reads its evidence from the alignment files and builds no psp
+/// and no census.
+fn this_run_had_no_census(file: &ParametersFile) -> Vec<String> {
+    let mut note = vec![
+        "**This run had no census** — no store of evidence was built, either because it fitted nothing or because it read its reads straight from the alignment files. So there is nothing here for another run to line its own census up against."
+            .to_owned(),
+        String::new(),
+        // **⚑ What this used to say was false for the reader it named.** It promised that any
+        // run reading this file would find a disagreement at the first line and demote it. Two
+        // empty term lists agree — `census_disagreement` zips them and finds nothing on either
+        // side — and a run that has no census of its own does not compare at all. Only a run
+        // that *has* a census disagrees with this one, and it disagrees because this file names
+        // none. Found by a geneticist reading a produced file, 2026-08-31.
+        "**What another run does with that depends on whether it has a census of its own.** A run that has one finds a disagreement here — it names twelve terms and this file names none — and reports every number in this file as supplied rather than fitted. A run that has none, which is any run reading its reads straight from the alignment files, compares nothing and takes these numbers as they stand."
+            .to_owned(),
+    ];
+    if file.what_the_run_fitted().nothing_was_fitted() {
+        note.push(String::new());
+        note.push(
+            "On this file neither answer changes a number's warrant: no number in it says `fitted_here` to begin with."
+                .to_owned(),
+        );
+    }
+    // **A `#` on its own at the end**, so this derived paragraph does not run into the section's
+    // written one below it — a reader otherwise meets two claims about the census as one block.
+    note.push(String::new());
+    note
+}
+
+/// The groups, in the file's own order, as a sentence's list — **capitalised**, for a list that
+/// opens a sentence.
+fn a_capitalised_list_of_groups(groups: &[GroupOfNumbers]) -> String {
+    let list = a_list_of_groups(groups);
+    let mut letters = list.chars();
+    letters.next().map_or(list.clone(), |first| {
+        first.to_uppercase().collect::<String>() + letters.as_str()
+    })
+}
+
+/// The groups, in the file's own order, as a sentence's list — **with an *and* before the last**,
+/// because these lists are read inside sentences and a bare comma before the final item reads as
+/// another clause rather than as the end of the list.
+fn a_list_of_groups(groups: &[GroupOfNumbers]) -> String {
+    let named: Vec<&str> = groups
+        .iter()
+        .map(|group| group.in_the_readers_words())
+        .collect();
+    match named.split_last() {
+        None => String::new(),
+        Some((last, &[])) => (*last).to_owned(),
+        Some((last, before)) => format!("{} and {last}", before.join(", ")),
+    }
+}
+
 /// The same, for lines that had to be wrapped at run time.
 fn note_lines(out: &mut String, lines: &[String]) {
     for line in lines {
@@ -651,9 +828,22 @@ fn scalar_with_note(out: &mut String, key: &str, value: &str, note: Option<&'sta
 /// Both halves are recorded at Checkpoint B.
 mod origins {
     /// The base-quality multiplier, where no usable rate was fitted.
+    ///
+    /// **⚑ It does not say *taken at face value*, and it used to.** A geneticist reading a
+    /// produced file met `value = 4.0, warrant = "defaulted"` under a note saying the reads were
+    /// taken at the quality the instrument reported — six Phred apart from what the run actually
+    /// scored them at. The owner's ruling of 2026-08-31 is that a read group nothing could be
+    /// fitted for is **charged the pre-pass's stated rate** rather than believed, so the
+    /// multiplier is that rate over the library's own mean reported error and is 1.0 only by
+    /// coincidence. `a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`
+    /// pins 4.0 and 2.0 for two libraries reporting 2.5 × 10⁻⁴ and 5 × 10⁻⁴.
+    /// **One line, because it is written once a read group.** The explanation of what such a
+    /// multiplier *is* belongs to the section and is written there once; a run at the top of the
+    /// committed cohort range (`CLAUDE.md`) can have thousands of read groups, and a defaults run
+    /// gets this note on every one of them.
     pub const CALIBRATION_MULTIPLIER: &str = concat!(
-        "not calibrated: this read group's reported qualities are taken at face value, ",
-        "because no usable error rate could be fitted for it"
+        "not calibrated: no usable error rate could be fitted for this read group, so it is ",
+        "charged the stated rate — see the note above this table"
     );
 
     /// The tract ladder's bottom rung — what a run falls back to where nothing was fitted.
@@ -2275,5 +2465,249 @@ mod every_float_comes_back_bit_identical {
                 "a negative zero keeps its sign through {writer}, which `==` cannot see"
             );
         }
+    }
+}
+
+/// **The two things a file says about itself in prose, and both are derived** — how much of it
+/// was fitted from the reader's data, and what `[fitted_from]` is for on a run that fitted
+/// nothing.
+///
+/// # Why this module exists rather than a line in the golden file
+///
+/// The golden file pins the file a *fitted* run writes, and both notes take their other arm on a
+/// run that fitted nothing — the arm no golden file in this module covers, because the defaults
+/// run's file is not checked in. These tests read the text a defaults-shaped file produces and
+/// assert what a geneticist would look for in it.
+#[cfg(test)]
+mod what_the_file_says_about_itself {
+    use super::super::tests::{a_file_using_every_shape, unwrapped_comments};
+    use super::super::{GroupOfNumbers, ParametersFile, SeedRung, Warrant};
+
+    /// Everything the file says before its first key.
+    fn the_opening_of(file: &ParametersFile) -> String {
+        let text = file.to_toml();
+        unwrapped_comments(&text[..text.find("format_version").expect("the file has one")])
+    }
+
+    /// The every-shape fixture, stripped back to a run that fitted nothing — every warrant
+    /// weakened, every fitted table emptied, the census gone.
+    fn a_file_a_defaults_run_would_write() -> ParametersFile {
+        let mut file = a_file_using_every_shape();
+        for row in &mut file.base_quality_calibration.by_read_group {
+            row.error_probability_multiplier.warrant = Warrant::Defaulted;
+            row.error_probability_multiplier.observations = None;
+        }
+        file.contamination = None;
+        for row in &mut file.inbreeding.by_sample {
+            row.inbreeding_coefficient.warrant = Warrant::Defaulted;
+            row.inbreeding_coefficient.observations = None;
+        }
+        file.ordinary_site_prior.rung = SeedRung::StatedHeterozygosity;
+        file.repeat_tracts.slippage_by_stratum_and_group.clear();
+        file.repeat_tracts.length_spectrum_by_stratum.clear();
+        file.repeat_tracts.length_spectrum_by_period.clear();
+        file.repeat_tracts.substitution_rate_by_stratum.clear();
+        file.fitted_from.census.terms.clear();
+        file
+    }
+
+    /// **A run that fitted nothing says so before `format_version`**, which is where a reader
+    /// meets it — and it names every group, so the reader does not have to know what the seven
+    /// are.
+    #[test]
+    fn a_defaults_runs_file_opens_by_saying_nothing_was_fitted() {
+        let opening = the_opening_of(&a_file_a_defaults_run_would_write());
+
+        assert!(
+            opening.contains("Nothing in this file was fitted from reads"),
+            "{opening}"
+        );
+        assert!(opening.contains("0 of its 7 groups"), "{opening}");
+        for group in GroupOfNumbers::EVERY {
+            assert!(
+                opening.contains(group.in_the_readers_words()),
+                "the opening does not name {}:\n{opening}",
+                group.key()
+            );
+        }
+    }
+
+    /// **A fitted run's file opens by saying so**, and does not claim more than it can: the
+    /// headline counts groups, and the sentence after it tells the reader that a number's own
+    /// warrant is what says whether *that* number was measured.
+    #[test]
+    fn a_fitted_runs_file_opens_by_saying_every_group_was_fitted() {
+        let opening = the_opening_of(&a_file_using_every_shape());
+
+        assert!(
+            opening.contains("All 7 groups of numbers in this file were fitted from reads"),
+            "{opening}"
+        );
+        // **The maximal claim is the one that most needs checking**, so this arm names the seven
+        // too — a reader counting `[section]` headings gets nine and cannot reconstruct them.
+        for group in GroupOfNumbers::EVERY {
+            assert!(
+                opening.contains(group.in_the_readers_words()),
+                "the opening does not name {}:\n{opening}",
+                group.key()
+            );
+        }
+    }
+
+    /// **The file says which of its groups can answer *whose* reads and which cannot**, on every
+    /// file rather than only where it looks needed.
+    ///
+    /// Four of the seven carry no `warrant`, so spec §2.1's demotion cannot reach them
+    /// ([`GroupOfNumbers::states_whose_reads`]). A reader who is not told that reads a demoted
+    /// file's slippage as this run's own fit — which is what three reviewers found on 2026-08-31
+    /// and what this sentence exists to stop.
+    #[test]
+    fn the_file_says_which_groups_can_say_whose_reads() {
+        for file in [
+            a_file_using_every_shape(),
+            a_file_a_defaults_run_would_write(),
+        ] {
+            let opening = the_opening_of(&file);
+            assert!(
+                opening.contains("only 3 of the 7 groups answer it"),
+                "{opening}"
+            );
+            assert!(
+                opening.contains("still read as fitted"),
+                "the file must say what a demotion cannot reach:\n{opening}"
+            );
+            // Every warrant word the file uses is defined where it is introduced — `borrowed`
+            // above all, which the headline's count depends on and which appeared as a value
+            // twice and was explained nowhere.
+            for defined in [
+                "`fitted_here` means it was estimated from",
+                "`borrowed` means there was too little of them",
+                "`supplied` means the run was handed the number",
+                "`defaulted` means nothing could be fitted",
+            ] {
+                assert!(
+                    opening.contains(defined),
+                    "{defined} is not defined:\n{opening}"
+                );
+            }
+        }
+    }
+
+    /// **A demoted file's opening line does not claim this run fitted it.**
+    ///
+    /// The state spec §2.1 creates: every warrant `supplied`, and four groups whose rows carry no
+    /// warrant to demote. The headline counts them as fitted — it must, since the file says a fit
+    /// produced them — and the sentence below it is what stops a reader taking that for *fitted
+    /// from your data*.
+    #[test]
+    fn a_demoted_file_says_a_fit_produced_its_numbers_and_not_that_this_run_did() {
+        let opening =
+            the_opening_of(&a_file_using_every_shape().demoted_to_no_better_than_supplied());
+        assert!(
+            !opening.contains("from your data"),
+            "the claim the file cannot support:\n{opening}"
+        );
+        assert!(
+            opening.contains("were fitted from reads"),
+            "and the claim it can:\n{opening}"
+        );
+        assert!(opening.contains("still read as fitted"), "{opening}");
+    }
+
+    /// **A partly fitted run is the commoner case and gets the count and the list.**
+    ///
+    /// Two groups dropped here, so the headline is a fraction rather than either extreme and the
+    /// list names exactly the two.
+    #[test]
+    fn a_partly_fitted_runs_file_names_the_groups_it_did_not_fit() {
+        let mut file = a_file_using_every_shape();
+        file.contamination = None;
+        file.repeat_tracts.substitution_rate_by_stratum.clear();
+        let opening = the_opening_of(&file);
+
+        assert!(
+            opening.contains("5 of the 7 groups of numbers in this file were fitted from reads"),
+            "{opening}"
+        );
+        assert!(
+            opening.contains("2 were not: contamination and repeat-tract substitution rates"),
+            "{opening}"
+        );
+    }
+
+    /// **`[fitted_from]` heads a file where nothing was fitted from anything**, and the section's
+    /// own note is what stops it reading as a claim. The bindings still do what they do, so only
+    /// the first clause moves.
+    #[test]
+    fn fitted_from_does_not_claim_a_fit_on_a_run_that_had_none() {
+        let text = a_file_a_defaults_run_would_write().to_toml();
+        let section = unwrapped_comments(
+            &text[text.find("[fitted_from]").expect("the section")
+                ..text.find("[fitted_from.census]").expect("and the next")],
+        );
+
+        assert!(
+            section.contains("Nothing in this file was fitted from it"),
+            "{section}"
+        );
+        assert!(
+            section.contains("these lines still bind the file"),
+            "{section}"
+        );
+        assert!(
+            !section.contains("What these numbers were fitted from"),
+            "the fitted run's opening clause is still there:\n{section}"
+        );
+    }
+
+    /// And a fitted run's `[fitted_from]` keeps the sentence it always had.
+    #[test]
+    fn fitted_from_still_says_what_the_numbers_were_fitted_from() {
+        let prose = unwrapped_comments(&a_file_using_every_shape().to_toml());
+        assert!(
+            prose.contains("What these numbers were fitted from."),
+            "{prose}"
+        );
+    }
+
+    /// **An empty census is explained where it stands.** A reader holding a defaults run's file
+    /// found `terms = []` under a section whose paragraphs describe a census that exists.
+    #[test]
+    fn an_empty_census_says_the_run_had_none() {
+        let prose = unwrapped_comments(&a_file_a_defaults_run_would_write().to_toml());
+        assert!(prose.contains("**This run had no census**"), "{prose}");
+        // **⚑ The note used to promise a demotion that does not happen.** Two empty term lists
+        // agree, and a run with no census of its own compares nothing — so *a run that reads this
+        // file will find a disagreement* was false for the very reader the sentence above it
+        // names. Found by a geneticist reading a produced file, 2026-08-31.
+        assert!(
+            prose.contains("A run that has one finds a disagreement here"),
+            "the demotion is the census-holding run's, and the note must say so:\n{prose}"
+        );
+        assert!(
+            prose.contains("A run that has none, which is any run reading its reads straight"),
+            "and the other run compares nothing:\n{prose}"
+        );
+        assert!(
+            prose.contains("no number in it says `fitted_here` to begin with"),
+            "on a file that fitted nothing neither answer changes a warrant, and the note says so"
+        );
+    }
+
+    /// **A run with a census gets no such note**, so the explanation appears exactly where it is
+    /// needed rather than in every file.
+    #[test]
+    fn a_file_with_a_census_carries_no_note_about_not_having_one() {
+        let prose = unwrapped_comments(&a_file_using_every_shape().to_toml());
+        assert!(!prose.contains("**This run had no census**"), "{prose}");
+    }
+
+    /// **Everything the notes claim still parses.** A derived paragraph is emitted as TOML
+    /// comments, and a note that forgot its `#` on one line would be read as a key.
+    #[test]
+    fn a_defaults_runs_file_still_reads_back_as_itself() {
+        let file = a_file_a_defaults_run_would_write();
+        let read = ParametersFile::from_toml(&file.to_toml()).expect("its own text parses");
+        assert_eq!(read, file);
     }
 }

@@ -170,10 +170,14 @@ mod from_toml;
 mod to_run_parameters;
 mod to_toml;
 mod validate;
+mod what_was_fitted;
+mod written_beside_the_vcf;
 
-pub use bindings::ParametersForThisRun;
+pub use bindings::{CensusAgreement, ParametersForThisRun};
 pub use defaults::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
+pub use from_run_parameters::ReadsBehindEachCalibration;
 pub use to_run_parameters::RunParametersFromFile;
+pub use written_beside_the_vcf::beside_the_vcf;
 
 use serde::{Deserialize, Serialize};
 
@@ -509,6 +513,48 @@ pub struct ParametersFile {
     pub repeat_tracts: RepeatTracts,
     /// The numbers no fit produces, written out rather than left in the binary (spec §3.8).
     pub stated_constants: StatedConstants,
+}
+
+/// **One group of numbers in the file — one thing a fit either did or did not do.**
+///
+/// The unit the file's opening line counts in, and the grain at which a reader can act: a run
+/// either fitted contamination or it did not, where "4,211 of 5,102 numbers" would be a report
+/// about how many read groups and strata the cohort has. `what_was_fitted.rs` says which of the
+/// file's sections are groups and which are not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupOfNumbers {
+    /// `[base_quality_calibration]` — how far to trust each library's own base qualities.
+    BaseQualityCalibration,
+    /// `[contamination]` — how much of each library's DNA came from somebody else.
+    Contamination,
+    /// `[inbreeding]` — how inbred each sample is.
+    Inbreeding,
+    /// `[ordinary_site_prior]` — what the SNP/indel prior is seeded from.
+    OrdinarySitePrior,
+    /// `repeat_tracts.slippage_by_stratum_and_group` — how often a read slips a repeat.
+    RepeatTractSlippage,
+    /// **Both fitted rungs of the tract ladder** — `length_spectrum_by_stratum` and
+    /// `length_spectrum_by_period` — because they are one answer to *did this run fit what
+    /// lengths a tract's chromosomes are spread over*.
+    RepeatTractLengthSpectra,
+    /// `repeat_tracts.substitution_rate_by_stratum` — how often a base reads wrong inside a
+    /// tract.
+    RepeatTractSubstitutionRates,
+}
+
+/// **How many of this file's groups of numbers a fit produced, and how many it did not.**
+///
+/// Built by [`ParametersFile::what_the_run_fitted`], which derives it from the file rather than
+/// reading a recorded count, so it cannot go stale against the rows below it.
+///
+/// **⚑ It is not *fitted from this run's own reads*, and only three of the seven groups could
+/// say that.** A `warrant` is the word that answers *whose reads*, and four groups carry no such
+/// word — see [`GroupOfNumbers::states_whose_reads`], which is where the limit and its
+/// consequence for spec §2.1's demotion are written down.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WhatTheRunFitted {
+    fitted: Vec<GroupOfNumbers>,
+    not_fitted: Vec<GroupOfNumbers>,
 }
 
 // ---------------------------------------------------------------------
@@ -1340,6 +1386,20 @@ mod tests {
             term.digest = byte.repeat(16);
         }
         identity
+    }
+
+    /// **Every comment line of a written file, joined back into the sentences a reader sees.**
+    ///
+    /// The writer wraps a note to the file's comment width, so any phrase longer than a few words
+    /// is split across `# ` lines. A test searching the raw text for a sentence therefore finds
+    /// it or not depending on where the wrap happened to fall, which is a fact about the column
+    /// width rather than about what the file says.
+    pub(super) fn unwrapped_comments(text: &str) -> String {
+        text.lines()
+            .filter_map(|line| line.trim_start().strip_prefix('#'))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// A file with **every section non-empty and every shape used at least once**.

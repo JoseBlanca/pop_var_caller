@@ -77,6 +77,29 @@ use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::{Bp, ContigId};
 
 impl CensusIdentity {
+    /// **The run that has no census at all** — no terms, because there was no store of evidence.
+    ///
+    /// **Two runs reach it and both are real** (spec §7, `run_streaming.md` §2): the defaults run,
+    /// which fitted nothing, and any direct-mode run, which reads its evidence from the alignment
+    /// files and builds no psp and no census. Spec §7 says such a run writes its parameters file
+    /// like any other, so `[fitted_from.census]` has to be able to say *there was none*.
+    ///
+    /// **An empty list of terms rather than an absent section**, and the difference is what a
+    /// later reader does with it. [`ParametersFile::census_disagreement`] already treats a term
+    /// one identity has and the other does not as a disagreement, so a psp-mode run reading this
+    /// file finds one at the first term and demotes — which is the right answer, since none of
+    /// these numbers was fitted under *its* census. An absent section would have to be given that
+    /// meaning separately, in a second place, and could come to disagree with this one.
+    ///
+    /// **The demotion costs such a file nothing**, and that is worth knowing before it looks
+    /// alarming: demotion is [`weaker_of`](crate::ng::parameter_estimation::Provenance::weaker_of)
+    /// against `Supplied`, and every number a run with no census wrote is already `supplied` or
+    /// `defaulted`.
+    #[must_use]
+    pub fn of_a_run_with_no_census() -> Self {
+        Self { terms: Vec::new() }
+    }
+
     /// **The census a fit ran under, as the file names it** — one term a value, digested.
     ///
     /// The order is [`RecordingTerms::first_disagreement`]'s own checking order: the seven
@@ -390,6 +413,28 @@ impl ParametersFile {
     ///    warranted.
     /// 4. [`Self::to_run_parameters`], on the file as demotion left it.
     ///
+    /// # `census: None` — the run that has no census to compare against
+    ///
+    /// **Direct mode has none** (`run_streaming.md` §2): it reads its evidence from the alignment
+    /// files, builds no psp and runs no fit, and it is *the* mode this file format exists for —
+    /// the parameters file is that mode's user-facing input. So the argument is an `Option`, and
+    /// the question is what `None` should do with the fourth binding.
+    ///
+    /// **`None` keeps the file's warrants**, and spec §2.1 settles it rather than leaving it to
+    /// taste. Demoting on every read was considered there and rejected *because it breaks the
+    /// two-mode oracle*: the same cohort called in direct mode from a file and in psp mode from
+    /// the fit in memory must report the same warrants for identical genotypes. Direct mode is
+    /// exactly the mode with no census — so demoting whenever there is nothing to compare
+    /// against **is** demoting on every read, under another name, and would break that oracle at
+    /// every locus.
+    ///
+    /// **What `None` gives up is said plainly**: a file fitted under another census of this
+    /// cohort reads back into a direct-mode run with its `fitted_here` warrants intact, where the
+    /// same file in psp mode would be demoted. That is a difference in what the run *reports*
+    /// and never in what it *computes* — §2 is explicit that consumers combine warrants and do
+    /// not branch on them — and the alternative trades it for a difference in what two modes
+    /// report about the same call, which is the larger of the two.
+    ///
     /// # Why the demotion happens to the *file* and not to the parameters
     ///
     /// Spec §2.1's trap for the coder is that **demotion is per-file, not per-number** — there is
@@ -415,27 +460,38 @@ impl ParametersFile {
         &self,
         reference: &ReferenceDigest,
         read_groups: &ReadGroups,
-        census: &CensusIdentity,
+        census: Option<&CensusIdentity>,
     ) -> Result<ParametersForThisRun, ParametersFileError> {
         self.validate()?;
         self.refuse_if_not_this_runs_inputs(reference, read_groups)?;
 
-        let fitted_under_another_census = self.census_disagreement(census);
+        // **An identity naming no terms is the same fact as no identity at all**, and both
+        // reach here: the writer spells *this run had no census* as
+        // `CensusIdentity::of_a_run_with_no_census()` and the reader spells it `None`. A driver
+        // holding one identity — the natural shape, since `of_run` takes one by value — would
+        // otherwise hand this the writer's spelling and get the demotion the argument above
+        // exists to avoid.
+        let census = census.filter(|census| !census.terms.is_empty());
+        let agreement = match census.map(|census| self.census_disagreement(census)) {
+            None => CensusAgreement::NothingToCompareAgainst,
+            Some(None) => CensusAgreement::TheSameCensus,
+            Some(Some(term)) => CensusAgreement::FittedUnderAnother(term),
+        };
         // **Two costs here, both once per run and both deliberate.** `validate` runs a second
         // time inside the projection, on a file that has already passed it — both are public
         // entry points and neither may assume the other ran. And the demotion copies the file,
         // whose largest axis spec §9 prices at up to 62 MB at 3,000 samples; the copy is
         // transient and dropped as soon as the projection is done, and demoting the file rather
         // than the assembled parameters is what makes the demotion provably per-file.
-        let from_file = match &fitted_under_another_census {
-            None => self.to_run_parameters()?,
-            Some(_) => self
-                .demoted_to_no_better_than_supplied()
-                .to_run_parameters()?,
+        let from_file = if agreement.demoted_the_file() {
+            self.demoted_to_no_better_than_supplied()
+                .to_run_parameters()?
+        } else {
+            self.to_run_parameters()?
         };
         Ok(ParametersForThisRun {
             from_file,
-            fitted_under_another_census,
+            census: agreement,
         })
     }
 
@@ -592,13 +648,51 @@ pub struct ParametersForThisRun {
     /// **Named `from_file` rather than `parameters`** so that reaching the run's own parameters
     /// through it reads as `from_file.parameters` rather than as one word twice.
     pub from_file: RunParametersFromFile,
-    /// **Which term of the census the file and this run disagree on**, and `None` where they
-    /// agree.
+    /// **What comparing this run's census against the file's found** — including the case where
+    /// there was nothing to compare against.
+    pub census: CensusAgreement,
+}
+
+/// **What comparing a run's census against a file's found** — spec §6's fourth binding, which
+/// demotes rather than refusing.
+///
+/// **Three states rather than two, and the third is why.** Until step F1 this was
+/// `Option<String>`, `None` documented as *they agree*. A run with no census of its own — every
+/// direct-mode run (`run_streaming.md` §2) — makes no comparison at all, and folding that into
+/// `None` tells whatever reports it that the file matched this run's census when no census
+/// existed. The demotion is what a run says about its own numbers (§13 test 5), so the difference
+/// has to survive as far as the report.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CensusAgreement {
+    /// The run's census and the file's name the same terms with the same digests.
+    TheSameCensus,
+    /// **This run has no census**, so the fourth binding was not checked and nothing was demoted.
+    /// The file's warrants stand — spec §2.1's grounds for not demoting on every read.
+    NothingToCompareAgainst,
+    /// They differ, at this term, in the census's own words — so every number in the file was
+    /// demoted to no better than `supplied` (§2.1).
+    FittedUnderAnother(String),
+}
+
+impl CensusAgreement {
+    /// **Which term the two censuses first differ on**, and `None` where they do not differ or
+    /// were never compared.
     ///
-    /// Where it is `Some`, every warrant in `parameters` has been demoted (spec §2.1) and this
-    /// is the term to name when a run says why — in the census's own words, so that the sentence
-    /// is the one the fit already prints.
-    pub fitted_under_another_census: Option<String>,
+    /// **A convenience for a caller that only wants to print the term**, and deliberately not the
+    /// representation: it collapses the two states this type exists to keep apart.
+    #[must_use]
+    pub fn term_they_differ_on(&self) -> Option<&str> {
+        match self {
+            Self::TheSameCensus | Self::NothingToCompareAgainst => None,
+            Self::FittedUnderAnother(term) => Some(term),
+        }
+    }
+
+    /// Whether the file's numbers were demoted because of this comparison.
+    #[must_use]
+    pub fn demoted_the_file(&self) -> bool {
+        matches!(self, Self::FittedUnderAnother(_))
+    }
 }
 
 /// One warrant, no better founded than *somebody handed this over*.
@@ -1520,7 +1614,7 @@ mod the_fourth_binding_demotes {
 
     fn read_for(file: &ParametersFile, census: &CensusIdentity) -> ParametersForThisRun {
         let (reference, read_groups, _) = this_run();
-        file.to_run_parameters_for(&reference, &read_groups, census)
+        file.to_run_parameters_for(&reference, &read_groups, Some(census))
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
@@ -1536,7 +1630,7 @@ mod the_fourth_binding_demotes {
         let (_, _, census) = this_run();
         let read = read_for(&file, &census);
 
-        assert_eq!(read.fitted_under_another_census, None);
+        assert_eq!(read.census, CensusAgreement::TheSameCensus);
         assert_eq!(
             read.from_file.parameters.calibration_by_read_group()[0].provenance,
             Provenance::FittedHere,
@@ -1561,8 +1655,83 @@ mod the_fourth_binding_demotes {
             "selection seed",
         ] {
             let read = read_for(&file, &a_census_of_the_same_cohort_recorded_otherwise(term));
-            assert_eq!(read.fitted_under_another_census.as_deref(), Some(term));
+            assert_eq!(read.census.term_they_differ_on(), Some(term));
         }
+    }
+
+    /// **A run with no census keeps the file's warrants**, and spec §2.1 is what settles it
+    /// rather than taste.
+    ///
+    /// Direct mode has no census (`run_streaming.md` §2) and is the mode this file format exists
+    /// for. Demoting whenever there is nothing to compare against would be demoting on every read
+    /// in that mode — which §2.1 considered and rejected, because the two-mode oracle requires
+    /// the same cohort called from the file and from the fit in memory to report the same
+    /// warrants for identical genotypes.
+    ///
+    /// **The three refusals still fire**, which is the half of §6 a missing census does not
+    /// touch: they are about the reference, the samples and the read groups, none of which
+    /// direct mode is missing.
+    #[test]
+    fn a_run_with_no_census_keeps_the_files_warrants_and_still_refuses_the_other_bindings() {
+        let file = a_file_using_every_shape();
+        let (reference, read_groups, census) = this_run();
+
+        let read = file
+            .to_run_parameters_for(&reference, &read_groups, None)
+            .expect("a file this run's inputs match");
+        // **Not `TheSameCensus`** — nothing was compared, and a report that said the censuses
+        // matched would be claiming a check that never ran.
+        assert_eq!(read.census, CensusAgreement::NothingToCompareAgainst);
+        assert_eq!(
+            read.from_file.inbreeding_by_sample[0].provenance,
+            Provenance::FittedHere,
+            "nothing was demoted"
+        );
+
+        // **And the same file under a census that disagrees *is* demoted**, so the `None` arm is
+        // not merely a census that happens to match: the two arms give different answers on one
+        // file.
+        let demoted = file
+            .to_run_parameters_for(
+                &reference,
+                &read_groups,
+                Some(&a_census_of_the_same_cohort_recorded_otherwise(
+                    "the loci actually kept",
+                )),
+            )
+            .expect("a mismatched census demotes rather than refusing");
+        assert_eq!(
+            demoted.from_file.inbreeding_by_sample[0].provenance,
+            Provenance::Supplied
+        );
+        assert!(demoted.census.demoted_the_file());
+
+        // **The writer's spelling of the same fact gives the same answer.** A driver holding one
+        // `CensusIdentity` would otherwise hand this `Some(of_a_run_with_no_census())` and get
+        // every number demoted — the outcome the `None` arm exists to avoid.
+        let as_the_writer_spells_it = file
+            .to_run_parameters_for(
+                &reference,
+                &read_groups,
+                Some(&CensusIdentity::of_a_run_with_no_census()),
+            )
+            .expect("a run with no census, said the other way");
+        assert_eq!(
+            as_the_writer_spells_it.census,
+            CensusAgreement::NothingToCompareAgainst
+        );
+        assert_eq!(
+            as_the_writer_spells_it.from_file.inbreeding_by_sample[0].provenance,
+            Provenance::FittedHere
+        );
+
+        // The reference binding refuses whether or not there is a census to compare.
+        let _ = census;
+        assert!(
+            file.to_run_parameters_for(&ReferenceDigest([0xab; 16]), &read_groups, None)
+                .is_err(),
+            "a run with no census still refuses a file fitted against another reference"
+        );
     }
 
     /// **A term renamed while its digest stands still is a disagreement**, which comparing
@@ -1632,7 +1801,7 @@ mod the_fourth_binding_demotes {
             &a_file_using_every_shape(),
             &a_census_of_the_same_cohort_recorded_otherwise("depth ladder edges"),
         );
-        assert!(read.fitted_under_another_census.is_some());
+        assert!(read.census.demoted_the_file());
         assert_eq!(
             read.from_file.parameters.calibration_by_read_group()[0].provenance,
             Provenance::Supplied,
@@ -1845,7 +2014,7 @@ mod the_fourth_binding_demotes {
         let mut at_odds = a_file_using_every_shape();
         at_odds.fitted_from.samples.reverse();
         let error = at_odds
-            .to_run_parameters_for(&reference, &read_groups, &census)
+            .to_run_parameters_for(&reference, &read_groups, Some(&census))
             .expect_err("a file whose sample list is not its own table's");
         assert!(
             matches!(error, ParametersFileError::Meaningless { .. }),
@@ -1854,7 +2023,7 @@ mod the_fourth_binding_demotes {
 
         // And a good file against another run: a binding's message.
         let error = a_file_using_every_shape()
-            .to_run_parameters_for(&ReferenceDigest([0xab; 16]), &read_groups, &census)
+            .to_run_parameters_for(&ReferenceDigest([0xab; 16]), &read_groups, Some(&census))
             .expect_err("another reference");
         assert!(
             matches!(error, ParametersFileError::FittedFromOtherInputs { .. }),

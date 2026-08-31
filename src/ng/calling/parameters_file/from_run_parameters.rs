@@ -41,14 +41,163 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{ErrorRate, InbreedingF, ReadGroupId};
 
+/// **How much data stood behind each read group's base-quality multiplier** — one entry a read
+/// group in the run's dense order, from whichever of spec §7's three sources the run had.
+///
+/// # Why a type rather than the fit's rates
+///
+/// Spec §7 is *one writer, three sources — a file the user supplied, the defaults in the binary,
+/// or the fit — and after assembly the run cannot tell them apart*. The multiplier and its
+/// warrant do come out of [`RunParameters`](crate::ng::calling::run_parameters::RunParameters)
+/// the same way whatever the source, but **the count beside them does not**, and until
+/// 2026-08-31 [`ParametersFile::of_run`] took the fit's own
+/// `BTreeMap<ReadGroupId, Estimate<ErrorRate>>` for it. Two of the three sources cannot produce
+/// one:
+///
+/// - **the defaults run has no rates**, which E2 handled by admitting an empty map;
+/// - **a run scoring from a supplied file has no rates either.** The file carries the *counts*
+///   and never the rates — the fitted error rate is nowhere in it, because what a fit produces
+///   and calling reads is the multiplier. So such a run has counts to write and no `Estimate` to
+///   put them in, and passing the empty map wrote a file whose calibration rows had lost their
+///   `observations`. **Measured before this type existed**: `of_run` did not merely drop them, it
+///   panicked — *read group 0's calibration is Supplied and no rate was offered for it* — so spec
+///   §7's "every run writes the file it used" was true of two runs in three.
+///
+/// The three constructors are those three sources, named. What `of_run` asks of the value is one
+/// question — *how many reads stood behind read group `n`'s multiplier* — and each constructor
+/// answers it from what its own source holds.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ReadsBehindEachCalibration(Vec<Option<EvidenceCount>>);
+
+impl ReadsBehindEachCalibration {
+    /// **The run that fitted nothing and was handed no file** (spec §8): no read group has a
+    /// count, because nothing counted anything.
+    ///
+    /// Every calibration of such a run is `Defaulted` and a defaulted value writes no
+    /// `observations` in any case, so this is the same file the fit's own door would write from
+    /// an empty rate set — said as a source rather than as an absence.
+    #[must_use]
+    pub fn nothing_was_fitted(read_group_count: usize) -> Self {
+        Self(vec![None; read_group_count])
+    }
+
+    /// **The counts a parameters file recorded**, in the run's dense read-group order — what
+    /// [`RunParametersFromFile::reads_behind_each_calibration`](crate::ng::calling::parameters_file::RunParametersFromFile)
+    /// hands back.
+    ///
+    /// **A run that read a file writes back what it read** (spec §7): the counts belong to
+    /// whichever run fitted them, and a run that dropped them would write a file claiming its
+    /// supplied multipliers rest on nothing.
+    #[must_use]
+    pub fn as_a_file_recorded_them(counts: Vec<Option<EvidenceCount>>) -> Self {
+        Self(counts)
+    }
+
+    /// **The pre-pass's own rates**, which is where the count lives on a run that fitted them:
+    /// [`ReadGroupCalibration`] is a multiplier and a warrant with no count on it, and the count
+    /// spec §3.3 asks for is on the `Estimate<ErrorRate>` assembly read and did not store.
+    ///
+    /// # Panics
+    ///
+    /// Held in release, because each is two tables minted from different inputs and joined on a
+    /// key the other does not have — whose symptom is one library's reads written beside
+    /// another's multiplier, which looks like an answer rather than a failure:
+    ///
+    /// - **the rates name exactly the run's read groups** — the same count, none missing — or
+    ///   name none at all, which is the run with no fit. A *short* list is the failure worth
+    ///   refusing.
+    /// - **each rate's warrant is the one that read group's calibration carries**, with one
+    ///   legitimate disagreement: a rate assembly *refused* leaves the calibration `Defaulted`
+    ///   beside a rate that is not (`from_fitted_rate` refuses a zero rate). Anything else means
+    ///   the two came from different fits.
+    #[must_use]
+    pub fn of_the_fits_rates(
+        rate_by_read_group: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        calibration_by_read_group: &[ReadGroupCalibration],
+    ) -> Self {
+        let read_group_count = calibration_by_read_group.len();
+        assert!(
+            rate_by_read_group.is_empty() || rate_by_read_group.len() == read_group_count,
+            "the fit supplied base-quality rates for {} read groups and the run has {}; the count \
+             written beside each multiplier comes from these rates, so a set covering some of \
+             them is a different fit — a run that fitted none supplies none",
+            rate_by_read_group.len(),
+            read_group_count
+        );
+        Self(
+            calibration_by_read_group
+                .iter()
+                .enumerate()
+                .map(|(read_group, calibration)| {
+                    let id = ReadGroupId(
+                        u32::try_from(read_group).expect("a run's read-group axis fits in a u32"),
+                    );
+                    // **A read group with no rate at all is legal exactly where its calibration
+                    // is `Defaulted`, and nowhere else.** That is the run with no fit (spec §8):
+                    // nothing was fitted for anybody, so there are no rates to offer, and a
+                    // `Defaulted` calibration writes no `observations` anyway.
+                    //
+                    // **The panic stays for every other warrant**, and it is the one worth
+                    // keeping: a *fitted* calibration whose rate is missing means the rate set
+                    // and the calibration axis came from different fits, and the count that row
+                    // would write is then the other fit's.
+                    let rate = rate_by_read_group.get(&id);
+                    assert!(
+                        rate.is_some() || calibration.provenance == Provenance::Defaulted,
+                        "read group {read_group}'s calibration is {:?} and no rate was offered \
+                         for it; only a `Defaulted` calibration can have none, because it is the \
+                         one that writes no count — so a rate set missing a fitted read group's \
+                         entry was fitted over a different set of read groups than the run has",
+                        calibration.provenance
+                    );
+                    // **The scale carries the rate's own warrant** — `from_fitted_rate` copies
+                    // it — with the one legitimate disagreement named above.
+                    assert!(
+                        calibration.provenance == Provenance::Defaulted
+                            || rate.is_none_or(|rate| calibration.provenance == rate.provenance),
+                        "read group {read_group}'s calibration is {:?} and the rate offered for \
+                         it is {:?}; the scale carries the rate's own warrant and the count \
+                         beside it comes from that rate, so two that disagree are two different \
+                         fits",
+                        calibration.provenance,
+                        rate.map(|rate| rate.provenance)
+                    );
+                    rate.map(|rate| EvidenceCount::Reads(rate.observations))
+                })
+                .collect(),
+        )
+    }
+
+    /// How many read groups this covers.
+    #[must_use]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// What stood behind one read group's multiplier, `None` where nothing states a count.
+    #[must_use]
+    fn behind(&self, read_group: usize) -> Option<EvidenceCount> {
+        self.0[read_group]
+    }
+}
+
 impl ParametersFile {
     /// **Write down what this run scored its reads under.**
     ///
+    /// **This is spec §7's one writer, and it is reached from all three of its sources** — a
+    /// file the user supplied, the defaults in the binary, or the fit. After assembly the run
+    /// cannot tell them apart, which is the point; what the three still differ on is the two
+    /// things assembly dropped, and each has a door of its own:
+    /// [`ReadsBehindEachCalibration`] for the counts and
+    /// [`DeclaredInbreeding::of_each_sample`](crate::ng::calling::parameters_file::DeclaredInbreeding::of_each_sample)
+    /// or the file's own table for the coefficients' warrants.
+    ///
     /// `run` is the parameters calling read; `read_groups` is the run's own table, which supplies
-    /// every name in the file; `base_quality_rate_by_read_group` and `inbreeding_by_sample` are
-    /// the two pre-pass estimate sets assembly consumed and did not keep (below);
+    /// every name in the file; `reads_behind_each_calibration` and `inbreeding_by_sample` are
+    /// the two things assembly consumed and did not keep (below);
     /// `reference` and `census` are what the file is bound to (spec §3.1, §6), and neither is
-    /// derivable from the numbers.
+    /// derivable from the numbers. **A run with no census passes
+    /// [`CensusIdentity::of_a_run_with_no_census`]**, which is the defaults run and direct mode.
     ///
     /// # It reads more than `RunParameters`, and that is the point
     ///
@@ -58,7 +207,9 @@ impl ParametersFile {
     /// - **the base-quality calibration's evidence count.**
     ///   [`ReadGroupCalibration`](crate::ng::calling::likelihood::ReadGroupCalibration) is a
     ///   multiplier and a warrant with no count on it, and spec §3.3 asks for the count by name.
-    ///   It is on the `Estimate<ErrorRate>` that assembly reads and does not store.
+    ///   Where it lives depends on the source, which is what [`ReadsBehindEachCalibration`] is
+    ///   for: on the fit's `Estimate<ErrorRate>`, in the supplied file's own rows, or nowhere at
+    ///   all on a defaults run.
     /// - **every sample's inbreeding warrant and count.** The pre-pass fits an
     ///   `Estimate<InbreedingF>` per sample and the seam into calling takes the bare
     ///   coefficients, so a file written from those would mark every sample's number as handed
@@ -99,9 +250,21 @@ impl ParametersFile {
     /// census a file names is therefore its caller's to say, where which reference it names is
     /// not.
     ///
-    /// **⚑ One run cannot satisfy this signature**: `ReferenceDigest::of` refuses a reference
-    /// read from a `.fai` alone, which holds no bases to digest, while spec §7 says writing is
-    /// unconditional. What such a run writes is step F1's, at the call site.
+    /// **⚑ One run still cannot satisfy this signature**: `ReferenceDigest::of` refuses a
+    /// reference read from a `.fai` alone, which holds no bases to digest, while spec §7 says
+    /// writing is unconditional. **Left required at step F1 and recorded rather than solved**,
+    /// because the two missing bindings are not the same kind of thing: a run with no census
+    /// cannot check a binding that *demotes*, and spec §2.1 says what to do then; a run with no
+    /// reference digest cannot check one that **refuses**, which is §6's strongest guarantee —
+    /// *a parameters file fitted against a different assembly gives a plausible VCF with wrong
+    /// repeat strata*. Making the digest optional would weaken that, so it is the run driver's
+    /// to raise with an owner rather than this writer's to decide.
+    ///
+    /// **⚑ Nothing here says which of the three sources a run used**, and the file it writes has
+    /// to: a defaults run's file and a fit's are the same shape by design, so a reader who did
+    /// not watch the run cannot tell them apart on the page. The file answers it in prose,
+    /// derived from the numbers themselves rather than recorded — see
+    /// [`ParametersFile::what_the_run_fitted`].
     ///
     /// **Six arguments rather than a bundle type**, on the same grounds
     /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)
@@ -119,11 +282,11 @@ impl ParametersFile {
     ///   Two checks, whose messages share no opening phrase: a test pinning one of them by a
     ///   shared substring passes when the other fires, which is how the first draft of this
     ///   step's own test could not fail.
-    /// - **the fitted rates name exactly the run's read groups** — the same count, none missing,
-    ///   and each rate's warrant is the one the run's calibration carries (or that calibration is
-    ///   `Defaulted`, which is what assembly substitutes when it refuses a rate). The count a row
-    ///   writes comes from that rate, so a rate set from another fit would write another run's
-    ///   reads beside this run's multipliers.
+    /// - **the counts behind the multipliers cover exactly the run's read groups.** They are
+    ///   joined to the calibration axis by position, so a set of another length would write
+    ///   another run's reads beside this run's multipliers. **The fit's own two further checks
+    ///   are [`ReadsBehindEachCalibration::of_the_fits_rates`]'s**, where the rates are, and are
+    ///   not restated here.
     /// - **the inbreeding estimates are the run's own**, one per sample and each carrying the
     ///   coefficient the parameters hold.
     /// - **every repeat-tract substitution rate is keyed to one of the run's read groups.** Every
@@ -145,14 +308,15 @@ impl ParametersFile {
     /// larger than at assembly, though: this runs *after* the last locus, so it discards a
     /// cohort's calling work where
     /// [`RunParameters::assemble`](crate::ng::calling::run_parameters::RunParameters::assemble)'s
-    /// equivalent checks discard a startup. **Nothing calls this yet** — whether the run driver
-    /// should instead log and keep its VCF is step F1's to settle, at the call site, where the
-    /// order of the two writes is decided.
+    /// equivalent checks discard a startup. **Still open, and it is the run driver's**: whether
+    /// a driver should instead log and keep its VCF is a choice about the order of the two
+    /// writes, which no run in this tree makes yet — [`Self::write_beside_the_vcf`] is where it
+    /// will be made.
     #[must_use]
     pub fn of_run(
         run: &RunParameters,
         read_groups: &ReadGroups,
-        base_quality_rate_by_read_group: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        reads_behind_each_calibration: &ReadsBehindEachCalibration,
         inbreeding_by_sample: &[Estimate<InbreedingF>],
         reference: &ReferenceDigest,
         census: CensusIdentity,
@@ -177,19 +341,18 @@ impl ParametersFile {
             samples.len(),
             run.inbreeding_coefficient_by_sample().len()
         );
-        // **A rate for every read group, or none at all** — the same two-state contract the
-        // contamination axis carries one level down, and for the same reason: a *short* list is
-        // the failure worth refusing, because it writes some other read group's count beside a
-        // multiplier. **Empty is the run with no fit** (spec §8), whose calibrations are all
-        // `Defaulted` and so write no count; `calibration_rows` refuses a missing rate under any
-        // other warrant, read group by read group.
-        assert!(
-            base_quality_rate_by_read_group.is_empty()
-                || base_quality_rate_by_read_group.len() == read_group_count,
-            "the fit supplied base-quality rates for {} read groups and the run has {}; the count \
-             written beside each multiplier comes from these rates, so a set covering some of \
-             them is a different fit — a run that fitted none supplies none",
-            base_quality_rate_by_read_group.len(),
+        // **One entry a read group, whichever of the three sources it came from.** The counts
+        // are joined to the calibration axis positionally, so a set covering a different number
+        // of read groups would write one library's reads beside another's multiplier — the same
+        // failure the two checks above refuse, one axis down. Each source's *own* rules are its
+        // constructor's; this is the one they share.
+        assert_eq!(
+            reads_behind_each_calibration.len(),
+            read_group_count,
+            "the counts behind the base-quality multipliers cover {} read groups and the run has \
+             {}; they are joined to the calibration axis by position, so two lengths that differ \
+             are two different runs",
+            reads_behind_each_calibration.len(),
             read_group_count
         );
 
@@ -216,7 +379,7 @@ impl ParametersFile {
             base_quality_calibration: BaseQualityCalibration {
                 by_read_group: calibration_rows(
                     run.calibration_by_read_group(),
-                    base_quality_rate_by_read_group,
+                    reads_behind_each_calibration,
                 ),
             },
             contamination: contamination_of(run.contamination_by_read_group(), read_groups),
@@ -253,11 +416,11 @@ impl ParametersFile {
     }
 }
 
-/// One row a read group: the multiplier and its warrant from the run, the count from the rate the
-/// multiplier was built from.
+/// One row a read group: the multiplier and its warrant from the run, the count from whichever of
+/// spec §7's three sources the run's [`ReadsBehindEachCalibration`] came from.
 fn calibration_rows(
     calibration_by_read_group: &[ReadGroupCalibration],
-    rate_by_read_group: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+    reads_behind: &ReadsBehindEachCalibration,
 ) -> Vec<BaseQualityCalibrationRow> {
     calibration_by_read_group
         .iter()
@@ -266,53 +429,20 @@ fn calibration_rows(
             let id = ReadGroupId(
                 u32::try_from(read_group).expect("a run's read-group axis fits in a u32"),
             );
-            // **A read group with no rate at all is legal exactly where its calibration is
-            // `Defaulted`, and nowhere else.** That is the run with no fit (spec §8): nothing was
-            // fitted for anybody, so there are no rates to offer, and a `Defaulted` calibration
-            // writes no `observations` anyway — the projection's rule that a stated constant has
-            // nothing behind it. So the row this builds is the same row whether a rate was
-            // offered or not, and requiring one would mean a caller inventing an `Estimate` to
-            // satisfy a lookup whose value is then dropped.
-            //
-            // **The panic stays for every other warrant**, and it is the one worth keeping: a
-            // *fitted* calibration whose rate is missing means the rate set and the calibration
-            // axis came from different fits, and the count that row is about to write is then
-            // the other fit's.
-            let rate = rate_by_read_group.get(&id);
-            assert!(
-                rate.is_some() || calibration.provenance == Provenance::Defaulted,
-                "read group {read_group}'s calibration is {:?} and no rate was offered for it; \
-                 only a `Defaulted` calibration can have none, because it is the one that writes \
-                 no count — so a rate set missing a fitted read group's entry was fitted over a \
-                 different set of read groups than the run has",
-                calibration.provenance
-            );
-            // **The scale carries the rate's own warrant** — `from_fitted_rate` copies it — with
-            // one legitimate disagreement: a rate assembly *refused* leaves the calibration
-            // `Defaulted` beside a rate that is not. Anything else means the two came from
-            // different fits, and the count this row is about to write is then the other fit's.
-            assert!(
-                calibration.provenance == Provenance::Defaulted
-                    || rate.is_none_or(|rate| calibration.provenance == rate.provenance),
-                "read group {read_group}'s calibration is {:?} and the rate offered for it is \
-                 {:?}; the scale carries the rate's own warrant and the count beside it comes \
-                 from that rate, so two that disagree are two different fits",
-                calibration.provenance,
-                rate.map(|rate| rate.provenance)
-            );
             BaseQualityCalibrationRow {
                 read_group: id.get(),
-                error_probability_multiplier: warranted_value(
-                    calibration.scale,
-                    calibration.provenance,
-                    // **The count on the no-rate arm is never read, and the two lines that make
-                    // that true are both above.** The assertion admits a missing rate only under
-                    // `Defaulted`, and `warranted_value` writes no `observations` at all under
-                    // `Defaulted` — so any number here produces the same row. Measured: putting
-                    // 7 in its place passes all 184 tests of `ng::calling::parameters_file`,
-                    // this module's 33 among them, which is an equivalent mutant rather than a
-                    // hole. Zero is written because it is the true count.
-                    EvidenceCount::Reads(rate.map_or(0, |rate| rate.observations)),
+                // **A source that states no count writes none**, and a source that states one
+                // still goes through the rule every warranted number here keeps: a `defaulted`
+                // value has nothing behind it whatever the source says. Applying that rule here
+                // rather than in each source is what stops the three getting it right three
+                // different ways.
+                error_probability_multiplier: reads_behind.behind(read_group).map_or_else(
+                    || WarrantedValue {
+                        value: calibration.scale,
+                        warrant: calibration.provenance.into(),
+                        observations: None,
+                    },
+                    |count| warranted_value(calibration.scale, calibration.provenance, count),
                 ),
             }
         })
@@ -886,6 +1016,15 @@ mod tests {
         ])
     }
 
+    /// **The counts the fit's rates put behind this run's multipliers** — spec §7's third source,
+    /// and where the two checks about a rate set now live.
+    fn the_counts_of(
+        run: &RunParameters,
+        rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+    ) -> ReadsBehindEachCalibration {
+        ReadsBehindEachCalibration::of_the_fits_rates(rates, run.calibration_by_read_group())
+    }
+
     fn the_runs_minted_totals() -> BTreeMap<ReadGroupId, MintedReadErrors> {
         BTreeMap::from([
             (ReadGroupId(0), a_read_groups_minted_totals(0.008, 1_000)),
@@ -1246,7 +1385,7 @@ mod tests {
         ParametersFile::of_run(
             run,
             read_groups,
-            &the_runs_fitted_rates(),
+            &the_counts_of(run, &the_runs_fitted_rates()),
             &the_runs_inbreeding(),
             &A_REFERENCE,
             a_census(),
@@ -2117,7 +2256,7 @@ mod tests {
         let file = ParametersFile::of_run(
             &run,
             &read_groups,
-            &rates,
+            &the_counts_of(&run, &rates),
             &one_coefficient,
             &A_REFERENCE,
             a_census(),
@@ -2214,7 +2353,7 @@ mod tests {
         let file = ParametersFile::of_run(
             &run,
             &read_groups,
-            &rates,
+            &the_counts_of(&run, &rates),
             &coefficients,
             &A_REFERENCE,
             a_census(),
@@ -2348,14 +2487,7 @@ mod tests {
             ReadGroupId(9),
             a_fitted_rate(0.001, Provenance::Borrowed, 640_918),
         );
-        let _ = ParametersFile::of_run(
-            &run,
-            &read_groups,
-            &one_short,
-            &the_runs_inbreeding(),
-            &A_REFERENCE,
-            a_census(),
-        );
+        let _ = the_counts_of(&run, &one_short);
     }
 
     #[test]
@@ -2370,14 +2502,7 @@ mod tests {
                 a_fitted_rate(0.002, Provenance::FittedHere, 500),
             );
         }
-        let _ = ParametersFile::of_run(
-            &run,
-            &read_groups,
-            &a_wider_fit,
-            &the_runs_inbreeding(),
-            &A_REFERENCE,
-            a_census(),
-        );
+        let _ = the_counts_of(&run, &a_wider_fit);
     }
 
     /// **A rate set covering *some* of the run's read groups is refused at the door, not at the
@@ -2393,14 +2518,7 @@ mod tests {
         let run = a_fitted_run(&read_groups, &the_runs_contamination());
         let mut one_short = the_runs_fitted_rates();
         one_short.remove(&ReadGroupId(2));
-        let _ = ParametersFile::of_run(
-            &run,
-            &read_groups,
-            &one_short,
-            &the_runs_inbreeding(),
-            &A_REFERENCE,
-            a_census(),
-        );
+        let _ = the_counts_of(&run, &one_short);
     }
 
     #[test]
@@ -2419,14 +2537,7 @@ mod tests {
                 a_fitted_rate(0.09, Provenance::Defaulted, 9),
             ),
         ]);
-        let _ = ParametersFile::of_run(
-            &run,
-            &read_groups,
-            &another_fit,
-            &the_runs_inbreeding(),
-            &A_REFERENCE,
-            a_census(),
-        );
+        let _ = the_counts_of(&run, &another_fit);
     }
 
     #[test]
@@ -2441,7 +2552,7 @@ mod tests {
         let _ = ParametersFile::of_run(
             &run,
             &read_groups,
-            &the_runs_fitted_rates(),
+            &the_counts_of(&run, &the_runs_fitted_rates()),
             &another_fits_estimates,
             &A_REFERENCE,
             a_census(),
@@ -2461,7 +2572,7 @@ mod tests {
         let _ = ParametersFile::of_run(
             &run,
             &read_groups,
-            &the_runs_fitted_rates(),
+            &the_counts_of(&run, &the_runs_fitted_rates()),
             &one_short,
             &A_REFERENCE,
             a_census(),
@@ -2555,5 +2666,268 @@ mod tests {
             1,
             "the fall-off",
         );
+    }
+}
+
+/// **Spec §7's one writer, reached from each of its three sources** — a file the user supplied,
+/// the defaults in the binary, or the fit.
+///
+/// # Why these three tests and not one
+///
+/// The three sources differ in exactly one thing, and it is the thing the writer needs and
+/// `RunParameters` does not keep: **how many reads stood behind each base-quality multiplier.**
+/// The fit has it on an `Estimate<ErrorRate>`, a supplied file has it in its own rows, and a
+/// defaults run has nothing to have. So one test a source, each asserting what its own source can
+/// still say about the counts — which is what a single test over one fixture cannot.
+///
+/// **The supplied-file case is the one that did not work**, and it is why step F1 changed the
+/// writer's signature. Measured on this fixture before the change:
+/// `of_run` panicked with *read group 0's calibration is Supplied and no rate was offered for
+/// it*, so a run scoring from a file could not write the file it used at all — two of spec §7's
+/// three sources worked, and the one the format exists for did not.
+#[cfg(test)]
+mod one_writer_three_sources {
+    use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
+    use super::super::to_run_parameters::tests::{
+        the_counts_the_projection_out_reads, the_files_read_groups,
+    };
+    use super::super::{
+        CensusAgreement, CensusIdentity, EvidenceCount, ParametersFile, ReadsBehindEachCalibration,
+        Warrant,
+    };
+
+    /// **A run scoring from a supplied file writes back the file it was given.**
+    ///
+    /// The whole of spec §7's first source in one trip: read the file into a run's parameters,
+    /// then write that run's parameters out. What comes back is the same file — every count, every
+    /// warrant.
+    ///
+    /// **The census the run writes is the file's own**, which is `of_run`'s own rule: a run that
+    /// read a file fitted under other terms writes back the terms it read, because it did not
+    /// fit these numbers and has no terms of its own to claim.
+    #[test]
+    fn a_run_scoring_from_a_supplied_file_writes_that_file_again() {
+        let supplied = a_file_using_every_shape();
+        let read_groups = the_files_read_groups(&supplied);
+        let back = supplied
+            .to_run_parameters()
+            .expect("a file this caller wrote is a file it can score with");
+
+        let written = ParametersFile::of_run(
+            &back.parameters,
+            &read_groups,
+            &the_counts_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            supplied.fitted_from.census.clone(),
+        );
+
+        assert_eq!(written, supplied);
+    }
+
+    /// **The counts are the file's and are not invented**, which is the half of the trip above a
+    /// whole-file equality could hide if both sides were wrong the same way.
+    ///
+    /// The fixture's three read groups carry three different states: 812,344 reads behind a
+    /// fitted multiplier, no count at all behind a defaulted one, and 640,918 behind a supplied
+    /// one — so a writer that dropped every count, or wrote a zero for the missing one, changes
+    /// two of the three.
+    #[test]
+    fn the_counts_a_supplied_file_carries_are_the_counts_written_back() {
+        let supplied = a_file_using_every_shape();
+        let back = supplied.to_run_parameters().expect("it projects");
+        let written = ParametersFile::of_run(
+            &back.parameters,
+            &the_files_read_groups(&supplied),
+            &the_counts_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            supplied.fitted_from.census.clone(),
+        );
+
+        let counts: Vec<(Warrant, Option<EvidenceCount>)> = written
+            .base_quality_calibration
+            .by_read_group
+            .iter()
+            .map(|row| {
+                (
+                    row.error_probability_multiplier.warrant,
+                    row.error_probability_multiplier.observations,
+                )
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                (Warrant::FittedHere, Some(EvidenceCount::Reads(812_344))),
+                (Warrant::Defaulted, None),
+                (Warrant::Supplied, Some(EvidenceCount::Reads(640_918))),
+            ]
+        );
+    }
+
+    /// **A run with no census writes an empty list of terms rather than somebody else's** — the
+    /// defaults run and every direct-mode run (`run_streaming.md` §2).
+    ///
+    /// It is a distinct file from the same run's under a real census, which is what stops the
+    /// empty identity being cosmetic: a later run comparing censuses finds a disagreement at the
+    /// first term and demotes, rather than reading these numbers as its own.
+    #[test]
+    fn a_run_with_no_census_says_so_in_the_file() {
+        let supplied = a_file_using_every_shape();
+        let back = supplied.to_run_parameters().expect("it projects");
+        let of_a_run_with_none = ParametersFile::of_run(
+            &back.parameters,
+            &the_files_read_groups(&supplied),
+            &the_counts_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            CensusIdentity::of_a_run_with_no_census(),
+        );
+
+        assert!(of_a_run_with_none.fitted_from.census.terms.is_empty());
+        assert_ne!(of_a_run_with_none, supplied);
+        assert_eq!(
+            of_a_run_with_none.census_disagreement(&supplied.fitted_from.census),
+            supplied
+                .fitted_from
+                .census
+                .terms
+                .first()
+                .map(|term| term.term.clone()),
+            "a run holding the file's own census disagrees with this one at its first term"
+        );
+    }
+
+    /// **What a run that was DEMOTED writes into its own `[fitted_from].census`** — the terms it
+    /// read, never its own.
+    ///
+    /// This is the question step F1 is the first place to face, because it is the first place a
+    /// run writes a file it might have demoted. Three answers were possible and two of them say
+    /// something false:
+    ///
+    /// - **this run's own census** would claim the numbers were fitted under terms they were not;
+    /// - **no census at all** would claim they were fitted under none, and they were fitted under
+    ///   one — this run simply is not it;
+    /// - **the terms the file named**, which is what the numbers actually came from, and what
+    ///   this asserts.
+    ///
+    /// **And the file that comes out is stable.** Read back by the same run it is no longer
+    /// demoted — its census now matches, because it is the file's own — and every warrant is
+    /// already no stronger than `supplied`, so nothing moves. Writing it a second time gives the
+    /// same file, which is what spec §7's *a run is reproducible from its own output* asks for on
+    /// the one path where a run's numbers change on the way in.
+    #[test]
+    fn a_demoted_run_writes_back_the_census_its_numbers_came_from() {
+        let supplied = a_file_using_every_shape();
+        let read_groups = the_files_read_groups(&supplied);
+        // A census of the same cohort recorded otherwise: the file is demoted, not refused.
+        let mut this_runs_census = supplied.fitted_from.census.clone();
+        this_runs_census.terms[0].digest = "ff".repeat(16);
+
+        let read = supplied
+            .to_run_parameters_for(
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                &read_groups,
+                Some(&this_runs_census),
+            )
+            .expect("a file fitted under another census is used, not refused");
+        assert!(read.census.demoted_the_file(), "it demoted");
+
+        let written = ParametersFile::of_run(
+            &read.from_file.parameters,
+            &read_groups,
+            &the_counts_the_projection_out_reads(&read.from_file),
+            &read.from_file.inbreeding_by_sample,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            supplied.fitted_from.census.clone(),
+        );
+
+        assert_eq!(
+            written.fitted_from.census, supplied.fitted_from.census,
+            "the terms these numbers were fitted under, not this run's"
+        );
+        assert_ne!(
+            written.fitted_from.census, this_runs_census,
+            "and not this run's own, which fitted none of them"
+        );
+        assert_eq!(
+            written.inbreeding.by_sample[0]
+                .inbreeding_coefficient
+                .warrant,
+            Warrant::Supplied,
+            "the demotion is in the file it writes, not only in what it scored with"
+        );
+
+        // **Stable**: the same run reads its own output without demoting it, and writes it again
+        // unchanged.
+        let again = written
+            .to_run_parameters_for(
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                &read_groups,
+                Some(&supplied.fitted_from.census),
+            )
+            .expect("its own output");
+        assert_eq!(again.census, CensusAgreement::TheSameCensus);
+        assert_eq!(
+            ParametersFile::of_run(
+                &again.from_file.parameters,
+                &read_groups,
+                &the_counts_the_projection_out_reads(&again.from_file),
+                &again.from_file.inbreeding_by_sample,
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                written.fitted_from.census.clone(),
+            ),
+            written
+        );
+    }
+
+    /// **A fitted number the file states no count for keeps stating none.**
+    ///
+    /// **The test a surviving mutant asked for.** Replacing the no-count arm of `calibration_rows`
+    /// with the old `warranted_value(…, Reads(0))` passed all 220 tests of this module: every
+    /// fixture whose count is absent is a `defaulted` row, where `warranted_value` drops the count
+    /// anyway, so the two branches wrote the same row and nothing could tell them apart. This is
+    /// the fixture that can: a `fitted_here` multiplier with no `observations`, which `validate`
+    /// accepts and which a hand-written file reaches easily.
+    ///
+    /// Under the mutant it comes back as `observations = { reads = 0 }` — *this fit produced a
+    /// number from no reads at all*, which is a claim about the run and not a rounding.
+    #[test]
+    fn a_fitted_multiplier_with_no_count_does_not_gain_a_count_of_zero() {
+        let mut supplied = a_file_using_every_shape();
+        supplied.base_quality_calibration.by_read_group[0]
+            .error_probability_multiplier
+            .observations = None;
+        supplied
+            .validate()
+            .expect("a fitted value with no count is a legal file");
+
+        let back = supplied.to_run_parameters().expect("it projects");
+        let written = ParametersFile::of_run(
+            &back.parameters,
+            &the_files_read_groups(&supplied),
+            &the_counts_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+            supplied.fitted_from.census.clone(),
+        );
+
+        assert_eq!(
+            written.base_quality_calibration.by_read_group[0].error_probability_multiplier,
+            supplied.base_quality_calibration.by_read_group[0].error_probability_multiplier
+        );
+        assert_eq!(written, supplied, "and the whole file round-trips");
+    }
+
+    /// **A defaults run's source states no count for anybody**, which is not the same as stating
+    /// zero: `observations` is absent on every row, so the file does not say the multipliers rest
+    /// on no reads — it says nothing rests behind them at all (spec §5's rule that absence is a
+    /// missing key).
+    #[test]
+    fn nothing_fitted_states_no_count_for_any_read_group() {
+        let nothing = ReadsBehindEachCalibration::nothing_was_fitted(3);
+        let a_file = ReadsBehindEachCalibration::as_a_file_recorded_them(vec![None, None, None]);
+        assert_eq!(nothing, a_file, "the two say the same thing about counts");
     }
 }

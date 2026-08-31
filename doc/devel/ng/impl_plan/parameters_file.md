@@ -393,8 +393,39 @@ cannot come to disagree with what the tracts were scored under.
 
 ### Milestone F — every run writes what it used
 
-☐ **F1. One writer, three sources.** Supplied file, defaults, or fit — after assembly the run
+✅ **F1. One writer, three sources.** Supplied file, defaults, or fit — after assembly the run
 cannot tell them apart, and writes the file beside its VCF unconditionally.
+
+**Landed 2026-08-31, and the source the format exists for was the one that did not work.** A run
+scoring from a supplied file has `Supplied` calibrations and no rate map, and `of_run` took the
+fit's own `BTreeMap<ReadGroupId, Estimate<ErrorRate>>` — measured before anything was built on it,
+it *panicked*: `read group 0's calibration is Supplied and no rate was offered for it`.
+`ReadsBehindEachCalibration` has three constructors, one a source, and the fit's two rate checks
+moved into the fit's own. **The minimal fix would have been wrong**: relaxing the assertion drops
+every `observations` count, and a run that read a file has to write back what it read.
+
+**`to_run_parameters_for` takes `Option<&CensusIdentity>`, and `None` keeps the file's warrants.**
+Spec §2.1 settles it rather than taste: it considered demoting on every read and rejected it
+*because it breaks the two-mode oracle*, and direct mode is exactly the mode with no census. The
+answer is a three-state `CensusAgreement` — *the same census*, *nothing to compare against*,
+*fitted under another* — because the first two are not one state and F2 is about to read it.
+
+**The two things E3 deferred here are done**, and a third the owner raised: a demoted run writes
+back **the terms it read**, and the file it writes is stable — read by the same run it is no longer
+demoted, and writing it again gives the same file.
+
+**⚑ The largest finding is not F1's to close.** All three reviews found that the new opening line
+claimed *"fitted from your data"* over a demoted file whose every warrant is `supplied`. One
+predicate was simply wrong and is fixed (`SubstitutionRateRow.rate` **does** carry a warrant); the
+other four groups carry no *handed-over* state at all, so §2.1's demotion cannot reach them. **The
+file discloses that now instead of overclaiming**, and closing it is a change to what the file
+records — the same gap already recorded for `SeedRung::FittedCurve`. Stop-and-ask before F2.
+
+**Two other reader findings are recorded and not fixed**, both E3's or structural: the fallback is
+disclosed only where a repeat-tract table is *wholly* empty, where the golden file writes 1
+substitution rate for 9 cells; and a defaults run's `[repeat_tracts]` still spends fifty lines
+defining vocabulary for keys that are not there.
+
 *Depends:* E2, B3. *Source:* §7.
 
 ☐ **F2. `RunParameterReport` becomes a view over the file.** It reaches only three things today and

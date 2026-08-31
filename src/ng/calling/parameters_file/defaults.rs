@@ -434,11 +434,12 @@ mod tests {
     use crate::ng::calling::likelihood::{
         DEFAULT_ERROR_PROBABILITY_MULTIPLIER, MIN_BASE_ERROR, ReadGroupCalibration,
     };
+    use crate::ng::calling::parameters_file::CensusIdentity;
     use crate::ng::calling::parameters_file::ParametersFile;
+    use crate::ng::calling::parameters_file::ReadsBehindEachCalibration;
     use crate::ng::calling::parameters_file::Warrant;
     use crate::ng::calling::parameters_file::tests::{
-        THE_REFERENCE_A_RUN_FITTED_AGAINST, a_census_a_run_could_have_fitted_under,
-        a_file_using_every_shape,
+        THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape, unwrapped_comments,
     };
     use crate::ng::calling::run_parameters::RunParameters;
     use crate::ng::parameter_estimation::Estimate;
@@ -945,10 +946,13 @@ mod tests {
     /// legal exactly because every calibration is `Defaulted` and a defaulted number writes no
     /// count; `from_run_parameters` refuses a missing rate under any other warrant.
     ///
-    /// **⚑ The census is the module's fixture and a direct-mode run has none.** `of_run` takes a
+    /// **A defaults run has no census, and step F1 gave that a name of its own.** `of_run` takes a
     /// `CensusIdentity` because §3.1 binds a fitted file to the census it was fitted from, and a
-    /// run that fitted nothing has no census to name. What a defaults run writes there is F1's
-    /// question and the owner's — it is the first of the three Milestone D left open.
+    /// run that fitted nothing has none to name — so it writes
+    /// [`CensusIdentity::of_a_run_with_no_census`], an empty list of terms. This was the first of
+    /// the three questions Milestone D left open; the file's own prose says what a later run does
+    /// with such a list (`to_toml`), and it is not the same answer for a run that has a census and
+    /// a run that does not.
     #[test]
     fn a_defaults_run_writes_a_file_that_reads_back_as_the_same_run() {
         let read_groups = a_runs_read_groups();
@@ -959,15 +963,19 @@ mod tests {
         let file = ParametersFile::of_run(
             &run,
             &read_groups,
-            // No rates: nothing was fitted for anybody.
-            &BTreeMap::new(),
+            // Nothing was fitted for anybody — spec §7's second source, named.
+            &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
             &declared.of_each_sample(&read_groups),
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
-            a_census_a_run_could_have_fitted_under(),
+            CensusIdentity::of_a_run_with_no_census(),
         );
 
         file.validate()
             .expect("a defaults run writes a file its own reader accepts");
+        assert!(
+            file.fitted_from.census.terms.is_empty(),
+            "a run that fitted nothing names no census"
+        );
 
         // Through the text, as a run reading one back does.
         let text = file.to_toml();
@@ -1118,10 +1126,12 @@ mod tests {
         let text = ParametersFile::of_run(
             &run,
             &read_groups,
-            &BTreeMap::new(),
+            &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
             &declared.of_each_sample(&read_groups),
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
-            a_census_a_run_could_have_fitted_under(),
+            // **A defaults run has no census**, which step F1 gave a name of its own; before it
+            // this fixture handed over a census a *fitted* run could have had.
+            CensusIdentity::of_a_run_with_no_census(),
         )
         .to_toml();
 
@@ -1130,6 +1140,10 @@ mod tests {
         // reader reads the sentence. This puts the comment text back together the way they do.
         let prose = unwrapped_comments(&text);
         for owed in [
+            // **The opening line, on the real `of_defaults` output rather than on a hand-built
+            // approximation of it.** `to_toml`'s own tests pin the sentence against a fixture
+            // edited to look like a defaults run; only this one asks the door itself.
+            "**Nothing in this file was fitted from reads** — 0 of its 7 groups of numbers",
             // That the table is empty is *not* the same claim as a missing row.
             "no stratum was fitted at all",
             // In the section's own three words, so it lines up with the table it sits on and
@@ -1151,16 +1165,6 @@ mod tests {
                 "a defaults run's file must say {owed:?}; its comments say:\n{prose}"
             );
         }
-    }
-
-    /// Every comment line of a written file, stripped of its `# ` and joined back into the
-    /// sentences a reader sees rather than the lines the wrapper emits.
-    fn unwrapped_comments(text: &str) -> String {
-        text.lines()
-            .filter_map(|line| line.trim_start().strip_prefix('#'))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 
     /// **A file that fitted something says none of it**, so the note is about the state and not a

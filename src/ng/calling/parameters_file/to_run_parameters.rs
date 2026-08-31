@@ -686,23 +686,30 @@ impl From<ShareShape> for FittedShape {
     }
 }
 
+/// **`pub(super)` for its helpers rather than for its tests**: `the_files_read_groups` and
+/// `the_counts_the_projection_out_reads` are how any test in this module builds the *supplied
+/// file* source of spec §7, and a second copy of either in a sibling file is a copy that can come
+/// to disagree.
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
-    use super::super::{ParametersFile, ParametersFileError, Warrant, WarrantedValue};
+    use super::super::{
+        ParametersFile, ParametersFileError, ReadsBehindEachCalibration, Warrant, WarrantedValue,
+    };
     use crate::ng::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+    use crate::ng::parameter_estimation::Provenance;
     use crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
-    use crate::ng::parameter_estimation::{Estimate, Provenance};
     use crate::ng::read::input::read_groups::ReadGroups;
-    use crate::ng::types::{ErrorRate, ReadGroupId};
-    use std::collections::BTreeMap;
+    use crate::ng::types::ReadGroupId;
 
     /// The run's read-group table, rebuilt from the identity block the file carries.
     ///
     /// **Step D2's job is to compare this against the run's own**, and this is not that: it is
     /// the table the file *says* the numbers were fitted from, which is the only one a round
     /// trip through the file can use.
-    pub(super) fn the_files_read_groups(file: &ParametersFile) -> ReadGroups {
+    pub(in crate::ng::calling::parameters_file) fn the_files_read_groups(
+        file: &ParametersFile,
+    ) -> ReadGroups {
         let lanes: Vec<(&str, &str, &str)> = file
             .fitted_from
             .read_groups
@@ -718,34 +725,21 @@ mod tests {
         ReadGroups::of_lanes(&lanes)
     }
 
-    /// **The rates `of_run` wants, rebuilt from what the file actually carries.**
+    /// **What a run scoring from this file writes back beside its multipliers** — the counts the
+    /// file recorded, unchanged.
     ///
     /// **The file does not carry the fitted error rate and never has** — it carries the
-    /// *multiplier* that rate produced, which is what `RunParameters` keeps too. `of_run` takes
-    /// the rates because it reads two things off them: the warrant, which it checks against the
-    /// calibration's, and the observation count, which it writes into the file. Both come back
-    /// from the projection; the rate's own value does not, and nothing reads it, so this fills a
-    /// placeholder rather than pretending to recover one.
-    pub(super) fn the_rates_the_projection_out_reads(
+    /// *multiplier* that rate produced, which is what `RunParameters` keeps too. Until step F1
+    /// this helper built an `Estimate<ErrorRate>` around a placeholder rate of 1e-3 to satisfy
+    /// `of_run`'s old signature, which had only the fit's door; the writer now takes
+    /// [`ReadsBehindEachCalibration`], whose three constructors are spec §7's three sources, and
+    /// this is the file's one.
+    pub(in crate::ng::calling::parameters_file) fn the_counts_the_projection_out_reads(
         projected: &super::RunParametersFromFile,
-    ) -> BTreeMap<ReadGroupId, Estimate<ErrorRate>> {
-        projected
-            .parameters
-            .calibration_by_read_group()
-            .iter()
-            .zip(&projected.reads_behind_each_calibration)
-            .enumerate()
-            .map(|(read_group, (calibration, count))| {
-                (
-                    ReadGroupId(read_group as u32),
-                    Estimate {
-                        value: ErrorRate::try_new(1e-3).expect("a placeholder rate"),
-                        provenance: calibration.provenance,
-                        observations: super::an_evidence_count(*count),
-                    },
-                )
-            })
-            .collect()
+    ) -> ReadsBehindEachCalibration {
+        ReadsBehindEachCalibration::as_a_file_recorded_them(
+            projected.reads_behind_each_calibration.clone(),
+        )
     }
 
     /// **A file, read into a run's parameters and written back out, is the file that was read.**
@@ -770,7 +764,7 @@ mod tests {
         let written = ParametersFile::of_run(
             &projected.parameters,
             &read_groups,
-            &the_rates_the_projection_out_reads(&projected),
+            &the_counts_the_projection_out_reads(&projected),
             &projected.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
@@ -817,7 +811,7 @@ mod tests {
             let written = ParametersFile::of_run(
                 &projected.parameters,
                 &read_groups,
-                &the_rates_the_projection_out_reads(&projected),
+                &the_counts_the_projection_out_reads(&projected),
                 &projected.inbreeding_by_sample,
                 &THE_REFERENCE_A_RUN_FITTED_AGAINST,
                 file.fitted_from.census.clone(),
@@ -846,7 +840,7 @@ mod tests {
         let written = ParametersFile::of_run(
             &projected.parameters,
             &read_groups,
-            &the_rates_the_projection_out_reads(&projected),
+            &the_counts_the_projection_out_reads(&projected),
             &projected.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
@@ -1240,14 +1234,14 @@ mod the_north_star_round_trip {
 
     use std::collections::BTreeMap;
 
-    use super::super::ParametersFile;
     use super::super::tests::{
         THE_REFERENCE_A_RUN_FITTED_AGAINST, a_census_a_run_could_have_fitted_under,
         a_file_using_every_shape,
     };
-    // **The one helper both modules need**, rather than a second copy of it: the rates `of_run`
-    // reads back are rebuilt the same way whichever fixture they came from.
-    use super::tests::the_rates_the_projection_out_reads;
+    use super::super::{ParametersFile, ReadsBehindEachCalibration};
+    // **The one helper both modules need**, rather than a second copy of it: the counts `of_run`
+    // writes back are read out of the projection the same way whichever fixture they came from.
+    use super::tests::the_counts_the_projection_out_reads;
     use super::*;
     use crate::ng::calling::genotype_prior::{SeedRegime, SpectrumSeed};
     use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
@@ -1772,7 +1766,10 @@ mod the_north_star_round_trip {
         ParametersFile::of_run(
             &run.parameters,
             &run.read_groups,
-            &run.rates,
+            &ReadsBehindEachCalibration::of_the_fits_rates(
+                &run.rates,
+                run.parameters.calibration_by_read_group(),
+            ),
             &run.inbreeding,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             a_census_a_run_could_have_fitted_under(),
@@ -1804,7 +1801,7 @@ mod the_north_star_round_trip {
         let again = ParametersFile::of_run(
             &back.parameters,
             &run.read_groups,
-            &the_rates_the_projection_out_reads(&back),
+            &the_counts_the_projection_out_reads(&back),
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
@@ -2028,7 +2025,7 @@ mod the_north_star_round_trip {
         let again = ParametersFile::of_run(
             &back.parameters,
             &read_groups,
-            &the_rates_the_projection_out_reads(&back),
+            &the_counts_the_projection_out_reads(&back),
             &back.inbreeding_by_sample,
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
