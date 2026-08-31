@@ -249,8 +249,10 @@ skeleton — segments dealt to workers, several in flight — describes neither.
 The knobs are newtypes over `NonZeroUsize` — a count whose zero is illegal:
 
 ```rust
-/// Cohort loci being called at once, in a variant caller's pool. The caller objects' one
-/// concurrency knob, and what their in-flight memory is a multiple of (spec §3.5, §7.1).
+/// How many cohort loci are being genotyped at the same time — one per worker, while the
+/// merge that produced them runs on its own thread. The two caller objects' one concurrency
+/// knob, and what their in-flight memory is a multiple of (spec §3.5, §7.1). The name is the
+/// spec's *callers in flight*; what it counts is loci, not variant callers.
 /// **No default is proposed** — spec §11 question 2 names the sweep that sets it.
 pub struct CallersInFlight(pub NonZeroUsize);
 
@@ -302,10 +304,10 @@ let inference = genotyper.call_locus(&evidence, &frozen, alleles, &loop_config, 
 **Where the call happens relative to the merge's builder is open, and the two documents lean
 different ways.** [`../spec/cohort_merge.md`](../spec/cohort_merge.md) §6.3 leans to calling *inside*
 the builder, because the buffer then holds called records rather than whole observations, and notes
-that the choice commutes — calling one cohort locus reads nothing outside it. Spec §3.5 puts the
-merge on one thread and the loci in a pool of callers, which is a hand-off *out* of the builder. The
-two agree on the answer and not on the thread. §8 records what is unsettled; nothing before a pool
-exists depends on it, because a single-threaded run calls in the same place either way.
+that the choice commutes — calling one cohort locus reads nothing outside it. Spec §3.5 keeps the
+merge on one thread and hands each finished locus *out* to a worker. The two agree on the answer and
+not on which thread computes it. §8 records what is unsettled; a run that genotypes one locus at a
+time calls in the same place either way, so nothing before that depends on it.
 
 **The comparison that would settle it is now available.** `cohort_merge.md` §14 question 6 asked to
 weigh the two buffers when the emission step fixed the record's shape; the record is
@@ -472,10 +474,16 @@ pub enum RunError {
     /// as `EMFILE` around the thousandth sample (spec §7.1a).
     #[error("{samples} samples need {needed} open files; this process may open {limit}")]
     NotEnoughFileDescriptors { samples: usize, needed: u64, limit: u64 },
+    /// A sample's reads are against a different assembly from the one the segments were
+    /// computed on: its alignment header names a contig the reference does not have, or names
+    /// one at a different length. **Direct mode's cohort check** — the one mistake that mode
+    /// can make, since one segmentation serves every sample of it (owner's ruling,
+    /// 2026-08-31; §8).
+    #[error("sample {sample}: {difference}")]
+    SampleAlignedToAnotherReference { sample: String, difference: String },
     /// Two samples were analysed over different segments, so they are not comparable — the
     /// cohort refusal (spec §6.2). **Reachable in psp mode only**, where each file records the
-    /// ground it was written over; in direct mode one segmentation serves the whole run, so
-    /// there is nothing to disagree (§8). Spec §11's question 5 may later soften this to
+    /// ground it was written over. Spec §11's question 5 may later soften this to
     /// intersection-calling; until then it refuses.
     #[error("samples {left} and {right} were analysed over different segments")]
     AnalysedRegionsDiffer { left: String, right: String },
@@ -538,10 +546,12 @@ the merge, and §8 below records them as still owed.
   their sizing is wholly the encoding spec's — spec §6.3, §10.
 - **The header carries no boundary digest and no writer version** — spec §6.3, **flagged for the
   owner as a reversal of an earlier draft**.
-- **Four refusal variants, four axes.** `AnalysedRegionsDiffer` compares samples to each other;
-  `SegmentationInputsDiffer` compares a file to the run; `ParameterSamplesDiffer` compares the
-  parameters to the run; `NotEnoughFileDescriptors` compares the run to the process — spec §6.2,
-  §7.1a.
+- **Five refusal variants, five axes**, and **each mode reaches a different one of the first
+  two**. `SampleAlignedToAnotherReference` compares a sample's reads to the run's assembly, which
+  is the cohort check direct mode can fail; `AnalysedRegionsDiffer` compares two psps' recorded
+  ground to each other, which only psp mode can; `SegmentationInputsDiffer` compares a psp to the
+  run; `ParameterSamplesDiffer` compares the parameters to the run; `NotEnoughFileDescriptors`
+  compares the run to the process — spec §6.2, §7.1a.
 - **`CallersInFlight`, `SamplesInFlight`, `Workers` are newtypes over `NonZeroUsize`**, and
   **none of them is given a default here** — spec §11 questions 2 and 3 own the sweeps that set
   the first two, and the third is not on the default path.
@@ -600,14 +610,14 @@ Genuinely open design questions:
   [`../impl_plan/vcf_output.md`](../impl_plan/vcf_output.md) Milestones D and E). **Owner's, and it
   is a sequencing question rather than a design one** — nothing about either shape changes with the
   answer.
-- **OPEN: which thread the call runs on, once there is a pool** (§3.2). Two readings, and they
-  differ only when more than one locus is called at a time. Calling *inside* the merge's builder
-  makes the caller pool the merge's own builders, which today are behind `merge_cohort_in_parallel`
-  and off by default (spec §3.5). Calling *after* the builder hands each finished locus to a
-  separate pool, which is what spec §3.5 describes and what keeps the merge single-threaded.
-  **Nothing before a pool exists depends on the answer** — a single-threaded run calls in the same
-  place either way — so it is owed by the step that adds the pool, not by the one that wires the
-  call.
+- **OPEN: which threads do the genotype arithmetic, once several loci are genotyped at a time**
+  (§3.2). Two readings, and they are the same run until the second locus starts before the first
+  has finished. Calling *inside* the merge's builder means the threads are the merge's own region
+  builders — they exist, in `merge_cohort_in_parallel`, and are off by default (spec §3.5).
+  Calling *after* the builder means the merge stays on one thread and hands each finished locus to
+  a separate set of workers, which is what spec §3.5 describes. **A single-threaded run calls in
+  the same place either way**, so nothing before that point depends on the answer and it is owed
+  by the step that adds the concurrency, not by the one that wires the call.
 - **OPEN: the cheap question a source cannot be asked** — spec §10's second entry. It costs direct
   mode nothing and blocks nothing here.
 
@@ -637,13 +647,11 @@ Implementation-time confirmations:
   is not, compare a digest — but keep the header stored, so a refusal can still name a field.
 - **How the descriptor headroom is read.** `RLIMIT_NOFILE` on Unix; the count needed is two
   descriptors per sample for a CRAM and its index (spec §7.1a).
-- **What direct mode's cohort check actually compares.** Spec §6.2's cohort refusal is about two
-  *files* recording different analysed ground, which is a psp fact: direct mode computes one
-  segmentation from the run's own inputs and every sample shares it, so a per-sample analysed-region
-  comparison has nothing to compare. What remains worth checking at construction is that each
-  sample's alignment header names contigs the segmentation's reference has, and with the same
-  lengths — a mismatch there is the same class of mistake and the one direct mode can actually
-  make. **Confirm before coding the check**, so it is not built vacuous.
+- **Which contig fields the reference comparison reads**, and whether an alignment header naming
+  *extra* contigs the run does not analyse is a refusal or is ignored. The check itself is settled
+  — §5's `SampleAlignedToAnotherReference`, owner's ruling 2026-08-31 — because spec §6.2's
+  analysed-regions refusal is a psp fact and direct mode hands one segmentation to every sample, so
+  that comparison cannot differ. What is left is how strict the comparison is.
 - **`SampleInput` and `CensusConfig`** — concrete fields pinned when the constructors are coded.
 
 ---

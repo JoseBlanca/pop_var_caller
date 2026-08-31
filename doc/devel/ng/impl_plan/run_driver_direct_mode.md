@@ -88,10 +88,11 @@ done; the second still blocks F1.**
   `LookAhead` knob, a segment pool and per-segment per-sample walkers — all retired by
   [`run_streaming.md`](../spec/run_streaming.md) §3.1 and §3.5. It now describes the built source
   trait, the serial merge feeding a pool of callers, and the two refusals A2 needs; its own
-  amendment section lists what moved. **Two questions it records rather than answers** and the
-  owner holds both: which thread the call runs on once a pool exists (its §8), and what A2's
-  cohort check can compare in direct mode, where one segmentation serves every sample (its §8,
-  last confirmation).
+  amendment section lists what moved. **One question it records rather than answers**, and it is
+  E1's rather than A1's: which thread the call runs on once several loci are called at a time —
+  the merge's own region builders, which exist and are switched off, or a separate set of workers
+  the merge feeds (its §8). It also surfaced A2's middle check, which the owner then ruled on;
+  see that step.
 - **The subcommand names are agreed and written nowhere.** `generate-psps`, `generate-census`,
   `call-from-psps`, `call-from-alignments` (owner, 2026-08-28). They belong with the rest of the
   command surface, which [`../spec/typed_regions_cli.md`](../spec/typed_regions_cli.md) owns.
@@ -109,11 +110,17 @@ and the shared read-only state. No iteration yet.
 *Depends:* the arch amendment above. *Source:* [`run_streaming.md`](../spec/run_streaming.md) §5.1.
 
 ☐ **A2. The construction checks.** The parameters' sample list matched against the run's **by name**
-(never by position), the analysed regions agreed across samples, and **the file-descriptor headroom
-checked against the sample count** — a run that would die at `EMFILE` around the thousandth sample
-refuses at construction naming the limit and the count, rather than failing with an operating-system
-error mid-run.
-*Depends:* A1. *Source:* §6.2, §7.1a; [`parameters_file.md`](../spec/parameters_file.md) §6.
+(never by position), **each sample's alignment header agreeing with the segmentation's reference** —
+same contigs, same lengths — and **the file-descriptor headroom checked against the sample count**:
+a run that would die at `EMFILE` around the thousandth sample refuses at construction naming the
+limit and the count, rather than failing with an operating-system error mid-run.
+**⛦ The middle check changed, owner's ruling 2026-08-31.** It read "the analysed regions agreed
+across samples", which is a psp fact: two files can record different ground, but a direct run
+computes one segmentation from its own inputs and hands the same one to every sample, so that
+comparison cannot differ. The contig agreement is the mistake direct mode can actually make, and it
+refuses for the same reason — a sample whose reads are against another assembly is not comparable.
+*Depends:* A1. *Source:* §6.2, §7.1a; [`parameters_file.md`](../spec/parameters_file.md) §6;
+[`../arch/run_streaming.md`](../arch/run_streaming.md) §5 (`SampleAlignedToAnotherReference`).
 
 > **Checkpoint A:** the object opens a 63-sample cohort and refuses the mismatches. Pause for review.
 
