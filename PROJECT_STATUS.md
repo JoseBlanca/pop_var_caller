@@ -19,7 +19,26 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-31):** **B1 of the run driver — one sample's alignment files
+> - **Last completed task (2026-08-31):** **Milestone B of the run driver — a walker is
+> indistinguishable from any other source**, at Checkpoint B (steps B1 and B2 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_b2_2026-08-31.md)). B2 is the
+> differential B1 could not run: the real generic locus generator over a real indexed BAM, walked
+> twice — once through the iterator that existed before this step, once through the walker behind
+> the merge's trait — and compared whole. 62 loci over four generic segments, a satellite, a gap,
+> a contig change and one analysed-but-empty stretch. **⚑ Spec §12's fourth oracle is not
+> literally true and that is the owner's to settle**: it asks that a segment walked alone emit
+> *exactly* what the same span emits inside a whole walk, and everything is equal but the chain
+> ids — the type's own documentation says "an id names a read within one walk", so no walk-scoped
+> id can satisfy "exactly". The test compares the grouping instead. **The same question is owed to
+> §12's first oracle**, byte-identical psps across worker counts, once chain ids reach a file.
+> **⛦ The review found the differential comparing the walker with itself** — the
+> segment-independence test drew both arms through the walker, so three mutations that mangled
+> every yielded observation passed it — **and walking the one segment where nothing is carried
+> over**, since the generator mints a fresh cursor at every contig change; the case with carried
+> state is a later segment on a contig already entered. Both fixed. 6 tests; `ng::run` at 349.
+>
+> - **Previously (2026-08-31):** **B1 of the run driver — one sample's alignment files
 > behind the cohort merge's source interface** (step B1 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_b1_2026-08-31.md)).

@@ -181,12 +181,28 @@ merge's trait: forward-only, one observation at a time, offering the spare recor
 One source per sample for the whole run — not one per worker, not one per segment.
 *Depends:* A1. *Source:* §3.4; [`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs).
 
-☐ **B2. One sample through the source equals one sample walked directly.** The observations a source
+✅ **B2. One sample through the source equals one sample walked directly.** The observations a source
 yields over the analysed ground are exactly those the iterator yields, in the same order. **Oracle:**
 the existing iterator, driven directly.
 *Depends:* B1. *Source:* §12 oracle 4.
 
-> **Checkpoint B:** a walker is indistinguishable from any other source. Pause for review.
+**⛦ §12's fourth oracle is not literally true, in one field, and that is the owner's to settle.**
+It asks that a segment walked alone emit *exactly* what the same span emits inside a whole walk.
+Measured on the real generator, everything is equal but the **chain ids**: the type's own
+documentation says "an id names a read within one walk", and the allocator counts up across a whole
+walk and survives the per-chromosome reset — so a read is id 0 walked alone and id 4 walked fourth.
+No implementation of a walk-scoped id can satisfy "exactly". B2 compares the **grouping** instead,
+which still catches a read split in two, two reads merged, or a locus that lost its witnesses.
+**The same question is owed to §12's first oracle**, byte-identical psps across worker counts,
+which inherits the problem once chain ids are written to a file.
+
+> **Checkpoint B: met 2026-08-31.** A walker is indistinguishable from any other source, proved
+> against the machinery that existed before it: the real generic generator over a real indexed BAM,
+> 62 loci across four generic segments, a satellite, a gap, a contig change and one analysed-but-
+> empty stretch, compared whole. A 21-mutation pass on B1 killed 20; a 14-mutation pass on B2
+> killed 13, six of them invisible to B1's tests. **Both survivors are the same one**: a walker
+> that stashed every offered record and never freed one, which nothing can pin while there is no
+> pool to count — recorded against G1. Pause for review.
 
 ### Milestone C — the merge, fed by walkers
 

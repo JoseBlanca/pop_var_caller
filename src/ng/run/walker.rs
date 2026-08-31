@@ -344,6 +344,16 @@ mod tests {
         }
     }
 
+    /// A segment no generator will take. **Refused permanently rather than as unbuilt**, and the
+    /// dispatcher decides that from the kind alone, whatever the slots hold — so it is the one
+    /// region kind a scripted fixture can use to fill the out-of-scope counter.
+    fn satellite_segment(contig: u32, start: u64, end: u64) -> TypedRegion {
+        TypedRegion {
+            kind: RegionKind::Satellite,
+            ..generic_segment(contig, start, end)
+        }
+    }
+
     /// What one segment does when the scripted generator reaches it.
     #[derive(Clone, Copy)]
     struct SegmentScript {
@@ -534,8 +544,12 @@ mod tests {
     }
 
     /// **The walk's tally is the generators' own**, so a run report reads one number rather
-    /// than counting again. Three segments in, three handled, five loci out — which the walk
-    /// above emits and nothing else here does.
+    /// than counting again. Four segments in, three handled, five loci out.
+    ///
+    /// **A satellite is in the fixture so the two kinds of nothing land in different counters.**
+    /// A region a generator looked at and found nothing in, and a region no generator would take,
+    /// are different facts, and with every region handled both refusal counters are zero — a
+    /// tally that booked one to the other would read as correct.
     #[test]
     fn the_walk_reports_the_counts_its_generators_kept() {
         let (_reference_dir, _bam_dir, reads) = reads_named("NA12878");
@@ -543,6 +557,7 @@ mod tests {
             stream(vec![
                 generic_segment(0, 10, 20),
                 generic_segment(0, 30, 40),
+                satellite_segment(0, 42, 44),
                 generic_segment(1, 50, 60),
             ]),
             reads,
@@ -551,9 +566,18 @@ mod tests {
         drain(&mut walker);
 
         let counts = walker.counts();
-        assert_eq!(counts.regions_in, 3);
-        assert_eq!(counts.regions_handled, 3);
+        assert_eq!(counts.regions_in, 4);
+        assert_eq!(counts.regions_handled, 3, "the three generic segments");
         assert_eq!(counts.loci_emitted, 5);
+        assert_eq!(
+            counts.unhandled_out_of_scope, 1,
+            "the satellite, which is refused permanently"
+        );
+        assert_eq!(
+            counts.unhandled_not_implemented, 0,
+            "nothing here is refused as merely unbuilt: the generic slot is filled and no \
+             segment asks for another"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -933,5 +957,435 @@ mod tests {
         assert!(rendered.contains("zeta"), "{rendered}");
         assert!(rendered.contains("After"), "{rendered}");
         assert!(!rendered.contains(".bam"), "{rendered}");
+    }
+}
+
+/// **A source yields exactly what the walk yields** — the observations-equal-the-walk oracle of
+/// `doc/devel/ng/spec/run_streaming.md` §12, built as step B2 of
+/// `doc/devel/ng/impl_plan/run_driver_direct_mode.md`.
+///
+/// The tests above prove the *adapter*: the ordering, how far the walk reached, the failure, the
+/// segment stream. They cannot prove the *walk*, because every one of them drives a scripted
+/// generator that never touches the reads it was handed. This module closes that: it runs the
+/// real generic locus generator over a real indexed BAM, twice — once through
+/// [`SampleLocusObservationsIterator`] directly, which is the machinery that existed before this
+/// step, and once through [`AlignmentFilesWalker`] behind the merge's trait — and compares the
+/// two, observation for observation.
+///
+/// **The oracle is the iterator, not another walker**, which is what makes this a differential
+/// rather than a self-check. If the two ever disagree, the walker has changed what a sample
+/// reports, and no test above would say so.
+#[cfg(test)]
+mod walking_the_real_generator {
+    use super::*;
+    use crate::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+    use crate::ng::locus_generation::{
+        GeneratorCounts, GeneratorSlot, LocusCounts, UnhandledReason,
+    };
+    use crate::ng::read::filtering::ReadFilterConfig;
+    use crate::ng::read::input::test_fixtures::{
+        fixture_reference, fixture_reference_bases, header, indexed_bam, matching_contigs,
+        read_named_with_length,
+    };
+    use crate::ng::read::left_align::LeftAlignPreparer;
+    use crate::ng::region_typing::RegionKind;
+    use crate::ng::types::{ContigId, GenomeRegion, Position};
+    use std::sync::Arc;
+
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::record_buf::Sequence;
+
+    /// A read of `bases` at `start`, so the walk has something other than the reference to
+    /// report.
+    ///
+    /// **The fixture reference is all `A`** ([`fixture_reference_bases`]), so a read that
+    /// carried its default sequence would agree with it everywhere. Giving a read `C`s puts
+    /// distinguishable evidence in the records the two walks are compared on: against an all-`A`
+    /// reference every one of the 62 loci would otherwise hold a single observation whose bases
+    /// equal the reference, and a defect that mangled `bases` or dropped an observation would be
+    /// invisible.
+    fn read_of(qname: &str, contig: usize, start: usize, bases: &[u8]) -> RecordBuf {
+        let mut record = read_named_with_length(qname, contig, start, bases.len());
+        *record.sequence_mut() = Sequence::from(bases.to_vec());
+        record
+    }
+
+    /// The reads both walks see: on `chr1` one that matches the reference everywhere and one
+    /// carrying a `C` at two positions, so a locus has both a matching and a non-matching
+    /// witness; on `chr2` one more, so a walk that stopped at the first contig change is visible.
+    ///
+    /// **Thirty bases each, because the shipped read filter drops anything shorter**
+    /// (`DEFAULT_MIN_READ_LENGTH`, 30). A fixture of ten-base reads reaches the generator as no
+    /// reads at all and every walk comes back empty. That is what the first draft did, and it is
+    /// why the locus count below is asserted rather than described.
+    fn the_fixture_reads() -> Vec<RecordBuf> {
+        vec![
+            read_of("chr1-ref", 0, 10, b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            read_of("chr1-alt", 0, 15, b"AACAAAAAAAAAAAAAAAAACAAAAAAAAA"),
+            read_of("chr2-alt", 1, 30, b"AAAAACAAAAAAAAAAAAAAAAAAAAAAAA"),
+        ]
+    }
+
+    /// The ground both walks cover: two generic stretches on `chr1` separated by a satellite that
+    /// no generator handles, a generic stretch on `chr2` — and one more on `chr2` that no read
+    /// reaches.
+    ///
+    /// A source that quietly widened a segment, or that handled a region the dispatcher refuses,
+    /// would emit loci the iterator does not, and with one uninterrupted segment neither could be
+    /// seen. **The last segment is analysed and empty**, which is a different state from
+    /// unanalysed and the only one of the five that a filled generator looks at and finds nothing
+    /// in.
+    fn the_fixture_segments() -> Vec<TypedRegion> {
+        vec![
+            segment(RegionKind::Generic, 0, 5, 25),
+            segment(RegionKind::Satellite, 0, 26, 28),
+            segment(RegionKind::Generic, 0, 29, 50),
+            segment(RegionKind::Generic, 1, 25, 65),
+            segment(RegionKind::Generic, 1, 100, 120),
+        ]
+    }
+
+    fn segment(kind: RegionKind, contig: u32, start: u64, end: u64) -> TypedRegion {
+        TypedRegion {
+            region: GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(start),
+                end: Position(end),
+            },
+            kind,
+        }
+    }
+
+    /// One sample opened over the fixture reads, and a generator set with the **real** generic
+    /// generator in it.
+    ///
+    /// Built fresh on each call because neither piece can be shared: `SampleReads` is not
+    /// `Clone` — deliberately — and a generator carries the state of the walk it has done. So
+    /// each arm writes and opens its own copy of the same three records.
+    fn a_sample_and_its_generators() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        SampleReads,
+        GeneratorSet,
+    ) {
+        let (reference_dir, reference) = fixture_reference(false);
+        let (bam_dir, bam) = indexed_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some("NA12878"))],
+            ),
+            &the_fixture_reads(),
+        );
+        let reads =
+            SampleReads::open_only_sample(&[bam], &reference, ReadFilterConfig::default(), false)
+                .expect("the fixture sample opens");
+
+        let preparer = LeftAlignPreparer::with_default_normalizer(fixture_reference_bases());
+        // **No `arc_with_non_send_sync` waiver here, unlike the probes that build a generator
+        // over a file-backed accessor.** `InMemoryRefSeq` holds bases in memory and is `Send +
+        // Sync`, so the `Arc` this generator's constructor asks for is an ordinary one and the
+        // lint does not fire. A waiver copied from those probes is refused as unfulfilled.
+        let shared = Arc::new(fixture_reference_bases());
+        let generator = PileupGenerator::new(
+            shared,
+            fixture_reference_bases,
+            preparer,
+            PileupGeneratorConfig::default(),
+        )
+        .expect("the generic generator builds against the fixture reference");
+        let generators = GeneratorSet::new(
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+            GeneratorSlot::Generator(Box::new(generator)),
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        );
+        (reference_dir, bam_dir, reads, generators)
+    }
+
+    /// The walk as it existed before this step: the iterator, driven directly.
+    fn walked_directly() -> (Vec<SampleLocusObservations>, LocusCounts) {
+        let (_reference_dir, _bam_dir, reads, generators) = a_sample_and_its_generators();
+        let mut iterator = SampleLocusObservationsIterator::new(
+            the_fixture_segments().into_iter().map(Ok::<_, Infallible>),
+            reads,
+            generators,
+        );
+        let observations: Vec<_> = (&mut iterator)
+            .collect::<Result<_, _>>()
+            .expect("the fixture walk succeeds");
+        let counts = iterator.counts().clone();
+        (observations, counts)
+    }
+
+    /// The same ground through the merge's interface. `spare` is what the merge offers back on
+    /// every draw, so both the no-reuse and the reuse-offered cases go through one function.
+    fn drawn_through_the_source(
+        spare: impl Fn() -> Option<SampleLocusObservations>,
+    ) -> (Vec<SampleLocusObservations>, LocusCounts) {
+        let (_reference_dir, _bam_dir, reads, generators) = a_sample_and_its_generators();
+        let mut walker = AlignmentFilesWalker::new(
+            the_fixture_segments().into_iter().map(Ok::<_, Infallible>),
+            reads,
+            generators,
+        );
+        let mut observations = Vec::new();
+        for _ in 0..A_WALK_THAT_IS_REPEATING {
+            let Some(next) = walker.next_observation(spare()) else {
+                break;
+            };
+            observations.push(next.expect("the fixture walk succeeds"));
+        }
+        assert!(
+            observations.len() < A_WALK_THAT_IS_REPEATING,
+            "this walk is repeating itself rather than ending"
+        );
+        let counts = walker.counts().clone();
+        (observations, counts)
+    }
+
+    /// This module's own bound, and a different number from the sibling module's because the
+    /// fixtures are: a scripted generator emits a handful of loci where this one emits 62. What
+    /// the bound is for is the same — a walk that reaches this many draws is not walking, it is
+    /// repeating, and an unbounded loop reports that as a killed test binary rather than as a
+    /// named failure.
+    const A_WALK_THAT_IS_REPEATING: usize = 1_000;
+
+    /// **The observations a source yields are exactly the observations the walk yields, in the
+    /// same order.**
+    ///
+    /// Compared whole — region, reference bases, every sequence observation and its support, the
+    /// reads that witnessed nothing, the reads a cap discarded, and the locus kind — because
+    /// `SampleLocusObservations` is `PartialEq` and anything less would let a dropped field
+    /// through.
+    #[test]
+    fn a_source_yields_exactly_what_the_walk_yields() {
+        let (walked, _) = walked_directly();
+        let (drawn, _) = drawn_through_the_source(|| None);
+
+        // **What the fixture actually covers, asserted rather than described.** Its first draft
+        // used ten-base reads, which the shipped filter drops, so every walk came back empty and
+        // every comparison below passed on two empty vectors. An asserted count is what says so.
+        //
+        // 62 is the covered positions of the generic segments, and the regions are 1-based and
+        // inclusive: `chr1` 5–25 sees the two reads that start at 10 and 15, so positions 10–25,
+        // sixteen; `chr1` 29–50 sees them out to where they end at 39 and 44, positions 29–44,
+        // sixteen again; `chr2` 25–65 sees one read over 30–59, thirty. The satellite and the
+        // read-free `chr2` segment contribute none.
+        assert_eq!(
+            walked.len(),
+            62,
+            "the covered positions of the generic segments"
+        );
+        // `non_reference_reads` rather than an open-coded comparison: it is the one place the
+        // crate writes that test, and it counts only the observations that witnessed the whole
+        // locus, which a partial run's shorter bases would otherwise fail against.
+        let carrying_a_non_reference_base = walked
+            .iter()
+            .filter(|locus| locus.non_reference_reads() > 0)
+            .count();
+        assert_eq!(
+            carrying_a_non_reference_base, 3,
+            "the three `C`s the fixture reads carry against an all-`A` reference — without them \
+             all 62 loci hold one reference-matching observation and the comparison below cannot \
+             see a mangled or dropped one"
+        );
+
+        assert_eq!(drawn, walked);
+    }
+
+    /// **The two walks report the same tallies, not just the same observations.** The
+    /// observations could match while the tallies diverged — a region accounted to the wrong
+    /// counter emits nothing either way — and the run report reads the tallies.
+    #[test]
+    fn a_source_and_the_walk_account_for_the_same_regions() {
+        let (_, walked) = walked_directly();
+        let (_, drawn) = drawn_through_the_source(|| None);
+
+        assert_eq!(drawn, walked);
+        assert_eq!(walked.regions_in, 5, "the fixture's five segments");
+        assert_eq!(
+            walked.unhandled_out_of_scope, 1,
+            "the satellite — and out of scope because `begin_region` routes that kind there \
+             whatever the slots hold, not because a slot was left unfilled"
+        );
+        assert_eq!(
+            walked.regions_handled, 4,
+            "the four generic segments, the read-free one included: a region a filled generator \
+             looked at and found nothing in is handled, not unhandled"
+        );
+    }
+
+    /// One segment walked alone against the same span inside the whole walk — the
+    /// segment-independence oracle of `doc/devel/ng/spec/run_streaming.md` §12, compared on
+    /// everything but the chain-id numbering (see [`with_chain_ids_renumbered`]).
+    ///
+    /// **A segment is reached in one of two states, and they are not the same test.** On a
+    /// contig the walk has just entered, nothing is carried: the generic generator mints a
+    /// cursor, a reference window and a per-chromosome walker afresh at every contig change. On
+    /// a contig it is already inside, the cursor has advanced past the earlier segments and the
+    /// reference window has released the bases behind it. Both are checked below.
+    ///
+    /// If either differed, what a sample reports would depend on what ground was walked before
+    /// it, and the failure is a stretch of genome missing from the output rather than a crash.
+    /// **This is not the thirds-chopping failure spec §4.3 records** — that one cut a segment 74
+    /// bases inside a 91-base deletion and lost the bases past the cut. Nothing here cuts a
+    /// segment.
+    fn walked_alone_matches_the_whole_walk(alone: TypedRegion, expected_loci: usize) {
+        // **The whole-walk arm is the iterator's, not another walker's**, so this stays a
+        // differential rather than becoming a walker compared with itself. Measured: with both
+        // arms drawn through the source, three defects that mangled every yielded observation —
+        // cleared chain ids, zeroed support counts, blanked reference bases — passed this test
+        // while failing the one above it, because the same defect was applied to both sides.
+        let (whole_walk, _) = walked_directly();
+        let inside_the_whole_walk: Vec<_> = whole_walk
+            .into_iter()
+            .filter(|locus| {
+                locus.region.contig == alone.region.contig
+                    && locus.region.start >= alone.region.start
+                    && locus.region.end <= alone.region.end
+            })
+            .collect();
+
+        let (_reference_dir, _bam_dir, reads, generators) = a_sample_and_its_generators();
+        let mut walker = AlignmentFilesWalker::new(
+            vec![alone].into_iter().map(Ok::<_, Infallible>),
+            reads,
+            generators,
+        );
+        let mut walked_alone = Vec::new();
+        while let Some(next) = walker.next_observation(None) {
+            walked_alone.push(next.expect("the fixture walk succeeds"));
+            assert!(
+                walked_alone.len() < A_WALK_THAT_IS_REPEATING,
+                "this walk is repeating itself rather than ending"
+            );
+        }
+
+        assert_eq!(walked_alone.len(), expected_loci);
+        assert_eq!(
+            with_chain_ids_renumbered(walked_alone),
+            with_chain_ids_renumbered(inside_the_whole_walk),
+        );
+    }
+
+    /// **A segment on a contig the walk has just entered**: `chr2` 25–65, which is reached
+    /// fourth inside the whole walk and first when walked alone. Since the generator enters a
+    /// contig fresh either way, what this pins is that arriving fourth changes nothing.
+    #[test]
+    fn a_first_segment_on_a_contig_emits_the_same_loci_alone_and_in_the_whole_walk() {
+        walked_alone_matches_the_whole_walk(segment(RegionKind::Generic, 1, 25, 65), 30);
+    }
+
+    /// **A segment behind earlier ones on the same contig**: `chr1` 29–50. Inside the whole walk
+    /// the cursor has already crossed 5–25 and a satellite, the reference window has released
+    /// the bases behind it, and both reads are being met for the second time. **This is where
+    /// carried state could change what is emitted**, and the first case cannot see it.
+    #[test]
+    fn a_later_segment_on_a_walked_contig_emits_the_same_loci_alone_and_in_the_whole_walk() {
+        walked_alone_matches_the_whole_walk(segment(RegionKind::Generic, 0, 29, 50), 16);
+    }
+
+    /// The same observations with every chain id replaced by the order in which it first
+    /// appears — so two walks are compared on **which reads were grouped together**, not on
+    /// what those reads were called.
+    ///
+    /// **Chain ids are walk-relative and the type says so**: "an id names a read within one
+    /// walk" ([`SequenceObservation::chain_ids`](crate::ng::locus_generation::SequenceObservation)).
+    /// The `chr2` read is id 0 when its segment is walked alone and id 4 when two `chr1`
+    /// segments and a satellite came first, because the allocator counts up across a whole walk.
+    /// Comparing the raw numbers would therefore fail on a property nobody claims, while
+    /// comparing the grouping still catches what matters — a read split into two, two reads
+    /// merged into one, or a locus that lost its witnesses.
+    ///
+    /// **This is the one field of spec §12's fourth oracle that is not literally equal.** The
+    /// oracle says a segment walked alone emits *exactly* what it emits inside a whole walk;
+    /// measured, everything is equal but this, and this cannot be, by the design of the
+    /// allocator. Recorded, not worked around.
+    fn with_chain_ids_renumbered(
+        mut loci: Vec<SampleLocusObservations>,
+    ) -> Vec<SampleLocusObservations> {
+        let mut first_seen: Vec<u64> = Vec::new();
+        for locus in &mut loci {
+            for observed in &mut locus.observations {
+                for id in &mut observed.chain_ids {
+                    let rank = first_seen
+                        .iter()
+                        .position(|seen| seen == id)
+                        .unwrap_or_else(|| {
+                            first_seen.push(*id);
+                            first_seen.len() - 1
+                        });
+                    *id = rank as u64;
+                }
+            }
+        }
+        loci
+    }
+
+    /// **The spare the merge offers back does not reach the output.**
+    ///
+    /// Today the walker drops it, so this restates the sibling module's scripted check over the
+    /// real generator. It becomes load-bearing at the step that refills the record, where one
+    /// stale field carried from a reused record would show up here — against 62 real
+    /// observations — and nowhere else.
+    #[test]
+    fn offering_a_spare_does_not_change_what_a_source_yields() {
+        let (walked, _) = walked_directly();
+        let (drawn, _) = drawn_through_the_source(|| {
+            Some(SampleLocusObservations {
+                region: GenomeRegion {
+                    contig: ContigId(1),
+                    start: Position(199),
+                    end: Position(200),
+                },
+                reference_bases: Box::from(&b"CG"[..]),
+                observations: Vec::new(),
+                reads_without_observation: 7,
+                reads_discarded_by_cap: 7,
+                kind: crate::ng::locus_generation::LocusKind::Generic,
+            })
+        });
+
+        // **Its own guard, not one inherited from a sibling test.** Comparing two empty vectors
+        // passes, so a fixture that stopped producing anything would leave this green while
+        // proving nothing.
+        assert_eq!(walked.len(), 62, "the fixture still produces its loci");
+        assert_eq!(drawn, walked);
+    }
+
+    /// **The generators are reachable through the walker**, so the per-generator counters
+    /// [`AlignmentFilesWalker::counts`] does not carry still have a reader once a run owns its
+    /// walkers.
+    ///
+    /// Asserted on a **running, non-zero** count read back through the walker: an accessor wired
+    /// to a fresh set, or to a set nothing drove, passes an `is_some` and fails this.
+    ///
+    /// **Five admissions from three reads, and the difference is the point of the number.**
+    /// `reads_admitted` counts admissions, not distinct reads: a read is admitted once per
+    /// segment it is met in, and the two `chr1` reads span both `chr1` segments. Asserting three
+    /// would be asserting a count this field does not keep.
+    #[test]
+    fn the_generators_counts_are_reachable_through_the_walker() {
+        let (_reference_dir, _bam_dir, reads, generators) = a_sample_and_its_generators();
+        let mut walker = AlignmentFilesWalker::new(
+            the_fixture_segments().into_iter().map(Ok::<_, Infallible>),
+            reads,
+            generators,
+        );
+        while let Some(next) = walker.next_observation(None) {
+            next.expect("the fixture walk succeeds");
+        }
+
+        let Some(GeneratorCounts::Pileup(counts)) = walker.generators().generic_counts() else {
+            panic!("the generic slot is filled, so its counts must be reachable");
+        };
+        assert_eq!(
+            counts.reads_admitted, 5,
+            "the `chr2` read once, and each `chr1` read once per `chr1` segment"
+        );
+        assert!(
+            walker.generators().ssr_counts().is_none(),
+            "an unfilled slot counts nothing"
+        );
     }
 }

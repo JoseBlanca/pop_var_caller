@@ -873,7 +873,25 @@ Unit tests beside each file; the run-level oracles are spec §12 and belong in `
   when that field alone is mutated.
 - `walker.rs`: the observations a walker yields equal those the iterator yields driven directly,
   position for position — the merge's own fixtures cannot check this, because they are the
-  in-memory sources.
+  in-memory sources. **Built 2026-08-31**, over the real generic generator and a real indexed BAM,
+  and it carries **two things this document did not anticipate**.
+
+  **The segment-independence oracle landed here rather than in `tests/`**, against the rule above.
+  It is about one sample's walk, which is what this file owns, and an integration test would need
+  the same three-read BAM to say the same thing. Recorded rather than quietly done; move it if the
+  rule is meant to hold without exception.
+
+  **And that oracle is not literally true, in one field.** Spec §12 asks that a segment walked
+  alone emit *exactly* what the same span emits inside a whole walk. Measured, everything is equal
+  but the **chain ids**: `SequenceObservation::chain_ids` says in its own documentation that "an id
+  names a read within one walk", and the allocator counts up across a whole walk and survives the
+  per-chromosome reset — so the `chr2` read is id 0 walked alone and id 4 walked fourth. No
+  implementation of a walk-scoped id can satisfy "exactly". The test compares the **grouping** —
+  every id replaced by the order of its first appearance — which still catches a read split in
+  two, two reads merged, or a locus that lost its witnesses. **The spec sentence is the owner's to
+  amend**, and the same question is owed to spec §12's first oracle, which asks for byte-identical
+  psps across worker counts and would inherit the same problem once chain ids are written to a
+  file.
 - `callers.rs`: each construction refusal fires on its own, on a fixture that trips that one and no
   other; a cohort of the same loci called at one caller in flight and at sixteen yields the same
   records in the same order.
