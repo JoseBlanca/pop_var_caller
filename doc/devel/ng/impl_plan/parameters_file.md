@@ -321,11 +321,18 @@ finding. *A `defaulted` base-quality multiplier is the compiled-in constant and 
 rule the outlier weight and the fallback concentration both carry — **refused a file this caller had
 just written**. On those two, `defaulted` means the run took *that* number, so the warrant fixes the
 value; on a multiplier it is copied from the **error rate** the multiplier was built from, and the
-pre-pass's rate ladder has a `Defaulted` bottom rung of its own. Measured: two libraries averaging
-0.008 and 0.004 write `defaulted` beside 0.125 and 0.25.
+pre-pass's rate ladder has a `Defaulted` bottom rung of its own.
 [`a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`](../../../../src/ng/calling/parameters_file/from_run_parameters.rs)
-stops it coming back. **Spec §5's third row says the opposite and is the owner's to correct** —
-recorded in `PROJECT_STATUS.md`.
+stops it coming back.
+
+**Ruled by the owner, 2026-08-31: that is the intended behaviour, and spec §5's third row is the
+sentence to correct.** A library's real error rate is never its reported sequencing quality — the
+quality scores describe base calling, and the reads also carry mismapping, chimeras and damage — so
+a read group nothing could be fitted for is charged a stated rate rather than taken at its word, and
+on a real library that is the conservative direction: at HG002's measured mean minted error of
+2.9055 × 10⁻⁴ the multiplier is 3.44, 5.4 Phred less confident than the instrument claimed. The
+0.001 is a placeholder and is to be fitted from GIAB, like §8's slippage numbers. Recorded in
+`PROJECT_STATUS.md`; the spec is untouched.
 *Depends:* C4. *Source:* §8.
 
 ☐ **E2. A run with no fit and no supplied file assembles `RunParameters` from the defaults.**

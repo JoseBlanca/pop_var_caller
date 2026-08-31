@@ -70,8 +70,8 @@ sites of its own, no sibling above that floor to borrow from and nothing supplie
 run writes a `defaulted` multiplier of `0.001 / that library's mean minted error`, which is one only
 by coincidence.
 
-**Measured**, on the fixture the regression test now carries: two libraries whose reads averaged an
-error of 0.008 and 0.004 give multipliers of **0.125 and 0.25**.
+**Measured**, on the fixture the regression test now carries: two libraries reporting a mean error
+of 2.5 × 10⁻⁴ and 5 × 10⁻⁴ give multipliers of **4.0 and 2.0**.
 
 **The reach is the corner `CLAUDE.md` names as the hardest.** `MIN_SITES_TO_FIT` is 10,000 *sites*,
 so the ordinary way in is a run over one gene, a panel, a small contig, or a shallow single sample
@@ -81,12 +81,25 @@ parameters file becoming unreadable, so the run cannot be re-used or fed back in
 `a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts` is what stops the rung
 coming back, and `validate`'s comment says at length why it is absent.
 
-**⚑ It leaves a divergence that is the owner's.** Spec §5's third row says a read group whose rate
-could not be fitted gets *"scale 1.0, warrant `Defaulted`"*, and the tree charges it the pre-pass's
-stated 0.001 instead. Making the spec true would mean `from_fitted_rate` refusing a `Defaulted` rate
-the way it already refuses a zero one — a change to what an unfittable library's reads are scored
-under, which is a decision rather than a coding choice. Recorded in `PROJECT_STATUS.md`; the spec is
-untouched.
+**⚑ It leaves a divergence, and the owner ruled it on 2026-08-31: the code stays and spec §5's third
+row is the sentence to correct.** §5 says a read group whose rate could not be fitted gets *"scale
+1.0, warrant `Defaulted`"* — take its reads at the quality they claim. It should not: **a library's
+real error rate is never its reported sequencing quality**, because the quality scores describe base
+calling and the reads also carry mismapping, chimeras and damage. So a library nothing could be
+fitted for is charged a stated rate rather than taken at its word, and on a real library that is the
+conservative direction — at HG002's measured mean minted error of 2.9055 × 10⁻⁴
+([`read_likelihoods.md`](../../ng/spec/read_likelihoods.md) §3.2) the multiplier is **3.44**, so
+every read is charged 3.4 times worse than it claimed, 5.4 Phred less confident. `DEFAULT_ERROR_RATE`
+at 0.001 is a placeholder and is to be fitted from GIAB, like §8's slippage numbers.
+
+**⚑ The direction was reported backwards before the ruling, and the fixture is why.** The first
+draft of the regression test used libraries reporting 0.008 and 0.004 — chosen to make the two
+multipliers distinct, not to be realistic; 0.008 is Q21, which no library in this project is
+anywhere near. Those gave multipliers *below* one, so the report and the chat summary said a
+defaulted rate makes reads **more** confident, which is true of that fixture and false of any real
+library. The fixture now reports 2.5 × 10⁻⁴ and 5 × 10⁻⁴, either side of HG002's measured value, and
+the test asserts both multipliers are above one — so the fixture cannot be read the wrong way round
+again.
 
 ## 4. What was absorbed beyond the step's own brief
 

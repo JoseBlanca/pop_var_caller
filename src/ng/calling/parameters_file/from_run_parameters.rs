@@ -2089,18 +2089,23 @@ mod tests {
     /// a multiplier of 0.001 over that library's own average. That is the low-data corner
     /// `CLAUDE.md` commits this caller to: one gene, a panel, a shallow single sample.
     ///
+    /// **Ruled intended by the owner, 2026-08-31**, and the fixture's two libraries are chosen to
+    /// show the direction that makes it so. A library's real error rate is never its reported
+    /// sequencing quality — the quality scores describe base calling, and the reads also carry
+    /// mismapping, chimeras and damage — so a read group the fit could not measure is charged a
+    /// stated rate rather than taken at its word. **On any real library that is the conservative
+    /// direction**: the two here report 2.5 × 10⁻⁴ and 5 × 10⁻⁴, either side of HG002's measured
+    /// 2.9055 × 10⁻⁴ (`read_likelihoods.md` §3.2), and get multipliers of 4.0 and 2.0 — every read
+    /// charged four times and twice worse than it claimed. **An earlier fixture reported 0.008,
+    /// which is Q21 and unlike any library in this project**, and so showed the multiplier below
+    /// one and the reads made *more* confident. Spec §5's third row says such a read group gets
+    /// "scale 1.0" and is the sentence to correct.
+    ///
     /// **What this guards.** Step E1 added a rung to `validate` reading *a `defaulted` multiplier
     /// is [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::ng::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)
     /// and nothing else*, on the model of the outlier weight's and the fallback concentration's,
     /// and it **refused the file this test's run writes**. The rung is gone and this is what stops
     /// it coming back.
-    ///
-    /// **It also pins a divergence the owner has to settle.** Spec §5's third row says a read
-    /// group whose rate could not be fitted gets "scale 1.0, warrant `Defaulted`". The tree
-    /// charges it the stated 0.001 instead, which is a different claim about what an unfittable
-    /// library's reads are worth. If that is changed — `from_fitted_rate` refusing a `Defaulted`
-    /// rate as it already refuses a zero one — this test is what says so, because the two
-    /// multipliers below become 1.0.
     #[test]
     fn a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts() {
         let read_groups =
@@ -2118,11 +2123,12 @@ mod tests {
                 a_fitted_rate(defaulted_rate, Provenance::Defaulted, 0),
             ),
         ]);
-        // Two libraries whose reads averaged different qualities, so the two multipliers differ
-        // and neither is one.
+        // Two libraries at real reported qualities — about Q36 and Q33, either side of HG002's
+        // measured 2.9055e-4 — so the two multipliers differ, both are above one, and the
+        // fixture cannot be read as saying a defaulted rate makes reads cleaner.
         let totals = BTreeMap::from([
-            (ReadGroupId(0), a_read_groups_minted_totals(0.008, 1_000)),
-            (ReadGroupId(1), a_read_groups_minted_totals(0.004, 1_000)),
+            (ReadGroupId(0), a_read_groups_minted_totals(2.5e-4, 1_000)),
+            (ReadGroupId(1), a_read_groups_minted_totals(5e-4, 1_000)),
         ]);
         let coefficients = vec![
             an_inbreeding_estimate(0.42, Provenance::FittedHere, 180_600_412),
@@ -2156,17 +2162,31 @@ mod tests {
                 "the rate's warrant travels onto the multiplier built from it"
             );
         }
-        // 0.001 over reads averaging 0.008 and over reads averaging 0.004 — measured rather than
-        // recalled, and both a long way from one.
+        // 0.001 over reads reporting 2.5e-4 and 5e-4 — and **above one on both**, which is the
+        // half of this that says the ruling is the safe direction rather than merely a decision.
         let multipliers: Vec<f64> = file
             .base_quality_calibration
             .by_read_group
             .iter()
             .map(|row| row.error_probability_multiplier.value)
             .collect();
+        // **Compared relatively, against the accumulator's own quantum.** `MintedReadErrors` sums
+        // the per-read log error in fixed point in units of 2⁻²⁰ nats, and its documentation
+        // bounds the resulting relative miss on the mean at 2⁻²¹ ≈ 4.8 × 10⁻⁷; measured here the
+        // multipliers come back 3.9999999984 and 1.9999999992, four parts in ten thousand million.
+        // An absolute 1e-9 tolerance rejects them, which is a test asserting the fixed point
+        // rather than the calibration.
+        for (multiplier, expected) in multipliers.iter().zip([4.0, 2.0]) {
+            assert!(
+                (multiplier - expected).abs() / expected < 1e-6,
+                "a defaulted rate over a library's own minted mean, which is not one: \
+                 {multipliers:?}"
+            );
+        }
         assert!(
-            (multipliers[0] - 0.125).abs() < 1e-9 && (multipliers[1] - 0.25).abs() < 1e-9,
-            "a defaulted rate over a library's own minted mean, which is not one: {multipliers:?}"
+            multipliers.iter().all(|multiplier| *multiplier > 1.0),
+            "a library reporting better than the stated rate is charged worse than it claimed, \
+             not better: {multipliers:?}"
         );
 
         file.validate()

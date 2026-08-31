@@ -488,15 +488,16 @@ impl ParametersFile {
             // of `0.001 / that library's mean minted error`, which is one only by coincidence.
             // Measured, in `from_run_parameters`'s
             // `a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`: two
-            // libraries whose reads averaged an error of 0.008 and 0.004 write 0.125 and 0.25.
+            // libraries whose reads averaged an error of 2.5e-4 and 5e-4 write 4.0 and 2.0.
             //
-            // **Whether that is what a run should do is the owner's, not this file's.** Spec §5's
-            // third row says a read group whose rate could not be fitted gets *"scale 1.0,
-            // warrant `Defaulted`"*, and the tree charges it the stated 0.001 instead. Making the
-            // spec true would mean `from_fitted_rate` refusing a `Defaulted` rate the way it
-            // already refuses a zero one, which changes what an unfittable library's reads are
-            // scored under — the low-data corner `CLAUDE.md` commits the caller to. Recorded in
-            // `PROJECT_STATUS.md`.
+            // **RULED (owner, 2026-08-31): that is what a run should do, and spec §5's third row
+            // is the sentence to correct.** §5 says such a read group gets *"scale 1.0, warrant
+            // `Defaulted`"* — take its reads at the quality they claim. It should not: a library's
+            // real error rate is never its reported sequencing quality, because the qualities
+            // describe base calling while the reads also carry mismapping, chimeras and damage. So
+            // a read group the fit could not measure is charged a stated rate rather than taken at
+            // its word, and the multiplier is above one on any real library. Recorded in
+            // `PROJECT_STATUS.md`; the spec is untouched.
         }
         Ok(())
     }

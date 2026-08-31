@@ -233,11 +233,26 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// value the two spellings can come to disagree about.
 ///
 /// **⚑ Unlike the other two, a `defaulted` multiplier in the file is not held to this number, and
-/// cannot be.** [`Self::defaulted`] is not the only way to a `Provenance::Defaulted` calibration:
-/// [`Self::from_fitted_rate`] copies the *rate's* warrant onto a ratio, and the pre-pass's
-/// error-rate ladder has a defaulted bottom rung of its own, so a legitimate run writes a
-/// `defaulted` multiplier that is not one. `parameters_file::validate` carries the argument, and
-/// spec §5's third row says otherwise and is the owner's to correct.
+/// cannot be.** [`ReadGroupCalibration::defaulted`] is not the only way to a
+/// `Provenance::Defaulted` calibration:
+/// [`ReadGroupCalibration::from_fitted_rate`] copies the *rate's* warrant onto a ratio, and the
+/// pre-pass's
+/// error-rate ladder has a defaulted bottom rung of its own —
+/// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE) — so a
+/// read group the fit could not measure gets a multiplier of `0.001 / its own mean minted error`,
+/// which is one only by coincidence. `parameters_file::validate` carries the argument for why no
+/// rule can be written there.
+///
+/// **That is the intended behaviour and not a gap — owner's ruling, 2026-08-31.** A library's real
+/// error rate is never its reported sequencing quality, because the instrument's quality scores
+/// describe base calling and the reads also carry mismapping, chimeras and damage. So a read group
+/// the fit could not measure should be charged a *stated rate* rather than taken at its word, and
+/// this constant is what a rate-less run falls back to only where there is no rate at all. Measured
+/// on the project's most characterised library: HG002's mean minted error is 2.9055 × 10⁻⁴
+/// (`read_likelihoods.md` §3.2), so the stated 0.001 gives a multiplier of **3.44** — every read
+/// charged 3.4 times worse than it claimed, 5.4 Phred more conservative, which is the safe
+/// direction. **Spec §5's third row says such a read group gets "scale 1.0" and is the sentence to
+/// correct**; `DEFAULT_ERROR_RATE` itself is a placeholder until it is fitted from GIAB.
 ///
 /// **A fitted multiplier of exactly one is a different claim and stays expressible**, which is
 /// why the warrant travels beside the value rather than being inferred from it

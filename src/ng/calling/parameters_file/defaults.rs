@@ -56,8 +56,16 @@
 //!   supplied — so a run can legitimately write a `defaulted` multiplier of `0.001 / that
 //!   library's mean minted error`, which is one only by coincidence. **So the file's reader cannot
 //!   hold this key to its constant the way it holds the other two**, and `validate` says at length
-//!   why not. Spec §5's third row asserts the opposite ("scale 1.0, warrant `Defaulted`") and the
-//!   tree does not do it; the divergence is recorded in `PROJECT_STATUS.md` and is the owner's.
+//!   why not.
+//!
+//!   **And that is deliberate — owner's ruling, 2026-08-31.** A library's real error rate is never
+//!   its reported sequencing quality: the quality scores describe base calling, and the reads also
+//!   carry mismapping, chimeras and damage. So a read group the fit could not measure is charged a
+//!   stated rate rather than taken at its word, and on any real library that pushes the reads the
+//!   *conservative* way — on HG002's mean minted error of 2.9055 × 10⁻⁴ the multiplier is 3.44,
+//!   5.4 Phred less confident than the instrument claimed. Spec §5's third row says such a read
+//!   group gets "scale 1.0" and is the sentence to correct; `DEFAULT_ERROR_RATE` is itself a
+//!   placeholder until it is fitted from GIAB. Recorded in `PROJECT_STATUS.md`.
 //! - **The outlier weight is another caller's number**, inherited from the existing caller at 0.01
 //!   and never measured here (§3.8). It is the share of a repeat tract's reads the model expects to
 //!   have come from somewhere it cannot explain — a chimera, a paralogous tract, a mismapped read.
