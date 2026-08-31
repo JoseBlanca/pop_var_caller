@@ -1320,6 +1320,7 @@ dependencies = [
  "parquet",
  "proptest",
  "rayon",
+ "rustix",
  "serde",
  "serde_json",
  "serial_test",

@@ -19,7 +19,24 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-31):** **the object a direct-mode run is** — step A1 of
+> - **Last completed task (2026-08-31):** **Milestone A of the run driver — the object a
+> direct-mode run is, constructed and checked** (steps A1 and A2 of
+> [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md)), at Checkpoint A.
+> **⛦ A2 found two of its three planned checks already answered elsewhere.** The sample-name
+> match cannot be done at the caller at all — the assembled parameters carry no names, and a
+> supplied file's names are matched at that file's own door — so what is left is an arity check.
+> And the contig agreement is the open gate's, which compares names, lengths, order **and the
+> checksums whenever the reference carries them**; what A2 adds covers the one case it cannot, a
+> reference read from a `.fai`, whose checksums exist only once the background FASTA read has
+> finished. **⚑ Two things wait on the owner**: whether to keep the empty-cohort refusal, and the
+> descriptor-per-file count, which follows spec §7.1a and over-estimates this reader by about
+> twofold. **⛦ And A2's own review found a gap in its remit**: nothing checked that the repeat
+> catalog was built on the run's reference, and the catalog's own check is blind on the `.fai`
+> path — so a catalog from another build of the same assembly would have routed every repeat
+> tract to the wrong position, genome-wide, silently. Refused now. 40 tests across the two files;
+> `ng::run` at 329 passing.
+>
+> - **Previously (2026-08-31):** **the object a direct-mode run is** — step A1 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md). Every sample's
 > alignment files open at once, the ground to analyse, the numbers to call with; no iteration
 > yet. **The architecture document had to be amended before any code could be written**: it
@@ -2261,17 +2278,41 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Direct mode — alignment files to called loci, in one process
-- **Status:** **A1 shipped; A2 next, then Checkpoint A.** The object a direct-mode run *is* —
-  every sample's alignment files open at once, the ground to analyse, the numbers to call with —
-  constructed and inert. No iteration: no merge is driven, no locus called, no record written.
+- **Status:** **A1 and A2 shipped — Milestone A complete, at Checkpoint A.** The object a
+  direct-mode run *is* — every sample's alignment files open at once, the ground to analyse, the
+  numbers to call with — constructed, checked, and inert. No iteration: no merge is driven, no
+  locus called, no record written.
 - **Plan:** [run_driver_direct_mode.md](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
   **Spec:** [run_streaming.md](doc/devel/ng/spec/run_streaming.md) §5.1;
   **Arch:** [run_streaming.md](doc/devel/ng/arch/run_streaming.md) §1, §3.4, §5.
 - **Code:** [src/ng/run/segments.rs](src/ng/run/segments.rs) (`Segmentation`,
   `SegmentationInputs`), [src/ng/run/callers.rs](src/ng/run/callers.rs)
   (`AlignmentInputs`, `MergeParameters`, `AlignedFilesVariantCaller`),
-  [src/ng/run/mod.rs](src/ng/run/mod.rs) (`RunError`). 19 tests; `ng::run` at 308 passing.
-- **Impl report:** [A1](doc/devel/reports/implementations/ng_run_driver_a1_2026-08-31.md).
+  [src/ng/run/mod.rs](src/ng/run/mod.rs) (`RunError`, eight refusals — six of them direct
+  mode's and built). 40 tests across the two files; `ng::run` at 329 passing.
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_run_driver_a1_2026-08-31.md),
+  [A2](doc/devel/reports/implementations/ng_run_driver_a2_2026-08-31.md).
+- **A2 — six construction refusals:** a cohort of no alignment files; parameters assembled
+  for another cohort (an arity check); the file-descriptor headroom, counted over *files*; the
+  run's two views of its own reference agreeing; **the repeat catalog having been built on this
+  run's reference**; and each sample's contig checksums against the reference's.
+- **⚑ The catalog check came out of A2's own review and is the most consequential of the six.**
+  The catalog's own open compares digests only when the reference carries them, and a reference
+  read from a `.fai` — the ordinary path — carries none until its background FASTA read finishes,
+  which nothing waits for. So a catalog built on another build of the same assembly is admitted
+  on contig names, lengths and order, and every repeat tract's coordinates are then applied at
+  the wrong positions genome-wide with nothing to notice. Both values needed to catch it are in
+  hand at construction. **Two of the three
+  checks the step was planned around turned out to be answered elsewhere.** The sample-name match
+  cannot be done here at all — `RunParameters` carries no names, and a supplied file's names are
+  matched at that file's own door — so what is left is the arity. And the contig agreement is the
+  open gate's, which compares names, lengths, order **and the checksums whenever the reference
+  carries them**; what A2 adds covers the one case it cannot, a reference read from a `.fai`,
+  whose checksums exist only once the background FASTA read has finished. That is the ordinary
+  path, so the check earns its place.
+- **`rustix` promoted from a transitive dependency to an explicit one**, for
+  `getrlimit(RLIMIT_NOFILE)`. `Cargo.lock` grows by one line; `tempfile` enables only its `fs`
+  feature, so `process` does compile a module the build did not have.
 - **⚑ The architecture document was stale and was amended first, before any code.** It still
   specified a pool of workers each owning a stretch of genome, a look-ahead knob, and a source
   interface handing back a per-segment iterator — all retired by spec §3.5 and by the merge as
@@ -2297,10 +2338,29 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   built vacuous. And **Milestones A to D build against the single-threaded merge**; what
   Milestone E becomes is decided from D3's measurement of where the time goes, and whether the
   merge's own region batching survives at all is part of that question.
+- **⚑ A2's review found the messages, which is most of what A2 is.** The reporting type could
+  say *Compared* over files where not one checksum was compared — a check that looked at nothing
+  printed as a check that passed, the substitution it exists to prevent; the parameters refusal
+  printed "1 samples" at the single-sample end of the committed range; the assembly refusal never
+  named which reference the run was calling against, though two are in play and one is wrong;
+  the descriptor message quoted a total nobody could reproduce, because a 32-descriptor allowance
+  was invisible; and three assertions could not fail for the reason they stated — one passed on
+  the digit `4` inside the number `34`. All fixed.
 - **Open:**
-  - **A2 gained a fourth check from A1's review, and it is the owner's to keep or strike at
-    Checkpoint A:** a run whose file glob matched nothing opens a caller over zero samples and
-    dies later inside the parameter assembly — a panic rather than a message.
+  - **⚑ The empty-cohort refusal is built and is still the owner's to keep or strike** (the plan
+    asked for it to be raised at Checkpoint A): a run whose file pattern matched nothing would
+    otherwise open a caller over zero samples and die inside the parameter assembly — a panic
+    rather than a message. Building it makes the choice concrete; it does not make it.
+  - **⚑ The descriptor arithmetic follows spec §7.1a, not this reader, and the number is the
+    owner's.** §7.1a says "a CRAM and its index are two descriptors each". As built, an open
+    `AlignmentFile` holds no descriptor at all, its index is parsed into memory at open, and the
+    descriptor belongs to a cursor — one per file in direct mode. So two per file over-estimates
+    by about twofold today: it refuses a run that would have fitted rather than letting one die
+    at `EMFILE`, which is the safe direction and still the wrong number. **It may stop being
+    safe** once several callers are in flight (spec §11 question 2), which nobody has counted.
+    Two ways to settle it: count one per file and say so in the spec, or measure it with a probe
+    that opens a cohort and counts `/proc/self/fd`. Related: a process may raise its own soft
+    limit to the hard limit without privilege, which would make this refusal fire almost never.
   - **The subcommand names are agreed and written nowhere** — `generate-psps`,
     `generate-census`, `call-from-psps`, `call-from-alignments` (owner, 2026-08-28). They belong
     in [typed_regions_cli.md](doc/devel/ng/spec/typed_regions_cli.md), which mentions none of

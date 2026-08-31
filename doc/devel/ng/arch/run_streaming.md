@@ -404,6 +404,29 @@ pub struct AlignmentInputs<'a> {
     pub reference: &'a OpenReference,
     pub read_filters: ReadFilterConfig,
     pub build_index_if_missing: bool,
+    /// The reference **once its per-contig checksums are known** — what each sample's own
+    /// contig checksums are compared against (§5's `SampleAlignedToAnotherReference`). **The
+    /// one field here not read at a sample's open**: the checksums to compare are captured as
+    /// each file opens, so this is used after they all have. Only the caller can supply it: a
+    /// `.fai`-only reference and one whose FASTA has not been read are the same value, so the
+    /// run reports which it got rather than inferring it.
+    pub reference_with_checksums: &'a ReferenceInfo,
+}
+
+/// What a run could learn about the assembly its samples were aligned to. **Two different
+/// facts, and only one is reassuring**: *every sample agrees* is a check that ran, where
+/// *nothing could be compared* is a check that did not, and a run report must tell them apart.
+pub enum AssemblyCheckOutcome {
+    /// The second number is what makes the first mean something: "1,386 of 1,512".
+    EverySampleMatchedTheReference {
+        alignment_files: usize,
+        checksums_compared: usize,
+        checksums_possible: usize,
+    },
+    /// Not one checksum could be compared. `because` names the side that had none — the
+    /// reference (a `.fai`, an unread FASTA, or a trusted index) or the alignment files
+    /// (ordinary: `@SQ M5` is optional).
+    NothingCouldBeChecked { because: NoChecksums },
 }
 
 /// Direct mode (spec §5.1). Holds every sample's SampleReads open for the whole run —
@@ -524,25 +547,74 @@ pub enum RunError {
         at: GenomePosition,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// The parameters name a sample the run does not have, or the run has one the parameters do
-    /// not name. Per-sample values are keyed by name and never by position
-    /// ([`parameters_file.md`](../spec/parameters_file.md) §6), so a gap either way is refused
-    /// naming the samples rather than silently defaulted (spec §6.2).
-    #[error("the parameters and the run name different samples: {difference}")]
-    ParameterSamplesDiffer { difference: String },
-    /// The run needs more open files than the process is allowed. **Names the limit and the
-    /// count**, because raising the limit is the operator's to do and a message that does not
-    /// say by how much leaves them nothing to act on. Refused at construction rather than met
-    /// as `EMFILE` around the thousandth sample (spec §7.1a).
-    #[error("{samples} samples need {needed} open files; this process may open {limit}")]
+    /// **Built.** The run was given no alignment files, so there is no cohort to call.
+    /// Refused rather than answered with an empty output, because assembling the parameters
+    /// for a cohort of none panics inside the pre-pass — this refusal comes before that.
+    #[error(
+        "this run was given no alignment files, so it has no samples to call; \
+         check the paths or the pattern it was given"
+    )]
+    NoAlignmentFiles,
+    /// **Built.** The parameters were not assembled for this cohort.
+    ///
+    /// **An arity check and not a match by name.** The assembled parameters carry no sample
+    /// names — one number per sample and one per read group, in the run's order — so the run
+    /// cannot compare names even in principle. A supplied file's names *are* matched against
+    /// the run's, at that file's own door: `ParametersFile::to_run_parameters_for` refuses
+    /// naming the position where the two lists diverge ([`parameters_file.md`](../spec/parameters_file.md)
+    /// §6). What is left for a run to catch is parameters assembled for one cohort handed to a
+    /// caller opened over another, which nothing else prevents.
+    #[error(
+        "the parameters were assembled for a different cohort: {counted} is \
+         {in_the_parameters} in the parameters and {in_the_run} in this run; re-run the \
+         parameter pre-pass for this cohort, or point the run at the file assembled for it"
+    )]
+    ParametersAreForAnotherCohort {
+        counted: &'static str,   // "the number of samples", "the number of read groups …"
+        in_the_parameters: usize,
+        in_the_run: usize,
+    },
+    /// **Built.** The run needs more open files than the process is allowed. **Names both
+    /// numbers and what to do**, because raising the limit is the operator's. The count is of
+    /// *files*, not samples: a sample sequenced across four lanes is four files and eight
+    /// descriptors (spec §7.1a).
+    #[error(
+        "this run needs {needed} open files for its {samples} samples and this process may \
+         open {limit}; raise the limit (`ulimit -n`) or call fewer samples at once"
+    )]
     NotEnoughFileDescriptors { samples: usize, needed: u64, limit: u64 },
-    /// A sample's reads are against a different assembly from the one the segments were
-    /// computed on: its alignment header names a contig the reference does not have, or names
-    /// one at a different length. **Direct mode's cohort check** — the one mistake that mode
-    /// can make, since one segmentation serves every sample of it (owner's ruling,
-    /// 2026-08-31; §8).
-    #[error("sample {sample}: {difference}")]
-    SampleAlignedToAnotherReference { sample: String, difference: String },
+    /// **Built.** The repeat catalog was built on a different reference from the one this run
+    /// calls against. **Checked here because the catalog's own check cannot do it on the
+    /// ordinary path**: opening a catalog compares digests only when the reference it was
+    /// handed carries them, and one read from a `.fai` carries none, so there a catalog is
+    /// admitted on contig names, lengths and order alone. The digests exist once the FASTA has
+    /// been read. Silent and genome-wide otherwise — the catalog's coordinates are where the
+    /// repeat tracts are, and every segment is drawn from it.
+    #[error("the repeat catalog was built on a different reference: …")]
+    CatalogIsForAnotherReference { reference: PathBuf, in_the_catalog: String, in_the_run: String },
+    /// **Built.** The reference whose checksums the samples were checked against is not the one
+    /// their files were opened against — a caller mistake, refused rather than trusted, because
+    /// the comparison downstream walks the two contig lists in step.
+    #[error("the reference the samples were checked against is not the one they were opened against: {difference}")]
+    ReferenceCheckedAgainstAnotherGenome { difference: String },
+    /// **Built.** A sample's reads are against a different build of the reference's assembly —
+    /// every contig the right name and the right length, and different bases.
+    ///
+    /// **The open gate catches this itself whenever the reference carries digests**, so what
+    /// remains for the run is the `.fai` path: there the contig table arrives at once and the
+    /// digests only when the background verification is joined, so the files open against a
+    /// reference with nothing to compare. That is why the caller takes the *verified* reference
+    /// and reports an `AssemblyCheckOutcome` — *no sample was aligned to a wrong assembly* and
+    /// *no sample could be checked* are different facts.
+    #[error("sample {sample} was not aligned to this run's reference {}", reference.display())]
+    SampleAlignedToAnotherReference {
+        sample: String,
+        /// Named because two inputs are in play and only one is wrong — the same reason
+        /// `Catalog` carries its path. Which file and which contig come from the cause, so
+        /// the two sentences say different things rather than one saying the other twice.
+        reference: PathBuf,
+        #[source] source: AssemblyMismatch,
+    },
     /// Two samples were analysed over different segments, so they are not comparable — the
     /// cohort refusal (spec §6.2). **Reachable in psp mode only**, where each file records the
     /// ground it was written over. Spec §11's question 5 may later soften this to
@@ -608,15 +680,29 @@ the merge, and §8 below records them as still owed.
   their sizing is wholly the encoding spec's — spec §6.3, §10.
 - **The header carries no boundary digest and no writer version** — spec §6.3, **flagged for the
   owner as a reversal of an earlier draft**.
-- **Five refusal variants, five axes**, and **each mode reaches a different one of the first
-  two**. `SampleAlignedToAnotherReference` compares a sample's reads to the run's assembly, which
-  is the cohort check direct mode can fail; `AnalysedRegionsDiffer` compares two psps' recorded
-  ground to each other, which only psp mode can; `SegmentationInputsDiffer` compares a psp to the
-  run; `ParameterSamplesDiffer` compares the parameters to the run; `NotEnoughFileDescriptors`
-  compares the run to the process — spec §6.2, §7.1a. **`SampleAppearsTwice` is not among them
-  and is psp mode's alone**: in direct mode several files naming one individual are one sample by
-  construction, since the read-group table groups them (`callers.rs`, built 2026-08-31), and a
-  cohort that opens the same individual twice is a thing only two files can express.
+- **Eight refusal variants, eight axes**, and each one compares a different pair of things.
+  `NoAlignmentFiles` asks whether the run has a cohort at all; `ParametersAreForAnotherCohort`
+  compares the parameters to the run; `NotEnoughFileDescriptors` compares the run to the process;
+  `SampleAlignedToAnotherReference` compares a sample's reads to the run's assembly;
+  `CatalogIsForAnotherReference` compares the segments' catalog to it;
+  `ReferenceCheckedAgainstAnotherGenome` compares the run's two views of its own reference;
+  `AnalysedRegionsDiffer` compares two psps' recorded ground to each other; and
+  `SegmentationInputsDiffer` compares a psp to the run — spec §6.2, §7.1a. **The first six are
+  direct mode's and are built (2026-08-31); the last two only psp mode can reach.**
+- **⚑ `CatalogIsForAnotherReference` exists because the layer that should hold it cannot, on the
+  path that matters.** The catalog's own open guards every digest comparison on the reference
+  having one, and the `.fai` path — the ordinary one — has none until its background read
+  finishes. So the catalog is admitted on contig names, lengths and order, and nothing compares
+  the digests afterwards. The run holds both values at construction and is the first place that
+  can. Without it a catalog from another build of the same assembly routes every repeat tract to
+  the wrong position, genome-wide, with nothing to notice.
+- **`SampleAppearsTwice` is psp mode's alone**: in direct mode several files naming one
+  individual are one sample by construction, since the read-group table groups them
+  (`callers.rs`, built 2026-08-31), and a cohort that opens the same individual twice is a thing
+  only two files can express.
+- **Three of the six run before a single file is opened**, and the three that compare references
+  after, because one of them reads the checksums each open captured. Each of the first three
+  condemns the whole run, so opening a thousand files first would only make the message slower.
 - **The refusals are refusals; the two built variants are failures.** `Catalog` and
   `OpeningSample` say a run could not read something it was handed, where the five above say a
   run was handed things that do not go together. They live in one enum because a caller has one

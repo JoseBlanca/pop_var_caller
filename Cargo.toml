@@ -178,6 +178,14 @@ noodles-vcf = "0.88.0"
 # buys and a row format cannot.
 parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.10"
+# rustix: `getrlimit(RLIMIT_NOFILE)`, so a cohort that would run out of file
+# descriptors part-way through the genome refuses at construction — naming the
+# count, the limit and how to raise it — instead of dying at `EMFILE` mid-run
+# (doc/devel/ng/spec/run_streaming.md §7.1a). Already in the lock file through
+# `tempfile`, so the crate is not new; `tempfile` enables only its `fs` feature,
+# so `process` does compile a module the build did not have. `rustix::process`
+# is a safe wrapper — no `unsafe` reaches this crate.
+rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 # Only the experiment binary's `estimate-contamination` writes JSON. Already in the
 # lock file through other crates, so it costs no new build.

@@ -104,28 +104,62 @@ done; the second still blocks F1.**
 
 ### Milestone A — the object, constructed but inert
 
-☐ **A1. `AlignedFilesVariantCaller`'s type and construction.** Every sample's alignment files, the
+✅ **A1. `AlignedFilesVariantCaller`'s type and construction.** Every sample's alignment files, the
 segmentation's ingredients, the parameters in; the object holds one open `SampleReads` per sample
 and the shared read-only state. No iteration yet.
 *Depends:* the arch amendment above. *Source:* [`run_streaming.md`](../spec/run_streaming.md) §5.1.
 
-☐ **A2. The construction checks.** The parameters' sample list matched against the run's **by name**
-(never by position), **each sample's alignment header agreeing with the segmentation's reference** —
-same contigs, same lengths — and **the file-descriptor headroom checked against the sample count**:
-a run that would die at `EMFILE` around the thousandth sample refuses at construction naming the
-limit and the count, rather than failing with an operating-system error mid-run.
-**⛦ The middle check changed, owner's ruling 2026-08-31.** It read "the analysed regions agreed
-across samples", which is a psp fact: two files can record different ground, but a direct run
-computes one segmentation from its own inputs and hands the same one to every sample, so that
-comparison cannot differ. The contig agreement is the mistake direct mode can actually make, and it
-refuses for the same reason — a sample whose reads are against another assembly is not comparable.
-**⛦ A fourth check, from A1's review: a cohort of no samples.** `build_read_groups` over an empty
-path list is not a failure by design, so a run whose file glob matched nothing opens a caller over
-zero samples and dies later inside the parameter assembly — a panic rather than a message. The
-range this caller commits to starts at one sample. **Raised at Checkpoint A; strike it if you would
-rather the command line refuse an empty list.**
+✅ **A2. The construction checks.** Six refusals at construction, three of them before a single
+file is opened:
+
+- **a cohort of no alignment files** — a file pattern that matched nothing would otherwise open a
+  caller over zero samples and die later inside the parameter assembly, a panic rather than a
+  message;
+- **parameters assembled for another cohort** — one inbreeding coefficient per sample of this run
+  and one calibration per read group, each count checked with the other held fixed;
+- **the file-descriptor headroom**, counted over *files* and not samples, so a run that would die
+  at `EMFILE` refuses now, showing the arithmetic and the `ulimit` command;
+- **the run's two views of its own reference agreeing** — the one the files were opened against
+  and the one carrying the checksums are meant to be one reference at two moments, and the
+  comparison downstream walks them in step;
+- **the repeat catalog having been built on this run's reference** — *added from A2's own review,
+  and the most consequential of the six*, because the catalog's own open compares digests only
+  when the reference carries them and a `.fai`-read reference carries none. Without it a catalog
+  from another build of the same assembly routes every repeat tract to the wrong position,
+  genome-wide, with nothing to notice;
+- **and each sample's contig checksums against the reference's** — the case names and lengths
+  cannot catch.
+
+**⛦ Two of the three checks this step was planned around turned out to be built already, and the
+step changed shape twice. Both changes are the owner's, 2026-08-31.**
+
+**⛦ First: the reference check.** It read "the analysed regions agreed across samples", which is a
+psp fact — two files can record different ground, but a direct run computes one segmentation and
+hands the same one to every sample, so the comparison cannot differ. The owner replaced it with the
+contig agreement. **Then A2 found that check almost entirely built already, and building the rest
+showed exactly what is left.** The open gate in `SampleReads::open`
+([`open_bam.rs`](../../../../src/ng/read/input/open_bam.rs)) compares each file's `@SQ` list against
+the reference's contig table — names, lengths, order **and the `M5` digests, whenever the reference
+carries them**. A file aligned to another assembly, opened against a reference read from its FASTA,
+never opens at all: the gate refuses it.
+
+**So `check_assembly` covers one case and only one**, and it is the ordinary one: a run whose
+reference was read from a `.fai`. That path hands back the contig table at once and verifies the
+FASTA on a background thread, so the files open against a reference carrying *no* digests and the
+gate has nothing to compare. The digests arrive only when the run joins that thread, and comparing
+them then is what A2 builds. The caller therefore takes the verified reference and reports an
+`AssemblyCheckOutcome` — because *no sample was aligned to a wrong assembly* and *no sample could be
+checked* are different facts, and a run report has to tell them apart.
+
+**⛦ Second: the sample-name match.** It cannot be done here. `RunParameters` carries no names — one
+number per sample and one per read group, in the run's order — and a supplied file's names are
+matched against the run's at that file's own door
+(`ParametersFile::to_run_parameters_for`, which refuses naming the position where the two lists
+diverge). What is left, and what nothing else prevents, is parameters assembled for one cohort
+handed to a caller opened over another; A2 catches that on the counts.
+
 *Depends:* A1. *Source:* §6.2, §7.1a; [`parameters_file.md`](../spec/parameters_file.md) §6;
-[`../arch/run_streaming.md`](../arch/run_streaming.md) §5 (`SampleAlignedToAnotherReference`).
+[`../arch/run_streaming.md`](../arch/run_streaming.md) §5.
 
 > **Checkpoint A:** the object opens a 63-sample cohort and refuses the mismatches. Pause for review.
 
