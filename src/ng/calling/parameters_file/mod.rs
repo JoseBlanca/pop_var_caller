@@ -164,6 +164,7 @@
 //!   choose its own order and pin it with its own golden file.
 
 mod bindings;
+mod defaults;
 mod from_run_parameters;
 mod from_toml;
 mod to_run_parameters;

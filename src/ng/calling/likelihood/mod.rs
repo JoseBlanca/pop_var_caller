@@ -206,6 +206,44 @@ pub use crate::ng::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 /// making the sample's whole row `NaN` (spec §8).
 pub const MIN_BASE_ERROR: f64 = 1e-12;
 
+/// **The multiplier a read group's reads are charged where nothing was fitted — one, which
+/// leaves every quality exactly as the instrument reported it.**
+///
+/// **It declines to recalibrate; it does not abstain from a claim.** The scale is a ratio of a
+/// fitted error rate to the geometric mean of the minted error ([`ReadGroupCalibration`]), and a
+/// run with neither has nothing to form a ratio from — so one is the only multiplier that changes
+/// no read's error probability. **That is still an assumption about the library**: that the
+/// instrument's reported qualities are right, which is the assumption
+/// `doc/devel/ng/spec/read_likelihoods.md` §3.2 says the calibration exists to remove, and which
+/// [`ReadGroupCalibration::from_fitted_rate`]'s own callers refute routinely — a multiplier above
+/// one is common and says the instrument was optimistic. What is true is only that it is an
+/// assumption nothing here can put a number on.
+///
+/// **Where it differs from the project's other two defaults.** They are guesses at quantities
+/// that exist and that a fit could in principle measure —
+/// [`DEFAULT_OUTLIER_WEIGHT`](ssr::DEFAULT_OUTLIER_WEIGHT), and the tract ladder's
+/// [`STATED_FLAT_CONCENTRATION`](crate::ng::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION).
+/// This one is the value at which the model does nothing, which is why
+/// `doc/devel/ng/spec/parameters_file.md` §8 can say "a tomato PCR library taking a human PCR-free
+/// slip rate is a guess in a way that a scale of one is not".
+///
+/// **Named rather than written `1.0`**, because the parameters file writes this number out for a
+/// person to read and change (`doc/devel/ng/spec/parameters_file.md` §8, which asks for a named
+/// `pub const` with its origin beside it), and a value the file states in two spellings is a
+/// value the two spellings can come to disagree about.
+///
+/// **⚑ Unlike the other two, a `defaulted` multiplier in the file is not held to this number, and
+/// cannot be.** [`Self::defaulted`] is not the only way to a `Provenance::Defaulted` calibration:
+/// [`Self::from_fitted_rate`] copies the *rate's* warrant onto a ratio, and the pre-pass's
+/// error-rate ladder has a defaulted bottom rung of its own, so a legitimate run writes a
+/// `defaulted` multiplier that is not one. `parameters_file::validate` carries the argument, and
+/// spec §5's third row says otherwise and is the owner's to correct.
+///
+/// **A fitted multiplier of exactly one is a different claim and stays expressible**, which is
+/// why the warrant travels beside the value rather than being inferred from it
+/// (`doc/devel/ng/spec/parameters_file.md` §5, third row).
+pub const DEFAULT_ERROR_PROBABILITY_MULTIPLIER: f64 = 1.0;
+
 /// §3.2's calibration: one multiplier per read group, so that the average error the model
 /// charges that group's reads is the rate the parameter fit measured.
 ///
@@ -287,8 +325,9 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// choice is free. Revisiting it is one multiply per site and a re-run.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct ReadGroupCalibration {
-    /// The multiplier, applied to each read's own error probability. **One** where nothing
-    /// was fitted, which leaves the qualities exactly as the instrument reported them.
+    /// The multiplier, applied to each read's own error probability.
+    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`] where nothing was fitted, which leaves the
+    /// qualities exactly as the instrument reported them.
     pub scale: f64,
     /// Where the scale came from. **`Defaulted` is not an error condition and it is not a
     /// detail**: a run calibrated against a measurement and a run trusting the instrument
@@ -360,7 +399,7 @@ impl ReadGroupCalibration {
     #[must_use]
     pub fn defaulted() -> Self {
         Self {
-            scale: 1.0,
+            scale: DEFAULT_ERROR_PROBABILITY_MULTIPLIER,
             provenance: Provenance::Defaulted,
         }
     }

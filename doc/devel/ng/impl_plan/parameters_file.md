@@ -301,12 +301,31 @@ questions this milestone hands back.
 
 ### Milestone E — the defaults, compiled in
 
-☐ **E1. The defaults as named constants with their origin.** The base-quality calibration scale of
+✅ **E1. The defaults as named constants with their origin.** The base-quality calibration scale of
 one, the repeat-tract outlier weight
 ([`DEFAULT_OUTLIER_WEIGHT`](../../../../src/ng/calling/likelihood/ssr.rs), 0.01, inherited and never
 measured here), the flat concentration
 ([`STATED_FLAT_CONCENTRATION`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)), and
 contamination's absence. Each marked `Defaulted` when used.
+
+**Landed 2026-08-31, and the inventory is seven rows rather than these four.**
+[`to_toml.rs`](../../../../src/ng/calling/parameters_file/to_toml.rs)'s own `origins` module —
+written at B3 "so that step E1 has one list to reconcile against" — already carried the repeat-tract
+substitution rate, the slippage numbers and the inbreeding coefficient. The last of those is the one
+that matters: it is **forbidden** a default rather than owed a measurement, and it is what step E2
+turns on. The prior's seed is outside the table because what marks its fallback is
+`SeedRegime::FallbackDiversity` and not a warrant, so no `validate` rung is possible for it.
+
+**⚑ The step added a `validate` rung and had to take it out again**, and that is its most useful
+finding. *A `defaulted` base-quality multiplier is the compiled-in constant and nothing else* — the
+rule the outlier weight and the fallback concentration both carry — **refused a file this caller had
+just written**. On those two, `defaulted` means the run took *that* number, so the warrant fixes the
+value; on a multiplier it is copied from the **error rate** the multiplier was built from, and the
+pre-pass's rate ladder has a `Defaulted` bottom rung of its own. Measured: two libraries averaging
+0.008 and 0.004 write `defaulted` beside 0.125 and 0.25.
+[`a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`](../../../../src/ng/calling/parameters_file/from_run_parameters.rs)
+stops it coming back. **Spec §5's third row says the opposite and is the owner's to correct** —
+recorded in `PROJECT_STATUS.md`.
 *Depends:* C4. *Source:* §8.
 
 ☐ **E2. A run with no fit and no supplied file assembles `RunParameters` from the defaults.**

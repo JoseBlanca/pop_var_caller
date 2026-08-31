@@ -2076,6 +2076,103 @@ mod tests {
         assert!(file.repeat_tracts.slippage_by_stratum_and_group.is_empty());
     }
 
+    /// **⚑ A run whose error rate itself was defaulted writes a `defaulted` multiplier that is
+    /// not 1.0, and its own reader accepts the file.**
+    ///
+    /// **The state, and how a run reaches it.**
+    /// [`resolve_error_rates`](crate::ng::parameter_estimation::generic::fallback::resolve_error_rates)
+    /// hands a read group with too few sites to fit, no sibling above the floor to borrow from
+    /// and nothing supplied the pre-pass's own constant —
+    /// [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE) at
+    /// 0.001, marked `Defaulted`. `ReadGroupCalibration::from_fitted_rate` then copies **the
+    /// rate's** warrant onto `rate / mean minted error`, so what is written is `defaulted` beside
+    /// a multiplier of 0.001 over that library's own average. That is the low-data corner
+    /// `CLAUDE.md` commits this caller to: one gene, a panel, a shallow single sample.
+    ///
+    /// **What this guards.** Step E1 added a rung to `validate` reading *a `defaulted` multiplier
+    /// is [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::ng::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)
+    /// and nothing else*, on the model of the outlier weight's and the fallback concentration's,
+    /// and it **refused the file this test's run writes**. The rung is gone and this is what stops
+    /// it coming back.
+    ///
+    /// **It also pins a divergence the owner has to settle.** Spec §5's third row says a read
+    /// group whose rate could not be fitted gets "scale 1.0, warrant `Defaulted`". The tree
+    /// charges it the stated 0.001 instead, which is a different claim about what an unfittable
+    /// library's reads are worth. If that is changed — `from_fitted_rate` refusing a `Defaulted`
+    /// rate as it already refuses a zero one — this test is what says so, because the two
+    /// multipliers below become 1.0.
+    #[test]
+    fn a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts() {
+        let read_groups =
+            ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3"), ("HWI.4", AWKWARD_SAMPLE, "lib4")]);
+        // The pre-pass's bottom rung, for both libraries: nothing could be fitted and nothing was
+        // supplied, so each takes the stated constant.
+        let defaulted_rate = crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE;
+        let rates = BTreeMap::from([
+            (
+                ReadGroupId(0),
+                a_fitted_rate(defaulted_rate, Provenance::Defaulted, 0),
+            ),
+            (
+                ReadGroupId(1),
+                a_fitted_rate(defaulted_rate, Provenance::Defaulted, 0),
+            ),
+        ]);
+        // Two libraries whose reads averaged different qualities, so the two multipliers differ
+        // and neither is one.
+        let totals = BTreeMap::from([
+            (ReadGroupId(0), a_read_groups_minted_totals(0.008, 1_000)),
+            (ReadGroupId(1), a_read_groups_minted_totals(0.004, 1_000)),
+        ]);
+        let coefficients = vec![
+            an_inbreeding_estimate(0.42, Provenance::FittedHere, 180_600_412),
+            an_inbreeding_estimate(0.11, Provenance::FittedHere, 180_600_412),
+        ];
+        let run = RunParameters::assemble(
+            &rates,
+            &totals,
+            &BTreeMap::new(),
+            DeclaredBatches::all_together(&read_groups),
+            coefficients.iter().map(|estimate| estimate.value).collect(),
+            a_seed(),
+            StratumFits::over(&[], BTreeMap::new()),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let file = ParametersFile::of_run(
+            &run,
+            &read_groups,
+            &rates,
+            &coefficients,
+            &A_REFERENCE,
+            a_census(),
+        );
+
+        for row in &file.base_quality_calibration.by_read_group {
+            assert_eq!(
+                row.error_probability_multiplier.warrant,
+                Warrant::Defaulted,
+                "the rate's warrant travels onto the multiplier built from it"
+            );
+        }
+        // 0.001 over reads averaging 0.008 and over reads averaging 0.004 — measured rather than
+        // recalled, and both a long way from one.
+        let multipliers: Vec<f64> = file
+            .base_quality_calibration
+            .by_read_group
+            .iter()
+            .map(|row| row.error_probability_multiplier.value)
+            .collect();
+        assert!(
+            (multipliers[0] - 0.125).abs() < 1e-9 && (multipliers[1] - 0.25).abs() < 1e-9,
+            "a defaulted rate over a library's own minted mean, which is not one: {multipliers:?}"
+        );
+
+        file.validate()
+            .expect("this caller must not refuse a file it has just written");
+    }
+
     /// **What the projection writes is a legal file** — it parses back to the same value through
     /// the shape's own serde derives.
     ///

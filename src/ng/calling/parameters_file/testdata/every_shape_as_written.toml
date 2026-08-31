@@ -12,8 +12,22 @@
 # where this file holds a fitted stratum spectrum for it to be the median of,
 # and `defaulted` only at the built-in constant;
 # `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
-# caller's own constant. Both take `supplied` freely, which is what you write
-# when you change one. Anything else is refused, and says so.
+# built-in constant. Both take `supplied` freely, which is what you write when
+# you change one. Anything else is refused, and says so.
+#
+# **What that checking reaches, and what it cannot.** It reaches those two keys
+# and nowhere else. It cannot catch a number you changed that still says
+# `fitted_here` or `borrowed`: nothing in this file can tell your value from a
+# fitted one, so the run will report it as measured, with the old `observations`
+# count still beside it. And on every other key a `defaulted` warrant is checked
+# against nothing. On most of them there is no built-in number for it to be, so
+# writing one is a claim about this caller that no build makes — do not mark an
+# inbreeding coefficient or a substitution rate `defaulted`. On
+# `base_quality_calibration.by_read_group[...].error_probability_multiplier`
+# there is a built-in number, 1.0, and the key still is not checked: `defaulted`
+# there is copied from the error rate the multiplier was built from, and a run
+# whose rate itself was defaulted writes a `defaulted` multiplier that is not
+# 1.0.
 #
 # The slippage numbers, the prior's two concentrations and the length spectrum
 # rows carry no warrant — they say where they came from another way, and there
@@ -89,8 +103,8 @@ terms = [
 # the other way.
 by_read_group = [
     { read_group = 0, error_probability_multiplier = { value = 1.0324, warrant = "fitted_here", observations = { reads = 812344 } } },
-    # no calibration: this read group's reported qualities are used exactly as
-    # they came, because no usable error rate could be fitted for it
+    # not calibrated: this read group's reported qualities are taken at face
+    # value, because no usable error rate could be fitted for it
     { read_group = 1, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
     { read_group = 2, error_probability_multiplier = { value = 0.87, warrant = "supplied", observations = { reads = 640918 } } },
 ]

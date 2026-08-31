@@ -460,12 +460,43 @@ impl ParametersFile {
                 return Err(refuse(
                     at,
                     format!(
-                        "is {}, and a multiplier on an error probability is above zero — a zero \
-                         charges every read of the library the error floor",
+                        "is {:?}, and a multiplier on an error probability is above zero — a zero \
+                         charges every read of that read group the error floor",
                         row.error_probability_multiplier.value
                     ),
                 ));
             }
+            // **⚑ Every warrant is free on this key, `defaulted` included — and it is the one
+            // key of the file's three defaultable numbers where that is so.** Step E1 added a
+            // rung here reading *`defaulted` implies
+            // [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`], as the outlier weight and the tract
+            // ladder's fallback concentration already do*, and it **refused a file this caller
+            // had just written**. It is recorded rather than left out, so that the next reader
+            // of `doc/devel/ng/spec/parameters_file.md` §5's third row does not add it again.
+            //
+            // **The two rules are not the same rule.** On the outlier weight and the fallback
+            // concentration, `defaulted` means *the run took this compiled-in number*, so the
+            // value is determined by the warrant. Here it means something one level up: the
+            // multiplier is a fitted error **rate** divided by the geometric mean of that read
+            // group's minted error, and
+            // [`from_fitted_rate`](crate::ng::calling::likelihood::ReadGroupCalibration::from_fitted_rate)
+            // copies **the rate's** warrant onto the ratio. The pre-pass's error-rate ladder has
+            // a `Defaulted` bottom rung of its own —
+            // [`DEFAULT_ERROR_RATE`](crate::ng::parameter_estimation::generic::DEFAULT_ERROR_RATE)
+            // at 0.001, taken by a read group with too few sites to fit, no sibling to borrow
+            // from and nothing supplied — so a legitimate run produces a `defaulted` multiplier
+            // of `0.001 / that library's mean minted error`, which is one only by coincidence.
+            // Measured, in `from_run_parameters`'s
+            // `a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`: two
+            // libraries whose reads averaged an error of 0.008 and 0.004 write 0.125 and 0.25.
+            //
+            // **Whether that is what a run should do is the owner's, not this file's.** Spec §5's
+            // third row says a read group whose rate could not be fitted gets *"scale 1.0,
+            // warrant `Defaulted`"*, and the tree charges it the stated 0.001 instead. Making the
+            // spec true would mean `from_fitted_rate` refusing a `Defaulted` rate the way it
+            // already refuses a zero one, which changes what an unfittable library's reads are
+            // scored under — the low-data corner `CLAUDE.md` commits the caller to. Recorded in
+            // `PROJECT_STATUS.md`.
         }
         Ok(())
     }
@@ -662,8 +693,10 @@ impl ParametersFile {
             return Err(refuse(
                 at,
                 format!(
-                    "is `defaulted` at {value}, and the constant a run falls back to is \
-                     {STATED_FLAT_CONCENTRATION}; a number somebody chose is `supplied`"
+                    "is {value:?}, and its warrant is `defaulted`, which says this run fitted no \
+                     stratum and fell back to the built-in {STATED_FLAT_CONCENTRATION:?}; a \
+                     number you changed is one the run was handed, so change the warrant beside \
+                     it to `supplied`"
                 ),
             ));
         }
@@ -671,7 +704,7 @@ impl ParametersFile {
             return Err(refuse(
                 at,
                 format!(
-                    "is {}, and a concentration is above zero",
+                    "is {:?}, and a concentration is above zero",
                     tracts.fallback_length_spectrum_concentration.value
                 ),
             ));
@@ -788,9 +821,10 @@ impl ParametersFile {
         // fits this number, so `fitted_here` and `borrowed` are claims about it that no run
         // could make, and the in-memory shape it projects onto
         // ([`RepeatTractOutlierWeight`](crate::ng::calling::likelihood::ssr::RepeatTractOutlierWeight))
-        // has nowhere to put them. **The state worth catching is the third one**: a person who
-        // takes spec §1.2 goal 3 at its word — copy the file your run wrote and change one line
-        // — changes the number and leaves `warrant = "defaulted"` above it. That says *this run
+        // has nowhere to put them. **The state worth catching is the third one**: a person doing
+        // what `doc/devel/ng/spec/parameters_file.md` §7's third bullet invites — copy the file
+        // your run wrote and change one line — changes the number and leaves
+        // `warrant = "defaulted"` above it. That says *this run
         // inherited 0.01* beside a number that is not 0.01, and the file's own header names the
         // fix ("change its warrant to supplied and delete its observations"), so the refusal
         // says it too.
@@ -800,9 +834,9 @@ impl ParametersFile {
             Warrant::Defaulted => Err(refuse(
                 at,
                 format!(
-                    "is {}, and its warrant is `defaulted`, which says this run inherited the \
-                     compiled-in {DEFAULT_OUTLIER_WEIGHT}; a number you changed is one the run \
-                     was handed, so change the warrant beside it to `supplied`",
+                    "is {:?}, and its warrant is `defaulted`, which says this run inherited the \
+                     built-in {DEFAULT_OUTLIER_WEIGHT:?}; a number you changed is one the run was \
+                     handed, so change the warrant beside it to `supplied`",
                     weight.value
                 ),
             )),
@@ -810,7 +844,7 @@ impl ParametersFile {
                 at,
                 format!(
                     "has the warrant `{}`, and nothing fits this number: it is either the \
-                     compiled-in {DEFAULT_OUTLIER_WEIGHT}, which is `defaulted`, or one you \
+                     built-in {DEFAULT_OUTLIER_WEIGHT:?}, which is `defaulted`, or one you \
                      wrote here, which is `supplied`",
                     the_word_for(other)
                 ),
@@ -1460,7 +1494,20 @@ mod tests {
             field,
             "repeat_tracts.fallback_length_spectrum_concentration"
         );
-        assert!(problem.contains("is `defaulted` at 3.5"), "{problem}");
+        assert!(
+            problem.contains("is 3.5, and its warrant is `defaulted`"),
+            "{problem}"
+        );
+        // **The same closing clause the other two `defaulted` keys carry**, so a reader who has
+        // met one refusal can act on this one without re-reading it
+        // (`parameters_file::defaults`'s own test holds all three together).
+        assert!(
+            problem.ends_with(
+                "a number you changed is one the run was handed, so change the warrant beside it \
+                 to `supplied`"
+            ),
+            "{problem}"
+        );
     }
 
     /// **⚑ A demoted file marks this number `supplied`, and that is accepted** — which the check

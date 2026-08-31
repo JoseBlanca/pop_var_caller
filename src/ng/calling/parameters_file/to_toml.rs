@@ -89,7 +89,9 @@ impl ParametersFile {
                 "",
                 "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
                 "",
-                "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the caller's own constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
+                "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
+                "",
+                "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing. On most of them there is no built-in number for it to be, so writing one is a claim about this caller that no build makes — do not mark an inbreeding coefficient or a substitution rate `defaulted`. On `base_quality_calibration.by_read_group[...].error_probability_multiplier` there is a built-in number, 1.0, and the key still is not checked: `defaulted` there is copied from the error rate the multiplier was built from, and a run whose rate itself was defaulted writes a `defaulted` multiplier that is not 1.0.",
                 "",
                 "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
@@ -512,8 +514,8 @@ fn scalar_with_note(out: &mut String, key: &str, value: &str, note: Option<&'sta
 mod origins {
     /// The base-quality multiplier, where no usable rate was fitted.
     pub const CALIBRATION_MULTIPLIER: &str = concat!(
-        "no calibration: this read group's reported qualities are used exactly as they ",
-        "came, because no usable error rate could be fitted for it"
+        "not calibrated: this read group's reported qualities are taken at face value, ",
+        "because no usable error rate could be fitted for it"
     );
 
     /// The tract ladder's bottom rung — what a run falls back to where nothing was fitted.
@@ -1513,7 +1515,7 @@ mod tests {
             .take_while(|line| line.trim_start().starts_with('#'))
             .fold(String::new(), |all, line| format!("{line} {all}"));
         assert!(
-            note_above.contains("no calibration"),
+            note_above.contains("not calibrated"),
             "the note is on the lines above the row it is about, and they say: {note_above}"
         );
 
