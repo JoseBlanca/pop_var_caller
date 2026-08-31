@@ -131,3 +131,32 @@ Arch §9 says the run-level oracles of spec §12 belong in `tests/`. The segment
 landed in `walker.rs` instead: it is about one sample's walk, which is what that file owns, and an
 integration test would need the same three-read BAM to say the same thing. **Recorded rather than
 quietly done** — arch §9 now carries the note, and the rule is the owner's to hold or relax.
+
+---
+
+## Addendum — the segments are shared, not borrowed (owner's ruling, 2026-08-31)
+
+B1's design review found that a run could not hold both halves of what the architecture says it
+holds. `AlignedFilesVariantCaller` owned its `Segmentation` by value and `RunSegments<'a>` borrowed
+one, so `Vec<AlignmentFilesWalker<RunSegments<'?>>>` beside that field would have been a struct
+whose walkers borrow it — self-referential, and safe Rust cannot express it. Neither escape was
+open: `Segmentation` is deliberately not `Clone`, and minting a walker per draw breaks the
+one-source-per-sample clause of arch §2's contract.
+
+**The owner approved the shared handle and it is applied.** `RunSegments` holds an
+`Arc<Segmentation>` and an index; `AlignedFilesVariantCaller` holds the same handle and hands one
+out through `shared_segmentation`; `AlignmentFilesWalker::over` takes it. The genome-sized list is
+stored once however many samples read it — 63 reference counts, not 63 copies of 100,171 segments —
+and the walker type now carries **no lifetime**, which is the property that lets a run store it.
+
+**`Arc` and not `Rc`**, though a walker is `!Send` today. What makes it `!Send` is the generator
+set's `Box<dyn LocusGenerator<S>>` with no auto-trait bound, one layer down; an `Rc` here would add
+a second blocker that would have to be found and removed again if that one is ever lifted.
+
+**The test is that it compiles.** `a_run_can_hold_its_walkers_beside_the_segmentation_they_read`
+builds the shape C1 needs — a struct holding an `Arc<Segmentation>` and a `Vec` of walkers over
+it — so a change back to a borrow fails at the compiler here rather than three steps later at the
+wiring. It also asserts the sharing is real: three walkers over one segmentation leave a strong
+count of four, where three copies would leave four allocations.
+
+`ng::run` at 350, full lib at 5,790; fmt and clippy clean by exit code, `cargo doc` unmoved.

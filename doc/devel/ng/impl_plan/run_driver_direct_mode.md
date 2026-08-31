@@ -209,6 +209,14 @@ which inherits the problem once chain ids are written to a file.
 ☐ **C1. The merge driven over walker sources.** The single-threaded merge (`merge_cohort_through_cache`)
 reading k walkers instead of the in-memory sources its tests use, yielding cohort loci in genome
 order.
+
+**⛦ The ownership C1 needs is already in place** (owner's ruling, 2026-08-31, applied the same
+day). B1's review found that C1 could not hold both: the caller owned the segmentation by value
+and a walker borrowed it, so a run holding one walker per sample beside that segmentation would
+have been self-referential. `RunSegments` now holds an `Arc<Segmentation>` and an index, the caller
+holds the same handle and hands one out through `shared_segmentation`, and the walker type carries
+no lifetime. `a_run_can_hold_its_walkers_beside_the_segmentation_they_read` is the test, and it
+fails at the compiler if anyone changes it back.
 *Depends:* B2. *Source:* §3.2; [`cohort_merge.md`](../spec/cohort_merge.md).
 
 ☐ **C2. Cohort loci from reads match cohort loci from records.** Walk a small cohort, capture its

@@ -273,10 +273,22 @@ pub trait ObservationSource {
   twice and Rust refuses the overlap. The walk stays reachable as an iterator one level down,
   which is what the observations-equal-the-walk oracle (spec §12, plan step B2) drives.
 
-  **Its region stream is a borrow of the segmentation, `RunSegments`**, whose item is
+  **Its region stream is `RunSegments`, an `Arc<Segmentation>` and an index**, whose item is
   `Result<TypedRegion, Infallible>`: a run's segments were read out of the catalog once, at
   `Segmentation::build`, so this stream has nothing left to fail at and says so in its type.
   `locus_generation` carries one `From<Infallible>` impl to admit it.
+
+  **⛦ Shared ownership, and it was a borrow for a day** (owner's ruling, 2026-08-31). B1 shipped
+  `RunSegments<'a>` holding a slice iterator, and B1's own review found what that costs: a run
+  holds one walker per sample *and* the segmentation those walkers read, so with a borrow the run
+  would be a struct whose walkers borrow its own field — self-referential, and safe Rust cannot
+  express it. Cloning is not the escape, because `Segmentation` is deliberately not `Clone`, and
+  neither is minting a walker per draw, which breaks the one-source-per-sample clause of §2's
+  contract. So `AlignedFilesVariantCaller` holds `Arc<Segmentation>` and hands each walker a
+  reference count; the genome-sized list is still stored once, and the walker type carries no
+  lifetime, which is what lets a run store it. **`Arc` and not `Rc`**, even though a walker is
+  `!Send` today: what makes it `!Send` is the generator set's unbounded trait object one layer
+  down, and an `Rc` would add a second blocker to find and remove if that one is lifted.
 - **The psp reader** (`src/ng/psp/`, built): a cursor over one open psp that decodes whichever
   blocks it needs and keeps the one it is in. Its resident state is the file's coarse index plus one
   decoded block; measured, that is **123 kB a cursor**, on top of **357 kB** for the open file
@@ -468,7 +480,9 @@ pub enum AssemblyCheckOutcome {
 /// 11–15 MiB **per open alignment file** — plus the shared read-only state, and from B1 one
 /// walker per sample advancing at the merge frontier.
 pub struct AlignedFilesVariantCaller { /* SampleReads per sample, read groups, reference,
-                                          filters, segmentation, params, configs */ }
+                                          filters, Arc<Segmentation>, params, configs */ }
+// The segmentation is behind an Arc so the walkers this run will own can hold it too; a
+// walker that borrowed it could not be stored beside it (§2, and `shared_segmentation`).
 
 impl AlignedFilesVariantCaller {
     /// Opens every sample's files — and, from A2, runs spec §6.2's and §7.1a's checks —

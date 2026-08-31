@@ -181,11 +181,11 @@ borrowing its own field, and safe Rust cannot express that. The escapes are bloc
 `Segmentation` is deliberately not `Clone`, and building a walker per `next()` breaks the
 one-source-per-sample clause outright.
 
-Nothing here is wrong today, and C1 hits it first. The shape that resolves it is an owned handle —
-`RunSegments` holding an `Arc<Segmentation>` and an index — which keeps exactly the reason the
-borrow exists (63 walkers share one list of 100,171 segments rather than copying it) and costs the
-caller a field-type change. **Not taken here**, because it changes A1's ownership of the
-segmentation, which is the owner's to settle; raised at Checkpoint B.
+Nothing here was wrong as it stood, and C1 would have hit it first. **The owner ruled the same day
+and it is applied** (see the B2 report): `RunSegments` holds an `Arc<Segmentation>` and an index,
+`AlignedFilesVariantCaller` holds the same handle and hands one out, and the walker type carries no
+lifetime. That keeps exactly the reason the borrow existed — 63 walkers share one list of 100,171
+segments rather than copying it — and costs one reference count a sample.
 
 ## What this step does not prove
 

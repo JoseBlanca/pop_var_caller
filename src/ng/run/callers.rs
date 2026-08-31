@@ -18,6 +18,8 @@
 //! reject them as dead code. The intent is the architecture's; narrow this when the walker
 //! lands. `cohort_merge` carries the same note for the same reason.
 
+use std::sync::Arc;
+
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
 use crate::ng::calling::inference::RunnableCallingLoopConfig;
 use crate::ng::calling::run_parameters::RunParameters;
@@ -140,7 +142,14 @@ pub struct AlignedFilesVariantCaller {
     /// opens its cursors with it.
     read_filters: ReadFilterConfig,
     /// The ground, computed once and shared by every sample's walk.
-    segmentation: Segmentation,
+    ///
+    /// **Held behind an `Arc` because the walkers this run will own read it.** A walker keeps a
+    /// handle on the segmentation for the whole run (`walker.rs`), so a run that held the
+    /// segmentation by value and its walkers beside it would be a struct whose fields borrow one
+    /// another — which safe Rust cannot express, and which cloning cannot escape, since
+    /// [`Segmentation`] is deliberately not `Clone`. The list is still stored once: what each
+    /// walker takes is a reference count, not a copy (owner's ruling, 2026-08-31).
+    segmentation: Arc<Segmentation>,
     /// Every number the pre-pass fitted, frozen for the run.
     parameters: RunParameters,
     /// How the calling loop runs — already validated, because
@@ -227,7 +236,7 @@ impl AlignedFilesVariantCaller {
             read_groups: alignments.read_groups.clone(),
             reference: alignments.reference.clone(),
             read_filters: alignments.read_filters,
-            segmentation,
+            segmentation: Arc::new(segmentation),
             parameters,
             calling_loop_config,
             candidate_selection,
@@ -268,6 +277,17 @@ impl AlignedFilesVariantCaller {
     #[must_use]
     pub fn segmentation(&self) -> &Segmentation {
         &self.segmentation
+    }
+
+    /// A handle on that ground, for a walker to keep for the whole run.
+    ///
+    /// **A second accessor rather than a wider return on the first**, because the two answer
+    /// different questions: [`segmentation`](Self::segmentation) is for reading it here, and this
+    /// is for holding it elsewhere. Handing out the `Arc` from one accessor would make every
+    /// reader take shared ownership of the genome-sized list to ask how many segments it has.
+    #[must_use]
+    pub fn shared_segmentation(&self) -> Arc<Segmentation> {
+        Arc::clone(&self.segmentation)
     }
 
     /// The numbers the pre-pass fitted, which every call is scored against.

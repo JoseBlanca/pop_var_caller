@@ -56,10 +56,14 @@ Skills and agents are instructed to leave it untouched.
 > the names were unreachable (a run's `Segmentation` carries the catalog's contig table), that a
 > lookup would cost a table per walker (one `&Segmentation` is shared by all of them), and that
 > `contig 0:13` is ng's usual spelling (ng prints a *position* as `contig N position P`; that form
-> is a *region*). **⚑ One finding is the owner's and lands on C1**: `RunSegments` borrows the
-> segmentation and `AlignedFilesVariantCaller` owns one, so holding a walker per sample for the run
-> would be a self-referential struct. An owned `Arc<Segmentation>` is the shape that resolves it;
-> not taken here because it changes A1's ownership.
+> is a *region*). **⚑ One finding was the owner's and landed on C1; they ruled the same day and it
+> is applied.** `RunSegments` borrowed the segmentation while `AlignedFilesVariantCaller` owned
+> one, so a run holding a walker per sample beside it would have been a self-referential struct.
+> The segments are shared now — `Arc<Segmentation>` in both, one reference count a sample rather
+> than one copy of a genome-sized list — and the walker type carries no lifetime, which is what
+> lets a run store it. `Arc` and not `Rc`, because what makes a walker `!Send` is the generator
+> set's unbounded trait object one layer down, and an `Rc` would add a second blocker to remove if
+> that one is ever lifted.
 >
 > - **Previously (2026-08-31):** **Milestone A of the run driver — the object a
 > direct-mode run is, constructed and checked** (steps A1 and A2 of

@@ -45,6 +45,7 @@
 //! source against the walk builds that iterator directly over the same fixture.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use crate::ng::locus_generation::{
     GeneratorSet, LocusCounts, LocusGenerationError, SampleLocusObservations,
@@ -140,15 +141,20 @@ impl<T> AlignmentFilesWalker<T> {
     }
 }
 
-impl<'a> AlignmentFilesWalker<RunSegments<'a>> {
+impl AlignmentFilesWalker<RunSegments> {
     /// A walker over **the whole run's ground**: every segment of the segmentation, in genome
     /// order, once.
     ///
-    /// This is the shape a run builds. Every sample of the run gets the same segments from the
-    /// same object, which is what makes "k samples over one segmentation" true rather than "k
-    /// segmentations that happen to agree" (spec §4.2).
+    /// This is the shape a run builds. Every sample of the run reads the same segments from the
+    /// same object — one `Arc::clone` a sample, not one copy of the list — which is what makes
+    /// "k samples over one segmentation" true rather than "k segmentations that happen to
+    /// agree" (spec §4.2).
+    ///
+    /// **The type it produces carries no lifetime**, and that is the point rather than a detail:
+    /// a run has to hold its walkers and the segmentation they read in one object, and a walker
+    /// that borrowed the segmentation could not be stored beside it.
     pub fn over(
-        segmentation: &'a Segmentation,
+        segmentation: Arc<Segmentation>,
         reads: SampleReads,
         generators: GeneratorSet,
     ) -> Self {
@@ -244,21 +250,38 @@ where
 /// was reported there. The wrapped iterator takes a fallible stream because the catalog's own
 /// reader is one; this says, in the type, that this particular stream has nothing left to fail
 /// at.
-pub struct RunSegments<'a> {
-    remaining: std::slice::Iter<'a, TypedRegion>,
+pub struct RunSegments {
+    /// **Shared ownership, not a borrow, and that is what makes a run possible.**
+    ///
+    /// A run holds one walker per sample for the whole run, and it holds the segmentation those
+    /// walkers read. With a borrow the two cannot live in one object: the walkers would borrow a
+    /// field of the struct that holds them, which is self-referential and which safe Rust cannot
+    /// express. Cloning is not the escape — [`Segmentation`] is deliberately not `Clone`, for the
+    /// reason this type exists — and neither is minting a walker per draw, which breaks the
+    /// one-source-per-sample rule outright. So the handle is shared, and the genome-sized list is
+    /// still stored once however many samples read it.
+    ///
+    /// **`Arc` rather than `Rc`** even though a walker is `!Send` today: what makes it `!Send` is
+    /// the generator set's unbounded trait object, one layer down, and an `Rc` here would add a
+    /// second blocker that would have to be found and removed again if that one is ever lifted.
+    segmentation: Arc<Segmentation>,
+    /// How far through the list this stream is. An index rather than a slice iterator because a
+    /// borrowing iterator is what the shared handle exists to avoid.
+    next: usize,
 }
 
-impl<'a> RunSegments<'a> {
+impl RunSegments {
     /// Every segment of `segmentation`, in genome order.
     #[must_use]
-    pub fn of(segmentation: &'a Segmentation) -> Self {
+    pub fn of(segmentation: Arc<Segmentation>) -> Self {
         Self {
-            remaining: segmentation.segments().iter(),
+            segmentation,
+            next: 0,
         }
     }
 }
 
-impl Iterator for RunSegments<'_> {
+impl Iterator for RunSegments {
     type Item = Result<TypedRegion, Infallible>;
 
     /// **Cloned rather than borrowed**, because a generator is *given* the region it begins and
@@ -271,7 +294,9 @@ impl Iterator for RunSegments<'_> {
     /// (`RegionKind::SsrBundle`'s `Box<[RepeatInterval]>`, two or more members). So at most two
     /// allocations a segment, paid once per segment rather than once per locus.
     fn next(&mut self) -> Option<Self::Item> {
-        self.remaining.next().cloned().map(Ok)
+        let segment = self.segmentation.segments().get(self.next)?;
+        self.next += 1;
+        Some(Ok(segment.clone()))
     }
 }
 
@@ -843,7 +868,7 @@ mod tests {
     // The run's segments
     // -----------------------------------------------------------------
 
-    fn segmentation_over(segments: Vec<TypedRegion>) -> Segmentation {
+    fn segmentation_over(segments: Vec<TypedRegion>) -> Arc<Segmentation> {
         let bounds = [
             ContigBounds {
                 name: "chr1",
@@ -868,6 +893,7 @@ mod tests {
             StrRepeatCriteria::default(),
             PathBuf::from("/genomes/test.catalog.parquet"),
         )
+        .map(Arc::new)
         .expect("a clean stream builds")
     }
 
@@ -885,7 +911,7 @@ mod tests {
         ];
         let segmentation = segmentation_over(segments.clone());
 
-        let handed_out: Vec<TypedRegion> = RunSegments::of(&segmentation)
+        let handed_out: Vec<TypedRegion> = RunSegments::of(Arc::clone(&segmentation))
             .map(|segment| segment.expect("reading a built list cannot fail"))
             .collect();
 
@@ -900,7 +926,7 @@ mod tests {
         let segmentation =
             segmentation_over(vec![generic_segment(0, 10, 20), generic_segment(1, 50, 60)]);
         let mut walker = AlignmentFilesWalker::over(
-            &segmentation,
+            Arc::clone(&segmentation),
             reads,
             generators_following(vec![emits(1), emits(1)]),
         );
@@ -933,10 +959,16 @@ mod tests {
         let (_other_reference_dir, _other_bam_dir, alpha) = reads_named("alpha");
         let segmentation = segmentation_over(vec![generic_segment(0, 10, 20)]);
 
-        let walking_zeta =
-            AlignmentFilesWalker::over(&segmentation, zeta, generators_following(vec![emits(1)]));
-        let walking_alpha =
-            AlignmentFilesWalker::over(&segmentation, alpha, generators_following(vec![emits(1)]));
+        let walking_zeta = AlignmentFilesWalker::over(
+            Arc::clone(&segmentation),
+            zeta,
+            generators_following(vec![emits(1)]),
+        );
+        let walking_alpha = AlignmentFilesWalker::over(
+            Arc::clone(&segmentation),
+            alpha,
+            generators_following(vec![emits(1)]),
+        );
 
         assert_eq!(walking_zeta.sample_name(), "zeta");
         assert_eq!(walking_alpha.sample_name(), "alpha");
@@ -957,6 +989,61 @@ mod tests {
         assert!(rendered.contains("zeta"), "{rendered}");
         assert!(rendered.contains("After"), "{rendered}");
         assert!(!rendered.contains(".bam"), "{rendered}");
+    }
+
+    /// **A run can hold its walkers and the segmentation they read, in one object** — which is
+    /// the whole reason the segments are shared rather than borrowed.
+    ///
+    /// This is the shape the next step needs and the shape a borrow cannot take: a struct whose
+    /// walkers borrowed its own segmentation would be self-referential, and safe Rust would
+    /// refuse it. **The test is that this compiles**, so a change back to a borrow fails here at
+    /// the compiler rather than three steps later at the wiring.
+    ///
+    /// **And the list is stored once, not once per sample.** Three walkers over one segmentation
+    /// leave four holders of the same allocation — the three of them and the run — where three
+    /// copies would leave four allocations of a genome-sized list.
+    #[test]
+    fn a_run_can_hold_its_walkers_beside_the_segmentation_they_read() {
+        struct ARunHoldingBoth {
+            segmentation: Arc<Segmentation>,
+            walkers: Vec<AlignmentFilesWalker<RunSegments>>,
+        }
+
+        let samples = ["zeta", "alpha", "mu"];
+        let opened: Vec<_> = samples.iter().map(|name| reads_named(name)).collect();
+        let segmentation = segmentation_over(vec![generic_segment(0, 10, 20)]);
+
+        let mut run = ARunHoldingBoth {
+            walkers: opened
+                .into_iter()
+                .map(|(_reference_dir, _bam_dir, reads)| {
+                    AlignmentFilesWalker::over(
+                        Arc::clone(&segmentation),
+                        reads,
+                        generators_following(vec![emits(1)]),
+                    )
+                })
+                .collect(),
+            segmentation,
+        };
+
+        assert_eq!(
+            Arc::strong_count(&run.segmentation),
+            4,
+            "the run and its three walkers, all on one list"
+        );
+        assert_eq!(
+            run.walkers
+                .iter()
+                .map(AlignmentFilesWalker::sample_name)
+                .collect::<Vec<_>>(),
+            samples,
+        );
+        for walker in &mut run.walkers {
+            let (regions, failure) = drain(walker);
+            assert!(failure.is_none());
+            assert_eq!(regions.len(), 1, "each walker walks the shared segment");
+        }
     }
 }
 
