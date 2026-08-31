@@ -28,13 +28,29 @@ Skills and agents are instructed to leave it untouched.
 > And the contig agreement is the open gate's, which compares names, lengths, order **and the
 > checksums whenever the reference carries them**; what A2 adds covers the one case it cannot, a
 > reference read from a `.fai`, whose checksums exist only once the background FASTA read has
-> finished. **⚑ Two things wait on the owner**: whether to keep the empty-cohort refusal, and the
-> descriptor-per-file count, which follows spec §7.1a and over-estimates this reader by about
-> twofold. **⛦ And A2's own review found a gap in its remit**: nothing checked that the repeat
+> finished. **Both things that waited on the owner are now settled (rulings of 2026-08-31).** The
+> empty-cohort refusal stays, and the command line will refuse the same shape again when F1 lands
+> — fail as early as a run can be known to be wrong. And the descriptor count was **measured
+> rather than argued**: `examples/ng_open_cohort_descriptors.rs` opens the 63 tomato accessions
+> and counts `/proc/self/fd`. **The constant of 2 a file is right and spec §7.1a's reason for it
+> is not.** Sixty-three open alignment files cost **one** descriptor between them — an index is
+> parsed into memory and an open `AlignmentFile` holds no handle — so "a CRAM and its index are
+> two descriptors each" describes neither half. What costs 2 a file is a **cursor**: one for the
+> file's reader and one for the per-file reference accessor, which opens the FASTA (63 cursors
+> took the process from 4 descriptors to 130, exactly 2.00 a file). A run holds one cursor per
+> file for the whole walk, so the arithmetic the refusal prints is sound; only its explanation
+> was wrong, and `callers.rs` now says what was counted. **The spec is not edited** — this is the
+> correction recorded against §7.1a. Milestone E can still move it: nobody has counted what
+> several callers in flight open. **⛦ And A2's own review found a gap in its remit**: nothing checked that the repeat
 > catalog was built on the run's reference, and the catalog's own check is blind on the `.fai`
 > path — so a catalog from another build of the same assembly would have routed every repeat
 > tract to the wrong position, genome-wide, silently. Refused now. 40 tests across the two files;
-> `ng::run` at 329 passing.
+> `ng::run` at 329 passing. **Checkpoint A's other half is now evidence rather than an
+> expectation**: the fixtures top out at three samples, and the same probe opens the real
+> 63-accession tomato cohort — 63 files, 100,171 segments over 80 BED regions, and an assembly
+> check that compared **819 of 819** contig checksums and found every one agreeing. The catalog
+> comes from an explicit path rather than the sibling convention, because the reference lives on
+> the container's read-only `$HOME/genomes` mount and no catalog can be written beside it.
 >
 > - **Previously (2026-08-31):** **the object a direct-mode run is** — step A1 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md). Every sample's

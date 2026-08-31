@@ -12,11 +12,13 @@ into build order; it is **not** a place for new design.
 while the psp encoding is still being measured; it is the shortest path to ng calling from real
 reads; and once psp mode exists, direct mode is its oracle.
 
-**Where this plan stops, and why.** At **called loci**, not at a VCF. The VCF writer's shape and the
-`Variant` record's belong to the emission step, whose document does not exist
-([`run_streaming.md`](../spec/run_streaming.md) §10). Writing that spec is the next thing on the
-critical path after this plan, and this plan is what makes it writable — you cannot settle a record
-format for something nothing produces yet.
+**Where this plan stops — ⛦ revised 2026-08-31, and it now goes further.** The draft stopped at
+**called loci** because the emission step had no document. **It has one**: the format is settled in
+[`../spec/vcf_output.md`](../spec/vcf_output.md) and the writer is coded, `src/ng/vcf/`, with
+bcftools reading its output (owner's ruling, 2026-08-31). So **Milestone D goes through to VCF
+records**, which is what [`../arch/run_streaming.md`](../arch/run_streaming.md) §3.4 already gives
+both callers as their `Iterator::Item`. Expect to tweak that writer rather than to wait for another
+plan.
 
 ---
 
@@ -29,9 +31,10 @@ it yields; the wiring of `call_locus` into the merge's builder; the construction
 
 **Out (later plans, or blocked):**
 
-- **The VCF writer and the `Variant` record** — blocked on the emission step's spec. Production's
-  [`src/vcf/`](../../../../src/vcf/) is caller-agnostic and is the reuse candidate;
-  `var_calling/vcf_writer.rs` assembles production's own types and is a copy-into-ng, not a reuse.
+- ~~**The VCF writer and the `Variant` record**~~ — **no longer out, 2026-08-31.** They were listed
+  as blocked on the emission step's spec; that spec is [`../spec/vcf_output.md`](../spec/vcf_output.md)
+  and the writer is `src/ng/vcf/`. Milestone D reaches VCF records, and what it needs from the
+  writer is a tweak rather than a build.
 - **Everything psp** — the walk stage, the psp writer and reader, `PspVariantCaller`,
   `generate-psps`, `call-from-psps`, `generate-census`. Blocked on the encoding, which is under
   measurement ([`psp_encoding_experiments.md`](psp_encoding_experiments.md)).
@@ -161,7 +164,15 @@ handed to a caller opened over another; A2 catches that on the counts.
 *Depends:* A1. *Source:* §6.2, §7.1a; [`parameters_file.md`](../spec/parameters_file.md) §6;
 [`../arch/run_streaming.md`](../arch/run_streaming.md) §5.
 
-> **Checkpoint A:** the object opens a 63-sample cohort and refuses the mismatches. Pause for review.
+> **Checkpoint A: met 2026-08-31.** The refusals are covered by 40 tests across `callers.rs` and
+> `segments.rs`. The 63-sample open is `examples/ng_open_cohort_descriptors.rs`, which opens the
+> tomato accessions in `benchmarks/tomato1/crams/` — 63 files, 100,171 segments over the 80 BED
+> regions, **819 of 819** contig checksums compared and agreeing — and counts what that costs in
+> file descriptors. **It takes the catalog's path rather than finding it beside the reference**,
+> because the reference is on the container's read-only `$HOME/genomes` mount and nothing can be
+> written next to it. What it measured corrects the mechanism behind `DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS`'s
+> constant without changing the constant; `callers.rs` carries the numbers and PROJECT_STATUS the
+> correction against spec §7.1a.
 
 ### Milestone B — one sample's walk, behind the merge's interface
 

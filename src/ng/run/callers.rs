@@ -414,16 +414,22 @@ fn refuse_parameters_assembled_for_another_cohort(
 
 /// Descriptors one alignment file needs while a run holds it open.
 ///
-/// **This is spec §7.1a's estimate — "a CRAM and its index are two descriptors each" — and not
-/// a measured property of this reader.** Read as built, the two differ: an open
-/// [`AlignmentFile`](crate::ng::read::input::open_bam::AlignmentFile) holds no descriptor at
-/// all, its index is parsed into memory at open, and the descriptor belongs to a cursor, of
-/// which direct mode holds one per file. So today this over-estimates by about twofold, which
-/// refuses a run that would have fitted rather than letting one die at `EMFILE`.
+/// **Measured, on the 63-accession tomato cohort** — `examples/ng_open_cohort_descriptors.rs`,
+/// which opens that cohort through [`AlignedFilesVariantCaller::open`] and counts
+/// `/proc/self/fd` at three points. The number is right and spec §7.1a's reason for it — "a CRAM
+/// and its index are two descriptors each" — is not, so what was counted is written here instead:
 ///
-/// **Which is the safe direction and still the wrong number**, and it may stop being safe:
-/// spec §11's question 2 puts several callers in flight, and nobody has counted what that opens.
-/// Owner's, and raised at Checkpoint A.
+/// - **63 open alignment files cost one descriptor between them** (3 → 4). An index is parsed
+///   into memory at open and an open
+///   [`AlignmentFile`](crate::ng::read::input::open_bam::AlignmentFile) keeps no handle, so
+///   neither half of the spec's sentence is where the cost is.
+/// - **A cursor costs 2 a file** (4 → 130 for 63 cursors, 2.00 a file): one for the file's own
+///   reader, and one for the reference accessor [`SampleReads::cursor`] mints per file, which
+///   opens the FASTA. A run holds one cursor per file for the whole walk (spec §5.1), so this is
+///   the shape the refusal has to size for.
+///
+/// **Milestone E can move it**: spec §11's question 2 puts several callers in flight, and nobody
+/// has counted what that opens. Re-run the probe there.
 const DESCRIPTORS_AN_ALIGNMENT_FILE_NEEDS: u64 = 2;
 
 /// Descriptors a run needs for everything that is not an alignment file: the three standard
