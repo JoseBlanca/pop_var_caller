@@ -80,13 +80,18 @@ it yields; the wiring of `call_locus` into the merge's builder; the construction
 - **The parameters** — [`parameters_file.md`](parameters_file.md)'s Milestone F, so a run can be
   given its numbers or take the defaults. **This plan cannot start before that one reaches E2.**
 
-**⚠ Two preconditions are not in place, and the executor must not work around them.**
+**⚠ Two preconditions were not in place, and the executor must not work around them. One is now
+done; the second still blocks F1.**
 
-- **The architecture document is stale.** [`../arch/run_streaming.md`](../arch/run_streaming.md)
-  still specifies `call_vars_in_segment`, a `LookAhead` knob, a segment pool and per-segment
-  per-sample walkers — the design [`run_streaming.md`](../spec/run_streaming.md) §3.1 and §3.5
-  retired. **Amend it before A1**; that is architecture work, not plan work, and coding from it as
-  it stands builds the deleted design.
+- ~~**The architecture document is stale.**~~ **Amended 2026-08-31**, and A1 is unblocked.
+  [`../arch/run_streaming.md`](../arch/run_streaming.md) had specified `call_vars_in_segment`, a
+  `LookAhead` knob, a segment pool and per-segment per-sample walkers — all retired by
+  [`run_streaming.md`](../spec/run_streaming.md) §3.1 and §3.5. It now describes the built source
+  trait, the serial merge feeding a pool of callers, and the two refusals A2 needs; its own
+  amendment section lists what moved. **Two questions it records rather than answers** and the
+  owner holds both: which thread the call runs on once a pool exists (its §8), and what A2's
+  cohort check can compare in direct mode, where one segmentation serves every sample (its §8,
+  last confirmation).
 - **The subcommand names are agreed and written nowhere.** `generate-psps`, `generate-census`,
   `call-from-psps`, `call-from-alignments` (owner, 2026-08-28). They belong with the rest of the
   command surface, which [`../spec/typed_regions_cli.md`](../spec/typed_regions_cli.md) owns.

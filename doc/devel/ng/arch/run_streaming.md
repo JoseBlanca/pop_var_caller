@@ -1,11 +1,13 @@
 # ng — driving a run: types and interfaces
 
-*Status: architecture draft (2026-08-16), companion to the spec
+*Status: architecture draft (2026-08-16), **amended 2026-08-31**. Companion to the spec
 [`../spec/run_streaming.md`](../spec/run_streaming.md) (the design and every *why*) and to the
 shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary) and
-[`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
-[`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for types,
-verbs for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the
+[`module_layout.md`](module_layout.md) (the `src/ng/` tree). The merge these callers drive has its
+own pair — [`../spec/cohort_merge.md`](../spec/cohort_merge.md) and
+[`cohort_merge.md`](cohort_merge.md) — and is built; this document says what drives it. Naming
+follows [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for
+types, verbs for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the
 **contract** is the deliverable. This document does not re-argue a decision — the spec section is
 cited instead.*
 
@@ -13,26 +15,59 @@ The public surface is the spec's three objects (spec §1): `AlignedFilesVariantC
 `PspVariantCaller`, `SampleObservationGatherer` — each an iterator. Everything else in this
 document is crate-private machinery inside one of them.
 
+## What the amendment of 2026-08-31 changed
+
+The 16 August draft ran the genome through a pool of workers, each owning one stretch. Spec §3.5
+retired that arrangement and the merge was built to its replacement, so this document described
+machinery that does not exist. Two later documents recorded the divergence on their own pages
+instead of here — [`cohort_merge.md`](cohort_merge.md)'s note that it revises §3.2, and spec §3.2's
+flag that its own text "describes the merge this document imagined, not the one that was built" —
+and nobody came back to the original. **The amendment takes no design decision the spec or the
+built code had not already taken.** Six things moved:
+
+- **Where the parallelism is.** Stretches of genome are no longer dealt to a pool. One thread
+  merges, and each cohort locus it produces goes to a free caller (spec §3.5). §3 is rewritten
+  around that, and the `LookAhead` knob — segments in flight — is deleted. What survives is a count
+  of **callers in flight**, and it belongs to the caller objects rather than to all three.
+- **What a source is asked for.** `observations_in`, which returned an iterator over one segment,
+  is replaced by the trait the merge built and uses: one observation at a time, with the spent
+  record offered back for reuse (§2).
+- **Where that trait lives.** In the merge, not in this module — recorded, not moved (§2).
+- **The calling core.** `call_vars_in_segment` and `k_way_merge` are both gone: the merge is
+  [`cohort_merge`](cohort_merge.md), and calling one cohort locus is the calling module's existing
+  `LocusGenotyper::call_locus` reached through two shaping functions (§3.2).
+- **Two refusals were missing** — the parameters' sample list against the run's, and the
+  file-descriptor headroom (spec §6.2, §7.1a). Both are in `RunError` now (§5).
+- **Every `file:line` in §7 was re-read.** The citations had drifted by up to 215 lines.
+
+---
+
 ## Module home
 
-`src/ng/run/`, a new folder beside `locus_generation/` and `parameter_estimation/`:
+`src/ng/run/`, beside `locus_generation/` and `parameter_estimation/`:
 
 ```
 src/ng/run/
-├── mod.rs        – re-exports the three objects + RunError
-├── segments.rs   – Segmentation + SegmentationInputs: the run's segments and what they
-│                   were computed from
-├── source.rs     – the ObservationSource trait + the alignment-backed walker impl
-├── gatherer.rs   – SampleObservationGatherer
-├── calling.rs    – call_vars_in_segment, k_way_merge, and the two caller iterators
-└── psp_header.rs – PspHeader: the values every psp records
+├── mod.rs         – re-exports the three objects + RunError
+├── segments.rs    – Segmentation + SegmentationInputs: the run's segments and what they
+│                    were computed from
+├── walker.rs      – one sample's alignment files behind the merge's source trait
+├── callers.rs     – AlignedFilesVariantCaller, and later PspVariantCaller
+├── gatherer.rs    – SampleObservationGatherer
+├── psp_header.rs  – PspHeader: the values every psp records
+└── cohort_merge/  – built; its own arch doc (cohort_merge.md)
 ```
+
+**`walker.rs` and `callers.rs` replace the draft's `source.rs` and `calling.rs`.** `source.rs` was
+named for the trait it would hold, and the trait is in the merge (§2), so the file holds only the
+alignment-backed implementation and is named for it. `calling.rs` was named for two free functions
+that no longer exist; what goes in that file is the caller objects.
 
 The psp **writer** and **reader** are deliberately not files here: their shapes belong to the
 encoding spec (spec §10). This document defines what they plug into — the writer consumes the
-gatherer's iterator (spec §5.2), the reader implements `ObservationSource` (§2) — and the header
-values they write and check (§4). The walk stage's per-sample loop (spec §5.2) is composition the
-CLI owns; it needs no type of its own.
+gatherer's iterator (spec §5.2), the reader implements the merge's source trait (§2) — and the
+header values they write and check (§4). The walk stage's per-sample loop (spec §5.2) is
+composition the CLI owns; it needs no type of its own.
 
 **This revises [`module_layout.md`](module_layout.md)'s `pipeline.rs` entry**, which named one
 file holding "the `CallerRecipe` + the driver that runs it end-to-end". The recipe stays where
@@ -44,9 +79,9 @@ changed, because the tree in that document still shows the old placement.
 ## 1. The segments (`segments.rs`)
 
 The segments every loop advances over are the typed-region generator's segments, held once and
-shared read-only by every worker (spec §4.2, §9). No grouping routine exists: the loop unit is
-one segment (spec §4.4), so `Segmentation` is a list plus the record of its inputs — the previous
-draft's `group_toward` is retired with the size choices it served.
+shared read-only by every worker (spec §4.2, §9). No grouping routine exists: the loop unit for
+*observation generation* is one segment (spec §4.4), so `Segmentation` is a list plus the record of
+its inputs — the previous draft's `group_toward` is retired with the size choices it served.
 
 ```rust
 /// The run's segments, in genome order, plus the values they were computed from. A function of
@@ -76,7 +111,7 @@ impl Segmentation {
 `SegmentationInputs` is both the psp header's core (§4) and the operand of the file-against-run
 check (spec §6.2). The parameters fit holds the equivalent object for its own compatibility
 check: `RecordingTerms`
-([`census.rs:995`](../../../../src/ng/parameter_estimation/joint/census.rs)).
+([`census.rs:1024`](../../../../src/ng/parameter_estimation/joint/census.rs)).
 
 ```rust
 #[derive(Clone, PartialEq)]
@@ -109,71 +144,188 @@ impl SegmentationInputs {
 
 ---
 
-## 2. The source (`source.rs`)
+## 2. The source (`walker.rs`, and the trait in `cohort_merge/`)
 
-One trait carries the whole difference between the two callers (spec §3.3). The item is
-`SampleLocusObservations` directly — no wrapper: an empty segment yields nothing, and
-"analysed-but-empty" is carried by the psp header plus trailer and by the gatherer's own
-`mark_walked`, not by an empty container (spec §5.2, §8).
+**A source answers one question: what did this sample see next?** It hands back one observation at
+a time, in coordinate order, never going backwards, for the whole run. One trait carries the entire
+difference between the two callers (spec §3.3): behind it sits either a walk over alignment files
+or a read from a psp, and nothing above it can tell which.
+
+**The trait is already in the tree, and it is in the merge rather than here** —
+[`ObservationSource`](../../../../src/ng/run/cohort_merge/observation_cache.rs), declared at
+`observation_cache.rs:70`. The merge needed it before this module existed and defined it locally;
+its own arch doc ([`cohort_merge.md`](cohort_merge.md) §2) says this document owns it. **Decided:
+it stays where it is and this document describes it.** Moving a trait the whole merge already
+implements against buys nothing a reader of either document cannot get from a cross-reference.
 
 ```rust
-/// Answers one question: this sample's observations in this segment, in coordinate order.
+/// One sample's observations, one at a time, in coordinate order, forward only.
 pub trait ObservationSource {
-    fn observations_in(
+    /// What a failed read is. The merge adds nothing to it and passes it through, so it must
+    /// name the sample it came from (§5).
+    type Error;
+
+    /// The next observation, or `None` once this sample is spent.
+    ///
+    /// `spare` is a record the merge will not read again, offered for reuse; `None` when it has
+    /// none to hand back.
+    fn next_observation(
         &mut self,
-        segment: &GenomeRegion,
-    ) -> impl Iterator<Item = Result<SampleLocusObservations, RunError>> + '_;
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<SampleLocusObservations, Self::Error>>;
 }
 ```
 
-**Contract.** The yield is exactly the observations minted inside `segment`, in coordinate order,
-produced lazily — the merge pulls, the source decodes or walks as pulled (spec §3.2). Segments may
-be asked in any order and the answer is the same; ascending is the fast path, and a backward jump
-costs a seek (spec §8). A source serves one consumer at a time (`&mut self`); a parallel loop
-gives each in-flight segment its own source per sample over the sample's one shared open file
-(spec §3.4, §7).
+**Contract.**
+
+- **Coordinate order, forward only.** Observations start at non-decreasing positions. Going
+  backwards is not an error the source may report: it trips an assertion inside the merge's cache
+  (`ObservationCache::cover`), because the cache has no error of its own to mint. That is right
+  while observations come from this crate's generators, where backwards is a bug; `organise.rs`
+  records that it owes the change to a returned `RunError` once observations are decoded from a
+  file.
+- **Exhaustion is final.** Once `next_observation` answers `None` it is never called again — the
+  cache holds a flag of its own to guarantee it. A source that yielded `Some` after a `None` would
+  be drawn in behind the cache window's right edge, and so silently out of coordinate order.
+- **A failure leaves the source live.** `Some(Err(_))` ends the merge but does not end the source;
+  it is `None` that ends it.
+- **One source per sample for the whole run**, not one per worker and not one per segment (spec
+  §3.4; [`cohort_merge.md`](cohort_merge.md) §6.4's "one reader per sample for the whole run"). The
+  merge is the only consumer and it only moves forward, so each stretch is decoded once and the
+  backward jump never happens. Both sources are still *capable* of a backward jump — asked for
+  ground behind them they seek, and pay for it (spec §8).
+- **Reuse is optional.** Every iterator of one sample's observations is already a source, through a
+  blanket implementation (`observation_cache.rs:98`) that drops the spare and calls `next`. That is
+  what lets fixtures and probes hand the merge a plain `Vec`'s iterator unchanged. A source opts
+  into reuse by implementing the trait itself.
+- **`Send + Sync` only for the parallel merge.** `merge_cohort_in_parallel`
+  ([`parallel.rs:96`](../../../../src/ng/run/cohort_merge/parallel.rs)) shares the cache across
+  rayon workers and so requires `S: Sync + Send`; the single-threaded driver does not. A walker
+  built on `Rc` or `RefCell` would therefore work in direct mode and not under the parallel merge,
+  which is off by default (spec §3.5).
 
 **Two implementations:**
 
-- **The walker** (this file): owns a `SampleCursor` (`SampleReads::cursor` takes `&self` and
+- **The walker** (`walker.rs`): owns a `SampleCursor` (`SampleReads::cursor` takes `&self` and
   returns an owned, `Send` cursor — [`read/input/mod.rs:623`](../../../../src/ng/read/input/mod.rs),
   test [`:1441`](../../../../src/ng/read/input/mod.rs)), a reference accessor from the factory
   (`WindowedRefSeq` is `Send` and deliberately not `Sync` —
-  [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)), and a generator set,
-  whose drop order is load-bearing
-  ([`locus_generation/mod.rs:707-737`](../../../../src/ng/locus_generation/mod.rs)). Spec §8 is
-  the trap list this ownership shape honours.
+  [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs)), and a generator set, whose
+  drop order is load-bearing
+  ([`locus_generation/mod.rs:1028-1040`](../../../../src/ng/locus_generation/mod.rs)). It is
+  `SampleLocusObservationsIterator`
+  ([`:921`](../../../../src/ng/locus_generation/mod.rs)) driven over the run's segments and made to
+  answer the trait. Spec §8 is the trap list this ownership shape honours.
 - **The psp reader** (`src/ng/psp/`, built): a cursor over one open psp that decodes whichever
-  blocks overlap the segment and keeps the one it is in. Its resident state is the file's coarse
-  index plus one decoded block; measured, that is **123 kB a cursor**, on top of **357 kB** for
-  the open file itself on a human reference — almost all of the second being the reference's
-  contig list (spec §7.2). No block is visible in its interface. `records_from(at)` is the seek and
-  `building_only_where(…)` the predicate walk this trait's contract needs.
+  blocks it needs and keeps the one it is in. Its resident state is the file's coarse index plus one
+  decoded block; measured, that is **123 kB a cursor**, on top of **357 kB** for the open file
+  itself on a human reference — almost all of the second being the reference's contig list (spec
+  §7.2). No block is visible in its interface.
+
+**The cheap question is not on this trait, and spec §10 owns that gap.** Deciding whether a
+position is worth calling needs two small numbers per sample, and everything else only where the
+cohort kept something (spec §3.3). This trait has one method and it returns a whole inflated
+observation, so a psp reader behind it would decode everything everywhere. The shape of the fix is a
+second method; it cannot be settled before the encoding is, and it costs a walker nothing either
+way, so direct mode is unaffected.
 
 ---
 
-## 3. The three objects and the calling core (`gatherer.rs`, `calling.rs`)
+## 3. The three objects (`callers.rs`, `gatherer.rs`)
 
-All three objects share one internal skeleton (spec §3.4): segments dealt to `workers` threads
-in genome order, at most `look_ahead` segments in flight, results drained at the yield point in
-genome order. The knobs are newtypes over `NonZeroUsize` — a count whose zero is illegal:
+### 3.1 The shape, and where the threads are
+
+**The two stages parallelise along different axes** (spec §3.5), and the draft's single shared
+skeleton — segments dealt to workers, several in flight — describes neither.
+
+- **The two variant callers: a serial merge feeding a pool of callers.** One thread runs the merge
+  and produces cohort loci in genome order; each locus goes to a free caller as it appears; results
+  are released in genome order. The genome is not cut for calling, because a cohort locus is not a
+  position — a deletion joins consecutive positions into one — so where loci begin and end is an
+  output of the merge, not an input to it (spec §3.5).
+- **The walk: one worker per sample.** Several samples are walked at once, one worker each, and
+  each sample's walk is serial inside it (spec §5.2).
+
+The knobs are newtypes over `NonZeroUsize` — a count whose zero is illegal:
 
 ```rust
-pub struct Workers(pub NonZeroUsize);
-/// Segments in flight beyond the next to yield — each object's one memory knob (spec §3.4,
-/// §7.1). No default is proposed; spec §11 open question 2 names the sweep.
-pub struct LookAhead(pub NonZeroUsize);
-/// The walk stage's samples-at-once. Default 1 — one open alignment file, cohort-independent
-/// peak (spec §5.2).
+/// Cohort loci being called at once, in a variant caller's pool. The caller objects' one
+/// concurrency knob, and what their in-flight memory is a multiple of (spec §3.5, §7.1).
+/// **No default is proposed** — spec §11 question 2 names the sweep that sets it.
+pub struct CallersInFlight(pub NonZeroUsize);
+
+/// Samples being walked at once in psp mode's walk stage. Each costs one open alignment file at
+/// 11–15 MiB plus its census accumulator at about 6 MB per read group, so the read-group count
+/// is part of the sizing and not a formality (spec §5.2). **No default is proposed** — spec §11
+/// question 2 again.
 pub struct SamplesInFlight(pub NonZeroUsize);
+
+/// Segments of one sample's own walk in flight inside one gatherer. **Not on the default path**:
+/// at one, a gatherer is the serial walk spec §5.2 describes. Whether raising it scales at all
+/// is spec §11 question 3, and question 8 turns on the answer.
+pub struct Workers(pub NonZeroUsize);
 ```
 
-### 3.1 `SampleObservationGatherer`
+**`LookAhead` is deleted.** It counted segments in flight beyond the next to yield, which was the
+memory knob of the pool spec §3.5 retired. Nothing in the built design has a segment in flight.
+
+### 3.2 Calling one cohort locus
+
+**There is no `call_vars_in_segment` and no `k_way_merge`.** The merge is the module
+[`cohort_merge.md`](cohort_merge.md) documents, and calling one locus is three existing calls in the
+calling module — the caller objects compose them and add nothing of their own:
+
+```rust
+// which alleles the locus is called over, and what each covering sample lost to the cut
+let selection = select_generic(&observation, &selection_config, &mut selection_scratch);
+// the merge's covering samples become one entry per sample of the run
+let evidence = shape_generic_locus(
+    &mut shaping, &observation, &selection, run_sample_count, &mut views,
+);
+// the call itself; the allele table leaves the selection by value (`LocusSelection::into_parts`)
+let inference = genotyper.call_locus(&evidence, &frozen, alleles, &loop_config, &mut scratch);
+```
+
+- `select_generic` — [`allele_candidates/generic.rs:81`](../../../../src/ng/calling/allele_candidates/generic.rs).
+  The repeat-tract path's equivalent is specified and unbuilt
+  ([`../spec/candidate_alleles_ssr.md`](../spec/candidate_alleles_ssr.md)).
+- `shape_generic_locus` / `shape_ssr_locus` —
+  [`evidence_shaping.rs:403,443`](../../../../src/ng/calling/evidence_shaping.rs). **This is where
+  the three sample numberings meet**, and that module's own header documents them: the merge's
+  per-sample list holds only the samples that covered the locus, each naming its index in the run's
+  order; the loop's list is one entry per sample of the run; and candidate selection's dropped-allele
+  list is parallel to the merge's, not to the run's.
+- `LocusGenotyper::call_locus` —
+  [`inference/mod.rs:619,629`](../../../../src/ng/calling/inference/mod.rs). One cohort locus in,
+  one `LocusInference` out.
+
+**Where the call happens relative to the merge's builder is open, and the two documents lean
+different ways.** [`../spec/cohort_merge.md`](../spec/cohort_merge.md) §6.3 leans to calling *inside*
+the builder, because the buffer then holds called records rather than whole observations, and notes
+that the choice commutes — calling one cohort locus reads nothing outside it. Spec §3.5 puts the
+merge on one thread and the loci in a pool of callers, which is a hand-off *out* of the builder. The
+two agree on the answer and not on the thread. §8 records what is unsettled; nothing before a pool
+exists depends on it, because a single-threaded run calls in the same place either way.
+
+**The comparison that would settle it is now available.** `cohort_merge.md` §14 question 6 asked to
+weigh the two buffers when the emission step fixed the record's shape; the record is
+`VcfRecord` ([`vcf/mod.rs:84`](../../../../src/ng/vcf/mod.rs)) and the step is specified
+([`../spec/vcf_output.md`](../spec/vcf_output.md)).
+
+**Both built merge drivers accumulate, and a real run must not.**
+`merge_cohort_through_cache` ([`serial.rs:146`](../../../../src/ng/run/cohort_merge/serial.rs)) and
+`merge_cohort_in_parallel` ([`parallel.rs:96`](../../../../src/ng/run/cohort_merge/parallel.rs))
+both return a `RegionOutcome` holding every cohort observation of the whole run in one `Vec`
+([`build.rs:743`](../../../../src/ng/run/cohort_merge/build.rs)). That is what an oracle wants and
+what a run cannot afford. The caller objects consume each locus where it is built and keep none, so
+what they hold is the pool's loci and not the genome's.
+
+### 3.3 `SampleObservationGatherer` — psp mode's walk
 
 ```rust
 /// One sample's observations in genome order, census accumulated as they pass. psp mode's
 /// walk stage is a loop of these, one per sample (spec §5.2).
-pub struct SampleObservationGatherer { /* pool, sources, CensusWriter, tallies */ }
+pub struct SampleObservationGatherer { /* sources, CensusWriter, tallies */ }
 
 impl SampleObservationGatherer {
     pub fn new(
@@ -181,7 +333,6 @@ impl SampleObservationGatherer {
         segmentation: &Segmentation,
         census: &CensusConfig,
         workers: Workers,
-        look_ahead: LookAhead,
     ) -> Result<Self, RunError>;
 
     /// After the iterator is exhausted: the census the walk accumulated. Calling it earlier is
@@ -194,52 +345,38 @@ impl Iterator for SampleObservationGatherer {
 }
 ```
 
-**Contract.** Yields in genome order. At the yield point — single-threaded by construction —
-every observation passes `CensusWriter::add_locus` and every completed segment passes
-`mark_walked`, empty segments included
-([`census.rs:1965,1984`](../../../../src/ng/parameter_estimation/joint/census.rs)); what the
-iterator yields and what the census counted are the same stream, which is the whole of spec
-§5.2's two closures. Read-filter tallies are per-cursor
+**Contract.** Yields in genome order. At the yield point — single-threaded by construction — every
+observation passes `CensusWriter::add_locus` and every completed segment passes `mark_walked`, empty
+segments included
+([`census.rs:2087,2106`](../../../../src/ng/parameter_estimation/joint/census.rs)); what the
+iterator yields and what the census counted are the same stream, which is the whole of spec §5.2's
+two closures. Read-filter tallies are per-cursor
 ([`read/input/mod.rs:620-622`](../../../../src/ng/read/input/mod.rs)) and summed at `finish` —
 unsummed, drop rates under-report by the worker count (spec §8).
 
-### 3.2 The calling core
+**A gatherer never sees more than one sample's files**, whichever way the stage is parallelised: the
+pool is outside it, over samples; `workers` is inside it, over that sample's segments. At the
+default of one there is no inside pool at all.
 
-```rust
-/// The one merge-and-call, over one segment. Nothing inside can tell a walker from a psp
-/// reader (spec §3.1, goal 1). Serial, straight-line; the loop and its bookkeeping live in
-/// the callers.
-fn call_vars_in_segment(
-    segment: &GenomeRegion,
-    sources: &mut [impl ObservationSource],
-    parameters: &ModelParams,
-    variants: &mut Vec<Variant>,   // OPEN — the emission step's document owns Variant's shape
-) -> Result<(), RunError>;
-
-/// Streaming cohort merge: one head per source, keyed on coordinates, yielding one cohort
-/// observation at a time. Modeled on MergedRegionReads — argmin over per-stream heads, keys
-/// beside the heads (sample_reads.md §4). The reconciliation of differing spans inside a
-/// cohort observation is the deferred merge spec's (spec §3.2, §10).
-fn k_way_merge<'a>(
-    per_sample: &'a mut [impl Iterator<Item = Result<SampleLocusObservations, RunError>>],
-) -> impl Iterator<Item = Result<CohortObservation, RunError>> + 'a;
-```
-
-### 3.3 The two callers
+### 3.4 The two variant callers
 
 ```rust
 /// Direct mode (spec §5.1). Holds every sample's SampleReads open for the whole run —
-/// 11–15 MiB each — plus the shared read-only state; each in-flight segment's task owns its
-/// per-sample walkers.
-pub struct AlignedFilesVariantCaller { /* segmentation, SampleReads per sample, params, pool */ }
+/// 11–15 MiB each — plus the shared read-only state, and one walker per sample advancing at
+/// the merge frontier.
+pub struct AlignedFilesVariantCaller { /* segmentation, SampleReads + walker per sample, params, pool */ }
 
 impl AlignedFilesVariantCaller {
+    /// Opens every sample's files and runs spec §6.2's and §7.1a's checks before a read is
+    /// decoded.
     pub fn new(
         samples: &[SampleInput],
         segmentation: Segmentation,
-        parameters: ModelParams,
-        workers: Workers,
-        look_ahead: LookAhead,
+        parameters: RunParameters,
+        loop_config: RunnableCallingLoopConfig,
+        selection: CandidateSelectionConfig,
+        merge: MergeParameters,
+        callers_in_flight: CallersInFlight,
     ) -> Result<Self, RunError>;
 }
 
@@ -253,20 +390,34 @@ impl PspVariantCaller {
         psps: &[PathBuf],
         catalog: RepeatCatalogHeader,   // plus the open catalog + reference the rebuild needs
         routing: StrRepeatCriteria,
-        parameters: ModelParams,
-        workers: Workers,
-        look_ahead: LookAhead,
+        parameters: RunParameters,
+        loop_config: RunnableCallingLoopConfig,
+        selection: CandidateSelectionConfig,
+        merge: MergeParameters,
+        callers_in_flight: CallersInFlight,
     ) -> Result<Self, RunError>;
 }
 
-impl Iterator for AlignedFilesVariantCaller { type Item = Result<Variant, RunError>; }
-impl Iterator for PspVariantCaller        { type Item = Result<Variant, RunError>; }
+impl Iterator for AlignedFilesVariantCaller { type Item = Result<VcfRecord, RunError>; }
+impl Iterator for PspVariantCaller        { type Item = Result<VcfRecord, RunError>; }
 ```
 
-**Contract, both variant callers.** Variants in genome order, identical at every worker count and
-look-ahead (spec §12.2), identical between the two callers on one cohort with fixed parameters
-(spec §12.3 — the regression anchor). Iteration ends at the first `Err`; direct mode leaves
-nothing to clean up, and a psp without a valid trailer is refused at `open` (spec §9).
+**`MergeParameters` is a grouping, not a new decision.** The merge's five run parameters already
+exist and are separate types
+([`cohort_merge/mod.rs:269,314,367,465,532`](../../../../src/ng/run/cohort_merge/mod.rs)); passing
+them one by one alongside four other arguments is what the grouping avoids. Whether it is worth a
+struct is the constructor's to settle when it is coded.
+
+**Contract, both callers.** Records in genome order, identical at every number of callers in flight
+(spec §12.2), and identical between the two callers on one cohort with fixed parameters (spec §12.3
+— the regression anchor). Iteration ends at the first `Err`; direct mode leaves nothing to clean up,
+and a psp without a valid trailer is refused at `open` (spec §9).
+
+**What direct mode holds for the whole run:** one open `SampleReads` per sample, one walker per
+sample, the segmentation, the parameters, the merge's observation cache, and the pool's loci. **The
+open files are the whole bill** — 0.9 GB at 63 samples and 15 GB at a thousand, before a read is
+decoded (spec §5.1) — which is what puts the descriptor check (spec §7.1a) and "where does direct
+mode stop being usable" (spec §11, question 6) on the same axis.
 
 ---
 
@@ -301,16 +452,30 @@ across worker counts (spec §6.3, §12.1).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// A worker failed over a known stretch. **Both the sample and the span** — neither alone
+    /// One sample's source failed. **Both the sample and where it had reached** — neither alone
     /// locates a failure in a run over thousands of samples (spec §9).
-    #[error("sample {sample}: failed over {segment}")]
-    WorkerFailed {
+    #[error("sample {sample}: failed at {at}")]
+    SourceFailed {
         sample: String,
-        segment: GenomeRegion,
+        at: GenomePosition,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// Two psps were analysed over different segments, so the samples are not comparable —
-    /// the cohort refusal (spec §6.2). Open question 5 may later soften this to
+    /// The parameters name a sample the run does not have, or the run has one the parameters do
+    /// not name. Per-sample values are keyed by name and never by position
+    /// ([`parameters_file.md`](../spec/parameters_file.md) §6), so a gap either way is refused
+    /// naming the samples rather than silently defaulted (spec §6.2).
+    #[error("the parameters and the run name different samples: {difference}")]
+    ParameterSamplesDiffer { difference: String },
+    /// The run needs more open files than the process is allowed. **Names the limit and the
+    /// count**, because raising the limit is the operator's to do and a message that does not
+    /// say by how much leaves them nothing to act on. Refused at construction rather than met
+    /// as `EMFILE` around the thousandth sample (spec §7.1a).
+    #[error("{samples} samples need {needed} open files; this process may open {limit}")]
+    NotEnoughFileDescriptors { samples: usize, needed: u64, limit: u64 },
+    /// Two samples were analysed over different segments, so they are not comparable — the
+    /// cohort refusal (spec §6.2). **Reachable in psp mode only**, where each file records the
+    /// ground it was written over; in direct mode one segmentation serves the whole run, so
+    /// there is nothing to disagree (§8). Spec §11's question 5 may later soften this to
     /// intersection-calling; until then it refuses.
     #[error("samples {left} and {right} were analysed over different segments")]
     AnalysedRegionsDiffer { left: String, right: String },
@@ -320,6 +485,10 @@ pub enum RunError {
     /// `SegmentationInputs::first_difference`'s answer.
     #[error("psp for sample {sample} was written under a different {field}")]
     SegmentationInputsDiffer { sample: String, field: &'static str },
+    /// Two files name the same sample: a duplicated argument, or a cohort that would call one
+    /// individual twice and weight the allele frequencies by it (spec §6.2).
+    #[error("sample {sample} appears twice: {first} and {second}")]
+    SampleAppearsTwice { sample: String, first: PathBuf, second: PathBuf },
     /// A psp ended without a valid trailer: an interrupted walk, not a short sample (spec §9).
     #[error("psp for sample {sample} is incomplete")]
     IncompletePsp { sample: String },
@@ -328,62 +497,95 @@ pub enum RunError {
 }
 ```
 
+**`SourceFailed` replaces the draft's `WorkerFailed`, which named a segment.** The segment was the
+unit of the pool §3.1 retired; under a serial merge what a caller can say is which sample failed and
+where it had reached.
+
+**The merge's `RunEndedShort` folds in here** when this type lands, together with its
+`ObservationExceedsReachCeiling` — [`cohort_merge.md`](cohort_merge.md) §8 owes that, and three
+other cleanups gated on the same moment. **They are not this document's to schedule**: they touch
+the merge, and §8 below records them as still owed.
+
 ---
 
 ## 6. Design decisions — decided
 
 - **Three public objects, each an iterator; everything else crate-private.** No caller of this
   module names a work unit, a block, or a range — spec §1, §3.
-- **The loop unit is one segment; no grouping routine exists.** `Segmentation` is a list;
-  the previous draft's `group_toward`, `SampleSpanLoci`, `SampleLociSource`, `LociSink` and the
-  three free entry points are retired with the size choices they served — spec §4.4.
-- **One source trait, two implementations; the calling core consumes the trait and never
-  invokes a walk.** The whole of "one calling function, whichever mode" — spec §3.1, §3.3.
-- **`k_way_merge` streams and keys on coordinates**, modeled on `MergedRegionReads`
-  ([`sample_reads.md`](sample_reads.md) §4); its residency is the frontier — spec §3.2.
-- **What flows is `SampleLocusObservations`, bare.** No span-carrying wrapper: walked-empty
-  ground is recorded by the gatherer's `mark_walked` and readable back through the header plus
-  trailer, so an empty container had no remaining job — spec §5.2, §8.
+- **The genome is not cut for calling.** The merge runs on one thread and its loci go to a pool;
+  no line is drawn through the genome in advance, because loci are what the merge produces —
+  spec §3.5. This retires the draft's segment pool, `LookAhead`, and per-segment per-sample
+  walkers.
+- **The loop unit for *observation generation* is still one segment**, and no grouping routine
+  exists — spec §4.4. The two statements are about different stages and do not conflict.
+- **One source trait, two implementations; the merge consumes the trait and never invokes a
+  walk.** The whole of "one calling function, whichever mode" — spec §3.1, §3.3.
+- **The source trait stays in `cohort_merge/observation_cache.rs`**, where the merge built it,
+  and this document describes it — §2. Moving it would change every implementation site to
+  document ownership a cross-reference already carries.
+- **One source per sample for the whole run**, in both callers — spec §3.4;
+  [`cohort_merge.md`](cohort_merge.md) §6.4. This is what keeps every cursor forward-only.
+- **Calling composes three existing calls and mints nothing** — selection, shaping, the call
+  (§3.2). *Where* they run relative to the merge's builder is open (§8).
+- **The callers' item is `VcfRecord`** ([`vcf/mod.rs:84`](../../../../src/ng/vcf/mod.rs)) — the
+  emission step's document exists and named it, closing the draft's `OPEN: Variant's shape`.
+- **What flows from a source is `SampleLocusObservations`, bare.** No span-carrying wrapper:
+  walked-empty ground is recorded by the gatherer's `mark_walked` and readable back through the
+  header plus trailer, so an empty container had no remaining job — spec §5.2, §8.
 - **The census accumulator lives inside the gatherer, fed at the yield point.** One stream, two
   consumers impossible to desynchronise — spec §5.2.
 - **The psp reader serves segments; blocks exist only inside the writer and reader** — spec §3.3;
   their sizing is wholly the encoding spec's — spec §6.3, §10.
 - **The header carries no boundary digest and no writer version** — spec §6.3, **flagged for the
-  owner as a reversal of the previous draft**.
-- **Two refusal variants, two axes.** `AnalysedRegionsDiffer` compares files to each other;
-  `SegmentationInputsDiffer` compares a file to the run — spec §6.2.
-- **`Workers`, `LookAhead`, `SamplesInFlight` are newtypes over `NonZeroUsize`** — zero is
-  illegal for each; look-ahead is each object's one memory knob — spec §3.4, §7.1.
+  owner as a reversal of an earlier draft**.
+- **Four refusal variants, four axes.** `AnalysedRegionsDiffer` compares samples to each other;
+  `SegmentationInputsDiffer` compares a file to the run; `ParameterSamplesDiffer` compares the
+  parameters to the run; `NotEnoughFileDescriptors` compares the run to the process — spec §6.2,
+  §7.1a.
+- **`CallersInFlight`, `SamplesInFlight`, `Workers` are newtypes over `NonZeroUsize`**, and
+  **none of them is given a default here** — spec §11 questions 2 and 3 own the sweeps that set
+  the first two, and the third is not on the default path.
 - **`RepeatCatalogHeader` is reused whole as the reference-and-catalog identity.** No
-  `ReferenceDigest` or `CatalogIdentity` is minted
-  ([`repeat_catalog/mod.rs:283`](../../../../src/ng/repeat_catalog/mod.rs)).
+  `ReferenceDigest` or `CatalogIdentity` is minted for the segmentation
+  ([`repeat_catalog/mod.rs:283`](../../../../src/ng/repeat_catalog/mod.rs)). The parameters file
+  has its own `ReferenceDigest` for a different job — proving the numbers were fitted against this
+  assembly ([`parameters_file.md`](../spec/parameters_file.md) §6) — and the two are not unified.
 
 ---
 
 ## 7. Reconciliation with existing code
 
-Every row read at the cited line.
+Every row read at the cited line on 2026-08-31.
 
 | this doc | existing code | how they meet |
 |---|---|---|
 | the segments the loops advance over | `TypedRegion` [`region_typing/mod.rs:144`](../../../../src/ng/region_typing/mod.rs), `RegionKind` [`:168`](../../../../src/ng/region_typing/mod.rs) | consumed as-is; `Segmentation` holds the list; nothing re-classifies |
 | the flowing item | `SampleLocusObservations` [`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs) | already owned and lifetime-free, which is what lets an observation outlive the worker that minted it |
-| the walker behind the alignment source | `SampleLocusObservationsIterator` [`locus_generation/mod.rs:706`](../../../../src/ng/locus_generation/mod.rs) | one per in-flight segment's task; drop order load-bearing [`:707-737`](../../../../src/ng/locus_generation/mod.rs) |
-| the per-worker read cursor | `SampleReads` [`read/input/mod.rs:398`](../../../../src/ng/read/input/mod.rs), `cursor` [`:623`](../../../../src/ng/read/input/mod.rs) | one shared `SampleReads` per sample, one owned cursor per task (`Send` proven at [`:1441`](../../../../src/ng/read/input/mod.rs); `Sync` to confirm — §8) |
-| the reference accessor factory | factory parameter of `cursor` [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs) | one accessor per task; the factory exists because `WindowedRefSeq` is `Send`, not `Sync` |
-| "correct in any order, fastest ascending" | per-segment fetch [`pileup/generator.rs:621`](../../../../src/ng/locus_generation/pileup/generator.rs); any-order cursor [`cursor.rs:92-96`](../../../../src/ng/read/input/cursor.rs), test [`:1207`](../../../../src/ng/read/input/cursor.rs) | the `ObservationSource` ordering contract, walker side |
+| the source trait (§2) | `ObservationSource` [`cohort_merge/observation_cache.rs:70`](../../../../src/ng/run/cohort_merge/observation_cache.rs), blanket impl for iterators [`:98`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | **built, and described here rather than moved**; the walker implements it |
+| the walker behind the alignment source | `SampleLocusObservationsIterator` [`locus_generation/mod.rs:921`](../../../../src/ng/locus_generation/mod.rs) | **one per sample for the whole run**; drop order load-bearing [`:1028`](../../../../src/ng/locus_generation/mod.rs) |
+| the per-sample read cursor | `SampleReads` [`read/input/mod.rs:398`](../../../../src/ng/read/input/mod.rs), `cursor` [`:623`](../../../../src/ng/read/input/mod.rs) | one `SampleReads` per sample, one owned cursor per walker (`Send` proven at [`:1441`](../../../../src/ng/read/input/mod.rs)) |
+| the reference accessor factory | factory parameter of `cursor` [`read/input/mod.rs:606-611`](../../../../src/ng/read/input/mod.rs) | one accessor per walker; the factory exists because `WindowedRefSeq` is `Send`, not `Sync` |
+| "correct in any order, fastest ascending" | per-segment fetch [`pileup/generator.rs:621`](../../../../src/ng/locus_generation/pileup/generator.rs); any-order cursor [`cursor.rs:92`](../../../../src/ng/read/input/cursor.rs), test [`:1207`](../../../../src/ng/read/input/cursor.rs) | the source ordering contract, walker side |
 | read-filter tallies | in the cursor [`read/input/mod.rs:620-622`](../../../../src/ng/read/input/mod.rs) | summed at the gatherer's `finish` (spec §8) |
-| the streaming merge's model | `MergedRegionReads` [`sample_reads.md`](sample_reads.md) §4 | argmin over heads, keys beside heads; `k_way_merge` copies the shape, swaps the item and the yield |
-| the census accumulator | `CensusWriter` [`census.rs:1806`](../../../../src/ng/parameter_estimation/joint/census.rs), `add_locus` [`:1965`](../../../../src/ng/parameter_estimation/joint/census.rs), `mark_walked` [`:1984`](../../../../src/ng/parameter_estimation/joint/census.rs), `finish` [`:2252`](../../../../src/ng/parameter_estimation/joint/census.rs) → `SampleCensusEvidence` [`:1349`](../../../../src/ng/parameter_estimation/joint/census.rs) | owned by the gatherer, fed at the yield point; its doc comment already says it borrows the same locus stream its siblings see |
-| the psp header's first consumer | `PileupIdentity::of_header` [`census_file.rs:91`](../../../../src/ng/parameter_estimation/joint/census_file.rs), `freshness` [`:126`](../../../../src/ng/parameter_estimation/joint/census_file.rs) | **already built on `main`** — it digests the psp header's reference, analysed regions, read filters and command line, plus the record count, so a psp header must carry all four (spec §6.1); which bytes exactly is the encoding spec's business |
-| the census file | `write_census` [`census_file.rs:195`](../../../../src/ng/parameter_estimation/joint/census_file.rs), `open_census` [`:421`](../../../../src/ng/parameter_estimation/joint/census_file.rs) | the walk stage's loop writes `finish()`'s result through it |
-| `SegmentationInputs`'s sibling in the fit | `RecordingTerms` [`census.rs:995`](../../../../src/ng/parameter_estimation/joint/census.rs) | same shape, different stage; not unified — each stage refuses in its own vocabulary |
+| the merge | `merge_cohort_through_cache` [`serial.rs:146`](../../../../src/ng/run/cohort_merge/serial.rs), `merge_cohort_in_parallel` [`parallel.rs:96`](../../../../src/ng/run/cohort_merge/parallel.rs) | **built**; both accumulate the whole run's loci in `RegionOutcome` [`build.rs:743`](../../../../src/ng/run/cohort_merge/build.rs), which is the oracle shape and not the run's |
+| the cohort locus | `CohortObservation` [`build.rs:930`](../../../../src/ng/run/cohort_merge/build.rs) | what a source's observations become and what calling consumes; closes the draft's second `OPEN` |
+| the streaming merge's model | `MergedCursors` [`read/input/sample_cursor.rs:178`](../../../../src/ng/read/input/sample_cursor.rs) | argmin over heads, keys beside heads. **The draft cited `MergedRegionReads`, a name from a superseded design that is not in the tree** (spec §3.2) |
+| candidate selection | `select_generic` [`allele_candidates/generic.rs:81`](../../../../src/ng/calling/allele_candidates/generic.rs), `CandidateSelectionConfig` [`allele_candidates/mod.rs:46`](../../../../src/ng/calling/allele_candidates/mod.rs) | called per locus; the tract path is specified and unbuilt |
+| the merge's loci → what the loop reads | `shape_generic_locus` [`evidence_shaping.rs:403`](../../../../src/ng/calling/evidence_shaping.rs), `shape_ssr_locus` [`:443`](../../../../src/ng/calling/evidence_shaping.rs) | data-shaping only; **where the three sample numberings are joined**, documented in that file's header |
+| the call | `LocusGenotyper` [`inference/mod.rs:619`](../../../../src/ng/calling/inference/mod.rs), `call_locus` [`:629`](../../../../src/ng/calling/inference/mod.rs) → `LocusInference` [`calling/mod.rs:2942`](../../../../src/ng/calling/mod.rs) | one cohort locus in, genotypes out; the caller supplies `CallingScratch` [`calling/mod.rs:1241`](../../../../src/ng/calling/mod.rs) per worker |
+| the fitted parameters | `RunParameters` [`calling/run_parameters.rs:98`](../../../../src/ng/calling/run_parameters.rs), borrowed as `FrozenParameters` [`calling/mod.rs:627`](../../../../src/ng/calling/mod.rs) | **the draft's `ModelParams` does not exist**; this is the type, and it holds only fitted numbers — the loop's own config is `RunnableCallingLoopConfig` [`inference/mod.rs:518`](../../../../src/ng/calling/inference/mod.rs) |
+| the callers' item | `VcfRecord` [`vcf/mod.rs:84`](../../../../src/ng/vcf/mod.rs), `assemble_record` [`vcf/assemble.rs:117`](../../../../src/ng/vcf/assemble.rs), `VcfWriter` [`vcf/writer.rs:57`](../../../../src/ng/vcf/writer.rs) | built; the writer consumes the caller's stream in genome order |
+| the census accumulator | `CensusWriter` [`census.rs:1928`](../../../../src/ng/parameter_estimation/joint/census.rs), `add_locus` [`:2087`](../../../../src/ng/parameter_estimation/joint/census.rs), `mark_walked` [`:2106`](../../../../src/ng/parameter_estimation/joint/census.rs), `finish` [`:2378`](../../../../src/ng/parameter_estimation/joint/census.rs) → `SampleCensusEvidence` [`:1378`](../../../../src/ng/parameter_estimation/joint/census.rs) | owned by the gatherer, fed at the yield point |
+| the psp header's first consumer | `PileupIdentity::of_header` [`census_file.rs:96`](../../../../src/ng/parameter_estimation/joint/census_file.rs), `freshness` [`:131`](../../../../src/ng/parameter_estimation/joint/census_file.rs) | digests the psp header's reference, analysed regions, read filters and command line, plus the record count, so a psp header must carry all four (spec §6.1) |
+| the census file | `write_census` [`census_file.rs:200`](../../../../src/ng/parameter_estimation/joint/census_file.rs), `open_census` [`:426`](../../../../src/ng/parameter_estimation/joint/census_file.rs) | the walk stage's loop writes `finish()`'s result through it |
+| `SegmentationInputs`'s sibling in the fit | `RecordingTerms` [`census.rs:1024`](../../../../src/ng/parameter_estimation/joint/census.rs) | same shape, different stage; not unified — each stage refuses in its own vocabulary |
 | `SegmentationInputs::catalog` | `RepeatCatalogHeader` [`repeat_catalog/mod.rs:283`](../../../../src/ng/repeat_catalog/mod.rs) — `reference_md5` [`:291`](../../../../src/ng/repeat_catalog/mod.rs), `built_under` [`:295`](../../../../src/ng/repeat_catalog/mod.rs) | **reused whole** — no identity type is minted |
 | `SegmentationInputs::routing` | `StrRepeatCriteria` [`repeat_catalog/criteria.rs:61`](../../../../src/ng/repeat_catalog/criteria.rs); `min_purity: f32` [`segment_criteria.rs:502`](../../../../src/ng/region_typing/segment_criteria.rs) | stored, not restated; the `f32` is why the type is `PartialEq`, not `Eq` |
 | `SegmentationInputs::analysed` | `GenomeRegions` [`region_typing/mod.rs:77`](../../../../src/ng/region_typing/mod.rs), `whole_contigs` [`:87`](../../../../src/ng/region_typing/mod.rs), `from_bed_path` [`:100`](../../../../src/ng/region_typing/mod.rs) | **reused whole** — "whole genome" is already the region set covering every contig |
-| BED-edge clipping | `clips_at_a_bed_edge` [`region_typing/mod.rs:471`](../../../../src/ng/region_typing/mod.rs), emission rule [`:482-488`](../../../../src/ng/region_typing/mod.rs) | **consumed, not decided** — every loop sees finished segments |
+| BED-edge clipping | `clips_at_a_bed_edge` [`region_typing/mod.rs:471`](../../../../src/ng/region_typing/mod.rs), emission rule [`:478-490`](../../../../src/ng/region_typing/mod.rs) | **consumed, not decided** — every loop sees finished segments |
 | the resident index the psp reader must not copy | `BlockIndexEntry` [`src/psp/index.rs:42`](../../../../src/psp/index.rs), `decode_index` [`:110`](../../../../src/psp/index.rs) | **a model of what not to build** — 3.8 MB a file at 5 kb blocks, multiplied by the cohort (spec §7.2) |
-| `GenomeRegion`, `ContigId`, `Bp` | [`ng/types.rs:79`](../../../../src/ng/types.rs), [`:13`](../../../../src/ng/types.rs), [`:174`](../../../../src/ng/types.rs) | used as-is |
+| the open-file bill | [`examples/dhat_ng_open_files.rs`](../../../../examples/dhat_ng_open_files.rs) | where 11–15 MiB per open alignment file was measured (spec §5.1) |
+| `GenomeRegion`, `GenomePosition`, `ContigId`, `Bp` | [`ng/types.rs:79`](../../../../src/ng/types.rs), [`:60`](../../../../src/ng/types.rs), [`:13`](../../../../src/ng/types.rs), [`:185`](../../../../src/ng/types.rs) | used as-is |
 
 ---
 
@@ -391,28 +593,57 @@ Every row read at the cited line.
 
 Genuinely open design questions:
 
-- **OPEN: `Variant`'s shape.** Named in §3.2 only so the callers have an item type; the emission
-  step's document owns it.
-- **OPEN: `CohortObservation`'s shape** and the span reconciliation inside it — the deferred
-  merge spec (spec §3.2, §10), which must also confirm the merge frontier stays bounded when
-  spans overlap.
+- **OPEN: which plan wires a called locus to a `VcfRecord`.** This document's callers yield
+  records; the mapper `assemble_record` is built; what is unsettled is whether the run driver's
+  plan or the VCF module's plan does the joining, since both name it as their own work
+  ([`../impl_plan/run_driver_direct_mode.md`](../impl_plan/run_driver_direct_mode.md) Milestone D,
+  [`../impl_plan/vcf_output.md`](../impl_plan/vcf_output.md) Milestones D and E). **Owner's, and it
+  is a sequencing question rather than a design one** — nothing about either shape changes with the
+  answer.
+- **OPEN: which thread the call runs on, once there is a pool** (§3.2). Two readings, and they
+  differ only when more than one locus is called at a time. Calling *inside* the merge's builder
+  makes the caller pool the merge's own builders, which today are behind `merge_cohort_in_parallel`
+  and off by default (spec §3.5). Calling *after* the builder hands each finished locus to a
+  separate pool, which is what spec §3.5 describes and what keeps the merge single-threaded.
+  **Nothing before a pool exists depends on the answer** — a single-threaded run calls in the same
+  place either way — so it is owed by the step that adds the pool, not by the one that wires the
+  call.
+- **OPEN: the cheap question a source cannot be asked** — spec §10's second entry. It costs direct
+  mode nothing and blocks nothing here.
+
+Owed to [`cohort_merge.md`](cohort_merge.md) §8, all four gated on `RunError` landing in this
+module, and **none of them is scheduled by this document**:
+
+- the organiser should hold the cache, which it cannot while the cache is generic over its source's
+  error type;
+- `RunEndedShort` ([`organise.rs:59`](../../../../src/ng/run/cohort_merge/organise.rs)) should fold
+  into `RunError`, together with `ObservationExceedsReachCeiling`;
+- `ObservationCache::cover` and `evict_before` should become private once the organiser is their
+  only caller;
+- a source whose observations go backwards should return `RunError` rather than trip an assertion
+  — which starts to matter when observations are decoded from a file rather than minted here.
 
 Implementation-time confirmations:
 
-- **Is `SampleReads` `Sync`?** §2 shares it by reference across tasks; the suite proves the
-  cursor `Send` ([`read/input/mod.rs:1441`](../../../../src/ng/read/input/mod.rs)) but nothing
-  asserts `Sync` for `SampleReads`. Add an `assert_sync::<SampleReads>()` beside that test; if an
-  interior non-`Sync` field turns up, the fix is per-task `SampleReads` plus a note in spec §7's
-  formulas — not a lock.
-- **Where the summed read-filter tallies ride at `finish`.** Beside the census in a small
-  outcome struct, or a separate accessor — pin when coding; they must not be droppable silently
-  (spec §8).
-- **Worker reuse of cursors and generators across its consecutive segments.** An internal
-  optimisation the design permits and does not require (spec §4.4); build the naive per-task
-  shape first, measure, then reuse if per-segment overhead shows in a profile.
+- **Is `SampleReads` `Sync`?** §3.4 holds one per sample and the walkers advance on one thread, so
+  direct mode does not need it; the parallel merge would. The suite proves the *cursor* `Send`
+  ([`read/input/mod.rs:1441`](../../../../src/ng/read/input/mod.rs)) and nothing asserts `Sync` for
+  `SampleReads`. Add the assertion beside that test when it is first needed.
+- **Where the summed read-filter tallies ride at `finish`.** Beside the census in a small outcome
+  struct, or a separate accessor — pin when coding; they must not be droppable silently (spec §8).
+- **Whether `MergeParameters` is worth a struct** (§3.4).
 - **Cost of comparing `SegmentationInputs` per sample at open.** A `RepeatCatalogHeader`
-  comparison walks a per-contig vector; fine at hundreds of contigs and thousands of samples. If
-  it is not, compare a digest — but keep the header stored, so a refusal can still name a field.
+  comparison walks a per-contig vector; fine at hundreds of contigs and thousands of samples. If it
+  is not, compare a digest — but keep the header stored, so a refusal can still name a field.
+- **How the descriptor headroom is read.** `RLIMIT_NOFILE` on Unix; the count needed is two
+  descriptors per sample for a CRAM and its index (spec §7.1a).
+- **What direct mode's cohort check actually compares.** Spec §6.2's cohort refusal is about two
+  *files* recording different analysed ground, which is a psp fact: direct mode computes one
+  segmentation from the run's own inputs and every sample shares it, so a per-sample analysed-region
+  comparison has nothing to compare. What remains worth checking at construction is that each
+  sample's alignment header names contigs the segmentation's reference has, and with the same
+  lengths — a mismatch there is the same class of mistake and the one direct mode can actually
+  make. **Confirm before coding the check**, so it is not built vacuous.
 - **`SampleInput` and `CensusConfig`** — concrete fields pinned when the constructors are coded.
 
 ---
@@ -423,12 +654,12 @@ Unit tests beside each file; the run-level oracles are spec §12 and belong in `
 
 - `segments.rs`: `build` records the inputs it was given; `first_difference` names each field
   when that field alone is mutated.
-- `source.rs`: a fake source proves the contract — the yield is exactly the segment's
-  observations in coordinate order, an empty segment yields nothing, the same segment asked twice
-  in different orders answers the same.
-- `calling.rs`: `call_vars_in_segment` over fake sources — the merge keys on coordinates, not
-  arrival order; a caller fed completions in every permutation yields in genome order; yields at
-  look-ahead 1 equal yields at look-ahead 8.
+- `walker.rs`: the observations a walker yields equal those the iterator yields driven directly,
+  position for position — the merge's own fixtures cannot check this, because they are the
+  in-memory sources.
+- `callers.rs`: each construction refusal fires on its own, on a fixture that trips that one and no
+  other; a cohort of the same loci called at one caller in flight and at sixteen yields the same
+  records in the same order.
 - `gatherer.rs`: everything yielded was counted by the census and everything completed was
   marked walked, empty segments included; tallies from several workers sum at `finish`.
 
