@@ -171,7 +171,10 @@ any two changes a called genotype.
 
 ☐ **D3. The end-to-end fixture.** A handful of the tomato slices
 (`benchmarks/tomato1/crams/`) over a small BED, alignments in, called genotypes out, on the generic
-path. **Runs in the dev loop in minutes, not hours.**
+path. **Runs in the dev loop in minutes, not hours.** **It also reports where the time went** —
+walking the reads, assembling loci, genotyping them — because Milestone E's shape is decided from
+that split and this is the first run that can produce it (owner's ruling above; spec §11 question 7
+asks the same question and says nobody has measured it).
 *Depends:* D2. *Source:* §12 oracle 3 (its direct-mode half).
 
 > **Checkpoint D:** ng calls genotypes from CRAM files. Pause for review — **this is the milestone
@@ -179,9 +182,18 @@ path. **Runs in the dev loop in minutes, not hours.**
 
 ### Milestone E — the pool
 
+**⛦ Owner's ruling, 2026-08-31: Milestones A to D build against the single-threaded merge, and what
+this milestone becomes is decided from D3's measurement.** Two arrangements can genotype several
+loci at once — the merge's own region batching switched on, so each thread assembles and genotypes
+its own stretch of ground, or the merge left on one thread handing each finished locus to workers
+that only genotype — and nothing measured says which. **The region batching may not survive either**;
+whether it is worth keeping at all is the same measurement. So D3 comes first and reports where the
+time goes, and this milestone is shaped after it.
+*Background:* [`../arch/run_streaming.md`](../arch/run_streaming.md) §8; spec §11 question 7.
+
 ☐ **E1. Callers in flight.** The merge stays on one thread; each cohort locus goes to a free worker;
 results are released in genome order. The bound is `callers in flight × one cohort locus`.
-*Depends:* D3. *Source:* §3.5, §5.1.
+*Depends:* D3, and the ruling above. *Source:* §3.5, §5.1.
 
 ☐ **E2. Concurrency invariance. Own commit, do not bundle.** The same VCF-bound output at one caller
 and at sixteen. **This is where a missed reset in `CallingScratch` shows** — the scratch is per

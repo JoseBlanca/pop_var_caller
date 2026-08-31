@@ -615,9 +615,12 @@ Genuinely open design questions:
   has finished. Calling *inside* the merge's builder means the threads are the merge's own region
   builders — they exist, in `merge_cohort_in_parallel`, and are off by default (spec §3.5).
   Calling *after* the builder means the merge stays on one thread and hands each finished locus to
-  a separate set of workers, which is what spec §3.5 describes. **A single-threaded run calls in
-  the same place either way**, so nothing before that point depends on the answer and it is owed
-  by the step that adds the concurrency, not by the one that wires the call.
+  a separate set of workers, which is what spec §3.5 describes.
+  **⛦ Owner's ruling, 2026-08-31: build against the single-threaded merge and settle this from a
+  measurement.** A single-threaded run calls in the same place under either reading, so the run
+  driver reaches genotypes from alignment files without answering it. **Whether the region
+  batching is kept at all is part of the same question** — it is switched off today on a measured
+  1.4× at eight threads, and nothing says it earns its place once genotyping is in the mix.
 - **OPEN: the cheap question a source cannot be asked** — spec §10's second entry. It costs direct
   mode nothing and blocks nothing here.
 
