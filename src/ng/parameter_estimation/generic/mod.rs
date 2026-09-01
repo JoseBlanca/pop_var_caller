@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use smallvec::SmallVec;
 
 use crate::ng::parameter_estimation::fitting::FitTermination;
+use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::generic::runs::RunsModelFit;
 use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
 use crate::ng::types::{
@@ -441,6 +442,34 @@ pub struct GenericSampleParameters {
     /// individual and does not vary with ploidy, so there is one of these however many
     /// ploidies the genome holds.
     pub error_rate: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+    /// **How wrong this sample's reads said they were, summed per read group** — the
+    /// denominator the calling step divides [`Self::error_rate`] by
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §3.2).
+    ///
+    /// A read arrives carrying its own claim about how likely it is to be wrong, from its base
+    /// and mapping qualities. The fit above says how often a read of this library *actually*
+    /// disagrees. The calling step scores each read at its own claim multiplied by the ratio
+    /// between the two, so it needs both halves — and this is the half that is a sum over the
+    /// reads rather than a fit, which is why it comes off the tally
+    /// ([`GenericAccumulators::minted_errors`](accumulators::GenericAccumulators::minted_errors))
+    /// unchanged rather than out of a fit.
+    ///
+    /// **Carried here because the tally does not outlive the fit.** The streaming entry point
+    /// drops its accumulator as soon as the fit returns, so this is the last moment the totals
+    /// can be reached — and until 2026-08-27 they went with it, leaving nothing that assembled a
+    /// run's calling parameters able to supply the denominator at all. That much does not fail
+    /// quietly: `RunParameters::assemble` refuses a fitted rate whose read group has no total
+    /// here, and the reverse, so a run built without them stops at assembly naming the first read
+    /// group. **What is quiet is a total under the wrong key** — a map with the right identifiers
+    /// and another read group's numbers in them, which no assertion can see and which moves every
+    /// scale it touches.
+    ///
+    /// **A read group with no entry is one that put no complete observation anywhere**, which
+    /// is not the same as one whose reads all read perfectly: a sum of zero over reads that
+    /// were seen is an ordinary value, since a read at Phred 0 contributes `ln 1 = 0`. The
+    /// calling step's own assembly refuses a fitted rate whose read group has no total here,
+    /// and the reverse, because the two are one pass over one set of reads.
+    pub minted_errors: BTreeMap<ReadGroupId, MintedReadErrors>,
     /// The genotype frequencies, **one set per ploidy present**. A genome with a
     /// haploid sex chromosome has two entries; today's runs have one.
     pub rates: BTreeMap<Ploidy, Estimate<SampleRates>>,

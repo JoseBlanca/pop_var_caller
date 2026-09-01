@@ -48,7 +48,7 @@
 //! silent, but because failing at assembly is the difference between a message about the run and
 //! a message about a locus.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
@@ -58,14 +58,17 @@ use super::run_report::{
     SequencingBatchingUsed,
 };
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
-use crate::ng::parameter_estimation::Estimate;
+use crate::ng::parameter_estimation::generic::GenericSampleParameters;
 use crate::ng::parameter_estimation::generic::calibration::MintedReadErrors;
 use crate::ng::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
+use crate::ng::parameter_estimation::joint::fit::JointFit;
 use crate::ng::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::ng::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::ng::parameter_estimation::ssr::SsrSampleParameters;
 use crate::ng::parameter_estimation::ssr::StratumKey;
+use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
 use crate::ng::read::input::read_groups::ReadGroups;
 use crate::ng::types::{
     ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, Ploidy,
@@ -139,6 +142,211 @@ impl RunParameters {
         diversity: Option<ExpectedHeterozygosity>,
     ) -> SpectrumSeed {
         seed_from_population_moments(expected_frequency, diversity)
+    }
+
+    /// **What the parameter pre-pass produced, turned into what calling reads.**
+    ///
+    /// The pre-pass measures a run three ways and reports in three shapes: one value per sample
+    /// for the SNP/indel path, one per sample for the repeat tracts, and one fit over the whole
+    /// cohort at once. Calling reads a single object. This is the join between them, and it does
+    /// nothing else — no walk, and no input or output.
+    ///
+    /// **It gathers rather than fits.** Every per-library and per-sample number it hands on is
+    /// one of the three pre-pass outputs, unchanged. The one exception is the genotype prior's
+    /// seed, which [`Self::seed_from_moments`] solves in closed form from the cohort fit's two
+    /// moments, and which falls back to its own constants where a moment is missing.
+    ///
+    /// # The joins, and the two that no type enforces
+    ///
+    /// Four of the arguments are read per sample and three are passed through. The two joins
+    /// worth stating are the ones a compiler cannot check:
+    ///
+    /// - **Sample order.** `generic_by_sample` and `repeat_tract_by_sample` are the run's samples
+    ///   in the run's own order, which is `read_groups.read_groups_per_sample()`'s order.
+    ///   Position `i` of both lists is the sample named at position `i` of that table.
+    ///
+    ///   **The inbreeding coefficient is the one value here with no identifier on it.** Every
+    ///   other quantity a sample carries is keyed by read group, and the cohort fit's per-sample
+    ///   results are keyed by sample name — so those either land under a key that says whose they
+    ///   are, or are looked up by the name this table gives position `i`. A coefficient is a bare
+    ///   number, and a permuted list sends it to the wrong sample with nothing about the value
+    ///   saying so.
+    ///
+    ///   **What catches a permuted list is the read-group check below**, not anything about the
+    ///   coefficient: the sample at position `i` then carries its neighbour's identifiers, which
+    ///   are not this sample's, and the run stops. That leaves one gap, and it is the one a
+    ///   caller should know about — a sample carrying *no* read-group-keyed value at all would
+    ///   pass, and only its coefficient would be wrong. The SNP/indel fit does not produce one
+    ///   (`GenericAccumulators::estimate` refuses a sample with no read group with reads), so
+    ///   this is a statement about what the check rests on rather than a live hole.
+    /// - **The read-group union.** Each sample's error rates, minted-error totals and tract
+    ///   substitution rates are keyed by identifiers that are unique across the whole run,
+    ///   because a read group belongs to exactly one sample: the run's read-group table files
+    ///   each declared `@RG` under the single sample its header names. So the run's maps are the
+    ///   samples' maps put together, and every key a sample carries is checked against that
+    ///   sample's own.
+    ///
+    /// # Errors
+    ///
+    /// [`ParameterEstimationError::InbreedingNotFittedForSample`] where a sample carries no
+    /// inbreeding coefficient. **The run stops and the sample is named**, which is the pre-pass's
+    /// own rule repeated at this edge: a cohort's diversity divides by `1 − F`, so a coefficient
+    /// invented rather than measured is amplified rather than absorbed. The cohort fit's
+    /// homozygote excess is not used as a fallback — it is measured by the same fit whose
+    /// diversity the coefficient exists to correct.
+    ///
+    /// # Panics
+    ///
+    /// On the joins above being untrue, and on everything [`Self::assemble`] refuses. Each is a
+    /// run-assembly bug rather than a data condition, and each would otherwise surface as a
+    /// wrong genotype rather than as a crash:
+    ///
+    /// - the two per-sample lists and the run's sample table do not all name the same number of
+    ///   samples;
+    /// - a sample of the run is missing from the cohort fit's contamination results, so the fit
+    ///   and the run were made over different cohorts;
+    /// - a value is carried under a library that is not the sample's own;
+    /// - a library the run declared has no error rate from any sample — including the one case
+    ///   that is data rather than a mis-paired caller, a library whose reads were all refused at
+    ///   admission;
+    /// - a repeat-tract rate was fitted at a ploidy other than the run's, which would make every
+    ///   one of them unreachable at every locus without anything failing.
+    pub fn from_prepass(
+        generic_by_sample: &[GenericSampleParameters],
+        repeat_tract_by_sample: &[SsrSampleParameters],
+        joint: &JointFit,
+        read_groups: &ReadGroups,
+        sequencing_batches: SequencingBatches,
+        ssr_slippage_fits: StratumFits,
+        ploidy: Ploidy,
+    ) -> Result<Self, ParameterEstimationError> {
+        let of_each_sample = read_groups.read_groups_per_sample();
+        assert_eq!(
+            generic_by_sample.len(),
+            of_each_sample.len(),
+            "the SNP/indel results cover {} samples and the run's read-group table names {}; \
+             position i of the list is sample i of the run, so two lists of different lengths \
+             are two different cohorts",
+            generic_by_sample.len(),
+            of_each_sample.len()
+        );
+        assert_eq!(
+            repeat_tract_by_sample.len(),
+            of_each_sample.len(),
+            "the repeat-tract results cover {} samples and the run's read-group table names {}; \
+             as above, and this list is joined by position too",
+            repeat_tract_by_sample.len(),
+            of_each_sample.len()
+        );
+
+        let mut error_rate_by_read_group = BTreeMap::new();
+        let mut minted_by_read_group = BTreeMap::new();
+        let mut contamination_by_read_group = BTreeMap::new();
+        let mut ssr_substitution_rate = BTreeMap::new();
+        let mut inbreeding_coefficient_by_sample = Vec::with_capacity(of_each_sample.len());
+
+        for (index, of_sample) in of_each_sample.iter().enumerate() {
+            let sample = of_sample.sample.as_ref();
+            let generic = &generic_by_sample[index];
+            let repeat_tract = &repeat_tract_by_sample[index];
+            let its_own: BTreeSet<ReadGroupId> = of_sample.read_groups.iter().copied().collect();
+
+            // **The one refusal.** A sample with no coefficient stops the run and is named; see
+            // this method's `# Errors` for why there is nothing to put in its place.
+            let Some(inbreeding) = generic.inbreeding.as_ref() else {
+                return Err(ParameterEstimationError::InbreedingNotFittedForSample {
+                    sample: sample.to_string(),
+                });
+            };
+            inbreeding_coefficient_by_sample.push(inbreeding.value);
+
+            for (&group, rate) in &generic.error_rate {
+                its_own_read_group(&its_own, group, sample, "a fitted error rate");
+                error_rate_by_read_group.insert(group, rate.clone());
+            }
+            for (&group, &minted) in &generic.minted_errors {
+                its_own_read_group(&its_own, group, sample, "a minted-error total");
+                minted_by_read_group.insert(group, minted);
+            }
+
+            let of_the_fit = joint.contamination.get(sample).unwrap_or_else(|| {
+                panic!(
+                    "the cohort fit has no contamination result for sample {sample}, which this \
+                     run holds; the fit and the run were made over different cohorts, and a \
+                     sample missing from the fit would otherwise be called as though every one \
+                     of its libraries had been measured and found clean"
+                )
+            });
+            for (group, estimate) in of_the_fit {
+                its_own_read_group(&its_own, *group, sample, "a contamination estimate");
+                contamination_by_read_group.insert(*group, estimate.clone());
+            }
+
+            for (key, rate) in repeat_tract.substitution_rate_by_stratum() {
+                its_own_read_group(&its_own, key.read_group, sample, "a substitution rate");
+                // **The one axis of this key that is not checked anywhere else, and the only
+                // one whose mismatch is silent.** A tract substitution rate is looked up by
+                // `(read group, tract shape, ploidy)`, and the lookup rebuilds the ploidy from
+                // the run's rather than from the key — so a rate fitted at a different ploidy is
+                // never found at any locus, every tract falls back to the model's stated
+                // constant, and the run finishes with no rate it measured ever used.
+                assert_eq!(
+                    key.ploidy, ploidy,
+                    "sample {sample} fitted a repeat-tract substitution rate at ploidy {} and \
+                     this run is called at ploidy {ploidy}; the lookup rebuilds the key with the \
+                     run's ploidy, so every rate fitted at the other one is unreachable and every \
+                     tract would be called on the constant instead",
+                    key.ploidy
+                );
+                ssr_substitution_rate.insert(key, rate);
+            }
+        }
+
+        // **Every library the run declared got a rate, checked here because this is the first
+        // place that holds both lists.** `assemble` derives the read-group axis from the union
+        // above and cannot see a library missing from it: an interior gap makes its contiguity
+        // check fire with a message about ids, and a missing *highest* library shortens the axis
+        // silently — after which `calibration_of` panics at whichever locus first carries one of
+        // its reads, which is the failure this module's header says assembly exists to turn into
+        // a message about the run.
+        //
+        // **It is reachable from data, not only from a mis-paired caller.** A sample's fitted
+        // rates cover the read groups that produced reads (`resolve_error_rates` walks the reads
+        // per group), so a declared library whose reads were all refused by admission has no
+        // entry anywhere.
+        //
+        // **⚑ What such a run should get is a question the design has not answered** — refusing
+        // it, as here, or giving that library the defaulted calibration it would get if it had
+        // been fitted and found unmeasurable. Refusing is the conservative half: it never calls a
+        // locus on a library it silently dropped.
+        for (group, declared) in read_groups.iter() {
+            assert!(
+                error_rate_by_read_group.contains_key(&group),
+                "read group {} ({}) of sample {} is one this run declared and no sample's \
+                 parameters carry an error rate for it — a library whose reads were all refused \
+                 looks exactly like this. It cannot be left out: the read-group axis is built \
+                 from the rates that are here, so this library would be dropped from the run and \
+                 the failure deferred to the first locus carrying one of its reads",
+                group.get(),
+                declared.id,
+                declared.sample
+            );
+        }
+
+        Ok(Self::assemble(
+            &error_rate_by_read_group,
+            &minted_by_read_group,
+            &contamination_by_read_group,
+            sequencing_batches,
+            inbreeding_coefficient_by_sample,
+            Self::seed_from_moments(
+                joint.fitted_alternative_frequency(),
+                joint.fitted_diversity(),
+            ),
+            ssr_slippage_fits,
+            ssr_substitution_rate,
+            ploidy,
+        ))
     }
 
     /// **Gather one run's frozen parameters.**
@@ -665,6 +873,39 @@ pub(crate) const UNMEASURED_READ_GROUP: ContaminationView = ContaminationView {
     // would make this unrepresentable, and it belongs to that type's owner.
     source: ContaminationSource::TheWholeSamplesReads,
 };
+
+/// **Refuse a value one sample carries under another sample's library.**
+///
+/// The run's maps are the samples' maps put together, which is only a union because a read group
+/// belongs to exactly one sample: the run's read-group table files each declared `@RG` under the
+/// single sample its header names. So a sample carrying a value for an identifier that is not one
+/// of its own means the two lists this seam joins by position are not the same cohort, or are the
+/// same cohort in different orders.
+///
+/// **What it costs to miss it is one library's numbers replaced by another's, silently.** The
+/// entry lands in the run's map under a real identifier, so nothing downstream can tell it was
+/// written by the wrong sample; every read of that library is then scored under a neighbour's
+/// chemistry. `what` names the quantity so the message says which of the four went astray.
+///
+/// # Panics
+///
+/// Always, when `group` is not one of `its_own`.
+fn its_own_read_group(
+    its_own: &BTreeSet<ReadGroupId>,
+    group: ReadGroupId,
+    sample: &str,
+    what: &str,
+) {
+    assert!(
+        its_own.contains(&group),
+        "sample {sample} carries {what} for read group {}, which is not one of its own ({:?}); a \
+         read group belongs to exactly one sample, so this is two lists joined in different \
+         orders — and the value would land under a real identifier and score another library's \
+         reads under this sample's chemistry",
+        group.get(),
+        its_own.iter().map(|group| group.get()).collect::<Vec<_>>()
+    );
+}
 
 /// How many read groups the run has — **and the two refusals that make the dense build safe**,
 /// which is why the name says `checked`.
@@ -2163,6 +2404,698 @@ mod tests {
             diploid(),
         );
         let _ = run.report(&two_samples_one_of_them_two_read_groups());
+    }
+
+    // -----------------------------------------------------------------
+    // The seam: what the pre-pass produced, turned into what calling reads.
+    // -----------------------------------------------------------------
+
+    /// **A run of three samples over four libraries, in which no two numbers are alike.**
+    ///
+    /// Every quantity the seam carries differs between every pair it could be swapped across:
+    /// four error rates, four minted-error means, four contamination fractions, four tract
+    /// substitution rates, three inbreeding coefficients. The scales the four calibrations come
+    /// to are distinct too — 0.5, 0.25, 0.75 and 0.125 — because two libraries with different
+    /// rates and different minted means can still land on the same scale, and the scale is what
+    /// a consumer reads.
+    ///
+    /// **And the sample a library belongs to is not its own index.** The first sample holds two
+    /// libraries, so read group 2 belongs to sample 1 and read group 3 to sample 2 — a fixture
+    /// giving each sample one library makes the two axes the same list of numbers, which is the
+    /// accident that has hidden a join in this project four times.
+    const SAMPLE_NAMES: [&str; 3] = ["SL_landrace_07", "SL_wild_02", "SL_cultivar_11"];
+
+    /// `(read group, its sample, error rate, mean minted error, contamination fraction, tract
+    /// substitution rate)` — the four libraries of the fixture above.
+    const A_RUNS_LIBRARIES: [(u32, usize, f64, f64, f64, f64); 4] = [
+        (0, 0, 0.001, 0.002, 0.011, 0.0031),
+        (1, 0, 0.002, 0.008, 0.022, 0.0042),
+        (2, 1, 0.003, 0.004, 0.033, 0.0053),
+        (3, 2, 0.004, 0.032, 0.044, 0.0064),
+    ];
+
+    /// The three samples' inbreeding coefficients, in the run's sample order.
+    const A_RUNS_INBREEDING: [f64; 3] = [0.10, 0.20, 0.30];
+
+    /// **The one stratum every library of the fixture has a rate for.**
+    ///
+    /// One shared stratum rather than one each, deliberately: with a stratum apiece, a rate
+    /// swapped between two libraries lands on a key nothing asks about and the lookup answers
+    /// *absent*, which is a visible failure. Sharing the stratum makes a swap answer with
+    /// another library's number, which is the failure worth catching.
+    fn the_shared_stratum() -> Stratum {
+        Stratum::new(
+            SsrPeriod::try_new(2).expect("a dinucleotide"),
+            RepeatCount(5),
+        )
+    }
+
+    fn the_runs_read_groups() -> ReadGroups {
+        let libraries: Vec<(String, String)> = A_RUNS_LIBRARIES
+            .iter()
+            .map(|&(group, sample, ..)| (format!("rg{group}"), SAMPLE_NAMES[sample].to_string()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = libraries
+            .iter()
+            .map(|(id, sample)| (id.as_str(), sample.as_str()))
+            .collect();
+        ReadGroups::of_libraries(&borrowed)
+    }
+
+    /// One sample's SNP/indel parameters, carrying its own libraries' rates and totals and its
+    /// own coefficient — and `inbreeding` set to whatever the caller says, because one test
+    /// hands in a sample that has none.
+    fn generic_parameters_of(
+        sample: usize,
+        inbreeding: Option<InbreedingF>,
+    ) -> GenericSampleParameters {
+        let mine = A_RUNS_LIBRARIES
+            .iter()
+            .filter(move |&&(_, its_sample, ..)| its_sample == sample);
+        GenericSampleParameters {
+            error_rate: mine
+                .clone()
+                .map(|&(group, _, rate, ..)| {
+                    (
+                        ReadGroupId(group),
+                        fitted_rate(rate, Provenance::FittedHere),
+                    )
+                })
+                .collect(),
+            minted_errors: mine
+                .clone()
+                .map(|&(group, _, _, mean, ..)| {
+                    (ReadGroupId(group), minted(mean, 500 + group * 100))
+                })
+                .collect(),
+            rates: BTreeMap::new(),
+            inbreeding: inbreeding.map(|value| Estimate {
+                value,
+                provenance: Provenance::Supplied,
+                observations: 10_000,
+            }),
+            runs_model: None,
+            site_noise: None,
+            site_noise_off_the_ladder: false,
+            error_rate_on_a_ladder_end: BTreeSet::new(),
+            coupled_fit: crate::ng::parameter_estimation::fitting::FitTermination {
+                iterations: 1,
+                converged: true,
+            },
+        }
+    }
+
+    /// One sample's repeat-tract parameters: a substitution rate at the shared stratum for each
+    /// library the sample holds.
+    fn repeat_tract_parameters_of(sample: usize) -> SsrSampleParameters {
+        let rates: Vec<(StratumKey, Estimate<ErrorRate>)> = A_RUNS_LIBRARIES
+            .iter()
+            .filter(|&&(_, its_sample, ..)| its_sample == sample)
+            .map(|&(group, _, _, _, _, substitution)| {
+                (
+                    StratumKey {
+                        read_group: ReadGroupId(group),
+                        stratum: the_shared_stratum(),
+                        ploidy: diploid(),
+                    },
+                    Estimate {
+                        value: ErrorRate::try_new(substitution).expect("a legal rate"),
+                        provenance: Provenance::FittedHere,
+                        observations: 100_000,
+                    },
+                )
+            })
+            .collect();
+        SsrSampleParameters::of_substitution_rates(&rates)
+    }
+
+    /// The cohort fit of that run: a density whose moments are worth checking, and one
+    /// contamination fraction per library, filed under the sample the library belongs to.
+    fn the_cohort_fit() -> JointFit {
+        let density = a_fitted_density();
+        let mut contamination: BTreeMap<String, Vec<(ReadGroupId, ContaminationEstimate)>> =
+            SAMPLE_NAMES
+                .iter()
+                .map(|&name| (name.to_string(), Vec::new()))
+                .collect();
+        for &(group, sample, _, _, alpha, _) in &A_RUNS_LIBRARIES {
+            contamination
+                .get_mut(SAMPLE_NAMES[sample])
+                .expect("every sample has a row")
+                .push((
+                    ReadGroupId(group),
+                    estimated(alpha, 100 * u64::from(group + 1)),
+                ));
+        }
+        JointFit {
+            noise: BTreeMap::new(),
+            noisy_share: 0.0,
+            expected_heterozygosity: density.value.expected_heterozygosity(),
+            density,
+            duplicated: None,
+            hom_excess: BTreeMap::new(),
+            rates: BTreeMap::new(),
+            contamination,
+            census_moments:
+                crate::ng::parameter_estimation::joint::census_moments::CensusMomentSums::over(
+                    SAMPLE_NAMES.len(),
+                ),
+            noisy_posterior: Vec::new(),
+            genotype_posterior: Vec::new(),
+            duplicated_posterior: Vec::new(),
+            trace: Vec::new(),
+            passes: 3,
+            converged: true,
+            log_likelihood: -1.0,
+        }
+    }
+
+    /// **A batch per sample**, so the batching that comes out is one a run declared rather than
+    /// the default every fixture would otherwise carry — the first sample's two libraries
+    /// together, then one each.
+    ///
+    /// **Three and not two, because two gave samples 1 and 2 the same batch**, and a review
+    /// measured what that costs: the assertions on those two read the same number, so the axis
+    /// could not see the two samples exchanged. Every sample's batch is now its own.
+    fn a_batch_per_sample(groups: &ReadGroups) -> SequencingBatches {
+        SequencingBatches::declared(
+            groups,
+            &[
+                BTreeSet::from([ReadGroupId(0), ReadGroupId(1)]),
+                BTreeSet::from([ReadGroupId(2)]),
+                BTreeSet::from([ReadGroupId(3)]),
+            ],
+        )
+        .expect("every sample's libraries stay inside one batch")
+    }
+
+    /// A slippage gather that gives each library its own slippage group, so a pass-through that
+    /// substituted a different gather would answer differently.
+    fn a_slippage_gather() -> StratumFits {
+        StratumFits::over(
+            &[],
+            A_RUNS_LIBRARIES
+                .iter()
+                .map(|&(group, ..)| (ReadGroupId(group), group))
+                .collect(),
+        )
+    }
+
+    /// Assemble the fixture run, with every sample's coefficient present.
+    fn assemble_the_fixture_run() -> RunParameters {
+        let groups = the_runs_read_groups();
+        let generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        let repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(repeat_tract_parameters_of)
+            .collect();
+        RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        )
+        .expect("every sample of this run has a coefficient")
+    }
+
+    /// **Every number calling reads is traceable to the pre-pass output it came from.**
+    ///
+    /// This is the whole of what the seam does, and every one of its failures is quiet: a value
+    /// carried to the wrong key is still a plausible number under a real identifier, and the run
+    /// completes. So the fixture is built so that no two of anything are alike — see
+    /// [`A_RUNS_LIBRARIES`] — and each assertion below names the input it is tracing.
+    #[test]
+    fn every_field_of_the_assembled_run_comes_from_its_own_input() {
+        let run = assemble_the_fixture_run();
+        let view = run.view();
+
+        assert_eq!(view.read_group_count(), 4);
+        assert_eq!(view.sample_count(), 3);
+        assert_eq!(view.ploidy(), diploid());
+
+        for &(group, _, rate, mean, alpha, substitution) in &A_RUNS_LIBRARIES {
+            let at = group as usize;
+            // The calibration is the fitted rate over the reads' own mean reported error. Both
+            // halves are this library's, and the four scales are four different numbers.
+            let scale = view.calibration_by_read_group()[at].scale;
+            assert!(
+                (scale - rate / mean).abs() < 1e-9,
+                "read group {group}: {rate} over {mean} is {}, and the run has {scale}",
+                rate / mean
+            );
+
+            let contamination = view.contamination_by_read_group()[at];
+            assert!(
+                (contamination.fraction - alpha).abs() < 1e-12,
+                "read group {group} was fitted at {alpha} and the run has {}",
+                contamination.fraction
+            );
+            assert_eq!(
+                contamination.markers_with_reads,
+                100 * u64::from(group + 1),
+                "the evidence behind read group {group}'s fraction travels with it"
+            );
+
+            let fitted = view
+                .ssr_substitution_rate_at(
+                    ReadGroupId(group),
+                    SsrPeriod::try_new(2).expect("a dinucleotide"),
+                    RepeatCount(5),
+                )
+                .expect("every library of this run has a rate at the shared stratum");
+            assert!(
+                (fitted.value.get() - substitution).abs() < 1e-12,
+                "read group {group} measured {substitution} inside its tracts and the run has {}",
+                fitted.value.get()
+            );
+
+            assert_eq!(
+                view.ssr_slippage_fits()
+                    .slippage_group_of(ReadGroupId(group)),
+                Some(group),
+                "the slippage gather arrives as it was handed in"
+            );
+        }
+
+        let coefficients: Vec<f64> = view
+            .inbreeding_coefficient_by_sample()
+            .iter()
+            .map(|value| value.get())
+            .collect();
+        assert_eq!(
+            coefficients,
+            A_RUNS_INBREEDING.to_vec(),
+            "the coefficients are the run's samples in the run's own order"
+        );
+
+        // The batching is the declared one, not the default that every other fixture carries.
+        assert_eq!(view.batch_count(), 3);
+        // A batch apiece, so exchanging any two samples changes what is asserted. The read-group
+        // view is checked too: the first sample's two libraries share its batch, which is the
+        // one place the two views are not the same list.
+        assert_eq!(view.batch_of_sample(0), BatchId(0));
+        assert_eq!(view.batch_of_sample(1), BatchId(1));
+        assert_eq!(view.batch_of_sample(2), BatchId(2));
+        assert_eq!(view.batch_of_read_group(ReadGroupId(0)), BatchId(0));
+        assert_eq!(view.batch_of_read_group(ReadGroupId(1)), BatchId(0));
+        assert_eq!(view.batch_of_read_group(ReadGroupId(2)), BatchId(1));
+        assert_eq!(view.batch_of_read_group(ReadGroupId(3)), BatchId(2));
+        assert!(!run.sequencing_batches().is_default());
+
+        // **The prior's seed is the cohort fit's own two moments**, and **both** are checked.
+        // A Dirichlet(α_ref, α_alt) has expected alternative frequency α_alt / (α_ref + α_alt),
+        // and this fixture's density is far from symmetric — so the ratio pins the frequency.
+        //
+        // **The ratio alone cannot see the diversity at all**, which a review measured: the
+        // builder sets α_ref = A(1−f) and α_alt = A f, so the ratio is exactly f for *any* total
+        // A, and halving the diversity the seam passes in left every test here green. The total
+        // is what the diversity sets, so the total is what has to be asserted — against the
+        // identity of `ordinary_site_seed.md` §3, `t = θ / (2f(1−f))` and `A = t/(1−t)`, computed
+        // from the fixture's own two moments rather than read back off the seed.
+        let seed = view.prior_seed();
+        let total = seed.alpha_ref() + seed.alpha_alt_total();
+        let density = a_fitted_density();
+        let frequency = density.value.expected_alternative_frequency();
+        assert!(
+            (seed.alpha_alt_total() / total / frequency - 1.0).abs() < 1e-12,
+            "the seed's mean frequency is {} where the fitted density's is {frequency}",
+            seed.alpha_alt_total() / total
+        );
+        let diversity = density.value.expected_heterozygosity();
+        let share_of_ceiling = diversity / (2.0 * frequency * (1.0 - frequency));
+        let implied_total = share_of_ceiling / (1.0 - share_of_ceiling);
+        assert!(
+            (total / implied_total - 1.0).abs() < 1e-12,
+            "the seed's conviction totals {total} where the fit's diversity of {diversity} implies \
+             {implied_total}"
+        );
+    }
+
+    /// **A sample the pre-pass could not give an inbreeding coefficient stops the run, by name.**
+    ///
+    /// Not a default and not the cohort fit's homozygote excess: a cohort's diversity divides by
+    /// `1 − F`, and the excess is measured by the same fit that diversity comes from. The sample
+    /// refused here is the *second* of three, so a message that named the first sample — or a
+    /// check that only looked at one — would show.
+    #[test]
+    fn a_sample_with_no_inbreeding_coefficient_refuses_the_run_and_names_it() {
+        let groups = the_runs_read_groups();
+        let generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                let coefficient = (sample != 1).then(|| {
+                    InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")
+                });
+                generic_parameters_of(sample, coefficient)
+            })
+            .collect();
+        let repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(repeat_tract_parameters_of)
+            .collect();
+
+        let refusal = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        )
+        .expect_err("a sample with no coefficient stops the run");
+
+        assert!(
+            matches!(
+                refusal,
+                ParameterEstimationError::InbreedingNotFittedForSample { .. }
+            ),
+            "the wrong refusal: {refusal}"
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains(SAMPLE_NAMES[1]),
+            "the sample without a coefficient is named: {message}"
+        );
+        assert!(
+            !message.contains(SAMPLE_NAMES[0]),
+            "and it is the one that has none: {message}"
+        );
+    }
+
+    /// **A run of one sample assembles.** The pre-pass's cohort quantities all exist at one
+    /// sample — the density is fitted off one genome's two copies — and what a one-sample run
+    /// gives up is contamination, which has no panel to be surprised by and comes back
+    /// *not identified* rather than zero. So the seam has nothing to special-case, and this is
+    /// what says so.
+    #[test]
+    fn a_run_of_one_sample_assembles_and_is_uncontaminated() {
+        let groups = ReadGroups::of_libraries(&[("rg0", SAMPLE_NAMES[0])]);
+        let mut generic = generic_parameters_of(0, Some(outbred()));
+        generic.error_rate =
+            BTreeMap::from([(ReadGroupId(0), fitted_rate(0.001, Provenance::FittedHere))]);
+        generic.minted_errors = BTreeMap::from([(ReadGroupId(0), minted(0.002, 500))]);
+        let repeat_tract = SsrSampleParameters::of_substitution_rates(&[]);
+
+        let mut joint = the_cohort_fit();
+        joint.contamination = BTreeMap::from([(
+            SAMPLE_NAMES[0].to_string(),
+            vec![(
+                ReadGroupId(0),
+                ContaminationEstimate::NotIdentified {
+                    reason: NotIdentifiedReason::NoPanel,
+                },
+            )],
+        )]);
+
+        let run = RunParameters::from_prepass(
+            std::slice::from_ref(&generic),
+            std::slice::from_ref(&repeat_tract),
+            &joint,
+            &groups,
+            SequencingBatches::all_together(&groups),
+            no_strata(),
+            diploid(),
+        )
+        .expect("a one-sample run assembles");
+        let view = run.view();
+
+        assert_eq!(view.sample_count(), 1);
+        assert_eq!(view.read_group_count(), 1);
+        assert!(
+            (view.calibration_by_read_group()[0].scale - 0.5).abs() < 1e-9,
+            "0.001 over 0.002: {}",
+            view.calibration_by_read_group()[0].scale
+        );
+        assert!(
+            view.contamination_is_absent(),
+            "nothing was identified, so the read likelihood computes its plain formula"
+        );
+    }
+
+    /// Which of the four quantities a sample carries is given to a library that is not its own.
+    ///
+    /// **Four routes and not one, because a review found three of them untested.** The check is
+    /// written once and called four times, and a fixture that mis-files only an error rate cannot
+    /// see the other three calls at all: deleting each of them left every test in this file green.
+    #[derive(Copy, Clone)]
+    enum MisfiledQuantity {
+        ErrorRate,
+        MintedTotal,
+        Contamination,
+        SubstitutionRate,
+    }
+
+    /// Assemble the fixture run with the **last** sample's stated quantity carried under the
+    /// second sample's library — read group 2, where its own is read group 3.
+    fn assemble_with_one_quantity_misfiled(misfiled: MisfiledQuantity) {
+        let groups = the_runs_read_groups();
+        let mut generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        let mut repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(repeat_tract_parameters_of)
+            .collect();
+        let mut joint = the_cohort_fit();
+        let somebody_elses = ReadGroupId(2);
+
+        match misfiled {
+            MisfiledQuantity::ErrorRate => {
+                generic[2].error_rate =
+                    BTreeMap::from([(somebody_elses, fitted_rate(0.004, Provenance::FittedHere))]);
+            }
+            MisfiledQuantity::MintedTotal => {
+                generic[2].minted_errors = BTreeMap::from([(somebody_elses, minted(0.032, 800))]);
+            }
+            MisfiledQuantity::Contamination => {
+                joint.contamination.insert(
+                    SAMPLE_NAMES[2].to_string(),
+                    vec![(somebody_elses, estimated(0.044, 400))],
+                );
+            }
+            MisfiledQuantity::SubstitutionRate => {
+                repeat_tract[2] = SsrSampleParameters::of_substitution_rates(&[(
+                    StratumKey {
+                        read_group: somebody_elses,
+                        stratum: the_shared_stratum(),
+                        ploidy: diploid(),
+                    },
+                    Estimate {
+                        value: ErrorRate::try_new(0.0064).expect("a legal rate"),
+                        provenance: Provenance::FittedHere,
+                        observations: 100_000,
+                    },
+                )]);
+            }
+        }
+
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &joint,
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// **An error rate carried under a library that is not the sample's own stops the run.**
+    ///
+    /// A read group belongs to exactly one sample, so the run's maps are the samples' maps put
+    /// together. If the two lists this seam joins by position are not in the same order, a
+    /// sample's rate lands under a real identifier belonging to somebody else — every read of
+    /// that library then scored under another sample's chemistry, with nothing downstream able
+    /// to tell.
+    ///
+    /// **The expectation names the quantity and not only the refusal**, because that is the whole
+    /// job of the label the check is given: without it, all four of these tests pass on each
+    /// other's message and the label could be crossed unseen.
+    #[test]
+    #[should_panic(expected = "carries a fitted error rate for read group 2")]
+    fn an_error_rate_under_another_samples_library_is_refused() {
+        assemble_with_one_quantity_misfiled(MisfiledQuantity::ErrorRate);
+    }
+
+    /// **And the minted-error total**, which is the denominator of the same library's scale.
+    #[test]
+    #[should_panic(expected = "carries a minted-error total for read group 2")]
+    fn a_minted_total_under_another_samples_library_is_refused() {
+        assemble_with_one_quantity_misfiled(MisfiledQuantity::MintedTotal);
+    }
+
+    /// **And the contamination fraction**, which arrives from the cohort fit rather than from the
+    /// per-sample list and so travels by a different route to the same map.
+    #[test]
+    #[should_panic(expected = "carries a contamination estimate for read group 2")]
+    fn a_contamination_fraction_under_another_samples_library_is_refused() {
+        assemble_with_one_quantity_misfiled(MisfiledQuantity::Contamination);
+    }
+
+    /// **And the repeat-tract substitution rate**, whose key carries the library inside it rather
+    /// than being keyed by it.
+    #[test]
+    #[should_panic(expected = "carries a substitution rate for read group 2")]
+    fn a_substitution_rate_under_another_samples_library_is_refused() {
+        assemble_with_one_quantity_misfiled(MisfiledQuantity::SubstitutionRate);
+    }
+
+    /// **A repeat-tract rate fitted at another ploidy stops the run**, and it is the one key
+    /// axis whose mismatch nothing downstream would show.
+    ///
+    /// The lookup rebuilds the key with the run's ploidy rather than reading the key's, so a rate
+    /// fitted at a different one is not found at any locus. Nothing fails: every tract is called
+    /// on the model's stated constant instead, and a run that measured a rate for every stratum
+    /// uses none of them. The read-group axis of the same key is checked loudly beside it; this
+    /// axis was not checked at all.
+    #[test]
+    #[should_panic(expected = "the lookup rebuilds the key with the run's ploidy")]
+    fn a_tract_rate_fitted_at_another_ploidy_is_refused() {
+        let groups = the_runs_read_groups();
+        let generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        let mut repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(repeat_tract_parameters_of)
+            .collect();
+        // The same library, the same tract shape, fitted as though the genome were haploid.
+        repeat_tract[1] = SsrSampleParameters::of_substitution_rates(&[(
+            StratumKey {
+                read_group: ReadGroupId(2),
+                stratum: the_shared_stratum(),
+                ploidy: Ploidy::try_new(1).expect("one genome copy"),
+            },
+            Estimate {
+                value: ErrorRate::try_new(0.0053).expect("a legal rate"),
+                provenance: Provenance::FittedHere,
+                observations: 100_000,
+            },
+        )]);
+
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// **A library the run declared that no sample carries a rate for stops the run, by name.**
+    ///
+    /// **Reachable from data rather than only from a mis-paired caller**: a sample's fitted rates
+    /// cover the read groups that produced reads, so a library whose reads were all refused at
+    /// admission has no entry anywhere. What happens without this check depends on which library
+    /// it is, and the worse case is the quieter one — a missing *highest* library shortens the
+    /// read-group axis with nothing said, and the run then panics at whichever locus first
+    /// carries one of its reads. The fixture drops read group 3, which is that case.
+    #[test]
+    #[should_panic(expected = "no sample's parameters carry an error rate for it")]
+    fn a_declared_library_with_no_rate_anywhere_is_refused() {
+        let groups = the_runs_read_groups();
+        let mut generic: Vec<GenericSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                generic_parameters_of(
+                    sample,
+                    Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+                )
+            })
+            .collect();
+        generic[2].error_rate = BTreeMap::new();
+        generic[2].minted_errors = BTreeMap::new();
+
+        let repeat_tract: Vec<SsrSampleParameters> = (0..SAMPLE_NAMES.len())
+            .map(|sample| {
+                if sample == 2 {
+                    SsrSampleParameters::of_substitution_rates(&[])
+                } else {
+                    repeat_tract_parameters_of(sample)
+                }
+            })
+            .collect();
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// Assemble the fixture run with one of the two per-sample lists a sample short.
+    fn assemble_with_a_short_list(short_generic: bool, short_repeat_tract: bool) {
+        let groups = the_runs_read_groups();
+        let of_sample = |sample: usize| {
+            generic_parameters_of(
+                sample,
+                Some(InbreedingF::try_new(A_RUNS_INBREEDING[sample]).expect("a coefficient")),
+            )
+        };
+        let generic: Vec<GenericSampleParameters> =
+            (0..if short_generic { 2 } else { SAMPLE_NAMES.len() })
+                .map(of_sample)
+                .collect();
+        let repeat_tract: Vec<SsrSampleParameters> = (0..if short_repeat_tract {
+            2
+        } else {
+            SAMPLE_NAMES.len()
+        })
+            .map(repeat_tract_parameters_of)
+            .collect();
+        let _ = RunParameters::from_prepass(
+            &generic,
+            &repeat_tract,
+            &the_cohort_fit(),
+            &groups,
+            a_batch_per_sample(&groups),
+            a_slippage_gather(),
+            diploid(),
+        );
+    }
+
+    /// **And a list of the wrong length stops it too**, before anything is joined: the two
+    /// per-sample lists are joined to the run's sample table by position, so lists of different
+    /// lengths are two different cohorts.
+    ///
+    /// **The expectation names which list**, because the two messages differ only in their first
+    /// four words. A review found that an expectation quoting the shared half passes on either,
+    /// so the second assertion could be pointed at the first list instead of at the run's sample
+    /// table and no test would notice — after which a short repeat-tract list would index past
+    /// the end of it and panic with `index out of bounds` rather than with the sentence written
+    /// for it.
+    #[test]
+    #[should_panic(expected = "the SNP/indel results cover 2 samples")]
+    fn a_short_snp_indel_list_is_refused() {
+        assemble_with_a_short_list(true, false);
+    }
+
+    /// **And the repeat-tract list, which is checked against the same table and not against its
+    /// neighbour.**
+    #[test]
+    #[should_panic(expected = "the repeat-tract results cover 2 samples")]
+    fn a_short_repeat_tract_list_is_refused() {
+        assemble_with_a_short_list(false, true);
     }
 
     /// **And the other axis**, which a run of one library per sample cannot tell from the

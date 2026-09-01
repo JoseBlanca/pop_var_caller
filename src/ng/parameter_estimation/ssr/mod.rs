@@ -743,6 +743,87 @@ pub struct SsrSampleParameters {
     pub summary: BTreeMap<ReadGroupId, StratumFitSummary>,
 }
 
+impl SsrSampleParameters {
+    /// **How often a read inside a repeat tract shows a wrong base rather than a slipped
+    /// repeat** — one rate per `(library, tract shape, ploidy)`, in the shape the calling step
+    /// takes.
+    ///
+    /// A read that came out of a repeat tract can disagree with the allele it was drawn from in
+    /// two quite different ways: it can report the wrong *number* of repeats, which is slippage,
+    /// or it can report the right number with a *wrong base* somewhere inside, which is this.
+    /// The caller scores those two channels separately and needs both numbers
+    /// (`doc/devel/ng/spec/parameter_prepass_ssr.md` §4.1).
+    ///
+    /// **A projection of [`Self::by_stratum`] and not a second store of the same numbers.** Every
+    /// record already carries its stratum's rate, unchanged from the division that measured it
+    /// ([`substitution_rate_of`]), so a field beside them would be a second copy that could drift
+    /// from the first. What this adds is the shape: calling wants the whole set keyed by stratum,
+    /// and reading it off a map of records is a join a consumer should not have to write.
+    ///
+    /// **A stratum whose reads compared no bases has no rate, and never a zero** — a zero here
+    /// would say every mismatch a read shows is a slip, which biases the one parameter the whole
+    /// per-stratum design exists to protect. That rule is enforced where the rate is measured
+    /// rather than here: [`substitution_rate_of`] answers `None` and [`substitution_rates`]
+    /// leaves the key out. So a key that reaches this map has been measured, and there is no
+    /// absence left for it to represent.
+    ///
+    /// **What happens to the stratum that has none is a whole-sample abort, and it is reachable
+    /// from data.** [`assemble_sample_parameters`] panics for it, naming the stratum — the
+    /// sample's parameters are not built at all, rather than that one stratum being dropped and
+    /// the rest kept. One repeat tract every read shows as entirely deleted is enough: those
+    /// reads witness the tract completely, so they are entered and file a shape, and they show no
+    /// bases to compare. Two tests in this file build exactly that state.
+    #[must_use]
+    pub fn substitution_rate_by_stratum(&self) -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+        self.by_stratum
+            .iter()
+            .map(|(&key, fit)| (key, fit.substitution.clone()))
+            .collect()
+    }
+
+    /// **A sample's repeat-tract parameters carrying the stated substitution rates and nothing
+    /// else a test would read** — for a test elsewhere in the crate about where those rates
+    /// travel to, rather than about how they are fitted.
+    ///
+    /// Built here rather than in the test that wants it because [`StratumFit`] has ten fields
+    /// and only one of them is the point; a caller assembling the other nine by hand is nine
+    /// chances to write a fixture that is subtly not what a fit produces.
+    ///
+    /// **Test-only, and the assembled route is the real one**: a run's records come from
+    /// [`assemble_sample_parameters`], over an accumulator and the four fits.
+    #[cfg(test)]
+    pub(crate) fn of_substitution_rates(rates: &[(StratumKey, Estimate<ErrorRate>)]) -> Self {
+        let a_model = Estimate {
+            value: SlippageModel::try_new(0.01, 0.20, 0.065).expect("a slippage model"),
+            provenance: Provenance::FittedHere,
+            observations: 0,
+        };
+        Self {
+            by_stratum: rates
+                .iter()
+                .map(|(key, rate)| {
+                    (
+                        *key,
+                        StratumFit {
+                            stratum: key.stratum,
+                            slippage: a_model.clone(),
+                            substitution: rate.clone(),
+                            genotypes: Vec::new(),
+                            not_whole_repeat_share: 0.0,
+                            unexplained_locus_share: 0.0,
+                            starts_tried: SmallVec::new(),
+                            fitted_over: SmallVec::from_slice(&[key.stratum]),
+                            shares_fitted_over: SmallVec::from_slice(&[key.stratum]),
+                            slipped_reads: 0,
+                        },
+                    )
+                })
+                .collect(),
+            summary: BTreeMap::new(),
+        }
+    }
+}
+
 /// Everything the accumulator did to a locus other than enter it as it arrived.
 ///
 /// **Every field is a plain sum, so shards merge; and every field is reported**, because the
@@ -6024,6 +6105,148 @@ mod tests {
             "a stratum that borrowed everything is not also one that borrowed its shares — those \
              are the strata reporting a level of their own"
         );
+    }
+
+    /// Three strata of one library, **each at its own substitution rate and each over its own
+    /// number of compared bases** — 2, 5 and 10 mismatched bases in a thousand, over 600,000,
+    /// 720,000 and 840,000 bases.
+    ///
+    /// Every other fixture that reaches [`assemble_sample_parameters`] is built from reads that
+    /// show their tract perfectly, so every stratum's rate is the same measured zero and every
+    /// warrant differs only through the tract length. On such a fixture a rate read out from
+    /// under the wrong stratum's key is the same number as the right one.
+    fn three_strata_at_unlike_substitution_rates()
+    -> (SsrAccumulators, BTreeMap<StratumKey, StratumSlippageFit>) {
+        const LOCI: u64 = 1_200;
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut fits = BTreeMap::new();
+        let mut at = 1_000u64;
+        for (repeats, clean, mismatching) in [(5u32, 49u32, 1u32), (6, 47, 3), (7, 43, 7)] {
+            let reference: Vec<u8> = b"AT".repeat(repeats as usize);
+            for _ in 0..LOCI {
+                accumulators.add_locus(&tract_at_a_known_rate(
+                    at,
+                    &reference,
+                    b"AT",
+                    0,
+                    clean,
+                    mismatching,
+                    1,
+                ));
+                at += 200;
+            }
+            fits.insert(
+                key_at(repeats),
+                fit_over(repeats, 0.01 * f64::from(repeats), 0.20, LOCI, 9_000),
+            );
+        }
+        (accumulators, fits)
+    }
+
+    /// **The rate at which a read inside a tract shows a wrong base, per stratum, is readable off
+    /// a sample's parameters** — which is what the calling step takes, one map for the run built
+    /// by putting every sample's together.
+    ///
+    /// It is a projection of the records rather than a second store: each record already carries
+    /// its stratum's rate, so what this checks is that the projection keeps every key and pairs
+    /// each with its own rate. Asserted whole map against whole map, against the gather the
+    /// records were built from — a key dropped, added or paired with a neighbour's rate all show
+    /// — and then each of the three rates read out by hand, so the check does not rest on two
+    /// wrong answers agreeing.
+    #[test]
+    fn every_stratums_substitution_rate_is_readable_off_the_samples_parameters() {
+        let (accumulators, fits) = three_strata_at_unlike_substitution_rates();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("all three are thick enough to be fitted");
+        let parameters = assembled(&accumulators, &resolved);
+
+        assert_eq!(
+            parameters.substitution_rate_by_stratum(),
+            substitution_rates(&accumulators),
+            "every stratum's rate reaches the sample's parameters, under its own key"
+        );
+
+        let rates = parameters.substitution_rate_by_stratum();
+        for (repeats, rate, compared) in [
+            (5u32, 0.002, 1_200 * 50 * 10u64),
+            (6, 0.005, 1_200 * 50 * 12),
+            (7, 0.010, 1_200 * 50 * 14),
+        ] {
+            let fitted = &rates[&key_at(repeats)];
+            assert!(
+                (fitted.value.get() - rate).abs() < 1e-12,
+                "a {repeats}-copy tract measured {} where its reads carried {rate}",
+                fitted.value.get()
+            );
+            assert_eq!(
+                fitted.observations,
+                compared,
+                "1,200 loci of 50 reads across a {}-base tract",
+                repeats * 2
+            );
+            assert_eq!(fitted.provenance, Provenance::FittedHere);
+        }
+    }
+
+    /// **All three axes of a stratum's key survive the projection, and two of them are held
+    /// constant in every other fixture here.**
+    ///
+    /// A key is `(library, tract shape, ploidy)`. The tract shape varies in the walked fixture
+    /// above; the other two do not. Every accumulator built in these tests is diploid and the
+    /// walked fixture gives all its strata to read group 0, so the projection could **drop a
+    /// whole ploidy** or **rewrite every key onto one library** and this file stayed green —
+    /// measured: a `filter(|(key, _)| key.ploidy == diploid)` left all 4,928 tests passing, and
+    /// forcing `read_group: ReadGroupId(0)` was caught only by a test in another module.
+    ///
+    /// A haploid stratum is not hypothetical at the range this caller commits to: a genome with a
+    /// haploid sex chromosome has loci at two ploidies, and [`StratumKey`] keeps them apart for
+    /// the reason the type documents — the fit scores each entry against the genotypes of *one*
+    /// ploidy.
+    ///
+    /// Built through the test constructor rather than through an accumulator, because what is
+    /// under test is the projection and not the fit: a mixed-ploidy accumulator needs a ploidy
+    /// map over genome regions, which would put a second thing in the fixture that can be wrong.
+    #[test]
+    fn every_axis_of_a_stratum_key_survives_the_projection() {
+        let keyed = |group: u32, repeats: u32, copies: u8, rate: f64| {
+            (
+                StratumKey {
+                    read_group: ReadGroupId(group),
+                    stratum: stratum(2, repeats),
+                    ploidy: Ploidy::try_new(copies).expect("a positive copy number"),
+                },
+                Estimate {
+                    value: ErrorRate::try_new(rate).expect("a legal rate"),
+                    provenance: Provenance::FittedHere,
+                    observations: 500_000,
+                },
+            )
+        };
+        // Four keys, no two alike on any axis they share, and four different rates.
+        let entries = [
+            keyed(0, 5, 1, 0.002),
+            keyed(0, 5, 2, 0.007),
+            keyed(1, 5, 2, 0.011),
+            keyed(0, 6, 2, 0.013),
+        ];
+        let parameters = SsrSampleParameters::of_substitution_rates(&entries);
+
+        let rates = parameters.substitution_rate_by_stratum();
+        assert_eq!(
+            rates.len(),
+            entries.len(),
+            "one entry per key, and the four keys are four keys"
+        );
+        for (key, fitted) in &entries {
+            assert_eq!(
+                rates[key].value.get(),
+                fitted.value.get(),
+                "read group {}, {} repeats, ploidy {} kept its own rate",
+                key.read_group.get(),
+                key.stratum.repeats.0,
+                key.ploidy.get()
+            );
+        }
     }
 
     /// **A stratum that kept the level it measured and borrowed the two shares it could not says

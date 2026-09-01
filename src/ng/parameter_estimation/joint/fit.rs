@@ -46,7 +46,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
-use crate::ng::types::{ExpectedHeterozygosity, Ploidy, ReadGroupId};
+use crate::ng::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
 
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
@@ -384,6 +384,34 @@ impl JointFit {
     #[must_use]
     pub fn fitted_diversity(&self) -> Option<ExpectedHeterozygosity> {
         ExpectedHeterozygosity::try_new(self.expected_heterozygosity).ok()
+    }
+
+    /// **How often a base drawn at random from the population is not the reference's**, in the
+    /// type the caller's genotype prior takes — the other of the two numbers that prior is
+    /// seeded from (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §2).
+    ///
+    /// **A wrap, not a computation**: [`FrequencyDensity::expected_alternative_frequency`] is the
+    /// number, and this puts it behind the constructor that refuses a value outside `[0, 1]`.
+    ///
+    /// **It reads a different place from [`Self::fitted_diversity`] beside it, and the two agree
+    /// by convention rather than by construction.** That one wraps the stored
+    /// [`Self::expected_heterozygosity`] field; this one recomputes from [`Self::density`]. The
+    /// fitter sets both from one density in the same struct literal, so on every `JointFit` this
+    /// crate produces they are two moments of one curve — but every field here is public, and a
+    /// value built by hand can hold a density and a heterozygosity that have nothing to do with
+    /// each other. The two travel together
+    /// into [`RunParameters::seed_from_moments`](crate::ng::calling::run_parameters::RunParameters::seed_from_moments),
+    /// and having one of them wrapped here and the other wrapped at each call site is how they
+    /// come to be wrapped differently.
+    ///
+    /// **`None` means the fit produced something that is not a frequency**, and the seed's own
+    /// ladder takes over rather than the run failing — the same rule as its neighbour. It is not
+    /// reachable from a fit that converged: the value is a mass plus a mass times a Beta mean,
+    /// all three of which are in `[0, 1]`.
+    #[must_use]
+    pub fn fitted_alternative_frequency(&self) -> Option<ExpectedAlternativeFrequency> {
+        ExpectedAlternativeFrequency::try_new(self.density.value.expected_alternative_frequency())
+            .ok()
     }
 }
 
@@ -3204,6 +3232,51 @@ mod tests {
     fn a_diversity_that_is_not_a_probability_does_not_reach_the_caller() {
         let fit = a_fit_carrying(a_lopsided_density(), 1.5);
         assert!(fit.fitted_diversity().is_none());
+    }
+
+    /// **The seed's other moment reaches the caller wrapped too, and it is the density's own
+    /// mean frequency rather than its heterozygosity.**
+    ///
+    /// The two are read out side by side and handed to the prior's seed together, so returning
+    /// one where the other was asked is the mistake worth pinning. **Until this test there was
+    /// none**: a review found that returning the heterozygosity here was caught only by a test in
+    /// another module, one that assembles a whole run.
+    ///
+    /// **The fixture has to keep the two apart or the test cannot tell them apart**, and on this
+    /// density they are close: a `Beta(0.5, 2.0)` over 9 in 100 segregating positions, plus 1 in
+    /// 100 fixed for a non-reference base, gives a mean frequency of **2.80 in 100** and a
+    /// heterozygosity of **2.06 in 100** — the frequency 36% the larger. The guard below is a
+    /// fifth, so it holds with room and would fail on a density that made them equal.
+    #[test]
+    fn the_fitted_frequency_is_the_densitys_own_mean_and_not_its_heterozygosity() {
+        let density = a_lopsided_density();
+        let fit = a_fit_carrying(density, density.expected_heterozygosity());
+        let wrapped = fit
+            .fitted_alternative_frequency()
+            .expect("the mean frequency of a real density is a probability");
+
+        assert_eq!(wrapped.get(), density.expected_alternative_frequency());
+        let diversity = density.expected_heterozygosity();
+        assert!(
+            (wrapped.get() / diversity - 1.0).abs() > 0.2,
+            "the fixture must keep the two moments apart: frequency {}, heterozygosity {diversity}",
+            wrapped.get()
+        );
+    }
+
+    /// **A density whose mean frequency is not a probability hands back nothing**, the same rule
+    /// as its neighbour — and the case is `a = b = 0`, where the Beta mean is `0/0`.
+    #[test]
+    fn a_frequency_that_is_not_a_probability_does_not_reach_the_caller() {
+        let degenerate = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.0,
+            b: 0.0,
+        };
+        assert!(degenerate.expected_alternative_frequency().is_nan());
+        let fit = a_fit_carrying(degenerate, 0.01);
+        assert!(fit.fitted_alternative_frequency().is_none());
     }
 
     // The whole fit, against a cohort whose truth is known, is in `whole_fit_tests` below —

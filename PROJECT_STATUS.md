@@ -25,7 +25,7 @@ Skills and agents are instructed to leave it untouched.
 > **5,885 tests in the lib** — 17 added.
 > **Why a run has to say anything at all**: a VCF cannot distinguish ground the caller examined
 > and found nothing at from ground it never spoke for, which is `cohort_merge.md` §3.3's argument
-> for the failed-locus count being *counted* and not merely dropped. The F1 review measured what
+> for the failed-locus count being *counted* and not merely dropped. F1's implementation report records what
 > that costs — a run over a 60-base `AT` tract at 24 reads a sample **printed six zeros and
 > exited successfully**, indistinguishable from a clean genome.
 > **The report states every count as a share of a stated whole**: the analysed ground partitions
@@ -50,8 +50,9 @@ Skills and agents are instructed to leave it untouched.
 > because a region carries no reference; a run carries one, so `RunReport` names every span it
 > shows. The `Display` is unchanged.
 > **⚑ The fourth is not built**: `RunError::RecordNotWritten` still renders its locus through that
-> `Display`, so the one message whose job is to say how far a partial file got prints `contig 0`
-> and 0-based coordinates a reader cannot match against the VCF they hold. It is an error type
+> `Display`, so the one message whose job is to say how far a partial file got prints `contig 0`,
+> whose chromosome a reader cannot match against the VCF they hold — the coordinates are
+> 1-based, as everything in ng is. It is an error type
 > reached from a path with no contig table in hand.
 > **The report is lines, not printed output**, which is what makes it testable — F2's report
 > records its correctness pass finding the summary the one part of this command a mutation could
@@ -1044,6 +1045,50 @@ Skills and agents are instructed to leave it untouched.
 > the tenth reported as unreachable.
 > [the review](doc/devel/reports/reviews/ng_psp_e4_2026-08-28.md);
 > [the fixes](doc/devel/reports/reviews/fixes_applied_ng_psp_e4_2026-08-28.md).
+>
+> - **Previously (2026-08-27, merged to main 2026-09-01):** **what the parameter pre-pass
+> measured is now what calling reads** (branch `ng-prepass-handover`, plan
+> [prepass_calling_handover.md](doc/devel/ng/impl_plan/prepass_calling_handover.md)). The pre-pass
+> reports a run three ways — per sample from the SNP/indel path, per sample from the repeat tracts,
+> and once over the whole cohort — and calling reads one object. **Nothing built that object**: its
+> constructor was called from 29 places and every one was its own tests, each handing it values
+> written by hand. One function now does it, and it gathers rather than fits: every per-library and
+> per-sample number it hands on is a pre-pass output unchanged, and the one derived value is the
+> genotype prior's seed. **A sample whose inbreeding coefficient was never fitted stops the run and
+> is named** — not defaulted, and not taken from the cohort fit's homozygote excess, which is
+> measured by the very fit whose diversity the coefficient exists to correct.
+> **⛦ The second step's premise turned out to be false and the step is smaller than planned**: the
+> repeat-tract substitution-rate gather already existed, already omitted a stratum that compared no
+> bases rather than calling it zero, and its records already carried the rate — what was missing
+> was only the shape calling asks for, so what shipped is a projection rather than a second copy of
+> numbers that could drift from the first.
+> **⛦ Three reviews found two ways the seam could lose every number it carried and still finish**,
+> both now refused: a repeat-tract rate fitted at a ploidy other than the run's is unreachable at
+> every locus, so every tract would be called on the model's stated constant; and a library the run
+> declared that no sample carries a rate for shortens the read-group axis silently, which defers
+> the failure to a locus. The second is reachable from data — a library whose reads were all
+> refused at admission — and **what such a run should get is a question for the owner**: refuse it,
+> as now, or give that library the defaulted calibration.
+> **⛦ Eight of 24 planted defects passed every test, and four mattered.** Three of the four
+> library-ownership checks had no test at all — only the error-rate one did, and deleting each of
+> the others left the file green. The seed's fitted diversity could be halved unseen, because the
+> tracing test read the seed's mean frequency and that ratio is exactly the frequency for **any**
+> total, so the diversity cancels. A filter dropping every non-diploid key from the tract
+> projection left all 4,928 tests passing, since every fixture here is diploid. And two samples
+> shared a batch, so that axis could not see them exchanged. Six survivors now fail; one is benign
+> and one is not a defect — an equivalent mutant the review misread.
+> **⛦ They also found eleven wrong claims, four of them the stated reason for a design or a
+> test** — including that a missing minted-error total lets a run finish, which the assembly
+> refuses, and that a permuted per-sample list silently mis-assigns coefficients, which the
+> library-ownership check stops. All corrected; no defect was found in the seam's arithmetic.
+> **⛦ And a thousand samples cost 1.14 GB, of which the per-sample results are 97.7%.** Per sample:
+> 1,114,632 bytes of per-sample pre-pass results against 26,596 bytes of the run-wide maps built
+> from them, the latter a lower bound. The difference is the repeat-tract records, 3,366 bytes a
+> stratum of which 2,496 is the allele-length genotype table, and calling reads one number off each
+> record — **a finding for the run driver's plan**, which can project each sample's rates as that
+> sample finishes and release the rest, peaking at 1/43rd of that.
+> The library's own test suite at the time, 4,920 → **4,937** passing.
+> [What was built](doc/devel/reports/implementations/ng_prepass_calling_handover_2026-08-27.md).
 >
 > - **Previously (2026-08-27):** **one observation's reads are not stored — they are the
 > live set minus every other observation's** (step E4 of
