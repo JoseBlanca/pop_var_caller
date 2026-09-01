@@ -4882,7 +4882,9 @@ mod records_handed_over_as_the_run_finishes_them {
     //! where.
 
     use super::calling_joined_to_the_merge::the_shipped_genotyper;
-    use super::the_merge_over_walkers::{open_over, read_of, sample_showing};
+    use super::the_merge_over_walkers::{
+        open_over, read_of, sample_showing, sample_showing_on_reads, shipped_calling_loop,
+    };
     use super::*;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
@@ -5264,6 +5266,510 @@ mod records_handed_over_as_the_run_finishes_them {
                 "nine fixed columns and two samples: {line}"
             );
             assert_eq!(columns[8], "GT:GQ:DP:AD", "the generic FORMAT string");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Milestone E2 — concurrency invariance (spec §12.2; the plan's E2).
+    //
+    // The record path's whole claim is the same VCF at every worker count, and since E1 a
+    // worker count is a rayon thread count: the cover's sweep is the one thing that threads.
+    // The oracle is the serial caller, on a cohort whose loci differ in kind — a shared SNP,
+    // a sample-private SNP, an insertion, a locus that is called and establishes no variant,
+    // a sample with no evidence at all — over ground with a repeat tract interleaved between
+    // two ordinary stretches, so the walk crosses every kind of ground the caller routes.
+    //
+    // Spec §8's calling-scratch trap is what this oracle exists to catch, and today it cannot
+    // fire: no built arrangement reorders the loci a scratch sees, because assembly and
+    // genotyping stay on the merge thread in genome order. The oracle is built now so that
+    // whatever first threads the calling is caught by a test that predates it.
+    //
+    // Seeded by the E1 determinism review's probe suite, which ran this shape (without the
+    // tract, the mixed cohort and the width sweep) at pools of 1, 2, 4 and 8 and found the
+    // bytes identical.
+    // ---------------------------------------------------------------
+
+    /// The analysed ground E2 calls over: an ordinary stretch, a repeat tract, an ordinary
+    /// stretch — so ordinary sites and a tract are interleaved, as the plan's oracle asks.
+    ///
+    /// The tract routes to an unfilled generator slot and is charged to *not built yet*
+    /// (every E2 read lies inside the first stretch), which is exactly what a run over
+    /// tract-bearing ground does today; what the fixture pins is that the routing and the
+    /// accounting are identical at every thread count, not that a tract is called.
+    fn ground_with_a_tract_interleaved() -> Segmentation {
+        use crate::ng::region_typing::segment_criteria::SsrSegment;
+        use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion};
+        use crate::ng::repeat_catalog::StrRepeatCriteria;
+        use crate::ng::types::Motif;
+        use crate::regions::ContigBounds;
+
+        let chr1 = |start: u64, end: u64| GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        };
+        let bounds = [ContigBounds {
+            name: "chr1",
+            length: 100,
+        }];
+        let segments = vec![
+            TypedRegion {
+                region: chr1(1, 40),
+                kind: RegionKind::Generic,
+            },
+            TypedRegion {
+                region: chr1(41, 52),
+                kind: RegionKind::SsrSegment(
+                    SsrSegment::new("chr1".into(), 41, 52, Motif::new(b"AT").unwrap(), 1.0)
+                        .expect("a twelve-base AT tract inside the contig"),
+                ),
+            },
+            TypedRegion {
+                region: chr1(53, 100),
+                kind: RegionKind::Generic,
+            },
+        ];
+        Segmentation::build(
+            segments.into_iter().map(Ok),
+            GenomeRegions::whole_contigs(&bounds),
+            super::tests::catalog_header(),
+            StrRepeatCriteria::default(),
+            PathBuf::from("/genomes/test.catalog.parquet"),
+        )
+        .expect("a clean stream builds")
+    }
+
+    /// A caller over `paths` on the tract-interleaved ground, with the shipped settings and
+    /// the merge's knobs named — E2 sweeps the building-region width so that the run is made
+    /// to divide the same ground two different ways while answering the same file. See
+    /// [`the_record_path_is_byte_identical_at_every_thread_count`] for what that sweep does
+    /// and does not buy; it is not what makes a broken parallel reduction visible, which was
+    /// measured rather than assumed.
+    fn open_over_the_tract_ground_with(
+        paths: &[PathBuf],
+        reference: &crate::ng::read::input::reference::OpenReference,
+        merge: MergeParameters,
+    ) -> AlignedFilesVariantCaller {
+        use crate::ng::calling::parameters_file::DeclaredInbreeding;
+        use crate::ng::read::input::read_groups::build_read_groups;
+
+        let read_groups = build_read_groups(paths).expect("the fixtures declare read groups");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
+                reference_with_checksums: reference.info(),
+            },
+            ground_with_a_tract_interleaved(),
+            parameters,
+            shipped_calling_loop(),
+            crate::ng::calling::allele_candidates::CandidateSelectionConfig::DEFAULT,
+            merge,
+        )
+        .expect("five readable samples over a readable reference open")
+    }
+
+    /// The two building-region widths E2 runs everything at: the shipped default, where the
+    /// fixture's first ordinary stretch is a single building region, and a seven-base width,
+    /// which cuts that stretch into six — so the run is made to cover, evict and build its
+    /// ground in six steps instead of one while answering the same file.
+    fn the_two_widths() -> [MergeParameters; 2] {
+        [
+            MergeParameters::DEFAULT,
+            MergeParameters {
+                cohort_locus_builder_regions_len:
+                    crate::ng::run::cohort_merge::CohortLocusBuilderRegionsLen(
+                        std::num::NonZeroU32::new(7).expect("seven is non-zero"),
+                    ),
+                ..MergeParameters::DEFAULT
+            },
+        ]
+    }
+
+    /// E2's cohort: every kind of locus the built caller can produce, in one run.
+    ///
+    /// zeta and alpha carry a shared SNP at `chr1:17` (three and four reads, so the samples
+    /// are numerically distinguishable); alpha alone carries `chr1:35`; iota carries a
+    /// two-base insertion anchored at `chr1:14`; kappa shows two sequences one read each at
+    /// `chr1:15`, which the merge builds on the pooled two and candidate selection then
+    /// empties — the called-but-not-written locus; and mu has reads that all match the
+    /// reference, so it is genotyped from coverage alone at every locus.
+    ///
+    /// **⚑ Every locus this cohort produces is one reference position wide**, and that is a
+    /// limitation rather than a choice: the fixture reference is a hundred identical bases,
+    /// so two substitutions never share a base to chain on, an insertion's reference span is
+    /// its anchor alone, and a deletion left-aligns off the record (measured at D1). Two
+    /// samples departing at adjacent positions were tried and closed as two separate loci,
+    /// not one. `the_mixed_cohorts_records_describe_the_serial_callers_loci` asserts the
+    /// one-position width, so the limitation is checked rather than assumed — it is what
+    /// stops this module from pinning the parallel cover's chain-following, which
+    /// `cohort_merge`'s own fixtures do instead.
+    fn the_mixed_cohort() -> (Vec<TempDir>, Vec<PathBuf>) {
+        let (zeta_dir, zeta) = sample_showing_on_reads("zeta", "zeta.bam", &[7], 3);
+        let (alpha_dir, alpha) = sample_showing_on_reads("alpha", "alpha.bam", &[7, 25], 4);
+        let (mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let (iota_dir, iota) = sample_carrying_an_insertion("iota", "iota.bam", 2);
+        let (kappa_dir, kappa) =
+            sample_showing_two_sequences_once_each("kappa", "kappa.bam", b'C', b'G');
+        (
+            vec![zeta_dir, alpha_dir, mu_dir, iota_dir, kappa_dir],
+            vec![zeta, alpha, mu, iota, kappa],
+        )
+    }
+
+    /// Write the mixed cohort's VCF inside a pool of `threads`; the file's bytes and the
+    /// run's answer come back for comparison.
+    fn mixed_cohort_vcf_in_a_pool(
+        threads: usize,
+        paths: &[PathBuf],
+        reference: &crate::ng::read::input::reference::OpenReference,
+        merge: MergeParameters,
+    ) -> (Vec<u8>, WrittenCohort) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a fixture pool");
+        pool.install(|| {
+            let caller = open_over_the_tract_ground_with(paths, reference, merge);
+            let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
+            let metadata = VcfHeaderMetadata::try_new(
+                vec![HeaderContig {
+                    name: "chr1".to_owned(),
+                    length: 100,
+                    md5: None,
+                }],
+                sample_names,
+                "pop_var_caller_exp call-from-alignments".to_owned(),
+                "reference.fa".to_owned(),
+                String::new(),
+            )
+            .expect("a header this run can state");
+            let out = tempfile::tempdir().expect("a temporary directory");
+            let path = out.path().join("calls.vcf");
+            let mut writer =
+                VcfWriter::create(&path, metadata, Ploidy::try_new(2).expect("a diploid"))
+                    .expect("the output opens");
+            let written = caller
+                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
+                    writer.write_record(record)
+                })
+                .expect("the mixed cohort calls");
+            writer.finish().expect("the file is renamed into place");
+            (std::fs::read(&path).expect("the VCF is there"), written)
+        })
+    }
+
+    /// One sample's walk as the thread-count sweep compares it: its name, and the three
+    /// tally structs whole rather than fields picked out of them.
+    type SampleWalkTalliesForComparison = (
+        String,
+        LocusCounts,
+        Vec<(Option<ReadGroupId>, ReadFilterCounts)>,
+        Option<PileupGeneratorCounts>,
+    );
+
+    /// **Each sample's walk, named and counted** — the projection the thread-count sweep
+    /// compares. The sample's own name rides along with its counts, so a run that produced
+    /// the right multiset of tallies but paired them with the wrong samples fails; written
+    /// once and called on both sides, so the two cannot drift into comparing different things.
+    fn walk_tallies_of(run: &WrittenCohort) -> Vec<SampleWalkTalliesForComparison> {
+        run.walk
+            .per_sample
+            .iter()
+            .map(|walk| {
+                (
+                    walk.sample_name.clone(),
+                    walk.regions.clone(),
+                    walk.read_filters.clone(),
+                    walk.snp_indel,
+                )
+            })
+            .collect()
+    }
+
+    /// **Each sample's admitted-read count under its own name, against absolute numbers** —
+    /// the guard the thread-count sweep structurally cannot provide, because that sweep
+    /// compares the record path against itself.
+    ///
+    /// **⚑ This closes a hole the record path had and the oracle path did not.** Reversing
+    /// the sample-name list before it is paired with the walkers in
+    /// [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] passed the whole
+    /// library — measured, 437 of 437 green — while the same reversal in
+    /// [`AlignedFilesVariantCaller::call_cohort`] is killed by two tests. A run report would
+    /// then have carried one sample's read-drop rates under another sample's name: a wrong
+    /// report rather than a crash, which is the failure `CohortWalkTallies::of`'s own length
+    /// check exists to prevent and cannot see, both lists being the right length.
+    ///
+    /// The counts are what make the pairing checkable: the five samples walk **3, 4, 3, 3 and
+    /// 6 reads**, so no two of them are interchangeable and any permutation shows.
+    fn walk_counts_by_name(run: &WrittenCohort) -> Vec<(&str, u64)> {
+        run.walk
+            .per_sample
+            .iter()
+            .map(|walk| {
+                (
+                    walk.sample_name.as_str(),
+                    walk.snp_indel
+                        .as_ref()
+                        .map_or(0, |counts| counts.reads_admitted),
+                )
+            })
+            .collect()
+    }
+
+    /// **The written VCF is byte-identical at every thread count, at both widths, and across
+    /// the widths** — spec §12.2's oracle, taken all the way to the artefact a person diffs,
+    /// on the cohort and ground described above. A pool of one takes the serial-sweep
+    /// fallback; pools of 2, 4, 8 and 16 take the Jacobi sweep, each run three times because
+    /// a schedule-dependent divergence shows only under some interleavings. The seven-base
+    /// width runs the same cohort over six building regions instead of one, so the file must
+    /// not depend on where the merge cuts its ground either. The counts beside the file —
+    /// written, called-but-not-written, refused, nobody-callable, and each sample's whole walk
+    /// tallies — must agree too, because a run report built from them must not depend on the
+    /// thread count either. **The two refusal lists are empty on this fixture**, so those two
+    /// comparisons cannot fail today and are kept for the fixture that fills them; the walk
+    /// tallies are compared as whole structs rather than as chosen fields, so a count added to
+    /// `LocusCounts`, `ReadFilterCounts` or `PileupGeneratorCounts` later joins the
+    /// comparison instead of silently dropping out of it.
+    ///
+    /// **⚑ What this reaches and what it does not, measured by three mutations to
+    /// [`ObservationCache::cover_in_parallel`] rather than argued.**
+    ///
+    /// | mutation | effect on the sweep | these two tests |
+    /// |---|---|---|
+    /// | drop the last sample from `par_iter_mut` | a sample is never drawn forward | **both fail** |
+    /// | `max` → `min` in the `try_reduce` | a cover stops at the least reach any sample grew to | both pass |
+    /// | `break` after the first iteration | the fixpoint never iterates | both pass |
+    ///
+    /// So the oracle has real power over **who** the sweep draws and none at all over **how
+    /// far** it keeps drawing. The reason is the fixture reference, and it is not fixable
+    /// here: it is a hundred identical bases, so no observation ever reaches past a building
+    /// region into where another sample's begins — two substitutions share no base to chain
+    /// on, an insertion's reference span is its anchor alone, and a deletion left-aligns off
+    /// the record (measured at D1). Two extra samples departing at adjacent positions were
+    /// tried during E2 to give a cover something to chain, and closed as two separate loci.
+    /// With no chain there is nothing for a second sweep to find, so a cover that stops early
+    /// loses nothing *on this ground*.
+    ///
+    /// The fixpoint is pinned a layer down, on fixtures minted in memory that can hold a
+    /// 26-base observation: the same two mutations are killed by
+    /// `the_parallel_cover_gives_the_serial_drivers_answer` and five others in
+    /// [`cohort_merge`](super::super::cohort_merge). **So the layering is deliberate — the
+    /// cover's fixpoint at the merge, the end-to-end tie here**, and the one-position locus
+    /// width this fixture is limited to is asserted by
+    /// [`the_mixed_cohorts_records_describe_the_serial_callers_loci`] so it cannot silently
+    /// stop being true.
+    #[test]
+    fn the_record_path_is_byte_identical_at_every_thread_count() {
+        let (_dirs, paths) = the_mixed_cohort();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let (default_width_bytes, baseline) =
+            mixed_cohort_vcf_in_a_pool(1, &paths, &reference, MergeParameters::DEFAULT);
+        assert_eq!(
+            baseline.records_written, 3,
+            "the shared SNP, alpha's own SNP and iota's insertion reach the file",
+        );
+        assert_eq!(
+            baseline.loci_called_but_not_written, 1,
+            "kappa's two-singletons locus is called and establishes nothing",
+        );
+        // **Every sample, not the first one.** A run hands one segmentation to the whole
+        // cohort, so all five walk the same three segments and charge the same tract to
+        // not-built-yet; reading only `per_sample[0]` would pass just as well if the tallies
+        // were paired with the wrong samples, or if four of the five were left empty.
+        assert_eq!(
+            baseline
+                .walk
+                .per_sample
+                .iter()
+                .map(|walk| (
+                    walk.regions.regions_in,
+                    walk.regions.unhandled_not_implemented
+                ))
+                .collect::<Vec<_>>(),
+            vec![(3, 1); paths.len()],
+            "each sample walks the fixture's three segments and charges the tract to \
+             not-built-yet, on every thread count",
+        );
+        assert_eq!(
+            walk_counts_by_name(&baseline),
+            [
+                ("zeta", 3),
+                ("alpha", 4),
+                ("mu", 3),
+                ("iota", 3),
+                ("kappa", 6),
+            ],
+            "each sample's admitted reads come back under that sample's own name",
+        );
+
+        for merge in the_two_widths() {
+            let width = merge.cohort_locus_builder_regions_len.get();
+            let (baseline_bytes, _) = mixed_cohort_vcf_in_a_pool(1, &paths, &reference, merge);
+            // At the default width this compares a second serial run against the first, which
+            // is worth its cost for a different reason than the name suggests: it is the only
+            // place the whole path is run twice with everything held fixed, so a run that
+            // depended on the order two temporary directories happened to be created in, or on
+            // any other per-run state, fails here rather than being blamed on a thread count.
+            assert_eq!(
+                baseline_bytes, default_width_bytes,
+                "a serial run at a {width}-base building region must give the file the shipped \
+                 width gave",
+            );
+            for threads in [2, 4, 8, 16] {
+                for repetition in 0..3 {
+                    let (bytes, again) =
+                        mixed_cohort_vcf_in_a_pool(threads, &paths, &reference, merge);
+                    assert_eq!(
+                        bytes, baseline_bytes,
+                        "the VCF differs between a pool of 1 and a pool of {threads} at a \
+                         {width}-base building region (repetition {repetition})",
+                    );
+                    assert_eq!(again.records_written, baseline.records_written);
+                    assert_eq!(
+                        again.loci_called_but_not_written,
+                        baseline.loci_called_but_not_written
+                    );
+                    assert_eq!(
+                        again.loci_too_wide_to_assemble,
+                        baseline.loci_too_wide_to_assemble
+                    );
+                    assert_eq!(
+                        again.loci_with_nobody_to_call,
+                        baseline.loci_with_nobody_to_call
+                    );
+                    assert_eq!(
+                        walk_tallies_of(&again),
+                        walk_tallies_of(&baseline),
+                        "each sample's walk tallies at a pool of {threads}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// **And the records are the serial caller's loci** — the oracle the plan names for E2.
+    /// `call_cohort` never touches the parallel cover, so agreement here ties the whole
+    /// thread-count sweep above back to the one driver whose schedule has never changed.
+    ///
+    /// **⚑ The record path runs inside a pool of eight on purpose.** Left to the ambient
+    /// pool it would take whatever `rayon::current_num_threads()` happened to be, and on a
+    /// one-CPU runner — or under `RAYON_NUM_THREADS=1` — the driver takes its serial-sweep
+    /// fallback, so this would quietly become the serial cover compared against itself and
+    /// still pass. Naming the pool makes the comparison the one the test claims.
+    #[test]
+    fn the_mixed_cohorts_records_describe_the_serial_callers_loci() {
+        let (_dirs, paths) = the_mixed_cohort();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+
+        let called = open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("the serial oracle calls");
+        let mut records = Vec::new();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .expect("a fixture pool");
+        let written = pool.install(|| {
+            assert!(
+                rayon::current_num_threads() > 1,
+                "the record path must take the parallel sweep here, not its serial fallback",
+            );
+            open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
+                .call_cohort_handing_each_record_over(&the_shipped_genotyper(), &mut |record| {
+                    records.push(record.clone());
+                    Ok::<(), std::io::Error>(())
+                })
+                .expect("the record path calls")
+        });
+
+        assert_eq!(
+            written.loci_called(),
+            called.called_loci.len() as u64,
+            "written plus establishing-nothing is exactly what the serial caller called",
+        );
+        let written_regions: Vec<GenomeRegion> =
+            records.iter().map(|record| record.region()).collect();
+        let called_regions: Vec<GenomeRegion> = called
+            .called_loci
+            .iter()
+            .map(|locus| locus.region)
+            .collect();
+        assert!(
+            written_regions
+                .iter()
+                .all(|region| called_regions.contains(region)),
+            "every record's span is a span the serial caller called: {written_regions:?} \
+             against {called_regions:?}",
+        );
+        assert_eq!(
+            called_regions.len() - written_regions.len(),
+            written.loci_called_but_not_written as usize,
+            "and the difference is exactly the called-but-not-written count",
+        );
+
+        // **The fixture's limitation, asserted rather than described.** Every locus this
+        // cohort produces is one reference position wide, because a reference of a hundred
+        // identical bases gives substitutions no shared base to chain on and slides deletions
+        // off the record. That is why this module cannot pin the parallel cover's
+        // chain-following and `cohort_merge`'s in-memory fixtures can. Asserting it keeps the
+        // claim honest in both directions: if a later change to the mint or to candidate
+        // selection ever does produce a wider locus here, this fails and the paragraph above
+        // has to be rewritten rather than quietly becoming false.
+        let widest = written_regions
+            .iter()
+            .map(|region| region.end.0.saturating_sub(region.start.0) + 1)
+            .max()
+            .expect("the fixture writes records");
+        assert_eq!(
+            widest, 1,
+            "every locus this reference can express is one position wide: {written_regions:?}",
+        );
+    }
+
+    /// **A cohort of one sample gives the same file at one thread and at eight.**
+    ///
+    /// The single low-coverage sample is the hardest end of the range this caller commits to
+    /// (`CLAUDE.md`, spec §7.2), and it is the shape where a sweep over samples has the least
+    /// to do: one sample means the Jacobi reduction folds a single value, so anything that
+    /// only works because a second sample happened to widen the reach shows here and nowhere
+    /// else in this module. `a_cohort_of_one_sample_writes_its_records` already proves such a
+    /// run reaches the file; what it does not do is vary the thread count, because it runs
+    /// under whatever pool the harness has.
+    #[test]
+    fn a_cohort_of_one_sample_is_byte_identical_at_every_thread_count() {
+        let (_dirs, paths) = the_mixed_cohort();
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let alone = &paths[..1];
+
+        for merge in the_two_widths() {
+            let width = merge.cohort_locus_builder_regions_len.get();
+            let (serial_bytes, serial) = mixed_cohort_vcf_in_a_pool(1, alone, &reference, merge);
+            assert_eq!(
+                serial.records_written, 1,
+                "zeta alone still carries its SNP at chr1:17",
+            );
+            for threads in [2, 8] {
+                for repetition in 0..3 {
+                    let (bytes, again) =
+                        mixed_cohort_vcf_in_a_pool(threads, alone, &reference, merge);
+                    assert_eq!(
+                        bytes, serial_bytes,
+                        "one sample's VCF differs between a pool of 1 and a pool of \
+                         {threads} at a {width}-base building region (repetition {repetition})",
+                    );
+                    assert_eq!(walk_tallies_of(&again), walk_tallies_of(&serial));
+                }
+            }
         }
     }
 }

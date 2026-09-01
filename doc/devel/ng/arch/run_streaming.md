@@ -1089,7 +1089,27 @@ Unit tests beside each file; the run-level oracles are spec §12 and belong in `
   file.
 - `callers.rs`: each construction refusal fires on its own, on a fixture that trips that one and no
   other; a cohort of the same loci called at one caller in flight and at sixteen yields the same
-  records in the same order.
+  records in the same order. **Built 2026-09-01 (plan step E2), and "callers in flight" reads
+  "rayon thread count"** — E1 measured the genotyping pool out and put the parallelism in the
+  cover, so the thread count is the only concurrency a calling run has.
+  `the_record_path_is_byte_identical_at_every_thread_count` writes the cohort's VCF through the
+  real writer at pools of 1 (the serial-sweep fallback), 2, 4, 8 and 16, three repetitions per
+  parallel pool, at two building-region widths, and compares the **files byte for byte** plus
+  every count a run report is built from; `the_mixed_cohorts_records_describe_the_serial_callers_loci`
+  ties that to the serial `call_cohort`, which never touches the parallel cover.
+
+  **What it reaches, measured by three mutations to the parallel cover rather than argued.**
+  Dropping a sample from the sweep fails both tests; inverting the reduction and stopping the
+  fixpoint after one iteration both pass, and are killed by six `cohort_merge` tests instead.
+  **So the oracle has real power over *who* the sweep draws and none over *how far* it keeps
+  drawing.** These fixtures call from real BAM files against a reference of a hundred identical
+  bases, on which no observation reaches past a building region into another sample's —
+  substitutions share no base, an insertion spans its anchor alone, a deletion left-aligns off
+  the record — so there is no chain for a second sweep to find and a cover that stops early
+  loses nothing here. `cohort_merge`'s fixtures are minted in memory and can hold a 26-base
+  observation, which is where the fixpoint claim lives. **So the layering is deliberate: the
+  cover's fixpoint at the merge, the end-to-end tie here.** The one-position locus width is
+  asserted, so the limitation cannot silently stop being true.
 - `gatherer.rs`: everything yielded was counted by the census and everything completed was
   marked walked, empty segments included; tallies from several workers sum at `finish`.
 

@@ -19,7 +19,34 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **E1 of the run driver — the calling run's cover goes
+> - **Last completed task (2026-09-01):** **E2 of the run driver — concurrency invariance, and
+> Checkpoint E met**
+> (step E2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_e2_2026-09-01.md)).
+> The record path's VCF is **byte-identical at pools of 1, 2, 4, 8 and 16, across two
+> building-region widths**, on a cohort whose loci differ in kind — a shared SNP, a private
+> SNP, an insertion, a called-but-not-written locus, a sample with only reference reads —
+> over ground with a repeat tract interleaved; every count a run report is built from agrees
+> too, and a second test ties it to the plan's named oracle, the serial `call_cohort`.
+> **⚑ What it reaches is measured, by three mutations to the parallel cover**: dropping a
+> sample from the sweep fails both new tests; inverting the reduction and stopping the fixpoint
+> after one iteration both pass, and are killed by six existing `cohort_merge` tests. So the
+> oracle has real power over *who* the sweep draws and none over *how far* it keeps drawing —
+> the fixture reference is a hundred identical bases, so no observation reaches past a building
+> region into another sample's and a cover that stops early loses nothing. The fixpoint stays
+> pinned a layer down; this step is the end-to-end tie. The one-position locus width is
+> asserted so that stays true.
+> **Spec §8's calling-scratch trap cannot fire yet** — nothing reorders the loci a scratch
+> sees — so the oracle predates the arrangement that would arm it.
+> **The review found one real hole and it is closed**: reversing the sample-name list before
+> it is paired with the walkers passed all 437 tests on the path the command runs, and was
+> killed by two tests on the oracle path — so a run report could have carried one sample's
+> read-drop rates under another sample's name, a wrong report rather than a crash. Each
+> sample's admitted reads are now asserted under that sample's own name. A determinism agent
+> failed to make the output differ in about 19,000 comparisons, including 810 whole runs to
+> VCF bytes and repeats under full CPU saturation.
+>
+> - **Earlier (2026-09-01):** **E1 of the run driver — the calling run's cover goes
 > parallel across samples**
 > (step E1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md)).
@@ -2721,8 +2748,7 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Direct mode — alignment files to called loci, in one process
-- **Status:** **Milestones A–D and F shipped; E1 implemented (2026-09-01), E2 — the end-to-end
-  concurrency-invariance oracle — still owed.** A person runs
+- **Status:** **Milestones A–F shipped (Checkpoint E met 2026-09-01).** A person runs
   `pop_var_caller_exp call-from-alignments` on a cohort of CRAMs and gets a VCF, the parameters
   used beside it, and a run report; since E1 the run's record path draws every sample's reader
   forward concurrently inside each cover (the merge's parallel cover), while assembly and
@@ -2806,6 +2832,27 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
   its letter — `WindowedRefSeq` is `Sync` since E1 — while its point (never share one
   accessor across workers; k cursors on one window serialise the walk) stands and is what the
   code documents instead.
+- **⚑ Spec §8's calling-scratch trap is unreachable as built, and E2's premise moved with it
+  (recorded here; the spec is the owner's to edit).** §8 says a missed reset in the calling
+  scratch "must be caught by §12.2's invariance oracle … run at more than one worker count",
+  on the premise that the scratch is per worker and a pool reorders the loci it sees. Since
+  E1 there is no such pool: eviction, assembly, genotyping and the sink all stay on the merge
+  thread in genome order, so the scratch is per *run* and single-threaded and no built
+  arrangement can reorder it. E2 therefore proves the end-to-end half of §12.2 — the same VCF
+  bytes at every rayon thread count — and the scratch trap waits for whatever first threads
+  the calling, which the oracle now predates rather than owes.
+- **⚑ The development container's incremental-compilation cache can forge a determinism
+  failure, and did.** On 2026-09-01 a corrupt `target-container/debug/incremental` produced a
+  test binary in which `cargo test --lib ng::run` returned **429 passed, 6 failed** at a clean
+  ee7124f0 — the six merge tests that compare the parallel form against the serial one, with
+  the parallel side assembling fewer of a sample's records into a locus. The same cache then
+  crashed rustc in `join_codegen`, produced a link failure against undefined `anon.*.llvm.*`
+  symbols, and produced a binary the container could not exec. `rm -rf
+  target-container/debug/incremental` (2.6 GB, inside the container) ended all four; the six
+  tests then passed in 457 consecutive runs, 331 under full CPU saturation. **The forged
+  failure's signature is identical to that of a genuinely broken parallel cover**, so a
+  determinism failure seen once and not reproduced should have the cache cleared before it is
+  believed. Set `CARGO_INCREMENTAL=0` when a build starts behaving impossibly.
 - **Open:**
   - **⚑ The empty-cohort refusal is built and is still the owner's to keep or strike** (the plan
     asked for it to be raised at Checkpoint A): a run whose file pattern matched nothing would

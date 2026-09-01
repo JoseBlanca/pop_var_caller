@@ -392,7 +392,7 @@ large enough to move genotyping's share is measured (a tenth to a third at a tho
 on D3's three defensible models).
 *Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_e1_2026-09-01.md).
 
-☐ **E2. Concurrency invariance. Own commit, do not bundle.** The same VCF-bound output at one caller
+✅ **E2. Concurrency invariance. Own commit, do not bundle.** The same VCF-bound output at one caller
 and at sixteen. **This is where a missed reset in `CallingScratch` shows** — the scratch is per
 worker and reused across loci, the code already records that a dropped `clear()` is invisible in one
 locus order, and under a pool the order is a scheduling artefact. **Oracle:** the serial caller of
@@ -400,7 +400,47 @@ D3, on a fixture whose loci differ in kind (ordinary sites and repeat tracts int
 several worker counts.
 *Depends:* E1. *Source:* §8 (the calling-scratch trap), §12 oracle 2.
 
+**⛦ A worker count is a rayon thread count under E1's shape, and the scratch trap cannot fire
+yet** — no built arrangement reorders the loci a scratch sees, since assembly and genotyping
+stay on the merge thread in genome order. The oracle is built anyway, so whatever first threads
+the calling is caught by a test that predates it. What landed, three tests:
+`the_record_path_is_byte_identical_at_every_thread_count` writes the mixed cohort's VCF through
+the real writer at pools of 1, 2, 4, 8 and 16 (three repetitions per parallel pool) and
+byte-compares the files, plus every count a run report is built from; the cohort holds a shared
+SNP, a private SNP, an insertion, a called-but-not-written locus and a sample with only
+reference reads, over ground with a repeat tract interleaved between two ordinary stretches —
+the plan's "differ in kind", as far as the built caller can differ.
+`a_cohort_of_one_sample_is_byte_identical_at_every_thread_count` takes the same sweep to the
+hardest end of the committed range, where the reduction folds a single value.
+**⛦ The review found one real hole and it is closed**: reversing the sample-name list before
+it is paired with the walkers passed all 437 tests on the record path and was killed by two on
+the oracle path, so a run report could have carried one sample's read-drop rates under
+another's name. Each sample's admitted reads are now asserted under that sample's own name.
+**⛦ The sweep runs at two building-region widths**, so the file must not depend on where the
+merge cuts its ground either: at seven bases the fixture's 40-base first stretch is six building
+regions instead of one. The second test ties the sweep back to the plan's named oracle — the
+records describe exactly the loci the serial `call_cohort` calls.
+**⛦ What this step reaches, measured by three mutations to the parallel cover rather than
+argued.** Dropping a sample from the sweep **fails both new tests**; inverting the reduction
+(`max` → `min`) and stopping the fixpoint after one iteration **both pass**, and are killed by
+six existing `cohort_merge` tests. So the oracle has real power over *who* the sweep draws and
+none over *how far* it keeps drawing. The reason is the fixture reference — a hundred identical
+bases — on which no observation reaches past a building region into another sample's, so there
+is no chain for a second sweep to find and a cover that stops early loses nothing: substitutions
+share no base, an insertion spans its anchor alone, a deletion left-aligns off the record. Two
+samples departing at adjacent positions were tried and closed as two separate loci. **So the
+layering is deliberate — the cover's fixpoint at the merge, the end-to-end tie here**; the
+one-position locus width is asserted, so the limitation cannot silently stop being true.
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_e2_2026-09-01.md).
+
 > **Checkpoint E:** the answer does not depend on the worker count. Pause for review.
+> **Met 2026-09-01.** Byte-identical VCFs at pools of 1 to 16 across two building-region
+> widths on the mixed fixture; byte-identical VCFs at pools of 1 to 8 on the E1 determinism
+> review's end-to-end probes; and on the real cohort, identical loci between the serial and
+> parallel covers on every measured run — 23,450 on the 200 kb ground and 1,069,772 on the
+> whole benchmark. What the parallelism is worth, measured on alternated arms: **1.8× wall on
+> the 200 kb slice and 1.5× on the whole 8 Mb ground at 8 threads**, at about half again the
+> CPU. Pause for review.
 
 ### Milestone F — the command
 
