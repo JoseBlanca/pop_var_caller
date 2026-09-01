@@ -504,6 +504,39 @@ impl<'a> LocusEvidence<'a> {
         }
     }
 
+    /// **How many of the run's samples this locus can actually be called on** — the rest were
+    /// ruled uncallable by the candidate step, for having earned a sequence the allele cap cut
+    /// (`doc/devel/ng/spec/candidate_alleles.md` §4.1).
+    ///
+    /// **It counts the run's samples and not the locus's covering ones**, which is the whole of
+    /// what a caller has to get right here. A sample that covered nothing is **callable**: its
+    /// evidence is empty, an empty sum is zero, every genotype scores alike and the prior
+    /// decides alone. So this reaches zero only where **every sample of the run** covered the
+    /// locus and every one of them lost a sequence its own reads had earned — which in a large
+    /// cohort at low coverage is close to never, because some sample almost always covers
+    /// nothing.
+    ///
+    /// **A locus can still have none.** A run must count such a locus and carry on rather than
+    /// die on it (owner's ruling, 2026-09-01), so whoever drives the calling asks this before
+    /// handing the locus to a genotyper — and
+    /// [`LocusGenotyper::call_locus`](inference::LocusGenotyper::call_locus) keeps its
+    /// precondition that there is somebody to call, since its scratch cannot be prepared for
+    /// no rows.
+    ///
+    /// **A repeat tract sets no sample aside**, so on that path this is always the run's whole
+    /// sample count (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
+    #[inline]
+    #[must_use]
+    pub fn callable_sample_count(&self) -> usize {
+        match self {
+            Self::Generic { per_sample, .. } => per_sample
+                .iter()
+                .filter(|sample| sample.is_callable())
+                .count(),
+            Self::Ssr { per_sample, .. } => per_sample.len(),
+        }
+    }
+
     /// Which calling path this evidence is on, in the words the panic messages use.
     #[inline]
     fn path_word(&self) -> &'static str {

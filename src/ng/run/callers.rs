@@ -539,6 +539,7 @@ impl AlignedFilesVariantCaller {
         let mut scratch: CallingScratch<S> = CallingScratch::default();
         let mut called_loci = Vec::new();
         let mut loci_too_wide_to_assemble = Vec::new();
+        let mut loci_with_nobody_to_call = Vec::new();
 
         let mut cache = ObservationCache::over(walkers);
         merge_cohort_handing_each_locus_over(
@@ -548,7 +549,8 @@ impl AlignedFilesVariantCaller {
             merge_parameters.max_cohort_locus_span,
             merge_parameters.min_alt_reads,
             &mut |observation| {
-                called_loci.push(call_one_generic_locus(
+                let region = observation.region;
+                match call_one_generic_locus(
                     genotyper,
                     &observation,
                     &frozen,
@@ -557,7 +559,10 @@ impl AlignedFilesVariantCaller {
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
-                ));
+                ) {
+                    Some(called) => called_loci.push(called),
+                    None => loci_with_nobody_to_call.push(region),
+                }
             },
             &mut loci_too_wide_to_assemble,
         )?;
@@ -565,6 +570,7 @@ impl AlignedFilesVariantCaller {
         Ok(CalledCohort {
             called_loci,
             loci_too_wide_to_assemble,
+            loci_with_nobody_to_call,
             walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
         })
     }
@@ -600,7 +606,7 @@ fn call_one_generic_locus<S, G>(
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     scratch: &mut CallingScratch<S>,
-) -> LocusInference
+) -> Option<LocusInference>
 where
     G: LocusGenotyper<S>,
 {
@@ -621,8 +627,17 @@ where
     );
     // The allele table leaves the selection by value: a discovery round appends to it and the
     // final prune shrinks it, so the loop owns it and hands it back inside the inference.
+    // **A locus no sample of the run can be called at is counted, not called, and never
+    // fatal** (owner's ruling, 2026-09-01). The genotyper's precondition is that there is
+    // somebody to call — its scratch cannot be prepared for no rows — so the question is asked
+    // here rather than left to fail there.
+    if evidence.callable_sample_count() == 0 {
+        return None;
+    }
+    // The allele table leaves the selection by value: a discovery round appends to it and the
+    // final prune shrinks it, so the loop owns it and hands it back inside the inference.
     let (alleles, _verdict, _unmatched, _remap) = selection.into_parts();
-    genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch)
+    Some(genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch))
 }
 
 /// **A run whose walkers are built and which has not yet read a byte** — one walker per
@@ -649,13 +664,14 @@ struct RunReadyToWalk {
 /// it the right words, and it is the name every signature the pool milestone adds will want.
 pub type RunWalker = AlignmentFilesWalker<RunSegments>;
 
-/// **What a calling run produced: the genotypes, the ground it refused, and what the walk
-/// counted on the way.**
+/// **What a calling run produced: the genotypes, the two kinds of ground it produced no
+/// genotypes for, and what the walk counted on the way.**
 ///
-/// The three are one value because they are one run, and a report that quoted the genotypes
-/// without the other two would be describing a cohort rather than a run: a locus the width
-/// bound refused and a locus nobody varied at both emit nothing, and only the second is a
-/// quiet cohort.
+/// The four are one value because they are one run, and a report that quoted the genotypes
+/// alone would be describing a cohort rather than a run. **`called_loci` is not every locus the
+/// merge assembled**: add [`Self::loci_with_nobody_to_call`] for that. And neither of the two
+/// refusal lists is the same fact as a locus nobody varied at, which is counted nowhere by
+/// design (`cohort_merge.md` §3.3).
 #[derive(Debug)]
 pub struct CalledCohort {
     /// One per surviving locus, in genome order.
@@ -672,6 +688,25 @@ pub struct CalledCohort {
     /// examined and found matching the reference. Only this one is a setting worth reporting
     /// (`cohort_merge.md` §3.3).
     pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
+    /// **The ground of the loci no sample of the run could be called at**, in genome order —
+    /// loci the merge assembled and that produced no genotypes.
+    ///
+    /// The allele cap cuts a sequence rather than refusing a locus
+    /// (`doc/devel/ng/spec/candidate_alleles.md` §4.1), and a sample that had reads on the cut
+    /// sequence is ruled uncallable. This is the case where **no sample of the run** is left —
+    /// which needs every sample to have covered the locus, since one that covered nothing is
+    /// callable and scored by the prior alone
+    /// ([`LocusEvidence::callable_sample_count`](crate::ng::calling::LocusEvidence::callable_sample_count)).
+    ///
+    /// **It is not an error** — one hard locus must not end a cohort's run (owner's ruling,
+    /// 2026-09-01). **And it is a third fact**: not a locus the width bound refused, which was
+    /// never assembled; not a locus nobody varied at, which is counted nowhere; not a sample
+    /// set aside at a locus other samples were called at, which is
+    /// [`SampleGenotypeCall::Missing`](crate::ng::calling::SampleGenotypeCall::Missing).
+    ///
+    /// **A non-empty list is worth acting on**: raising `max_candidate_alleles` keeps more of
+    /// what those loci vary over.
+    pub loci_with_nobody_to_call: Vec<GenomeRegion>,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
 }
@@ -2788,6 +2823,49 @@ mod the_merge_over_walkers {
         )
     }
 
+    /// A sample carrying **two different alternatives** at `chr1:15` — two reads showing
+    /// `first`, two showing `second`, and two matching the reference.
+    ///
+    /// **The fixture for a locus nobody can be called at.** The candidate cap cuts sequences,
+    /// not loci, and a sample is ruled uncallable when the cap cuts one its own reads earned.
+    /// Where every covering sample has reads on *both* alternatives, a cap of one alternative
+    /// cuts a sequence all of them earned — so none is callable and the locus has no genotype
+    /// this caller could honestly report for anybody.
+    pub(super) fn sample_carrying_two_alternatives(
+        sample: &str,
+        file_name: &str,
+        first: u8,
+        second: u8,
+        offsets: &[usize],
+    ) -> (TempDir, PathBuf) {
+        // **Every offset gets both alternatives on the same reads**, so a cohort of these
+        // samples has one nobody-callable locus per offset — which is what lets a test say
+        // the list comes back in genome order rather than merely non-empty.
+        let read_showing = |alt: u8| {
+            let mut bases = [b'A'; 30];
+            for offset in offsets {
+                bases[*offset] = alt;
+            }
+            bases
+        };
+        let records: Vec<RecordBuf> = (0..2)
+            .map(|read| read_of(&format!("{sample}-a{read}"), 10, &read_showing(first)))
+            .chain(
+                (0..2).map(|read| read_of(&format!("{sample}-b{read}"), 10, &read_showing(second))),
+            )
+            .chain((0..2).map(|read| read_of(&format!("{sample}-ref{read}"), 10, &[b'A'; 30])))
+            .collect();
+        indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some(sample))],
+            ),
+            &records,
+            file_name,
+        )
+    }
+
     /// A sample **with no reads in the run's analysed ground**: its reads lie on `chr2`, and
     /// the segmentation these fixtures walk is `chr1` alone.
     ///
@@ -3623,6 +3701,10 @@ mod calling_joined_to_the_merge {
                     &mut shaping,
                     &mut scratch,
                 )
+                // **This fixture's cohort leaves every locus with somebody to call**, so a
+                // `None` here would mean the fixture changed under the test rather than that
+                // the two sides disagree — the oracle side is never asked about callability.
+                .expect("every locus of this fixture has somebody to call")
             })
             .collect();
 
@@ -4272,5 +4354,222 @@ mod the_sample_order_join {
     /// assertion written on the options and print `None` where the message says Phred.
     fn quality_of(call: &SampleGenotypeCall) -> Option<f32> {
         call.score_best_genotype().map(Phred::get)
+    }
+}
+
+/// **A locus nobody can be called at is counted and reported, and never ends the run.**
+///
+/// The candidate step cuts an allele rather than refusing a locus, on the ground that most
+/// samples stay callable (`doc/devel/ng/arch/candidate_alleles.md` §4.1). Where the cap cuts a
+/// sequence that **every** covering sample had reads on, none of them is callable, and there is
+/// no genotype this caller could honestly report for anybody there.
+///
+/// **That was a panic until 2026-09-01**, which meant one hard locus ended a cohort's run after
+/// however many hours of walking. The owner's ruling is that such a locus is counted and
+/// reported at the end; these tests are what says it is.
+#[cfg(test)]
+mod a_locus_nobody_can_be_called_at {
+    use super::calling_joined_to_the_merge::the_shipped_genotyper;
+    use super::the_merge_over_walkers::{
+        open_over_declaring_inbreeding, sample_carrying, sample_carrying_two_alternatives,
+    };
+    use crate::ng::calling::allele_candidates::{CandidateSelectionConfig, MaxCandidateAlleles};
+    use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::read::input::test_fixtures::fixture_reference_from_its_index;
+    use crate::ng::types::{ContigId, GenomeRegion, Position};
+
+    /// The cap that keeps the reference and one alternative — the smallest the type allows, and
+    /// what makes a second alternative something a sample can have earned and lost.
+    fn a_cap_of_one_alternative() -> CandidateSelectionConfig {
+        CandidateSelectionConfig {
+            max_candidate_alleles: MaxCandidateAlleles::new_or_panic(2),
+            ..CandidateSelectionConfig::DEFAULT
+        }
+    }
+
+    /// **Two samples that both carry both alternatives: the run finishes, and says where it
+    /// could call nobody.**
+    ///
+    /// Each sample shows `C` on two reads, `G` on two and the reference on two, so both
+    /// alternatives clear the merge's floor and both are earned by both samples. At a cap of
+    /// one alternative the lower-ranked is cut, every covering sample has lost a sequence its
+    /// own reads earned, and the locus has nobody to call.
+    #[test]
+    fn a_locus_where_the_cap_cut_everybodys_allele_is_counted_and_the_run_finishes() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) =
+            sample_carrying_two_alternatives("zeta", "zeta.bam", b'C', b'G', &[5]);
+        let (_mu_dir, mu) = sample_carrying_two_alternatives("mu", "mu.bam", b'C', b'G', &[5]);
+
+        let called = open_over_declaring_inbreeding(
+            &[zeta, mu],
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("a locus nobody can be called at does not end the run");
+
+        assert_eq!(
+            called.loci_with_nobody_to_call,
+            vec![GenomeRegion {
+                contig: ContigId(0),
+                start: Position(15),
+                end: Position(15),
+            }],
+            "the one locus, reported with its ground so a person can go and look at it",
+        );
+        assert!(
+            called.called_loci.is_empty(),
+            "and no record is made for it: {:?}",
+            called.called_loci,
+        );
+        // **The three lists are three facts, which the type's own documentation claims and
+        // nothing else here checks.** A locus counted in two of them would be reported twice
+        // and would make the loci-assembled total wrong in both directions.
+        assert!(
+            called.loci_too_wide_to_assemble.is_empty(),
+            "this locus was assembled — the width bound refused nothing: {:?}",
+            called.loci_too_wide_to_assemble,
+        );
+    }
+
+    /// **Two such loci come back in genome order**, which is what the field claims.
+    ///
+    /// The same two samples, each carrying both alternatives at **two** positions, so the cap
+    /// leaves nobody callable at both. One locus could not tell an ordered list from a
+    /// reversed one.
+    #[test]
+    fn the_loci_nobody_can_be_called_at_come_back_in_genome_order() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) =
+            sample_carrying_two_alternatives("zeta", "zeta.bam", b'C', b'G', &[5, 20]);
+        let (_mu_dir, mu) = sample_carrying_two_alternatives("mu", "mu.bam", b'C', b'G', &[5, 20]);
+
+        let called = open_over_declaring_inbreeding(
+            &[zeta, mu],
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("neither locus ends the run");
+
+        assert_eq!(
+            called
+                .loci_with_nobody_to_call
+                .iter()
+                .map(|region| region.start)
+                .collect::<Vec<_>>(),
+            vec![Position(15), Position(30)],
+            "both loci, in genome order",
+        );
+    }
+
+    /// **A cohort of one sample is called, not emptied.**
+    ///
+    /// The guard is "no sample of the run is callable", and at one sample that is one sample —
+    /// so a guard written `<= 1` rather than `== 0` would drop **every** locus of a
+    /// single-sample run and hand back an empty output with a count beside it. A single sample
+    /// is the thinnest end of the range this caller commits to
+    /// (`doc/devel/ng/spec/design_principles.md` §0) and the one no other fixture in this file
+    /// exercises.
+    #[test]
+    fn a_cohort_of_one_sample_is_called() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_carrying("zeta", "zeta.bam", b'C');
+
+        let called = open_over_declaring_inbreeding(
+            std::slice::from_ref(&zeta),
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            CandidateSelectionConfig::DEFAULT,
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert!(
+            called.loci_with_nobody_to_call.is_empty(),
+            "one callable sample is somebody to call: {:?}",
+            called.loci_with_nobody_to_call,
+        );
+        assert_eq!(called.called_loci.len(), 1, "and the locus is called");
+        assert_eq!(
+            called.called_loci[0].per_sample.len(),
+            1,
+            "over the run's one sample",
+        );
+    }
+
+    /// **The same cohort at the shipped cap calls that locus normally**, which is what says the
+    /// test above is about the cap rather than about the reads.
+    ///
+    /// At six candidate alleles nothing is cut, nobody has lost an allele they earned, and both
+    /// samples are called.
+    #[test]
+    fn the_same_cohort_at_the_shipped_cap_calls_that_locus() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) =
+            sample_carrying_two_alternatives("zeta", "zeta.bam", b'C', b'G', &[5]);
+        let (_mu_dir, mu) = sample_carrying_two_alternatives("mu", "mu.bam", b'C', b'G', &[5]);
+
+        let called = open_over_declaring_inbreeding(
+            &[zeta, mu],
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            CandidateSelectionConfig::DEFAULT,
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert!(
+            called.loci_with_nobody_to_call.is_empty(),
+            "nothing was cut, so nobody lost an allele they earned: {:?}",
+            called.loci_with_nobody_to_call,
+        );
+        assert_eq!(called.called_loci.len(), 1, "the locus is called");
+        assert_eq!(
+            called.called_loci[0].alleles().len(),
+            3,
+            "over the reference and both alternatives",
+        );
+    }
+
+    /// **A cohort where only some samples lose their allele is called, not counted**, so the
+    /// new list is the *nobody* case and not a rename of the set-aside one.
+    ///
+    /// `nu` alone carries the lower-ranked `G`; `zeta` and `mu` carry the `C` that survives.
+    /// The cap sets `nu` aside and the other two are called, which is the ordinary behaviour
+    /// the ruling above does not change.
+    #[test]
+    fn a_locus_where_only_some_samples_lose_their_allele_is_still_called() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_carrying("zeta", "zeta.bam", b'C');
+        let (_nu_dir, nu) = sample_carrying("nu", "nu.bam", b'G');
+        let (_mu_dir, mu) = sample_carrying("mu", "mu.bam", b'C');
+
+        let called = open_over_declaring_inbreeding(
+            &[zeta, nu, mu],
+            &reference,
+            &DeclaredInbreeding::nothing_said(),
+            a_cap_of_one_alternative(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert!(
+            called.loci_with_nobody_to_call.is_empty(),
+            "two of the three samples keep the allele they earned, so there is somebody to call",
+        );
+        assert_eq!(called.called_loci.len(), 1);
+        assert_eq!(
+            called.called_loci[0]
+                .per_sample
+                .iter()
+                .map(|call| call.is_missing())
+                .collect::<Vec<_>>(),
+            vec![false, true, false],
+            "nu alone is set aside — which is a different fact from the locus having nobody",
+        );
     }
 }

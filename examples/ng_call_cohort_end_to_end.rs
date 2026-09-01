@@ -374,6 +374,25 @@ fn report_the_calls(called: &CalledCohort) {
         "# loci the merge declined to assemble for being too wide: {}",
         called.loci_too_wide_to_assemble.len()
     );
+    // **A third fact, and not a rename of either of the others.** Too wide is ground the merge
+    // would not assemble; too quiet is ground no sample varied at and is counted nowhere; this
+    // is ground that was assembled and where the allele cap then left nobody callable.
+    //
+    // **No flag is named here because none exists yet.** The candidate cap is
+    // `CandidateSelectionConfig::max_candidate_alleles`, which this probe leaves at its shipped
+    // value and the command surface does not expose (that is the plan's Milestone F); telling
+    // an operator to raise a flag they cannot type would be worse than telling them nothing.
+    println!(
+        "# loci where the allele cap left nobody callable: {} (assembled, and no sample of the \
+         run was left to call: every sample covered them and every one had earned a sequence \
+         the cap cut)",
+        called.loci_with_nobody_to_call.len()
+    );
+    println!(
+        "# loci the merge assembled: {} (called plus nobody-callable — a locus nobody varied \
+         at is counted nowhere, by design)",
+        called.called_loci.len() + called.loci_with_nobody_to_call.len(),
+    );
     if called.called_loci.is_empty() {
         println!("# (nothing was called, so there is nothing to break down per sample)");
         return;

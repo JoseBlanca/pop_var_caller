@@ -2079,15 +2079,14 @@ where
         let table = GenotypeTable::build(parameters.ploidy(), candidates.len());
         let genotypes = table.view();
 
-        let callable_sample_count = (0..evidence.sample_count())
-            .filter(|sample| is_callable(evidence, *sample))
-            .count();
+        let callable_sample_count = evidence.callable_sample_count();
         assert!(
             callable_sample_count > 0,
             "every one of the {} samples at {} was ruled uncallable by the candidate step, so \
-             this locus has nobody to call. Selection cuts an allele rather than refusing a \
-             locus, on the ground that most samples stay callable (candidate_alleles.md §4.1), \
-             and a locus where none of them does is the case that ruling does not cover",
+             this locus has nobody to call. **This is a precondition of this trait**, not a \
+             statement about the data: a caller asks `LocusEvidence::callable_sample_count` \
+             first and counts such a locus rather than offering it here (owner's ruling, \
+             2026-09-01), because the scratch below cannot be prepared for no rows",
             evidence.sample_count(),
             evidence.region()
         );

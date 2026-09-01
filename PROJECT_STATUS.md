@@ -19,7 +19,27 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
+> - **Last completed task (2026-09-01):** **A locus nobody can be called at is counted, not
+> fatal** — the owner's ruling at Checkpoint D
+> ([report](doc/devel/reports/implementations/ng_locus_with_nobody_to_call_2026-09-01.md)).
+> The allele cap cuts a sequence rather than refusing a locus, on the ground that most samples
+> stay callable; where it cuts one **every** covering sample had reads on, none of them is — and
+> that hit an assertion, so one hard locus ended a whole cohort's run. D1's wiring is what made
+> it reachable from real data. Now `LocusEvidence::callable_sample_count` is asked before a
+> locus is offered to a genotyper and `CalledCohort::loci_with_nobody_to_call` carries the
+> ground of those loci so a run says **where**. 376 tests in `ng::run`, 5,816 in the lib.
+> **The fixture reaches the old panic**: removing the guard makes it fire, so the case is
+> provoked rather than described. **On real data it does not fire** — six tomato accessions over
+> 400 kb, 8,411 loci called, **0** where the cap left nobody callable, printed on every run.
+> **⚑ A correction is owed to `doc/devel/ng/arch/candidate_alleles.md` §4.1**, which is the
+> owner's to make: its ruling covers *most samples stay callable* and not the case where none
+> does, which the code now answers.
+> **⛦ And Milestone E is deferred** (owner: *"we just want a working caller, don't fret too much
+> about the parallel performance, we'll improve it later"*). Its two arrangements parallelise
+> 2.2–4.9% of `call_cohort` while the 94–97% that remains is one thread whose parallel form
+> already exists. **The next milestone is F, the command.**
+>
+> - **Previously (2026-09-01):** **Milestone D of the run driver — ng calls genotypes
 > from CRAM files**, at Checkpoint D (steps D1–D3 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [D3's report](doc/devel/reports/implementations/ng_run_driver_d3_2026-09-01.md)). Six tomato

@@ -323,6 +323,14 @@ ground — reading and checksumming the 795 MB reference, opening the catalog, b
 *Depends:* D2. *Source:* §12 oracle 3 (its direct-mode half).
 *Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d3_2026-09-01.md).
 
+> **⛦ Two rulings taken at this checkpoint, 2026-09-01.** **Milestone E is deferred** — see its
+> own section. And **a locus the allele cap leaves nobody callable at is counted and reported
+> rather than ending the run**: `CalledCohort::loci_with_nobody_to_call` carries the ground of
+> those loci, `LocusEvidence::callable_sample_count` is what a driver asks before offering a
+> locus to a genotyper, and on six tomato accessions over 400 kb the count is **0** at the
+> shipped cap
+> ([report](../../reports/implementations/ng_locus_with_nobody_to_call_2026-09-01.md)).
+>
 > **Checkpoint D: met 2026-09-01.** ng calls genotypes from CRAM files — six tomato accessions
 > over 400 kb of SL4.0, through the real repeat catalog, 8,411 loci called, in 4.8 seconds. The
 > assembly check ran against real CRAM headers for the first time and compared 78 of 78 contig
@@ -338,6 +346,18 @@ ground — reading and checksumming the 795 MB reference, opening the catalog, b
 > Pause for review — **this is the milestone the whole plan exists for.**
 
 ### Milestone E — the pool
+
+**⛦ DEFERRED — owner's ruling, 2026-09-01: "we just want a working caller, don't fret too much
+about the parallel performance, we'll improve it later."** D3 measured the split this milestone
+was waiting for and it does not support building the milestone now: **assembling and genotyping
+together are 2.2% of `call_cohort` at three samples and 4.9% at twenty-four**, and those two are
+exactly what E1 and E2 parallelise. The 94–97% that remains is `ObservationCache::cover` on one
+thread, and `cover_in_parallel` — which sweeps the cohort's samples concurrently and reaches the
+same fixpoint by a different schedule — already exists and is reached only by the merge's
+parallel driver. **So the next milestone is F, the command**, and E is picked up when the caller
+works end to end. When it is, its first question is whether a calling run may use the parallel
+cover, and its second — which calling arrangement to build — belongs at the cohort size the
+caller is meant to serve rather than at six.
 
 **⛦ Owner's ruling, 2026-08-31: Milestones A to D build against the single-threaded merge, and what
 this milestone becomes is decided from D3's measurement.** Two arrangements can genotype several
@@ -367,7 +387,12 @@ several worker counts.
 ☐ **F1. `call-from-alignments`.** The subcommand: reference, catalog, alignment files, parameters
 file or `--defaults`, analysed regions, output. Kebab-cased from its enum variant, like the three
 that exist ([`cli.rs`](../../../../src/pop_var_caller_exp/cli.rs)).
-*Depends:* E2, and the command-surface note above. *Source:* [`typed_regions_cli.md`](../spec/typed_regions_cli.md).
+
+**⛦ No longer depends on E2** — Milestone E is deferred (owner, 2026-09-01), so this depends on
+D3. **The command-surface note above still stands**: the four subcommand names are agreed and
+written nowhere, and [`typed_regions_cli.md`](../spec/typed_regions_cli.md) is the owner's
+document to record them in.
+*Depends:* D3, and the command-surface note above. *Source:* [`typed_regions_cli.md`](../spec/typed_regions_cli.md).
 
 ☐ **F2. The run writes the parameters it used, beside its output.**
 *Depends:* F1. *Source:* [`parameters_file.md`](../spec/parameters_file.md) §7.
