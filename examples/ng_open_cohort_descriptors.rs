@@ -58,6 +58,7 @@ use pop_var_caller::ng::calling::allele_candidates::CandidateSelectionConfig;
 use pop_var_caller::ng::calling::inference::CallingLoopConfig;
 use pop_var_caller::ng::calling::parameters_file::DeclaredInbreeding;
 use pop_var_caller::ng::calling::run_parameters::RunParameters;
+use pop_var_caller::ng::locus_generation::pileup::PileupGeneratorConfig;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::read::input::reference::OpenReference;
@@ -182,6 +183,7 @@ fn run(
             reference: &reference,
             read_filters: ReadFilterConfig::default(),
             build_index_if_missing: false,
+            locus_generator_settings: PileupGeneratorConfig::default(),
             reference_with_checksums: &with_checksums,
         },
         segmentation,

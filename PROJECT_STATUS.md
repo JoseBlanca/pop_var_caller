@@ -19,7 +19,36 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-08-31):** **Milestone C of the run driver — alignment files to
+> - **Last completed task (2026-09-01):** **D1 of the run driver — calling, joined to the merge**
+> (step D1 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [report](doc/devel/reports/implementations/ng_run_driver_d1_2026-09-01.md)).
+> `AlignedFilesVariantCaller::call_cohort` walks every sample's alignment files at the merge
+> frontier and genotypes each cohort locus **where it is built** — the three-call chain arch §3.2
+> names had no caller anywhere in the tree before this. 369 tests in `ng::run`, 5,809 in the lib.
+> **Both of Checkpoint C's open questions landed here, as the owner ruled**: the walk's tallies and
+> the assembly-check outcome now survive the merge, and a run can set its locus generator's five
+> settings, checked at `open`. **⛦ The read-filter tallies are still unreachable, and not for want
+> of an accessor** — each contig boundary drops the retiring cursor's read-group counts, so a walk
+> has already lost every contig but its last; F3's.
+> **⛦ The mutation pass found five ways to be wrong with the suite green, and all five now die**:
+> the run's candidate selection, its calling-loop settings, its merge parameters and its generator
+> settings could each be replaced by the shipped defaults inside `call_cohort` — an operator's own
+> thresholds silently ignored — and every sample's walk tallies could be permuted across samples.
+> All five survived for one reason: the fixtures made the distinctions coincide. **⛦ One mutation
+> is still alive and the fixture reference is why** — a run's refused-span list can be emptied
+> undetected, because pinning it needs a locus wider than one base and this module's reference is a
+> hundred `A`s, so every deletion in it is inside one homopolymer (measured: a five-base deletion
+> produces no cohort locus at all, at either bound).
+> **⛦ And nine claims in the new prose were wrong**, the worst being this step's own: a
+> `positions_short_of_cap` of zero was written as *the run's depth settings shaped no evidence*,
+> and it means only that the **read-hold ceiling** cost no coverage — a run can have zero there and
+> millions of per-position truncations.
+> **⚑ One thing waits on the owner, and D3 is where it bites:** a locus where the allele cap has
+> ruled every covering sample uncallable aborts the run with a panic, and `call_cohort` is the
+> first thing that can reach it from real data. Spec §4.1's ruling does not cover the case. It is
+> unmeasured; D3 is the first run that can answer it with a number.
+>
+> - **Previously (2026-08-31):** **Milestone C of the run driver — alignment files to
 > cohort loci**, at Checkpoint C (steps C1 and C2 of
 > [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_c_2026-08-31.md)).

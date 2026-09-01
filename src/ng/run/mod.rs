@@ -9,8 +9,10 @@
 //! **Landed so far:** [`cohort_merge`], which turns k samples' observations into one stream of
 //! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
 //! walks; [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the merge's
-//! source interface; and [`callers`]'s [`AlignedFilesVariantCaller`], which now drives that merge
-//! over one walker per sample and returns the cohort's loci — though not yet one at a time.
+//! source interface; and [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
+//! over one walker per sample and genotypes each cohort locus where it is built — though it
+//! returns them all at once rather than one at a time, and as called loci rather than as VCF
+//! records.
 
 pub mod callers;
 pub mod cohort_merge;
@@ -160,14 +162,18 @@ pub enum RunError {
 
     /// A locus generator would not accept the settings it was built with.
     ///
-    /// **A caller mistake rather than a user's, today**: nothing yet lets a run choose these, so
-    /// every run builds its generators with the shipped defaults and this cannot fire. It exists
-    /// because the settings are an argument, and an argument nobody can pass today is one
-    /// somebody passes tomorrow.
-    #[error("this run's locus generator would not accept its settings")]
+    /// **A user's mistake, since 2026-09-01**: `AlignmentInputs::locus_generator_settings` is
+    /// how a run says how deep to fold each position and how many reads to hold open, so these
+    /// are numbers somebody typed. Checked at `AlignedFilesVariantCaller::open`, before a file
+    /// is opened, so a cohort of a thousand samples is not opened to be told at its first
+    /// locus.
+    ///
+    /// **The message is the cause's alone.** Wrapping it would put a sentence about locus
+    /// generators in front of the one sentence that names the setting and the limit, and the
+    /// reader needs the second.
+    #[error(transparent)]
     LocusGeneratorSettings {
         /// Which setting, and why it was refused.
-        #[source]
         source: crate::ng::locus_generation::pileup::PileupGeneratorConfigError,
     },
 

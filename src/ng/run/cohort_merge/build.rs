@@ -823,9 +823,57 @@ pub fn build_region(
     min_alt_reads: MinAltReads,
 ) -> RegionOutcome {
     let mut outcome = RegionOutcome::default();
+    // Destructured so the two sinks are two disjoint borrows of one outcome, which is what
+    // lets the collecting form be written as the streaming one with `Vec::push` for a sink
+    // rather than as a second copy of the ownership walk.
+    let RegionOutcome {
+        cohort_observations,
+        failed_locus_spans,
+    } = &mut outcome;
+    build_region_handing_over(
+        builder_region,
+        observations_per_sample,
+        max_cohort_locus_span,
+        min_alt_reads,
+        &mut |built| cohort_observations.push(built),
+        failed_locus_spans,
+    );
+    outcome
+}
+
+/// Build one region, **handing each surviving locus to `keep` the moment it is assembled**
+/// rather than collecting them, and each refused locus's ground to `refused`.
+///
+/// This is [`build_region`]'s own body; that function is this one with `Vec::push` for a sink.
+/// The ownership rule, the walk and the verdicts are written once, here, because widening
+/// either end of the ownership comparison loses a locus from the run with nothing to say so —
+/// about one in twenty at the shipped twenty-base building regions, and more as the regions
+/// get shorter. A second copy of that loop is the last thing this module should have.
+///
+/// **What the sink is for: a run that calls each locus where it is built.** Buffering every
+/// [`CohortObservation`] for a whole run is what
+/// [`merge_cohort_through_cache`](super::serial::merge_cohort_through_cache) does and what
+/// spec §5.1's bound forbids. Calling inside this loop lets each observation be dropped as
+/// soon as its genotypes exist, and the spec says the placement commutes — the call reads
+/// nothing outside its own locus (`doc/devel/ng/spec/run_streaming.md` §3.1,
+/// `cohort_merge.md` §6.3).
+///
+/// **`keep` cannot fail, and that is a fact about calling rather than a simplification.**
+/// `LocusGenotyper::call_locus` returns an inference, never an error: a locus whose loop did
+/// not settle is emitted with `converged` false rather than refused. A sink that could fail
+/// would need the failure threaded through the merge's every driver for a case that does not
+/// arise.
+pub fn build_region_handing_over(
+    builder_region: GenomeRegion,
+    observations_per_sample: &[&[SampleLocusObservations]],
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    keep: &mut impl FnMut(CohortObservation),
+    refused: &mut Vec<GenomeRegion>,
+) {
     if no_locus_can_begin_in(builder_region, observations_per_sample) {
         super::timing::REGIONS_WITH_NO_LOCUS.add(1);
-        return outcome;
+        return;
     }
 
     // The walk's setup is one allocation per sample several times over, so it is timed apart
@@ -865,15 +913,11 @@ pub fn build_region(
         }
 
         match locus.verdict {
-            Verdict::Build => outcome
-                .cohort_observations
-                .push(CohortObservation::over(&locus)),
-            Verdict::Failed => outcome.failed_locus_spans.push(locus.region),
+            Verdict::Build => keep(CohortObservation::over(&locus)),
+            Verdict::Failed => refused.push(locus.region),
             Verdict::TooQuiet => {}
         }
     }
-
-    outcome
 }
 
 /// Whether no locus this builder could own can begin in `builder_region` — so the outcome is

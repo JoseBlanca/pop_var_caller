@@ -196,6 +196,26 @@ impl<S> ObservationCache<S> {
             covered_to: None,
         }
     }
+
+    /// **The sources back, in the run's sample order** — the same order they were handed over
+    /// in, so entry `i` is the sample the cohort's `i`th entry describes.
+    ///
+    /// **Why a cache hands its readers back at all.** A source is not only a reader: a run's
+    /// walker carries what its walk saw — the regions it handled, the regions it could not,
+    /// and its generators' per-slot counts, which are what explain a covered region emitting
+    /// nothing. The cache owns the sources for the whole merge, so without this the merge's
+    /// return is where all of that is dropped, and a run report has nothing to say about a
+    /// sample beyond its genotypes (arch §3.4).
+    ///
+    /// **It says nothing about how far the readers got**, and a caller must not infer it: a
+    /// merge that failed leaves its sources wherever they stopped, and one that succeeded
+    /// leaves them spent. Which of the two happened is the merge's return value, not this.
+    pub fn into_sources(self) -> Vec<S> {
+        self.samples
+            .into_iter()
+            .map(|window| window.source)
+            .collect()
+    }
 }
 
 impl<S> ObservationCache<S> {

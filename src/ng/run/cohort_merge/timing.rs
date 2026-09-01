@@ -180,7 +180,26 @@ pub static WINDOW_NANOS: Counter = Counter::new();
 /// time.
 pub static WALK_SETUP_NANOS: Counter = Counter::new();
 /// Nanoseconds the organiser spent releasing loci in region order — `submit` and `drain_ready`.
+///
+/// **The parallel driver's alone**, since 2026-09-01. The serial cached driver used to charge
+/// its per-region `Vec::extend` here; it no longer has one, because each locus now goes
+/// straight to a sink where it is built, so a serial breakdown reads zero for this and the
+/// time it used to hold is inside `BUILDER_BUSY_NANOS`.
 pub static ORGANISE_NANOS: Counter = Counter::new();
+/// Nanoseconds spent on each built locus **after it was assembled and before the next one is
+/// closed** — inside builder time, and subtracted from it to leave the assembling alone.
+///
+/// **In a calling run this is the genotyping**, which is the one term
+/// `run_streaming.md` §11 question 7 has no measurement for and which decides the pool
+/// milestone's shape. In the merge's own collecting driver it is the push onto the outcome's
+/// vector, which is nearly nothing — the counter measures whatever the sink is, not what it
+/// is for.
+///
+/// **Read once per built locus**, which costs two `clock_gettime` calls a locus under
+/// `--features merge-timing` and nothing at all without it. Only
+/// `merge_cohort_handing_each_locus_over` adds to it; the parallel driver goes through the
+/// collecting `build_region`, whose sink is untimed, so a parallel breakdown reads zero here.
+pub static AFTER_ASSEMBLY_NANOS: Counter = Counter::new();
 /// Nanoseconds of the whole merge, from the driver's first line to its last.
 pub static MERGE_WALL_NANOS: Counter = Counter::new();
 
@@ -201,6 +220,7 @@ pub fn reset() {
         &WINDOW_NANOS,
         &WALK_SETUP_NANOS,
         &ORGANISE_NANOS,
+        &AFTER_ASSEMBLY_NANOS,
         &MERGE_WALL_NANOS,
     ] {
         counter.take();
@@ -243,6 +263,10 @@ pub struct Report {
     pub walk_setup_ms: f64,
     /// Releasing loci in region order, on the organiser's thread.
     pub organise_ms: f64,
+    /// What was done with each locus once it was assembled — the genotyping, in a calling
+    /// run. **Inside [`Self::builder_busy_ms`]**, so the assembling alone is the difference
+    /// ([`Self::assembling_loci_ms`]).
+    pub after_assembly_ms: f64,
 }
 
 /// Read every counter into a [`Report`]. `threads` is what rayon had while the merge ran.
@@ -264,10 +288,25 @@ pub fn report(threads: usize) -> Report {
         window_ms: ms(&WINDOW_NANOS),
         walk_setup_ms: ms(&WALK_SETUP_NANOS),
         organise_ms: ms(&ORGANISE_NANOS),
+        after_assembly_ms: ms(&AFTER_ASSEMBLY_NANOS),
     }
 }
 
 impl Report {
+    /// **Assembling the loci, with what was done to each of them afterwards taken out** —
+    /// the builders' own work minus [`Self::after_assembly_ms`].
+    ///
+    /// This and `after_assembly_ms` are the two halves of a run's builder time, and telling
+    /// them apart is what says whether a calling run is spending its time putting loci
+    /// together or genotyping them — the split spec §11 question 7 asks for.
+    ///
+    /// **The subtraction cannot go negative**: every nanosecond counted after a locus is
+    /// assembled is counted inside the builder's own stopwatch, which starts before the
+    /// region's walk opens and stops after its last locus is handed over.
+    pub fn assembling_loci_ms(&self) -> f64 {
+        self.builder_busy_ms - self.after_assembly_ms
+    }
+
     /// The build phase's time if every round's builders had been spread perfectly over the
     /// threads — the builders' summed work divided by the threads that were there.
     pub fn perfectly_spread_ms(&self) -> f64 {
@@ -351,6 +390,16 @@ impl fmt::Display for Report {
             out,
             "    of which setting each region's walk up, {:.1}, -",
             self.walk_setup_ms
+        )?;
+        writeln!(
+            out,
+            "    of which assembling the loci, {:.1}, -",
+            self.assembling_loci_ms()
+        )?;
+        writeln!(
+            out,
+            "    of which what each locus was then handed to (a run: genotyping it), {:.1}, -",
+            self.after_assembly_ms
         )?;
         writeln!(
             out,

@@ -8,14 +8,16 @@
 //! own, writes what it saw to a per-sample file, fits the parameters from those, and calls
 //! from the files.
 //!
-//! What this file holds today is the object, its construction, and the merge driven over one
-//! walker per sample. What is still missing is calling and the records: the object returns the
-//! cohort's loci in one go rather than yielding called variants as it goes
-//! (`doc/devel/ng/impl_plan/run_driver_direct_mode.md`).
+//! What this file holds today is the object, its construction, the merge driven over one
+//! walker per sample, and the calling joined to it — reads in, one called locus per locus the
+//! merge kept. What is still missing is the shape and the emission: the object returns every
+//! called locus in one go rather than yielding VCF records as it goes, which is the rest of
+//! this milestone and the pool's (`doc/devel/ng/impl_plan/run_driver_direct_mode.md`).
 //!
 //! **`pub`, though the architecture calls all of this crate-private** (arch §6: three public
 //! objects, each an iterator, and nothing else). **The intent is real and acting on it is still
-//! blocked, and the block is mechanical**: `merge_cohort` has no consumer outside tests until the
+//! blocked, and the block is mechanical**: neither `merge_cohort` nor `call_cohort` has a
+//! consumer outside tests until the
 //! subcommand lands, so narrowing it makes it dead code and the crate's `-D warnings` gate
 //! rejects the build — measured, not assumed, when this step tried it. What *did* narrow is
 //! everything reachable only through it: `WalkReference` and `generic_path_generators` are
@@ -25,19 +27,26 @@
 use std::sync::Arc;
 
 use crate::ng::calling::allele_candidates::CandidateSelectionConfig;
-use crate::ng::calling::inference::RunnableCallingLoopConfig;
+use crate::ng::calling::allele_candidates::generic::select_generic;
+use crate::ng::calling::evidence_shaping::{GenericEvidenceScratch, shape_generic_locus};
+use crate::ng::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::ng::calling::run_parameters::RunParameters;
-use crate::ng::locus_generation::pileup::PileupGeneratorConfig;
+use crate::ng::calling::{CallingScratch, FrozenParameters, LocusInference};
+use crate::ng::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
+use crate::ng::locus_generation::{GeneratorCounts, LocusCounts};
 use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::read::input::{AssemblyMismatch, check_assembly};
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::run::cohort_merge::build::RegionOutcome;
+use crate::ng::run::cohort_merge::build::{CohortObservation, RegionOutcome};
 use crate::ng::run::cohort_merge::observation_cache::ObservationCache;
-use crate::ng::run::cohort_merge::serial::merge_cohort_through_cache;
+use crate::ng::run::cohort_merge::serial::{
+    merge_cohort_handing_each_locus_over, merge_cohort_through_cache,
+};
 use crate::ng::run::cohort_merge::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads};
+use crate::ng::types::GenomeRegion;
 use crate::pop_var_caller::common::format_md5_hex;
 
 use super::RunError;
@@ -46,9 +55,9 @@ use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_pa
 
 /// The alignment files a run reads, and how it reads them.
 ///
-/// **Grouped rather than passed one by one**, because four of the five are answers to one
-/// question — what this run's reads are — and travel together into every sample's open. The
-/// fifth is read after those opens finish, and says so at its own field.
+/// **Grouped rather than passed one by one**, because all six answer one question — how this
+/// run turns its files into evidence. Four of them travel together into every sample's open;
+/// the other two are read afterwards, and each says so at its own field.
 ///
 /// **The read-group table is the run's rather than each sample's**, because a read group is
 /// one library preparation and that is the grouping the error model keys on: one sample's
@@ -66,6 +75,24 @@ pub struct AlignmentInputs<'a> {
     pub reference: &'a OpenReference,
     /// Which reads are admitted, applied per file as they are read.
     pub read_filters: ReadFilterConfig,
+    /// **The five knobs the locus generator walks with** — the two per-column depth caps, the
+    /// widest record footprint, the mate-lookup window and the ceiling on reads held open at
+    /// once.
+    ///
+    /// **Here beside the read filters because the two answer one question**: how this run
+    /// turns bytes into evidence. The filters decide which reads are admitted; these decide
+    /// how many of the admitted ones a position is scored on.
+    ///
+    /// **Three of the five are the depth axis, and it is not a formality.** The ceiling on
+    /// reads held open was 4,096 until 2026-08-05, and at that value one ~130× tomato
+    /// chromosome silently refused 19,725 reads
+    /// ([`PileupGeneratorConfig::max_active_reads`]). A cohort deeper than the constants were
+    /// set for needs a run that can raise them, and one shallower gains nothing by holding
+    /// them high.
+    ///
+    /// **Checked at [`AlignedFilesVariantCaller::open`]**, with the rest of the refusals,
+    /// rather than at the first locus a generator is built for.
+    pub locus_generator_settings: PileupGeneratorConfig,
     /// Build a missing alignment index, **writing it beside the alignment file**, rather than
     /// refusing the file. Fails when that directory is not writable, which is the ordinary
     /// case for a read-only archive mount.
@@ -73,8 +100,10 @@ pub struct AlignmentInputs<'a> {
     /// The reference **once its per-contig checksums are known** — what each sample's own
     /// contig checksums are compared against.
     ///
-    /// **The one field here that is not read at any sample's open**: it is used after every
-    /// file is open, because the checksums to compare are captured as each one opens.
+    /// **Not read at any sample's open**: it is used after every file is open, because the
+    /// checksums to compare are captured as each one opens. The settings above are the other
+    /// field of this struct no sample's open reads — they are read where the walkers are
+    /// built.
     ///
     /// **Only the caller can supply it, and only once the background read of the FASTA has
     /// finished.** A reference read from a `.fai` alone and one whose FASTA has not been read
@@ -174,6 +203,9 @@ pub struct AlignedFilesVariantCaller {
     candidate_selection: CandidateSelectionConfig,
     /// What the merge admits and how wide a locus it will build.
     merge_parameters: MergeParameters,
+    /// The settings every one of this run's locus generators is built with — checked at
+    /// `open`, so building a generator from them cannot fail later.
+    locus_generator_settings: PileupGeneratorConfig,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
 }
@@ -200,12 +232,20 @@ impl AlignedFilesVariantCaller {
     ) -> Result<Self, RunError> {
         let per_sample = alignments.read_groups.read_groups_per_sample();
 
-        // **Four refusals before a single alignment file is opened**, because each of them condemns the
+        // **Five refusals before a single alignment file is opened**, because each of them condemns the
         // whole run and opening a thousand files first would only make the message slower.
         refuse_an_empty_cohort(per_sample)?;
         refuse_parameters_assembled_for_another_cohort(&parameters, alignments.read_groups)?;
         refuse_without_descriptor_headroom(alignments.read_groups)?;
-        // **The fourth is the walk's own precondition, checked at the door.** Opening the
+        // **The locus generator's settings are checked before anything is built with them**,
+        // for the reason the three above are checked before a file opens: a run whose depth
+        // caps are impossible is wrong at the door, and a refusal at the first locus would
+        // arrive after every file of a thousand-sample cohort had been opened.
+        alignments
+            .locus_generator_settings
+            .check()
+            .map_err(|source| RunError::LocusGeneratorSettings { source })?;
+        // **The fifth is the walk's own precondition, checked at the door.** Opening the
         // reference for walking parses its index and refuses a reference that carries no bases at
         // all; doing it here rather than at the first locus is the same rule as the other three,
         // and it is the only one whose product the run keeps.
@@ -262,6 +302,7 @@ impl AlignedFilesVariantCaller {
             calling_loop_config,
             candidate_selection,
             merge_parameters,
+            locus_generator_settings: alignments.locus_generator_settings,
         })
     }
 
@@ -347,6 +388,12 @@ impl AlignedFilesVariantCaller {
         self.read_filters
     }
 
+    /// The settings every locus generator of this run is built with.
+    #[must_use]
+    pub fn locus_generator_settings(&self) -> PileupGeneratorConfig {
+        self.locus_generator_settings
+    }
+
     /// Whether this run could check what assembly its samples were aligned to, and over how
     /// much.
     ///
@@ -370,18 +417,26 @@ impl AlignedFilesVariantCaller {
     /// generator carries state
     /// across segments (spec §8). Each is the generic path filled and both repeat-tract slots
     /// refused as unbuilt, which is what [`generic_path_generators`] documents.
-    fn walkers(self) -> Result<(Arc<Segmentation>, MergeParameters, Vec<RunWalker>), RunError> {
+    fn walkers(self) -> Result<RunReadyToWalk, RunError> {
         let mut walkers = Vec::with_capacity(self.samples.len());
         for reads in self.samples {
             let generators =
-                generic_path_generators(&self.walk_reference, PileupGeneratorConfig::default())?;
+                generic_path_generators(&self.walk_reference, self.locus_generator_settings)?;
             walkers.push(AlignmentFilesWalker::over(
                 Arc::clone(&self.segmentation),
                 reads,
                 generators,
             ));
         }
-        Ok((self.segmentation, self.merge_parameters, walkers))
+        Ok(RunReadyToWalk {
+            segmentation: self.segmentation,
+            merge_parameters: self.merge_parameters,
+            walkers,
+            parameters: self.parameters,
+            calling_loop_config: self.calling_loop_config,
+            candidate_selection: self.candidate_selection,
+            assembly_check: self.assembly_check,
+        })
     }
 
     /// **Read this run's cohort into cohort loci, in genome order, on one thread.**
@@ -390,23 +445,24 @@ impl AlignedFilesVariantCaller {
     /// forward only as far as the ground it is building, so each stretch of each file is decoded
     /// once and no walker runs ahead of what has been asked for (spec §5.1).
     ///
-    /// **This consumes the run and returns everything at once, and both are temporary.** A
-    /// calling run is an iterator that yields records as it goes (arch §3.4); what this does is
-    /// prove the join — real reads through real walkers into the merge that was until now fed
-    /// from memory — before calling is wired into it. Its memory is the whole cohort's surviving
-    /// loci, which is [`merge_cohort_through_cache`]'s own shape and not a cost this step added:
-    /// that driver already extends one [`RegionOutcome`] per building region. **It is still short
-    /// of spec §5.1's bound**, `callers in flight × one cohort locus` plus the merge frontier, and
-    /// nothing before the pool milestone needs to close that — that is where the loci start being
-    /// released one at a time.
+    /// **This is the merge's oracle, not the path a run takes.** It proves the join — real
+    /// reads through real walkers into the merge that was until now fed from memory — and it
+    /// stops at the evidence, so a test can compare cohort loci without a genotyper's answers
+    /// in the way. [`call_cohort`](Self::call_cohort) is what a run drives, and it is this
+    /// same driver with the calls made where each locus is built.
     ///
-    /// **⚑ It also destroys what a run report will need.** The walkers go into the cache, the
-    /// cache owns them and hands nothing back, so every walker's locus tally, its generators'
-    /// per-slot counts and its cursors' read-filter tallies are dropped when this returns. Adding
-    /// a route back is a signature the next step is already editing; raised at Checkpoint C.
+    /// **Its memory is the whole cohort's surviving loci**, which no real run can afford
+    /// (spec §5.1's `callers in flight × one cohort locus` plus the frontier). That is what an
+    /// oracle wants and what `call_cohort` no longer does.
+    ///
+    /// **It keeps none of what the walk counted**, and that is deliberate rather than a gap:
+    /// this is the merge's own oracle, not the path a run takes.
+    /// [`call_cohort`](Self::call_cohort) is the run's, and it hands the tallies back.
     pub fn merge_cohort(self) -> Result<RegionOutcome, RunError> {
-        let (segmentation, merge, walkers) = self.walkers()?;
-        let mut cache = ObservationCache::over(walkers);
+        let pieces = self.walkers()?;
+        let merge = pieces.merge_parameters;
+        let segmentation = Arc::clone(&pieces.segmentation);
+        let mut cache = ObservationCache::over(pieces.walkers);
         merge_cohort_through_cache(
             segmentation.analysed_regions(),
             &mut cache,
@@ -415,6 +471,175 @@ impl AlignedFilesVariantCaller {
             merge.min_alt_reads,
         )
     }
+
+    /// **Call this run's cohort: reads in, one called locus per locus the merge kept, in
+    /// genome order.**
+    ///
+    /// **A locus is not a position** — a deletion joins consecutive positions into one, so how
+    /// many loci a stretch of genome yields is the merge's answer rather than its length
+    /// (arch §3.1).
+    ///
+    /// The whole of direct mode's join in one call — every sample's files walked at the merge
+    /// frontier, the cohort's loci assembled over the analysed ground, and each locus
+    /// genotyped **where it is built**, before the next one is closed.
+    ///
+    /// # Calling happens inside the builder, and the spec says it may
+    ///
+    /// A call reads nothing outside its own locus, so where it runs relative to the merge is
+    /// free (`run_streaming.md` §3.1, `cohort_merge.md` §6.3). Calling inside the builder is
+    /// what lets the cohort observation be dropped as soon as its genotypes exist: a cohort
+    /// observation carries every covering sample's reads folded onto the locus's alleles,
+    /// where a called locus carries one genotype per sample. The proof that it is free is
+    /// `calling_inside_the_builder_gives_what_calling_after_the_merge_gives`, which calls the
+    /// same cohort both ways and refuses any difference.
+    ///
+    /// # What it does not do yet
+    ///
+    /// **It still returns everything at once.** Spec §5.1 bounds a run at `callers in flight ×
+    /// one cohort locus`; what this bounds is the *observations*, not the calls, and the pool
+    /// milestone is where the calls start being released one at a time as well. What that
+    /// milestone inherits is a driver that no longer has to buffer the observations to get
+    /// there. **`loci_too_wide_to_assemble` accumulates for the whole run too**, and nothing
+    /// bounds it either.
+    ///
+    /// **Every locus goes down the generic path.** Repeat-tract candidate selection is
+    /// specified and unbuilt, and both tract generator slots are refused as such — so a run
+    /// over ground with tracts in it is short rather than wrong, and
+    /// [`CohortWalkTallies`] says by how much.
+    ///
+    /// # Errors
+    ///
+    /// The first sample whose walk fails ends the run, naming the sample and how far it got
+    /// ([`RunError::SourceFailed`]). Calling itself cannot fail: a locus whose loop did not
+    /// settle comes back with `converged` false rather than as an error.
+    pub fn call_cohort<S, G>(self, genotyper: &G) -> Result<CalledCohort, RunError>
+    where
+        G: LocusGenotyper<S>,
+        S: Default,
+    {
+        let run_sample_count = self.samples.len();
+        let sample_names: Vec<String> = self.sample_names().map(str::to_owned).collect();
+        let pieces = self.walkers()?;
+        let RunReadyToWalk {
+            segmentation,
+            merge_parameters,
+            walkers,
+            parameters,
+            calling_loop_config,
+            candidate_selection,
+            assembly_check,
+        } = pieces;
+
+        let frozen = parameters.view();
+        // **Per worker, not per locus** — there is one worker here. The shaping buffers are
+        // cleared and refilled at every locus (`evidence_shaping`'s module note); the calling
+        // scratch is resized and refilled by `CallingScratch::prepare_for_locus`, which
+        // `call_locus` runs before it reads anything.
+        let mut shaping = GenericEvidenceScratch::default();
+        let mut scratch: CallingScratch<S> = CallingScratch::default();
+        let mut called_loci = Vec::new();
+        let mut loci_too_wide_to_assemble = Vec::new();
+
+        let mut cache = ObservationCache::over(walkers);
+        merge_cohort_handing_each_locus_over(
+            segmentation.analysed_regions(),
+            &mut cache,
+            merge_parameters.cohort_locus_builder_regions_len,
+            merge_parameters.max_cohort_locus_span,
+            merge_parameters.min_alt_reads,
+            &mut |observation| {
+                called_loci.push(call_one_generic_locus(
+                    genotyper,
+                    &observation,
+                    &frozen,
+                    &candidate_selection,
+                    &calling_loop_config,
+                    run_sample_count,
+                    &mut shaping,
+                    &mut scratch,
+                ));
+            },
+            &mut loci_too_wide_to_assemble,
+        )?;
+
+        Ok(CalledCohort {
+            called_loci,
+            loci_too_wide_to_assemble,
+            walk: CohortWalkTallies::of(sample_names, cache.into_sources(), assembly_check),
+        })
+    }
+}
+
+/// One cohort locus from evidence to genotypes: **which alleles it is called over, whose reads
+/// say what, and what each sample's genotype is.**
+///
+/// Three existing calls and nothing of its own (arch §3.2). It is a free function rather than
+/// a method because it belongs to no run in particular — the pool milestone runs it on a
+/// worker thread, over a scratch that worker owns.
+///
+/// **`views` is declared here and nowhere higher up, and the type says why.** It borrows the
+/// rows `shaping` holds, and a `Vec` is invariant in its element type, so a list kept across
+/// two loci would hold the first locus's borrow open into the second — an `E0499`
+/// ([`shape_generic_locus`]). It is the shaping step's one per-locus allocation; the call
+/// itself makes more, since a [`LocusInference`] owns its per-sample calls and its expected
+/// allele copies.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the eight are the five things a locus is called against — the model, the \
+              evidence, the parameters, and the selection's and the loop's configurations — \
+              plus the run's sample count and the two scratches. Grouping any of them would make a struct whose only \
+              purpose is this signature, and the pool milestone hands the same eight to a \
+              worker."
+)]
+fn call_one_generic_locus<S, G>(
+    genotyper: &G,
+    observation: &CohortObservation,
+    parameters: &FrozenParameters<'_>,
+    candidate_selection: &CandidateSelectionConfig,
+    calling_loop_config: &RunnableCallingLoopConfig,
+    run_sample_count: usize,
+    shaping: &mut GenericEvidenceScratch,
+    scratch: &mut CallingScratch<S>,
+) -> LocusInference
+where
+    G: LocusGenotyper<S>,
+{
+    // Selection's buffers live on the calling scratch and are sized by selection itself, so
+    // this borrow ends before the locus's shape is known and the one below begins.
+    let selection = select_generic(
+        observation,
+        candidate_selection,
+        scratch.candidate_selection_mut(),
+    );
+    let mut views = Vec::new();
+    let evidence = shape_generic_locus(
+        shaping,
+        observation,
+        &selection,
+        run_sample_count,
+        &mut views,
+    );
+    // The allele table leaves the selection by value: a discovery round appends to it and the
+    // final prune shrinks it, so the loop owns it and hands it back inside the inference.
+    let (alleles, _verdict, _unmatched, _remap) = selection.into_parts();
+    genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch)
+}
+
+/// **A run whose walkers are built and which has not yet read a byte** — one walker per
+/// sample, plus everything each locus will be called against.
+///
+/// **Private, and a struct rather than a tuple**: seven positional fields, four of which are
+/// this run's configuration, is a signature a reader has to count their way through. The run's
+/// two entry points destructure it and take what each needs.
+struct RunReadyToWalk {
+    segmentation: Arc<Segmentation>,
+    merge_parameters: MergeParameters,
+    /// One per sample, in the run's sample order.
+    walkers: Vec<RunWalker>,
+    parameters: RunParameters,
+    calling_loop_config: RunnableCallingLoopConfig,
+    candidate_selection: CandidateSelectionConfig,
+    assembly_check: AssemblyCheckOutcome,
 }
 
 /// What a run's walker is, spelled once: the alignment-file source over the run's own segments.
@@ -423,6 +648,155 @@ impl AlignedFilesVariantCaller {
 /// [`AlignmentFilesWalker`] with its region stream named. It buys the one signature that names
 /// it the right words, and it is the name every signature the pool milestone adds will want.
 pub type RunWalker = AlignmentFilesWalker<RunSegments>;
+
+/// **What a calling run produced: the genotypes, the ground it refused, and what the walk
+/// counted on the way.**
+///
+/// The three are one value because they are one run, and a report that quoted the genotypes
+/// without the other two would be describing a cohort rather than a run: a locus the width
+/// bound refused and a locus nobody varied at both emit nothing, and only the second is a
+/// quiet cohort.
+#[derive(Debug)]
+pub struct CalledCohort {
+    /// One per surviving locus, in genome order.
+    pub called_loci: Vec<LocusInference>,
+    /// **The ground of the loci the merge declined to assemble for being wider than
+    /// `max_cohort_locus_span`**, in genome order.
+    ///
+    /// **Not a failure, and the name says so** — the merge's own field for these is called
+    /// `failed_locus_spans`, and a run report that echoed that word would tell an operator
+    /// their caller failed N times when what it did was decline ground it was configured not
+    /// to assemble.
+    ///
+    /// Nor is it the ground nobody varied at: a locus too quiet to build is ground the caller
+    /// examined and found matching the reference. Only this one is a setting worth reporting
+    /// (`cohort_merge.md` §3.3).
+    pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
+    /// What each sample's walk saw, and what the run could check about the assembly.
+    pub walk: CohortWalkTallies,
+}
+
+/// **What every sample's walk counted, kept past the walk.**
+///
+/// **The run does not own its walkers once the merge has them** — the observation cache does,
+/// for the merge's whole duration, and hands them back spent
+/// ([`ObservationCache::into_sources`]) — so these are copied out at that point rather than
+/// read from a walker later. What is here is what a run report has to be able to state: for
+/// each sample, how much of the analysed ground its walk handled, how much it could not and
+/// why, and what the SNP/indel generator counted while doing it.
+///
+/// **Two things a run report also wants are not here, and neither is an oversight.**
+///
+/// **The per-read-group read-filter tallies**, which spec §8 requires a run to sum at the end
+/// or under-report every drop rate. The read layer does hand them out —
+/// `SampleCursor::read_group_counts` — but the locus generator that owns the cursor does not,
+/// and the harder obstacle is that it could not: at each contig boundary the retiring cursor's
+/// read-group counts are dropped rather than accumulated, so by the end of a walk every contig
+/// but the last has already lost them. Reaching them is a change to the generator, not an
+/// accessor.
+///
+/// **And the repeat-tract slots' counts**, absent because both slots are unfilled — a tract's
+/// ground is charged to `unhandled_not_implemented` in [`SampleWalkTallies::regions`], which
+/// is where a reader looks to see how short this caller's coverage is.
+#[derive(Debug)]
+pub struct CohortWalkTallies {
+    /// One per sample, in the run's sample order.
+    pub per_sample: Vec<SampleWalkTallies>,
+    /// Whether the run could check what assembly its samples were aligned to, and over how
+    /// much. **Carried here because it is computed at construction and the run is consumed**,
+    /// so a report assembled after the run would otherwise have nowhere to read it.
+    pub assembly_check: AssemblyCheckOutcome,
+}
+
+impl CohortWalkTallies {
+    /// Copy what each walker counted out of it, in the order the walkers were handed over —
+    /// which is the run's sample order, since that is the order the cache holds them in.
+    ///
+    /// # Panics
+    ///
+    /// If the names and the walkers are different lengths, which would pair one sample's name
+    /// with another's counts — a wrong run report rather than a crash, and the accident the
+    /// run's single sample order exists to prevent.
+    fn of(
+        sample_names: Vec<String>,
+        walkers: Vec<RunWalker>,
+        assembly_check: AssemblyCheckOutcome,
+    ) -> Self {
+        assert_eq!(
+            sample_names.len(),
+            walkers.len(),
+            "the run holds {} samples and {} per-sample readers came back, so a report built \
+             from these would put one sample's counts under another sample's name. This is a \
+             defect in ng rather than anything about the data.",
+            sample_names.len(),
+            walkers.len()
+        );
+        Self {
+            per_sample: sample_names
+                .into_iter()
+                .zip(walkers)
+                .map(|(sample_name, walker)| SampleWalkTallies {
+                    regions: walker.counts().clone(),
+                    // **The slot holds a pileup generator or nothing**, which is what
+                    // `generic_path_generators` builds, so the two arms below are the two
+                    // real cases and the third is unreachable rather than merged in: a tally
+                    // of another kind there would be a generator set built for a different
+                    // path, and this reports it as counting nothing — which is what a
+                    // generator set nobody mis-wired also reports. Nothing in a run can
+                    // produce it; if `generic_path_generators` ever fills the slot from a
+                    // caller's choice, this becomes two facts and needs two answers.
+                    snp_indel: match walker.generators().generic_counts() {
+                        Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
+                        Some(_) | None => None,
+                    },
+                    sample_name,
+                })
+                .collect(),
+            assembly_check,
+        }
+    }
+}
+
+/// **What one sample's walk counted** — its share of [`CohortWalkTallies`].
+#[derive(Debug, Clone)]
+pub struct SampleWalkTallies {
+    /// The sample, by the name the run's read-group table gave it.
+    pub sample_name: String,
+    /// How this sample's share of the analysed ground was accounted for: regions in, regions
+    /// handled, loci emitted, and the two kinds of region this caller produced nothing for —
+    /// a gap it has not filled yet, and ground it will never call.
+    ///
+    /// **`regions_handled`, `unhandled_not_implemented` and `unhandled_out_of_scope` sum
+    /// exactly to `regions_in`**, which is what makes "how much did this run not look at"
+    /// answerable rather than an estimate.
+    ///
+    /// **In regions, not in bases**, for the handled share: the two unhandled classes each
+    /// carry their base count and the handled one does not, so *what fraction of the genome
+    /// did this run call* cannot be worked out from here. Regions differ in length by orders
+    /// of magnitude, so a ratio of region counts is not that fraction.
+    pub regions: LocusCounts,
+    /// What the SNP/indel generator counted while walking this sample — **`None` where it
+    /// counted nothing at all**, which is a sample whose ground held no such region.
+    ///
+    /// Named for what it counts rather than for the code's word for it: this project calls
+    /// the SNP/indel path the *generic* path, against the repeat-tract path, and *generic* to
+    /// a reader of a run report means *unspecific*.
+    ///
+    /// # Two depth numbers, and reading one for the other is reading the opposite
+    ///
+    /// **`positions_short_of_cap` answers one question: did the read-hold ceiling cost this
+    /// sample coverage?** Zero means no position was scored on fewer reads than
+    /// `max_snp_column_depth` allows *because the ceiling had already given reads up*;
+    /// `short_of_cap_deficit` says how many reads those positions were missing altogether.
+    ///
+    /// **It says nothing about the two per-position caps**, which is
+    /// `column_depth_truncations` — the positions where `max_snp_column_depth` or
+    /// `max_indel_column_depth` cut contributors the walk was holding. A run can have
+    /// `positions_short_of_cap` at zero and `column_depth_truncations` in the millions: the
+    /// ceiling kept every read and the caps then declined to score on all of them. So "did my
+    /// depth settings shape the evidence" is answered by **both**, and by neither alone.
+    pub snp_indel: Option<PileupGeneratorCounts>,
+}
 
 /// **The sample names and the sizes, not the contents.** A derived `Debug` would print every
 /// open file, every segment and every fitted number — megabytes for a real cohort, in a
@@ -767,6 +1141,7 @@ mod tests {
     use crate::error_render::format_error_chain;
     use crate::ng::calling::inference::CallingLoopConfig;
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::locus_generation::pileup::MAX_RECORD_SPAN_CEILING;
     use crate::ng::read::input::read_groups::build_read_groups;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, matching_contigs, named_bam,
@@ -901,6 +1276,19 @@ mod tests {
         }
     }
 
+    /// **Locus-generator settings no run would arrive at by default**, so a run that dropped
+    /// them on the floor and built its generators with the shipped constants is visible.
+    ///
+    /// The knob moved is the hold ceiling, because it is the one whose default has already
+    /// been wrong once in a way nothing noticed: at 4,096 it silently refused 19,725 reads on
+    /// one ~130× tomato chromosome.
+    pub(super) fn unusual_locus_generator_settings() -> PileupGeneratorConfig {
+        PileupGeneratorConfig {
+            max_active_reads: 4_096,
+            ..PileupGeneratorConfig::default()
+        }
+    }
+
     fn unusual_candidate_selection() -> CandidateSelectionConfig {
         CandidateSelectionConfig {
             min_allele_support: MinAltReads {
@@ -945,6 +1333,7 @@ mod tests {
                 reference,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: reference.info(),
             },
             segmentation(),
@@ -1062,6 +1451,10 @@ mod tests {
         let caller = open_over(std::slice::from_ref(&a), &reference).expect("opens");
 
         assert_eq!(caller.read_filters(), unusual_read_filters());
+        assert_eq!(
+            caller.locus_generator_settings(),
+            unusual_locus_generator_settings()
+        );
         assert_eq!(*caller.candidate_selection(), unusual_candidate_selection());
         assert_eq!(caller.merge_parameters(), unusual_merge_parameters());
         assert_eq!(*caller.calling_loop_config(), unusual_calling_loop_config());
@@ -1069,6 +1462,10 @@ mod tests {
         // And each of those really is unlike what ships, or the assertions above would hold
         // for a caller that ignored its arguments entirely.
         assert_ne!(unusual_read_filters(), ReadFilterConfig::default());
+        assert_ne!(
+            unusual_locus_generator_settings(),
+            PileupGeneratorConfig::default()
+        );
         assert_ne!(
             unusual_candidate_selection(),
             CandidateSelectionConfig::DEFAULT
@@ -1078,6 +1475,63 @@ mod tests {
             unusual_calling_loop_config(),
             RunnableCallingLoopConfig::default(),
         );
+    }
+
+    /// **Locus-generator settings the walk could not use are refused at the door, before a
+    /// file is opened.**
+    ///
+    /// The run is given both an impossible record-span ceiling *and* a BAM with no index
+    /// beside it, and must report the settings — the refusal that costs nothing — rather than
+    /// the open failure. That ordering is the whole of the check: a run whose depth caps are
+    /// unusable would otherwise learn so at its first locus, after every file of a
+    /// thousand-sample cohort had been opened.
+    #[test]
+    fn locus_generator_settings_the_walk_cannot_use_are_refused_before_a_file_is_opened() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_bad_dir, unindexed) = unindexed_bam_for("zeta", "zeta.bam");
+        let read_groups = build_read_groups(&[unindexed]).expect("the fixture declares a group");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+
+        let refused = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &reference,
+                read_filters: unusual_read_filters(),
+                build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig {
+                    // One past what a witness run can describe, which is the one knob whose
+                    // ceiling this caller sets rather than inherits from production.
+                    max_record_span: MAX_RECORD_SPAN_CEILING + 1,
+                    ..PileupGeneratorConfig::default()
+                },
+                reference_with_checksums: reference.info(),
+            },
+            segmentation(),
+            parameters,
+            unusual_calling_loop_config(),
+            unusual_candidate_selection(),
+            unusual_merge_parameters(),
+        )
+        .expect_err("both are wrong, and the cheap one is reported");
+
+        assert!(
+            matches!(refused, RunError::LocusGeneratorSettings { .. }),
+            "the settings, not the unopenable file: {refused:?}"
+        );
+        // **Asserted on the setting's name and on both numbers**, not on either alone: a
+        // message carrying the values and not the knob leaves a reader with nothing to change,
+        // and this is the one refusal of the six that a person reaches by typing a number.
+        let rendered = format_error_chain(&refused);
+        for expected in ["max_record_span", "65536", "65535"] {
+            assert!(
+                rendered.contains(expected),
+                "the refusal must name {expected}: {rendered}",
+            );
+        }
     }
 
     /// The ground and the read-group table come back too.
@@ -1134,7 +1588,9 @@ mod tests {
 
 #[cfg(test)]
 mod construction_checks {
-    use super::tests::{bam_for, segmentation_built_on, unusual_read_filters};
+    use super::tests::{
+        bam_for, segmentation_built_on, unusual_locus_generator_settings, unusual_read_filters,
+    };
     use super::*;
     use crate::error_render::format_error_chain;
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
@@ -1170,6 +1626,7 @@ mod construction_checks {
                 reference,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: verified,
             },
             // **The catalog claims the reference it is actually given**, so these tests reach
@@ -1619,7 +2076,10 @@ mod checks_that_needed_their_own_fixtures {
     //! together, and reversing a two-element pairing is the identity. Seven mutations lived in
     //! that blind spot. Each test below names the one it kills.
 
-    use super::tests::{bam_for, catalog_header, segmentation_built_on, unusual_read_filters};
+    use super::tests::{
+        bam_for, catalog_header, segmentation_built_on, unusual_locus_generator_settings,
+        unusual_read_filters,
+    };
     use super::*;
     use crate::error_render::format_error_chain;
     use crate::ng::calling::parameters_file::DeclaredInbreeding;
@@ -1655,6 +2115,7 @@ mod checks_that_needed_their_own_fixtures {
                 reference: opened_against,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: with_checksums,
             },
             segmentation_built_on(with_checksums.md5.unwrap_or([7; 16])),
@@ -1947,6 +2408,7 @@ mod checks_that_needed_their_own_fixtures {
                 reference: &opened_against,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: verified.info(),
             },
             segmentation_built_on(of_another),
@@ -1990,6 +2452,7 @@ mod checks_that_needed_their_own_fixtures {
                 reference: &reference,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: reference.info(),
             },
             segmentation_built_on([0xab; 16]),
@@ -2018,6 +2481,7 @@ mod checks_that_needed_their_own_fixtures {
                 reference: &opened_against,
                 read_filters: unusual_read_filters(),
                 build_index_if_missing: false,
+                locus_generator_settings: unusual_locus_generator_settings(),
                 reference_with_checksums: another_genome.info(),
             },
             segmentation_built_on([7; 16]),
@@ -2098,11 +2562,25 @@ mod the_merge_over_walkers {
         file_name: &str,
         alt_offsets: &[usize],
     ) -> (TempDir, PathBuf) {
+        sample_showing_on_reads(sample, file_name, alt_offsets, 3)
+    }
+
+    /// The same, with the read count named — for the tests where the samples have to be
+    /// **numerically distinguishable from each other**, not merely differently named.
+    ///
+    /// A cohort whose samples all walked the same number of reads cannot show a per-sample
+    /// tally paired with the wrong sample: every count is every sample's count.
+    pub(super) fn sample_showing_on_reads(
+        sample: &str,
+        file_name: &str,
+        alt_offsets: &[usize],
+        reads: usize,
+    ) -> (TempDir, PathBuf) {
         let mut bases = [b'A'; 30];
         for offset in alt_offsets {
             bases[*offset] = b'C';
         }
-        let records: Vec<RecordBuf> = (0..3)
+        let records: Vec<RecordBuf> = (0..reads)
             .map(|read| read_of(&format!("{sample}-r{read}"), 10, &bases))
             .collect();
         indexed_named_bam(
@@ -2135,6 +2613,73 @@ mod the_merge_over_walkers {
         reference: &OpenReference,
         merge: MergeParameters,
     ) -> AlignedFilesVariantCaller {
+        open_over_with_settings(
+            paths,
+            reference,
+            merge,
+            PileupGeneratorConfig::default(),
+            CandidateSelectionConfig::DEFAULT,
+            shipped_calling_loop(),
+        )
+    }
+
+    /// The same, with the locus generator's settings named — for the tests that are about
+    /// **what the walk holds and folds** rather than about what the merge then does with it.
+    ///
+    /// **Kept apart from the shipped-settings door above**, because the oracle these fixtures
+    /// are compared against builds its own generators with the shipped settings: a fixture
+    /// that quietly walked with different ones would move one side of the differential and
+    /// not the other.
+    pub(super) fn open_over_with_generator_settings(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+        locus_generator_settings: PileupGeneratorConfig,
+    ) -> AlignedFilesVariantCaller {
+        open_over_with_settings(
+            paths,
+            reference,
+            MergeParameters::DEFAULT,
+            locus_generator_settings,
+            CandidateSelectionConfig::DEFAULT,
+            shipped_calling_loop(),
+        )
+    }
+
+    /// The calling-loop settings this caller ships, checked once so the fixtures below need
+    /// not repeat the validation.
+    pub(super) fn shipped_calling_loop() -> RunnableCallingLoopConfig {
+        CallingLoopConfig::DEFAULT
+            .validate()
+            .expect("the shipped calling-loop settings are runnable")
+    }
+
+    /// The same, with the settings the *calls* are made under named — for the tests that ask
+    /// whether a run's own candidate selection and calling loop reach the genotyper, rather
+    /// than what the merge finds.
+    pub(super) fn open_over_calling_with(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+        candidate_selection: CandidateSelectionConfig,
+        calling_loop: RunnableCallingLoopConfig,
+    ) -> AlignedFilesVariantCaller {
+        open_over_with_settings(
+            paths,
+            reference,
+            MergeParameters::DEFAULT,
+            PileupGeneratorConfig::default(),
+            candidate_selection,
+            calling_loop,
+        )
+    }
+
+    fn open_over_with_settings(
+        paths: &[PathBuf],
+        reference: &OpenReference,
+        merge: MergeParameters,
+        locus_generator_settings: PileupGeneratorConfig,
+        candidate_selection: CandidateSelectionConfig,
+        calling_loop: RunnableCallingLoopConfig,
+    ) -> AlignedFilesVariantCaller {
         let read_groups = build_read_groups(paths).expect("the fixtures declare read groups");
         let parameters = RunParameters::of_defaults(
             &read_groups,
@@ -2147,14 +2692,13 @@ mod the_merge_over_walkers {
                 reference,
                 read_filters: ReadFilterConfig::default(),
                 build_index_if_missing: false,
+                locus_generator_settings,
                 reference_with_checksums: reference.info(),
             },
             segmentation_built_on([7; 16]),
             parameters,
-            CallingLoopConfig::DEFAULT
-                .validate()
-                .expect("the shipped calling-loop settings are runnable"),
-            CandidateSelectionConfig::DEFAULT,
+            calling_loop,
+            candidate_selection,
             merge,
         )
         .expect("three readable samples over a readable reference open")
@@ -2324,6 +2868,7 @@ mod the_merge_over_walkers {
                 reference: &geometry_only,
                 read_filters: ReadFilterConfig::default(),
                 build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
                 reference_with_checksums: geometry_only.info(),
             },
             segmentation_built_on([7; 16]),
@@ -2703,6 +3248,7 @@ mod what_the_fixtures_above_could_not_distinguish {
                 reference: &reference,
                 read_filters: ReadFilterConfig::default(),
                 build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
                 reference_with_checksums: reference.info(),
             },
             segmentation,
@@ -2749,6 +3295,7 @@ mod what_the_fixtures_above_could_not_distinguish {
                 reference: &geometry_only,
                 read_filters: ReadFilterConfig::default(),
                 build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
                 reference_with_checksums: geometry_only.info(),
             },
             super::tests::segmentation_built_on([7; 16]),
@@ -2811,6 +3358,488 @@ mod what_the_fixtures_above_could_not_distinguish {
             counts.unhandled_out_of_scope, 0,
             "and not a permanent refusal — that is the satellite's answer, and saying it here \
              would tell a run report the tract will never be called",
+        );
+    }
+}
+
+/// **Calling joined to the merge: alignment files in, genotypes out.**
+///
+/// Everything before this milestone stopped at cohort loci — the evidence a locus offers, with
+/// nothing said about which alleles are real or what genotype each sample has. These tests are
+/// about the join: that the call happens where the locus is built, that putting it there
+/// changes no answer, and that what the walk counted survives a merge that consumes the
+/// walkers.
+#[cfg(test)]
+mod calling_joined_to_the_merge {
+    use super::the_merge_over_walkers::{
+        open_over, open_over_calling_with, open_over_with, open_over_with_generator_settings,
+        sample_showing, sample_showing_on_one_read, sample_showing_on_reads, shipped_calling_loop,
+    };
+    use super::*;
+    use crate::ng::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
+    use crate::ng::calling::inference::CallingLoopConfig;
+    use crate::ng::calling::inference::summarise_condition::SummariseConditionLoop;
+    use crate::ng::calling::likelihood::ssr_emission::{
+        StutterSubstitutionEmission, StutterSubstitutionScratch,
+    };
+    use crate::ng::calling::parameters_file::DeclaredInbreeding;
+    use crate::ng::read::input::test_fixtures::fixture_reference_from_its_index;
+    use crate::ng::run::cohort_merge::{MinAltObs, MinAltReadShare};
+    use crate::ng::types::{ContigId, Ploidy, Position};
+    use std::num::NonZeroU32;
+
+    /// **The way a real run scores a locus**: arm A, with the repeat-tract emission model and
+    /// the genotype prior this caller ships.
+    ///
+    /// Named once so that every test here is calling the same thing the run would, rather than
+    /// a stub that would pass whatever the wiring did to the evidence.
+    fn the_shipped_genotyper()
+    -> SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior> {
+        SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior)
+    }
+
+    /// Refuse any difference between two lists of called loci, naming the **first** locus that
+    /// differs rather than printing both lists.
+    ///
+    /// The same choice `cohort_merge`'s own `refuse_any_difference` makes and for the same
+    /// reason: one called locus over a cohort renders to hundreds of bytes, and two lists of
+    /// them inside one `assert_eq!` is not something a reader can diff by eye.
+    fn refuse_any_difference(
+        what_changed: &str,
+        expected: &[LocusInference],
+        actual: &[LocusInference],
+    ) {
+        if let Some(first) = expected
+            .iter()
+            .zip(actual)
+            .position(|(one, other)| one != other)
+        {
+            panic!(
+                "{what_changed} changed the calls, first at locus {first}:\
+                 \n  expected: {:?}\n  actual:   {:?}",
+                expected[first], actual[first],
+            );
+        }
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what_changed} changed how many loci were called",
+        );
+    }
+
+    /// **Alignment files in, one called locus per surviving position, in genome order.**
+    ///
+    /// The same three-sample fixture the merge's own test uses: `zeta` and `alpha` both carry a
+    /// `C` at `chr1:15`, `alpha` a second at `chr1:30`, `mu` matches the reference everywhere.
+    /// So two positions are worth calling, and **every one of the three samples is called at
+    /// both of them** — including `mu`, which showed nothing there. A sample with no
+    /// non-reference evidence is not a sample without a genotype.
+    #[test]
+    fn a_cohort_of_alignment_files_is_called_into_genotypes_in_genome_order() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+
+        let called = open_over(&[zeta, alpha, mu], &reference)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("the fixture cohort calls");
+
+        assert_eq!(
+            called
+                .called_loci
+                .iter()
+                .map(|locus| locus.region.start)
+                .collect::<Vec<_>>(),
+            vec![Position(15), Position(30)],
+            "the two positions the cohort varies at, in genome order",
+        );
+        for locus in &called.called_loci {
+            assert_eq!(
+                locus.per_sample.len(),
+                3,
+                "one call per sample of the run at {}, not one per covering sample",
+                locus.region,
+            );
+        }
+        assert_eq!(
+            called.called_loci[0].region,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(15),
+                end: Position(15),
+            },
+        );
+    }
+
+    /// **Calling inside the builder answers what calling after the whole merge answers.**
+    ///
+    /// This is the claim `run_streaming.md` §3.1 makes when it says the placement commutes —
+    /// a call reads nothing outside its own locus — and it is what makes calling in the
+    /// builder a memory decision rather than a modelling one. The oracle is the merge as it
+    /// stood before this step: every cohort locus collected first, then each one called by the
+    /// same three calls.
+    ///
+    /// **What it does not catch is a scratch that leaks between loci.** Both sides walk the
+    /// same loci in the same order, each reusing its own scratch across them in the same
+    /// pattern, so a missed `clear()` produces the same wrong answer on both sides and
+    /// cancels. Separate scratches stop one side's state reaching the other and nothing more.
+    /// The calling-scratch trap (spec §8) is caught where the *order* differs, which is the
+    /// pool milestone's concurrency-invariance step.
+    #[test]
+    fn calling_inside_the_builder_gives_what_calling_after_the_merge_gives() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_alpha_dir, alpha) = sample_showing("alpha", "alpha.bam", &[5, 20]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let paths = [zeta, alpha, mu];
+        let genotyper = the_shipped_genotyper();
+
+        // The oracle: the merge alone, then the calls. **The parameters are rebuilt the way
+        // `open_over` builds them** rather than taken off the caller, because a run owns them
+        // and `merge_cohort` consumes the run — so the oracle asserts they are the same
+        // defaults, which is what makes the two sides comparable at all.
+        let merging_first = open_over(&paths, &reference);
+        let run_sample_count = merging_first.sample_count();
+        let selection = *merging_first.candidate_selection();
+        let loop_config = *merging_first.calling_loop_config();
+        let parameters = RunParameters::of_defaults(
+            merging_first.read_groups(),
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        assert_eq!(
+            merging_first
+                .parameters()
+                .inbreeding_coefficient_by_sample()
+                .len(),
+            parameters.inbreeding_coefficient_by_sample().len(),
+            "the rebuilt parameters describe the same cohort as the run's own",
+        );
+        let merged = merging_first.merge_cohort().expect("merges");
+        let frozen = parameters.view();
+        let mut shaping = GenericEvidenceScratch::default();
+        let mut scratch: CallingScratch<StutterSubstitutionScratch> = CallingScratch::default();
+        let called_afterwards: Vec<LocusInference> = merged
+            .cohort_observations
+            .iter()
+            .map(|observation| {
+                call_one_generic_locus(
+                    &genotyper,
+                    observation,
+                    &frozen,
+                    &selection,
+                    &loop_config,
+                    run_sample_count,
+                    &mut shaping,
+                    &mut scratch,
+                )
+            })
+            .collect();
+
+        let called_in_the_builder = open_over(&paths, &reference)
+            .call_cohort(&genotyper)
+            .expect("calls");
+
+        assert!(
+            !called_afterwards.is_empty(),
+            "a fixture that called nothing would make this comparison vacuous",
+        );
+        refuse_any_difference(
+            "calling inside the builder rather than after the merge",
+            &called_afterwards,
+            &called_in_the_builder.called_loci,
+        );
+    }
+
+    /// **The run's own locus-generator settings are what its generators walk with, not the
+    /// shipped constants.**
+    ///
+    /// A run that built its generators with `PileupGeneratorConfig::default()` would read
+    /// every operator's depth settings and ignore them — wrong evidence, no failure. The knob
+    /// moved here is the per-position cap on reads folded at a position with no indel:
+    /// `max_snp_column_depth`, at **1**, against a shipped 8,000. The fixture's three reads
+    /// cover the same position, so at 1 the walk truncates that column and at the default it
+    /// does not, and `column_depth_truncations` is the count that says which happened.
+    ///
+    /// **`positions_short_of_cap` cannot see this**, which is why it is not what is asserted:
+    /// it counts positions the *hold ceiling* cost reads, and a per-position cap acts on reads
+    /// the walk is already holding.
+    #[test]
+    fn the_runs_own_locus_generator_settings_are_what_its_walk_uses() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let paths = std::slice::from_ref(&zeta);
+
+        let at_the_shipped_settings = open_over(paths, &reference)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls");
+        let at_a_cap_of_one = open_over_with_generator_settings(
+            paths,
+            &reference,
+            PileupGeneratorConfig {
+                max_snp_column_depth: 1,
+                ..PileupGeneratorConfig::default()
+            },
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        let truncations = |called: &CalledCohort| {
+            called.walk.per_sample[0]
+                .snp_indel
+                .expect("the fixture's ground is a generic region")
+                .column_depth_truncations
+        };
+        assert_eq!(
+            truncations(&at_the_shipped_settings),
+            0,
+            "no column is 8,000 reads deep, so the shipped cap cuts nothing",
+        );
+        assert!(
+            truncations(&at_a_cap_of_one) > 0,
+            "a cap of one read a position must cut the fixture's three-read columns; it cut {}",
+            truncations(&at_a_cap_of_one),
+        );
+    }
+
+    /// **The run's own merge parameters are what a called run applies**, not the shipped ones.
+    ///
+    /// One sample carrying its variant on **one** of three reads is below the shipped floor of
+    /// two non-reference reads and above a floor of one, so the same alignment files give one
+    /// called locus at one setting and two at the other. A `call_cohort` that reached for
+    /// `MergeParameters::DEFAULT` would answer the same at both, and an operator's own
+    /// threshold would be silently ignored.
+    #[test]
+    fn the_runs_own_merge_parameters_are_what_a_called_run_applies() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_faint_dir, faint) = sample_showing_on_one_read("alpha", "alpha.bam", 20);
+        let paths = [zeta, faint];
+
+        let at_the_shipped_floor = open_over_with(&paths, &reference, MergeParameters::DEFAULT)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls");
+        let at_a_floor_of_one = open_over_with(
+            &paths,
+            &reference,
+            MergeParameters {
+                min_alt_reads: MinAltReads {
+                    floor: MinAltObs(NonZeroU32::new(1).expect("not zero")),
+                    share: MinAltReadShare::new_or_panic(0.0),
+                },
+                ..MergeParameters::DEFAULT
+            },
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert_eq!(
+            at_the_shipped_floor.called_loci.len(),
+            1,
+            "only zeta's position, whose three reads clear a floor of two",
+        );
+        assert_eq!(
+            at_a_floor_of_one.called_loci.len(),
+            2,
+            "and alpha's single carrying read as well, once one read is enough",
+        );
+    }
+
+    // **⚑ `CalledCohort::loci_too_wide_to_assemble` is not pinned, and the fixture reference
+    // is why.** A locus wider than one reference base needs an observation that spans several,
+    // which on real reads means a deletion — and this module's reference is a hundred `A`s on
+    // `chr1`, so every deletion in it is a deletion inside one homopolymer. Measured: three
+    // reads carrying a five-base deletion at `chr1:20` produce **no cohort locus at all**, at
+    // the shipped width bound and at a bound of three alike, so there is nothing for the width
+    // test to refuse. A run's refused-span list can therefore be replaced by an empty vector
+    // with every test here green — the one mutation of this step's correctness review that is
+    // still alive.
+    //
+    // What would pin it is a fixture reference with varied bases, which `build_fasta` does not
+    // build: it takes contig names and lengths and fills with `A`. That is a change to a
+    // fixture four modules share, so it is recorded here rather than made under this step.
+
+    /// **The run's own candidate selection is what the calls are made over.**
+    ///
+    /// `zeta` carries its variant on three reads and `mu` on none. At the shipped floor of two
+    /// non-reference reads the alternative is a candidate and the locus is called over two
+    /// alleles; at a floor of seven it is cut and the locus is called over the reference
+    /// alone. A `call_cohort` that reached for `CandidateSelectionConfig::DEFAULT` would
+    /// report two alleles at both.
+    #[test]
+    fn the_runs_own_candidate_selection_is_what_the_calls_are_made_over() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let paths = [zeta, mu];
+
+        let at_the_shipped_floor = open_over_calling_with(
+            &paths,
+            &reference,
+            CandidateSelectionConfig::DEFAULT,
+            shipped_calling_loop(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+        let at_a_floor_of_seven = open_over_calling_with(
+            &paths,
+            &reference,
+            CandidateSelectionConfig {
+                min_allele_support: MinAltReads {
+                    floor: MinAltObs(NonZeroU32::new(7).expect("not zero")),
+                    share: MinAltReadShare::new_or_panic(0.0),
+                },
+                ..CandidateSelectionConfig::DEFAULT
+            },
+            shipped_calling_loop(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert_eq!(
+            at_the_shipped_floor.called_loci[0].alleles().len(),
+            2,
+            "the reference and zeta's alternative",
+        );
+        assert_eq!(
+            at_a_floor_of_seven.called_loci[0].alleles().len(),
+            1,
+            "three reads are below a floor of seven, so the alternative is not a candidate",
+        );
+    }
+
+    /// **The run's own calling-loop settings are what the loop runs under.**
+    ///
+    /// The pass cap is the one loop setting whose effect a fixture can see without a locus
+    /// contrived not to settle: at a cap of one the loop reports one pass, and at the shipped
+    /// cap of fifty it reports however many it took. A `call_cohort` that reached for the
+    /// shipped configuration would report the same number at both.
+    #[test]
+    fn the_runs_own_calling_loop_settings_are_what_the_loop_runs_under() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5]);
+        let (_mu_dir, mu) = sample_showing("mu", "mu.bam", &[]);
+        let paths = [zeta, mu];
+
+        let at_the_shipped_cap = open_over_calling_with(
+            &paths,
+            &reference,
+            CandidateSelectionConfig::DEFAULT,
+            shipped_calling_loop(),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+        let at_a_cap_of_one = open_over_calling_with(
+            &paths,
+            &reference,
+            CandidateSelectionConfig::DEFAULT,
+            CallingLoopConfig {
+                max_passes: NonZeroU32::new(1).expect("not zero"),
+                ..CallingLoopConfig::DEFAULT
+            }
+            .validate()
+            .expect("one pass is a runnable setting"),
+        )
+        .call_cohort(&the_shipped_genotyper())
+        .expect("calls");
+
+        assert_eq!(
+            at_a_cap_of_one.called_loci[0].passes, 1,
+            "a cap of one pass stops the loop after one",
+        );
+        assert!(
+            at_the_shipped_cap.called_loci[0].passes > 1,
+            "and the shipped cap of fifty lets this locus take the {} it needs — a fixture \
+             that settled in one pass could not tell the two caps apart",
+            at_the_shipped_cap.called_loci[0].passes,
+        );
+    }
+
+    /// **What each sample's walk counted survives the merge that consumed its walker.**
+    ///
+    /// The observation cache owns the walkers for the whole merge, so without a route back
+    /// every one of these numbers is dropped where the merge returns — and a run report has
+    /// nothing to say about a sample beyond its genotypes.
+    ///
+    /// The three samples are checked **by name and in the run's order**, because tallies
+    /// carrying the right numbers under the wrong sample is exactly the failure that reads as
+    /// correct.
+    #[test]
+    fn what_each_walk_counted_comes_back_from_the_merge() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing_on_reads("zeta", "zeta.bam", &[5], 3);
+        let (_alpha_dir, alpha) = sample_showing_on_reads("alpha", "alpha.bam", &[5, 20], 5);
+        let (_mu_dir, mu) = sample_showing_on_reads("mu", "mu.bam", &[], 7);
+
+        let called = open_over(&[zeta, alpha, mu], &reference)
+            .call_cohort(&the_shipped_genotyper())
+            .expect("calls");
+
+        assert_eq!(
+            called
+                .walk
+                .per_sample
+                .iter()
+                .map(|walk| walk.sample_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha", "mu"],
+            "one entry per sample, in the run's own sample order",
+        );
+        // **Each sample walked a different number of reads**, so the counts identify the
+        // sample they came from and a permutation is visible. With three samples of three
+        // reads each — which is every other fixture in this file — reversing the walkers on
+        // the way out of the merge pairs zeta's name with mu's counts and nothing can see it.
+        assert_eq!(
+            called
+                .walk
+                .per_sample
+                .iter()
+                .map(|walk| {
+                    walk.snp_indel
+                        .expect("the fixture's ground is a generic region")
+                        .reads_admitted
+                })
+                .collect::<Vec<_>>(),
+            vec![3, 5, 7],
+            "each sample's own read count, under its own name",
+        );
+        for walk in &called.walk.per_sample {
+            assert!(
+                walk.regions.regions_in > 0,
+                "{}'s walk was handed regions",
+                walk.sample_name,
+            );
+            assert_eq!(
+                walk.regions.regions_handled
+                    + walk.regions.unhandled_not_implemented
+                    + walk.regions.unhandled_out_of_scope,
+                walk.regions.regions_in,
+                "{}'s regions partition exactly",
+                walk.sample_name,
+            );
+            let counted = walk
+                .snp_indel
+                .expect("the fixture's ground is a generic region, so that generator counted");
+            assert!(
+                counted.reads_admitted > 0,
+                "{}'s three reads were admitted",
+                walk.sample_name,
+            );
+            assert_eq!(
+                counted.positions_short_of_cap, 0,
+                "the read-hold ceiling cost {} no coverage",
+                walk.sample_name,
+            );
+        }
+        assert!(
+            matches!(
+                called.walk.assembly_check,
+                AssemblyCheckOutcome::NothingCouldBeChecked { .. }
+            ),
+            "the fixture's reference carries no checksums, and the run says so rather than \
+             claiming every sample agreed: {:?}",
+            called.walk.assembly_check,
         );
     }
 }

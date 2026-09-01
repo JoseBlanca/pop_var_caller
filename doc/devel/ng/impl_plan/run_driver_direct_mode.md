@@ -240,11 +240,32 @@ own in-memory driver, which is already the reference for its parallel one.
 
 ### Milestone D — calling, joined to the merge
 
-☐ **D1. `call_locus` in the builder.** The builder that assembles a cohort locus also calls it. The
+✅ **D1. `call_locus` in the builder.** The builder that assembles a cohort locus also calls it. The
 spec says the placement commutes; this is the wiring
 [`calling_loop.md`](calling_loop.md) lists as its own remaining work and no plan has claimed.
+
+**⛦ Both of Checkpoint C's open questions landed here**, as the owner ruled on 2026-09-01. A run's
+walk tallies and its assembly-check outcome now survive the merge (`ObservationCache::into_sources`),
+and a run can set its locus generator's five settings, checked at `open` — which is what makes
+`RunError::LocusGeneratorSettings` reachable. **The per-read-group read-filter tallies are still
+out**, and not for want of an accessor: each contig boundary drops the retiring cursor's read-group
+counts, so a walk has already lost every contig but its last. That is F3's.
+
+**⛦ Calling went into the builder without the merge learning about calling.** `build_region`'s
+locus walk moved into `build_region_handing_over`, which hands each surviving locus to a sink;
+`build_region` is that function with `Vec::push` for a sink, and `merge_cohort_through_cache` split
+the same way. So spec §6.1's ownership rule is still written once, every existing oracle checks
+both drivers at once, and `merge_cohort` stays as the merge's oracle rather than the run's path.
+
+**⛦ One mutation is alive and the fixture reference is why.** A run's list of loci the width bound
+refused can be replaced by an empty vector with every test green: pinning it needs a locus wider
+than one base, which means a deletion, and this module's fixture reference is a hundred `A`s — so
+every deletion in it is inside one homopolymer. Measured: three reads carrying a five-base deletion
+produce **no cohort locus at all**, at the shipped bound and at a bound of three alike. What would
+pin it is a fixture reference with varied bases, which four modules share.
 *Depends:* C2. *Source:* [`run_streaming.md`](../spec/run_streaming.md) §3.1;
 [`calling_loop.md`](calling_loop.md), *Out of scope*.
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_d1_2026-09-01.md).
 
 ☐ **D2. The sample-order join. Own commit, do not bundle.** The merge names samples by their index
 in the run's order; the parameters name them by sample name; the scratch rows are the run's sample

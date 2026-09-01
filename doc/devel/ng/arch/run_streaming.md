@@ -450,11 +450,19 @@ pub struct AlignmentInputs<'a> {
     pub read_groups: &'a ReadGroups,
     pub reference: &'a OpenReference,
     pub read_filters: ReadFilterConfig,
+    /// **The five knobs the locus generator walks with** (2026-09-01) — the two per-column
+    /// depth caps, the widest record footprint, the mate-lookup window and the ceiling on
+    /// reads held open at once. Beside `read_filters` because the two answer one question:
+    /// how this run turns bytes into evidence. **Checked at `open`**, with the other
+    /// refusals, so `RunError::LocusGeneratorSettings` fires before a file is opened rather
+    /// than at the first locus.
+    pub locus_generator_settings: PileupGeneratorConfig,
     pub build_index_if_missing: bool,
     /// The reference **once its per-contig checksums are known** — what each sample's own
-    /// contig checksums are compared against (§5's `SampleAlignedToAnotherReference`). **The
-    /// one field here not read at a sample's open**: the checksums to compare are captured as
-    /// each file opens, so this is used after they all have. Only the caller can supply it: a
+    /// contig checksums are compared against (§5's `SampleAlignedToAnotherReference`). **Not
+    /// read at a sample's open**: the checksums to compare are captured as each file opens, so
+    /// this is used after they all have — as are the generator settings above, which are read
+    /// where the walkers are built. Only the caller can supply it: a
     /// `.fai`-only reference and one whose FASTA has not been read are the same value, so the
     /// run reports which it got rather than inferring it.
     pub reference_with_checksums: &'a ReferenceInfo,
@@ -528,15 +536,34 @@ exist and are separate types
 them one by one alongside four other arguments is what the grouping avoids. Whether it is worth a
 struct is the constructor's to settle when it is coded.
 
-**⛦ Direct mode drives the merge but does not yet yield one record at a time (2026-08-31).**
-`AlignedFilesVariantCaller::merge_cohort` builds one walker per sample and runs the
-single-threaded merge over them, returning the whole cohort's loci as one `RegionOutcome`. That is
-not spec §5.1's bound — `callers in flight × one cohort locus` plus the frontier — and it is not a
-cost the step added: `merge_cohort_through_cache` already accumulates one outcome per building
-region. Calling lands inside that driver, so the shape survives the next step; the pool milestone
-is where loci start being released one at a time. **Two things it consumes and does not give
-back**, both wanted by the run report: every walker's tallies, and the assembly-check outcome. The
-cache owns the walkers and has no `into_sources`.
+**⛦ Direct mode calls its cohort, and calling happens in the builder (2026-09-01).**
+`AlignedFilesVariantCaller::call_cohort(&genotyper)` drives the merge over one walker per sample
+and genotypes each cohort locus **where it is built**, through the three calls §3.2 sketches. It
+returns a `CalledCohort`: the called loci in genome order, the ground of the loci the width bound
+refused, and what each sample's walk counted.
+
+**How the call got inside the builder without the merge learning about calling.** `build_region`'s
+locus walk moved into `build_region_handing_over`, which hands each surviving locus to a sink and
+each refused locus's span to a vector; `build_region` is that function with `Vec::push` for a sink,
+and `merge_cohort_through_cache` split the same way into `merge_cohort_handing_each_locus_over`.
+The run supplies the calling sink, so `cohort_merge` imports nothing from `ng::calling`, the
+ownership rule of spec §6.1 is still written once, and every existing oracle of the merge checks
+both drivers at once. `merge_cohort` stays as the merge's oracle rather than the run's path.
+
+**⛦ It still returns everything at once**, which is not spec §5.1's bound —
+`callers in flight × one cohort locus` plus the frontier. What it *does* bound is the
+observations: each is dropped as soon as its genotypes exist, which is what calling in the builder
+buys. The refused-span list accumulates for the whole run as well. The pool milestone is where the
+calls start being released singly, and it inherits a driver that no longer has to buffer the
+observations to get there.
+
+**⛦ What the run keeps from its walk (2026-09-01).** `ObservationCache::into_sources` hands the
+per-sample readers back, so each walker's region accounting, its SNP/indel generator's counters and
+the assembly-check outcome reach `CohortWalkTallies` before the walkers are dropped. **The
+per-read-group read-filter tallies are still unreachable, and not for want of an accessor**: at
+each contig boundary the retiring cursor's read-group counts are dropped rather than accumulated,
+so by the end of a walk every contig but the last has lost them. Spec §8 requires a run to sum them
+at the end; reaching them is a change to the locus generator, and it is F3's.
 
 **Contract, both callers.** Records in genome order, identical at every number of callers in flight
 (spec §12.2), and identical between the two callers on one cohort with fixed parameters (spec §12.3

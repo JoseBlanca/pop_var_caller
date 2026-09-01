@@ -19,7 +19,7 @@
 //! over this same cache; the loci that differ once builders see different windows are what the
 //! organiser's overlap resolution settles (spec §6.1).
 
-use super::build::{RegionOutcome, build_region};
+use super::build::{CohortObservation, RegionOutcome, build_region, build_region_handing_over};
 use super::observation_cache::{ObservationCache, ObservationSource, building_regions_of};
 use super::timing;
 use super::{
@@ -153,12 +153,68 @@ pub fn merge_cohort_through_cache<S, E>(
 where
     S: ObservationSource<Error = E>,
 {
+    let mut merged = RegionOutcome::default();
+    // Two disjoint borrows of one outcome, so that collecting the loci is this driver's
+    // streaming form with `Vec::push` for a sink rather than a second copy of it.
+    let RegionOutcome {
+        cohort_observations,
+        failed_locus_spans,
+    } = &mut merged;
+    merge_cohort_handing_each_locus_over(
+        analysed,
+        cache,
+        cohort_locus_builder_regions_len,
+        max_cohort_locus_span,
+        min_alt_reads,
+        &mut |built| cohort_observations.push(built),
+        failed_locus_spans,
+    )?;
+    Ok(merged)
+}
+
+/// Merge the cohort over `analysed` as [`merge_cohort_through_cache`] does, **handing each
+/// surviving locus to `keep` where it is built** instead of collecting them.
+///
+/// The two are one driver: `merge_cohort_through_cache` is this with `Vec::push` for a sink,
+/// so nothing about the division of the ground, the eviction or the covering differs between
+/// them, and the merge's oracles check both at once.
+///
+/// **This is the entry point a calling run drives.** What it buys is that the buffer holds
+/// what the sink made of each locus rather than the locus itself: a called locus is one
+/// genotype per sample, where a cohort observation is every covering sample's reads folded
+/// onto the locus's alleles. Spec §5.1 bounds a run at `callers in flight × one cohort locus`,
+/// and collecting the observations for a whole run is what that bound forbids — the pool
+/// milestone is where the loci also stop being *released* in one go, and this is what lets
+/// them stop being *held*.
+///
+/// **The failure behaviour is `merge_cohort_through_cache`'s, and what the sink has already
+/// been handed is kept**: a caller that owns the sink's buffer still holds every locus built
+/// before the failing cover. The collecting form drops them, because its buffer is the value
+/// it does not return.
+pub fn merge_cohort_handing_each_locus_over<S, E>(
+    analysed: &[GenomeRegion],
+    cache: &mut ObservationCache<S>,
+    cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    keep: &mut impl FnMut(CohortObservation),
+    refused: &mut Vec<GenomeRegion>,
+) -> Result<(), E>
+where
+    S: ObservationSource<Error = E>,
+{
     // Zero-sized and doing nothing without `--features merge-timing` (`super::timing`), and
     // named the same parts as the parallel driver's so the two breakdowns can be compared
     // line for line. A region is this driver's round.
     let whole_merge = timing::Stopwatch::start();
-    let mut merged = RegionOutcome::default();
     refuse_malformed_analysed_regions(analysed);
+    // The sink is timed apart from the assembling it happens inside, because in a calling run
+    // it *is* the genotyping and the two together are one undifferentiated builder time.
+    let mut timed_keep = |built| {
+        let after_assembly = timing::Stopwatch::start();
+        keep(built);
+        after_assembly.add_to(&timing::AFTER_ASSEMBLY_NANOS);
+    };
 
     for analysed_region in analysed {
         for building_region in
@@ -176,29 +232,28 @@ where
             timing::ROUNDS.add(1);
             timing::REGIONS.add(1);
             let builder = timing::Stopwatch::start();
-            let outcome = cache.with_observations(building_region, |observations_per_sample| {
-                build_region(
+            cache.with_observations(building_region, |observations_per_sample| {
+                build_region_handing_over(
                     building_region,
                     observations_per_sample,
                     max_cohort_locus_span,
                     min_alt_reads,
-                )
+                    &mut timed_keep,
+                    refused,
+                );
             });
+            // **The sink's own work is inside this**, where the collecting form's push was
+            // too: a run that calls each locus here charges the genotyping to the builder,
+            // which is what the milestone-E measurement has to be able to see.
             let busy = builder.elapsed_nanos();
             timing::BUILDER_BUSY_NANOS.add(busy);
             timing::SLOWEST_BUILDER_NANOS.add(busy);
             timing::ROUND_WALL_NANOS.add(busy);
-            let organising = timing::Stopwatch::start();
-            merged
-                .cohort_observations
-                .extend(outcome.cohort_observations);
-            merged.failed_locus_spans.extend(outcome.failed_locus_spans);
-            organising.add_to(&timing::ORGANISE_NANOS);
         }
     }
 
     whole_merge.add_to(&timing::MERGE_WALL_NANOS);
-    Ok(merged)
+    Ok(())
 }
 
 #[cfg(test)]
