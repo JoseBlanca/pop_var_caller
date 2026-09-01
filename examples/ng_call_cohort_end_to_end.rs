@@ -178,6 +178,78 @@ const SAMPLES_BY_DEFAULT: usize = 6;
 /// How many analysed intervals a run takes when nothing says otherwise.
 const REGIONS_BY_DEFAULT: usize = 4;
 
+/// **The heap, when this is built to profile it** — the measurement Milestone G is decided
+/// from (the run driver's plan; owner's ruling of 2026-09-01, *measure before building*).
+///
+/// ```text
+/// ./scripts/dev.sh cargo run --release --example ng_call_cohort_end_to_end \
+///     --no-default-features --features dhat-heap,merge-timing -- <args>
+/// ```
+///
+/// **Why the allocator is swapped rather than sampled.** The project forbids `unsafe`, so it
+/// cannot install a counting allocator of its own; `dhat::Alloc` provides one whose unsafe
+/// lives inside dhat, which is the route every other `examples/dhat_*.rs` takes. It is not
+/// the allocator a run ships with — mimalloc is — so **the block counts transfer and the
+/// times do not**.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// What the calling phase allocated, and how much of it the per-sample records are.
+///
+/// **The question this answers is whether leasing is worth building.** The merge is the last
+/// owner of every per-sample observation record and frees them all; a walker that refilled a
+/// returned record instead would remove those allocations and those frees. What nobody had
+/// measured is the share of a *calling* run they are — the figure the plan quotes comes from
+/// a synthetic merge probe fed pre-made records, and a calling run's decode allocates heavily
+/// for reads, sequences, qualities and CIGARs that leasing does not touch.
+///
+/// **The record arithmetic, stated so it can be checked rather than trusted.** Every record
+/// the merge draws costs two allocations of its own — `reference_bases` and the `observations`
+/// vector — plus two for each observation it carries, that observation's `bases` and its
+/// `chain_ids`
+/// ([`fast_column.rs`](../src/ng/locus_generation/pileup/fast_column.rs) and
+/// [`open_record.rs`](../src/ng/locus_generation/pileup/open_record.rs) are the two mint
+/// sites). So `2 × records + 2 × observations` is what leasing could remove, and it is an
+/// **upper bound**: the slow mint path allocates more per record than that, and reuse only
+/// avoids an allocation where the returned buffer is big enough.
+#[cfg(feature = "dhat-heap")]
+fn report_the_heap(before: &dhat::HeapStats, after: &dhat::HeapStats) {
+    let blocks = after.total_blocks.saturating_sub(before.total_blocks);
+    let bytes = after.total_bytes.saturating_sub(before.total_bytes);
+    let records = timing::RECORDS_DRAWN.get();
+    let observations = timing::OBSERVATIONS_DRAWN.get();
+    let leasable = 2 * records + 2 * observations;
+    println!("# heap, calling phase only (dhat's allocator, not the shipped one)");
+    println!("#   blocks allocated: {blocks}");
+    println!("#   bytes allocated:  {bytes}");
+    println!("#   records drawn into the merge: {records}");
+    println!("#   observations inside them:     {observations}");
+    if blocks == 0 {
+        println!("#   (no allocation recorded — is --features merge-timing on too?)");
+        return;
+    }
+    println!(
+        "#   allocations leasing could remove: at most {leasable} of {blocks} — {:.1}%",
+        100.0 * leasable as f64 / blocks as f64,
+    );
+}
+
+/// Without the profiler there is nothing to report, and the record counts alone would invite
+/// the share to be guessed at.
+#[cfg(not(feature = "dhat-heap"))]
+fn report_the_heap() {
+    let records = timing::RECORDS_DRAWN.get();
+    if records > 0 {
+        println!(
+            "# records drawn into the merge: {records}, carrying {} observations \
+             (build with --no-default-features --features dhat-heap,merge-timing for the share \
+             of the heap they are)",
+            timing::OBSERVATIONS_DRAWN.get(),
+        );
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [fasta, catalog, bed, crams] = args.as_slice() else {
@@ -223,6 +295,14 @@ fn run(
     bed: &Path,
     crams: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // **The profiler covers the whole run and the report subtracts the setup**, rather than
+    // being started just before the calling: dhat's stats are cumulative from the profiler's
+    // birth, so a profiler born late would still be counting from its own zero and the
+    // subtraction below would be the same. Starting it here also means a run that fails during
+    // setup still reports, instead of panicking on stats with no profiler behind them.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::builder().testing().build();
+
     // **Everything before the first read is decoded is timed too.** Reading and checksumming
     // an 800 MB reference and opening a 60 MB catalog cost seconds, are constant in the cohort
     // and in the ground, and are most of what a person waits for at this probe's defaults — so
@@ -358,11 +438,20 @@ fn run(
     // what the two arms measure against each other is the cover's schedule, which is why the
     // probe grew the switch.
     let cover = std::env::var("NG_COVER").unwrap_or_else(|_| "serial".to_string());
+    // **Read before the calling starts, so the setup's allocations are not charged to it.**
+    // Reading and checksumming an 800 MB reference and opening the catalog allocate heavily
+    // and have nothing to do with what Milestone G would change.
+    #[cfg(feature = "dhat-heap")]
+    let heap_before = dhat::HeapStats::get();
     match cover.as_str() {
         "serial" => {
             let calling = Instant::now();
             let called = caller.call_cohort(&genotyper)?;
             let calling_seconds = calling.elapsed().as_secs_f64();
+            #[cfg(feature = "dhat-heap")]
+            report_the_heap(&heap_before, &dhat::HeapStats::get());
+            #[cfg(not(feature = "dhat-heap"))]
+            report_the_heap();
             println!("# cover: serial (call_cohort, the oracle)");
             report_the_calls(&called);
             report_the_ground(&called, analysed_bases);
@@ -378,6 +467,10 @@ fn run(
                 &mut |_record| -> Result<(), std::io::Error> { Ok(()) },
             )?;
             let calling_seconds = calling.elapsed().as_secs_f64();
+            #[cfg(feature = "dhat-heap")]
+            report_the_heap(&heap_before, &dhat::HeapStats::get());
+            #[cfg(not(feature = "dhat-heap"))]
+            report_the_heap();
             println!(
                 "# cover: parallel (call_cohort_handing_each_record_over, the run's path) \
                  over {} rayon threads",

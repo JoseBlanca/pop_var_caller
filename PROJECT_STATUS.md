@@ -19,7 +19,25 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-01):** **E2 of the run driver — concurrency invariance, and
+> - **Last completed task (2026-09-01):** **the run driver's plan is finished — ng calls a cohort
+> from the command line, and Milestone G is dropped**
+> ([plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
+> [G2 report](doc/devel/reports/implementations/ng_run_driver_g2_2026-09-01.md)).
+> Milestones A–F are built, Checkpoint E is met, and **G — the one optimisation — is closed
+> unbuilt on the owner's ruling**: "we'll work on the performance in future sessions, the
+> critical objective right now is to have a first working variant caller to improve upon".
+> **G2 was run first and is what ruled G1 out.** The per-sample records a leasing walker would
+> recycle are **20.7% of a calling run's allocations at three accessions and 23.9% at
+> sixty-three** — flat across the range, so no cohort size rescues it. The 92% the milestone was
+> written around was measured on a probe whose denominator held the merge's own allocations
+> alone; a calling run decodes reads, and three quarters of the allocation is read sequences,
+> qualities and CIGARs that leasing never touches. Two further ceilings, both restated from
+> retracted or misread sources: the merge is **1.4–10%** of walk-plus-merge (the research note
+> withdrew its own 2.6–18% in §3), and the frees sit inside the 88% "drawing the readers" column
+> of E1's split, not the 0.8% eviction column. **No wall-clock figure exists and none was
+> claimed** — this machine cannot sample allocator time.
+>
+> - **Earlier (2026-09-01):** **E2 of the run driver — concurrency invariance, and
 > Checkpoint E met**
 > (step E2 of [the run driver's plan](doc/devel/ng/impl_plan/run_driver_direct_mode.md);
 > [report](doc/devel/reports/implementations/ng_run_driver_e2_2026-09-01.md)).
@@ -2748,7 +2766,15 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 ---
 
 #### Direct mode — alignment files to called loci, in one process
-- **Status:** **Milestones A–F shipped (Checkpoint E met 2026-09-01).** A person runs
+- **Status:** **the plan is complete — A–F shipped, Checkpoint E met, G dropped (2026-09-01).**
+  Milestone G, the walker that would refill the merge's spare record instead of allocating, is
+  closed **unbuilt**: G2 measured the prize at 20.7–23.9% of a calling run's allocations against
+  a 92% the milestone was written around, and the owner ruled a first working caller ahead of
+  its performance. What G1 would have cost is recorded in the plan so the milestone can be
+  re-opened knowing it — a new `LocusGenerator` method, a spare threaded through
+  `PileupWalker::fill_pending`, changes at both mint sites, and the overturning of
+  `finalise_recycling`'s written decision that an emitted record's bytes must be new each time.
+  A person runs
   `pop_var_caller_exp call-from-alignments` on a cohort of CRAMs and gets a VCF, the parameters
   used beside it, and a run report; since E1 the run's record path draws every sample's reader
   forward concurrently inside each cover (the merge's parallel cover), while assembly and

@@ -203,6 +203,22 @@ pub static AFTER_ASSEMBLY_NANOS: Counter = Counter::new();
 /// Nanoseconds of the whole merge, from the driver's first line to its last.
 pub static MERGE_WALL_NANOS: Counter = Counter::new();
 
+/// **Per-sample observation records drawn from the sources**, over the whole merge.
+///
+/// Counted where every record enters the merge — `ObservationCache::draw_next`, which is
+/// private to its module and so named here rather than linked — because
+/// this and [`OBSERVATIONS_DRAWN`] price the milestone that would stop the merge freeing
+/// them (the run driver's plan, Milestone G). A record's heap footprint is two allocations
+/// of its own — the reference bases and the observation vector — plus two per observation it
+/// carries, its bases and its chain ids, so these two counts and a heap profile of the same
+/// run give the share of a calling run's allocator traffic that leasing could remove.
+///
+/// **A count and not a measurement of what it costs.** A share of allocator *calls* is not a
+/// share of wall time; it bounds the prize rather than naming it.
+pub static RECORDS_DRAWN: Counter = Counter::new();
+/// **Sequence observations inside those records**, summed — the second term above.
+pub static OBSERVATIONS_DRAWN: Counter = Counter::new();
+
 /// Every counter, back to zero — call before the merge that is to be measured.
 pub fn reset() {
     for counter in [
@@ -222,6 +238,8 @@ pub fn reset() {
         &ORGANISE_NANOS,
         &AFTER_ASSEMBLY_NANOS,
         &MERGE_WALL_NANOS,
+        &RECORDS_DRAWN,
+        &OBSERVATIONS_DRAWN,
     ] {
         counter.take();
     }

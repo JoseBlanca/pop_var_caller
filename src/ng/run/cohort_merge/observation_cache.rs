@@ -580,6 +580,11 @@ where
             self.spent = true;
             return Ok(None);
         };
+        // **Every record the merge will later free passes here**, which is why the count that
+        // prices Milestone G is taken here rather than at the mint: the generator's own
+        // records include ones the region clamp discards, and those the merge never owns.
+        super::timing::RECORDS_DRAWN.add(1);
+        super::timing::OBSERVATIONS_DRAWN.add(next.observations.len() as u64);
 
         // **A release check, not a `debug_assert!`** — the release profile is the one this
         // repo runs, and a source that goes backwards is silent otherwise: the draw loop stops

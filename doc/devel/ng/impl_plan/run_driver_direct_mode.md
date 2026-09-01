@@ -1,6 +1,15 @@
 # ng — direct mode: alignment files to called loci, in one process
 
-**Status:** draft, 2026-08-28. The build order for **direct mode**: the object that takes every
+**Status: complete, 2026-09-01.** Milestones A to F are built and Checkpoint E is met; Milestone
+G, the one optimisation, is dropped on the owner's ruling after G2 measured what it was worth
+(see its section). **ng calls a cohort of alignment files end to end from the command line** —
+`pop_var_caller_exp call-from-alignments` takes a reference, a repeat catalog, one alignment file
+a sample and either a parameters file or `--defaults`, and writes a VCF, the parameters it used,
+and a run report. What it does not yet do is call repeat tracts: both tract generator slots are
+unfilled, so a tract in the analysed ground is counted as ground this caller has not built yet
+rather than called wrongly. *Originally: draft, 2026-08-28.*
+
+The build order for **direct mode**: the object that takes every
 sample's alignment files plus the run's parameters and yields called loci in genome order, and the
 command that drives it. Design is settled in
 [`../spec/run_streaming.md`](../spec/run_streaming.md) (the run's shape, §3 and §5.1) and
@@ -559,6 +568,34 @@ the F2 correctness review said so.
 
 ### Milestone G — stop the merge freeing the records it was handed
 
+**⛦ DROPPED — owner's ruling, 2026-09-01: "drop G. We'll work on the performance in future
+sessions. The critical objective right now is to have a first working variant caller to be able
+to improve upon it."** G2 was run first, on the owner's earlier ruling that a measurement decides
+a milestone before it is built, and it does not support building G1: **the records leasing would
+recycle are 20.7–23.9% of a calling run's allocations**, flat across 3, 12, 24 and 63 tomato
+accessions, where the figure this milestone was written around — 92% — was measured on a probe
+whose denominator held the merge's allocations alone. A calling run decodes reads, and that is
+where three quarters of the allocation goes.
+[Report](../../reports/implementations/ng_run_driver_g2_2026-09-01.md).
+
+**Two of the numbers below are stale, and the report says why.** The merge is **1.4–10%** of
+walk-plus-merge, not the 2.6–18% G2's text asks for — the research note retracted its own pair
+in §3 once record-making was priced out. And the frees do not sit where a reader would look for
+them: E1's split of `call_cohort` at 63 accessions is 88.1% drawing the readers, 0.8% evicting,
+5.5% assembling, 5.3% genotyping, and the frees are inside the 88%, because eviction moves a
+record to the cache's spare list and the walker frees it later when it declines the offer.
+
+**What G1 would have cost, recorded so the milestone can be re-opened knowing it.** The walker
+cannot refill anything: a record is minted four layers below it — walker →
+`SampleLocusObservationsIterator` → `GeneratorSet` → `PileupGenerator` → the chromosome walk →
+[`fast_column.rs:373`](../../../../src/ng/locus_generation/pileup/fast_column.rs) or
+[`open_record.rs:1115`](../../../../src/ng/locus_generation/pileup/open_record.rs). Leasing needs
+a new method on the `LocusGenerator` trait (7 implementors), a spare threaded down through
+`PileupWalker::fill_pending`, and changes at both mint sites — and it overturns a decision
+already written down, `finalise_recycling`'s own "the reference bytes are **not** handed back:
+they leave with the emitted locus, which is the one part of a record that genuinely has to be new
+each time".
+
 **Last because it is an optimisation and everything above is correctness**, and because measuring it
 needs a walker feeding a real merge — which is B1 and C1. Nothing here changes what a run answers.
 
@@ -575,7 +612,7 @@ could accept it. A walker that refills the returned record instead of allocating
 **92% of the merge's frees** (21.4 of 23.1 million on that ground, counted with dhat), and costs the
 walker nothing it was not already doing: it fills a record either way.
 
-☐ **G1. The walker refills the spare instead of allocating.** `next_observation(spare)` writes the
+✗ **G1. The walker refills the spare instead of allocating — not built (owner, 2026-09-01).** `next_observation(spare)` writes the
 next observation into the returned record where its buffers are the right size, and allocates only
 what it must grow. **Oracle:** B2 — the observations a source yields must not change, and a refilled
 record that kept a stale field would show there.
@@ -588,13 +625,30 @@ is unbounded growth of exactly the records this step exists to stop allocating**
 starts keeping records must bound how many it keeps and assert the bound.
 *Depends:* B1, C1. *Source:* §3.4; [`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs)'s `spare` list.
 
-☐ **G2. What it was worth, on real reads.** The merge's wall time with the walker leasing against
+✅ **G2. What it was worth, on real reads — run first, and it ruled G1 out.** The merge's wall time with the walker leasing against
 minting, arms alternated inside one process. **Report the cohort size, the density, the machine and
 the allocator**; and report it against the walk's own time, because the merge is 2.6–18% of
 walk-plus-merge on the only cohort this has been measured on.
 *Depends:* G1. *Source:* the research finding above, §5.5.
 
+**⛦ What was run instead, and why it answers the same question.** With nothing built there are no
+arms to alternate, so what G2 measured is the **ceiling**: the share of a calling run's
+allocations that the records are, which is exactly what leasing could remove and no more. Counted
+by arithmetic on the record's own shape rather than by attributing a profile — an emitted record
+owns two allocations plus two per observation — against dhat's total for the calling phase, at
+four cohort sizes on 200 kb of SL4.0. **20.7% at three accessions, 23.9% at sixty-three.** The
+apparatus is two counters under `--features merge-timing` and a heap report on
+`examples/ng_call_cohort_end_to_end.rs`, so the measurement is repeatable and costs a shipped run
+nothing. **No wall-clock figure**: this machine cannot sample allocator time, and the only other
+route to one is building G1 first.
+*Landed 2026-09-01:* [report](../../reports/implementations/ng_run_driver_g2_2026-09-01.md).
+
 > **Checkpoint G:** the merge stops paying for records it did not make. Pause for review.
+> **⛦ Not met, and closed rather than met — owner's ruling, 2026-09-01.** The merge goes on
+> freeing the records it was handed. What replaces the checkpoint is the number that says what
+> that costs, so the milestone can be re-opened on evidence rather than on the retracted 92%:
+> at most a quarter of a calling run's allocations, inside a decode that is 88% of `call_cohort`,
+> in a merge that is 1.4–10% of walk-plus-merge.
 
 ---
 
@@ -608,7 +662,7 @@ walk-plus-merge on the only cohort this has been measured on.
 | D | genotypes on real tomato slices; and a fixture where the three sample numberings differ, so swapping any two changes a call (D2) |
 | E | identical output at one caller and at sixteen, on a fixture mixing ordinary sites and repeat tracts (E2) |
 | F | the command runs a cohort end to end and writes back the parameters it used |
-| G | B2's oracle still holds with a leasing walker, and the merge's time is measured against the walk's |
+| G | ~~B2's oracle still holds with a leasing walker~~ — **dropped, 2026-09-01**: G2 measured the prize at 20.7–23.9% of a calling run's allocations and the owner closed the milestone (G2) |
 
 ## Out of scope (next plans)
 
